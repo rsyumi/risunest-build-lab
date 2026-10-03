@@ -121,6 +121,7 @@ fn precondition(status: Option<u16>) -> ProviderError {
         retry_at_ms: None,
         oauth_error: None,
         oauth_error_description: None,
+        cause: Default::default(),
     }
 }
 

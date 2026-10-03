@@ -73,15 +73,14 @@ const MIN_OBJECT_BYTES: u64 = 1024;
 static SNAPSHOT_CPU: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(1)));
 
-pub(super) fn corrupt(_: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Corrupt)
+pub(super) fn corrupt(error: impl std::fmt::Display) -> ProviderError {
+    ProviderError::new(ErrorKind::Corrupt).caused(&error)
 }
 pub(super) fn transient(error: impl std::fmt::Display + 'static) -> ProviderError {
-    let error = &error as &dyn std::any::Any;
-    if let Some(error) = error.downcast_ref::<std::io::Error>() {
-        return local_io_kind(error.kind());
-    }
-    ProviderError::new(ErrorKind::Transient)
+    let io = (&error as &dyn std::any::Any).downcast_ref::<std::io::Error>();
+    io.map(|io| local_io_kind(io.kind()))
+        .unwrap_or_else(|| ProviderError::new(ErrorKind::Transient))
+        .caused(&error)
 }
 
 fn local_io_kind(kind: std::io::ErrorKind) -> ProviderError {
@@ -94,7 +93,10 @@ fn local_io_kind(kind: std::io::ErrorKind) -> ProviderError {
 }
 
 pub(super) fn format_error(error: risunest_external_storage_format::FormatError) -> ProviderError {
-    error.io_kind().map(local_io_kind).unwrap_or_else(|| corrupt(error))
+    match error.io_kind() {
+        Some(kind) => local_io_kind(kind).caused(&error),
+        None => corrupt(error),
+    }
 }
 
 pub(super) async fn cpu_permit() -> Result<tokio::sync::OwnedSemaphorePermit> {
@@ -4685,44 +4687,31 @@ mod tests {
         source: &CapturedSection,
         versioned: bool,
     ) -> Vec<SectionRow> {
-        if versioned {
-            let entries = source
-                .sources
-                .iter()
-                .map(|file| {
-                    (
-                        file.kind,
-                        file.key.clone(),
-                        crate::external_storage::sections::read_source_bytes(file, &Cancellation::default())
-                            .unwrap(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            return crate::external_storage::sections::decode_section(
-                source.kind,
-                &entries,
-                &source.content_fingerprint,
+        if !versioned {
+            crate::external_storage::sections::prepare_received_backup_sections(
+                std::slice::from_ref(source),
+                &Cancellation::default(),
             )
             .unwrap();
         }
-        let directory = tempfile::tempdir().unwrap();
-        let mut store = PersistentStore::open(directory.path()).unwrap();
-        let section = crate::external_storage::sections::section_of(source.kind).unwrap();
-        let mut prepared = crate::external_storage::sections::prepare_received_backup_sections(
-            std::slice::from_ref(source),
-            &Cancellation::default(),
+        let entries = source
+            .sources
+            .iter()
+            .map(|file| {
+                (
+                    file.kind,
+                    file.key.clone(),
+                    crate::external_storage::sections::read_source_bytes(file, &Cancellation::default())
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        crate::external_storage::sections::decode_section(
+            source.kind,
+            &entries,
+            &source.content_fingerprint,
         )
-        .unwrap();
-        store
-            .device_store_mut()
-            .unwrap()
-            .restore_prepared_backup_section(&prepared.remove(0))
-            .unwrap();
-        store
-            .device_store_mut()
-            .unwrap()
-            .read_backup_section_rows(section)
-            .unwrap()
+        .unwrap()
     }
 
     fn section_values(
@@ -5110,7 +5099,7 @@ mod tests {
                 for bytes in &asset_bytes[2..] {local.prepare_bytes(bytes).unwrap();}
                 if already_present {for bytes in &asset_bytes[..2] {local.prepare_bytes(bytes).unwrap();}}
                 let request=serde_json::from_value(serde_json::json!({"connectionId":"synthetic-connection","kind":"restore","snapshotId":"full-phase","targetRevision":"0"})).unwrap();
-                let mut job=DurableJob::new(request,false,1,store.external_identity().unwrap());
+                let mut job=DurableJob::new(request,1,store.external_identity().unwrap());
                 job.summary["restoreSource"]=serde_json::to_value(completed.reference.stored(&connected.handle).unwrap()).unwrap();
                 let jobs=JobStore::open(destination.path()).unwrap();jobs.put(&job).unwrap();
                 crate::persistent_store::hash_work::reset_hash_work();

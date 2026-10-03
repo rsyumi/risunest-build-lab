@@ -1567,6 +1567,7 @@ fn documented_failure_statuses_map_to_provider_kinds_without_a_server_message() 
                     retry_at_ms: None,
                     oauth_error: None,
                     oauth_error_description: None,
+                    cause: Default::default(),
                 },
             ),
             (
@@ -1579,6 +1580,7 @@ fn documented_failure_statuses_map_to_provider_kinds_without_a_server_message() 
                     retry_at_ms: None,
                     oauth_error: None,
                     oauth_error_description: None,
+                    cause: Default::default(),
                 },
             ),
             (
@@ -1591,6 +1593,7 @@ fn documented_failure_statuses_map_to_provider_kinds_without_a_server_message() 
                     retry_at_ms: Some(NOW_MS + 30_000),
                     oauth_error: None,
                     oauth_error_description: None,
+                    cause: Default::default(),
                 },
             ),
             (
@@ -1603,6 +1606,7 @@ fn documented_failure_statuses_map_to_provider_kinds_without_a_server_message() 
                     retry_at_ms: Some(NOW_MS + 5_000),
                     oauth_error: None,
                     oauth_error_description: None,
+                    cause: Default::default(),
                 },
             ),
             (
@@ -1615,6 +1619,7 @@ fn documented_failure_statuses_map_to_provider_kinds_without_a_server_message() 
                     retry_at_ms: Some(NOW_MS + 5_000),
                     oauth_error: None,
                     oauth_error_description: None,
+                    cause: Default::default(),
                 },
             ),
             (
@@ -1627,6 +1632,7 @@ fn documented_failure_statuses_map_to_provider_kinds_without_a_server_message() 
                     retry_at_ms: None,
                     oauth_error: None,
                     oauth_error_description: None,
+                    cause: Default::default(),
                 },
             ),
         ] {

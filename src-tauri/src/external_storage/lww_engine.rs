@@ -114,11 +114,11 @@ enum Settlement {
     Missing,
     Conflict,
 }
-fn store_error(_: crate::persistent_store::StoreError) -> ProviderError {
-    segment::corrupt()
+fn store_error(error: crate::persistent_store::StoreError) -> ProviderError {
+    segment::corrupt().caused(&error)
 }
-fn transient(_: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Transient)
+fn transient(error: impl std::fmt::Display) -> ProviderError {
+    ProviderError::new(ErrorKind::Transient).caused(&error)
 }
 pub(crate) struct BytesSource(pub Vec<u8>);
 impl TransferSource for BytesSource {

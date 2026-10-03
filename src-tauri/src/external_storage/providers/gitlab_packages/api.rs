@@ -170,6 +170,7 @@ pub(super) fn classify(
             retry_at_ms: None,
             oauth_error: None,
             oauth_error_description: None,
+            cause: Default::default(),
         },
         403 => ProviderError {
             kind: ErrorKind::Unauthorized,
@@ -177,6 +178,7 @@ pub(super) fn classify(
             retry_at_ms: None,
             oauth_error: None,
             oauth_error_description: None,
+            cause: Default::default(),
         },
         429 => ProviderError {
             kind: ErrorKind::RateLimited,
@@ -184,6 +186,7 @@ pub(super) fn classify(
             retry_at_ms: retry_at(headers, now_ms),
             oauth_error: None,
             oauth_error_description: None,
+            cause: Default::default(),
         },
         _ => common::classify_status(status, headers, now_ms),
     }

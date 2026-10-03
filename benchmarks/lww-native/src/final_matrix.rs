@@ -761,7 +761,7 @@ async fn costly_external(output:&Path,fixture:&mut CycleFixture,hashes:&[String]
             let request:StartJobRequest=serde_json::from_value(json!({"connectionId":connected.stored.id,"kind":"restore",
                 "snapshotId":backup.as_ref().ok_or("actual full backup producer absent")?.snapshot_id,
                 "restoreAreas":["library","referencedAssets","hypa","local-plugins","local-settings"]})).map_err(|e|e.to_string())?;
-            let job=DurableJob::new(request,false,crate::external_storage::runtime::now_ms(),destination.external_identity().map_err(|e|e.to_string())?);
+            let job=DurableJob::new(request,crate::external_storage::runtime::now_ms(),destination.external_identity().map_err(|e|e.to_string())?);
             JobStore::open(destination.repository_root()).map_err(|e|format!("{e:?}"))?.put(&job).map_err(|e|format!("{e:?}"))?;
             let jobs=crate::native_file_jobs::NativeFileJobState::initialize(destination.repository_root().join("native-file-jobs"));
             let permit=jobs.admission.file(true)?;

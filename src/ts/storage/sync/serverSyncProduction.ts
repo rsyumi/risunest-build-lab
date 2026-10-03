@@ -98,7 +98,7 @@ function continueHydration(): void {
     })
 }
 async function updateForeground(visible: boolean): Promise<void> {
-    foreground = visible && !!context && !context.signal.aborted
+    foreground = visible && !replacing && !!context && !context.signal.aborted
     if (!foreground && hydrating) hydrationPending = true
     await scheduler.foreground(foreground)
     continueHydration()
@@ -177,7 +177,7 @@ const transport: SyncBindingTransport = {
     inspectTarget: c => invoke('server_sync_lww_inspect', { request: { bindingAuthority: c.state.targetAuthority, requestId: crypto.randomUUID() } }),
     pullAvailableState: (inspected,c) => invoke('server_sync_lww_stage_target', { inspectionId: inspected.inspectionId, request: { bindingAuthority: c.state.targetAuthority, requestId: crypto.randomUUID() } }),
     replaceFromTarget: replaceNativeSyncBinding,
-    async fenceOldJobs(c) { foreground = false; context = undefined; persistedBinding = undefined; await scheduler.fence(); await hydrating; await invoke('server_sync_lww_fence', { newDevice: c.mode === 'new-device' }); hydrationPending = false; hydrationAgain = false },
+    async fenceOldJobs(c) { foreground = false; context = undefined; persistedBinding = undefined; await scheduler.fence(); await hydrating; await invoke('server_sync_lww_fence', { newDevice: c.mode === 'new-device' || c.mode === 'fresh-writer' }); hydrationPending = false; hydrationAgain = false },
     async receiveAvailableChanges(c) { c.signal.throwIfAborted(); if (!context || context.state.targetAuthority !== c.state.targetAuthority || context.state.selectionEpoch !== c.state.selectionEpoch) throw new Error('Sync binding changed'); await receiveAvailableServerChanges(); c.signal.throwIfAborted() },
     async publishInitialSharedState(c) {
         context = c
@@ -196,12 +196,15 @@ const transport: SyncBindingTransport = {
     async resumeBinding(c) { context = c; adoptSchedulerAuthority(c); await invoke('server_sync_lww_activate', { request: header() }); checkContext(c); persistedBinding = c.state; hydrationPending = true; await updateForeground(document.visibilityState !== 'hidden'); scheduler.remoteHint() },
     prepareNewDeviceBinding: (staged,c) => invoke('server_sync_lww_prepare_new_device', { stagingId: staged.stagingId, request: { bindingAuthority: c.state.targetAuthority, requestId: staged.receiveId } }),
     replaceAsNewDevice: replaceNativeSyncBindingAsNewDevice,
+    prepareFreshWriter: (inspected,c) => invoke('server_sync_lww_prepare_fresh_writer', { inspectionId: inspected.inspectionId, request: { bindingAuthority: c.state.targetAuthority, requestId: crypto.randomUUID() } }),
     async resumeNewDeviceBinding(preparation,result,c) { await invoke('server_sync_lww_activate_new_device', { authorizationId: preparation.authorizationId, writerId: result.writerId, request: { bindingAuthority: result.bindingAuthority, requestId: crypto.randomUUID() } }); context = c; adoptSchedulerAuthority(c); checkContext(c); persistedBinding = c.state; error = ''; hydrationError = ''; hydrationPending = true; await scheduler.retry(); await updateForeground(document.visibilityState !== 'hidden'); scheduler.remoteHint() },
 }
 export async function receiveAvailableServerChanges(): Promise<void> { await scheduler.receiveAvailableChanges() }
 export async function configureServerSyncConnection(config: ServerConfig): Promise<void> { await invoke('server_sync_configure', { config }); error = '' }
 export async function connectServerSync(config: ServerConfig, newDevice = false): Promise<void> { await configureServerSyncConnection(config); await bindSyncTarget({ kind: 'server', connectionId: 'server' }, newDevice ? { mode: 'new-device' } : {}); await controller.ensureStatus() }
 export async function disconnectServerSync(): Promise<void> { await unbindSyncTarget(); context = undefined; await controller.ensureStatus() }
+/** Stops automatic sync until the returned release runs, so an asset download is not refused as busy. */
+export const holdServerSync = () => controller.beginReplacement()
 export async function retryServerSync(): Promise<void> {
     await controller.ensureStatus()
     const current = persistedBinding
@@ -238,7 +241,12 @@ const controller = {
     snapshot,
     subscribe: (listener: (value: ReturnType<typeof snapshot>) => void) => { listeners.add(listener); listener(controller.snapshot()); return () => { listeners.delete(listener) } },
     assertFileOperationAvailable: () => { if (replacing) throw new Error('server-sync-busy') },
-    beginReplacement: async () => { replacing = true; foreground = false; if (hydrating) hydrationPending = true; await scheduler.fence(); await hydrating; changed(); return async () => { replacing = false; await updateForeground(document.visibilityState !== 'hidden'); changed() } },
+    beginReplacement: async () => {
+        replacing = true; foreground = false; if (hydrating) hydrationPending = true
+        const release = async () => { replacing = false; await updateForeground(document.visibilityState !== 'hidden'); changed() }
+        try { await scheduler.fence(); await hydrating } catch (value) { await release().catch(() => {}); throw value }
+        changed(); return release
+    },
     confirmReplacement: async () => {},
     holdAutomaticSync: () => { foreground = false; if (hydrating) hydrationPending = true; void scheduler.fence() },
     ensureStatus: async () => { if (isTauri) { [status,persistedBinding] = await Promise.all([invoke<Status>('server_sync_status'),invoke<BindingContext['state']>('pds_lww_binding_state')]) } changed() },

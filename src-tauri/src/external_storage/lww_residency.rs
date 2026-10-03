@@ -48,8 +48,8 @@ pub(crate) fn freeze_remote_body(root:&Path,hash:&str)->Result<Option<FrozenBody
     if let Some(source)=source(root,hash)? {return Ok(Some(FrozenBodySource::Standalone(source)));}
     Ok(packed_source(root,hash)?.map(FrozenBodySource::Packed))
 }
-fn local(_: impl std::fmt::Display) -> ProviderError {
-    segment::corrupt()
+fn local(error: impl std::fmt::Display) -> ProviderError {
+    segment::corrupt().caused(&error)
 }
 fn database(root: &Path, create: bool) -> Result<Option<Connection>> {
     let directory = root.join("external-sync");

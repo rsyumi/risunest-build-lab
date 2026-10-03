@@ -82,8 +82,8 @@ pub(crate) struct ConnectionStore(Connection);
 fn corrupt() -> ProviderError {
     ProviderError::new(ErrorKind::Corrupt)
 }
-fn storage(_: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Transient)
+fn storage(error: impl std::fmt::Display) -> ProviderError {
+    ProviderError::new(ErrorKind::Transient).caused(&error)
 }
 
 impl ConnectionStore {

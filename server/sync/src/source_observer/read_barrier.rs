@@ -10,7 +10,7 @@ pub(crate) const HOLD_LIMIT: Duration = Duration::from_secs(30);
 type Hook = Arc<dyn Fn(Reached) + Send + Sync>;
 static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
 pub(crate) fn install_hook(hook: Option<Hook>) {
-    *HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() = hook;
+    *HOOK.get_or_init(|| Mutex::new(None)).lock_unpoisoned() = hook;
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -83,7 +83,7 @@ pub(super) struct Barrier {
 }
 impl Barrier {
     pub(super) fn observation(&self) -> Observation {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock_unpoisoned();
         Observation {
             intent: self.intent.clone(),
             status: state.status,
@@ -96,11 +96,11 @@ impl Barrier {
     }
     fn violated(&self, reason: &str) {
         if let Some(owner) = self.owner.upgrade() {
-            violation(&mut owner.lock().unwrap(), reason);
+            violation(&mut owner.lock_unpoisoned(), reason);
         }
     }
     fn cancel(&self, reason: &str) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock_unpoisoned();
         if state.status == "released" || state.status == "cancelled" {
             return false;
         }
@@ -121,7 +121,7 @@ impl Barrier {
         kind: &'static str,
         offset: u64,
     ) -> Option<Wait> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock_unpoisoned();
         if state.status == "released" {
             return None;
         }
@@ -150,8 +150,7 @@ impl Barrier {
         if let Some(event) = event {
             let hook = HOOK
                 .get_or_init(|| Mutex::new(None))
-                .lock()
-                .unwrap()
+                .lock_unpoisoned()
                 .clone();
             if let Some(hook) = hook {
                 hook(event);
@@ -167,9 +166,9 @@ impl Barrier {
     }
 }
 pub(crate) fn arm(intent: Intent) -> Result<Observation, &'static str> {
-    let mut registry = registry().lock().unwrap();
+    let mut registry = registry().lock_unpoisoned();
     let context = registry.active.clone().ok_or("read-barrier-no-scope")?;
-    let mut scope = context.scope.lock().unwrap();
+    let mut scope = context.scope.lock_unpoisoned();
     if scope.closed || scope.id != intent.scope_id || scope.generation != intent.generation {
         return Err("read-barrier-stale-scope");
     }
@@ -218,7 +217,7 @@ pub(crate) fn arm(intent: Intent) -> Result<Observation, &'static str> {
 }
 fn matching(intent: &Intent) -> Result<Arc<Barrier>, &'static str> {
     let context = active().ok_or("read-barrier-no-scope")?;
-    let scope = context.scope.lock().unwrap();
+    let scope = context.scope.lock_unpoisoned();
     if scope.closed || scope.id != intent.scope_id || scope.generation != intent.generation {
         return Err("read-barrier-stale-scope");
     }
@@ -230,7 +229,7 @@ fn matching(intent: &Intent) -> Result<Arc<Barrier>, &'static str> {
 }
 pub(crate) fn release(intent: &Intent) -> Result<Observation, &'static str> {
     let barrier = matching(intent)?;
-    let mut state = barrier.state.lock().unwrap();
+    let mut state = barrier.state.lock_unpoisoned();
     if state.status != "reached" {
         return Err("read-barrier-not-reached");
     }
@@ -260,7 +259,7 @@ pub(crate) fn cancel(intent: &Intent) -> Result<Observation, &'static str> {
     Ok(barrier.observation())
 }
 pub(crate) fn cancel_dangling(reason: &str) {
-    let barrier = active().and_then(|c| c.scope.lock().unwrap().read_barrier.clone());
+    let barrier = active().and_then(|c| c.scope.lock_unpoisoned().read_barrier.clone());
     if let Some(barrier) = barrier {
         barrier.cancel(reason);
     }
@@ -273,12 +272,12 @@ pub(super) struct Wait {
 impl Wait {
     fn finish(&mut self) {
         if !self.finished {
-            self.barrier.state.lock().unwrap().waiters -= 1;
+            self.barrier.state.lock_unpoisoned().waiters -= 1;
             self.finished = true;
         }
     }
     fn result(&mut self) -> Option<io::Result<()>> {
-        let status = self.barrier.state.lock().unwrap().status;
+        let status = self.barrier.state.lock_unpoisoned().status;
         match status {
             "released" => {
                 self.finish();
@@ -296,7 +295,7 @@ impl Wait {
             if let Some(result) = self.result() {
                 return result;
             }
-            let state = self.barrier.state.lock().unwrap();
+            let state = self.barrier.state.lock_unpoisoned();
             if state.status != "reached" {
                 continue;
             }
@@ -309,14 +308,19 @@ impl Wait {
                 self.barrier.cancel("read-barrier-timeout");
                 continue;
             }
-            drop(self.barrier.changed.wait_timeout(state, left).unwrap());
+            drop(
+                self.barrier
+                    .changed
+                    .wait_timeout(state, left)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
         }
     }
     pub(super) fn poll(&mut self, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         if let Some(result) = self.result() {
             return Poll::Ready(result);
         }
-        let mut state = self.barrier.state.lock().unwrap();
+        let mut state = self.barrier.state.lock_unpoisoned();
         if state.status != "reached" {
             drop(state);
             return Poll::Ready(self.result().unwrap());
@@ -386,7 +390,12 @@ mod tests {
         })));
         arm(intent.clone()).unwrap();
         let context = active().unwrap();
-        let barrier = context.scope.lock().unwrap().read_barrier.clone().unwrap();
+        let barrier = context
+            .scope
+            .lock_unpoisoned()
+            .read_barrier
+            .clone()
+            .unwrap();
         let worker = worker();
         let owned_root = root.path().to_owned();
         let task = std::thread::spawn(move || {
@@ -395,7 +404,7 @@ mod tests {
             file.read(&mut [0; 1])
         });
         receive.recv_timeout(Duration::from_secs(2)).unwrap();
-        barrier.state.lock().unwrap().deadline = Some(Instant::now());
+        barrier.state.lock_unpoisoned().deadline = Some(Instant::now());
         let released = release(&intent);
         reader_held.wait();
         let read = task.join().unwrap();

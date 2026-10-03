@@ -4,7 +4,7 @@ use risunest_external_storage_format::snapshot::{
 };
 use risunest_external_storage_format::{
     control::{BackupBundleDocument, BackupPointDocument, BackupPointKind, BundleSource, InventoryEntry, LeaseDocument, LeaseKind},
-    section::{ObjectReference, SectionValue, HypaValue, InlineOrObject, LocalPluginValue, PluginSpace},
+    section::{ObjectReference, SectionValue, HypaValue, InlineOrObject, LocalPluginValue, PluginSpace, ValueOrObject},
     catalog::{ChunkReference, Entry},
 };
 use risunest_sync_wire::Sequence;
@@ -164,8 +164,9 @@ fn section_control_metadata_changes_without_normalizing_user_payload_numbers() {
     assert_eq!(value["dimensions"], 1);
     assert_eq!(value["metadata"], json!({"n": 1.25, "nested": [3]}));
     assert_eq!(serde_json::from_value::<HypaValue>(value).unwrap(), hypa);
-    let plugin = LocalPluginValue { space: PluginSpace::Json, value: json!({"fraction": 0.5, "count": 9}) };
-    assert_eq!(serde_json::to_value(&plugin).unwrap()["value"], plugin.value);
+    let payload = json!({"fraction": 0.5, "count": 9});
+    let plugin = LocalPluginValue { space: PluginSpace::Json, value: ValueOrObject::Inline(payload.clone()) };
+    assert_eq!(serde_json::to_value(&plugin).unwrap()["value"], payload);
 }
 
 

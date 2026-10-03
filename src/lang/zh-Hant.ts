@@ -1538,6 +1538,7 @@ export const languageChineseTraditional = {
         concurrentEditNotice: "同時在多台裝置上修改同一項時，將保留最後一次修改。修改內容或訊息可能會遺失，請勿同時使用多台裝置。",
         replaceTitle: "是否取代此裝置的資料？",
         replaceDescription: "為進行同步，將清除此裝置的資料並取代為遠端資料。如需備份，請手動備份。",
+        serverRestoredDescription: "伺服器已從備份還原。將清除此裝置的資料並取代為伺服器資料，備份之後在此裝置上所做的修改將會遺失。如需備份，請手動備份。",
         replaceAcknowledge: "清除此裝置的資料",
         replaceAction: "取代",
         cancelAction: "取消",

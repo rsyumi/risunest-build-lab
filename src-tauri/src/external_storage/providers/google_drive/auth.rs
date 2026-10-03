@@ -189,6 +189,7 @@ async fn post_token(
             retry_at_ms: None,
             oauth_error,
             oauth_error_description,
+            cause: Default::default(),
         });
     }
     Err(wire::classify(&mut response, dependencies.clock.now_ms(), cancel).await)

@@ -12,7 +12,7 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 
 const ARCHIVE_PAYLOAD_VERSION: u32 = 1;
 const MAX_DECODED_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const ARCHIVE_CANCELLED_MESSAGE: &str = "character archive operation cancelled";
+pub(crate) const ARCHIVE_CANCELLED_MESSAGE: &str = "character archive operation cancelled";
 
 fn ensure_not_cancelled(is_cancelled: &dyn Fn() -> bool) -> StoreResult<()> {
     if is_cancelled() {
@@ -808,7 +808,12 @@ fn stage_payload(
             connection,
             is_cancelled,
         }
-        .deserialize(&mut deserializer)?;
+        .deserialize(&mut deserializer);
+        // A JSON failure keeps only its position, so name a cancellation here.
+        let payload = match payload {
+            Err(_) if is_cancelled() => return validation(ARCHIVE_CANCELLED_MESSAGE),
+            payload => payload?,
+        };
         deserializer.end()?;
         payload
     };

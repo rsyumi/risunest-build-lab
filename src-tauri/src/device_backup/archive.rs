@@ -10,8 +10,7 @@ use risunest_external_storage_format::{
     content_identity::hash as content_hash,
     format::FingerprintBuilder,
     section::{
-        InlineOrObject, ObjectReference, SectionEntry, SectionKind, SectionValue,
-        MAX_SECTION_ENTRY_BYTES, SECTION_CODEC,
+        ObjectReference, SectionEntry, SectionKind, MAX_SECTION_ENTRY_BYTES, SECTION_CODEC,
     },
 };
 use sha2::Digest;
@@ -215,13 +214,7 @@ fn parse_native_header(metadata: &[u8], kind: SectionKind) -> Result<NativeSecti
 }
 
 fn object_reference(entry: &SectionEntry) -> Option<&ObjectReference> {
-    match &entry.value {
-        SectionValue::Hypa(value) => match &value.vector {
-            InlineOrObject::Object(reference) => Some(reference),
-            InlineOrObject::Inline(_) => None,
-        },
-        _ => None,
-    }
+    entry.value.object_reference()
 }
 
 fn native_object_key(kind: SectionKind, reference: &ObjectReference) -> String {
@@ -642,20 +635,6 @@ fn read_native_object(
         "Native backup object length differs from its section entry",
     )?;
     Ok(bytes)
-}
-
-pub(crate) fn apply_prepared_native_sections(
-    store: &mut PersistentStore,
-    sections: &[PreparedDeviceSection],
-) -> Result<()> {
-    for section in sections {
-        store
-            .device_store_mut()
-            .map_err(device_store_error)?
-            .restore_prepared_backup_section(section.rows())
-            .map_err(device_store_error)?;
-    }
-    Ok(())
 }
 
 pub(crate) fn journal_prepared_native_sections(

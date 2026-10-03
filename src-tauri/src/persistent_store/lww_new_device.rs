@@ -91,6 +91,36 @@ impl PersistentStore {
         })
     }
 
+    /// Takes over the writer a changed registration claimed. The clock, unsent versions,
+    /// publications and receive progress stay, so retained versions keep their stamps.
+    pub(crate) fn lww_adopt_fresh_writer(
+        &mut self,
+        authority: DecimalU64,
+        old_writer_id: &str,
+        writer_id: &str,
+    ) -> StoreResult<()> {
+        self.lww_recover_intents()?;
+        let tx = self.device_store_mut()?.transaction()?;
+        verify(&tx, authority)?;
+        let current: String = tx.query_row(
+            "SELECT writer_id FROM device_meta WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )?;
+        if current == writer_id {
+            return Ok(());
+        }
+        if current != old_writer_id {
+            return Err(error("fresh-writer-changed"));
+        }
+        tx.execute(
+            "UPDATE device_meta SET writer_id=?1,revision=revision+1 WHERE singleton=1",
+            [writer_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn lww_replace_target_as_new_device(
         &mut self,
         header: &Header,

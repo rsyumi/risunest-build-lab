@@ -19,13 +19,15 @@ pub(crate) mod portable_source_custody;
 
 #[tauri::command(async)]
 pub(crate) fn native_portable_source_discard(app:AppHandle,source:JobSource)->Result<bool,NativeJobError> {
-    portable_source_custody::ensure_platform_source(&app,&source)?;
-    portable_source_custody::discard(&source)
+    logged("native_portable_source_discard", (|| {
+        portable_source_custody::ensure_platform_source(&app,&source)?;
+        portable_source_custody::discard(&source)
+    })())
 }
 
 #[tauri::command(async)]
 pub(crate) fn native_portable_source_cleanup_orphans(app:AppHandle)->Result<(),NativeJobError> {
-    portable_source_custody::cleanup_orphans(&app)
+    logged("native_portable_source_cleanup_orphans", portable_source_custody::cleanup_orphans(&app))
 }
 pub(crate) mod raw_recovery;
 pub(crate) use backup_source::*;
@@ -38,6 +40,7 @@ mod windows_cloud_source;
 #[cfg(test)]
 mod screenshot_output_test;
 
+use crate::native_log::logged;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -90,6 +93,23 @@ impl std::fmt::Display for NativeJobError {
 }
 
 impl std::error::Error for NativeJobError {}
+
+impl crate::native_log::CommandFailure for NativeJobError {
+    fn code(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(&self.code)
+    }
+
+    fn detail(&self) -> Option<std::borrow::Cow<'_, str>> {
+        Some(std::borrow::Cow::Borrowed(&self.message))
+    }
+
+    fn expected(&self) -> bool {
+        matches!(
+            self.code.as_str(),
+            "cancelled" | "library-operation-busy" | "job-capacity" | "cleanup-pending" | "revision-conflict"
+        )
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -3099,7 +3119,7 @@ pub(crate) fn native_file_job_start(
     state: State<'_, NativeFileJobState>,
     request: NativeFileJobStartRequest,
 ) -> Result<NativeFileJobStarted, NativeJobError> {
-    state.start(request, app)
+    logged("native_file_job_start", state.start(request, app))
 }
 
 #[tauri::command(async)]
@@ -3119,23 +3139,25 @@ pub(crate) async fn native_file_job_stage_inline_asset(
     offset: u64,
     data: Vec<u8>,
 ) -> Result<content::InlineAssetStageResult, NativeJobError> {
-    if data.len() > 64 * 1024 {
-        return Err(NativeJobError::new("invalid-input", "Inline asset chunk exceeds the IPC limit"));
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app.state::<crate::persistent_store::PersistentStoreState>()
-            .admit_renderer_operation().map_err(|error| NativeJobError::new("store-error", error.to_string()))?;
-        crate::asset_repository::commands::with_unsealed_content_session(&app, &job_id, |session| {
-            app.state::<NativeFileJobState>().stage_inline_asset(&job_id, session, &name, total_bytes, offset, &data)
-        })
-    }).await.map_err(|error| NativeJobError::new("store-error", error.to_string()))?
+    logged("native_file_job_stage_inline_asset", async move {
+        if data.len() > 64 * 1024 {
+            return Err(NativeJobError::new("invalid-input", "Inline asset chunk exceeds the IPC limit"));
+        }
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app.state::<crate::persistent_store::PersistentStoreState>()
+                .admit_renderer_operation().map_err(|error| NativeJobError::new("store-error", error.to_string()))?;
+            crate::asset_repository::commands::with_unsealed_content_session(&app, &job_id, |session| {
+                app.state::<NativeFileJobState>().stage_inline_asset(&job_id, session, &name, total_bytes, offset, &data)
+            })
+        }).await.map_err(|error| NativeJobError::new("store-error", error.to_string()))?
+    }.await)
 }
 
 #[tauri::command(async)]
 pub(crate) fn native_file_job_list(
     state: State<'_, NativeFileJobState>,
 ) -> Result<Vec<JobStatus>, NativeJobError> {
-    state.list()
+    logged("native_file_job_list", state.list())
 }
 
 #[tauri::command(async)]
@@ -3146,39 +3168,41 @@ pub(crate) fn native_snapshot_restore_bodies_start(
     activation_revision: String,
     binding_authority: String,
 ) -> Result<NativeSnapshotBodiesStarted,NativeJobError> {
-    let _cleanup=state.admit_cleanup_operation()?;
-    let _start=state.snapshot_body_start.lock().map_err(|_|NativeJobError::new("store-error","Snapshot body start is unavailable"))?;
-    let revision:i64=activation_revision.parse().map_err(|_|NativeJobError::new("invalid-activation-receipt","Snapshot revision is invalid"))?;
-    if revision<0 || revision.to_string()!=activation_revision {return Err(NativeJobError::new("invalid-activation-receipt","Snapshot revision is not canonical"));}
-    for status in state.registry.list().map_err(|error|NativeJobError::new("store-error",error))? {
-        if status.kind==JobKind::SnapshotBodies && status.snapshot_staging_id.as_deref()==Some(staging_id.as_str())
-            && !status.state.is_terminal() {
-            if status.activation_revision!=Some(revision) || status.activation_authority.as_deref()!=Some(binding_authority.as_str()) {
-                return Err(NativeJobError::new("invalid-activation-receipt","Snapshot body operation identity differs"));
+    logged("native_snapshot_restore_bodies_start", (|| {
+        let _cleanup=state.admit_cleanup_operation()?;
+        let _start=state.snapshot_body_start.lock().map_err(|_|NativeJobError::new("store-error","Snapshot body start is unavailable"))?;
+        let revision:i64=activation_revision.parse().map_err(|_|NativeJobError::new("invalid-activation-receipt","Snapshot revision is invalid"))?;
+        if revision<0 || revision.to_string()!=activation_revision {return Err(NativeJobError::new("invalid-activation-receipt","Snapshot revision is not canonical"));}
+        for status in state.registry.list().map_err(|error|NativeJobError::new("store-error",error))? {
+            if status.kind==JobKind::SnapshotBodies && status.snapshot_staging_id.as_deref()==Some(staging_id.as_str())
+                && !status.state.is_terminal() {
+                if status.activation_revision!=Some(revision) || status.activation_authority.as_deref()!=Some(binding_authority.as_str()) {
+                    return Err(NativeJobError::new("invalid-activation-receipt","Snapshot body operation identity differs"));
+                }
+                return Ok(NativeSnapshotBodiesStarted {job_id:status.job_id,kind:JobKind::SnapshotBodies,staging_id,activation_revision,binding_authority});
             }
-            return Ok(NativeSnapshotBodiesStarted {job_id:status.job_id,kind:JobKind::SnapshotBodies,staging_id,activation_revision,binding_authority});
         }
-    }
-    let permit=WorkerPermit::acquire(Arc::clone(&state.active_workers),state.max_concurrent_jobs)?;
-    let (mut store,plan,job)=crate::persistent_store::commands::with_store_mut(app.state(),|store|Ok(state.prepare_snapshot_bodies(store,&staging_id,revision,&binding_authority)))
-        .map_err(error::store_error)??;
-    let directory=snapshot_bodies::prepare_directory(&state.root.join("jobs"),&job)?;
-    let started=NativeSnapshotBodiesStarted {job_id:job.id(),kind:JobKind::SnapshotBodies,staging_id,activation_revision,binding_authority};
-    #[cfg(test)] let body_scope=crate::asset_repository::body_io::capture_body_io_scope();
-    tauri::async_runtime::spawn_blocking(move || {
-        let _permit=permit;
-        let mut operation=|| {
-            #[cfg(test)] let _source_scope=crate::portable_backup::source_io::attach(&job.source_io_scope);
-            let mut outcome=run_worker(||snapshot_bodies::run(&mut store,&plan,&job,&directory),"Snapshot body worker panicked");
-            if let Err(failure)=cleanup_one_owned_directory(directory.parent().expect("owned job directory has a parent"),&directory,&job.id()) {
-                outcome=Err(NativeJobError::new("cleanup-failed",failure));
-            }
-            let _=snapshot_bodies::finish(&job,outcome);
-        };
-        #[cfg(test)] crate::asset_repository::body_io::with_body_io_scope(body_scope,operation);
-        #[cfg(not(test))] operation();
-    });
-    Ok(started)
+        let permit=WorkerPermit::acquire(Arc::clone(&state.active_workers),state.max_concurrent_jobs)?;
+        let (mut store,plan,job)=crate::persistent_store::commands::with_store_mut(app.state(),|store|Ok(state.prepare_snapshot_bodies(store,&staging_id,revision,&binding_authority)))
+            .map_err(error::store_error)??;
+        let directory=snapshot_bodies::prepare_directory(&state.root.join("jobs"),&job)?;
+        let started=NativeSnapshotBodiesStarted {job_id:job.id(),kind:JobKind::SnapshotBodies,staging_id,activation_revision,binding_authority};
+        #[cfg(test)] let body_scope=crate::asset_repository::body_io::capture_body_io_scope();
+        tauri::async_runtime::spawn_blocking(move || {
+            let _permit=permit;
+            let mut operation=|| {
+                #[cfg(test)] let _source_scope=crate::portable_backup::source_io::attach(&job.source_io_scope);
+                let mut outcome=run_worker(||snapshot_bodies::run(&mut store,&plan,&job,&directory),"Snapshot body worker panicked");
+                if let Err(failure)=cleanup_one_owned_directory(directory.parent().expect("owned job directory has a parent"),&directory,&job.id()) {
+                    outcome=Err(NativeJobError::new("cleanup-failed",failure));
+                }
+                let _=snapshot_bodies::finish(&job,outcome);
+            };
+            #[cfg(test)] crate::asset_repository::body_io::with_body_io_scope(body_scope,operation);
+            #[cfg(not(test))] operation();
+        });
+        Ok(started)
+    })())
 }
 
 #[tauri::command(async)]
@@ -3190,12 +3214,12 @@ pub(crate) fn native_portable_confirm_restore_adoption(
     binding_authority: String,
     device_session_id: String,
 ) -> Result<(), NativeJobError> {
-    state.confirm_portable_restore_adoption(&device,&job_id,&activation_revision,&binding_authority,&device_session_id)
+    logged("native_portable_confirm_restore_adoption", state.confirm_portable_restore_adoption(&device,&job_id,&activation_revision,&binding_authority,&device_session_id))
 }
 
 #[tauri::command(async)]
 pub(crate) fn native_portable_retry_restore_bodies(state:State<'_,NativeFileJobState>,request:PortableBodyRetryRequest)->Result<NativeFileJobStarted,NativeJobError> {
-    state.retry_portable_restore_bodies(&request)
+    logged("native_portable_retry_restore_bodies", state.retry_portable_restore_bodies(&request))
 }
 
 #[tauri::command(async)]
@@ -3204,15 +3228,17 @@ pub(crate) fn native_portable_select_sections(
     job_id: String,
     selection: portable::PortableSelection,
 ) -> Result<(), NativeJobError> {
-    let job = state
-        .registry
-        .lookup(&job_id)
-        .map_err(|e| NativeJobError::new("store-error", e))?
-        .ok_or_else(|| {
-            NativeJobError::new("job-not-found", "Portable backup job is unavailable")
-        })?;
-    job.select_portable_sections(selection)
-        .map_err(|e| NativeJobError::new("invalid-selection", e))
+    logged("native_portable_select_sections", (|| {
+        let job = state
+            .registry
+            .lookup(&job_id)
+            .map_err(|e| NativeJobError::new("store-error", e))?
+            .ok_or_else(|| {
+                NativeJobError::new("job-not-found", "Portable backup job is unavailable")
+            })?;
+        job.select_portable_sections(selection)
+            .map_err(|e| NativeJobError::new("invalid-selection", e))
+    })())
 }
 
 #[tauri::command(async)]
@@ -3223,24 +3249,26 @@ pub(crate) fn native_plugin_values_assign(
     assignments: Vec<crate::persistent_store::commit::StagedPluginAssignment>,
     automatic: bool,
 ) -> Result<(), NativeJobError> {
-    let job = state
-        .registry
-        .lookup(&job_id)
-        .map_err(|e| NativeJobError::new("store-error", e))?
-        .ok_or_else(|| NativeJobError::new("job-not-found", "Import job is unavailable"))?;
-    let staging_id = job
-        .plugin_value_staging_id()
-        .map_err(|e| NativeJobError::new("store-error", e))?
-        .ok_or_else(|| {
-            NativeJobError::new(
-                "invalid-selection",
-                "Import job is no longer waiting for plugin value assignment",
-            )
-        })?;
-    crate::persistent_store::commands::with_store_mut(app.state(), |store| {
-        store.assign_staged_plugin_values(&staging_id, &assignments, automatic)
-    })
-    .map_err(|error| NativeJobError::new("store-error", error.to_string()))
+    logged("native_plugin_values_assign", (|| {
+        let job = state
+            .registry
+            .lookup(&job_id)
+            .map_err(|e| NativeJobError::new("store-error", e))?
+            .ok_or_else(|| NativeJobError::new("job-not-found", "Import job is unavailable"))?;
+        let staging_id = job
+            .plugin_value_staging_id()
+            .map_err(|e| NativeJobError::new("store-error", e))?
+            .ok_or_else(|| {
+                NativeJobError::new(
+                    "invalid-selection",
+                    "Import job is no longer waiting for plugin value assignment",
+                )
+            })?;
+        crate::persistent_store::commands::with_store_mut(app.state(), |store| {
+            store.assign_staged_plugin_values(&staging_id, &assignments, automatic)
+        })
+        .map_err(|error| NativeJobError::new("store-error", error.to_string()))
+    })())
 }
 
 #[tauri::command(async)]
@@ -3249,7 +3277,7 @@ pub(crate) fn native_file_job_finalize(
     job_id: String,
     expected_revision: Option<i64>,
 ) -> Result<FinalizeOutcome, NativeJobError> {
-    state.finalize(&job_id, expected_revision)
+    logged("native_file_job_finalize", state.finalize(&job_id, expected_revision))
 }
 
 #[tauri::command(async)]
@@ -3257,7 +3285,7 @@ pub(crate) fn native_file_job_cancel(
     state: State<'_, NativeFileJobState>,
     job_id: String,
 ) -> Result<CancelOutcome, NativeJobError> {
-    state.cancel(&job_id)
+    logged("native_file_job_cancel", state.cancel(&job_id))
 }
 
 #[tauri::command(async)]
@@ -3265,7 +3293,7 @@ pub(crate) fn native_file_job_official_publication_retry(
     state: State<'_, NativeFileJobState>,
     request: OfficialPublicationRetryRequest,
 ) -> Result<(), NativeJobError> {
-    state.retry_official_publication(request)
+    logged("native_file_job_official_publication_retry", state.retry_official_publication(request))
 }
 
 #[tauri::command(async)]
@@ -3274,8 +3302,10 @@ pub(crate) fn native_file_job_forget(
     device: State<'_, crate::device_backup::DeviceBackupState>,
     job_id: String,
 ) -> Result<bool, NativeJobError> {
-    forget_device_session(&state, &device, &job_id)?;
-    state.forget(&job_id)
+    logged("native_file_job_forget", (|| {
+        forget_device_session(&state, &device, &job_id)?;
+        state.forget(&job_id)
+    })())
 }
 
 fn forget_device_session(
@@ -3313,13 +3343,13 @@ pub(crate) fn native_portable_handoff_cleanup(
     state: State<'_, NativeFileJobState>,
     path: String,
 ) -> Result<bool, NativeJobError> {
-    cleanup_handoff_path(
+    logged("native_portable_handoff_cleanup", cleanup_handoff_path(
         &state.root,
         Path::new(&path),
         "risunest-backup-",
         ".risunest",
         "portable backup",
-    )
+    ))
 }
 
 #[tauri::command(async)]
@@ -3327,13 +3357,13 @@ pub(crate) fn native_raw_recovery_handoff_cleanup(
     state: State<'_, NativeFileJobState>,
     path: String,
 ) -> Result<bool, NativeJobError> {
-    cleanup_handoff_path(
+    logged("native_raw_recovery_handoff_cleanup", cleanup_handoff_path(
         &state.root,
         Path::new(&path),
         "risunest-rescue-",
         ".risunest-rescue.zip",
         "raw recovery",
-    )
+    ))
 }
 
 #[tauri::command(async)]
@@ -3341,7 +3371,7 @@ pub(crate) fn native_legacy_backup_handoff_cleanup(
     state: State<'_, NativeFileJobState>,
     path: String,
 ) -> Result<bool, NativeJobError> {
-    cleanup_legacy_backup_handoff_path(&state.root, Path::new(&path))
+    logged("native_legacy_backup_handoff_cleanup", cleanup_legacy_backup_handoff_path(&state.root, Path::new(&path)))
 }
 
 #[tauri::command(async)]
@@ -3349,7 +3379,7 @@ pub(crate) fn native_character_charx_handoff_cleanup(
     state: State<'_, NativeFileJobState>,
     path: String,
 ) -> Result<bool, NativeJobError> {
-    cleanup_character_charx_handoff_path(&state.root, Path::new(&path))
+    logged("native_character_charx_handoff_cleanup", cleanup_character_charx_handoff_path(&state.root, Path::new(&path)))
 }
 
 #[tauri::command(async)]
@@ -3357,7 +3387,7 @@ pub(crate) fn native_character_card_handoff_cleanup(
     state: State<'_, NativeFileJobState>,
     path: String,
 ) -> Result<bool, NativeJobError> {
-    cleanup_character_card_handoff_path(&state.root, Path::new(&path))
+    logged("native_character_card_handoff_cleanup", cleanup_character_card_handoff_path(&state.root, Path::new(&path)))
 }
 
 #[tauri::command(async)]
@@ -3365,7 +3395,7 @@ pub(crate) fn native_risu_module_handoff_cleanup(
     state: State<'_, NativeFileJobState>,
     path: String,
 ) -> Result<bool, NativeJobError> {
-    cleanup_risu_module_handoff_path(&state.root, Path::new(&path))
+    logged("native_risu_module_handoff_cleanup", cleanup_risu_module_handoff_path(&state.root, Path::new(&path)))
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -8824,6 +8854,50 @@ mod tests {
         assert!(!owned.exists());
         assert!(unrelated.exists());
     }
+
+    #[test]
+    fn native_job_commands_log_their_own_failures() {
+        let directory = TempDir::new().unwrap();
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        app.manage(NativeFileJobState::initialize(directory.path().join("native-file-jobs")));
+        let refused = native_legacy_backup_handoff_cleanup(app.state(), "relative-handoff".into());
+        assert!(refused.is_err());
+        let refused = refused.unwrap_err().code;
+        let selection = serde_json::from_value(json!({"library": true, "deviceSections": []})).unwrap();
+        let missing = native_portable_select_sections(app.state(), "missing-job".into(), selection);
+        assert_eq!(missing.unwrap_err().code, "job-not-found");
+        let metadata = tauri::async_runtime::block_on(native_content_source_metadata(app.state(), "not-a-token".into()));
+        let metadata = metadata.unwrap_err().code;
+        for (command, code) in [
+            ("native_legacy_backup_handoff_cleanup", refused.as_str()),
+            ("native_portable_select_sections", "job-not-found"),
+            ("native_content_source_metadata", metadata.as_str()),
+        ] {
+            let entry = crate::native_log::global_state()
+                .tail(None)
+                .into_iter()
+                .rev()
+                .find(|entry| entry.message.starts_with(&format!("{command} failed: code={code} cause=")))
+                .unwrap_or_else(|| panic!("{command} logs its failure"));
+            assert_eq!((entry.level.as_str(), entry.target.as_str()), ("error", "native-command"));
+            assert!(entry.message.contains("native_file_jobs"), "{}", entry.message);
+        }
+    }
+
+    #[test]
+    fn routine_native_job_refusals_are_warnings() {
+        use crate::native_log::CommandFailure;
+        for code in ["cancelled", "library-operation-busy", "job-capacity", "cleanup-pending", "revision-conflict"] {
+            assert!(NativeJobError::new(code, "synthetic").expected(), "{code}");
+        }
+        for code in ["store-error", "invalid-input", "library-operation-state-unavailable", "job-not-found"] {
+            let error = NativeJobError::new(code, "synthetic detail");
+            assert!(!error.expected(), "{code}");
+            assert_eq!((error.code().as_ref(), error.detail().as_deref()), (code, Some("synthetic detail")));
+        }
+    }
 }
 
 #[tauri::command]
@@ -8831,31 +8905,33 @@ pub(crate) async fn native_content_source_metadata(
     state: tauri::State<'_, NativeFileJobState>,
     token: String,
 ) -> Result<String, NativeJobError> {
-    let root = state.root.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        use std::io::Read;
-        let source = open_job_source(&root, &JobSource::AndroidSpool { token })?;
-        const LIMIT: u64 = crate::import_export_jobs::MAX_CONTENT_METADATA_BYTES as u64;
-        if source.total_bytes > LIMIT {
-            return Err(NativeJobError::new(
-                "native-limit",
-                "Content metadata exceeds 128 MiB",
-            ));
-        }
-        let mut text = String::new();
-        source
-            .file
-            .take(LIMIT + 1)
-            .read_to_string(&mut text)
-            .map_err(|e| NativeJobError::new("invalid-input", e.to_string()))?;
-        if text.len() as u64 > LIMIT {
-            return Err(NativeJobError::new(
-                "native-limit",
-                "Content metadata exceeds 128 MiB",
-            ));
-        }
-        Ok(text)
-    })
-    .await
-    .map_err(|e| NativeJobError::new("store-error", e.to_string()))?
+    logged("native_content_source_metadata", async move {
+        let root = state.root.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            use std::io::Read;
+            let source = open_job_source(&root, &JobSource::AndroidSpool { token })?;
+            const LIMIT: u64 = crate::import_export_jobs::MAX_CONTENT_METADATA_BYTES as u64;
+            if source.total_bytes > LIMIT {
+                return Err(NativeJobError::new(
+                    "native-limit",
+                    "Content metadata exceeds 128 MiB",
+                ));
+            }
+            let mut text = String::new();
+            source
+                .file
+                .take(LIMIT + 1)
+                .read_to_string(&mut text)
+                .map_err(|e| NativeJobError::new("invalid-input", e.to_string()))?;
+            if text.len() as u64 > LIMIT {
+                return Err(NativeJobError::new(
+                    "native-limit",
+                    "Content metadata exceeds 128 MiB",
+                ));
+            }
+            Ok(text)
+        })
+        .await
+        .map_err(|e| NativeJobError::new("store-error", e.to_string()))?
+    }.await)
 }

@@ -1,4 +1,5 @@
 use super::{NativeFileJobStarted, NativeJobError};
+use crate::native_log::logged;
 use crate::persistent_store::export::destination::{
     self, DestinationWriteError, DestinationWriteResult,
 };
@@ -800,7 +801,7 @@ pub(crate) fn native_file_job_screenshot_output_start(
     state: State<'_, ScreenshotOutputState>,
     destination: Option<String>,
 ) -> Result<NativeFileJobStarted, NativeJobError> {
-    state.start(destination.map(PathBuf::from))
+    logged("native_file_job_screenshot_output_start", state.start(destination.map(PathBuf::from)))
 }
 
 #[tauri::command(async)]
@@ -809,7 +810,7 @@ pub(crate) fn native_file_job_screenshot_output_append(
     job_id: String,
     chunk: Vec<u8>,
 ) -> Result<(), NativeJobError> {
-    state.append(&job_id, &chunk)
+    logged("native_file_job_screenshot_output_append", state.append(&job_id, &chunk))
 }
 
 #[tauri::command(async)]
@@ -817,15 +818,17 @@ pub(crate) async fn native_file_job_screenshot_output_publish(
     state: State<'_, ScreenshotOutputState>,
     job_id: String,
 ) -> Result<ScreenshotOutputPublished, NativeJobError> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.publish(&job_id))
-        .await
-        .map_err(|error| {
-            NativeJobError::new(
-                "store-error",
-                format!("screenshot output worker failed: {error}"),
-            )
-        })?
+    logged("native_file_job_screenshot_output_publish", async move {
+        let state = state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || state.publish(&job_id))
+            .await
+            .map_err(|error| {
+                NativeJobError::new(
+                    "store-error",
+                    format!("screenshot output worker failed: {error}"),
+                )
+            })?
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -833,7 +836,7 @@ pub(crate) fn native_file_job_screenshot_output_cancel(
     state: State<'_, ScreenshotOutputState>,
     job_id: String,
 ) -> Result<ScreenshotOutputCancelOutcome, NativeJobError> {
-    state.cancel(&job_id)
+    logged("native_file_job_screenshot_output_cancel", state.cancel(&job_id))
 }
 
 #[tauri::command(async)]
@@ -841,7 +844,7 @@ pub(crate) fn native_file_job_screenshot_output_release(
     state: State<'_, ScreenshotOutputState>,
     job_id: String,
 ) -> Result<(), NativeJobError> {
-    state.release(&job_id)
+    logged("native_file_job_screenshot_output_release", state.release(&job_id))
 }
 
 #[cfg(test)]
@@ -861,5 +864,35 @@ mod cleanup_tests {
         std::fs::remove_dir_all(&directory).unwrap();
         state.reopen_after_cleanup().unwrap();
         assert!(state.start(None).is_ok());
+    }
+
+    #[test]
+    fn screenshot_output_commands_log_their_own_failures() {
+        let root = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        tauri::Manager::manage(&app, ScreenshotOutputState::initialize(root.path().join("screenshots")));
+        let oversized = vec![0; MAX_SCREENSHOT_OUTPUT_APPEND_BYTES + 1];
+        let appended = native_file_job_screenshot_output_append(tauri::Manager::state(&app), "missing-job".into(), oversized);
+        assert_eq!(appended.unwrap_err().code, "invalid-input");
+        let published = tauri::async_runtime::block_on(native_file_job_screenshot_output_publish(
+            tauri::Manager::state(&app),
+            "missing-job".into(),
+        ));
+        let published = published.unwrap_err().code;
+        for (command, code) in [
+            ("native_file_job_screenshot_output_append", "invalid-input"),
+            ("native_file_job_screenshot_output_publish", published.as_str()),
+        ] {
+            let entry = crate::native_log::global_state()
+                .tail(None)
+                .into_iter()
+                .rev()
+                .find(|entry| entry.message.starts_with(&format!("{command} failed: code={code} cause=")))
+                .unwrap_or_else(|| panic!("{command} logs its failure"));
+            assert_eq!((entry.level.as_str(), entry.target.as_str()), ("error", "native-command"));
+            assert!(entry.message.contains("screenshot_output.rs:"), "{}", entry.message);
+        }
     }
 }

@@ -121,7 +121,7 @@ fn restore_original_backup(populate: impl FnOnce(&mut PersistentStore)) -> (temp
             &connected.root_key, packaging::PackageLimits::from_capabilities(&connected.stored.capabilities).unwrap(), None, &mut journal,
             connected.provider.as_ref(), &connected.handle, &PhaseProgress::silent(), &Cancellation::default()).await.unwrap();
         let request = serde_json::from_value(json!({"connectionId": "synthetic-connection", "kind": "restore", "snapshotId": backup_id, "targetRevision": "0"})).unwrap();
-        let mut job = DurableJob::new(request, false, 1, store.external_identity().unwrap());
+        let mut job = DurableJob::new(request, 1, store.external_identity().unwrap());
         job.summary["restoreSource"] = serde_json::to_value(backup.reference.stored(&connected.handle).unwrap()).unwrap();
         JobStore::open(destination.path()).unwrap().put(&job).unwrap();
         let (database, sections) = runtime_restore::prepare_database_first_backup(destination.path(), &connected, &job, &Cancellation::default()).await.unwrap();

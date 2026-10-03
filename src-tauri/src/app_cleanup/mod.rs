@@ -2,7 +2,8 @@ mod files;
 mod paths;
 pub(crate) mod mobile;
 
-use files::Result;
+use files::{failed, Result};
+use crate::native_log::logged;
 use paths::Paths;
 use serde::{Deserialize, Serialize};
 use std::{fs, sync::atomic::{AtomicBool, Ordering}};
@@ -35,9 +36,9 @@ fn read_request(paths: &Paths) -> Result<Option<Request>> {
     let bytes = match fs::read(paths.request()) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err("cleanup-journal-unavailable".into()),
+        Err(error) => return Err(failed("cleanup-journal-unavailable", error)),
     };
-    let request: Request = serde_json::from_slice(&bytes).map_err(|_| "cleanup-journal-corrupt")?;
+    let request: Request = serde_json::from_slice(&bytes).map_err(|error| failed("cleanup-journal-corrupt", error))?;
     if request.version != 1 || !uuid::Uuid::parse_str(&request.token)
         .is_ok_and(|value| value.get_version_num() == 4 && value.to_string() == request.token) {
         return Err("cleanup-journal-corrupt".into());
@@ -106,56 +107,60 @@ pub(crate) struct Status { pending: bool, mode: Option<Mode>, error: Option<Stri
 
 #[tauri::command]
 pub(crate) fn app_cleanup_status(app: AppHandle) -> Result<Status> {
-    let state = app.try_state::<CleanupState>().ok_or("cleanup-state-unavailable")?;
-    if let Some(error) = &state.unavailable {
-        return Ok(Status { pending: state.pending.load(Ordering::Acquire), mode: None, error: Some(error.clone()), can_cancel: false });
-    }
-    #[cfg(mobile)]
-    if state.ready.load(Ordering::Acquire) {
-        // The fresh document hands storage back to normal bootstrap.
-        mobile::finish(&app)?;
-        fs::remove_file(state.paths.request()).map_err(|_| "cleanup-journal-unavailable")?;
-        let _ = fs::remove_dir(&state.paths.control);
-        state.pending.store(false, Ordering::Release);
-        state.ready.store(false, Ordering::Release);
-    }
-    match read_request(&state.paths) {
-        Ok(Some(request)) => Ok(Status { pending: true, mode: Some(request.mode), error: request.error,
-            can_cancel: !request.roots_started && !state.running.load(Ordering::Acquire) && !state.closing.load(Ordering::Acquire) }),
-        Ok(None) => Ok(Status { pending: false, mode: None, error: None, can_cancel: false }),
-        Err(error) => Ok(Status { pending: true, mode: None, error: Some(error), can_cancel: false }),
-    }
+    logged("app_cleanup_status", (|| {
+        let state = app.try_state::<CleanupState>().ok_or("cleanup-state-unavailable")?;
+        if let Some(error) = &state.unavailable {
+            return Ok(Status { pending: state.pending.load(Ordering::Acquire), mode: None, error: Some(error.clone()), can_cancel: false });
+        }
+        #[cfg(mobile)]
+        if state.ready.load(Ordering::Acquire) {
+            // The fresh document hands storage back to normal bootstrap.
+            mobile::finish(&app)?;
+            fs::remove_file(state.paths.request()).map_err(|error| failed("cleanup-journal-unavailable", error))?;
+            let _ = fs::remove_dir(&state.paths.control);
+            state.pending.store(false, Ordering::Release);
+            state.ready.store(false, Ordering::Release);
+        }
+        match read_request(&state.paths) {
+            Ok(Some(request)) => Ok(Status { pending: true, mode: Some(request.mode), error: request.error,
+                can_cancel: !request.roots_started && !state.running.load(Ordering::Acquire) && !state.closing.load(Ordering::Acquire) }),
+            Ok(None) => Ok(Status { pending: false, mode: None, error: None, can_cancel: false }),
+            Err(error) => Ok(Status { pending: true, mode: None, error: Some(error), can_cancel: false }),
+        }
+    })())
 }
 
 fn navigate(app: &AppHandle) -> Result<()> {
     let window = app.get_webview_window("main").ok_or("cleanup-window-unavailable")?;
-    let mut url = window.url().map_err(|_| "cleanup-window-unavailable")?;
+    let mut url = window.url().map_err(|error| failed("cleanup-window-unavailable", error))?;
     url.set_query(None);
     url.set_fragment(None);
-    window.navigate(url).map_err(|_| "cleanup-navigation-failed".into())
+    window.navigate(url).map_err(|error| failed("cleanup-navigation-failed", error))
 }
 
 #[tauri::command]
 pub(crate) async fn app_cleanup_request(app: AppHandle, mode: Mode) -> Result<()> {
-    #[cfg(mobile)]
-    if mode == Mode::PrepareRemoval { return Err("cleanup-mode-unavailable".into()); }
-    let state = app.state::<CleanupState>();
-    state.available()?;
-    crate::cleanup_webview::preflight(&app).await?;
-    if state.pending.swap(true, Ordering::AcqRel) { return Err("cleanup-already-pending".into()); }
-    let request = Request {
-        version: 1, token: uuid::Uuid::new_v4().to_string(), mode,
-        webview_cleared: false, roots_started: false, error: None,
-        #[cfg(target_os = "linux")]
-        appimage: app.env().appimage.map(std::path::PathBuf::from),
-        #[cfg(not(target_os = "linux"))]
-        appimage: None,
-    };
-    if let Err(error) = files::write_json(&state.paths.request(), &request) {
-        state.pending.store(false, Ordering::Release);
-        return Err(error);
-    }
-    navigate(&app)
+    logged("app_cleanup_request", async move {
+        #[cfg(mobile)]
+        if mode == Mode::PrepareRemoval { return Err("cleanup-mode-unavailable".into()); }
+        let state = app.state::<CleanupState>();
+        state.available()?;
+        crate::cleanup_webview::preflight(&app).await?;
+        if state.pending.swap(true, Ordering::AcqRel) { return Err("cleanup-already-pending".into()); }
+        let request = Request {
+            version: 1, token: uuid::Uuid::new_v4().to_string(), mode,
+            webview_cleared: false, roots_started: false, error: None,
+            #[cfg(target_os = "linux")]
+            appimage: app.env().appimage.map(std::path::PathBuf::from),
+            #[cfg(not(target_os = "linux"))]
+            appimage: None,
+        };
+        if let Err(error) = files::write_json(&state.paths.request(), &request) {
+            state.pending.store(false, Ordering::Release);
+            return Err(error);
+        }
+        navigate(&app)
+    }.await)
 }
 
 struct Running<'a>(&'a AtomicBool);
@@ -163,19 +168,21 @@ impl Drop for Running<'_> { fn drop(&mut self) { self.0.store(false, Ordering::R
 
 #[tauri::command]
 pub(crate) async fn app_cleanup_resume(app: AppHandle) -> Result<()> {
-    let state = app.state::<CleanupState>();
-    state.available()?;
-    if state.running.swap(true, Ordering::AcqRel) { return Err("cleanup-already-running".into()); }
-    let _running = Running(&state.running);
-    let mut request = read_request(&state.paths)?.ok_or("cleanup-not-pending")?;
-    let result = resume(&app, &mut request).await;
-    if let Err(error) = &result {
-        if let Ok(Some(mut recorded)) = read_request(&state.paths) {
-            recorded.error = Some(error.clone());
-            let _ = files::write_json(&state.paths.request(), &recorded);
+    logged("app_cleanup_resume", async move {
+        let state = app.state::<CleanupState>();
+        state.available()?;
+        if state.running.swap(true, Ordering::AcqRel) { return Err("cleanup-already-running".into()); }
+        let _running = Running(&state.running);
+        let mut request = read_request(&state.paths)?.ok_or("cleanup-not-pending")?;
+        let result = resume(&app, &mut request).await;
+        if let Err(error) = &result {
+            if let Ok(Some(mut recorded)) = read_request(&state.paths) {
+                recorded.error = Some(error.clone());
+                let _ = files::write_json(&state.paths.request(), &recorded);
+            }
         }
-    }
-    result
+        result
+    }.await)
 }
 
 fn cancellable_request(paths: &Paths) -> Result<Request> {
@@ -186,10 +193,10 @@ fn cancellable_request(paths: &Paths) -> Result<Request> {
 }
 
 fn remove_request(paths: &Paths) -> Result<()> {
-    fs::remove_file(paths.request()).map_err(|_| "cleanup-journal-unavailable")?;
+    fs::remove_file(paths.request()).map_err(|error| failed("cleanup-journal-unavailable", error))?;
     #[cfg(unix)]
     fs::File::open(&paths.control).and_then(|directory| directory.sync_all())
-        .map_err(|_| "cleanup-journal-unavailable")?;
+        .map_err(|error| failed("cleanup-journal-unavailable", error))?;
     Ok(())
 }
 
@@ -201,26 +208,28 @@ async fn cancel_with(paths: &Paths, restore: impl std::future::Future<Output = R
 
 #[tauri::command]
 pub(crate) async fn app_cleanup_cancel(app: AppHandle) -> Result<()> {
-    let state = app.state::<CleanupState>();
-    state.available()?;
-    if state.closing.load(Ordering::Acquire) { return Err("cleanup-cancel-unavailable".into()); }
-    if state.running.swap(true, Ordering::AcqRel) { return Err("cleanup-already-running".into()); }
-    let _running = Running(&state.running);
-    let result = cancel_with(&state.paths, async {
-        #[cfg(mobile)]
-        {
-            // Complete any partial teardown before reopening the retained library.
-            mobile::prepare(&app).await?;
-            mobile::rebuild(&app)?;
-            mobile::finish(&app)?;
+    logged("app_cleanup_cancel", async move {
+        let state = app.state::<CleanupState>();
+        state.available()?;
+        if state.closing.load(Ordering::Acquire) { return Err("cleanup-cancel-unavailable".into()); }
+        if state.running.swap(true, Ordering::AcqRel) { return Err("cleanup-already-running".into()); }
+        let _running = Running(&state.running);
+        let result = cancel_with(&state.paths, async {
+            #[cfg(mobile)]
+            {
+                // Complete any partial teardown before reopening the retained library.
+                mobile::prepare(&app).await?;
+                mobile::rebuild(&app)?;
+                mobile::finish(&app)?;
+            }
+            Ok(())
+        }).await;
+        if matches!(read_request(&state.paths), Ok(None)) {
+            state.pending.store(false, Ordering::Release);
         }
-        Ok(())
-    }).await;
-    if matches!(read_request(&state.paths), Ok(None)) {
-        state.pending.store(false, Ordering::Release);
-    }
-    result?;
-    navigate(&app)
+        result?;
+        navigate(&app)
+    }.await)
 }
 
 async fn resume(app: &AppHandle, request: &mut Request) -> Result<()> {
@@ -234,7 +243,7 @@ async fn resume(app: &AppHandle, request: &mut Request) -> Result<()> {
     files::write_json(&state.paths.request(), request)?;
     #[cfg(desktop)]
     {
-        let executable = std::env::current_exe().map_err(|_| "cleanup-executable-unavailable")?;
+        let executable = std::env::current_exe().map_err(|error| failed("cleanup-executable-unavailable", error))?;
         let mut command = std::process::Command::new(executable);
         command.args(["--cleanup-worker", &request.token]);
         #[cfg(windows)]
@@ -243,7 +252,7 @@ async fn resume(app: &AppHandle, request: &mut Request) -> Result<()> {
             command.creation_flags(0x08000000);
         }
         command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()).spawn().map_err(|_| "cleanup-worker-start-failed")?;
+            .stderr(std::process::Stdio::null()).spawn().map_err(|error| failed("cleanup-worker-start-failed", error))?;
         state.closing.store(true, Ordering::Release);
         app.exit(0);
         Ok(())
@@ -255,7 +264,7 @@ async fn resume(app: &AppHandle, request: &mut Request) -> Result<()> {
         let (updated, result) = tauri::async_runtime::spawn_blocking(move || {
             let result = erase(&paths, &mut worker_request);
             (worker_request, result)
-        }).await.map_err(|_| "cleanup-worker-failed")?;
+        }).await.map_err(|error| failed("cleanup-worker-failed", error))?;
         *request = updated;
         result?;
         mobile::rebuild(app)?;
@@ -290,15 +299,15 @@ fn erase_with(paths: &Paths, request: &mut Request,
 #[cfg(desktop)]
 fn lock(paths: &Paths, timeout: Duration) -> Result<fs::File> {
     files::validate(&paths.control)?;
-    fs::create_dir_all(&paths.control).map_err(|_| "cleanup-journal-unavailable")?;
+    fs::create_dir_all(&paths.control).map_err(|error| failed("cleanup-journal-unavailable", error))?;
     let file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
-        .open(paths.control.join("owner.lock")).map_err(|_| "cleanup-lock-unavailable")?;
+        .open(paths.control.join("owner.lock")).map_err(|error| failed("cleanup-lock-unavailable", error))?;
     let deadline = Instant::now() + timeout;
     loop {
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => return Ok(file),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
-            Err(_) => return Err("cleanup-app-still-running".into()),
+            Err(error) => return Err(failed("cleanup-app-still-running", error)),
         }
     }
 }
@@ -372,9 +381,9 @@ pub(crate) fn run_cli(manifest: &crate::app_paths::AppPaths) -> Option<i32> {
 fn relaunch(request: &Request) -> Result<()> {
     let executable = match &request.appimage {
         Some(path) => path.clone(),
-        None => std::env::current_exe().map_err(|_| "cleanup-executable-unavailable")?,
+        None => std::env::current_exe().map_err(|error| failed("cleanup-executable-unavailable", error))?,
     };
-    std::process::Command::new(executable).spawn().map_err(|_| "cleanup-relaunch-failed")?;
+    std::process::Command::new(executable).spawn().map_err(|error| failed("cleanup-relaunch-failed", error))?;
     Ok(())
 }
 
@@ -489,6 +498,28 @@ mod tests {
         fs::create_dir_all(&paths.control).unwrap();
         fs::write(paths.request(), b"{}").unwrap();
         assert!(read_request(&paths).is_err());
+    }
+
+    #[test]
+    fn a_cleanup_failure_keeps_its_cause_in_the_memory_log_only() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = paths(root.path());
+        fs::create_dir_all(&paths.control).unwrap();
+        fs::write(paths.request(), br#"{"version":"private-journal-value"}"#).unwrap();
+        assert_eq!(read_request(&paths).err().as_deref(), Some("cleanup-journal-corrupt"));
+        let entry = crate::native_log::global_state()
+            .tail(None)
+            .into_iter()
+            .rev()
+            .find(|entry| entry.target == "app-cleanup" && entry.message.starts_with("cleanup-journal-corrupt cause=json failure at line 1"))
+            .expect("the cause is logged");
+        assert_eq!(entry.level, "error");
+        assert!(!entry.message.contains("private-journal-value"), "{}", entry.message);
+        assert!(entry.message.contains("app_cleanup"), "{}", entry.message);
+        let log = crate::native_log::NativeLogState::initialize(root.path());
+        log.record_ring_only("error", "app-cleanup", "synthetic ring-only line");
+        assert!(log.tail(None).iter().any(|entry| entry.message == "synthetic ring-only line"));
+        assert!(!log.file_path().exists());
     }
     #[cfg(desktop)]
     #[test]

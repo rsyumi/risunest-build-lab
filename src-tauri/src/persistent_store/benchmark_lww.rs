@@ -34,6 +34,8 @@ mod source_receipt;
 mod source_process;
 #[path = "../../../benchmarks/lww-native/src/final_matrix.rs"]
 mod final_matrix;
+#[path = "../../../benchmarks/lww-native/src/ladder.rs"]
+mod ladder;
 
 use super::{lww::{self, MessageLocator, UnitMutation}, sync_selection::{SwitchBindingRequest, SyncTarget},
     ConversationMutation, PersistentStore, WorkingSetCommit};

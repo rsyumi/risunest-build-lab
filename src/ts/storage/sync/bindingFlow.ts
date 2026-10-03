@@ -15,6 +15,8 @@ export interface InspectedSyncTarget {
     libraryId: string
     empty: boolean
     previouslyBoundLibrary: boolean
+    registrationChanged?: boolean
+    serverRestored?: boolean
 }
 export interface StagedSyncTarget {
     targetId: string
@@ -22,10 +24,12 @@ export interface StagedSyncTarget {
     stagingId: string
     receiveId: string
 }
+export type BindingMode = 'new-device' | 'fresh-writer'
+export type ReplacementReason = 'server-restored'
 export interface BindingContext {
     state: SyncBindingState
     signal: AbortSignal
-    mode?: SyncBindingOptions['mode']
+    mode?: BindingMode
 }
 export interface NewDeviceBindingPreparation {
     authorizationId: string
@@ -48,6 +52,8 @@ export interface SyncBindingTransport {
     publishInitialSharedState(context: BindingContext): Promise<void>
     resumeBinding(context: BindingContext): Promise<void>
     fenceOldJobs(context: BindingContext): Promise<void>
+    // Claims a fresh writer for a changed registration to the library this device was bound to, keeping local data.
+    prepareFreshWriter?(inspected: InspectedSyncTarget, context: BindingContext): Promise<NewDeviceBindingPreparation>
     // These hooks reserve/register a writer before activation and use it only after activation.
     prepareNewDeviceBinding?(staged: StagedSyncTarget, context: BindingContext): Promise<NewDeviceBindingPreparation>
     replaceAsNewDevice?(staged: StagedSyncTarget, preparation: NewDeviceBindingPreparation, context: BindingContext): Promise<NewDeviceBindingResult>
@@ -79,7 +85,7 @@ export interface SyncBindingDependencies {
     withPausedWrites<T>(operation: () => Promise<T>): Promise<T>
     hasNonDefaultData(): Promise<boolean>
     hasNonDefaultSharedData(): Promise<boolean>
-    confirmReplacement(): Promise<boolean>
+    confirmReplacement(reason?: ReplacementReason): Promise<boolean>
     refreshActivatedLibrary(): Promise<void>
     beginActivatedLibraryGuard(): BindingActivationGuard
     recovery?: BindingRecoveryRegistration
@@ -90,9 +96,18 @@ function sameTarget(a: BindingTarget, b: BindingTarget): boolean {
     return a.kind === b.kind && (a.kind === 'none' || (b.kind !== 'none' && a.connectionId === b.connectionId))
 }
 
-function bindingContext(state: SyncBindingState, signal: AbortSignal, mode?: SyncBindingOptions['mode']): BindingContext {
-    return { state, signal, ...(mode === 'new-device' ? { mode } : {}) }
+function bindingContext(state: SyncBindingState, signal: AbortSignal, mode?: BindingMode): BindingContext {
+    return { state, signal, ...(mode ? { mode } : {}) }
 }
+
+/** A restored server always replaces this device; a new registration to the library it was bound to keeps local data. */
+export function bindingMode(explicit: SyncBindingOptions['mode'], inspected: InspectedSyncTarget): BindingMode | undefined {
+    if (inspected.serverRestored === true || explicit === 'new-device') return 'new-device'
+    if (inspected.previouslyBoundLibrary && inspected.registrationChanged === true) return 'fresh-writer'
+    return undefined
+}
+
+const supportsNewDevice = (transport: SyncBindingTransport) => !!(transport.prepareNewDeviceBinding && transport.replaceAsNewDevice && transport.resumeNewDeviceBinding)
 
 export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
     let running = false
@@ -123,7 +138,7 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
         } else await transport.fenceOldJobs(context)
         await check(context)
     }
-    const resumeOld = async (mode?: SyncBindingOptions['mode']) => {
+    const resumeOld = async (mode?: BindingMode) => {
         if (!active) return
         await dependencies.native.assertAuthority(active.context.state)
         const controller = new AbortController()
@@ -168,11 +183,9 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
         async bind(target: Exclude<BindingTarget, { kind: 'none' }>, transport: SyncBindingTransport, options: SyncBindingOptions = {}): Promise<BindingOutcome> {
             if (running) throw new Error('A sync binding change is already running')
             target = structuredClone(target)
-            const mode = options.mode === 'new-device' ? 'new-device' : undefined
-            const newDevice = mode === 'new-device'
-            if (newDevice && (!transport.prepareNewDeviceBinding || !transport.replaceAsNewDevice || !transport.resumeNewDeviceBinding)) {
-                throw new Error('New device sync binding is unavailable')
-            }
+            const explicit = options.mode === 'new-device' ? 'new-device' : undefined
+            if (explicit && !supportsNewDevice(transport)) throw new Error('New device sync binding is unavailable')
+            let mode: BindingMode | undefined = explicit
             running = true
             const controller = new AbortController()
             const switchRequestId = crypto.randomUUID()
@@ -187,14 +200,21 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
                 const state = await dependencies.native.state()
                 await adoptPersisted(state)
                 originalState = state
+                const inspectionContext = bindingContext(state, controller.signal, explicit)
+                const inspected = structuredClone(await transport.inspectTarget(inspectionContext))
+                await check(inspectionContext)
+                mode = bindingMode(explicit, inspected)
+                const newDevice = mode === 'new-device'
+                if (newDevice && !supportsNewDevice(transport)) throw new Error('New device sync binding is unavailable')
+                const freshWriter = mode === 'fresh-writer'
+                if (freshWriter && !transport.prepareFreshWriter) throw new Error('Sync binding registration change is unavailable')
                 const context = bindingContext(state, controller.signal, mode)
-                const inspected = structuredClone(await transport.inspectTarget(context))
-                await check(context)
+                const reason: ReplacementReason | undefined = inspected.serverRestored === true ? 'server-restored' : undefined
                 const replace = newDevice || (!inspected.empty && !inspected.previouslyBoundLibrary)
                 const switchRequired = replace || !sameTarget(state.target, target) || state.libraryId !== inspected.libraryId
                 let acknowledged = false
                 if (newDevice || (replace && await dependencies.hasNonDefaultData())) {
-                    if (!await dependencies.confirmReplacement()) return { kind: 'cancelled' }
+                    if (!await dependencies.confirmReplacement(reason)) return { kind: 'cancelled' }
                     acknowledged = true
                 }
                 const staged = replace ? structuredClone(await transport.pullAvailableState(inspected, context)) : undefined
@@ -205,6 +225,7 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
                 jobsFenced = true
                 await fenceOld(transport, context)
                 const preparation = newDevice ? structuredClone(await transport.prepareNewDeviceBinding!(staged!, context)) : undefined
+                if (freshWriter) await transport.prepareFreshWriter!(inspected, context)
                 await check(context)
                 if (replace) {
                     pluginsFenced = true
@@ -254,7 +275,7 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
                 const result: BindingOutcome = await dependencies.withPausedWrites(async () => {
                     await check(context)
                     if (replace && !acknowledged && await dependencies.hasNonDefaultData()) {
-                        if (!await dependencies.confirmReplacement()) {
+                        if (!await dependencies.confirmReplacement(reason)) {
                             pluginsFenced = false
                             await dependencies.plugins.restart()
                             return { kind: 'cancelled' }

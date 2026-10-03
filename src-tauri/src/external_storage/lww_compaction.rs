@@ -82,7 +82,7 @@ impl PublishedState {
         }
         Ok(())
     }
-}fn error(_: impl std::fmt::Display) -> ProviderError { segment::corrupt() }
+}fn error(error: impl std::fmt::Display) -> ProviderError { segment::corrupt().caused(&error) }
 
 struct PublishedProbe<'a>(&'a Cancellation);
 impl crate::local_backup::CancellationProbe for PublishedProbe<'_> {

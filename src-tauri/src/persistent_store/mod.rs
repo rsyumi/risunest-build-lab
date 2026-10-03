@@ -160,10 +160,40 @@ impl std::fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
+impl crate::native_log::CommandFailure for StoreError {
+    fn code(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::RevisionConflict { .. } => "revision-conflict",
+            Self::SnapshotReleased => "snapshot-released",
+            Self::RawBodyUnavailable => "raw-body-unavailable",
+            Self::CommitBusy => "commit-busy",
+            Self::CommitDecode { .. } => "commit-decode",
+            Self::Committed { .. } => "committed",
+            Self::Validation { .. } => "validation",
+            Self::Store { .. } => "store-error",
+        }
+        .into()
+    }
+    fn detail(&self) -> Option<std::borrow::Cow<'_, str>> {
+        Some(self.to_string().into())
+    }
+    fn expected(&self) -> bool {
+        match self {
+            Self::RevisionConflict { .. } | Self::CommitBusy | Self::SnapshotReleased => true,
+            Self::Validation { message } => {
+                message == crate::data_health::CANCELLED
+                    || message == archive::ARCHIVE_CANCELLED_MESSAGE
+                    || message == export::EXPORT_CANCELLED_MESSAGE
+            }
+            _ => false,
+        }
+    }
+}
+
 impl From<rusqlite::Error> for StoreError {
     fn from(error: rusqlite::Error) -> Self {
         Self::Store {
-            message: error.to_string(),
+            message: crate::native_log::sqlite_failure(&error),
         }
     }
 }
@@ -171,7 +201,7 @@ impl From<rusqlite::Error> for StoreError {
 impl From<std::io::Error> for StoreError {
     fn from(error: std::io::Error) -> Self {
         Self::Store {
-            message: error.to_string(),
+            message: crate::native_log::io_failure(&error),
         }
     }
 }
@@ -179,7 +209,7 @@ impl From<std::io::Error> for StoreError {
 impl From<serde_json::Error> for StoreError {
     fn from(error: serde_json::Error) -> Self {
         Self::Store {
-            message: error.to_string(),
+            message: crate::native_log::json_failure(&error),
         }
     }
 }

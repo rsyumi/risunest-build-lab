@@ -5,7 +5,7 @@ use fs2::FileExt;
 use rusqlite::{params, Connection};
 use std::{collections::BTreeSet, fs::{File, OpenOptions}, path::Path, sync::Mutex};
 
-fn failed(_: impl std::fmt::Display) -> ProviderError { ProviderError::new(ErrorKind::Transient) }
+fn failed(error: impl std::fmt::Display) -> ProviderError { ProviderError::new(ErrorKind::Transient).caused(&error) }
 fn corrupt() -> ProviderError { ProviderError::new(ErrorKind::Corrupt) }
 type Identity = (String, String, String);
 pub(crate) struct LocalLeaseLedger {

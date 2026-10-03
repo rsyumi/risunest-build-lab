@@ -9,8 +9,8 @@ use std::{collections::BTreeMap, path::Path};
 fn corrupt() -> ProviderError {
     ProviderError::new(ErrorKind::Corrupt)
 }
-fn storage(_: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Transient)
+fn storage(error: impl std::fmt::Display) -> ProviderError {
+    ProviderError::new(ErrorKind::Transient).caused(&error)
 }
 fn count(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| corrupt())

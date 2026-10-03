@@ -164,6 +164,12 @@ const sectionEntries = [
   section("local-settings", "risuNestDeviceSettings", {
     localSetting: { value: { startup: "restore" } },
   }),
+  section("local-plugins", JSON.stringify(["provider-manager", "json", "history"]), {
+    localPlugin: { space: "json", object: { contentSha256: Array(32).fill(9), byteLength: "70000" } },
+  }, { writeClock: "5", writerId: "writer-a" }),
+  section("local-settings", "risuNestUpdateSettings", {
+    localSetting: { object: { contentSha256: Array(32).fill(10), byteLength: "4097" } },
+  }),
 ].map(value => asArray(new TextEncoder().encode(JSON.stringify(value))));
 assert.deepEqual(sectionEntries, vector.sectionEntries);
 

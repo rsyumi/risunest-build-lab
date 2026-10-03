@@ -314,6 +314,7 @@ impl PersistentStore {
         let bounded = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
             Ok(source.query_row("SELECT body FROM backup_controls WHERE hash=?1 AND length(body)<=?2",rusqlite::params![hash,risunest_sync_wire::MAX_METADATA_BYTES as i64],|row|row.get(0)).optional()?)
         };
+        let pages = super::external_capture::OriginalMessagePages::new(&units,&bounded);
         // A control above the bound is read only as a large unit body or as a
         // page whose manifest declares that length.
         let read = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
@@ -323,7 +324,7 @@ impl PersistentStore {
             if body.is_some() {return Ok(body)}
             let length = u64::try_from(length).map_err(|_|invalid("invalid original control length"))?;
             if !large.contains(hash)
-                && super::external_capture::original_unit_message_page(&units,hash,&bounded)?.is_none_or(|page|page.byte_length.0 != length) {
+                && pages.page(hash)?.is_none_or(|page|page.byte_length.0 != length) {
                 return Ok(None);
             }
             Ok(source.query_row("SELECT body FROM backup_controls WHERE hash=?1",[hash],|row|row.get(0)).optional()?)

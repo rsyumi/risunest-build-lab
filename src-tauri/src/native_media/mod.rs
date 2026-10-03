@@ -1,3 +1,4 @@
+use crate::native_log::logged;
 use crate::asset_repository::PayloadCas;
 use crate::trust_boundary::is_lower_hex_byte;
 use image::codecs::gif::GifDecoder;
@@ -710,24 +711,26 @@ pub(crate) async fn native_media_encode_inlay_image(
     name: String,
     options: Option<InlayEncodeOptions>,
 ) -> Result<ipc::EncodedInlayIpcResult, String> {
-    if data.len() > ipc::NATIVE_MEDIA_IPC_CHUNK_BYTES {
-        return Err("native Inlay direct encoder input exceeds one IPC chunk".to_owned());
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<crate::persistent_store::PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        ipc::encode_direct(
-            &app.state::<ipc::NativeMediaIpcState>(),
-            &id,
-            &data,
-            &name,
-            options,
-        )
-    })
-    .await
-    .map_err(|error| format!("failed to join native Inlay image encoder: {error}"))?
+    logged("native_media_encode_inlay_image", async move {
+        if data.len() > ipc::NATIVE_MEDIA_IPC_CHUNK_BYTES {
+            return Err("native Inlay direct encoder input exceeds one IPC chunk".to_owned());
+        }
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<crate::persistent_store::PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            ipc::encode_direct(
+                &app.state::<ipc::NativeMediaIpcState>(),
+                &id,
+                &data,
+                &name,
+                options,
+            )
+        })
+        .await
+        .map_err(|error| format!("failed to join native Inlay image encoder: {error}"))?
+    }.await)
 }
 
 fn parse_range(value: Option<&HeaderValue>, size: u64) -> Option<RequestedRange> {

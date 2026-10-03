@@ -4,6 +4,7 @@ use crate::persistent_store::{
         hypa::HypaEmbeddingWrite,
         plugin_values::PluginDeviceMutation,
         sections::{reset_section_resource_evidence, section_resource_evidence},
+        Section,
     },
     PersistentStore,
 };
@@ -67,15 +68,14 @@ fn e4_section_capture_scale() {
 
     let baseline = working_set().unwrap_or(0);
     let started = Instant::now();
-    let ((captured, publications), peak) = measure_working_set(|| capture_state_sections(
-        &mut store,
-        &Sequence::from(1u64),
-        &BTreeMap::new(),
-        "scale-connection",
-        "scale-library",
-        spool.path(),
-        &Cancellation::default(),
-    ).expect("capture scale sections"));
+    let (captured, peak) = measure_working_set(|| {
+        let prepared = store.device_store_mut().unwrap().capture_backup_sections(&[
+            SectionKind::Hypa,
+            SectionKind::LocalPlugins,
+        ]).unwrap();
+        capture_prepared_backup_sections(&prepared, spool.path(), &Cancellation::default())
+            .expect("capture scale sections")
+    });
     let elapsed = started.elapsed();
     let plugin = captured.iter().find(|section| section.kind == SectionKind::LocalPlugins).unwrap();
     let hypa = captured.iter().find(|section| section.kind == SectionKind::Hypa).unwrap();
@@ -85,7 +85,6 @@ fn e4_section_capture_scale() {
         .filter(|source| source.kind == wire::CatalogEntryKind::SectionObject).count();
     assert_eq!(plugin_entries, rows);
     assert_eq!(hypa_objects, 1);
-    assert_eq!(publications.len(), 2);
     let source_index_bytes = captured.iter().map(|section| {
         std::mem::size_of::<SectionSource>() * section.sources.capacity()
             + section.sources.iter().map(|source| {
@@ -94,14 +93,6 @@ fn e4_section_capture_scale() {
                     + source.path.to_string_lossy().len()
             }).sum::<usize>()
     }).sum::<usize>();
-    assert_eq!(publications.iter().map(|publication| {
-        let (connection, _) = open_publication_index(&publication.publication_index_path).unwrap();
-        connection.query_row::<i64, _, _>(
-            "SELECT count(*) FROM publication_rows", [], |row| row.get(0),
-        ).unwrap()
-    }).sum::<i64>(), i64::try_from(rows + 1).unwrap());
-    drop(publications);
-    assert_eq!(load_prepared_section_publications(spool.path()).unwrap().len(), 2);
     let spool_bytes = tree_bytes(spool.path());
     let peak_delta = peak.saturating_sub(baseline);
 
