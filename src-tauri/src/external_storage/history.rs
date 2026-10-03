@@ -3,6 +3,7 @@ use super::{
     connection_commands::ConnectedRepository, connection_store::ConnectionStore, contract::*,
     control, packaging::{self, RemoteObject}, runtime, transfer::SpoolSink,
 };
+use crate::native_log::logged;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use risunest_external_storage_format::{
     content_identity::hash, crypto::derive_key, snapshot as wire,
@@ -158,96 +159,98 @@ pub(crate) async fn external_storage_list_history(
     app: AppHandle,
     request: HistoryRequest,
 ) -> Result<Value> {
-    let state = decode_cursor(&request)?;
-    let connected =
-        super::connection_commands::open_connected(&app, &request.connection_id).await?;
-    let cancel = Cancellation::default();
-    let cache = ConnectionStore::open(&runtime::root(&app)?)?;
-    let store_id = crate::persistent_store::commands::with_store_mut(app.state(), |store| {
-        store.external_identity()
-    })
-    .map_err(runtime::local_error)?
-    .store_id;
-    let mut items = BTreeMap::new();
-    let next = if state.phase == "points" {
-        let page = control::list_connected_backup_points_page(
-            &connected,
-            state.provider.as_deref(),
-            PAGE,
-            &cancel,
-        )
-        .await?;
-        for point in page.points {
-            let kind = match point.document.kind {
-                control::BackupPointKind::RecoveryCandidate => "recovery-candidate",
-                _ => "backup-point",
-            };
-            let pinned = point.document.kind == control::BackupPointKind::Manual;
-            for reference in point.document.bundles().into_iter().cloned() {
-                let document =
-                    control::read_snapshot_document(&connected, &reference, &cancel).await?;
-                cache.remember_discovery(
-                    &request.connection_id,
-                    &document.snapshot_id,
-                    &reference,
-                )?;
-                let mut value = item(&document, &reference, kind, pinned, &store_id);
-                let row_id = point.document.point_id.clone();
-                value["id"] = json!(row_id);
-                value["pointId"] = json!(point.document.point_id.clone());
-                value["pointObservation"] = json!(serde_json::to_string(
-                    &point.reference.stored(&connected.handle)?,
-                ).map_err(runtime::local_error)?);
-                value["deletable"] = json!(matches!(
-                    point.document.kind,
-                    control::BackupPointKind::Automatic | control::BackupPointKind::Manual
-                ));
-                items.insert(row_id, value);
-            }
-        }
-        match page.next_cursor {
-            Some(provider) => Some(CursorState {
-                connection: request.connection_id.clone(),
-                phase: "points".into(),
-                provider: Some(provider),
-            }),
-            None => Some(CursorState {
-                connection: request.connection_id.clone(),
-                phase: "snapshots".into(),
-                provider: None,
-            }),
-        }
-    } else {
-        let page = connected
-            .provider
-            .list_objects(
-                &connected.handle,
-                Collection::Snapshots,
+    logged("external_storage_list_history", async move {
+        let state = decode_cursor(&request)?;
+        let connected =
+            super::connection_commands::open_connected(&app, &request.connection_id).await?;
+        let cancel = Cancellation::default();
+        let cache = ConnectionStore::open(&runtime::root(&app)?)?;
+        let store_id = crate::persistent_store::commands::with_store_mut(app.state(), |store| {
+            store.external_identity()
+        })
+        .map_err(runtime::local_error)?
+        .store_id;
+        let mut items = BTreeMap::new();
+        let next = if state.phase == "points" {
+            let page = control::list_connected_backup_points_page(
+                &connected,
                 state.provider.as_deref(),
                 PAGE,
                 &cancel,
             )
             .await?;
-        for receipt in page.objects {
-            let (reference, document) = open_snapshot(&app, &connected, receipt, &cancel).await?;
-            cache.remember_discovery(&request.connection_id, &document.snapshot_id, &reference)?;
-            remember_item(
-                &mut items,
-                document.snapshot_id.clone(),
-                item(&document, &reference, "recovery-candidate", false, &store_id),
-            );
+            for point in page.points {
+                let kind = match point.document.kind {
+                    control::BackupPointKind::RecoveryCandidate => "recovery-candidate",
+                    _ => "backup-point",
+                };
+                let pinned = point.document.kind == control::BackupPointKind::Manual;
+                for reference in point.document.bundles().into_iter().cloned() {
+                    let document =
+                        control::read_snapshot_document(&connected, &reference, &cancel).await?;
+                    cache.remember_discovery(
+                        &request.connection_id,
+                        &document.snapshot_id,
+                        &reference,
+                    )?;
+                    let mut value = item(&document, &reference, kind, pinned, &store_id);
+                    let row_id = point.document.point_id.clone();
+                    value["id"] = json!(row_id);
+                    value["pointId"] = json!(point.document.point_id.clone());
+                    value["pointObservation"] = json!(serde_json::to_string(
+                        &point.reference.stored(&connected.handle)?,
+                    ).map_err(runtime::local_error)?);
+                    value["deletable"] = json!(matches!(
+                        point.document.kind,
+                        control::BackupPointKind::Automatic | control::BackupPointKind::Manual
+                    ));
+                    items.insert(row_id, value);
+                }
+            }
+            match page.next_cursor {
+                Some(provider) => Some(CursorState {
+                    connection: request.connection_id.clone(),
+                    phase: "points".into(),
+                    provider: Some(provider),
+                }),
+                None => Some(CursorState {
+                    connection: request.connection_id.clone(),
+                    phase: "snapshots".into(),
+                    provider: None,
+                }),
+            }
+        } else {
+            let page = connected
+                .provider
+                .list_objects(
+                    &connected.handle,
+                    Collection::Snapshots,
+                    state.provider.as_deref(),
+                    PAGE,
+                    &cancel,
+                )
+                .await?;
+            for receipt in page.objects {
+                let (reference, document) = open_snapshot(&app, &connected, receipt, &cancel).await?;
+                cache.remember_discovery(&request.connection_id, &document.snapshot_id, &reference)?;
+                remember_item(
+                    &mut items,
+                    document.snapshot_id.clone(),
+                    item(&document, &reference, "recovery-candidate", false, &store_id),
+                );
+            }
+            page.next_cursor.map(|provider| CursorState {
+                connection: request.connection_id.clone(),
+                phase: "snapshots".into(),
+                provider: Some(provider),
+            })
+        };
+        let mut output = json!({"items":items.into_values().collect::<Vec<_>>()});
+        if let Some(next) = next {
+            output["nextCursor"] = json!(encode_cursor(next)?);
         }
-        page.next_cursor.map(|provider| CursorState {
-            connection: request.connection_id.clone(),
-            phase: "snapshots".into(),
-            provider: Some(provider),
-        })
-    };
-    let mut output = json!({"items":items.into_values().collect::<Vec<_>>()});
-    if let Some(next) = next {
-        output["nextCursor"] = json!(encode_cursor(next)?);
-    }
-    Ok(output)
+        Ok(output)
+    }.await)
 }
 #[cfg(test)]
 mod tests {

@@ -1495,6 +1495,7 @@ export const languageGerman = {
         concurrentEditNotice: "Wenn derselbe Eintrag gleichzeitig auf mehreren Geräten bearbeitet wird, bleibt die letzte Änderung erhalten. Änderungen oder Nachrichten können verloren gehen. Verwenden Sie nicht mehrere Geräte gleichzeitig.",
         replaceTitle: "Daten auf diesem Gerät ersetzen?",
         replaceDescription: "Zur Synchronisierung werden die Daten auf diesem Gerät gelöscht und durch die entfernten Daten ersetzt. Erstellen Sie bei Bedarf manuell eine Sicherung.",
+        serverRestoredDescription: "Der Server wurde aus einer Sicherung wiederhergestellt. Die Daten auf diesem Gerät werden gelöscht und durch die Serverdaten ersetzt. Änderungen, die nach der Sicherung auf diesem Gerät vorgenommen wurden, gehen verloren. Erstellen Sie bei Bedarf manuell eine Sicherung.",
         replaceAcknowledge: "Daten auf diesem Gerät löschen",
         replaceAction: "Ersetzen",
         cancelAction: "Abbrechen",

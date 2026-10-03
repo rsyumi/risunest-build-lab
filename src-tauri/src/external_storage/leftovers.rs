@@ -232,7 +232,7 @@ mod tests {
         let request = serde_json::from_value(serde_json::json!({
             "connectionId":"removed-connection", "kind":"backup"
         })).unwrap();
-        let mut terminal = DurableJob::new(request, false, 1, identity.clone());
+        let mut terminal = DurableJob::new(request, 1, identity.clone());
         terminal.summary["state"] = serde_json::json!("failed");
         jobs.put(&terminal).unwrap();
         let unrelated = job_directory(root.path(), "removed-connection", &terminal.id)
@@ -303,7 +303,7 @@ mod tests {
             selection_epoch: "selection".into(),
             revision: 1,
         };
-        let mut job = DurableJob::new(request, false, 1, identity);
+        let mut job = DurableJob::new(request, 1, identity);
         assert_eq!(job.request.kind, JobKind::Restore);
         job.summary["state"] = serde_json::json!(state);
         JobStore::open(root).unwrap().put(&job).unwrap();

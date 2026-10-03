@@ -7,8 +7,8 @@ use risunest_external_storage_format::{
     crypto, pack,
     section::{
         hypa_entry_key, local_plugin_entry_key, HypaValue, InlineOrObject, LocalPluginValue,
-        LocalSettingValue, PluginSpace, SectionEntry, SectionEntryVersion, SectionKind,
-        SectionValue, SECTION_CODEC,
+        LocalSettingValue, ObjectReference, PluginSpace, SectionEntry, SectionEntryVersion,
+        SectionKind, SectionValue, ValueOrObject, SECTION_CODEC,
     },
     snapshot::{
         envelope_length, keyed_object_id, open_envelope, seal_envelope, CatalogDocument,
@@ -102,9 +102,9 @@ fn section_reference(kind: SectionKind, generation: u64, max_write_clock: u64) -
     }
 }
 
-/// Section identifiers, key shapes, counters and the empty section. An empty
-/// published section carries a reference; a section that was never published
-/// carries no map key at all.
+/// Section identifiers, key shapes, counters, device values carried as objects
+/// and the empty section. An empty published section carries a reference; a
+/// section that was never published carries no map key at all.
 fn section_entries() -> Vec<Vec<u8>> {
     let version = |clock: u64, writer: &str| {
         Some(SectionEntryVersion {
@@ -141,7 +141,7 @@ fn section_entries() -> Vec<Vec<u8>> {
             local_plugin_entry_key("provider-manager", "json", "settings").unwrap(),
             SectionValue::LocalPlugin(LocalPluginValue {
                 space: PluginSpace::Json,
-                value: serde_json::json!({ "zeta": [1, 2], "alpha": null }),
+                value: ValueOrObject::Inline(serde_json::json!({ "zeta": [1, 2], "alpha": null })),
             }),
             version(4, "writer-a"),
         )
@@ -151,7 +151,7 @@ fn section_entries() -> Vec<Vec<u8>> {
             local_plugin_entry_key("yumi-translator", "string", "cache:index").unwrap(),
             SectionValue::LocalPlugin(LocalPluginValue {
                 space: PluginSpace::String,
-                value: serde_json::Value::String("kept verbatim".into()),
+                value: ValueOrObject::Inline(serde_json::Value::String("kept verbatim".into())),
             }),
             None,
         )
@@ -160,7 +160,32 @@ fn section_entries() -> Vec<Vec<u8>> {
             SectionKind::LocalSettings,
             "risuNestDeviceSettings".into(),
             SectionValue::LocalSetting(LocalSettingValue {
-                value: serde_json::json!({ "startup": "restore" }),
+                value: ValueOrObject::Inline(serde_json::json!({ "startup": "restore" })),
+            }),
+            None,
+        )
+        .unwrap(),
+        SectionEntry::new(
+            SectionKind::LocalPlugins,
+            local_plugin_entry_key("provider-manager", "json", "history").unwrap(),
+            SectionValue::LocalPlugin(LocalPluginValue {
+                space: PluginSpace::Json,
+                value: ValueOrObject::Object(ObjectReference {
+                    content_sha256: [9; 32],
+                    byte_length: 70_000,
+                }),
+            }),
+            version(5, "writer-a"),
+        )
+        .unwrap(),
+        SectionEntry::new(
+            SectionKind::LocalSettings,
+            "risuNestUpdateSettings".into(),
+            SectionValue::LocalSetting(LocalSettingValue {
+                value: ValueOrObject::Object(ObjectReference {
+                    content_sha256: [10; 32],
+                    byte_length: 4_097,
+                }),
             }),
             None,
         )

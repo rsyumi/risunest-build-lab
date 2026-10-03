@@ -1,4 +1,5 @@
 use super::*;
+use crate::native_log::logged;
 use crate::asset_repository::job_pins::{CasReleaseOutcome, DurableCasJob};
 use std::io::ErrorKind;
 use tauri::{AppHandle, Manager, State};
@@ -74,58 +75,60 @@ pub(crate) fn native_device_backup_bootstrap(
     app: AppHandle,
     state: State<'_, DeviceBackupState>,
 ) -> Result<BootstrapDecision> {
-    if state.is_blocking()? {
+    logged("native_device_backup_bootstrap", (|| {
+        if state.is_blocking()? {
+            require(
+                app.webview_windows().len() == 1,
+                "Device maintenance requires one WebView with all previous plugin contexts closed",
+            )?;
+        }
+        let decision = state.bootstrap_for_entry()?;
+        let Some(session) = decision.session.as_ref() else {
+            return Ok(decision);
+        };
         require(
-            app.webview_windows().len() == 1,
-            "Device maintenance requires one WebView with all previous plugin contexts closed",
+            session.profile == "native-portable",
+            "Device recovery requires a native portable session",
         )?;
-    }
-    let decision = state.bootstrap_for_entry()?;
-    let Some(session) = decision.session.as_ref() else {
-        return Ok(decision);
-    };
-    require(
-        session.profile == "native-portable",
-        "Device recovery requires a native portable session",
-    )?;
-    if session.phase == "committed" {
-        return Ok(decision);
-    }
-    if matches!(
-        session.phase.as_str(),
-        "loading-source" | "preparing"
-    ) {
-        release_native_restore_pins(
-            session,
-            state.repository_root(),
-            CasReleaseOutcome::Aborted,
-        )?;
-        state.fail(&session.session_id, "interrupted-before-native-apply")?;
-        state.recovery_complete(&session.session_id)?;
-        return state.bootstrap_for_entry();
-    }
-    if matches!(
-        session.phase.as_str(),
-        "prepared" | "applying-device" | "committing-library"
-    ) {
-        let mut store = crate::persistent_store::PersistentStore::open(state.repository_root())
-            .map_err(|_| {
+        if session.phase == "committed" {
+            return Ok(decision);
+        }
+        if matches!(
+            session.phase.as_str(),
+            "loading-source" | "preparing"
+        ) {
+            release_native_restore_pins(
+                session,
+                state.repository_root(),
+                CasReleaseOutcome::Aborted,
+            )?;
+            state.fail(&session.session_id, "interrupted-before-native-apply")?;
+            state.recovery_complete(&session.session_id)?;
+            return state.bootstrap_for_entry();
+        }
+        if matches!(
+            session.phase.as_str(),
+            "prepared" | "applying-device" | "committing-library"
+        ) {
+            let mut store = crate::persistent_store::PersistentStore::open(state.repository_root())
+                .map_err(|_| {
+                    error(
+                        "device-storage-failed",
+                        "Native portable recovery could not open persistent storage",
+                    )
+                })?;
+            resume_journaled_native_restore(&state, &session.session_id, &mut store)?;
+            let decision = state.bootstrap_for_entry()?;
+            decision.session.as_ref().ok_or_else(|| {
                 error(
-                    "device-storage-failed",
-                    "Native portable recovery could not open persistent storage",
+                    "device-invalid-state",
+                    "Native portable recovery lost its committed session",
                 )
             })?;
-        resume_journaled_native_restore(&state, &session.session_id, &mut store)?;
-        let decision = state.bootstrap_for_entry()?;
-        decision.session.as_ref().ok_or_else(|| {
-            error(
-                "device-invalid-state",
-                "Native portable recovery lost its committed session",
-            )
-        })?;
-        return Ok(decision);
-    }
-    Ok(decision)
+            return Ok(decision);
+        }
+        Ok(decision)
+    })())
 }
 
 #[tauri::command(async)]
@@ -133,5 +136,5 @@ pub(crate) fn native_device_backup_recovery_complete(
     state: State<'_, DeviceBackupState>,
     session_id: String,
 ) -> Result<()> {
-    complete_native_recovery(&state, &session_id)
+    logged("native_device_backup_recovery_complete", complete_native_recovery(&state, &session_id))
 }

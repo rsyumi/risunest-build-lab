@@ -1168,7 +1168,6 @@ fn library_object_roots(db: &Connection, objects: &Connection, roots: &mut Objec
         "SELECT DISTINCT hash FROM message_page_indexes",
         "SELECT manifest_hash FROM external_storage_captures",
         "SELECT file_hash FROM external_storage_capture_files",
-        "SELECT content_hash FROM external_storage_base_records",
         "SELECT hash FROM snapshot_restore_payloads",
     ] {
         let mut statement = db.prepare(sql)?;

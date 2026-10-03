@@ -119,7 +119,7 @@ pub(crate) struct PublishedCatalog {
     pub coverage: Coverage,
     pub visited: u64,
 }
-fn sql(_: impl std::fmt::Display) -> ProviderError { segment::corrupt() }
+fn sql(error: impl std::fmt::Display) -> ProviderError { segment::corrupt().caused(&error) }
 impl PublishedCatalog {
     pub(crate) fn create(path: &Path) -> Result<Self> {
         let file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(sql)?;

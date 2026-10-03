@@ -549,3 +549,105 @@ fn claim_identity_remains_permanent_after_revoked_device_cleanup_and_reopen() {
         .authenticate(&candidate.library_id, &candidate.token)
         .is_err());
 }
+
+fn versions(root: &tempfile::TempDir, key: &str) -> i64 {
+    metadata(root)
+        .query_row(
+            "SELECT count(*) FROM writer_versions WHERE key=?1",
+            [key],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn a_fresh_publisher_forwards_an_entry_the_former_registration_already_published() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::init(root.path()).unwrap();
+    let former = store.add_device().unwrap();
+    let old = actor(&store, &former);
+    let entry = inline("language", WRITER_A, 10, "ja");
+    let first = store
+        .push(&old, &request(&store, WRITER_A, "old", vec![entry.clone()]))
+        .unwrap();
+    assert_eq!(first.accepted_keys, vec![entry.key.clone()]);
+    let candidate = store.add_device().unwrap();
+    let new = actor(&store, &candidate);
+    store
+        .claim_new_device_writer(&new, &claim(Some(&former.token)))
+        .unwrap();
+    let repeated = store
+        .push(
+            &new,
+            &request(&store, RESERVED, "fresh", vec![entry.clone()]),
+        )
+        .unwrap();
+    assert!(repeated.accepted_keys.is_empty());
+    assert_eq!(repeated.seq.0, 1);
+    assert_eq!(store.head().unwrap().seq.as_str(), "1");
+    assert_eq!(versions(&root, entry.key.as_str()), 1);
+    let pin = store.create_state_pin(&new).unwrap();
+    let state = store.state_page(&new, &pin.pin_id, None, 16).unwrap();
+    assert_eq!(state.items, vec![entry]);
+}
+
+#[test]
+fn a_fresh_publisher_forwards_an_entry_whose_former_publication_was_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::init(root.path()).unwrap();
+    let former = store.add_device().unwrap();
+    let old = actor(&store, &former);
+    store
+        .push(
+            &old,
+            &request(
+                &store,
+                WRITER_A,
+                "earlier",
+                vec![inline("other", WRITER_A, 5, "x")],
+            ),
+        )
+        .unwrap();
+    let entry = inline("language", WRITER_A, 10, "ja");
+    let lost = request(&store, WRITER_A, "lost", vec![entry.clone()]);
+    assert!(matches!(
+        store
+            .cancel_operation(
+                &old,
+                "lost",
+                &CancelOperationRequest {
+                    body_digest: lost.digest().unwrap(),
+                },
+            )
+            .unwrap(),
+        risunest_sync_wire::lww::OperationReceipt::Rejected { .. }
+    ));
+    let candidate = store.add_device().unwrap();
+    let new = actor(&store, &candidate);
+    store
+        .claim_new_device_writer(&new, &claim(Some(&former.token)))
+        .unwrap();
+    let receipt = store
+        .push(
+            &new,
+            &request(&store, RESERVED, "fresh", vec![entry.clone()]),
+        )
+        .unwrap();
+    assert_eq!(receipt.accepted_keys, vec![entry.key.clone()]);
+    assert_eq!(receipt.seq.0, 2);
+    assert_eq!(versions(&root, entry.key.as_str()), 1);
+    let journal: Vec<String> = metadata(&root)
+        .prepare("SELECT key FROM journal ORDER BY seq")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        journal,
+        [
+            inline("other", WRITER_A, 5, "x").key.as_str().to_owned(),
+            entry.key.as_str().to_owned()
+        ]
+    );
+}

@@ -194,6 +194,7 @@ fn operation_receipts_and_writer_versions_expire_with_the_journal_tail() {
         }],
     };
     let first = push("first", 1, br#""a""#);
+    let before = super::uploads::now().unwrap();
     let first_receipt = store.push(&actor, &first).unwrap();
     store.push(&actor, &push("second", 2, br#""b""#)).unwrap();
     let db = rusqlite::Connection::open(root.path().join("metadata.sqlite")).unwrap();
@@ -203,10 +204,10 @@ fn operation_receipts_and_writer_versions_expire_with_the_journal_tail() {
         })
         .unwrap()
     };
-    let current = super::uploads::now().unwrap();
-    store.maintain_at(current + 604800 - 1).unwrap();
+    let after = super::uploads::now().unwrap();
+    store.maintain_at(before + 604800 - 1).unwrap();
     assert_eq!((count("operations"), count("writer_versions")), (2, 2));
-    store.maintain_at(current + 604800 + 2).unwrap();
+    store.maintain_at(after + 604800 + 2).unwrap();
     assert_eq!((count("operations"), count("writer_versions")), (0, 1));
     assert_eq!(
         db.query_row("SELECT physical FROM writer_versions", [], |r| r

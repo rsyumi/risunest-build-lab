@@ -74,7 +74,7 @@ impl NativeLogState {
         self.record("error", "webview", bounded);
     }
 
-    fn record_ring_only(&self, level: &str, target: &str, message: impl AsRef<str>) {
+    pub(crate) fn record_ring_only(&self, level: &str, target: &str, message: impl AsRef<str>) {
         self.record_inner(level, target, message.as_ref(), false);
     }
 
@@ -196,7 +196,7 @@ fn write_file(inner: &Inner, entry: &LogEntry) {
 }
 
 fn mask(message: &str) -> String {
-    let mut masked = message.to_owned();
+    let mut masked = without_temporary_file_paths(message);
     for key in [
         "authorization",
         "api_key",
@@ -236,6 +236,31 @@ fn mask(message: &str) -> String {
         });
     }
     redact_long_runs(&redact_sk_tokens(&masked))
+}
+
+/// tempfile appends the path it failed on, which names the user's folders.
+fn without_temporary_file_paths(input: &str) -> String {
+    const MARKER: &str = " at path \"";
+    let mut kept = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find(MARKER) {
+        kept.push_str(&rest[..start]);
+        let quoted = &rest[start + MARKER.len()..];
+        let mut escaped = false;
+        let end = quoted.char_indices().find_map(|(index, character)| {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                return Some(index + 1);
+            }
+            None
+        });
+        rest = &quoted[end.unwrap_or(quoted.len())..];
+    }
+    kept.push_str(rest);
+    kept
 }
 
 fn redact_json_value(input: &str, key: &str) -> String {
@@ -464,6 +489,141 @@ pub(crate) fn log_global(level: &str, target: &str, message: String) {
     #[cfg(debug_assertions)]
     eprintln!("{}", format_console_line(level, target, &message));
     global_state().record(level, target, message);
+}
+
+/// Records to the in-memory log only, for failures raised while the log
+/// directory may be removed.
+pub(crate) fn log_ring_only(level: &str, target: &str, message: String) {
+    #[cfg(debug_assertions)]
+    eprintln!("{}", format_console_line(level, target, &message));
+    global_state().record_ring_only(level, target, message);
+}
+
+/// Target of the one line a failed native command leaves in the device log.
+pub(crate) const COMMAND_TARGET: &str = "native-command";
+const MAX_COMMAND_DETAIL_CHARS: usize = 2048;
+
+/// What a failed command reports to the device log. The detail is the failure
+/// behind the code; it must never carry user content.
+pub(crate) trait CommandFailure {
+    fn code(&self) -> std::borrow::Cow<'_, str>;
+    fn detail(&self) -> Option<std::borrow::Cow<'_, str>> {
+        None
+    }
+    /// A routine refusal, logged as a warning without its detail.
+    fn expected(&self) -> bool {
+        false
+    }
+}
+
+/// A command that fails with a bare string returns either a code or a message.
+impl CommandFailure for String {
+    fn code(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(if is_code(self) { self } else { "error" })
+    }
+    fn detail(&self) -> Option<std::borrow::Cow<'_, str>> {
+        (!is_code(self)).then(|| std::borrow::Cow::Borrowed(self.as_str()))
+    }
+    fn expected(&self) -> bool {
+        matches!(self.as_str(), "cancelled" | "library-operation-busy" | "cleanup-pending" | "native-media-busy")
+    }
+}
+
+fn is_code(text: &str) -> bool {
+    text.len() <= 64
+        && text.starts_with(|character: char| character.is_ascii_lowercase())
+        && !text.ends_with('-')
+        && text.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Logs a failed command once, with where it was called, and returns the
+/// result unchanged.
+#[track_caller]
+pub(crate) fn logged<T, E: CommandFailure>(command: &str, result: Result<T, E>) -> Result<T, E> {
+    if let Err(error) = &result {
+        record_command_failure(command, error, std::panic::Location::caller());
+    }
+    result
+}
+
+pub(crate) fn record_command_failure(
+    command: &str,
+    error: &(impl CommandFailure + ?Sized),
+    at: &std::panic::Location<'_>,
+) {
+    let expected = error.expected();
+    let cause = match error.detail() {
+        Some(detail) if !expected => {
+            let bounded: String = detail.chars().take(MAX_COMMAND_DETAIL_CHARS).collect();
+            format!(" cause={bounded}")
+        }
+        _ => String::new(),
+    };
+    log_global(
+        if expected { "warn" } else { "error" },
+        COMMAND_TARGET,
+        format!(
+            "{command} failed: code={}{cause} at={}:{}",
+            error.code(),
+            at.file(),
+            at.line()
+        ),
+    );
+}
+
+/// Names a JSON decoding failure by its category and position only. The
+/// decoder's own text can quote the input it rejected; a reader's failure
+/// cannot, so it is kept.
+pub(crate) fn json_failure(error: &serde_json::Error) -> String {
+    let category = match error.classify() {
+        serde_json::error::Category::Io => return format!("json-io: {error}"),
+        serde_json::error::Category::Syntax => "syntax",
+        serde_json::error::Category::Data => "shape",
+        serde_json::error::Category::Eof => "incomplete",
+    };
+    format!("json-{category} at line {} column {}", error.line(), error.column())
+}
+
+/// An io failure's text, with a JSON failure carried inside it named by
+/// [`json_failure`] instead.
+pub(crate) fn io_failure(error: &std::io::Error) -> String {
+    match error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<serde_json::Error>())
+    {
+        Some(json) => json_failure(json),
+        None => error.to_string(),
+    }
+}
+
+/// A SQLite failure's text, with a JSON failure met while reading a row named
+/// by [`json_failure`] instead.
+pub(crate) fn sqlite_failure(error: &rusqlite::Error) -> String {
+    if let rusqlite::Error::FromSqlConversionFailure(index, _, inner) = error {
+        if let Some(json) = inner.downcast_ref::<serde_json::Error>() {
+            return format!("column {index} is not readable: {}", json_failure(json));
+        }
+    }
+    error.to_string()
+}
+
+/// The text of a failure kept for the device log. A JSON failure keeps only its
+/// position, and a network failure only its kind, since its text can carry a
+/// signed URL. The type is matched by name so borrowed errors such as a
+/// poisoned lock are accepted too.
+pub(crate) fn failure_text<E: std::fmt::Display + ?Sized>(error: &E) -> String {
+    let name = std::any::type_name::<E>().trim_start_matches('&');
+    if name == std::any::type_name::<serde_json::Error>() {
+        let text = error.to_string();
+        match text.rfind(" at line ") {
+            Some(position) => format!("json failure{}", &text[position..]),
+            None => "json failure".to_owned(),
+        }
+    } else if name == std::any::type_name::<reqwest::Error>() {
+        "network failure".to_owned()
+    } else {
+        error.to_string()
+    }
 }
 
 fn format_console_line(level: &str, target: &str, message: &str) -> String {

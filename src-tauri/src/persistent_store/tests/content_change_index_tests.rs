@@ -1,6 +1,6 @@
 //! Transactional pruning and pinned capture regressions with synthetic stores.
 use super::*;
-use crate::persistent_store::{content_capture::ContentCaptureSink, sync_selection, RootMutation};
+use crate::persistent_store::{content_capture::ContentCaptureSink, RootMutation};
 
 fn cursor(store: &mut PersistentStore, consumer: &str, revision: i64) {
     let tx = store.connection.transaction().unwrap();
@@ -402,19 +402,4 @@ fn content_capture_drop_releases_the_read_guard_without_an_abandon_call() {
     assert!(consumers(&store).is_empty());
     assert_eq!(count(&store, "external_storage_captures"), 0);
     assert_eq!(floor(&store), 1);
-}
-
-#[test]
-fn restoring_a_copy_keeps_identity_invalidation_without_capture_reservations() {
-    let (_directory, mut store, _) = open_fixture();
-    cursor(&mut store, "backup", 1);
-    let old = sync_selection::identity(&store.connection).unwrap();
-    let tx = store.connection.transaction().unwrap();
-    sync_selection::restored_copy(&tx).unwrap();
-    tx.commit().unwrap();
-    let current = sync_selection::identity(&store.connection).unwrap();
-    assert_ne!(current.store_id, old.store_id);
-    assert_ne!(current.library_epoch, old.library_epoch);
-    assert_eq!(consumers(&store), vec![("backup".into(), 1, true)]);
-    assert_eq!(count(&store, "content_change_context"), 0);
 }

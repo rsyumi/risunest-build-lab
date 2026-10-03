@@ -997,6 +997,7 @@ mod tests {
         let failure = device_error(DeviceBackupError {
             code: "device-storage-failed".into(),
             message: "synthetic storage failure".into(),
+            cause: None,
         });
 
         assert_eq!(failure.code, "portable-backup-failed");
@@ -1848,6 +1849,47 @@ mod tests {
             .find(|character| character["chaId"] == "synthetic-large")
             .unwrap();
         assert!(character["chats"][0]["message"][0]["data"] == data.as_str());
+    }
+
+    #[test]
+    fn portable_backup_manifest_reads_do_not_grow_with_oversized_pages() {
+        use crate::persistent_store::{hash_work, WorkingSetCommit};
+        let data = "x".repeat(risunest_sync_wire::MAX_METADATA_BYTES);
+        let manifest_reads = |messages: usize| {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = library(&directory.path().join("source"));
+            let message = (0..messages)
+                .map(|index| serde_json::json!({"role": "user", "data": format!("{index} {data}")}))
+                .collect::<Vec<_>>();
+            store
+                .commit(&WorkingSetCommit {
+                    expected_revision: store.revision().unwrap(),
+                    add_character: Some(serde_json::json!({
+                        "type": "character", "chaId": "synthetic-large", "name": "Large",
+                        "chats": [{"id": "synthetic-large-chat", "name": "Large", "message": message}],
+                    })),
+                    ..Default::default()
+                })
+                .unwrap();
+            hash_work::reset_hash_work();
+            let restored = export_and_restore(directory.path(), store);
+            let reads = hash_work::take_hash_work().domains["native_backup_manifest_source"].calls;
+            let database = restored.materialize(None).unwrap();
+            let character = database["characters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|character| character["chaId"] == "synthetic-large")
+                .unwrap();
+            let restored_messages = character["chats"][0]["message"].as_array().unwrap();
+            assert_eq!(restored_messages.len(), messages);
+            assert!(restored_messages[messages - 1]["data"] == format!("{} {data}", messages - 1).as_str());
+            reads
+        };
+        // Each oversized page lookup reuses the manifests read for the first.
+        let one = manifest_reads(1);
+        assert!(one > 0);
+        assert_eq!(manifest_reads(3), one);
     }
 }
 

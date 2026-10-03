@@ -1,4 +1,4 @@
-use super::files::{self, Result};
+use super::files::{self, failed, Result};
 use crate::app_paths::AppPaths;
 use std::path::PathBuf;
 
@@ -41,7 +41,7 @@ impl Paths {
 
     pub fn from_app(app: &tauri::AppHandle) -> Result<Self> {
         let manifest =
-            crate::app_paths::manifest(app).map_err(|_| "cleanup-path-unavailable".to_owned())?;
+            crate::app_paths::manifest(app).map_err(|error| failed("cleanup-path-unavailable", error))?;
         Ok(Self::from_manifest(&manifest))
     }
 

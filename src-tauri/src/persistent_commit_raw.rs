@@ -3,6 +3,7 @@ use crate::persistent_store::{
     commands::with_store_mut, AssetAlias, RevisionResult, StoreError, StoreResult, WorkingSetCommit,
 };
 use serde::Deserialize;
+use crate::native_log::logged;
 use tauri::{
     ipc::{InvokeBody, Request},
     AppHandle, Manager, WebviewWindow,
@@ -16,16 +17,8 @@ pub(crate) struct Envelope {
 }
 
 pub(crate) fn decode_envelope(bytes: &[u8]) -> StoreResult<Envelope> {
-    serde_json::from_slice(bytes).map_err(|error| {
-        let category = match error.classify() {
-            serde_json::error::Category::Io => "io",
-            serde_json::error::Category::Syntax => "syntax",
-            serde_json::error::Category::Data => "shape",
-            serde_json::error::Category::Eof => "incomplete",
-        };
-        StoreError::CommitDecode {
-            message: format!("commit envelope {category} error at line {} column {}", error.line(), error.column()),
-        }
+    serde_json::from_slice(bytes).map_err(|error| StoreError::CommitDecode {
+        message: format!("commit envelope {}", crate::native_log::json_failure(&error)),
     })
 }
 
@@ -43,14 +36,14 @@ pub(crate) fn pds_commit_raw(
     request: Request<'_>,
 ) -> StoreResult<RevisionResult> {
     if window.label() != "main" {
-        return Err(StoreError::Validation {
+        return logged("pds_commit_raw", Err(StoreError::Validation {
             message: "commit transport requires the main webview".to_owned(),
-        });
+        }));
     }
-    match request.body() {
+    logged("pds_commit_raw", match request.body() {
         InvokeBody::Raw(bytes) => commit_bytes(&app, bytes),
         _ => Err(StoreError::RawBodyUnavailable),
-    }
+    })
 }
 
 #[cfg(test)]

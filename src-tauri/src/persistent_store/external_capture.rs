@@ -111,6 +111,12 @@ impl PersistentStore {
         let reader = self.revision_leases.get(lease)
             .ok_or_else(|| invalid("Backup dependency lease is unavailable"))?;
         let large = large_unit_body_hashes(units);
+        let read_manifest = |manifest: &str| -> StoreResult<Option<Vec<u8>>> {
+            let size:Option<i64>=reader.connection.query_row("SELECT length(body) FROM message_page_objects WHERE hash=?1",[manifest],|row|row.get(0)).optional()?;
+            if size.is_some_and(|size|size<0 || size as u64>risunest_sync_wire::MAX_METADATA_BYTES as u64) {return Err(invalid("Backup manifest exceeds its bound"));}
+            super::message_pages::object_body(&reader.connection,manifest)
+        };
+        let pages = OriginalMessagePages::new(units,&read_manifest);
         let load = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
             check(probe)?;
             let length: Option<i64> = reader.connection.query_row(
@@ -118,11 +124,7 @@ impl PersistentStore {
             ).optional()?;
             if length.is_some_and(|size| size < 0) {return Err(invalid("Backup control length is invalid"));}
             if let Some(size)=length.filter(|size|*size as u64>risunest_sync_wire::MAX_METADATA_BYTES as u64 && !large.contains(hash)) {
-                let page=original_unit_message_page(units,hash,&|manifest| {
-                    let size:Option<i64>=reader.connection.query_row("SELECT length(body) FROM message_page_objects WHERE hash=?1",[manifest],|row|row.get(0)).optional()?;
-                    if size.is_some_and(|size|size<0 || size as u64>risunest_sync_wire::MAX_METADATA_BYTES as u64) {return Err(invalid("Backup manifest exceeds its bound"));}
-                    super::message_pages::object_body(&reader.connection,manifest)
-                })?.ok_or_else(||invalid("Backup control exceeds its bounded metadata limit"))?;
+                let page=pages.page(hash)?.ok_or_else(||invalid("Backup control exceeds its bounded metadata limit"))?;
                 if page.byte_length.0!=size as u64 {return Err(invalid("Backup message page length differs"));}
             }
             super::message_pages::object_body(&reader.connection, hash)
@@ -193,7 +195,7 @@ pub(crate) fn verified_large_unit_body(bytes:&[u8])->StoreResult<()> {
 /// A control above the metadata bound is either one indivisible message page
 /// or a large unit body.
 pub(crate) fn verified_oversized_control(bytes:&[u8])->StoreResult<()> {
-    if verified_large_message_page(bytes).is_ok() {return Ok(());}
+    if bytes.starts_with(risunest_external_storage_format::message_pages::PAGE_PREFIX) && verified_large_message_page(bytes).is_ok() {return Ok(());}
     verified_large_unit_body(bytes)
 }
 
@@ -221,31 +223,85 @@ pub(crate) fn verified_large_message_page(bytes:&[u8])->StoreResult<Vec<serde_js
     Ok(messages)
 }
 
-pub(crate) fn original_unit_message_page(
-    units:&BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,hash:&str,
-    read_manifest:&dyn Fn(&str)->StoreResult<Option<Vec<u8>>>,
-) -> StoreResult<Option<risunest_external_storage_format::message_pages::ManifestPage>> {
-    let mut found=None;
-    for (key,value) in units {
-        if !super::lww::lww_known_unit_key(key) || key.components()[0]!="messages" {continue;}
-        let risunest_sync_wire::unit::UnitValue::Object{descriptor,..}=value else {continue;};
-        let bytes=read_manifest(&descriptor.object_hash)?.ok_or_else(||invalid("Original message manifest is unavailable"))?;
-        if bytes.len()>risunest_sync_wire::MAX_METADATA_BYTES || hash_backup_body(&bytes,"native_backup_manifest_source")!=descriptor.object_hash {return Err(invalid("Original message manifest identity differs"));}
-        let decoded=risunest_external_storage_format::message_pages::MessageManifest::decode(&bytes);
-        #[cfg(test)] crate::persistent_store::hash_work::decoded("native_backup_manifest_decode_identity",&bytes,&decoded);
-        for page in decoded.map_err(|_|invalid("Original message manifest integrity failed"))?.pages {
-            if page.hash!=hash {continue;}
-            if found.as_ref().is_some_and(|previous|previous!=&page) {return Err(invalid("Original message page references differ"));}
-            found=Some(page);
+/// The pages the original message manifests list, read once on first use.
+pub(crate) struct OriginalMessagePages<'a> {
+    units:&'a BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
+    read_manifest:&'a dyn Fn(&str)->StoreResult<Option<Vec<u8>>>,
+    pages:std::cell::OnceCell<BTreeMap<String,Option<risunest_external_storage_format::message_pages::ManifestPage>>>,
+}
+
+impl<'a> OriginalMessagePages<'a> {
+    pub(crate) fn new(
+        units:&'a BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
+        read_manifest:&'a dyn Fn(&str)->StoreResult<Option<Vec<u8>>>,
+    ) -> Self {
+        Self {units,read_manifest,pages:std::cell::OnceCell::new()}
+    }
+
+    /// The page `hash` names. Two manifests that describe it differently fail.
+    pub(crate) fn page(&self,hash:&str) -> StoreResult<Option<&risunest_external_storage_format::message_pages::ManifestPage>> {
+        let pages=match self.pages.get() {
+            Some(pages)=>pages,
+            None=>{let pages=self.read()?; self.pages.get_or_init(||pages)}
+        };
+        match pages.get(hash) {
+            None=>Ok(None),
+            Some(Some(page))=>Ok(Some(page)),
+            Some(None)=>Err(invalid("Original message page references differ")),
         }
     }
-    Ok(found)
+
+    fn read(&self) -> StoreResult<BTreeMap<String,Option<risunest_external_storage_format::message_pages::ManifestPage>>> {
+        let mut pages=BTreeMap::new();
+        for (key,value) in self.units {
+            if !super::lww::lww_known_unit_key(key) || key.components()[0]!="messages" {continue;}
+            let risunest_sync_wire::unit::UnitValue::Object{descriptor,..}=value else {continue;};
+            let bytes=(self.read_manifest)(&descriptor.object_hash)?.ok_or_else(||invalid("Original message manifest is unavailable"))?;
+            if bytes.len()>risunest_sync_wire::MAX_METADATA_BYTES || hash_backup_body(&bytes,"native_backup_manifest_source")!=descriptor.object_hash {return Err(invalid("Original message manifest identity differs"));}
+            let decoded=risunest_external_storage_format::message_pages::MessageManifest::decode(&bytes);
+            #[cfg(test)] crate::persistent_store::hash_work::decoded("native_backup_manifest_decode_identity",&bytes,&decoded);
+            for page in decoded.map_err(|_|invalid("Original message manifest integrity failed"))?.pages {
+                match pages.entry(page.hash.clone()) {
+                    std::collections::btree_map::Entry::Vacant(entry)=>{entry.insert(Some(page));}
+                    std::collections::btree_map::Entry::Occupied(mut entry)=>{
+                        if entry.get().as_ref().is_some_and(|previous|previous!=&page) {entry.insert(None);}
+                    }
+                }
+            }
+        }
+        Ok(pages)
+    }
 }
 
 pub(crate) fn original_unit_dependency_inventory(
     units: &BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
     read_body: &dyn Fn(&str) -> StoreResult<Option<Vec<u8>>>,
     payload_size: &dyn Fn(&str) -> StoreResult<Option<u64>>,
+    probe: &dyn CancellationProbe,
+    copy_bodies: bool,
+    emit: &mut dyn FnMut(&str,&[u8],BackupBodyRole) -> StoreResult<()>,
+) -> StoreResult<BackupDependencyInventory> {
+    dependency_inventory(units,read_body,payload_size,None,probe,copy_bodies,emit)
+}
+
+/// The inventory without reading any control above the metadata bound.
+/// Message pages and large unit bodies are recorded at the lengths their
+/// manifests and `large_length` declare, unverified.
+pub(crate) fn original_unit_control_lengths(
+    units: &BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
+    read_body: &dyn Fn(&str) -> StoreResult<Option<Vec<u8>>>,
+    payload_size: &dyn Fn(&str) -> StoreResult<Option<u64>>,
+    large_length: &dyn Fn(&str) -> StoreResult<Option<u64>>,
+    probe: &dyn CancellationProbe,
+) -> StoreResult<BackupDependencyInventory> {
+    dependency_inventory(units,read_body,payload_size,Some(large_length),probe,false,&mut |_,_,_| Ok(()))
+}
+
+fn dependency_inventory(
+    units: &BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
+    read_body: &dyn Fn(&str) -> StoreResult<Option<Vec<u8>>>,
+    payload_size: &dyn Fn(&str) -> StoreResult<Option<u64>>,
+    large_length: Option<&dyn Fn(&str) -> StoreResult<Option<u64>>>,
     probe: &dyn CancellationProbe,
     copy_bodies: bool,
     emit: &mut dyn FnMut(&str,&[u8],BackupBodyRole) -> StoreResult<()>,
@@ -277,7 +333,11 @@ pub(crate) fn original_unit_dependency_inventory(
         if hash_backup_body(&bytes,"native_backup_dependency_descriptor") != *descriptor_hash {return Err(invalid("Original backup descriptor identity differs"))}
         control(&mut inventory,emit,descriptor_hash,&bytes)?;
         let kind = key.components();
-        if is_large_unit(key) {
+        if let Some(large_length) = large_length.filter(|_| is_large_unit(key)) {
+            check(probe)?;
+            let length = large_length(&descriptor.object_hash)?.ok_or_else(|| invalid("Pinned backup large unit body is unavailable"))?;
+            inventory.controls.insert(descriptor.object_hash.clone(),length);
+        } else if is_large_unit(key) {
             check(probe)?;
             let body = read_body(&descriptor.object_hash)?.ok_or_else(|| invalid("Pinned backup large unit body is unavailable"))?;
             if hash_backup_body(&body,"native_backup_large_unit_source") != descriptor.object_hash {return Err(invalid("Pinned backup large unit body identity differs"))}
@@ -1237,6 +1297,54 @@ mod hydration_tests {
         let multiple=risunest_external_storage_format::logical_records::encode_message_page(&[message,serde_json::json!({})]).unwrap();
         assert!(verified_large_message_page(&multiple.bytes).is_err());
         assert!(verified_large_message_page(&serde_json::to_vec(&serde_json::json!({"content":"x".repeat(risunest_sync_wire::MAX_METADATA_BYTES)})).unwrap()).is_err());
+    }
+
+    #[test]
+    fn oversized_control_decodes_only_a_body_with_the_message_page_prefix() {
+        use crate::persistent_store::hash_work::{reset_hash_work, take_hash_work};
+        let message=serde_json::json!({"role":"user","content":"x".repeat(risunest_sync_wire::MAX_METADATA_BYTES)});
+        let page=risunest_external_storage_format::logical_records::encode_message_page(&[message.clone()]).unwrap().bytes;
+        let large=risunest_sync_wire::payload_value::encode(&message).unwrap();
+        assert!(large.len()>risunest_sync_wire::MAX_METADATA_BYTES);
+        reset_hash_work();
+        verified_oversized_control(&page).unwrap();
+        let work=take_hash_work();
+        assert_eq!(work.domains["native_large_message_page_decode_identity"].calls,1);
+        assert!(work.incomplete.is_empty());
+        reset_hash_work();
+        verified_oversized_control(&large).unwrap();
+        assert_eq!(take_hash_work(),Default::default());
+        let mut damaged=page.clone();damaged[1]=b' ';
+        reset_hash_work();
+        assert!(verified_oversized_control(&damaged).is_err());
+        assert_eq!(take_hash_work(),Default::default());
+    }
+
+    #[test]
+    fn oversized_message_pages_read_each_original_manifest_once() {
+        use crate::persistent_store::hash_work::{reset_hash_work, take_hash_work};
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let data = "x".repeat(risunest_sync_wire::MAX_METADATA_BYTES);
+        store.commit(&super::super::WorkingSetCommit {
+            expected_revision: store.revision().unwrap(),
+            add_character: Some(serde_json::json!({
+                "type": "character", "chaId": "synthetic-large", "name": "Large",
+                "chats": [{"id": "synthetic-large-chat", "name": "Large", "message": [
+                    {"role": "user", "data": format!("first {data}")},
+                    {"role": "char", "data": format!("second {data}")},
+                ]}],
+            })),
+            ..Default::default()
+        }).unwrap();
+        let (lease, _sections) = store.lww_acquire_backup_capture(store.revision().unwrap()).unwrap();
+        let units = store.lww_backup_unit_values(&lease.lease).unwrap();
+        reset_hash_work();
+        let closure = store.lww_backup_dependency_closure(&lease.lease, &units, &crate::local_backup::NeverCancelled).unwrap();
+        let work = take_hash_work();
+        assert_eq!(closure.controls.values().filter(|bytes| bytes.len() > risunest_sync_wire::MAX_METADATA_BYTES).count(), 2);
+        assert_eq!(work.domains["native_backup_manifest_source"].calls, 1);
+        store.release_revision(&lease.lease).unwrap();
     }
 
     fn receive_original_units(store: &mut PersistentStore, request: &str, changes: Vec<super::super::lww::Change>) {

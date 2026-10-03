@@ -461,6 +461,8 @@ fn full_restore_required_empty_sections_publish_device_deletions_and_clear_local
     let (_dir,mut store)=store();
     store.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins,true).unwrap();
     write_restore_device_fixture(&mut store,"old"); clear_outbox(&mut store);
+    store.device_store().unwrap().write_setting("risu_lastsaved",&serde_json::json!("control")).unwrap();
+    store.device_store().unwrap().write_setting("risuNestStartupExclusions",&serde_json::json!(["plugin-script"])).unwrap();
     let sections=full_device_backup(None); let stage=restore_stage(&mut store,"empty");
     let header=Header{binding_authority:0.into(),request_id:"empty-full-device-restore".into()};
     store.lww_commit_replacement_with_device_sections(&header,&stage,None,&sections.iter().collect::<Vec<_>>()).unwrap();
@@ -468,10 +470,34 @@ fn full_restore_required_empty_sections_publish_device_deletions_and_clear_local
     assert_eq!(device.hypa_embedding_usage().unwrap().0,0);
     assert!(device.list_plugin_device_storage().unwrap().is_empty());
     assert!(device.read_setting("accountst").unwrap().is_none());
+    assert_eq!(device.read_setting("risu_lastsaved").unwrap(),Some(serde_json::json!("control")));
+    assert_eq!(device.read_setting("risuNestStartupExclusions").unwrap(),Some(serde_json::json!(["plugin-script"])));
     assert_eq!(device.connection().query_row("SELECT count(*) FROM plugin_permissions",[],|row|row.get::<_,i64>(0)).unwrap(),0);
     let changes=store.lww_read_outbox(0.into(),100).unwrap().entries;
     assert_eq!(changes.iter().filter(|entry|is_device(&entry.key)&&matches!(entry.value,UnitValue::Deleted)).count(),3);
     assert!(changes.iter().all(|entry|entry.stamp==changes[0].stamp));
+}
+
+#[test]
+fn full_restore_installs_carried_device_rows_as_this_writer_and_removes_left_out_rows() {
+    use device_store::plugin_values::PluginDeviceMutation;
+    let (_dir,mut store)=store(); write_restore_device_fixture(&mut store,"old");
+    store.device_store_mut().unwrap().write_plugin_device_values("orphan",&[PluginDeviceMutation::Set{
+        space:"string".into(), key:"local-only".into(), value:"dropped".into(),
+    }]).unwrap();
+    let sections=full_device_backup(Some("restored")); let stage=restore_stage(&mut store,"restored");
+    let header=Header{binding_authority:0.into(),request_id:"carried-device-restore".into()};
+    store.lww_commit_replacement_with_device_sections(&header,&stage,None,&sections.iter().collect::<Vec<_>>()).unwrap();
+    assert_device_restore_label(&store,"restored");
+    let writer=store.lww_clock_state().unwrap().writer_id;
+    let device=store.device_store().unwrap();
+    assert_eq!(device.read_plugin_device_value("orphan","string","local-only").unwrap(),None);
+    let restored:(String,Option<String>)=device.connection().query_row(
+        "SELECT writer_id,published_clock FROM plugin_device_storage WHERE owner='orphan' AND space='string' AND key='shared-key'",
+        [],|row|Ok((row.get(0)?,row.get(1)?)),
+    ).unwrap();
+    assert_eq!(restored,(writer,None));
+    assert_eq!(device.connection().query_row("SELECT granted FROM plugin_permissions WHERE code_hash='restored' AND permission='synthetic'",[],|row|row.get::<_,i64>(0)).unwrap(),1);
 }
 
 #[test]
@@ -2366,6 +2392,61 @@ fn new_device_stage(store: &mut PersistentStore) -> (Header, String, Vec<Change>
         staging,
         changes,
     )
+}
+#[test]
+fn adopting_a_fresh_writer_keeps_the_clock_unsent_versions_and_receive_progress() {
+    let (_, mut store) = store();
+    save(&mut store, vec![mutation(&["root", "language"], serde_json::json!("ko"))]);
+    let authority = store.lww_binding_authority().unwrap();
+    store
+        .device_store()
+        .unwrap()
+        .connection()
+        .execute(
+            "INSERT INTO lww_progress VALUES('server','','9',?1)",
+            [authority.0.to_string()],
+        )
+        .unwrap();
+    let before = store.lww_clock_state().unwrap();
+    let unsent = |store: &PersistentStore| -> Vec<(UnitKey, Stamp)> {
+        store
+            .lww_read_outbox(authority, 256)
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| (entry.key, entry.stamp))
+            .collect()
+    };
+    let retained = unsent(&store);
+    assert_eq!(retained.len(), 1);
+    let fresh = Uuid::new_v4().to_string();
+    let refused = |result: StoreResult<()>| match result {
+        Err(StoreError::Validation { message }) => message,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        refused(store.lww_adopt_fresh_writer(DecimalU64(authority.0 + 1), &before.writer_id, &fresh)),
+        "binding-authority-changed"
+    );
+    assert_eq!(
+        refused(store.lww_adopt_fresh_writer(authority, &fresh, &Uuid::new_v4().to_string())),
+        "fresh-writer-changed"
+    );
+    for _ in 0..2 {
+        store.lww_adopt_fresh_writer(authority, &before.writer_id, &fresh).unwrap();
+    }
+    let after = store.lww_clock_state().unwrap();
+    assert_eq!(after.writer_id, fresh);
+    assert_eq!((after.issued.as_ref(), after.accepted.as_ref()), (before.issued.as_ref(), before.accepted.as_ref()));
+    assert_eq!(after.binding_authority, authority);
+    assert_eq!(unsent(&store), retained);
+    assert_eq!(store.lww_binding_state().unwrap().progress, serde_json::json!([{"kind": "server", "writerId": "", "cursor": "9"}]));
+    save(&mut store, vec![mutation(&["root", "askRemoval"], serde_json::json!(true))]);
+    let next = unsent(&store);
+    let edit = next.iter().find(|(key, _)| key.components()[1] == "askRemoval").unwrap();
+    assert_eq!(edit.1.writer_id, fresh);
+    assert!(edit.1.physical_ms >= before.issued.unwrap().physical_ms);
+    assert!(next.contains(&retained[0]));
 }
 #[test]
 fn explicit_new_device_replaces_before_identity_reset_and_completed_retry_preserves_later_edits() {

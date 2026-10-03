@@ -5,6 +5,7 @@ use crate::persistent_store::{
 use serde::Serialize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tauri::{AppHandle, Manager, State, WebviewWindow};
+use crate::native_log::logged;
 
 const CAPACITY: usize = 32 * 1024;
 const BINARY_CAPACITY: usize = 256 * 1024;
@@ -195,11 +196,13 @@ pub(crate) fn pds_commit_android_open(
     total_bytes: usize,
     binary: bool,
 ) -> StoreResult<Opened> {
-    guard(&window)?;
-    state.lock()?.open(id, total_bytes, binary)?;
-    Ok(Opened {
-        capacity: if binary { BINARY_CAPACITY } else { CAPACITY },
-    })
+    logged("pds_commit_android_open", (|| {
+        guard(&window)?;
+        state.lock()?.open(id, total_bytes, binary)?;
+        Ok(Opened {
+            capacity: if binary { BINARY_CAPACITY } else { CAPACITY },
+        })
+    })())
 }
 
 #[tauri::command(async)]
@@ -210,8 +213,10 @@ pub(crate) fn pds_commit_android_chunk(
     offset: usize,
     chunk: String,
 ) -> StoreResult<usize> {
-    guard(&window)?;
-    state.lock()?.append(&id, offset, &chunk)
+    logged("pds_commit_android_chunk", (|| {
+        guard(&window)?;
+        state.lock()?.append(&id, offset, &chunk)
+    })())
 }
 
 // Keep the single allocation budget occupied through parsing and the store transaction.
@@ -234,17 +239,19 @@ pub(crate) async fn pds_commit_android_finish(
     state: State<'_, AndroidCommitState>,
     id: String,
 ) -> StoreResult<RevisionResult> {
-    guard(&window)?;
-    let bytes = state.lock()?.take(&id)?;
-    let lease = FinishGuard { app, id };
-    tauri::async_runtime::spawn_blocking(move || {
-        let envelope = decode(&bytes)?;
-        with_store_mut(lease.app.state(), |store| {
-            store.commit_with_asset_aliases(&envelope.commit, &envelope.asset_aliases)
+    logged("pds_commit_android_finish", async move {
+        guard(&window)?;
+        let bytes = state.lock()?.take(&id)?;
+        let lease = FinishGuard { app, id };
+        tauri::async_runtime::spawn_blocking(move || {
+            let envelope = decode(&bytes)?;
+            with_store_mut(lease.app.state(), |store| {
+                store.commit_with_asset_aliases(&envelope.commit, &envelope.asset_aliases)
+            })
         })
-    })
-    .await
-    .map_err(|_| invalid("Android commit task failed"))?
+        .await
+        .map_err(|_| invalid("Android commit task failed"))?
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -253,9 +260,11 @@ pub(crate) fn pds_commit_android_cancel(
     state: State<'_, AndroidCommitState>,
     id: String,
 ) -> StoreResult<()> {
-    guard(&window)?;
-    state.lock()?.cancel(&id);
-    Ok(())
+    logged("pds_commit_android_cancel", (|| {
+        guard(&window)?;
+        state.lock()?.cancel(&id);
+        Ok(())
+    })())
 }
 
 #[cfg(test)]

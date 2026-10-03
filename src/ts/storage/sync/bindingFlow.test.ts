@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createSyncBindingFlow, type InspectedSyncTarget, type SyncBindingDependencies, type SyncBindingState, type SyncBindingTransport } from './bindingFlow'
+import { bindingMode, createSyncBindingFlow, type InspectedSyncTarget, type SyncBindingDependencies, type SyncBindingState, type SyncBindingTransport } from './bindingFlow'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { IndexedDbPersistentDataStore } from '../indexedDbPersistentDataStore'
 import { createMutationGatedPersistentDataStore } from '../mutationGatedPersistentDataStore'
@@ -21,11 +21,11 @@ function setup(options: Partial<InspectedSyncTarget> & { nonDefault?: boolean; c
         plugins: { fenceExecution: record('plugin-fence'), invalidateCaches: record('invalidate'), restart: record('restart') },
         withPausedWrites: async operation => { events.push('pause-flush'); return operation() }, hasNonDefaultData: async () => options.nonDefault ?? true,
         hasNonDefaultSharedData: async () => options.nonDefault ?? true,
-        confirmReplacement: async () => { events.push('confirm'); return options.confirm ?? true },
+        confirmReplacement: async reason => { events.push(reason ? `confirm:${reason}` : 'confirm'); return options.confirm ?? true },
         refreshActivatedLibrary: record('refresh'),
         beginActivatedLibraryGuard: () => ({ complete() {}, async abortUnchanged() {} }),
     }
-    const target: InspectedSyncTarget = { inspectionId: 'inspected', targetId: 'target', libraryId: 'library', empty: false, previouslyBoundLibrary: false, ...options }
+    const target: InspectedSyncTarget = { inspectionId: 'inspected', targetId: 'target', libraryId: 'library', empty: false, previouslyBoundLibrary: false, registrationChanged: false, serverRestored: false, ...options }
     const transport: SyncBindingTransport = {
         inspectTarget: async () => { events.push('inspect'); return target },
         pullAvailableState: async () => { events.push('stage'); return { targetId: 'target', libraryId: 'library', stagingId: 'validated', receiveId: 'receive' } },
@@ -54,6 +54,91 @@ function newDeviceTransport(s: ReturnType<typeof setup>) {
         s.events.push('resume-new-device')
     }
 }
+
+function freshWriterTransport(s: ReturnType<typeof setup>) {
+    const prepare = vi.fn<NonNullable<SyncBindingTransport['prepareFreshWriter']>>(async (inspected, context) => {
+        expect(inspected.inspectionId).toBe('inspected')
+        expect(context.mode).toBe('fresh-writer')
+        s.events.push('fresh-writer')
+        return { authorizationId: 'fresh-authorization', writerId: 'fresh-writer' }
+    })
+    s.transport.prepareFreshWriter = prepare
+    return prepare
+}
+
+describe('binding mode', () => {
+    const inspected = (options: Partial<InspectedSyncTarget>): InspectedSyncTarget => ({ inspectionId: 'i', targetId: 't', libraryId: 'l', empty: false, previouslyBoundLibrary: false, registrationChanged: false, serverRestored: false, ...options })
+    it('claims a fresh writer only for a new registration to the library this device was bound to', () => {
+        expect(bindingMode(undefined, inspected({ previouslyBoundLibrary: true, registrationChanged: true }))).toBe('fresh-writer')
+        expect(bindingMode(undefined, inspected({ previouslyBoundLibrary: true, registrationChanged: true, empty: true }))).toBe('fresh-writer')
+        expect(bindingMode(undefined, inspected({ previouslyBoundLibrary: false, registrationChanged: true }))).toBeUndefined()
+    })
+    it('replaces as a new device whenever the server was restored', () => {
+        expect(bindingMode(undefined, inspected({ serverRestored: true, registrationChanged: true }))).toBe('new-device')
+        expect(bindingMode(undefined, inspected({ serverRestored: true, previouslyBoundLibrary: true, registrationChanged: true }))).toBe('new-device')
+    })
+    it('keeps the same registration rebind and the explicit new-device request as before', () => {
+        expect(bindingMode(undefined, inspected({ previouslyBoundLibrary: true }))).toBeUndefined()
+        expect(bindingMode(undefined, inspected({ previouslyBoundLibrary: true, registrationChanged: undefined, serverRestored: undefined }))).toBeUndefined()
+        expect(bindingMode('new-device', inspected({ previouslyBoundLibrary: true, registrationChanged: true }))).toBe('new-device')
+        expect(bindingMode(undefined, inspected({}))).toBeUndefined()
+    })
+})
+
+describe('new registration to a previously bound library', () => {
+    it('claims a fresh writer without confirmation or staging, then switches back with the retained data', async () => {
+        const s = setup({ previouslyBoundLibrary: true, registrationChanged: true })
+        const prepare = freshWriterTransport(s)
+        const fence = vi.spyOn(s.transport, 'fenceOldJobs')
+        const resume = vi.spyOn(s.transport, 'resumeBinding')
+        expect(await s.flow.bind(target, s.transport)).toMatchObject({ kind: 'bound', action: 'resumed' })
+        expect(s.events).toEqual(['inspect', 'jobs-fence', 'fresh-writer', 'pause-flush', 'gate', 'switch', 'refresh', 'resume'])
+        expect(prepare).toHaveBeenCalledOnce()
+        expect(fence.mock.calls[0][0]).toHaveProperty('mode', 'fresh-writer')
+        expect(resume.mock.calls[0][0].state.targetAuthority).toBe('1')
+    })
+    it('keeps a current binding to the same library without switching', async () => {
+        const s = setup({ previouslyBoundLibrary: true, registrationChanged: true })
+        s.setState({ target, targetAuthority: '9', selectionEpoch: 'same', libraryId: 'library', progress: null })
+        freshWriterTransport(s)
+        await s.flow.bind(target, s.transport)
+        expect(s.events).toEqual(['inspect', 'jobs-fence', 'fresh-writer', 'pause-flush', 'gate', 'resume'])
+        expect((await s.deps.native.state()).targetAuthority).toBe('9')
+    })
+    it('resumes the unchanged binding when the fresh writer cannot be claimed', async () => {
+        const s = setup({ empty: true }); await s.flow.bind(target, s.transport); s.events.length = 0
+        s.transport.inspectTarget = async () => ({ inspectionId: 'inspected', targetId: 'target', libraryId: 'library', empty: false, previouslyBoundLibrary: true, registrationChanged: true, serverRestored: false })
+        s.transport.prepareFreshWriter = async () => { s.events.push('fresh-writer'); throw new Error('registration-used') }
+        await expect(s.flow.bind(target, s.transport)).rejects.toThrow('registration-used')
+        expect(s.events).toEqual(['jobs-fence', 'fresh-writer', 'resume'])
+        expect((await s.deps.native.state()).targetAuthority).toBe('1')
+    })
+    it('requires the adapter to claim a fresh writer', async () => {
+        const s = setup({ previouslyBoundLibrary: true, registrationChanged: true })
+        await expect(s.flow.bind(target, s.transport)).rejects.toThrow('Sync binding registration change is unavailable')
+        expect(s.events).toEqual(['inspect'])
+    })
+})
+
+describe('restored server', () => {
+    it('replaces as a new device and describes the restore in the confirmation', async () => {
+        const s = setup({ serverRestored: true, registrationChanged: true, nonDefault: false }); newDeviceTransport(s)
+        const fence = vi.spyOn(s.transport, 'fenceOldJobs')
+        expect(await s.flow.bind(target, s.transport)).toMatchObject({ kind: 'bound', action: 'new-device' })
+        expect(s.events).toEqual(['inspect', 'confirm:server-restored', 'stage', 'jobs-fence', 'reserve-register-settle', 'plugin-fence', 'pause-flush', 'gate', 'activate-new-device', 'invalidate', 'refresh', 'restart', 'resume-new-device'])
+        expect(fence.mock.calls[0][0]).toHaveProperty('mode', 'new-device')
+    })
+    it('stops at the restore confirmation when it is cancelled', async () => {
+        const s = setup({ serverRestored: true, confirm: false }); newDeviceTransport(s)
+        expect(await s.flow.bind(target, s.transport)).toEqual({ kind: 'cancelled' })
+        expect(s.events).toEqual(['inspect', 'confirm:server-restored'])
+    })
+    it('requires new-device support once inspection finds the restore', async () => {
+        const s = setup({ serverRestored: true })
+        await expect(s.flow.bind(target, s.transport)).rejects.toThrow('New device sync binding is unavailable')
+        expect(s.events).toEqual(['inspect'])
+    })
+})
 
 it('passes explicit new-device context mode through inspection, staging, fencing, preparation, activation and resume', async () => {
     const s = setup(); newDeviceTransport(s)

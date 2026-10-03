@@ -1,4 +1,5 @@
 //! A bounded signature probe chooses a reader; the chosen job still verifies its complete input.
+use crate::native_log::logged;
 use super::*;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -73,12 +74,12 @@ pub(crate) fn native_backup_source_format(
     state: State<'_, NativeFileJobState>,
     source: JobSource,
 ) -> Result<BackupSourceFormat, NativeJobError> {
-    if matches!(source,JobSource::AndroidSeekable{..}|JobSource::IosScoped{..}) {
+    logged("native_backup_source_format", (|| if matches!(source,JobSource::AndroidSeekable{..}|JobSource::IosScoped{..}) {
         portable_source_custody::ensure_platform_source(&app,&source)?;
         let detected=portable_source_custody::probe_format(&source)?;
         portable_source_custody::confirm_platform_probe(&app,&source,detected)?;
         Ok(detected)
-    } else { detect(open_job_source(&state.root,&source)?.file) }
+    } else { detect(open_job_source(&state.root,&source)?.file) })())
 }
 
 #[cfg(test)]

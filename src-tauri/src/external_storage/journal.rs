@@ -11,8 +11,8 @@ use std::sync::Arc;
 fn corrupt() -> ProviderError {
     ProviderError::new(ErrorKind::Corrupt)
 }
-fn storage(_: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Transient)
+fn storage(error: impl std::fmt::Display) -> ProviderError {
+    ProviderError::new(ErrorKind::Transient).caused(&error)
 }
 
 /// Named beside the transfer receipts because it is the same job's durable

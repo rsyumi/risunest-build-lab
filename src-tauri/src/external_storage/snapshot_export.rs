@@ -31,11 +31,11 @@ pub(crate) struct SnapshotExportReceipt {
     pub revision: i64,
 }
 
-fn corrupt(_: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Corrupt)
+fn corrupt(error: impl std::fmt::Display) -> ProviderError {
+    ProviderError::new(ErrorKind::Corrupt).caused(&error)
 }
-fn transient(_: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Transient)
+fn transient(error: impl std::fmt::Display) -> ProviderError {
+    ProviderError::new(ErrorKind::Transient).caused(&error)
 }
 fn decode_hash(value: &str) -> Result<[u8; 32]> {
     let bytes = hex::decode(value).map_err(corrupt)?;

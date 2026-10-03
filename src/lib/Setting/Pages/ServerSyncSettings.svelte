@@ -1,9 +1,9 @@
 <script lang="ts">
     import { onMount, onDestroy } from 'svelte'
     import { language } from 'src/lang'
-    import { alertConfirm } from 'src/ts/alert'
+    import { alertCheckboxConfirm, alertConfirm } from 'src/ts/alert'
     import { isTauri } from 'src/ts/platform'
-    import { connectServerSync, disconnectServerSync, retryServerSync, getServerSyncController, getServerSyncCacheUsage, cleanupServerSyncCache, type ServerSyncCacheUsage } from 'src/ts/storage/sync/serverSyncProduction'
+    import { connectServerSync, disconnectServerSync, holdServerSync, retryServerSync, getServerSyncController, getServerSyncCacheUsage, cleanupServerSyncCache, type ServerSyncCacheUsage } from 'src/ts/storage/sync/serverSyncProduction'
     import { parseServerRegistration } from 'src/ts/storage/sync/serverSyncRegistration'
     import { serverRegistrationInbox } from 'src/ts/storage/sync/serverSyncRegistrationInbox'
     import { canScanServerRegistration, createServerQrScanner } from 'src/ts/storage/sync/serverSyncQr'
@@ -27,12 +27,14 @@
     let failure = $state('')
     let residency = $state<AssetResidencyStatus | undefined>()
     let cache = $state<ServerSyncCacheUsage | undefined>()
+    let downloading = $state(false)
     let dispose = () => {}
     let inboxDispose = () => {}
     const writerRecoveryCodes = ['writer-collision', 'equal-stamp-integrity']
     let writerRecovery = $derived(writerRecoveryCodes.includes(view.error))
+    const errorCode = (error: unknown) => typeof error === 'object' && error && 'code' in error ? String(error.code) : ''
     const message = (error: unknown) => {
-        const token = typeof error === 'object' && error && 'code' in error ? String(error.code) : ''
+        const token = errorCode(error)
         if (['clock-skew', 'incoming-clock-skew', 'accepted-clock-correction-required'].includes(token)) return language.lwwSync.clockBlocked
         if (writerRecoveryCodes.includes(token)) return language.lwwSync.writerCollision
         if (token === 'unit-too-large') return language.lwwSync.unitTooLarge
@@ -49,6 +51,27 @@
     function readCode() { try { candidate = parseServerRegistration(code); code = ''; failure = '' } catch { failure = copy.registrationInvalid } }
     async function scan() { scanning = true; try { candidate = await scanner.scan(() => {}); failure = '' } catch (error) { failure = message(error) } finally { scanning = false } }
     async function connect(newDevice = false) { if (!candidate) return; await connectTarget(candidate, newDevice); candidate = undefined }
+    async function downloadAll() { downloading = true; try { await setAssetResidencyPolicy('full') } finally { downloading = false } }
+    async function downloadHeld() { const release = await holdServerSync(); try { await downloadAll() } finally { await release() } }
+    async function disconnect() {
+        let remoteObjects = 0
+        try { remoteObjects = (await getAssetResidencyStatus()).remoteObjects } catch {}
+        if (!remoteObjects) return disconnectServerSync()
+        const choice = await alertCheckboxConfirm({ title: copy.disconnectTitle, description: copy.disconnectRemoteOnly, checkboxLabel: copy.downloadThenDisconnect, actionLabel: copy.disconnect, cancelLabel: language.cancel, requireChecked: false })
+        if (!choice.confirmed) return
+        if (!choice.checked) return disconnectServerSync()
+        const release = await holdServerSync()
+        try {
+            try { await downloadAll() } catch (error) {
+                if (errorCode(error) === 'cancelled') return
+                // Files that are on neither this device nor the server fail the download but are not lost by disconnecting.
+                let remaining: number | undefined
+                try { remaining = (await getAssetResidencyStatus()).remoteObjects } catch {}
+                if (remaining !== 0) { failure = copy.downloadFailedKeptConnection; return }
+            }
+            await disconnectServerSync()
+        } finally { await release() }
+    }
     async function cleanCache() { if (await alertConfirm(copy.management.cleanConfirm)) await cleanupServerSyncCache() }
     const bytes = (value: number) => `${(value / 1024 / 1024).toFixed(1)} MiB`
     onMount(() => {
@@ -87,7 +110,7 @@
         {#if view.status.bound}
             <div class="mt-2 flex flex-wrap gap-2">
                 <SettingButton onclick={() => void run(retryServerSync)} disabled={busy}>{copy.syncNow}</SettingButton>
-                <SettingButton onclick={() => void run(disconnectServerSync)} disabled={busy}>{copy.disconnect}</SettingButton>
+                <SettingButton onclick={() => void run(disconnect)} disabled={busy}>{copy.disconnect}</SettingButton>
             </div>
         {/if}
         {#if view.error || failure}<p role="alert" class="mt-2 text-sm">{failure || message({ code: view.error })}</p>{/if}
@@ -101,8 +124,10 @@
                 <SettingButton onclick={() => void run(() => setAssetResidencyPolicy('full'))} disabled={busy || residency.policy === 'full'}>{copy.residency.full}</SettingButton>
                 <SettingButton onclick={() => void run(() => setAssetResidencyPolicy('remote'))} disabled={busy || residency.policy === 'remote'}>{copy.residency.remote}</SettingButton>
                 <SettingButton onclick={() => void run(evictLocalAssets)} disabled={busy}>{copy.residency.clean}</SettingButton>
+                {#if residency.policy === 'full' && residency.remoteObjects > 0}<SettingButton onclick={() => void run(downloadHeld)} disabled={busy}>{copy.residency.download}</SettingButton>{/if}
                 {#if busy}<SettingButton onclick={() => void cancelAssetResidencyOperation()}>{copy.residency.cancel}</SettingButton>{/if}
             </div>
+            {#if downloading}<p role="status" class="mt-2 text-sm">{copy.residency.working}</p>{/if}
             <p class="mt-2 text-sm">{copy.residency.cleanupNote}</p>
         </SettingGroup>
     {/if}

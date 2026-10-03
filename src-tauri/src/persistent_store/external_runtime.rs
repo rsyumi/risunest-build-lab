@@ -7,14 +7,6 @@ use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct ExternalBase {
-    pub repository_id: String,
-    pub snapshot_id: String,
-    pub commit_id: String,
-    pub head_observation: String,
-    pub identity: sync_selection::CaptureIdentity,
-}
-#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ExternalJob {
     pub id: String,
     pub connection_id: String,
@@ -71,9 +63,11 @@ mod tests {
         assert_eq!(job.connection_id, "destination");
         assert_eq!(job.phase, "complete");
         assert!(store.external_job("missing").unwrap().is_none());
-        let base = store.external_base("destination").unwrap().unwrap();
-        assert_eq!(base.snapshot_id, "sync-snapshot");
-        assert_eq!(base.head_observation, "authenticated-head");
+        let base: (String, String) = store.connection.query_row(
+            "SELECT snapshot_id,head_observation FROM external_storage_bases WHERE connection_id='destination'",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(base, ("sync-snapshot".into(), "authenticated-head".into()));
         assert_eq!(
             store.external_backup_result("backup").unwrap(),
             Some(("backup-snapshot".into(), identity))
@@ -143,47 +137,8 @@ impl PersistentStore {
         row.map(|(snapshot, identity)| Ok((snapshot, serde_json::from_str(&identity)?)))
             .transpose()
     }
-    pub(crate) fn external_validate_receive(
-        &self,
-        job: &str,
-        connection: &str,
-        expected: &sync_selection::CaptureIdentity,
-        authenticated_head: &str,
-    ) -> StoreResult<()> {
-        let intent = self.external_job(job)?
-            .ok_or_else(|| invalid("Missing prepared receive intent"))?;
-        if intent.role != "restore" || intent.phase != "ready"
-            || intent.connection_id != connection || intent.identity != *expected
-            || intent.expected_head.as_deref() != Some(authenticated_head)
-            || self.external_identity()? != *expected
-        {
-            return Err(invalid("Prepared receive identity changed"));
-        }
-        sync_selection::require_publish(&self.connection, expected, connection)?;
-        sync_selection::require_no_pending_publication(&self.connection)
-    }
-
     pub(crate) fn external_identity(&self) -> StoreResult<sync_selection::CaptureIdentity> {
         sync_selection::identity(&self.connection)
-    }
-    pub(crate) fn external_library_is_pristine(&self) -> StoreResult<bool> {
-        let identity = sync_selection::identity(&self.connection)?;
-        if identity.revision != 0 {
-            return Ok(false);
-        }
-        Ok(self.connection.query_row(
-            "SELECT value='{}'
-             AND NOT EXISTS(SELECT 1 FROM bot_presets WHERE generation=?1)
-             AND NOT EXISTS(SELECT 1 FROM characters WHERE generation=?1)
-             AND NOT EXISTS(SELECT 1 FROM conversations WHERE generation=?1)
-             AND NOT EXISTS(SELECT 1 FROM messages WHERE generation=?1)
-             AND NOT EXISTS(SELECT 1 FROM plugin_storage WHERE generation=?1)
-             AND NOT EXISTS(SELECT 1 FROM asset_aliases WHERE generation=?1)
-             AND NOT EXISTS(SELECT 1 FROM asset_owner_heads WHERE generation=?1)
-             FROM root WHERE generation=?1",
-            [&identity.generation],
-            |row| row.get(0),
-        )?)
     }
     pub(crate) fn external_selection(&self) -> StoreResult<sync_selection::Selection> {
         sync_selection::read(&self.connection)
@@ -204,23 +159,6 @@ impl PersistentStore {
         tx.commit()?;
         Ok(selected)
     }
-    pub(crate) fn external_base(&self, connection: &str) -> StoreResult<Option<ExternalBase>> {
-        let row: Option<(String,String,String,String,String)> = self.connection.query_row(
-            "SELECT repository_id,snapshot_id,commit_id,head_observation,identity FROM external_storage_bases WHERE connection_id=?1", [connection],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?;
-        row.map(
-            |(repository_id, snapshot_id, commit_id, head_observation, identity)| {
-                Ok(ExternalBase {
-                    repository_id,
-                    snapshot_id,
-                    commit_id,
-                    head_observation,
-                    identity: serde_json::from_str(&identity)?,
-                })
-            },
-        )
-        .transpose()
-    }
 
     pub(crate) fn external_job_has_no_capture_owner(&self, job: &str) -> StoreResult<bool> {
         Ok(!self.connection.query_row(
@@ -231,26 +169,6 @@ impl PersistentStore {
     }
 
 
-    pub(crate) fn external_jobs(&self, connection: &str) -> StoreResult<Vec<ExternalJob>> {
-        let mut query = self.connection.prepare("SELECT id,repository_id,capture_id,identity,role,strategy,expected_head,commit_id,phase FROM external_storage_jobs WHERE connection_id=?1 ORDER BY rowid DESC")?;
-        let mut rows = query.query([connection])?;
-        let mut result = Vec::new();
-        while let Some(row) = rows.next()? {
-            result.push(ExternalJob {
-                id: row.get(0)?,
-                connection_id: connection.into(),
-                repository_id: row.get(1)?,
-                capture_id: row.get(2)?,
-                identity: serde_json::from_str(&row.get::<_, String>(3)?)?,
-                role: row.get(4)?,
-                strategy: row.get(5)?,
-                expected_head: row.get(6)?,
-                commit_id: row.get(7)?,
-                phase: row.get(8)?,
-            });
-        }
-        Ok(result)
-    }
     pub(crate) fn external_job(&self, id: &str) -> StoreResult<Option<ExternalJob>> {
         self.connection
             .query_row(
@@ -315,17 +233,6 @@ impl PersistentStore {
         Ok(())
     }
 
-    pub(crate) fn external_prepare_receive(
-        &mut self,
-        intent: &jobs::ReceiveIntent<'_>,
-    ) -> StoreResult<()> {
-        let tx = self.connection.transaction()?;
-        jobs::prepare_receive(&tx, intent)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-
     pub(crate) fn external_cancel_prepared(&mut self, job: &str) -> StoreResult<()> {
         let tx = self.connection.transaction()?;
         jobs::cancel_prepared(&tx, job)?;
@@ -368,7 +275,6 @@ impl PersistentStore {
             "DELETE FROM external_storage_bases WHERE connection_id=?1",
             [connection],
         )?;
-        jobs::clear_base_records(&tx, connection)?;
         let selection = sync_selection::read(&tx)?;
         if selection.target == sync_selection::SyncTarget::External(connection.into()) {
             sync_selection::select(&tx, &selection.epoch, &sync_selection::SyncTarget::None)?;
