@@ -824,6 +824,93 @@ fn discarding_a_colliding_value_removes_only_the_incoming_one() {
         .is_none());
 }
 
+/// An assignment records both owners' keys and orders under one stamp, so the
+/// move is published and later writes for either owner still project.
+#[test]
+fn an_assignment_records_both_owners_units_and_later_owner_writes_commit() {
+    use crate::persistent_store::commit::AssignCollision;
+    use risunest_sync_wire::unit::{UnitKey, UnitValue};
+    use std::collections::{BTreeMap, BTreeSet};
+    fn units(store: &PersistentStore) -> BTreeMap<String, (String, String, String)> {
+        store.connection.prepare("SELECT key,stamp,value,version FROM lww_units ORDER BY key").unwrap()
+            .query_map([], |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?, row.get(3)?)))).unwrap()
+            .collect::<Result<_, _>>().unwrap()
+    }
+    fn key(parts: &[&str]) -> String {
+        UnitKey::new(parts).unwrap().as_str().to_owned()
+    }
+    fn value(units: &BTreeMap<String, (String, String, String)>, parts: &[&str]) -> UnitValue {
+        serde_json::from_str(&units[&key(parts)].1).unwrap()
+    }
+    fn changed(
+        before: &BTreeMap<String, (String, String, String)>,
+        after: &BTreeMap<String, (String, String, String)>,
+    ) -> BTreeSet<String> {
+        after.iter().filter(|(key, value)| before.get(*key) != Some(*value)).map(|(key, _)| key.clone()).collect()
+    }
+    let (_directory, mut store) = store_with_rows(&[
+        ("plugin-a", "moved", json!(1)),
+        ("plugin-a", "replaced", json!(2)),
+        ("plugin-a", "discarded", json!(3)),
+        ("plugin-a", "deferred", json!(4)),
+        ("plugin-a", "kept", json!(5)),
+        ("plugin-b", "replaced", json!("b-replaced")),
+        ("plugin-b", "discarded", json!("b-discarded")),
+        ("plugin-b", "deferred", json!("b-deferred")),
+        ("plugin-b", "own", json!("b-own")),
+    ]);
+    let source = |name: &str| ("plugin-a".to_owned(), name.to_owned());
+
+    let before = units(&store);
+    let outcome = assign(&mut store, &[source("moved"), source("replaced")], "plugin-b", AssignCollision::Replace);
+    assert_eq!((outcome.moved, outcome.replaced), (2, 1));
+    let after = units(&store);
+    let moved_keys = changed(&before, &after);
+    assert_eq!(moved_keys, [
+        key(&["plugin", "plugin-a", "moved"]),
+        key(&["plugin", "plugin-a", "replaced"]),
+        key(&["plugin", "plugin-b", "moved"]),
+        key(&["plugin", "plugin-b", "replaced"]),
+        key(&["order", "plugin-storage", "plugin-a"]),
+        key(&["order", "plugin-storage", "plugin-b"]),
+    ].into_iter().collect::<BTreeSet<_>>());
+    assert_eq!(moved_keys.iter().map(|key| after[key].0.clone()).collect::<BTreeSet<_>>().len(), 1);
+    assert_eq!(value(&after, &["plugin", "plugin-a", "moved"]), UnitValue::Deleted);
+    assert_eq!(value(&after, &["plugin", "plugin-b", "moved"]), crate::persistent_store::lww::inline(&json!(1)).unwrap());
+    assert_eq!(value(&after, &["plugin", "plugin-b", "replaced"]), crate::persistent_store::lww::inline(&json!(2)).unwrap());
+    for key in &moved_keys {
+        let pending: (String, String, String) = store.connection.query_row(
+            "SELECT stamp,value,version FROM lww_outbox WHERE key=?1", [key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(&pending, &after[key]);
+    }
+
+    let before = units(&store);
+    let outcome = assign(&mut store, &[source("discarded")], "plugin-b", AssignCollision::Discard);
+    assert_eq!(outcome.discarded, 1);
+    let after = units(&store);
+    assert_eq!(changed(&before, &after), [
+        key(&["plugin", "plugin-a", "discarded"]),
+        key(&["order", "plugin-storage", "plugin-a"]),
+    ].into_iter().collect::<BTreeSet<_>>());
+    assert_eq!(value(&after, &["plugin", "plugin-b", "discarded"]), crate::persistent_store::lww::inline(&json!("b-discarded")).unwrap());
+
+    let before = units(&store);
+    let outcome = assign(&mut store, &[source("deferred")], "plugin-b", AssignCollision::Defer);
+    assert_eq!(outcome.deferred, 1);
+    assert_eq!(units(&store), before);
+
+    for (owner, name, value) in [("plugin-a", "kept", json!(6)), ("plugin-b", "own", json!("b-own-2")), ("plugin-b", "moved", json!(7))] {
+        store.commit(&WorkingSetCommit {
+            expected_revision: store.revision().unwrap(),
+            plugin_storage: Some(vec![PluginStorageMutation::Set { owner: owner.into(), key: name.into(), value: value.clone() }]),
+            ..Default::default()
+        }).unwrap_or_else(|error| panic!("write {owner}/{name} after assignment: {error:?}"));
+        assert_eq!(store.read_plugin_storage(owner, name, None).unwrap().unwrap().value, value);
+    }
+}
+
 /// The import stage hands values to plugins before the replacement is applied,
 /// and its checkbox decides whether the rest may be taken automatically later.
 #[test]

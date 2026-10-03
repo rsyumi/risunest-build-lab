@@ -45,7 +45,12 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
             receiveTimer = undefined
             void receiveNow().catch(() => {})
             scheduleMaintenance()
-        }, Math.min(120_000, 15_000 * 2 ** Math.min(emptyListings, 3)))
+        }, emptyListings >= 3 ? 60_000 : 20_000)
+    }
+    const resetListing = () => {
+        const backedOff = emptyListings >= 3
+        emptyListings = 0
+        if (backedOff && receiveTimer !== undefined) scheduleReceive()
     }
     const receiveNow = async (force = false) => {
         clearReceive()
@@ -75,20 +80,33 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
             if (firstDirty === undefined) firstDirty = now()
             clearPublish()
             if (!enabled) return
+            resetListing()
             if (generationComplete) { void publishNow().catch(() => {}); return }
             const delay = Math.max(0, Math.min(15_000, firstDirty + 60_000 - now()))
             publishTimer = setTimer(() => { publishTimer = undefined; void publishNow().catch(() => {}) }, delay)
         },
-        start() {
+        /** A previous session can leave an outbox or a sealed publication, so starting publishes before it lists. */
+        start(publish = true) {
             if (enabled) return
             enabled = true
             emptyListings = 0
-            if (firstDirty !== undefined) this.dirty()
             scheduleMaintenance()
+            if (publish) {
+                if (firstDirty === undefined) firstDirty = now()
+                void publishNow().catch(() => {})
+            } else if (firstDirty !== undefined) this.dirty()
             void receiveNow().catch(() => {})
         },
         stop() { enabled = false; clearPublish(); clearReceive(); clearMaintenance() },
-        resumeForeground() { emptyListings = 0; if (!enabled) { this.start(); return serial } return receiveNow() },
+        resumeForeground(publish = true) {
+            if (!enabled) { this.start(publish); return serial }
+            emptyListings = 0
+            if (publish) {
+                if (firstDirty === undefined) firstDirty = now()
+                void publishNow().catch(() => {})
+            }
+            return receiveNow()
+        },
         conversationOpened() { emptyListings = 0; return receiveNow() },
         publishNow,
         receiveNow,

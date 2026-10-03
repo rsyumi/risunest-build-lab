@@ -17,7 +17,7 @@ impl LocalLeaseLedger {
     pub(crate) fn open(cache: &Path) -> Result<Self> {
         let directory = cache.join("external-storage").join("lease-ownership");
         std::fs::create_dir_all(&directory).map_err(failed)?;
-        if !super::receive_artifacts::managed_directory(cache, &directory).map_err(failed)? { return Err(corrupt()); }
+        if !super::leftovers::managed_directory(cache, &directory).map_err(failed)? { return Err(corrupt()); }
         let lock_path = directory.join("owner.lock");
         if lock_path.exists() { crate::trust_boundary::open_regular_source(&lock_path).map_err(failed)?; }
         let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(lock_path).map_err(failed)?;

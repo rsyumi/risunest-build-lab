@@ -4,8 +4,10 @@
  * checked without a DOM.
  */
 
+import { configureServerSyncConnection } from 'src/ts/storage/sync/serverSyncProduction'
+import type { ServerConfig } from 'src/ts/storage/sync/serverSync'
 import { bindSyncTarget } from 'src/ts/storage/sync/bindingRegistry'
-import type { BindingOutcome } from 'src/ts/storage/sync/bindingFlow'
+import type { BindingOutcome, SyncBindingOptions } from 'src/ts/storage/sync/bindingFlow'
 import { restorableExternalHistoryItems } from 'src/ts/storage/sync/external/connection'
 import {
     externalRestorableSections,
@@ -60,6 +62,11 @@ export function bindExternalOnboardingTarget(connectionId: string): Promise<Bind
     return bindSyncTarget({ kind: 'external', connectionId })
 }
 
-export function bindServerOnboardingTarget(connectionId: string): Promise<BindingOutcome> {
-    return bindSyncTarget({ kind: 'server', connectionId })
+export function bindServerOnboardingTarget(connectionId: string, options?: SyncBindingOptions): Promise<BindingOutcome> {
+    return bindSyncTarget({ kind: 'server', connectionId }, options)
+}
+
+export async function connectServerOnboardingTarget(config: ServerConfig, newDevice = false): Promise<BindingOutcome> {
+    await configureServerSyncConnection(config)
+    return bindServerOnboardingTarget('server', newDevice ? { mode: 'new-device' } : undefined)
 }

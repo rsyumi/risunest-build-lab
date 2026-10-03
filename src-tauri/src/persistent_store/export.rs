@@ -2919,6 +2919,7 @@ mod tests {
         let mut store = PersistentStore::open(directory.path()).unwrap();
         let staging = store.replace_begin().unwrap().staging_id;
         store.replace_put_root(&staging, &json!({
+            "modules":[],"loadouts":[],
             "plugins":[{"name":"plugin-a","script":"","enabled":true,"version":"3.0"}],
             "pluginCustomStorage":{"first":1,"claimed":2,"last":3}
         })).unwrap();

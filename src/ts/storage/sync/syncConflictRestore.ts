@@ -36,7 +36,8 @@ export async function openSyncConflictBackups(): Promise<void> {
     const selected = await alertSelect(entries.map(entryLabel), language.syncConflictBackups)
     const entry = entries[Number(selected)]
     if (!entry) return
-    if (!await alertConfirm(language.syncConflictRestoreConfirm)) return
+    // Native replacement asks once in its own restore dialog, after the sync pull.
+    if (!isTauri && !await alertConfirm(language.syncConflictRestoreConfirm)) return
     let decoded: Database
     try {
         const bytes = await store.read(entry.id)
@@ -61,14 +62,18 @@ export async function openSyncConflictBackups(): Promise<void> {
             hold = holdServerSyncAfterRestore
         }
         await flushPendingData('sync-conflict-restore')
-        const current = await capturePersistentMutationToken('sync-conflict-restore')
+        // The native replacement pins the revision it pauses at, which follows the sync pull.
+        const current = isTauri ? undefined : await capturePersistentMutationToken('sync-conflict-restore')
         await installLocalBackup(decoded, {
+            ...(isTauri ? { upstreamImportWarnings: [language.syncConflictRestoreScope] } : {}),
             replaceDatabase: async (database, reason, options) => {
                 const outcome = await replacePersistentDatabase(database, reason, {
                     ...options,
                     authoritative: true,
-                    expectedRevision: current.revision,
-                    expectedMutationGeneration: current.mutationGeneration,
+                    ...(current ? {
+                        expectedRevision: current.revision,
+                        expectedMutationGeneration: current.mutationGeneration,
+                    } : {}),
                 })
                 hold?.()
                 return outcome
@@ -81,8 +86,10 @@ export async function openSyncConflictBackups(): Promise<void> {
             relaunch: () => location.reload(),
         })
     } catch (cause) {
+        if (cause instanceof DOMException && cause.name === 'AbortError') return
         console.error('Conflict backup restoration failed', cause)
-        alertError(language.risuNest.backup.actionFailed)
+        const syncUnavailable = typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 'sync-unavailable'
+        alertError(syncUnavailable ? language.risuNest.backup.syncUnavailable : language.risuNest.backup.actionFailed)
     } finally {
         await release?.()
     }

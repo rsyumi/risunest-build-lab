@@ -216,23 +216,32 @@ export function createPersistenceCanonicalCapture(read: {
                     return previous!.value
                 }
                 let previous: {json:string; value:character | groupChat} | undefined
+                let previousParts: readonly unknown[] = []
                 const capture = () => {
                     const capturedDetail = detail()!
-                    const detailEntries: readonly (readonly [string, string])[] = capturedDetail.entries ?? Object.entries(JSON.parse(capturedDetail.json)).map(([key,value]) => [key, canonicalJson(value)] as const)
-                    const details = Object.fromEntries(detailEntries
-                        .map(([key,json]) => [key, decode('detail:' + key, json)]))
-                    const serializedChats: string[] = []
-                    const chatValues: Chat[] = []
                     const active = new Set(value.chats)
                     for (const chat of chats.keys()) if (!active.has(chat)) chats.delete(chat)
-                    for (const chat of value.chats) {
+                    const capturedChats = value.chats.map((chat) => {
                         let capturedChat = chats.get(chat)
                         if (!capturedChat) {
                             const omit = isConversationSummaryStub(chat) || !Object.prototype.propertyIsEnumerable.call(chat, 'message') ? new Set(['message']) : new Set<string>()
                             capturedChat = untrack(() => objectCapture(() => chat as unknown as Record<string, unknown>, omit, false))
                             chats.set(chat, capturedChat)
                         }
-                        const captured = capturedChat()!
+                        return capturedChat()!
+                    })
+                    // Unchanged reactive captures keep their identity, so an unchanged
+                    // character is returned without composing its JSON again.
+                    const parts = [capturedDetail, ...capturedChats]
+                    if (previous && parts.length === previousParts.length && parts.every((part, index) => part === previousParts[index])) return previous
+                    previousParts = parts
+                    const detailEntries: readonly (readonly [string, string])[] = capturedDetail.entries ?? Object.entries(JSON.parse(capturedDetail.json)).map(([key,value]) => [key, canonicalJson(value)] as const)
+                    const details = Object.fromEntries(detailEntries
+                        .map(([key,json]) => [key, decode('detail:' + key, json)]))
+                    const serializedChats: string[] = []
+                    const chatValues: Chat[] = []
+                    for (const [index, chat] of value.chats.entries()) {
+                        const captured = capturedChats[index]
                         serializedChats.push(captured.json)
                         chatValues.push(Object.fromEntries((captured.entries ?? Object.entries(JSON.parse(captured.json)).map(([key,value]) => [key,canonicalJson(value)] as const))
                             .map(([key,json]) => [key, decode('chat:' + chat.id + ':' + key, json)])) as Chat)

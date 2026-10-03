@@ -28,13 +28,14 @@ CREATE TABLE reference_relations (root TEXT NOT NULL REFERENCES reference_nodes(
 CREATE TABLE descriptors (hash TEXT PRIMARY KEY REFERENCES objects(hash), object TEXT NOT NULL REFERENCES objects(hash), body TEXT NOT NULL);
 CREATE TABLE writers(writer TEXT PRIMARY KEY,device TEXT NOT NULL);
 CREATE TABLE device_writer_claims(device TEXT PRIMARY KEY,authorization TEXT NOT NULL UNIQUE,writer TEXT NOT NULL UNIQUE REFERENCES writers(writer),digest TEXT NOT NULL,body TEXT NOT NULL);
-CREATE TABLE writer_versions(writer TEXT NOT NULL,key TEXT NOT NULL,physical TEXT NOT NULL,logical TEXT NOT NULL,identity TEXT NOT NULL,PRIMARY KEY(writer,key,physical,logical));
+CREATE TABLE writer_versions(writer TEXT NOT NULL,key TEXT NOT NULL,physical TEXT NOT NULL,logical TEXT NOT NULL,identity TEXT NOT NULL,created INTEGER NOT NULL DEFAULT(unixepoch()),PRIMARY KEY(writer,key,physical,logical));
 CREATE TABLE units(key TEXT PRIMARY KEY,body TEXT NOT NULL);
 CREATE TABLE retired(key TEXT PRIMARY KEY,body TEXT NOT NULL);
 CREATE TABLE unit_parents(parent TEXT NOT NULL,child TEXT NOT NULL,PRIMARY KEY(parent,child));
+CREATE INDEX unit_parents_child ON unit_parents(child);
 CREATE TABLE journal(seq TEXT PRIMARY KEY,key TEXT NOT NULL UNIQUE,body TEXT NOT NULL,created INTEGER NOT NULL DEFAULT(unixepoch()));
 CREATE INDEX journal_cursor ON journal(length(seq),seq);
-CREATE TABLE operations(device TEXT NOT NULL REFERENCES devices(id),operation TEXT NOT NULL,digest TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(device,operation));
+CREATE TABLE operations(device TEXT NOT NULL REFERENCES devices(id),operation TEXT NOT NULL,digest TEXT NOT NULL,body TEXT NOT NULL,error_status INTEGER,error_key TEXT,created INTEGER NOT NULL DEFAULT(unixepoch()),PRIMARY KEY(device,operation));
 CREATE TABLE state_pins(id TEXT PRIMARY KEY,device TEXT NOT NULL REFERENCES devices(id),start_seq TEXT NOT NULL,expires INTEGER NOT NULL);
 CREATE TABLE state_pin_units(pin TEXT NOT NULL REFERENCES state_pins(id) ON DELETE CASCADE,key TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(pin,key));
 PRAGMA user_version=1;

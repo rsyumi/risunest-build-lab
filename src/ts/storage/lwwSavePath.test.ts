@@ -1,4 +1,5 @@
-import {deriveEffectivePresetMirrors, deriveEffectivePersonaMirrors, deriveEffectiveToggleVariables, flushEffectivePresetEdits, flushEffectivePersonaEdits, flushEffectiveToggleEdits, presetMirrorMap, getExplicitGlobalChatVariables} from './effectiveIdentityState'
+import {deriveEffectivePresetMirrors, deriveEffectivePersonaMirrors, deriveEffectiveToggleVariables, flushEffectivePresetEdits, flushEffectivePersonaEdits, flushEffectiveToggleEdits, presetMirrorMap, getExplicitGlobalChatVariables, translateRootUnitIntents} from './effectiveIdentityState'
+import { configurePersistentIdentityHooks } from './persistentIdentityHooks'
 import { describe, expect, it, vi } from 'vitest'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
@@ -9,6 +10,7 @@ import { applyLwwWorkingSetUnits, captureLwwWorkingSetBaseline } from './lwwWork
 import { createGeneratingConversationRegistry } from './generatingConversationRegistry'
 import { diffMaterializedCharacter, diffRecordCollection } from './persistentUnitCapture'
 import { createConversationSummaryStubFromChat } from './conversationResidency'
+import { createMetadataOnlySelectedConversation, isMetadataOnlySelectedConversation } from './selectedConversationLifecycle'
 import type { Database, character } from './database.svelte'
 import type { LwwStageReceive, PersistentDataStore, WorkingSetCommit } from './persistentDataStore'
 
@@ -111,6 +113,22 @@ describe('LWW renderer save path', () => {
         commit.mockClear()
         await runtime.flushPendingDataLocally('after-received-selected-record')
         expect(commit).not.toHaveBeenCalled()
+    })
+
+    it('translates a plugin toggle intent after flushing an unsaved bound toggle edit', async () => {
+        const {database,store,runtime} = await identityRuntimeHarness()
+        configurePersistentIdentityHooks({beforeCapture:()=>flushEffectiveToggleEdits(database),afterRemoteApply:()=>undefined,
+            translateRootUnitIntents:(mutations)=>translateRootUnitIntents(database,mutations)})
+        try {
+            const chat = database.characters[0].chats[0]
+            database.globalChatVariables.toggle_mode = 'user edit'
+            await runtime.commitPersistentUnitIntent('plugin-toggle',[{key:'["toggle","toggle_plugin"]',type:'set',value:'plugin'}])
+            const stored = await store.readConversationMetadata(database.characters[0].chaId,chat.id!)
+            expect(stored?.value.conversation.savedToggleValues).toEqual({toggle_mode:'user edit',toggle_plugin:'plugin'})
+            expect(database.characters[0].chats[0].savedToggleValues).toEqual({toggle_mode:'user edit',toggle_plugin:'plugin'})
+        } finally {
+            configurePersistentIdentityHooks(null as never)
+        }
     })
 
     it('derives received saved toggles without publishing explicit toggle changes on the next flush', async () => {
@@ -242,6 +260,41 @@ describe('LWW renderer save path', () => {
         await applyLwwWorkingSetUnits(database,baseline,reader,['["character","char-a","opaqueOwn"]','["character","char-a","lastInteraction"]','["character","char-a","statics"]','["conversation","char-a","conv-long","opaqueOwn"]','["conversation","char-a","conv-long","isStreaming"]','["conversation","char-a","conv-long","note"]'])
         expect(live).toMatchObject({opaqueOwn:'local',lastInteraction:7,statics:{messages:5,shared:42}})
         expect(live.chats[0]).toMatchObject({opaqueOwn:'local-chat',isStreaming:true,note:'shared note'})
+    })
+
+    it('patches received conversation metadata and messages in place without replacing chat objects', async () => {
+        const {database} = await harness()
+        const live = database.characters.find((value) => value.chaId === 'char-a')!
+        const chat = live.chats.find((value) => value.id === 'conv-long')!
+        const {message: _message, ...metadata} = chat
+        const remoteMessages = [...structuredClone(chat.message), {role: 'char', data: 'remote reply'}]
+        const reader = {
+            readConversationMetadata: async () => ({revision: 2, value: {conversation: {...structuredClone(metadata), note: 'shared note'}}}),
+            readConversation: async () => ({revision: 2, value: {...structuredClone(metadata), message: remoteMessages}}),
+        } as unknown as import('./persistentDataStore').PersistentRevisionReader
+        const baseline = captureLwwWorkingSetBaseline(database, capturePersistentRoot(database), database.botPresets)
+        await applyLwwWorkingSetUnits(database, baseline, reader, ['["conversation","char-a","conv-long","note"]', '["messages","char-a","conv-long"]'])
+        expect(live.chats.find((value) => value.id === 'conv-long')).toBe(chat)
+        expect(chat).toMatchObject({note: 'shared note'})
+        expect(chat.message.at(-1)).toEqual({role: 'char', data: 'remote reply'})
+    })
+
+    it('keeps a metadata-only selected conversation shell when its received metadata is patched', async () => {
+        const {database} = await harness()
+        const live = database.characters.find((value) => value.chaId === 'char-a')!
+        const index = live.chats.findIndex((value) => value.id === 'conv-long')
+        const shell = createMetadataOnlySelectedConversation(live.chats[index])
+        live.chats[index] = shell
+        const {message: _message, ...metadata} = structuredClone(fixtureDatabase.characters.find((value) => value.chaId === 'char-a')!.chats.find((value) => value.id === 'conv-long')!)
+        const reader = {
+            readConversationMetadata: async () => ({revision: 2, value: {conversation: {...metadata, note: 'shared note'}}}),
+        } as unknown as import('./persistentDataStore').PersistentRevisionReader
+        const baseline = captureLwwWorkingSetBaseline(database, capturePersistentRoot(database), database.botPresets)
+        await applyLwwWorkingSetUnits(database, baseline, reader, ['["conversation","char-a","conv-long","note"]'])
+        // Comparing by identity keeps the failure report from reading the shell's message accessor.
+        expect(live.chats[index] === shell).toBe(true)
+        expect(isMetadataOnlySelectedConversation(live.chats[index])).toBe(true)
+        expect(shell.note).toBe('shared note')
     })
 
     it('retries changed units onto a newer revision without replacing unrelated values', async () => {

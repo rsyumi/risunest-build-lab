@@ -411,6 +411,91 @@ describe('persistent plugin storage capture', () => {
     })
 })
 
+describe('received unit projection into the selected conversation', () => {
+    async function selectedConversationReceiveHarness(receive: (persisted: Database) => string[]) {
+        const database = makeConversationDatabase('Initial')
+        const persisted = structuredClone(database)
+        let revision = 1
+        const store = {
+            open: vi.fn(async () => undefined),
+            readRoot: vi.fn(async () => ({ revision, value: capturePersistentRoot(persisted) })),
+            commit: vi.fn(async () => ({ revision: ++revision })),
+            acquireRevision: vi.fn(async (pinned: number) => {
+                const lease = makeDatabaseLease(structuredClone(persisted), pinned)
+                lease.readConversationMetadata = vi.fn(async (characterId: string, conversationId: string) => {
+                    const { message, ...conversation } = persisted.characters.find((value) => value.chaId === characterId)!.chats.find((value) => value.id === conversationId)!
+                    return { revision: pinned, value: { characterId, conversationId, conversation: structuredClone(conversation), totalMessages: message.length } }
+                }) as PersistentRevisionLease['readConversationMetadata']
+                return lease
+            }),
+            lwwStageReceive: vi.fn(async () => undefined),
+            lwwApplyReceive: vi.fn(async () => {
+                const affectedKeys = receive(persisted)
+                return { revision: ++revision, affectedKeys, heldKeys: [], deferredKeys: [] }
+            }),
+            lwwFinishReceive: vi.fn(async () => undefined),
+        } as unknown as PersistentDataStore
+        const runtime = createPersistentDataRuntime({
+            store,
+            state: {
+                captureRoot: () => capturePersistentRoot(database),
+                capturePresets: () => database.botPresets,
+                captureCharacters: () => database.characters,
+                captureWorkingSetDatabase: () => database,
+                captureSelectedCharacter: () => database.characters[0] ?? null,
+                captureCharacter: (id) => database.characters.find((character) => character.chaId === id) ?? null,
+                getSelectedCharacterId: () => database.characters[0]?.chaId,
+                getSelectedConversationId: () => database.characters[0]?.chats[0]?.id,
+                replaceDatabase: vi.fn(),
+                publishCharacter: vi.fn(),
+                publishConversation: vi.fn(),
+            },
+            prepareDatabase: async (value) => value,
+        })
+        await runtime.initializeActiveWorkingSet(database)
+        const session = runtime.getActiveConversationSession()!
+        const chat = database.characters[0].chats[0]
+        expect(session.matchesConversation('char-a', chat)).toBe(true)
+        const version = session.version
+        const events: unknown[] = []
+        session.subscribe((event) => { events.push(event) })
+        const applyReceive = () => runtime.applyLwwReceive({ bindingAuthority: '1', requestId: 'selected-receive', changes: [], progress: { kind: 'server', cursor: '1' }, admittedTimeUpperMs: '100' })
+        return { database, runtime, session, chat, version, events, applyReceive }
+    }
+
+    it('signals the selected session for a received conversation field without replacing its object', async () => {
+        const { database, runtime, session, chat, version, events, applyReceive } = await selectedConversationReceiveHarness((persisted) => {
+            persisted.characters[0].chats[0].note = 'Remote note'
+            return ['["conversation","char-a","chat-a","note"]']
+        })
+        await applyReceive()
+        expect(database.characters[0].chats[0]).toBe(chat)
+        expect(chat.note).toBe('Remote note')
+        expect(runtime.getActiveConversationSession()).toBe(session)
+        expect(session.version).toBe(version + 1)
+        expect(events).toEqual([expect.objectContaining({ commands: ['update-metadata'] })])
+    })
+
+    it('republishes the selected conversation as a new object when its session refuses the received change', async () => {
+        const { database, runtime, session, chat, version, events, applyReceive } = await selectedConversationReceiveHarness((persisted) => {
+            persisted.characters[0].chats[0].message.push({ role: 'char', data: 'Remote reply', chatId: 'message-remote' })
+            return ['["messages","char-a","chat-a"]']
+        })
+        // Resident segments track the message count, so an appended message cannot be adopted in place.
+        expect(session.residencyFallbackActive).toBe(false)
+        await applyReceive()
+        const republished = database.characters[0].chats[0]
+        expect(republished).not.toBe(chat)
+        expect(republished.message.at(-1)).toEqual({ role: 'char', data: 'Remote reply', chatId: 'message-remote' })
+        expect(session.version).toBe(version)
+        expect(session.isActive).toBe(false)
+        expect(events).toEqual([null])
+        const current = runtime.getActiveConversationSession()!
+        expect(current).not.toBe(session)
+        expect(current.matchesConversation('char-a', republished)).toBe(true)
+    })
+})
+
 describe('persistent conversation replacement publication', () => {
     it('forwards a lease-owned replacement refresh without changing selection', async () => {
         const harness = await createActiveSessionRuntimeHarness()

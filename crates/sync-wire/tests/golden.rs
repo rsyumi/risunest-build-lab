@@ -1,7 +1,7 @@
 use risunest_sync_wire::{
     canonical, hash,
     transfer::{self, Frame},
-    Domain, RecordVersion, RemoteHead, Sequence,
+    RecordVersion, RemoteHead, Sequence,
 };
 use serde_json::{json, Value};
 
@@ -200,51 +200,30 @@ fn full_frame_goldens_match_the_javascript_harness() {
 }
 
 #[test]
-fn domain_ordering_matches_its_wire_strings() {
-    let mut sorted = Domain::ALL;
-    sorted.sort_by_key(Domain::as_str);
-    assert_eq!(sorted, Domain::ALL);
-    assert_eq!(
-        Domain::ALL.map(|d| d.as_str()),
-        ["hypa", "library", "local-plugins"]
-    );
-    for domain in Domain::ALL {
-        assert_eq!(Domain::try_from(domain.as_str()).unwrap(), domain);
-        assert_eq!(
-            canonical::encode(&domain).unwrap(),
-            format!("\"{domain}\"").as_bytes()
-        );
-    }
-    assert!(Domain::try_from("device-settings").is_err());
-    assert!(canonical::decode::<Domain>(b"\"device-settings\"", 1024).is_err());
-}
-#[test]
-fn heads_carry_one_sequence_and_a_state_per_section() {
+fn heads_carry_one_sequence_and_no_section_state() {
     let head = RemoteHead::genesis("library".into(), "epoch".into()).unwrap();
     head.validate().unwrap();
-    assert_eq!(head.sections.len(), 3);
-    let ids: std::collections::BTreeSet<_> = head
-        .sections
-        .values()
-        .map(|section| section.state_id.clone())
-        .collect();
-    assert_eq!(ids.len(), 3);
     let encoded = canonical::encode(&head).unwrap();
     assert_eq!(
         canonical::decode::<RemoteHead>(&encoded, 4096).unwrap(),
         head
     );
-    assert!(std::str::from_utf8(&encoded)
-        .unwrap()
-        .contains("\"local-plugins\":"));
-    let mut missing = head.clone();
-    missing.sections.remove(&Domain::Hypa);
-    assert!(missing.validate().is_err());
-    let mut ahead = head.clone();
-    ahead.sections.get_mut(&Domain::Hypa).unwrap().changed_seq = 1.into();
-    assert!(ahead.validate().is_err());
+    let mut value: Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["epoch", "headId", "libraryId", "minRetainedSeq", "seq"]
+    );
+    value["sections"] = json!({});
+    assert_eq!(
+        canonical::decode::<RemoteHead>(&serde_json::to_vec(&value).unwrap(), 4096),
+        Err(risunest_sync_wire::WireError("invalid-control-schema"))
+    );
     let mut reclaimed = head.clone();
-    reclaimed.min_retained_seq = 0.into();
-    reclaimed.sections.get_mut(&Domain::Hypa).unwrap().gc_floor = 1.into();
+    reclaimed.min_retained_seq = 1.into();
     assert!(reclaimed.validate().is_err());
 }

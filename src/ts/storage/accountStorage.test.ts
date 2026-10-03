@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AccountNativeOfficialWriteAttemptContext } from './accountStorage'
-import type { NativeOfficialAccountFlow } from './sync/nativeOfficialAccountFlow'
+import {
+    createNativeOfficialAccountFlowService,
+    type NativeOfficialAccountFlow,
+} from './sync/nativeOfficialAccountFlow'
 import {
     SaveCoordinator,
     makeDatabase,
@@ -1042,8 +1045,6 @@ describe('AccountStorage structured wire contract', () => {
                 reauthenticate: (loginResult) => reauthenticateSnapshotRequest(loginResult),
             },
         })
-        const { createNativeOfficialAccountFlowService } =
-            await import('./sync/nativeOfficialAccountFlow')
         const service = createNativeOfficialAccountFlowService({
             credentialVault: vault,
             adapter: {
@@ -1098,8 +1099,6 @@ describe('AccountStorage structured wire contract', () => {
                 reauthenticate: (loginResult) => reauthenticateSnapshotRequest(loginResult),
             },
         })
-        const { createNativeOfficialAccountFlowService } =
-            await import('./sync/nativeOfficialAccountFlow')
         const vault = {
             read: vi.fn(async () => null),
             write: vi.fn(async () => undefined),
@@ -1162,8 +1161,6 @@ describe('AccountStorage structured wire contract', () => {
                 reauthenticate: (loginResult) => reauthenticateSnapshotRequest(loginResult),
             },
         })
-        const { createNativeOfficialAccountFlowService } =
-            await import('./sync/nativeOfficialAccountFlow')
         const vault = {
             read: vi.fn(async () => null),
             write: vi.fn(async () => undefined),
@@ -1227,8 +1224,6 @@ describe('AccountStorage structured wire contract', () => {
                     flow.reauthenticate(loginResult).then(() => undefined),
             },
         })
-        const { createNativeOfficialAccountFlowService } =
-            await import('./sync/nativeOfficialAccountFlow')
         const vault = {
             stored: { id: 'account-1', token: 'legacy-token', data: {} } as unknown,
             read: vi.fn(async () => vault.stored ?? null),

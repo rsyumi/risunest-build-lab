@@ -1651,7 +1651,7 @@ pub(crate) async fn admit_data_catalogs(
             let ObjectSource::File(path)=control.source else {return Err(corrupt("control file is unavailable"));};
             let bytes=read_bytes(&path,usize::try_from(control.byte_length).map_err(corrupt)?)?;
             if bytes.len() as u64!=control.byte_length || crate::persistent_store::external_capture::hash_backup_body(&bytes,"native_data_catalog_control_identity")!=control.content_hash {return Err(corrupt("control body identity differs"));}
-            if bytes.len()>risunest_sync_wire::MAX_METADATA_BYTES {crate::persistent_store::external_capture::verified_large_message_page(&bytes).map_err(corrupt)?;}
+            if bytes.len()>risunest_sync_wire::MAX_METADATA_BYTES {crate::persistent_store::external_capture::verified_oversized_control(&bytes).map_err(corrupt)?;}
             store.lww_put_object(&control.content_hash,&bytes).map_err(corrupt)?;
         }
         let required=required.into_iter().collect::<Vec<_>>();
@@ -1769,7 +1769,7 @@ pub(crate) struct DatabaseFirstSnapshot {
 }
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn admit_asset_catalogs(
-    catalogs:&[wire::StoredObject],store:&mut crate::persistent_store::PersistentStore,
+    catalogs:&[wire::StoredObject],store:&mut crate::persistent_store::PersistentStore,target:&str,
     library_id:&str,protected_segment:&str,connection_id:&str,connection_root:&Path,root_key:&[u8;32],
     provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation,
 ) -> Result<Vec<String>> {
@@ -1777,13 +1777,14 @@ pub(crate) async fn admit_asset_catalogs(
     let metadata=rusqlite::Connection::open_with_flags(store.repository_root().join("persistent/persistent.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(transient)?;
     let cas=PayloadCas::new(store.repository_root()).map_err(transient)?;
-    let mut planned=BTreeMap::<String,super::lww_residency::PackedSource>::new();
+    let mut planned=BTreeMap::<String,super::lww_residency::PackedSource>::new();let mut proofs=Vec::new();
     for catalog in catalogs {
         if catalog.header.repository_id!=repository.repository_id || catalog.header.role!=wire::ObjectRole::Catalog {
             return Err(corrupt("asset catalog repository or role differs"));
         }
         let root=RemoteObject::from_stored(catalog,repository)?;
         let (entries,packs,_)=read_catalog(&root,wire::CatalogKind::Assets,root_key,scratch.path(),provider,repository,cancel).await?;
+        let mut witnessed=Vec::new();
         for entry in entries {
             cancel.check()?;
             if entry.kind!=wire::CatalogEntryKind::Object {return Err(corrupt("asset catalog kind differs"));}
@@ -1800,12 +1801,15 @@ pub(crate) async fn admit_asset_catalogs(
                 library_id:library_id.into(),connection_id:connection_id.into(),connection_root:connection_root.into(),
                 protected_snapshot:protected_segment.into(),catalog:catalog.clone(),chunks:entry.chunks,packs:references};
             super::lww_residency::validate_packed_source(&source,repository)?;
+            witnessed.push((hash.clone(),source.byte_length));
             if let Some(previous)=planned.get(&hash) {
                 if previous.byte_length!=source.byte_length {return Err(corrupt("conflicting asset catalog body"));}
             } else {planned.insert(hash,source);}
         }
+        proofs.push((catalog,witnessed));
     }
     cancel.check()?;
+    for (catalog,entries) in proofs {store.external_lww_witness_asset_catalog(target,catalog,&entries).map_err(corrupt)?;}
     let registrations=planned.values().map(|source|crate::persistent_store::asset_object_catalog::AssetObjectRegistration{object_hash:source.hash.clone(),byte_size:source.byte_length}).collect::<Vec<_>>();
     for batch in registrations.chunks(crate::persistent_store::asset_object_catalog::ASSET_OBJECT_CATALOG_MAX_PAGE as usize) {
         store.asset_object_catalog().register(batch,super::runtime::now_ms() as i64).map_err(transient)?;

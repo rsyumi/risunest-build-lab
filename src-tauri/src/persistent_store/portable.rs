@@ -174,6 +174,8 @@ pub(crate) fn install_generation_views(
     Ok(())
 }
 
+pub(crate) const PRESENCE_BATCH: usize = 1024;
+
 fn cancelled(probe: &dyn CancellationProbe) -> StoreResult<()> {
     if probe.is_cancelled() {
         return Err(StoreError::Validation {
@@ -308,8 +310,26 @@ impl PersistentStore {
         let temporary=tempfile::tempdir_in(&self.snapshots_dir)?;
         let certified=Connection::open(temporary.path().join("certified.sqlite"))?;
         certified.execute_batch("PRAGMA cache_size=-16384; PRAGMA temp_store=FILE; CREATE TABLE controls(hash TEXT PRIMARY KEY,body BLOB NOT NULL)")?;
+        let large = super::external_capture::large_unit_body_hashes(&units);
+        let bounded = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
+            Ok(source.query_row("SELECT body FROM backup_controls WHERE hash=?1 AND length(body)<=?2",rusqlite::params![hash,risunest_sync_wire::MAX_METADATA_BYTES as i64],|row|row.get(0)).optional()?)
+        };
+        // A control above the bound is read only as a large unit body or as a
+        // page whose manifest declares that length.
+        let read = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
+            let row: Option<(i64,Option<Vec<u8>>)> = source.query_row("SELECT length(body),CASE WHEN length(body)<=?2 THEN body END FROM backup_controls WHERE hash=?1",
+                rusqlite::params![hash,risunest_sync_wire::MAX_METADATA_BYTES as i64],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+            let Some((length,body)) = row else {return Ok(None)};
+            if body.is_some() {return Ok(body)}
+            let length = u64::try_from(length).map_err(|_|invalid("invalid original control length"))?;
+            if !large.contains(hash)
+                && super::external_capture::original_unit_message_page(&units,hash,&bounded)?.is_none_or(|page|page.byte_length.0 != length) {
+                return Ok(None);
+            }
+            Ok(source.query_row("SELECT body FROM backup_controls WHERE hash=?1",[hash],|row|row.get(0)).optional()?)
+        };
         let inventory = super::external_capture::original_unit_dependency_inventory(&units,
-            &|hash| Ok(source.query_row("SELECT body FROM backup_controls WHERE hash=?1 AND length(body)<=?2",rusqlite::params![hash,risunest_sync_wire::MAX_METADATA_BYTES as i64],|row|row.get(0)).optional()?),
+            &read,
             &|hash| {
                 let size:Option<i64>=source.query_row("SELECT byte_length FROM backup_payloads WHERE hash=?1",[hash],|row|row.get(0)).optional()?;
                 size.map(|size|u64::try_from(size).map_err(|_|invalid("invalid original payload size"))).transpose()
@@ -353,9 +373,6 @@ impl PersistentStore {
         copy_generation(source, &target.generation, destination, probe)
     }
 
-    /// Prepare raw rows without activating them. The file restore coordinator must additionally
-    /// validate payloads, owner manifests and the F0 reference contract, publish recovery, and
-    /// obtain the existing replacement fence before using the normal commit API.
     pub(crate) fn portable_object_present(&self, hash: &str, expected_size:u64) -> StoreResult<bool> {
         risunest_sync_wire::validate_hash(hash).map_err(|e| super::StoreError::Validation { message: e.to_string() })?;
         match crate::asset_repository::PayloadCas::new(&self.repository_root)?.stat_object(hash)? {
@@ -365,6 +382,44 @@ impl PersistentStore {
         }
     }
 
+    /// Local body sizes for many objects, validating the repository once per batch rather than
+    /// once per object.
+    pub(crate) fn portable_object_sizes(&self, hashes: &[&str]) -> StoreResult<Vec<Option<u64>>> {
+        let scan = crate::asset_repository::PayloadCas::new(&self.repository_root)?.into_read_scan();
+        let mut sizes = Vec::with_capacity(hashes.len());
+        for batch in hashes.chunks(PRESENCE_BATCH) {
+            match scan.stat_objects(batch.iter().copied()) {
+                Ok(batch) => sizes.extend(batch),
+                // A write that creates a shard during the batch changes the scanned hierarchy;
+                // the per-object check gives the same answer without that requirement.
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                    let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
+                    for hash in batch {
+                        sizes.push(cas.stat_object(hash)?);
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(sizes)
+    }
+
+    pub(crate) fn portable_objects_present(&self, objects: &[(&str, u64)]) -> StoreResult<Vec<bool>> {
+        let hashes = objects.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+        self.portable_object_sizes(&hashes)?
+            .into_iter()
+            .zip(objects)
+            .map(|(size, (_, expected))| match size {
+                None => Ok(false),
+                Some(size) if size == *expected => Ok(true),
+                Some(_) => Err(invalid("existing portable payload size mismatch")),
+            })
+            .collect()
+    }
+
+    /// Prepare raw rows without activating them. The file restore coordinator must additionally
+    /// validate payloads, owner manifests and the F0 reference contract, publish recovery, and
+    /// obtain the existing replacement fence before using the normal commit API.
     pub(crate) fn stage_portable_records(
         &mut self,
         source: &Connection,
@@ -420,228 +475,6 @@ impl PersistentStore {
         }
         Ok(stage)
     }
-}
-
-/// Stages only the records a partial import chose, keeping the settings record and the storage
-/// authorities whole. Every row it writes is copied from the archive unchanged except for the
-/// ordering columns, which are renumbered because the records around them are gone.
-///
-/// The selected view is shared by validation, copying and object installation.
-pub(crate) fn stage_portable_records_selected(
-    store: &mut PersistentStore,
-    source: &Connection,
-    selection: &crate::portable_backup::ClosedSelection,
-    probe: &dyn CancellationProbe,
-) -> StoreResult<super::StagingResult> {
-    install_selected_views(source, selection, probe)?;
-    super::portable_validation::validate_records(source, probe)?;
-    let stage = store.replace_begin()?;
-    let result = copy_selected(store, source, &stage.staging_id, selection, probe);
-    if let Err(error) = result {
-        store.replace_abort(&stage.staging_id)?;
-        return Err(error);
-    }
-    Ok(stage)
-}
-
-fn install_selected_views(
-    source: &Connection,
-    selection: &crate::portable_backup::ClosedSelection,
-    probe: &dyn CancellationProbe,
-) -> StoreResult<()> {
-    let query_only: bool = source.pragma_query_value(None, "query_only", |row| row.get(0))?;
-    source.pragma_update(None, "query_only", false)?;
-    let result = (|| -> StoreResult<()> {
-    source.execute_batch("CREATE TEMP TABLE selected_characters(id TEXT PRIMARY KEY); CREATE TEMP TABLE selected_presets(id TEXT PRIMARY KEY); CREATE TEMP TABLE selected_plugins(owner TEXT,storage_key TEXT,PRIMARY KEY(owner,storage_key)); CREATE TEMP TABLE selected_aliases(kind TEXT,logical_key TEXT,PRIMARY KEY(kind,logical_key));")?;
-    for id in &selection.characters { source.execute("INSERT OR IGNORE INTO selected_characters VALUES(?1)", [id])?; }
-    for id in &selection.presets { source.execute("INSERT OR IGNORE INTO selected_presets VALUES(?1)", [id])?; }
-    for key in &selection.plugins { source.execute("INSERT OR IGNORE INTO selected_plugins VALUES(?1,?2)", rusqlite::params![key.owner,key.key])?; }
-    for (table, condition) in [
-        ("characters", "character_id IN (SELECT id FROM selected_characters)"),
-        ("conversations", "character_id IN (SELECT id FROM selected_characters)"),
-        ("messages", "character_id IN (SELECT id FROM selected_characters)"),
-        ("bot_presets", "preset_id IN (SELECT id FROM selected_presets)"),
-        ("plugin_storage", "(owner,storage_key) IN (SELECT owner,storage_key FROM selected_plugins)"),
-        ("asset_owner_heads", "owner_kind!='character-additional-assets' OR owner_locator IN (SELECT id FROM selected_characters)"),
-    ] {
-        source.execute_batch(&format!("CREATE TEMP VIEW {table} AS SELECT * FROM main.{table} WHERE {condition}"))?;
-    }
-    use crate::lossless_f0::{scan_portable_fragment, PortableFragment};
-    for (kind, sql) in [
-        ("root", "SELECT value,'','',0 FROM root"),
-        ("preset", "SELECT value,'','',configured_index FROM bot_presets"),
-        ("plugin", "SELECT value,storage_key,'',0 FROM plugin_storage"),
-        ("character", "SELECT detail,character_id,'',conversation_count FROM characters"),
-        ("conversation", "SELECT detail,character_id,'',0 FROM conversations"),
-        ("message", "SELECT value,character_id,conversation_id,message_index FROM messages"),
-    ] {
-        let mut statement = source.prepare(sql)?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            cancelled(probe)?;
-            let encoded: String = row.get(0)?;
-            let value: serde_json::Value = serde_json::from_str(&encoded).map_err(|_| invalid("selected record JSON is invalid"))?;
-            let id: String = row.get(1)?;
-            let conversation: String = row.get(2)?;
-            let index: i64 = row.get(3)?;
-            let fragment = match kind {
-                "root" => PortableFragment::Root { value: &value, selected_preset: None },
-                "preset" => PortableFragment::Preset { value: &value, index },
-                "plugin" => PortableFragment::Plugin { value: &value, key: &id },
-                "character" => PortableFragment::Character { value: &value, selected_chat: None, has_chats: index > 0 },
-                "conversation" => PortableFragment::Conversation { value: &value, character_id: &id },
-                _ => PortableFragment::Message { value: &value, character_id: &id, conversation_id: &conversation, index },
-            };
-            for reference in scan_portable_fragment(fragment).map_err(|_| invalid("selected reference cannot be scanned"))? {
-                if matches!(reference.target_kind.as_str(), "asset" | "inlay") {
-                    source.execute("INSERT OR IGNORE INTO selected_aliases VALUES(?1,?2)", rusqlite::params![reference.target_kind,reference.target_key])?;
-                }
-            }
-        }
-    }
-    source.execute_batch("CREATE TEMP TABLE selected_archived_hashes(hash TEXT PRIMARY KEY)")?;
-    let mut statement = source.prepare("SELECT archived_object FROM characters WHERE archived_object IS NOT NULL")?;
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        cancelled(probe)?;
-        let archived: super::archive::ArchivedObject = serde_json::from_str(&row.get::<_,String>(0)?).map_err(|_| invalid("selected archived payload is invalid"))?;
-        for hash in archived.object_roots() {
-            source.execute("INSERT OR IGNORE INTO selected_archived_hashes VALUES(?1)", [hash])?;
-        }
-    }
-    source.execute_batch("CREATE TEMP VIEW asset_aliases AS SELECT * FROM main.asset_aliases WHERE (kind,logical_key) IN (SELECT kind,logical_key FROM selected_aliases) OR object_hash IN (SELECT hash FROM selected_archived_hashes)")?;
-    Ok(())
-    })();
-    source.pragma_update(None, "query_only", query_only)?;
-    result
-}
-
-fn copy_selected(
-    store: &mut PersistentStore,
-    source: &Connection,
-    staging: &str,
-    _selection: &crate::portable_backup::ClosedSelection,
-    probe: &dyn CancellationProbe,
-) -> StoreResult<()> {
-    let transaction = store.connection.transaction()?;
-    for table in TABLES {
-        cancelled(probe)?;
-        let columns = table.column_list();
-        transaction.execute(
-            &format!("DELETE FROM {} WHERE generation=?1", table.name),
-            [staging],
-        )?;
-        let mut select = source.prepare(&format!(
-            "SELECT {columns} FROM {} ORDER BY {}",
-            table.name,
-            table.order
-        ))?;
-        let placeholders = (0..=table.columns.len())
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut insert = transaction.prepare(&format!(
-            "INSERT INTO {} (generation,{columns}) VALUES ({placeholders})",
-            table.name
-        ))?;
-        let mut rows = select.query([])?;
-        while let Some(row) = rows.next()? {
-            cancelled(probe)?;
-            insert.raw_bind_parameter(1, staging)?;
-            for index in 0..table.columns.len() {
-                insert.raw_bind_parameter(
-                    index + 2,
-                    rusqlite::types::ToSqlOutput::Borrowed(row.get_ref(index)?),
-                )?;
-            }
-            insert.raw_execute()?;
-        }
-        drop(rows);
-        drop(insert);
-        drop(select);
-    }
-    // An owner head belongs to a record; the ones whose character stayed behind have no owner.
-    transaction.execute(
-        "DELETE FROM asset_owner_heads WHERE generation=?1 AND owner_kind='character-additional-assets'
-         AND owner_locator NOT IN (SELECT character_id FROM characters WHERE generation=?1)",
-        [staging],
-    )?;
-    renumber_selected(&transaction, staging)?;
-    transaction.commit()?;
-    Ok(())
-}
-
-/// Closes the gaps the dropped records left in the ordering columns, and points the chosen preset
-/// at wherever it landed. Nothing else about the settings record changes.
-fn renumber_selected(transaction: &Connection, staging: &str) -> StoreResult<()> {
-    for (table, identity_columns, order) in [
-        ("characters", &["character_id"][..], "configured_index"),
-        ("plugin_storage", &["owner", "storage_key"][..], "ordinal"),
-    ] {
-        let identity = identity_columns
-            .iter()
-            .map(|column| format!("\"{column}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let prefixed = identity_columns
-            .iter()
-            .map(|column| format!("{table}.\"{column}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        transaction.execute(
-            &format!(
-                "UPDATE {table} SET \"{order}\"=(
-                     SELECT position-1 FROM (
-                         SELECT {identity}, row_number() OVER (ORDER BY \"{order}\") AS position
-                         FROM {table} WHERE generation=?1
-                     ) ranked WHERE ({identity})=({prefixed})
-                 ) WHERE generation=?1",
-            ),
-            [staging],
-        )?;
-    }
-    // A preset is named by its own position, so renumbering has to carry the identity with it.
-    let kept: Vec<String> = {
-        let mut statement = transaction.prepare(
-            "SELECT preset_id FROM bot_presets WHERE generation=?1 ORDER BY configured_index",
-        )?;
-        let mut rows = statement.query([staging])?;
-        let mut kept = Vec::new();
-        while let Some(row) = rows.next()? {
-            kept.push(row.get(0)?);
-        }
-        kept
-    };
-    let selected: Option<i64> = transaction
-        .query_row(
-            "SELECT CAST(json_extract(value,'$.botPresetsId') AS INTEGER) FROM root WHERE generation=?1",
-            [staging],
-            |row| row.get(0),
-        )
-        .optional()?
-        .flatten();
-    for (position, preset_id) in kept.iter().enumerate() {
-        transaction.execute(
-            "UPDATE bot_presets SET preset_id=?3, configured_index=?4 WHERE generation=?1 AND preset_id=?2",
-            rusqlite::params![staging, preset_id, position.to_string(), position as i64],
-        )?;
-    }
-    if let Some(selected) = selected {
-        // The chosen preset keeps being the chosen one where it landed, or the first that stayed.
-        let landed = kept
-            .iter()
-            .position(|preset_id| preset_id.parse::<i64>() == Ok(selected))
-            .map(|position| position as i64)
-            .unwrap_or(0)
-            .min((kept.len() as i64 - 1).max(0));
-        if landed != selected {
-            transaction.execute(
-                "UPDATE root SET value=json_set(value,'$.botPresetsId',?2) WHERE generation=?1",
-                rusqlite::params![staging, landed],
-            )?;
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn digest_raw_tables(
@@ -789,43 +622,6 @@ fn invalid(message: &str) -> StoreError {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn selected_views_keep_only_selected_valid_rows_and_owner_qualified_plugins() {
-        let source = Connection::open_in_memory().unwrap();
-        create_raw_tables(&source).unwrap();
-        source.execute("INSERT INTO root VALUES('{}')", []).unwrap();
-        for (index, id) in ["a", "b"].into_iter().enumerate() {
-            let detail = serde_json::json!({"chaId":id,"name":id,"type":"character","image":format!("assets/{id}")}).to_string();
-            source.execute("INSERT INTO characters VALUES(?1,?2,0,0,?1,?3,0,'character',NULL,NULL,?4,NULL)", rusqlite::params![id,index as i64,format!("assets/{id}"),detail]).unwrap();
-            source.execute("INSERT INTO asset_aliases VALUES(?1,?2,'asset',1,'application/octet-stream','','',NULL,NULL,NULL,'{}')", rusqlite::params![format!("assets/{id}"),"a".repeat(64)]).unwrap();
-            source.execute("INSERT INTO asset_owner_heads VALUES('character-additional-assets',?1,0,NULL,0)", [id]).unwrap();
-        }
-        source.execute("UPDATE characters SET detail='broken' WHERE character_id='b'", []).unwrap();
-        for (index, owner) in ["plugin:a", "plugin:b"].into_iter().enumerate() {
-            source.execute("INSERT INTO plugin_storage VALUES(?1,'same/key',2,?2,'{}',NULL,NULL,NULL)", rusqlite::params![owner,index as i64]).unwrap();
-        }
-        let selection = crate::portable_backup::ClosedSelection {
-            characters: vec!["a".into()],
-            plugins: vec![crate::portable_backup::PluginKey { owner:"plugin:a".into(),key:"same/key".into() }],
-            ..Default::default()
-        };
-        source.pragma_update(None, "query_only", true).unwrap();
-        install_selected_views(&source, &selection, &Never).unwrap();
-        assert!(source.pragma_query_value(None, "query_only", |row| row.get::<_,bool>(0)).unwrap());
-        for (table, column, expected) in [("characters","character_id","a"),("asset_aliases","logical_key","assets/a"),("asset_owner_heads","owner_locator","a"),("plugin_storage","owner","plugin:a")] {
-            let mut statement = source.prepare(&format!("SELECT {column} FROM {table}")).unwrap();
-            let values = statement.query_map([], |row| row.get::<_,String>(0)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
-            assert_eq!(values, [expected]);
-        }
-        let root = tempfile::tempdir().unwrap();
-        let mut store = PersistentStore::open(root.path()).unwrap();
-        super::super::portable_validation::validate_records(&source, &Never).unwrap();
-        let stage = store.replace_begin().unwrap();
-        copy_selected(&mut store, &source, &stage.staging_id, &selection, &Never).unwrap();
-        assert_eq!(store.portable_staged_counts(&stage.staging_id).unwrap(), (1,0));
-        store.replace_abort(&stage.staging_id).unwrap();
-    }
-
     use super::*;
     use rusqlite::params;
     struct Never;

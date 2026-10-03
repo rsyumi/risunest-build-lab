@@ -594,7 +594,7 @@ impl<'a> Transfer<'a> {
             for (result, group, elapsed) in failed {
                 match result {
                     Ok(reply) if matches!(reply.status, 502 | 503 | 504) => {
-                        let _ = client.resolve_identity(false);
+                        let _ = client.resolve_identity();
                         client.wait_transient_response(
                             reply.retry_after,
                             "server-unreachable",
@@ -602,7 +602,7 @@ impl<'a> Transfer<'a> {
                         )?
                     }
                     Err(error) if super::client::is_ambiguous_transient(&error) => {
-                        let _ = client.resolve_identity(false);
+                        let _ = client.resolve_identity();
                         client.wait_after_ambiguous(&error, elapsed)?
                     }
                     Ok(reply) => return Err(response_error(reply)),

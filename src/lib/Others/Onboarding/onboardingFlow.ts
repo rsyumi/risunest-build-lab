@@ -3,10 +3,8 @@
  * effect; the rules that decide which screen follows which live here so they
  * can be checked without a DOM.
  *
- * `sync-account` is the RisuAI account backup, `sync-hub` is the RisuNest sync
- * server and `sync-external` is a repository the reader keeps on a cloud
- * service or their own server. The design document calls the first two
- * `sync-server` and `sync-hub`; the names here say which server each one means.
+ * `sync-account` restores a RisuAI account backup, `sync-server` connects to
+ * a RisuNest sync server and `sync-external` opens external storage.
  */
 
 
@@ -14,7 +12,7 @@ export const ONBOARDING_STATES = [
     'home',
     'import',
     'sync',
-    'sync-hub',
+    'sync-server',
     'sync-account',
     'sync-account-found',
     'sync-external',
@@ -24,7 +22,7 @@ export const ONBOARDING_STATES = [
 export type OnboardingState = (typeof ONBOARDING_STATES)[number]
 
 /** How the reader got their data. It decides the wording on the last screen. */
-export type OnboardingPath = 'fresh' | 'import' | 'hub' | 'account' | 'external'
+export type OnboardingPath = 'fresh' | 'import' | 'server' | 'account' | 'external'
 
 export interface OnboardingFlow {
     readonly state: OnboardingState
@@ -40,7 +38,7 @@ const STEP_OF: Readonly<Record<OnboardingState, OnboardingStep>> = {
     'home': 1,
     'import': 2,
     'sync': 2,
-    'sync-hub': 2,
+    'sync-server': 2,
     'sync-account': 2,
     'sync-account-found': 2,
     'sync-external': 2,
@@ -52,7 +50,7 @@ const BACK_OF: Readonly<Record<OnboardingState, OnboardingState | null>> = {
     'home': null,
     'import': 'home',
     'sync': 'home',
-    'sync-hub': 'sync',
+    'sync-server': 'sync',
     'sync-account': 'sync',
     'sync-account-found': 'sync',
     'sync-external': 'sync',
@@ -63,7 +61,7 @@ const BACK_OF: Readonly<Record<OnboardingState, OnboardingState | null>> = {
 const PATH_OF: Readonly<Partial<Record<OnboardingState, OnboardingPath>>> = {
     'home': 'fresh',
     'import': 'import',
-    'sync-hub': 'hub',
+    'sync-server': 'server',
     'sync-account': 'account',
     'sync-account-found': 'account',
     'sync-external': 'external',

@@ -21,15 +21,14 @@ describe('onboarding flow', () => {
             expect([1, 2, 3]).toContain(onboardingStep(state))
         }
         expect(onboardingStep('home')).toBe(1)
-        expect(onboardingStep('sync-hub')).toBe(2)
+        expect(onboardingStep('sync-server')).toBe(2)
         expect(onboardingStep('done')).toBe(3)
     })
 
     it('sends the reader back one screen at a time', () => {
         expect(onboardingBack('import')).toBe('home')
         expect(onboardingBack('sync')).toBe('home')
-        expect(onboardingBack('sync-hub')).toBe('sync')
-        expect(onboardingBack('sync-hub')).toBe('sync')
+        expect(onboardingBack('sync-server')).toBe('sync')
         expect(onboardingBack('sync-account')).toBe('sync')
         expect(onboardingBack('sync-account-found')).toBe('sync')
         expect(onboardingBack('sync-external')).toBe('sync')
@@ -43,15 +42,14 @@ describe('onboarding flow', () => {
     it('records the path each screen commits to', () => {
         const flow = INITIAL_ONBOARDING_FLOW
         expect(goToOnboardingState(flow, 'import').path).toBe('import')
-        expect(goToOnboardingState(flow, 'sync-hub').path).toBe('hub')
-        expect(goToOnboardingState(flow, 'sync-hub').path).toBe('hub')
+        expect(goToOnboardingState(flow, 'sync-server').path).toBe('server')
         expect(goToOnboardingState(flow, 'sync-account').path).toBe('account')
         expect(goToOnboardingState(flow, 'sync-external').path).toBe('external')
     })
 
     it('keeps the current path on screens that choose none', () => {
-        const flow: OnboardingFlow = { state: 'sync-hub', path: 'hub' }
-        expect(goToOnboardingState(flow, 'done').path).toBe('hub')
+        const flow: OnboardingFlow = { state: 'sync-server', path: 'server' }
+        expect(goToOnboardingState(flow, 'done').path).toBe('server')
     })
 
     it('resets the path to the first screen default when going home', () => {
@@ -68,7 +66,7 @@ describe('onboarding flow', () => {
     it('names the closing sentence after the path that brought the data', () => {
         expect(onboardingSummary('fresh')).toBe('fresh')
         expect(onboardingSummary('import')).toBe('import')
-        for (const path of ['hub', 'account', 'external'] as const) {
+        for (const path of ['server', 'account', 'external'] as const) {
             expect(onboardingSummary(path)).toBe('data')
         }
     })

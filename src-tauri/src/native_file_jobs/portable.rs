@@ -617,35 +617,15 @@ fn restore_portable_inner(
     let mut journal_owned = false;
     let outcome = (|| {
         job.set_phase(JobPhase::StagingDatabase).map_err(error)?;
-        let stage = match (selection.library, selection.items.as_ref()) {
-            (false, _) => None,
-            (true, None) => Some(
-                store
-                    .stage_portable_records(&archive.db, &probe)
-                    .map_err(error)?,
-            ),
-            (true, Some(items)) => {
-                let closed = portable_backup::close_selection(&archive.db, items).map_err(error)?;
-                Some(
-                    crate::persistent_store::portable::stage_portable_records_selected(
-                        &mut store,
-                        &archive.db,
-                        &closed,
-                        &probe,
-                    )
-                    .map_err(error)?,
-                )
-            }
-        };
+        let stage = store
+            .stage_portable_records(&archive.db, &probe)
+            .map_err(error)?;
         let source_units = store.stage_portable_units(&archive.db,&probe).map_err(error)?;
         let prepared_device =
             prepare_native_sections(&archive, &selection.device_sections, &probe).map_err(error)?;
         let mut committed = false;
         let activated = (|| {
-            let counts = match stage.as_ref() {
-                Some(stage) => store.portable_staged_counts(&stage.staging_id).map_err(error)?,
-                None => (0, 0),
-            };
+            let counts = store.portable_staged_counts(&stage.staging_id).map_err(error)?;
             if let Some(finalized) = job.wait_for_restore_finalization().map_err(error)? {
                 revision = finalized;
             }
@@ -679,7 +659,7 @@ fn restore_portable_inner(
                     selection,
                     &mut store,
                     revision,
-                    stage.as_ref().map(|stage| stage.staging_id.as_str()),
+                    Some(stage.staging_id.as_str()),
                     job,
                     &prepared_device,
                     &probe,
@@ -706,20 +686,17 @@ fn restore_portable_inner(
                 )
                 .map_err(error)?;
                 result
-            } else if let Some(stage) = stage.as_ref() {
+            } else {
                 let header = crate::persistent_store::lww::Header { binding_authority: store.lww_binding_authority().map_err(error)?, request_id: job.id() };
                 let result = store.lww_commit_replacement_units(&header,&stage.staging_id,Some(&source_units)).map_err(error)?;
                 committed = true;
                 result.revision
-            } else {
-                committed = true;
-                revision
             };
             job.publish_portable_activation(final_revision, store.lww_binding_authority().map_err(error)?.0.to_string()).map_err(error)?;
             job.wait_for_portable_adoption().map_err(error)?;
             let retained=job.requires_restore_finalization && context.is_some();
             if retained {
-                job.prepare_portable_body_retry(&stage.as_ref().expect("full library stage").staging_id,&source_sha256,archive.source_identity_guard().map_err(error)?).map_err(error)?;
+                job.prepare_portable_body_retry(&stage.staging_id,&source_sha256,archive.source_identity_guard().map_err(error)?).map_err(error)?;
             }
             job.set_phase(JobPhase::CopyingMissingBodies).map_err(error)?;
             loop {
@@ -764,10 +741,8 @@ fn restore_portable_inner(
         })();
         match activated {
             Err(mut failure) if !committed => {
-                if let Some(stage) = stage.as_ref() {
-                    if let Err(cleanup) = store.replace_abort(&stage.staging_id) {
-                        append_cleanup_failure(&mut failure, "staging abort", cleanup);
-                    }
+                if let Err(cleanup) = store.replace_abort(&stage.staging_id) {
+                    append_cleanup_failure(&mut failure, "staging abort", cleanup);
                 }
                 Err(failure)
             }
@@ -809,32 +784,46 @@ fn install(
         .prepare("SELECT hash,owner FROM live_objects ORDER BY hash")
         .map_err(error)?;
     let mut rows = statement.query([]).map_err(error)?;
-    while let Some(row) = rows.next().map_err(error)? {
+    let mut batch = Vec::with_capacity(crate::persistent_store::portable::PRESENCE_BATCH);
+    loop {
+        batch.clear();
+        while batch.len() < crate::persistent_store::portable::PRESENCE_BATCH {
+            let Some(row) = rows.next().map_err(error)? else { break };
+            let hash: String = row.get(0).map_err(error)?;
+            let owner: bool = row.get(1).map_err(error)?;
+            let hash_bytes=hex::decode(&hash).map_err(error)?;
+            let size:i64=archive.db.query_row("SELECT byte_length FROM objects WHERE sha256=?1",[&hash_bytes],|row|row.get(0)).map_err(error)?;
+            batch.push((hash, u64::try_from(size).map_err(error)?, owner));
+        }
+        if batch.is_empty() {
+            return Ok(());
+        }
         if probe.is_cancelled() {
             return Err(NativeJobError::new("cancelled", "Portable restore cancelled during CAS staging"));
         }
-        let hash: String = row.get(0).map_err(error)?;
-        let owner: bool = row.get(1).map_err(error)?;
-        let hash_bytes=hex::decode(&hash).map_err(error)?;
-        let size:i64=archive.db.query_row("SELECT byte_length FROM objects WHERE sha256=?1",[&hash_bytes],|row|row.get(0)).map_err(error)?;
-        let size=u64::try_from(size).map_err(error)?;
-        if store.portable_object_present(&hash,size).map_err(error)? { continue; }
-        let (input, size) = archive.open_object(&hash).map_err(error)?;
-        let mut input = CancelledRead { input, probe };
-        pins.prepare_reader_expected(
-            &cas,
-            &mut input,
-            &hash,
-            size,
-            if owner {
-                CasObjectRole::OwnerManifest
-            } else {
-                CasObjectRole::DirectObject
-            },
-        )
-        .map_err(error)?;
+        let objects = batch.iter().map(|(hash, size, _)| (hash.as_str(), *size)).collect::<Vec<_>>();
+        let present = store.portable_objects_present(&objects).map_err(error)?;
+        for ((hash, _, owner), present) in batch.iter().zip(present) {
+            if present { continue; }
+            if probe.is_cancelled() {
+                return Err(NativeJobError::new("cancelled", "Portable restore cancelled during CAS staging"));
+            }
+            let (input, size) = archive.open_object(hash).map_err(error)?;
+            let mut input = CancelledRead { input, probe };
+            pins.prepare_reader_expected(
+                &cas,
+                &mut input,
+                hash,
+                size,
+                if *owner {
+                    CasObjectRole::OwnerManifest
+                } else {
+                    CasObjectRole::DirectObject
+                },
+            )
+            .map_err(error)?;
+        }
     }
-    Ok(())
 }
 struct CancelledRead<'a> {
     input: portable_backup::ArchiveObjectReader,
@@ -1303,6 +1292,33 @@ mod tests {
     }
 
     #[test]
+    fn restore_checks_present_bodies_in_metadata_batches_instead_of_per_object() {
+        let directory = tempfile::tempdir().unwrap();
+        let (path, bytes, hash) = test_archive(directory.path(), true);
+        let hash = hash.unwrap();
+        let target = directory.path().join("target");
+        let store = library(&target);
+        PayloadCas::new(&target).unwrap().prepare_bytes(b"synthetic incoming object").unwrap();
+        let jobs = directory.path().join("restore-job");
+        fs::create_dir(&jobs).unwrap();
+        let job = super::super::JobRegistry::default()
+            .create_internal(super::super::JobKind::RestorePortableBackup, Some(1), vec![], false)
+            .unwrap();
+        crate::asset_repository::body_io::reset_body_io();
+        let result = restore_portable(
+            OpenedJobSource { file: File::open(path).unwrap(), custody: None, total_bytes: bytes },
+            true, 1, &jobs, store, &job, None,
+        )
+        .unwrap();
+        let io = crate::asset_repository::body_io::take_body_io();
+        assert_eq!(result.revision, 2);
+        assert_eq!(io.stat_requests, 0);
+        assert_eq!(io.presence_queries, 0);
+        assert!(io.batch_stat_requests >= 1);
+        assert_eq!(PayloadCas::new(&target).unwrap().stat_object(&hash).unwrap(), Some(b"synthetic incoming object".len() as u64));
+    }
+
+    #[test]
     fn failed_restore_preserves_old_database_and_existing_objects_without_recovery_archive() {
         for corrupt_existing in [false, true] {
             let directory = tempfile::tempdir().unwrap();
@@ -1751,6 +1767,87 @@ mod tests {
             digest_raw_tables(&captured.catalog.db, &NeverCancelled).unwrap()
         );
         pins.release(CasReleaseOutcome::Aborted).unwrap();
+    }
+
+    fn export_and_restore(directory: &Path, store: PersistentStore) -> PersistentStore {
+        let jobs = directory.join("jobs");
+        let handoffs = directory.join("handoffs");
+        fs::create_dir_all(&jobs).unwrap();
+        let revision = store.revision().unwrap();
+        let registry = super::super::JobRegistry::default();
+        let export = registry
+            .create_internal(super::super::JobKind::ExportPortableBackup, Some(revision), vec![], false)
+            .unwrap();
+        let result =
+            export_portable(None, revision, &jobs, &handoffs, store, &export, None, "9.8.7-synthetic").unwrap();
+        let path = std::path::PathBuf::from(result.handoff_path.unwrap());
+        let target = directory.join("target");
+        let target_store = library(&target);
+        let target_revision = target_store.revision().unwrap();
+        let restore_jobs = directory.join("restore-job");
+        fs::create_dir(&restore_jobs).unwrap();
+        let restore = registry
+            .create_internal(super::super::JobKind::RestorePortableBackup, Some(target_revision), vec![], false)
+            .unwrap();
+        let bytes = fs::metadata(&path).unwrap().len();
+        restore_portable(
+            OpenedJobSource { file: File::open(path).unwrap(), custody: None, total_bytes: bytes },
+            true,
+            target_revision,
+            &restore_jobs,
+            target_store,
+            &restore,
+            None,
+        )
+        .unwrap();
+        PersistentStore::open(&target).unwrap()
+    }
+
+    #[test]
+    fn portable_export_restore_carries_a_large_unit_above_the_metadata_bound() {
+        use crate::persistent_store::{lww::UnitMutation, WorkingSetCommit};
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = library(&directory.path().join("source"));
+        let large = serde_json::json!("x".repeat(risunest_sync_wire::MAX_METADATA_BYTES));
+        store
+            .commit(&WorkingSetCommit {
+                expected_revision: store.revision().unwrap(),
+                unit_mutations: Some(vec![UnitMutation::Set {
+                    key: risunest_sync_wire::unit::UnitKey::new(&["root", "additionalPrompt"]).unwrap(),
+                    value: large.clone(),
+                }]),
+                ..Default::default()
+            })
+            .unwrap();
+        let restored = export_and_restore(directory.path(), store);
+        assert!(restored.read_root(None).unwrap().value["additionalPrompt"] == large);
+    }
+
+    #[test]
+    fn portable_export_restore_carries_an_indivisible_message_above_the_metadata_bound() {
+        use crate::persistent_store::WorkingSetCommit;
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = library(&directory.path().join("source"));
+        let data = "x".repeat(risunest_sync_wire::MAX_METADATA_BYTES);
+        store
+            .commit(&WorkingSetCommit {
+                expected_revision: store.revision().unwrap(),
+                add_character: Some(serde_json::json!({
+                    "type": "character", "chaId": "synthetic-large", "name": "Large",
+                    "chats": [{"id": "synthetic-large-chat", "name": "Large", "message": [{"role": "user", "data": data}]}],
+                })),
+                ..Default::default()
+            })
+            .unwrap();
+        let restored = export_and_restore(directory.path(), store);
+        let database = restored.materialize(None).unwrap();
+        let character = database["characters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|character| character["chaId"] == "synthetic-large")
+            .unwrap();
+        assert!(character["chats"][0]["message"][0]["data"] == data.as_str());
     }
 }
 

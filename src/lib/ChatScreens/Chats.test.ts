@@ -5,6 +5,7 @@ import { mount, tick, unmount } from 'svelte'
 import { alertNormal } from 'src/ts/alert'
 import type { character, Message } from 'src/ts/storage/database.svelte'
 import { ActiveConversationSession } from 'src/ts/storage/activeConversationSession'
+import { createCatalogCharacterStub } from 'src/ts/storage/workingSetCatalog'
 import {
     PersistentConversationViewportSource,
     SynchronousSessionConversationViewportSource,
@@ -337,6 +338,48 @@ describe('Chats imperative mount lifecycle', () => {
             document.body.replaceChildren()
             vi.unstubAllGlobals()
         }
+    })
+
+    test.each(['persistent', 'session'] as const)('clears the %s viewport when Home releases its character before unmounting Chats', async (kind) => {
+        const messages = [makeMessage(0), makeMessage(1)]
+        const character = makeCharacter(messages)
+        const sessionSource = makeViewportSource(character)
+        const source = kind === 'persistent' ? makePersistentViewportSource(messages) : sessionSource.source
+        const greetingRelease = vi.fn()
+        const resolver: LiveChatParserProjectionResolver = {
+            resolve: async ({ row }) => boundedProjection(character, row.absoluteIndex),
+        }
+        mounted = mount(ChatsHarness, {
+            target,
+            props: {
+                initialCharacter: character, initialViewportSource: source,
+                parserProjectionResolver: resolver,
+                acquireConversationStartParserLease: async () => ({ release: greetingRelease }),
+            },
+        })
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(2))
+        expect(conversationStartProbe(target)).not.toBeNull()
+        const previousMounts = [...chatMountProbe.mounts]
+        if (kind === 'session') expect(sessionSource.session.pinCount('viewport')).toBeGreaterThan(0)
+        const released = createCatalogCharacterStub({
+            id: character.chaId, name: character.name, type: 'character',
+            configuredIndex: 0, recentAt: 0, conversationCount: 1, trashed: false,
+        }) as character
+        ;(mounted as HarnessInstance).switchCharacter(released, [])
+        ;(mounted as HarnessInstance).setViewportSource(null)
+        await tick()
+        expect(probeElements(target)).toHaveLength(0)
+        expect(conversationStartProbe(target)).toBeNull()
+        await vi.waitFor(() => expect(greetingRelease).toHaveBeenCalledOnce())
+        for (const previousMount of previousMounts) {
+            expect(chatMountProbe.unmounts).toContain(previousMount.instanceId)
+            expect(previousMount.parserAbortSignal?.aborted).toBe(true)
+        }
+        expect(sessionSource.session.pinCount('viewport')).toBe(0)
+
+        ;(mounted as HarnessInstance).switchCharacterAndSource(character, source)
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(2))
+        expect(conversationStartProbe(target)).not.toBeNull()
     })
 
     test('keeps DOM order and settled component state, then cleans up a removed message', async () => {

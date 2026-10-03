@@ -19,15 +19,19 @@ describe('plugin immutable read baselines', () => {
         expect(rebasePluginFieldIntents({ ...character, desc: 'Remote' }, intents)).toEqual({ ...character, name: 'Edited', desc: 'Remote' })
     })
 
-    it('assigns distinct tokens to identical reads and keeps delayed read baselines immutable', () => {
+    it('maps every read of a target to its newest completed read, including delayed writes', () => {
         const { registry, character } = fixture()
         const first = registry.track(structuredClone(character), 'character', character.chaId, 1)
         const second = registry.track({ ...structuredClone(character), name: 'Second' }, 'character', character.chaId, 2)
         const third = registry.track(structuredClone(character), 'character', character.chaId, 3)
-        expect(new Set([first, second, third].map(value => collectPluginReadProvenance(value)[0].token)).size).toBe(3)
+        expect(new Set([first, second, third].map(value => collectPluginReadProvenance(value)[0].token)).size).toBe(1)
         second.desc = 'Second edit'
         first.name = 'Delayed edit'
-        expect(registry.intent(second, 'character', character.chaId, {})).toEqual([{ path: ['desc'], type: 'set', value: 'Second edit' }])
+        // The newest read has the original name, so a write from the second read restores its own name.
+        expect(registry.intent(second, 'character', character.chaId, {})).toEqual([
+            { path: ['desc'], type: 'set', value: 'Second edit' },
+            { path: ['name'], type: 'set', value: 'Second' },
+        ])
         expect(registry.intent(first, 'character', character.chaId, {})).toEqual([{ path: ['name'], type: 'set', value: 'Delayed edit' }])
         first.name = 'Another delayed edit'
         expect(registry.intent(first, 'character', character.chaId, {})).toEqual([{ path: ['name'], type: 'set', value: 'Another delayed edit' }])
@@ -43,14 +47,18 @@ describe('plugin immutable read baselines', () => {
         expect(registry.intent(nested, 'conversation', JSON.stringify([character.chaId, nested.id]), {})).toEqual([{ path: ['note'], type: 'set', value: 'Edited' }])
     })
 
-    it('preserves exact nested reads moved into a newer parent or constructed database', () => {
+    it('diffs nested reads moved into a newer parent against the newest read of their target', () => {
         const { registry, character } = fixture()
         const old = registry.track(structuredClone(character), 'character', character.chaId, 1)
         old.name = 'Edited'
         const latest = { ...structuredClone(character), desc: 'Remote' }
         const parent = registry.track({ characters: [latest] }, 'database', 'database', 2)
         parent.characters[0] = old
-        expect(registry.intent(parent, 'database', 'database', {})).toEqual([{ path: ['characters', character.chaId, 'name'], type: 'set', value: 'Edited' }])
+        // The database read is the newest read of the character, so the older copy restores its description.
+        expect(registry.intent(parent, 'database', 'database', {})).toEqual([
+            { path: ['characters', character.chaId, 'desc'], type: 'set', value: 'Retained' },
+            { path: ['characters', character.chaId, 'name'], type: 'set', value: 'Edited' },
+        ])
         const fresh = new PluginReadBaselines('other', () => 1)
         const child = fresh.track(structuredClone(character), 'character', character.chaId, 1)
         child.name = 'Edited'
@@ -87,14 +95,17 @@ describe('plugin immutable read baselines', () => {
         expect(registry.intent(copy, 'character', character.chaId, {})).toEqual([{ path: ['name'], type: 'set', value: 'Copy edit' }])
     })
 
-    it('accepts multiple compatible copies only when every diff has identical intent', () => {
+    it('diffs an untagged copy against the newest compatible read', () => {
         const { registry, character } = fixture()
         registry.track(structuredClone(character), 'character', character.chaId, 1)
         registry.track(structuredClone(character), 'character', character.chaId, 2)
-        const copy = { ...structuredClone(character), desc: 'Same intent' }
-        expect(registry.intent(copy, 'character', character.chaId, {})).toEqual([{ path: ['desc'], type: 'set', value: 'Same intent' }])
-        registry.track({ ...structuredClone(character), name: 'Different baseline' }, 'character', character.chaId, 3)
-        expect(() => registry.intent(copy, 'character', character.chaId, {})).toThrow('ambiguous')
+        const copy = { ...structuredClone(character), desc: 'Copy edit' }
+        expect(registry.intent(copy, 'character', character.chaId, {})).toEqual([{ path: ['desc'], type: 'set', value: 'Copy edit' }])
+        registry.track({ ...structuredClone(character), name: 'Newest' }, 'character', character.chaId, 3)
+        expect(registry.intent(copy, 'character', character.chaId, {})).toEqual([
+            { path: ['desc'], type: 'set', value: 'Copy edit' },
+            { path: ['name'], type: 'set', value: 'Before' },
+        ])
     })
 
     it('rejects expired exact objects and untagged copies after authority replacement', () => {
@@ -126,10 +137,13 @@ describe('plugin immutable read baselines', () => {
         expect(fresh.intent(copy, 'character', character.chaId, character)).toEqual([{ path: ['name'], type: 'set', value: 'New execution edit' }])
     })
 
-    it('retains outstanding read baselines without silent eviction', () => {
+    it('retains one baseline per target across repeated reads', () => {
         const { registry, character } = fixture()
         const oldest = registry.track(structuredClone(character), 'character', character.chaId, 1)
         for (let revision = 2; revision < 1002; revision++) registry.track(structuredClone(character), 'character', character.chaId, revision)
+        for (let revision = 2; revision < 1002; revision++) registry.track({ characters: [structuredClone(character)] }, 'database', 'database', revision)
+        // The character, its conversation and the database.
+        expect(registry.retainedBaselineCount).toBe(3)
         oldest.desc = 'Old read edit'
         expect(registry.intent(oldest, 'character', character.chaId, {})).toEqual([{ path: ['desc'], type: 'set', value: 'Old read edit' }])
     })
@@ -138,6 +152,38 @@ describe('plugin immutable read baselines', () => {
         const { registry, replaceAuthority } = fixture()
         replaceAuthority()
         expect(() => registry.track({}, 'database', 'database', 1, 1)).toThrow('stale')
+    })
+
+    it('diffs a spread copy against the newest read after conversation metadata changed', () => {
+        const { registry, character } = fixture()
+        const target = JSON.stringify([character.chaId, 'chat-a'])
+        registry.track(structuredClone(character.chats[0]), 'conversation', target, 1)
+        const fresh = registry.track({ ...structuredClone(character.chats[0]), lastMemory: 'Remote' }, 'conversation', target, 2)
+        const edited = { ...fresh, message: fresh.message.map(message => ({ ...message, data: 'Edited' })) }
+        expect(registry.intent(edited, 'conversation', target, {})).toEqual([{ path: ['message'], type: 'set', value: [{ role: 'user', data: 'Edited' }] }])
+        expect(registry.intent({ ...fresh, message: fresh.message.map(message => message) }, 'conversation', target, {})).toEqual([])
+    })
+
+    it('diffs a database copy against the newest read of each nested character', () => {
+        const { registry, character } = fixture()
+        const database = registry.track({ characters: [structuredClone(character)] }, 'database', 'database', 1)
+        registry.track({ ...structuredClone(character), desc: 'Remote' }, 'character', character.chaId, 2)
+        const copy = JSON.parse(JSON.stringify(database))
+        copy.characters[0].name = 'Edited'
+        copy.characters[0].desc = 'Remote'
+        expect(registry.intent(copy, 'database', 'database', {})).toEqual([{ path: ['characters', character.chaId, 'name'], type: 'set', value: 'Edited' }])
+    })
+
+    it('keeps one database baseline per read key so a reduced read never replaces unread keys', () => {
+        const registry = new PluginReadBaselines('synthetic-plugin', () => 1)
+        const full = registry.track({ username: 'Before', personas: [{ id: 'p', name: 'Persona' }] }, 'database', 'database', 1)
+        registry.track({ username: 'Remote' }, 'database', 'database', 2)
+        const copy = { ...JSON.parse(JSON.stringify(full)), personas: [{ id: 'p', name: 'Edited' }] }
+        expect(registry.intent(copy, 'database', 'database', {})).toEqual([
+            { path: ['personas', 'p', 'name'], type: 'set', value: 'Edited' },
+            { path: ['username'], type: 'set', value: 'Before' },
+        ])
+        expect(registry.intent({ personas: [{ id: 'p', name: 'Edited' }] }, 'database', 'database', {})).toEqual([{ path: ['personas', 'p', 'name'], type: 'set', value: 'Edited' }])
     })
 })
 

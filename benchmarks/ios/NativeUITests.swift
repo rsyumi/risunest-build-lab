@@ -97,6 +97,22 @@ final class NativeUITests: XCTestCase {
             category = knownErrors.firstIndex { texts["verification-error:" + $0].exists }.map { $0 + 1 } ?? 5
         }
         print("RISUNEST_CR228_STEP step=\(step) reached=\(reached ? 1 : 0) app_state=\(app.state.rawValue) webview_exists=\(app.webViews.firstMatch.exists ? 1 : 0) failed_exists=\(texts["failed"].exists ? 1 : 0) error_prefix_exists=\(errorPrefixExists ? 1 : 0) error_category=\(category)")
+        let progress = texts.containing(NSPredicate(format: "label BEGINSWITH %@", "legacy-readback-stage:")).firstMatch
+        guard progress.exists,
+              let data = String(progress.label.dropFirst("legacy-readback-stage:".count)).data(using: .utf8),
+              let values = try? JSONSerialization.jsonObject(with: data) as? [String: NSNumber],
+              Set(values.keys) == Set(["stage", "index", "readReturned", "hashVerified", "messageCount", "elapsedMs"]),
+              values.values.allSatisfy({ $0.doubleValue.isFinite && $0.doubleValue >= 0 && $0.doubleValue.rounded() == $0.doubleValue }),
+              let stage = values["stage"], (1...14).contains(stage.intValue),
+              let index = values["index"], index.intValue <= 1000,
+              let returned = values["readReturned"], returned.intValue <= 1000,
+              let verified = values["hashVerified"], verified.intValue <= returned.intValue,
+              let messages = values["messageCount"], messages.intValue <= 500000,
+              let elapsed = values["elapsedMs"], elapsed.int64Value <= 3600000 else {
+            print("RISUNEST_CR228_READBACK valid=0 boundary=\(step)")
+            return
+        }
+        print("RISUNEST_CR228_READBACK valid=1 boundary=\(step) stage=\(stage.intValue) index=\(index.intValue) read_returned=\(returned.intValue) hash_verified=\(verified.intValue) messages=\(messages.intValue) elapsed_ms=\(elapsed.int64Value)")
     }
 
     private func legacyRestoreMemory(_ megabytes: Int, _ encoding: String) throws {

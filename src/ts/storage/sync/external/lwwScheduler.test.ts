@@ -12,14 +12,19 @@ function fixture(withMaintenance = false) {
     const scheduler = createLwwScheduler({ available: () => available, publish, receive, failed, maintain: withMaintenance ? maintain : undefined, now: () => Date.now() })
     return { scheduler, publish, receive, failed, maintain, unavailable: () => { available = false } }
 }
+/** Starting publishes whatever a previous session left; the edits below are counted after it. */
+async function started(f: ReturnType<typeof fixture>) {
+    f.scheduler.start(); await f.scheduler.settled()
+    expect(f.publish).toHaveBeenCalledTimes(1)
+    f.publish.mockClear()
+}
 describe('LWW foreground scheduling', () => {
     it('keeps the maintenance deadline during sustained nonempty receives', async () => {
         const f = fixture(true)
         f.receive.mockImplementation(async () => 1)
-        f.scheduler.start()
-        await f.scheduler.settled()
+        await started(f)
         await vi.advanceTimersByTimeAsync(59_999)
-        expect(f.receive).toHaveBeenCalledTimes(4)
+        expect(f.receive).toHaveBeenCalledTimes(3)
         expect(f.maintain).not.toHaveBeenCalled()
         await vi.advanceTimersByTimeAsync(1)
         expect(f.maintain).toHaveBeenCalledTimes(1)
@@ -31,7 +36,7 @@ describe('LWW foreground scheduling', () => {
         expect(f.maintain).toHaveBeenCalledTimes(2)
     })
     it('publishes after quiet edits and caps a continuous burst at sixty seconds', async () => {
-        const f = fixture(); f.scheduler.start(); await f.scheduler.settled()
+        const f = fixture(); await started(f)
         f.scheduler.dirty()
         await vi.advanceTimersByTimeAsync(14_999)
         expect(f.publish).not.toHaveBeenCalled()
@@ -43,7 +48,7 @@ describe('LWW foreground scheduling', () => {
         f.scheduler.stop()
     })
     it('publishes generation completion immediately and lists opened conversations', async () => {
-        const f = fixture(); f.scheduler.start(); await f.scheduler.settled()
+        const f = fixture(); await started(f)
         const completedAt = Date.now()
         f.scheduler.dirty(true)
         await f.scheduler.settled()
@@ -56,7 +61,7 @@ describe('LWW foreground scheduling', () => {
         f.scheduler.stop()
     })
     it('generation completion replaces a pending ordinary debounce without leaving a delayed publication', async () => {
-        const f = fixture(); f.scheduler.start(); await f.scheduler.settled()
+        const f = fixture(); await started(f)
         f.scheduler.dirty()
         expect(vi.getTimerCount()).toBe(2)
         await vi.advanceTimersByTimeAsync(1_000)
@@ -72,7 +77,7 @@ describe('LWW foreground scheduling', () => {
         f.scheduler.stop()
     })
     it('generation completion respects foreground availability and stopped scheduling', async () => {
-        const f = fixture(); f.scheduler.start(); await f.scheduler.settled()
+        const f = fixture(); await started(f)
         f.unavailable(); f.scheduler.dirty(true)
         await f.scheduler.settled()
         await vi.advanceTimersByTimeAsync(15_000)
@@ -90,9 +95,53 @@ describe('LWW foreground scheduling', () => {
         f.scheduler.stop(); await vi.advanceTimersByTimeAsync(600_000)
         expect(f.receive).toHaveBeenCalledTimes(before + 1)
     })
-    it('backs idle listings off to two minutes, suspends offline, and waits for real completion', async () => {
+    it('publishes a leftover outbox before listing on start and on foreground resume', async () => {
         const f = fixture(); f.scheduler.start(); await f.scheduler.settled()
-        await vi.advanceTimersByTimeAsync(30_000 + 60_000 + 120_000)
+        expect(f.publish).toHaveBeenCalledTimes(1)
+        expect(f.publish.mock.invocationCallOrder[0]).toBeLessThan(f.receive.mock.invocationCallOrder[0])
+        await f.scheduler.resumeForeground(); await f.scheduler.settled()
+        expect(f.publish).toHaveBeenCalledTimes(2)
+        expect(f.publish.mock.invocationCallOrder[1]).toBeLessThan(f.receive.mock.invocationCallOrder[1])
+        f.scheduler.stop(); await f.scheduler.resumeForeground(); await f.scheduler.settled()
+        expect(f.publish).toHaveBeenCalledTimes(3)
+        f.scheduler.stop()
+    })
+    it('retries a leftover publication that failed at start', async () => {
+        const f = fixture()
+        f.publish.mockRejectedValueOnce(new Error('offline'))
+        f.scheduler.start(); await f.scheduler.settled()
+        expect(f.publish).toHaveBeenCalledTimes(1)
+        await vi.advanceTimersByTimeAsync(15_000); await f.scheduler.settled()
+        expect(f.publish).toHaveBeenCalledTimes(2)
+        await vi.advanceTimersByTimeAsync(600_000)
+        expect(f.publish).toHaveBeenCalledTimes(2)
+        f.scheduler.stop()
+    })
+    it('lists every twenty seconds, backs off to sixty after three unchanged checks, and resets on edits', async () => {
+        const f = fixture(); f.scheduler.start(); await f.scheduler.settled()
+        expect(f.receive).toHaveBeenCalledTimes(1)
+        await vi.advanceTimersByTimeAsync(40_000)
+        expect(f.receive).toHaveBeenCalledTimes(3)
+        await vi.advanceTimersByTimeAsync(59_999)
+        expect(f.receive).toHaveBeenCalledTimes(3)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(f.receive).toHaveBeenCalledTimes(4)
+        f.scheduler.dirty()
+        await vi.advanceTimersByTimeAsync(20_000)
+        expect(f.receive).toHaveBeenCalledTimes(5)
+        await vi.advanceTimersByTimeAsync(40_000)
+        expect(f.receive).toHaveBeenCalledTimes(7)
+        await vi.advanceTimersByTimeAsync(20_000)
+        expect(f.receive).toHaveBeenCalledTimes(7)
+        await f.scheduler.conversationOpened()
+        expect(f.receive).toHaveBeenCalledTimes(8)
+        await vi.advanceTimersByTimeAsync(20_000)
+        expect(f.receive).toHaveBeenCalledTimes(9)
+        f.scheduler.stop()
+    })
+    it('suspends offline and waits for real completion', async () => {
+        const f = fixture(); f.scheduler.start(); await f.scheduler.settled()
+        await vi.advanceTimersByTimeAsync(20_000 + 20_000 + 60_000)
         expect(f.receive).toHaveBeenCalledTimes(4)
         let finish!: () => void
         f.publish.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))

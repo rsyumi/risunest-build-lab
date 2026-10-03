@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+vi.mock('src/ts/storage/sync/serverSyncProduction', () => ({ configureServerSyncConnection: vi.fn() }))
 import { mergeExternalHistoryItems } from 'src/ts/storage/sync/external/connection'
 import type {
     ExternalConnectionSummary,

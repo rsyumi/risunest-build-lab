@@ -165,9 +165,6 @@ impl SectionRow {
             writer_id: self.writer_id.clone(),
         }
     }
-    fn same_version(&self, other: &Self) -> bool {
-        self.write_clock == other.write_clock && self.writer_id == other.writer_id
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -623,7 +620,6 @@ pub(crate) struct SectionSpoolBuilder {
     kind: SectionKind,
     versioned: bool,
     count: i64,
-    max_write_clock: Sequence,
 }
 
 pub(crate) struct PreparedSectionRows {
@@ -633,7 +629,6 @@ pub(crate) struct PreparedSectionRows {
     kind: SectionKind,
     versioned: bool,
     count: i64,
-    max_write_clock: Sequence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -777,7 +772,7 @@ impl SectionSpoolBuilder {
              ) WITHOUT ROWID;
              BEGIN IMMEDIATE;",
         )?;
-        Ok(Self { connection, directory, kind, versioned, count: 0, max_write_clock: Sequence::from(0u64) })
+        Ok(Self { connection, directory, kind, versioned, count: 0 })
     }
 
     pub(crate) fn push(&mut self, row: SectionRow, entry_key: &str, entry_hash: &[u8; 32]) -> StoreResult<()> {
@@ -844,7 +839,6 @@ impl SectionSpoolBuilder {
                 row.value.is_tombstone(), entry_key, entry_hash.as_slice()],
         )?;
         self.count = id;
-        self.max_write_clock = self.max_write_clock.clone().max(row.write_clock);
         Ok(())
     }
 
@@ -875,7 +869,7 @@ impl SectionSpoolBuilder {
         let count: i64 = connection.query_row("SELECT count(*) FROM row_index", [], |row| row.get(0))?;
         if count != self.count { return Err(invalid("Section spool is incomplete")); }
         Ok(PreparedSectionRows { connection, _directory: self.directory,
-            kind: self.kind, versioned: self.versioned, count, max_write_clock: self.max_write_clock })
+            kind: self.kind, versioned: self.versioned, count })
     }
 
     pub(super) fn finish_captured(self) -> StoreResult<PreparedSectionRows> {
@@ -903,12 +897,6 @@ impl PreparedSectionRows {
     pub(crate) fn kind(&self) -> SectionKind { self.kind }
     pub(crate) fn len(&self) -> u64 { self.count as u64 }
     pub(crate) fn is_empty(&self) -> bool { self.count == 0 }
-    pub(crate) fn max_write_clock(&self) -> &Sequence { &self.max_write_clock }
-
-    fn synchronized_section(&self) -> StoreResult<Section> {
-        if !self.versioned { return Err(invalid("Backup section cannot be merged as synchronized state")); }
-        section_of_kind(self.kind).ok_or_else(|| invalid("Section is not synchronized"))
-    }
 
     fn row(&self, key: &SectionKey) -> StoreResult<Option<SectionRow>> {
         let stored: Option<(String, Option<Vec<u8>>)> = self.connection.query_row(
@@ -1220,63 +1208,6 @@ fn local_permission_key_page(db: &Connection, after: &SectionKey) -> StoreResult
     read_key_page(&mut rows)
 }
 
-fn delete_current_row(tx: &Transaction<'_>, section: Section, row: &SectionRow) -> StoreResult<()> {
-    match section {
-        Section::Hypa => tx.execute(
-            "DELETE FROM hypa_embeddings WHERE cache_key=?1 AND write_clock=?2 AND writer_id=?3 AND tombstone=?4",
-            params![row.key1, row.write_clock.as_str(), row.writer_id, row.value.is_tombstone()],
-        )?,
-        Section::LocalPlugins => tx.execute(
-            "DELETE FROM plugin_device_storage WHERE owner=?1 AND space=?2 AND key=?3
-                AND write_clock=?4 AND writer_id=?5 AND tombstone=?6",
-            params![row.key1, row.key2, row.key3, row.write_clock.as_str(), row.writer_id, row.value.is_tombstone()],
-        )?,
-    };
-    Ok(())
-}
-
-fn rejoin_prepared(tx: &Transaction<'_>, prepared: &PreparedSectionRows, observed: &Sequence, behind_floor: bool) -> StoreResult<()> {
-    let section = prepared.synchronized_section()?;
-    let writer_id: String = tx.query_row("SELECT writer_id FROM device_meta WHERE singleton=1", [], |row| row.get(0))?;
-    let mut issued: Option<Sequence> = None;
-    let mut after = (String::new(), String::new(), String::new());
-    loop {
-        let page = local_key_page(tx, section, &after, false)?;
-        if page.is_empty() { break; }
-        for key in page {
-            let (mut row, published) = read_row(tx, section, &key)?.ok_or_else(|| invalid("Section row disappeared"))?;
-            after = key;
-            if published {
-                // A complete snapshot beyond the floor is authoritative for
-                // settled values. Only unpublished edits may be carried back.
-                if behind_floor && !row.value.is_tombstone() && !prepared.contains(&after, false)? {
-                    delete_current_row(tx, section, &row)?;
-                }
-                continue;
-            }
-            if let Some(remote) = prepared.row(&after)? {
-                if row.same_version(&remote) {
-                    resolve_section_row(Some(&row), &remote)?;
-                    continue;
-                }
-            }
-            if row.writer_id == writer_id && row.write_clock > *observed { continue; }
-            if issued.is_none() {
-                super::begin_mutation(tx)?;
-                issued = Some(super::issue_write_clock(tx, section)?);
-            }
-            row.write_clock = issued.as_ref().expect("issued write clock").clone();
-            row.writer_id = writer_id.clone();
-            if row.value.is_tombstone() {
-                row.value = SectionValueRow::Tombstone { first_published: None };
-            }
-            write_row(tx, section, &row, false)?;
-        }
-    }
-    if issued.is_some() { super::finish_mutation(tx)?; }
-    Ok(())
-}
-
 fn capture_backup_rows(
     snapshot: &Connection,
     kind: SectionKind,
@@ -1420,56 +1351,6 @@ impl DeviceStore {
         Ok(())
     }
 
-    /// The input owns a validated read-only spool. No transport or archive
-    /// decoding takes place inside this single section transaction.
-    pub(crate) fn apply_prepared_section_rows(
-        &mut self,
-        connection_id: &str,
-        library_lineage: &str,
-        expected_participation_generation: &Sequence,
-        prepared: &PreparedSectionRows,
-        cursor: &SectionCursor,
-        rejoining: bool,
-    ) -> StoreResult<SectionApplyOutcome> {
-        let section = prepared.synchronized_section()?;
-        if connection_id.is_empty() || library_lineage.is_empty()
-            || cursor.applied_gc_floor > cursor.applied_generation
-            || prepared.max_write_clock > cursor.observed_max_write_clock {
-            return Err(invalid("Prepared section identity or bounds are invalid"));
-        }
-        let tx = self.transaction()?;
-        let (participating, generation): (bool, String) = tx.query_row(
-            "SELECT participating,participation_generation FROM device_sections WHERE section=?1",
-            [section.as_str()], |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        if !participating || sequence(&generation)? != *expected_participation_generation {
-            return Err(invalid("Section participation changed during preparation"));
-        }
-        let current = read_cursor(&tx, connection_id, library_lineage, section)?;
-        if current.as_ref().is_some_and(|current| current.applied_generation > cursor.applied_generation
-            || current.applied_gc_floor > cursor.applied_gc_floor) {
-            return Err(invalid("Prepared section is older than the applied cursor"));
-        }
-        let behind_floor = current.as_ref().is_some_and(|current| cursor.applied_gc_floor > current.applied_generation);
-        let rejoining = rejoining || behind_floor || current.as_ref().is_none_or(|cursor| !cursor.joined());
-        let floor = if current.is_some() { cursor.applied_gc_floor.clone() } else { Sequence::from(0u64) };
-        observe_remote_clock(&tx, section, &cursor.observed_max_write_clock)?;
-        if rejoining {
-
-            rejoin_prepared(&tx, prepared, &cursor.observed_max_write_clock, behind_floor)?;
-        }
-        let mut outcome = SectionApplyOutcome::default();
-        prepared.visit(|row| {
-            if merge_validated_row(&tx, section, &row)? { outcome.applied += 1; }
-            else { outcome.kept += 1; }
-            Ok(())
-        })?;
-
-        record_cursor(&tx, connection_id, library_lineage, section, cursor)?;
-        tx.commit()?;
-        Ok(outcome)
-    }
-
     pub(crate) fn read_section_entry(&self, section: Section, key: &str) -> StoreResult<Option<LocalSectionEntry>> {
         let kind = kind_of_section(section);
         let Some((mut row, published)) = read_row(&self.connection, section, &decode_entry_key(kind, key)?)? else { return Ok(None); };
@@ -1547,15 +1428,6 @@ impl DeviceStore {
         }
     }
 
-    pub(crate) fn forget_section_publications(&mut self) -> StoreResult<()> {
-        let tx = self.transaction()?;
-        for table in ["hypa_embeddings", "plugin_device_storage"] {
-            tx.execute(&format!("UPDATE {table} SET published_clock=NULL WHERE published_clock IS NOT NULL"), [])?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
     pub(crate) fn write_section_entry(tx: &Transaction<'_>, write: &SectionWriteInput<'_>) -> StoreResult<()> {
         match write {
             SectionWriteInput::Apply { section, entry, object } => {
@@ -1618,8 +1490,8 @@ impl DeviceStore {
                 super::begin_mutation_remote(&transaction)?;
                 super::super::lww::activate_plugin_local_units(&transaction)?;
                 super::finish_mutation_remote(&transaction)?;
-                // Keep lineage identity for removal markers, but require a
-                // rejoin before exchanging values again after a pause.
+                // Keep lineage identity for removal markers, but treat the
+                // section as not yet exchanged after a pause.
                 transaction.execute(
                     "UPDATE device_remote_cursors SET applied_generation='0',applied_gc_floor='0'
                         WHERE section=?1",
@@ -1969,10 +1841,10 @@ impl DeviceStore {
         Ok(())
     }
 
-    /// Forgets how far one lineage has been applied, so the section goes back
-    /// through the rejoin path before this device publishes over it again. The
-    /// row stays, because it is what says the markers this device holds were
-    /// issued by this lineage. Explicit rejoin resets may move a cursor backwards.
+    /// Forgets how far one lineage has been applied, so the section counts as
+    /// not yet exchanged with it. The row stays, because it is what says the
+    /// markers this device holds were issued by this lineage. Explicit resets
+    /// may move a cursor backwards.
     pub(crate) fn forget_section_cursor(
         &mut self,
         connection_id: &str,

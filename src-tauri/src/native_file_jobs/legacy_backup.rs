@@ -528,7 +528,7 @@ impl restore::ReplacementSink for LegacyReplacementSink {
                 .seal(store, now_millis())
                 .map_err(crate::persistent_store::StoreError::from)
         })?;
-        let committed = crate::persistent_store::commands::replace_commit_with_snapshot(
+        let committed = crate::persistent_store::commands::commit_staged_replacement(
             &self.app,
             staging_id,
             Some(expected_revision),

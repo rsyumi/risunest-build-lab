@@ -42,23 +42,31 @@ fn check(store:&PersistentStore,plan:&BodyPlan,job:&JobControl)->Result<(),Nativ
 }
 
 fn observe(store:&PersistentStore,plan:&BodyPlan)->Result<BodyResult,NativeJobError> {
-    let cas=PayloadCas::new(store.repository_root()).map_err(error)?;
+    observe_missing(store,plan).map(|(result,_)|result)
+}
+
+/// The body state of the plan, and the objects that are not locally present.
+fn observe_missing<'a>(store:&PersistentStore,plan:&'a BodyPlan)->Result<(BodyResult,Vec<&'a BodyObject>),NativeJobError> {
     let residency=crate::server_sync::residency::Residency::open(store.repository_root()).map_err(sync_error)?;
     let mut result=BodyResult {stage_id:plan.stage_id.clone(),activated_revision:plan.revision,binding_authority:plan.authority.clone(),policy:plan.policy,total:plan.objects.len() as u64,locally_present:0,remote_held:0,unavailable:0,all_bodies_local:false,settled:false};
-    for object in &plan.objects {
-        match cas.stat_object(&object.hash).map_err(error)? {
+    let hashes=plan.objects.iter().map(|object|object.hash.as_str()).collect::<Vec<_>>();
+    let sizes=store.portable_object_sizes(&hashes).map_err(error)?;
+    let mut missing=Vec::new();
+    for (object,size) in plan.objects.iter().zip(sizes) {
+        match size {
             Some(size) if size==object.size=>result.locally_present+=1,
             Some(_)=>return Err(NativeJobError::new("snapshot-body-size-differs","Snapshot body size differs from the frozen inventory")),
             None=>{
                 let held=residency.object(&object.hash,None).map_err(sync_error)?.is_some_and(|proof|proof.size==object.size)
                     || crate::external_storage::lww_residency::stat(store.repository_root(),&object.hash).map_err(error)?==Some(object.size);
                 if held {result.remote_held+=1;} else {result.unavailable+=1;}
+                missing.push(object);
             }
         }
     }
     result.all_bodies_local=result.locally_present==result.total;
     result.settled=result.all_bodies_local || (plan.policy==AssetPolicy::Remote && result.unavailable==0);
-    Ok(result)
+    Ok((result,missing))
 }
 
 struct CheckedRead<'a,R:Read> {inner:R,store:&'a PersistentStore,plan:&'a BodyPlan,job:&'a JobControl,#[cfg(test)] hash:&'a str,cached_identity:Option<(&'a File,&'a crate::asset_repository::ExactFileIdentity)>}
@@ -86,14 +94,10 @@ impl<R:Read> Read for CheckedRead<'_,R> {
 
 pub(crate) fn run(store:&mut PersistentStore,plan:&BodyPlan,job:&JobControl,scratch:&Path)->Result<BodyResult,NativeJobError> {
     job.start(JobPhase::CopyingMissingBodies).map_err(error)?;
-    let initial=observe(store,plan)?;
+    let (initial,missing)=observe_missing(store,plan)?;
     job.set_snapshot_bodies(initial.clone()).map_err(error)?;
     check(store,plan,job)?;
     let cas=PayloadCas::new(store.repository_root()).map_err(error)?;
-    let mut missing=Vec::new();
-    for object in &plan.objects {
-        if !store.portable_object_present(&object.hash,object.size).map_err(error)? {missing.push(object);}
-    }
     let missing_bytes=missing.iter().try_fold(0u64,|total,object|total.checked_add(object.size)).ok_or_else(||error("Snapshot missing body size overflow"))?;
     job.set_progress(JobProgress {total_bytes:Some(missing_bytes),total_items:Some(missing.len() as u64),..Default::default()}).map_err(error)?;
     let mut pins=match DurableCasJob::open(store.repository_root(),&plan.protection_id) {
@@ -356,6 +360,25 @@ mod tests {
         assert_eq!(result.locally_present,1);
         assert_eq!(store.revision().unwrap(),foreground_revision);
         assert!(!plan.source.exists());
+    }
+
+    #[test]
+    fn snapshot_bodies_check_presence_in_metadata_batches_instead_of_per_object() {
+        let (root,mut store)=local();
+        for index in 0..8 {
+            put_asset(&mut store,&format!("assets/synthetic-{index}.png"),format!("synthetic snapshot body {index}").as_bytes());
+        }
+        let plan=activated(&mut store);
+        assert_eq!(plan.objects.len(),8);
+        crate::asset_repository::body_io::reset_body_io();
+        let result=run(&mut store,&plan,&job(&plan),root.path()).unwrap();
+        let io=crate::asset_repository::body_io::take_body_io();
+        assert!(result.all_bodies_local && result.settled);
+        assert_eq!(result.locally_present,8);
+        assert_eq!(io.asset_work().opens,0);
+        assert_eq!(io.stat_requests,0);
+        assert_eq!(io.presence_queries,0);
+        assert_eq!(io.batch_stat_requests,1);
     }
 
     #[test]

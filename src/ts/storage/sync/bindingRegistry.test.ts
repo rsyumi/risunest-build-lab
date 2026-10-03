@@ -26,6 +26,15 @@ describe('bound library replacement prerequisite',()=>{
         const release=registerSyncBindingTransport(state.target as {kind:'server';connectionId:string},{fenceOldJobs:async()=>{}} as unknown as SyncBindingTransport)
         try {await expect(prepareBoundLibraryReplacement()).rejects.toThrow('unavailable')} finally {release()}
     })
+    it('reports an unavailable bound target as sync-unavailable, not a revision conflict',async()=>{
+        await expect(prepareBoundLibraryReplacement()).rejects.toMatchObject({code:'sync-unavailable'})
+        const adapter=transport(vi.fn(async()=>{throw new Error('Sync binding changed')}))
+        const release=registerSyncBindingTransport(state.target as {kind:'server';connectionId:string},adapter)
+        try {
+            await expect(prepareBoundLibraryReplacement()).rejects.toMatchObject({code:'sync-unavailable'})
+            expect(adapter.fenceOldJobs).not.toHaveBeenCalled()
+        } finally {release()}
+    })
     it('awaits available remote head before fencing and resuming its captured context',async()=>{
         let finish!:()=>void
         const received=new Promise<void>(resolve=>{finish=resolve})

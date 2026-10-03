@@ -7,6 +7,14 @@ import {
 } from './sideChatListRows'
 
 describe('side chat list row indexing', () => {
+    it.each([
+        { folders: undefined },
+        { folders: null },
+        { folders: {} },
+    ])('rejects malformed resident folders: $folders', ({ folders }) => {
+        expect(() => indexSideChatListRows([], folders as Parameters<typeof indexSideChatListRows>[1])).toThrow()
+    })
+
     it('keeps every chat once while preserving folder and chat order', () => {
         const folders = [
             { id: 'folder-b', name: 'B', folded: true },

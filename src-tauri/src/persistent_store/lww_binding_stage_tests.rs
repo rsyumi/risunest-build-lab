@@ -158,7 +158,7 @@ fn archive_alias_and_reference_controls_stage_without_reading_any_large_dependen
     let original:String=store.connection.query_row("SELECT archived_object FROM characters WHERE generation=?1 AND character_id='archived'",[&stage.staging_id],|r|r.get(0)).unwrap();
     let mut changed:Value=serde_json::from_str(&original).unwrap(); changed["archivedAt"]=json!(2);
     store.connection.execute("UPDATE characters SET archived_object=?2 WHERE generation=?1 AND character_id='archived'",params![stage.staging_id,changed.to_string()]).unwrap();
-    crate::persistent_store::sync_selection::validate_binding_stage_content(&store.connection,&stage.staging_id).unwrap();
+    assert!(crate::persistent_store::sync_selection::validate_binding_stage_content(&store.connection,&stage.staging_id).is_err());
     assert!(validate_binding_source(&store.connection,&stage.staging_id,&header,&incoming).is_err());
     store.connection.execute("UPDATE characters SET archived_object=?2 WHERE generation=?1 AND character_id='archived'",params![stage.staging_id,original]).unwrap();
     activate(&mut store,&header,&inspection,&stage);
@@ -334,4 +334,172 @@ fn empty_incoming_stage_copies_no_active_records_and_preserves_exact_empty_recei
     assert_eq!(store.connection.query_row("SELECT changes FROM lww_binding_stages WHERE staging_id=?1",[&stage.staging_id],|r|r.get::<_,String>(0)).unwrap(),"[]");
     activate(&mut store,&header,&inspection,&stage);
     assert!(catalog(&store,&active_generation(&store.connection).unwrap())["characters"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn binding_stage_digest_streams_large_message_catalog_and_detects_tail_changes() {
+    use crate::persistent_store::{hash_work::{reset_hash_work, take_hash_work}, sync_selection::binding_stage_digest};
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(dir.path()).unwrap();
+    let staging = store.replace_begin().unwrap().staging_id;
+    let message = json!({"role":"char","data":"x".repeat(4096),"chatId":"synthetic"}).to_string();
+    {
+        let tx = store.connection.transaction().unwrap();
+        let mut insert = tx.prepare("INSERT INTO messages(generation,character_id,conversation_id,message_index,value) VALUES(?1,'character','conversation',?2,?3)").unwrap();
+        for index in 0..8192 { insert.execute(params![staging,index,message]).unwrap(); }
+        drop(insert);
+        tx.commit().unwrap();
+    }
+    let expected = catalog_digest(&store.connection, &staging).unwrap();
+    reset_hash_work();
+    assert_eq!(binding_stage_digest(&store.connection, &staging).unwrap(), expected);
+    let work = take_hash_work();
+    assert!(work.incomplete.is_empty());
+    assert_eq!(work.domains["binding_catalog_proof"].calls, 1);
+    assert!(work.domains["binding_catalog_proof"].bytes > 32 * 1024 * 1024);
+    assert!(!work.domains.contains_key("binding_stage_proof"));
+    store.connection.execute("UPDATE messages SET value='{}' WHERE generation=?1 AND message_index=8191",[&staging]).unwrap();
+    assert_ne!(binding_stage_digest(&store.connection, &staging).unwrap(), expected);
+    store.connection.execute("UPDATE messages SET value=?2 WHERE generation=?1 AND message_index=8191",params![staging,message]).unwrap();
+    assert_eq!(binding_stage_digest(&store.connection, &staging).unwrap(), expected);
+}
+
+#[test]
+fn binding_stage_digest_covers_raw_root_plugin_owners_and_asset_metadata() {
+    use crate::persistent_store::sync_selection::binding_stage_digest;
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(dir.path()).unwrap();
+    let staging = store.replace_begin().unwrap().staging_id;
+    let root = json!({"futureRoot":{"nested":true},"hypaV3":{"memos":[{"chatId":"synthetic"}]},"plugins":[{"name":"synthetic"}]}).to_string();
+    store.connection.execute("UPDATE root SET value=?2 WHERE generation=?1",params![staging,root]).unwrap();
+    store.connection.execute("INSERT INTO plugin_storage(generation,owner,storage_key,byte_size,ordinal,value) VALUES(?1,'orphan','key',2,0,'{}')",[&staging]).unwrap();
+    store.connection.execute("INSERT INTO asset_aliases(generation,logical_key,kind,size,mime,name,ext,metadata) VALUES(?1,'assets/synthetic','asset',0,'application/octet-stream','synthetic','bin','{}')",[&staging]).unwrap();
+    store.connection.execute("INSERT INTO asset_owner_heads(generation,owner_kind,owner_locator,present,manifest_hash,entry_count) VALUES(?1,'root-module-assets','synthetic',1,?2,0)",params![staging,"ab".repeat(32)]).unwrap();
+    let expected = binding_stage_digest(&store.connection, &staging).unwrap();
+    for sql in [
+        "UPDATE root SET value='{}' WHERE generation=?1",
+        "UPDATE plugin_storage SET owner='different' WHERE generation=?1",
+        "UPDATE plugin_storage SET value='null' WHERE generation=?1",
+        "UPDATE plugin_storage SET ordinal=1 WHERE generation=?1",
+        "UPDATE asset_aliases SET metadata='{\"unknown\":true}' WHERE generation=?1",
+        "UPDATE asset_aliases SET size=1 WHERE generation=?1",
+        "UPDATE asset_owner_heads SET entry_count=1 WHERE generation=?1",
+        "DELETE FROM asset_owner_heads WHERE generation=?1",
+    ] {
+        let tx = store.connection.transaction().unwrap();
+        tx.execute(sql,[&staging]).unwrap();
+        assert_ne!(binding_stage_digest(&tx, &staging).unwrap(), expected, "{sql}");
+        tx.rollback().unwrap();
+        assert_eq!(binding_stage_digest(&store.connection, &staging).unwrap(), expected);
+    }
+}
+
+#[test]
+fn triggered_binding_copy_does_not_spool_source_rows_into_an_ephemeral_btree() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PersistentStore::open(dir.path()).unwrap();
+    store.connection.execute("ATTACH DATABASE ?1 AS binding_incoming", [store.database_path.to_string_lossy().as_ref()]).unwrap();
+    let columns = catalog_columns(&store.connection, "messages").unwrap();
+    let opcodes = |sql: &str| {
+        let expanded = store.connection.prepare(sql).unwrap().expanded_sql().unwrap();
+        let mut stmt = store.connection.prepare(&format!("EXPLAIN {expanded}")).unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(1)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+    };
+    let bulk = format!("INSERT INTO messages(generation,{0}) SELECT ?1,{0} FROM binding_incoming.messages WHERE generation='incoming'", columns.join(","));
+    assert!(opcodes(&bulk).iter().any(|opcode| opcode == "OpenEphemeral"));
+    assert!(!opcodes(&binding_copy_insert_sql("messages", &columns)).iter().any(|opcode| opcode == "OpenEphemeral"));
+    store.connection.execute_batch("DETACH DATABASE binding_incoming").unwrap();
+}
+
+#[test]
+fn binding_copy_streams_large_multicolumn_catalog_without_changing_source_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("incoming.sqlite");
+    let mut source = Connection::open(&path).unwrap();
+    schema::initialize(&mut source).unwrap();
+    source.execute("INSERT INTO root VALUES('incoming','{}')", []).unwrap();
+    let body = json!({"role":"char","data":"x".repeat(4096)}).to_string();
+    {
+        let tx = source.transaction().unwrap();
+        let mut insert = tx.prepare("INSERT INTO messages(generation,character_id,conversation_id,message_index,message_id,value,canonical_hash,canonical_size) VALUES('incoming','character','conversation',?1,NULL,?2,'synthetic-hash',?3)").unwrap();
+        for index in 0..8192 { insert.execute(params![index,body,body.len() as i64]).unwrap(); }
+        drop(insert);
+        tx.execute("INSERT INTO plugin_storage(generation,owner,storage_key,byte_size,ordinal,value,assigned_at) VALUES('incoming','orphan','raw-types',3,0,?1,?2)", params![vec![0u8,1,255],1.5f64]).unwrap();
+        tx.commit().unwrap();
+    }
+    let expected = catalog_digest(&source, "incoming").unwrap();
+    source.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    let mut store = PersistentStore::open(&dir.path().join("target")).unwrap();
+    store.connection.execute("ATTACH DATABASE ?1 AS binding_incoming", [path.to_string_lossy().as_ref()]).unwrap();
+    {
+        let tx = store.connection.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        for &(table, _) in GENERATION_TABLES { copy_binding_table(&tx, table, "copied").unwrap(); }
+        assert_eq!(catalog_digest(&tx, "copied").unwrap(), expected);
+        tx.commit().unwrap();
+    }
+    store.connection.execute_batch("DETACH DATABASE binding_incoming").unwrap();
+    assert_eq!(catalog_digest(&source, "incoming").unwrap(), expected);
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM messages WHERE generation='copied'", [], |row| row.get::<_,i64>(0)).unwrap(),8192);
+    let types: (String,String,String) = store.connection.query_row("SELECT typeof(value),typeof(assigned_at),typeof(claimed_from) FROM plugin_storage WHERE generation='copied'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+    assert_eq!(types,("blob".into(),"real".into(),"null".into()));
+}
+
+#[test]
+fn late_binding_copy_trigger_failure_rolls_back_every_family_and_retries_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(dir.path()).unwrap();
+    let values = (0..513).map(|index| json!({"role":"char","data":"x".repeat(4096),"chatId":format!("synthetic-{index}")})).collect::<Vec<_>>();
+    let mut messages = change(&["messages","character","conversation"], Value::Null);
+    messages.value = message_value(&store, &values);
+    let incoming = vec![change(&["root","language"],json!("remote")),change(&["exists","character","character"],json!(true)),change(&["exists","conversation","character","conversation"],json!(true)),messages];
+    let (header,inspection) = context(&store);
+    let generation = active_generation(&store.connection).unwrap();
+    let clock = serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+    let source_objects: i64 = store.connection.query_row("SELECT count(*) FROM message_page_objects", [], |row| row.get(0)).unwrap();
+    store.connection.execute_batch("CREATE TRIGGER reject_binding_tail BEFORE INSERT ON messages WHEN NEW.generation LIKE 'staging-%' AND NEW.message_index=512 BEGIN SELECT RAISE(ABORT,'synthetic tail failure'); END;").unwrap();
+    assert!(store.lww_stage_binding_units(&header,&inspection,&incoming,7.into()).is_err());
+    for &(table, _) in GENERATION_TABLES {
+        assert_eq!(store.connection.query_row(&format!("SELECT count(*) FROM {table} WHERE generation LIKE 'staging-%'"), [], |row| row.get::<_,i64>(0)).unwrap(),0,"{table}");
+    }
+    for table in ["lww_binding_sources","lww_binding_source_units","lww_binding_stages"] {
+        assert_eq!(store.connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get::<_,i64>(0)).unwrap(),0,"{table}");
+    }
+    assert_eq!(active_generation(&store.connection).unwrap(),generation);
+    assert_eq!(store.revision().unwrap(),0);
+    assert_eq!(store.lww_binding_authority().unwrap(),header.binding_authority);
+    assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(),clock);
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM message_page_objects", [], |row| row.get::<_,i64>(0)).unwrap(),source_objects);
+    store.connection.execute_batch("DROP TRIGGER reject_binding_tail").unwrap();
+    let stage = store.lww_stage_binding_units(&header,&inspection,&incoming,7.into()).unwrap();
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM messages WHERE generation=?1", [&stage.staging_id], |row| row.get::<_,i64>(0)).unwrap(),513);
+    assert_eq!(store.lww_stage_binding_units(&header,&inspection,&incoming,7.into()).unwrap(),stage);
+    activate(&mut store,&header,&inspection,&stage);
+    let last: String = store.connection.query_row("SELECT value FROM messages WHERE generation=?1 AND message_index=512", [active_generation(&store.connection).unwrap()], |row| row.get(0)).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&last).unwrap(),values[512]);
+}
+
+#[test]
+fn binding_replacement_applies_large_shared_and_device_units_from_their_bodies() {
+    let dir = tempfile::tempdir().unwrap(); let mut store = PersistentStore::open(dir.path()).unwrap();
+    store.device_store_mut().unwrap().set_section_participating(crate::persistent_store::device_store::Section::LocalPlugins, true).unwrap();
+    let limit = risunest_sync_wire::unit::MAX_INLINE_UNIT_BYTES;
+    let object = |store: &PersistentStore, value: &Value| {
+        let body = risunest_sync_wire::payload_value::encode(value).unwrap();
+        let hash = risunest_sync_wire::hash(&body);
+        store.lww_put_object(&hash, &body).unwrap();
+        UnitValue::object(RecordDescriptor::content(hash)).unwrap()
+    };
+    let language = json!("l".repeat(limit + 1)); let plugin = "p".repeat(limit + 7);
+    let mut root = change(&["root","language"], Value::Null); root.value = object(&store, &language);
+    let mut local = change(&["plugin-local","synthetic-owner","string","large"], Value::Null); local.value = object(&store, &json!(plugin));
+    let incoming = vec![root.clone(), local.clone()];
+    let (header, inspection) = context(&store);
+    let stage = store.lww_stage_binding_units(&header, &inspection, &incoming, 7.into()).unwrap();
+    assert_eq!(catalog(&store, &stage.staging_id)["language"], language);
+    activate(&mut store, &header, &inspection, &stage);
+    assert_eq!(store.read_root(None).unwrap().value["language"], language);
+    assert_eq!(read_unit(&store.connection, &root.key).unwrap(), Some((root.stamp.clone(), root.value.clone())));
+    let device = store.device_store().unwrap().connection();
+    assert_eq!(read_unit(device, &local.key).unwrap(), Some((local.stamp.clone(), local.value.clone())));
+    assert_eq!(device.query_row("SELECT value FROM plugin_device_storage WHERE owner='synthetic-owner' AND space='string' AND key='large' AND tombstone=0", [], |r| r.get::<_,String>(0)).unwrap(), plugin);
 }

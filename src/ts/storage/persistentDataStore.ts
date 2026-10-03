@@ -520,11 +520,7 @@ export interface LwwApplyReceive extends LwwReceiveHeader {
 
 export interface LwwOutboxEntry extends LwwRemoteChange { version: string; targetAuthority: string }
 export interface LwwOutboxPage { revision: DataRevision; entries: LwwOutboxEntry[] }
-export interface LwwOutboxIdentity { key: string; version: string; stamp: LwwStamp; valueIdentity: string }
-export interface LwwClockState { writerId: string; issued: LwwStamp | null; accepted: LwwStamp | null; bindingAuthority: string }
 export interface LwwOutboxRequest extends LwwReceiveHeader { limit: string }
-export interface LwwAcknowledgeRequest extends LwwReceiveHeader { entries: LwwOutboxIdentity[] }
-export interface LwwRetryRequest extends LwwReceiveHeader { proofId: string; correctedTimeMs: string }
 export interface LwwReplacementRequest extends LwwReceiveHeader { stagingId: string }
 
 export interface WholeMessageIntent extends GeneratingConversation {
@@ -626,9 +622,6 @@ export interface PersistentDatabaseReplacementStage {
 export interface PersistentDataStore {
     lwwBindingState?(): Promise<{ targetAuthority: string }>
     lwwReadOutbox?(request: LwwOutboxRequest): Promise<LwwOutboxPage>
-    lwwAckOutbox?(request: LwwAcknowledgeRequest): Promise<void>
-    lwwClockState?(request: LwwReceiveHeader): Promise<LwwClockState>
-    lwwRetryUnpublished?(request: LwwRetryRequest): Promise<{ revision: DataRevision }>
     lwwCommitReplacement?(request: LwwReplacementRequest): Promise<{ revision: DataRevision }>
     lwwStageReceive?(request: LwwStageReceive): Promise<void>
     lwwApplyReceive?(request: LwwApplyReceive): Promise<LwwApplyResult>

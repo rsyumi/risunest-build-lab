@@ -548,30 +548,35 @@ fn stage_original_backup_controls(
     units:&std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
     cancel:&Cancellation,
 ) -> Result<()> {
-    use crate::persistent_store::external_capture::{original_unit_dependency_inventory,BackupBodyRole};
+    use crate::persistent_store::external_capture::{large_unit_body_hashes,original_unit_dependency_inventory,BackupBodyRole};
     let content=super::content_store::ContentStore::open(&snapshot.staging_root.join("external-storage")).map_err(pds_error)?;
     let declared=snapshot.objects.iter().map(|object| (object.content_hash.as_str(),object)).collect::<std::collections::BTreeMap<_,_>>();
     if declared.len() != snapshot.objects.len() {return Err(corrupt())}
-    let read=|hash:&str| -> crate::persistent_store::StoreResult<Option<Vec<u8>>> {
+    let read=|hash:&str,bound:u64| -> crate::persistent_store::StoreResult<Option<Vec<u8>>> {
         cancel.check().map_err(|_| StoreError::Validation{message:"External restore cancelled".into()})?;
         let Some(object)=declared.get(hash) else {return Ok(None)};
         if matches!(object.source,super::content_store::ObjectSource::Library(_)) {return Ok(None)}
-        if object.byte_length > risunest_sync_wire::MAX_METADATA_BYTES as u64 {return Err(StoreError::Validation{message:"Backup control exceeds its bound".into()})}
+        if object.byte_length > bound {return Err(StoreError::Validation{message:"Backup control exceeds its bound".into()})}
         let mut source=content.open_source(&object.source)?;
         let mut bytes=Vec::new();
         use std::io::Read;
-        source.by_ref().take(risunest_sync_wire::MAX_METADATA_BYTES as u64+1).read_to_end(&mut bytes)?;
+        source.by_ref().take(object.byte_length.saturating_add(1)).read_to_end(&mut bytes)?;
         if bytes.len() as u64 != object.byte_length {return Err(StoreError::Validation{message:"Backup control size differs".into()})}
         Ok(Some(bytes))
     };
     let size=|hash:&str| Ok(declared.get(hash).map(|object| object.byte_length));
     let probe=runtime::CancelProbe(cancel.clone());
-    let metadata=original_unit_dependency_inventory(units,&read,&size,&probe,false,&mut |_,_,_| Ok(()));
+    // Only large unit bodies are read above the bound here. Message pages are
+    // read in the second pass with the lengths their manifests declare.
+    let large=large_unit_body_hashes(units);
+    let metadata=original_unit_dependency_inventory(units,
+        &|hash| read(hash,if large.contains(hash) {u64::MAX} else {risunest_sync_wire::MAX_METADATA_BYTES as u64}),
+        &size,&probe,false,&mut |_,_,_| Ok(()));
     cancel.check()?;
     let metadata=metadata.map_err(pds_error)?;
     let mut spool=super::capture::BackupDependencySpool::new(&snapshot.staging_root.join("verified-original-controls")).map_err(pds_error)?;
     let inventory=original_unit_dependency_inventory(units,
-        &|hash| if metadata.controls.contains_key(hash) {read(hash)} else {Ok(None)},
+        &|hash| match metadata.controls.get(hash) {Some(length)=>read(hash,*length),None=>Ok(None)},
         &size,&probe,true,&mut |hash,bytes,role| Ok(spool.push(hash,bytes,role)?),
     );
     cancel.check()?;
@@ -834,6 +839,30 @@ mod tests {
         assert!(observed.complete());
         assert_eq!(observed.asset_work(),Default::default());
         assert!(observed.objects.is_empty());
+    }
+
+    #[test]
+    fn original_control_admission_stages_large_unit_bodies_above_the_metadata_bound() {
+        use risunest_sync_wire::{descriptor::RecordDescriptor,unit::{UnitKey,UnitValue}};
+        let directory=tempfile::tempdir().unwrap();
+        let mut store=PersistentStore::open(directory.path()).unwrap();
+        let staging=directory.path().join("staging");
+        let mut content=super::super::content_store::ContentStore::open(&staging.join("external-storage")).unwrap();
+        let body=risunest_sync_wire::payload_value::encode(&json!("x".repeat(risunest_sync_wire::MAX_METADATA_BYTES))).unwrap();
+        let padded=[b" ".as_slice(),&body].concat();
+        let mut snapshot=prepared(Some("source-device"));
+        snapshot.staging_root=staging;
+        for bytes in [&body,&padded] {
+            let hash=risunest_sync_wire::hash(bytes);
+            content.put(&hash,bytes).unwrap();
+            snapshot.objects.push(snapshot_restore::PreparedObject {content_hash:hash.clone(),byte_length:bytes.len() as u64,source:super::super::content_store::ObjectSource::Captured(hash)});
+        }
+        content.commit().unwrap();
+        let unit=|key:&[&str],bytes:&[u8]| std::collections::BTreeMap::from([(UnitKey::new(key).unwrap(),UnitValue::object(RecordDescriptor::content(risunest_sync_wire::hash(bytes))).unwrap())]);
+        assert!(stage_original_backup_controls(&mut store,&snapshot,&unit(&["root","additionalPrompt"],&padded),&Cancellation::default()).is_err());
+        assert!(store.lww_object_body(&risunest_sync_wire::hash(&body)).unwrap().is_none());
+        stage_original_backup_controls(&mut store,&snapshot,&unit(&["root","additionalPrompt"],&body),&Cancellation::default()).unwrap();
+        assert!(store.lww_object_body(&risunest_sync_wire::hash(&body)).unwrap()==Some(body));
     }
 
     fn commit_fixture(store:&mut PersistentStore,root:&Path,job:&DurableJob) -> DurableJob {

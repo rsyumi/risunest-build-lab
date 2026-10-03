@@ -487,8 +487,6 @@ pub(crate) mod tests {
         root: &Path, source: &Source, now: u64, roots: Roots,
         known: Vec<RemoteObject>, retired: Vec<RetiredPoint>,
     ) -> Result<Mark> {
-        let store = GcStore::open(root)?;
-        store.begin_observation("connection")?;
         let listed = source.objects.values()
             .filter(|object| matches!(object.role, ObjectRole::SyncState | ObjectRole::BackupBundle))
             .map(|object| object.receipt.clone()).collect();
@@ -496,7 +494,6 @@ pub(crate) mod tests {
             connection_id: "connection", repository: &fake::repository(), format_repository_id: "format-repository",
             now_ms: now, roots, listed, known_objects: known, retired_points: retired,
         }, &Cancellation::default()).await?;
-        store.finish_observation("connection")?;
         Ok(marked)
     }
 
@@ -578,15 +575,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn c_incomplete_or_cyclic_graphs_cannot_extend_an_unreachable_interval() {
+    fn c_incomplete_or_cyclic_graphs_never_start_an_unreachable_interval() {
         runtime().block_on(async {
             let root = tempfile::tempdir().unwrap();
             let catalog = object("catalog", ObjectRole::Catalog);
             let source = source(&[catalog.clone()], &[]);
-            observe(root.path(), &source, 1000, Roots::default(), vec![catalog.clone()], vec![]).await.unwrap();
             *source.fail.lock().unwrap() = Some(ErrorKind::Transient);
-            assert!(observe(root.path(), &source, 1000 + UNREACHABLE_GRACE_MS, Roots::default(), vec![catalog.clone()], vec![]).await.is_err());
-            assert!(observe(root.path(), &source, 1001 + UNREACHABLE_GRACE_MS, Roots::default(), vec![catalog.clone()], vec![]).await.unwrap().candidates.is_empty());
+            assert!(observe(root.path(), &source, 1000, Roots::default(), vec![catalog.clone()], vec![]).await.is_err());
+            assert!(observe(root.path(), &source, 1000 + UNREACHABLE_GRACE_MS, Roots::default(), vec![catalog.clone()], vec![]).await.unwrap().candidates.is_empty());
+            *source.fail.lock().unwrap() = Some(ErrorKind::Transient);
+            assert!(observe(root.path(), &source, 1500 + UNREACHABLE_GRACE_MS, Roots::default(), vec![catalog.clone()], vec![]).await.is_err());
+            assert!(observe(root.path(), &source, 999 + 2 * UNREACHABLE_GRACE_MS, Roots::default(), vec![catalog.clone()], vec![]).await.unwrap().candidates.is_empty());
+            assert_eq!(observe(root.path(), &source, 1000 + 2 * UNREACHABLE_GRACE_MS, Roots::default(), vec![catalog.clone()], vec![]).await.unwrap().candidates.len(), 1,
+                "a failed run between two observations keeps the age");
             let cyclic = self::source(&[catalog.clone()], &[(&catalog, vec![catalog.clone()])]);
             assert!(matches!(observe(root.path(), &cyclic, 2000 + UNREACHABLE_GRACE_MS, Roots::default(), vec![catalog], vec![]).await, Err(error) if error.kind == ErrorKind::Corrupt));
         });

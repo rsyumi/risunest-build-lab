@@ -84,7 +84,7 @@ fn tls_identity_requests(
             })
             .unwrap();
             let body = if input.starts_with("GET /session ") {
-                serde_json::json!({"head":head,"deviceId":device,"operationWatermark":"0","operationPending":false,"protocolId":risunest_sync_wire::PROTOCOL_ID}).to_string()
+                serde_json::json!({"head":head,"deviceId":device,"protocolId":risunest_sync_wire::PROTOCOL_ID}).to_string()
             } else {
                 head.to_string()
             };
@@ -119,7 +119,7 @@ fn mid_cycle_failure_rediscovers_and_verifies_the_changed_endpoint() {
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
-    assert!(client.resolve_identity(false).is_ok());
+    assert!(client.resolve_identity().is_ok());
     old_server.join().unwrap();
     let head = client.head().unwrap();
     assert_eq!(head.library_id, "library");
@@ -154,7 +154,7 @@ fn authenticated_identity_rejection_does_not_try_registry_fallback() {
         directory: Some(directory),
     })
     .unwrap();
-    let error = client.resolve_identity(false).unwrap_err();
+    let error = client.resolve_identity().unwrap_err();
     assert_eq!(error.status, 401);
     assert!(matches!(
         registry.accept(),
@@ -209,7 +209,7 @@ fn native_directory_recovery_verifies_identity_before_changing_endpoint() {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let result = client.resolve_identity(false);
+        let result = client.resolve_identity();
         if device == "device" {
             assert!(result.is_ok(), "{}", result.unwrap_err().code);
             assert_eq!(client.config().endpoint, endpoint);
@@ -238,7 +238,7 @@ fn native_directory_rejects_tampered_and_oversized_envelopes_without_mutation() 
             directory: Some(directory),
         };
         let client = ServerClient::new(config).unwrap();
-        assert!(client.resolve_identity(false).is_err());
+        assert!(client.resolve_identity().is_err());
         assert_eq!(client.config().endpoint, "http://127.0.0.1:1");
         task.join().unwrap();
     }
@@ -280,7 +280,7 @@ fn native_verified_cached_endpoint_does_not_read_directory() {
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
-    assert!(client.resolve_identity(false).is_ok());
+    assert!(client.resolve_identity().is_ok());
     assert_eq!(client.config().endpoint, endpoint);
     server.join().unwrap();
 }

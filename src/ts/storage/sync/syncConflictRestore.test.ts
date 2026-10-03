@@ -38,8 +38,9 @@ vi.mock('src/lang', () => ({
         syncConflictBackups: 'backups',
         syncConflictNoBackups: 'no backups',
         syncConflictRestoreConfirm: 'restore database only?',
+        syncConflictRestoreScope: 'assets, cold storage and inlays are not included',
         syncConflictBackupUnreadable: 'unreadable backup',
-        risuNest: { backup: { actionFailed: 'restore failed' } },
+        risuNest: { backup: { actionFailed: 'restore failed', syncUnavailable: 'connect sync first' } },
     },
 }))
 vi.mock('../../alert', () => ({
@@ -157,6 +158,64 @@ describe('openSyncConflictBackups', () => {
             .map((mock) => mock.mock.invocationCallOrder[0])
         expect(order).toEqual([...order].sort((a, b) => a - b))
         expect(mocks.hold).toHaveBeenCalledOnce()
+    })
+
+    it('restores a bound device whose pull advances the revision after one checkbox confirmation', async () => {
+        mocks.native.enabled = true
+        let revision = 7
+        const replacementConfirm = vi.fn(async () => true)
+        mocks.installLocalBackup.mockImplementation(async (database, dependencies) => {
+            await dependencies.replaceDatabase(database, 'local-backup', {
+                publishOfficial: true,
+                upstreamImport: true,
+                ...(dependencies.upstreamImportWarnings ? { upstreamImportWarnings: dependencies.upstreamImportWarnings } : {}),
+            })
+        })
+        // The bound replacement path pulls available changes, asks once, then pauses
+        // writes and compares any pinned revision against the post-pull revision.
+        mocks.replacePersistentDatabase.mockImplementation(async (_database, _reason, options) => {
+            revision = 8
+            if (!await replacementConfirm()) throw new Error('Import cancelled')
+            if (options.expectedRevision !== undefined && options.expectedRevision !== revision) {
+                throw new Error('persistent mutation fenced')
+            }
+            return { status: 'applied', revision: 9 }
+        })
+
+        await (await import('./syncConflictRestore')).openSyncConflictBackups()
+
+        expect(mocks.alertError).not.toHaveBeenCalled()
+        expect(mocks.alertConfirm).not.toHaveBeenCalled()
+        expect(replacementConfirm).toHaveBeenCalledOnce()
+        expect(mocks.installLocalBackup).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+                upstreamImportWarnings: ['assets, cold storage and inlays are not included'],
+            }),
+        )
+        expect(mocks.hold).toHaveBeenCalledOnce()
+        expect(mocks.release).toHaveBeenCalledOnce()
+    })
+
+    it('leaves the library unchanged without an error when the one restore dialog is cancelled', async () => {
+        mocks.native.enabled = true
+        mocks.replacePersistentDatabase.mockRejectedValue(new DOMException('Import cancelled', 'AbortError'))
+        await (await import('./syncConflictRestore')).openSyncConflictBackups()
+        expect(mocks.alertConfirm).not.toHaveBeenCalled()
+        expect(mocks.alertError).not.toHaveBeenCalled()
+        expect(mocks.hold).not.toHaveBeenCalled()
+        expect(mocks.release).toHaveBeenCalledOnce()
+    })
+
+    it('asks the user to connect when the bound sync target is unavailable', async () => {
+        mocks.native.enabled = true
+        mocks.replacePersistentDatabase.mockRejectedValue(
+            Object.assign(new Error('Sync is unavailable for library replacement'), { code: 'sync-unavailable' }),
+        )
+        await (await import('./syncConflictRestore')).openSyncConflictBackups()
+        expect(mocks.alertError).toHaveBeenCalledWith('connect sync first')
+        expect(mocks.hold).not.toHaveBeenCalled()
+        expect(mocks.release).toHaveBeenCalledOnce()
     })
 
     it.each(['confirm', 'replace'])('releases admission without installing a hold after %s refuses', async (failure) => {

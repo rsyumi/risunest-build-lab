@@ -171,7 +171,8 @@ describe('explicit variables and bound effective toggles', () => {
         const db = database()
         derive(db)
         const explicit = { ...getExplicitGlobalChatVariables(db) }
-        const chat = { savedToggleValues: { toggle_a: 'bound', toggle_unknown: 'unknown' } } as unknown as Chat
+        const chat = { id: 'chat', savedToggleValues: { toggle_a: 'bound', toggle_unknown: 'unknown' } } as unknown as Chat
+        db.characters = [{ chaId: 'character', chats: [chat] }] as unknown as Database['characters']
         deriveEffectiveToggleVariables(db, chat)
         flushEffectiveToggleEdits(db)
         expect(db.globalChatVariables).toEqual({ toggle_a: 'bound', toggle_unknown: 'unknown', other: 'shared', extension: 'opaque' })
@@ -182,8 +183,9 @@ describe('explicit variables and bound effective toggles', () => {
     it('flushes edits to the previous bound conversation before opening another', () => {
         const db = database()
         derive(db)
-        const previous = { savedToggleValues: { toggle_a: 'bound' } } as unknown as Chat
-        const next = { savedToggleValues: { toggle_a: 'next' } } as unknown as Chat
+        const previous = { id: 'previous', savedToggleValues: { toggle_a: 'bound' } } as unknown as Chat
+        const next = { id: 'next', savedToggleValues: { toggle_a: 'next' } } as unknown as Chat
+        db.characters = [{ chaId: 'character', chats: [previous, next] }] as unknown as Database['characters']
         deriveEffectiveToggleVariables(db, previous)
         db.globalChatVariables.toggle_a = 'edited bound'
         db.globalChatVariables.other = 'edited shared'
@@ -192,6 +194,24 @@ describe('explicit variables and bound effective toggles', () => {
         expect(previous.savedToggleValues).toEqual({ toggle_a: 'edited bound' })
         expect(next.savedToggleValues).toEqual({ toggle_a: 'next' })
         expect(getExplicitGlobalChatVariables(db)).toMatchObject({ toggle_a: 'explicit', other: 'edited shared' })
+    })
+    it('keeps the toggle binding on the conversation when its object is replaced', () => {
+        const db = database()
+        const chat = { id: 'chat', savedToggleValues: { toggle_a: 'bound' } } as unknown as Chat
+        db.characters = [{ chaId: 'character', chats: [chat] }] as unknown as Database['characters']
+        derive(db)
+        deriveEffectiveToggleVariables(db, chat)
+        const replacement = { ...chat, savedToggleValues: { toggle_a: 'bound', toggle_b: 'received' } } as Chat
+        db.characters[0].chats[0] = replacement
+        db.globalChatVariables.toggle_a = 'edited'
+        flushEffectiveToggleEdits(db)
+        expect(replacement.savedToggleValues).toEqual({ toggle_a: 'edited', toggle_b: 'received' })
+        expect(getExplicitGlobalChatVariables(db).toggle_a).toBe('explicit')
+        db.characters[0].chats[0] = { ...replacement, savedToggleValues: { ...replacement.savedToggleValues } } as Chat
+        expect(translateRootUnitIntents(db, [{ key: '["toggle","toggle_c"]', type: 'set', value: 'plugin' }])).toEqual([
+            { key: '["conversation","character","chat","savedToggleValues"]', type: 'set',
+                value: { toggle_a: 'edited', toggle_b: 'received', toggle_c: 'plugin' } },
+        ])
     })
     it('captures unbound deletion and edits while retaining unknown explicit variables', () => {
         const db = database()

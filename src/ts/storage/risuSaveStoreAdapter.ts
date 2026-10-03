@@ -240,7 +240,9 @@ export interface PinnedRisuSaveExport {
 }
 
 function adaptStableSelectionsForExport(database: Database, root: import('./persistentDataStore').PersistentRoot, presets: Database['botPresets']): void {
-    if (typeof root.botPresetsId === 'string') database.botPresetsId = Math.max(0, presets.findIndex((preset) => preset['id'] === root.botPresetsId))
+    // A missing preset exports as upstream's no-preset selection, which keeps the
+    // stored root values instead of another preset's.
+    if (typeof root.botPresetsId === 'string') database.botPresetsId = presets.findIndex((preset) => preset['id'] === root.botPresetsId)
     if (typeof root.selectedPersona === 'string') database.selectedPersona = Math.max(0, database.personas?.findIndex((persona) => persona.id === root.selectedPersona) ?? 0)
     const target = database as unknown as Record<string, unknown>
     const preset = presets[database.botPresetsId] as unknown as Record<string, unknown> | undefined

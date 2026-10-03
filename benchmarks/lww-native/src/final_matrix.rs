@@ -120,6 +120,34 @@ fn preinstall(source:&PersistentStore,destination:&PersistentStore,hashes:&[Stri
     }
     Ok(json!({"phase":"excluded-actual-destination-body-setup","alreadyPresent":present,"missing":missing}))
 }
+fn queue_initial_producer(store:&mut PersistentStore,certificate:&scale_certificate::ScaleCertificate,asset_count:usize)->Result<Value,String> {
+    let mut after=None;let mut units=0u64;let mut characters=0u64;let mut conversations=0u64;let mut messages=0u64;let mut assets=0u64;
+    loop {
+        let header=server_sync::lww_tests::header(store);
+        let page=store.lww_queue_unit_state_page(&header,after.as_ref(),256).map_err(|e|e.to_string())?;
+        for entry in &page.entries {
+            units+=1;
+            if matches!(&entry.value,risunest_sync_wire::unit::UnitValue::Deleted) {continue;}
+            let key=entry.key.components();
+            match key.first().map(String::as_str) {
+                Some("exists") if key.get(1).map(String::as_str)==Some("character")=>characters+=1,
+                Some("exists") if key.get(1).map(String::as_str)==Some("conversation")=>conversations+=1,
+                Some("messages")=>messages+=1,Some("asset")=>assets+=1,_=>{},
+            }
+        }
+        if !page.has_more {break;}
+        let next=page.after_key.ok_or("initial unit-state page omitted its continuation")?;
+        if after.as_ref()==Some(&next) {return Err("initial unit-state cursor did not advance".into());}
+        after=Some(next);
+    }
+    if characters!=certificate.database.active_characters || conversations!=certificate.database.active_conversations
+        || messages!=certificate.database.active_conversations || assets!=asset_count as u64 {
+        return Err("initial publication state does not cover the certified producer".into());
+    }
+    Ok(json!({"units":units,"characters":characters,"conversations":conversations,"messageUnits":messages,"assets":assets,
+        "scope":"actual paginated existing unit state queued under the new authority without restamping"}))
+}
+
 fn source(run:&str)->Result<source_process::SourceProcess,String> {
     source_process::SourceProcess::start(&PathBuf::from(environment("LWW_SOURCE_TEST_EXE")?),
         &environment("LWW_SOURCE_FINGERPRINT")?,&environment("LWW_SOURCE_BINARY_SHA")?,run)
@@ -158,9 +186,15 @@ pub(super) fn renderer_setup()->Result<(),String> {
         let producer=native_bootstrap::source_client(&mut child,&store,"synthetic-renderer-producer",&"71".repeat(32),false)?;
         let config=producer.client.config();
         bind(&mut store,SyncTarget::Server(config.endpoint.clone()),&config.endpoint,&config.library_id);
+        let initial=queue_initial_producer(&mut store,&certificate,certificate.assets.len())?;
         server_sync::lww_tests::drain_publications(&producer,&mut store,&[]).map_err(|e|format!("{e:?}"))?;
         if !store.lww_read_outbox(store.lww_binding_authority().map_err(|e|e.to_string())?,1).map_err(|e|e.to_string())?.entries.is_empty() {
             return Err("renderer producer publication is not drained".into());
+        }
+        let acknowledged:u64=producer.log.0.query_row("SELECT COUNT(*) FROM publications WHERE acknowledged=1 AND receipt IS NOT NULL",[],|row|sql_u64(row,0)).map_err(|e|e.to_string())?;
+        let submitted:u64=producer.log.0.query_row("SELECT COALESCE(SUM(json_array_length(intent,'$.request.changes')),0) FROM publications WHERE acknowledged=1 AND receipt IS NOT NULL",[],|row|sql_u64(row,0)).map_err(|e|e.to_string())?;
+        if acknowledged==0 || submitted<initial["units"].as_u64().ok_or("actual initial unit count missing")? {
+            return Err("renderer source lacks acknowledged complete producer publication".into());
         }
         let registrations=[("producer-registration.uri",config.encode_uri().map_err(|_|"producer URI encoding failed")?),
             ("windows-registration.uri",child.register("synthetic-renderer-windows",&"72".repeat(32))?.uri),
@@ -175,6 +209,7 @@ pub(super) fn renderer_setup()->Result<(),String> {
             "nativeBinarySha256":hex::encode(sha2::Sha256::digest(std::fs::read(executable).map_err(|e|e.to_string())?)),
             "endpoint":config.endpoint,"sourceRoot":child.ready["rootId"],"sourceFingerprint":child.ready["sourceFingerprint"],
             "sourceBinarySha256":child.ready["binarySha256"],"tier":tier,"baseCertificate":certificate,
+            "initialPublication":initial,"acknowledgedPublications":acknowledged,"submittedInitialUnits":submitted,
             "producerWriter":store.lww_clock_state().map_err(|e|e.to_string())?.writer_id,"localSseUrl":endpoint,
             "privateRegistrations":["producer-registration.uri","windows-registration.uri","android-registration.uri"],
             "shutdownSentinel":"shutdown-request","rendererAdoption":null,"measurement":false}))?;
@@ -246,6 +281,7 @@ fn run_inner()->Result<(),String> {
                 let server=LocalServerFixture::new();
                 let sender=server.client(&store);let config=sender.client.config();
                 bind(&mut store,SyncTarget::Server(server.endpoint.clone()),&server.endpoint,&config.library_id);
+                write(&output,"excluded-initial-publication.json",&queue_initial_producer(&mut store,&certificate,hashes.len())?)?;
                 server_sync::lww_tests::drain_publications(&sender,&mut store,&[]).map_err(|e|format!("{e:?}"))?;
                 if selected.is_some_and(|scenario|costly_runner::SCENARIOS.contains(&scenario)) {
                     costly_server(&output,&mut store,server,sender,&certificate,&hashes,selected.unwrap(),&route)?;
@@ -278,7 +314,7 @@ fn run_inner()->Result<(),String> {
                 else {selected_samples.push(collection);}
             } else if transport=="fake-provider" {
                 let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e|e.to_string())?;
-                let (collection,resume)=runtime.block_on(external_tier(&output,store,&hashes,selected,&route))?;
+                let (collection,resume)=runtime.block_on(external_tier(&output,store,&certificate,&hashes,selected,&route))?;
                 if let Some(samples)=resume {resume_samples.push((certificate,samples));continue;}
                 if selected.is_some_and(|scenario|costly_runner::SCENARIOS.contains(&scenario)) {
                     costly_reports.push(serde_json::from_reader::<_,Value>(File::open(output.join("costly-native-results.json")).map_err(|e|e.to_string())?)
@@ -442,6 +478,8 @@ fn costly_server(output:&Path,producer:&mut PersistentStore,server:LocalServerFi
                     let sender=native_bootstrap::source_client(&mut child,producer,"synthetic-final-producer",&hex::encode(sha2::Sha256::digest(label.as_bytes())),false)?;
                     let config=sender.client.config();
                     bind(producer,SyncTarget::Server(config.endpoint.clone()),&config.endpoint,&config.library_id);
+                    let initial=queue_initial_producer(producer,certificate,hashes.len())?;
+                    write(output,&format!("costly-{label}-initial-publication.json"),&initial)?;
                     reset_work(&hashes);
                     let published=server_sync::lww_tests::drain_publications(&sender,producer,&[]);
                     let observed=take_work(false);published.map_err(|e|format!("{e:?}"))?;
@@ -472,12 +510,13 @@ fn costly_server(output:&Path,producer:&mut PersistentStore,server:LocalServerFi
     Ok(())
 }
 
-async fn external_tier(output:&Path,store:PersistentStore,hashes:&[String],selected:Option<Scenario>,route:&str)
+async fn external_tier(output:&Path,store:PersistentStore,certificate:&scale_certificate::ScaleCertificate,hashes:&[String],selected:Option<Scenario>,route:&str)
     ->Result<(final_runner::CollectedSamples,Option<Vec<final_runner::NativeResumeSample>>),String> {
     let mut fixture=CycleFixture::new();
     fixture.a=store;fixture.sender.connection_root=fixture.a.repository_root().to_owned();
     bind(&mut fixture.a,SyncTarget::External(fixture.sender.connection_id.clone()),&fixture.sender.repository.connection_identity,&fixture.sender.library);
     bind(&mut fixture.b,SyncTarget::External(fixture.receiver.connection_id.clone()),&fixture.receiver.repository.connection_identity,&fixture.receiver.library);
+    write(output,"excluded-initial-publication.json",&queue_initial_producer(&mut fixture.a,certificate,hashes.len())?)?;
     let cancel=Cancellation::default();
     let authority_a=fixture.a.lww_binding_authority().map_err(|e|e.to_string())?;
     let authority_b=fixture.b.lww_binding_authority().map_err(|e|e.to_string())?;
@@ -817,7 +856,7 @@ async fn authenticated_source_ids(fixture:&CycleFixture,backup:Option<&crate::ex
     let cancel=Cancellation::default();
     if let Some(backup)=backup {
         let catalog=backup.asset_catalog.stored(&fixture.sender.repository).map_err(|e|format!("{e:?}"))?;
-        crate::external_storage::snapshot_restore::admit_asset_catalogs(std::slice::from_ref(&catalog),&mut metadata,&fixture.sender.library,
+        crate::external_storage::snapshot_restore::admit_asset_catalogs(std::slice::from_ref(&catalog),&mut metadata,&fixture.sender.target_scope(),&fixture.sender.library,
             &backup.snapshot_id,&fixture.sender.connection_id,&fixture.sender.connection_root,&fixture.sender.root_key,
             fixture.sender.provider.as_ref(),&fixture.sender.repository,&cancel).await.map_err(|e|format!("{e:?}"))?;
     } else {

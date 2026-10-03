@@ -1,5 +1,4 @@
 //! Short authoritative operations called between native network stages.
-use std::collections::BTreeMap;
 
 use super::{
     external_storage_state as jobs, sync_selection, PersistentStore, StoreError, StoreResult,
@@ -27,11 +26,6 @@ pub(crate) struct ExternalJob {
     pub expected_head: Option<String>,
     pub commit_id: String,
     pub phase: String,
-}
-pub(crate) struct ExternalReceiveCompletion {
-    pub snapshot_id: String,
-    pub expected_revision: i64,
-    pub revision: i64,
 }
 
 fn invalid(message: &str) -> StoreError {
@@ -149,28 +143,6 @@ impl PersistentStore {
         row.map(|(snapshot, identity)| Ok((snapshot, serde_json::from_str(&identity)?)))
             .transpose()
     }
-    pub(crate) fn external_receive_completion(
-        &self,
-        job: &str,
-        connection: &str,
-    ) -> StoreResult<Option<ExternalReceiveCompletion>> {
-        let Some(completed) = self.external_job(job)?.filter(|item| {
-            item.connection_id == connection && item.role == "restore" && item.phase == "complete"
-        }) else {
-            return Ok(None);
-        };
-        // The receive marker and the single revision increment share one transaction.
-        // A later cycle may have replaced the connection's base already.
-        let revision = completed.identity.revision.checked_add(1)
-            .filter(|_| completed.identity.revision >= 0)
-            .ok_or_else(|| invalid("Invalid completed receive revision"))?;
-        Ok(Some(ExternalReceiveCompletion {
-            snapshot_id: completed.capture_id,
-            expected_revision: completed.identity.revision,
-            revision,
-        }))
-    }
-
     pub(crate) fn external_validate_receive(
         &self,
         job: &str,
@@ -248,23 +220,6 @@ impl PersistentStore {
             },
         )
         .transpose()
-    }
-    /// What the snapshot behind this connection's base named under each key,
-    /// while the library still holds exactly that. The revision and identity
-    /// are checked here rather than by the caller, so a view that no longer
-    /// describes the library reads as absent instead of as empty.
-    pub(crate) fn external_base_records(
-        &self,
-        connection: &str,
-    ) -> StoreResult<Option<BTreeMap<String, String>>> {
-        let Some(base) = self.external_base(connection)? else {
-            return Ok(None);
-        };
-        let identity = self.external_identity()?;
-        if base.identity != identity {
-            return Ok(None);
-        }
-        jobs::base_records(&self.connection, connection, &base.snapshot_id)
     }
 
     pub(crate) fn external_job_has_no_capture_owner(&self, job: &str) -> StoreResult<bool> {

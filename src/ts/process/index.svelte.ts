@@ -291,13 +291,17 @@ export async function sendChat(chatProcessIndex = -1,arg:{
     const characterId = initialCharacter?.chaId
     const conversationId = initialConversation?.id
     const navigationGeneration = getPersistentNavigationGeneration()
-    const isTargetCurrent = () => {
+    const isAuthorityCurrent = () => {
         try {
             assertPersistentMutationAllowed(authorityEpoch)
+            return true
         } catch (error) {
             if (error instanceof PersistentMutationFencedError) return false
             throw error
         }
+    }
+    const isTargetCurrent = () => {
+        if (!isAuthorityCurrent()) return false
         const currentCharacter = DBState.db.characters[get(selectedCharID)]
         const currentConversation = currentCharacter?.chats[currentCharacter.chatPage]
         return currentCharacter?.chaId === characterId &&
@@ -381,8 +385,10 @@ export async function sendChat(chatProcessIndex = -1,arg:{
         throw error
     } finally {
         releaseGeneration?.()
+        // Receives held for the registered conversation are drained even when the
+        // selection moved away during generation.
         if (lifecycle.generationTarget && !lifecycle.acknowledgementAttempted &&
-            lifecycle.isTargetCurrent()) {
+            isAuthorityCurrent()) {
             try {
                 if (lifecycle.responseApplied) {
                     lifecycle.acknowledgementAttempted = true

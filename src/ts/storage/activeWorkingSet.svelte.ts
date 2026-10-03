@@ -1389,7 +1389,7 @@ export class ActiveWorkingSet {
         const beforeMetadata = hydrated.selectedMetadata.conversation
         const afterMetadata = cloneConversationMetadata(selectedConversation)
         const activationChange: WindowedConversationActivationChange = {}
-        if (!isEqual(beforeDetail, afterDetail)) {
+        if (!isEqual({ ...beforeDetail, chatFolders: beforeDetail.chatFolders ?? [] }, afterDetail)) {
             activationChange.character = {
                 before: beforeDetail,
                 after: afterDetail,
@@ -1875,6 +1875,9 @@ export class ActiveWorkingSet {
             )
         }
 
+        if (detail.value.chatFolders !== undefined && !Array.isArray(detail.value.chatFolders)) {
+            throw new Error(`Character ${id} returned invalid conversation folders`)
+        }
         const summaries: ConversationSummary[] = []
         const seenConversationIds = new Set<string>()
         let selectedSummary: ConversationSummary | undefined
@@ -1941,6 +1944,7 @@ export class ActiveWorkingSet {
         return {
             character: {
                 ...safeStructuredClone(detail.value),
+                chatFolders: safeStructuredClone(detail.value.chatFolders ?? []),
                 chats,
                 chatPage: selectedIndex,
             } as CompleteCharacter,

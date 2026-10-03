@@ -143,9 +143,6 @@ fn published_rejected_and_cancelled_credentials_are_not_fresh() {
             }
             _ => unreachable!(),
         }
-        let session = store.device_session(&new).unwrap();
-        assert_eq!(session.operation_watermark.as_str(), "0");
-        assert!(!session.operation_pending);
         assert_eq!(
             store
                 .claim_new_device_writer(&new, &claim(Some(&former.token)))

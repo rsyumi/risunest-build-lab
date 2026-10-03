@@ -800,8 +800,9 @@
             projectionReconcileGeneration += 1
         }
         const scope = currentChatScope()
+        const currentChat = currentCharacter.chats?.[currentCharacter.chatPage]
         const conversationIdentity = currentConversationHandoffIdentity()
-        if (activeScope !== scope) {
+        if (activeScope !== scope || !currentChat) {
             if (renderedOwnerId === currentCharacter.chaId && renderedConversationId &&
                 !currentCharacter.chats.some((chat) => chat.id === renderedConversationId)) {
                 const drafts = [...mountInstances.values()].flatMap((instance) => {
@@ -811,11 +812,15 @@
                 })
                 if (drafts.length) alertNormal(`${language.chatDraftConversationRemoved}\n\n${drafts.join('\n\n')}`)
             }
-            resetViewport(scope, renderedConversationIdentity !== conversationIdentity)
+            resetViewport(scope, !currentChat || renderedConversationIdentity !== conversationIdentity)
         }
         renderedConversationIdentity = conversationIdentity
         renderedOwnerId = currentCharacter.chaId
         renderedConversationId = currentCharacter.chats[currentCharacter.chatPage]?.id ?? null
+        if (!currentChat) {
+            abortSourceLoads()
+            return null
+        }
         const reloadPointerMap = get(ReloadChatPointer)
         const sourceSnapshot = currentSourceSnapshot()
         const jump = currentPendingJump()
@@ -851,7 +856,6 @@
                       viewportAnchor ??
                       captureDomAnchor())
         releaseClosedEditorPins()
-        const currentChat = currentCharacter.chats?.[currentCharacter.chatPage]
         const budget = getRuntimePerformanceBudgets().chatMountedMessageBudget
         const result = buildChatViewport({
             keySource,

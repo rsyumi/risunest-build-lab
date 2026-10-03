@@ -21,6 +21,7 @@
     import { bindPersona, chatBindingBlockedByGeneration, saveChatBinding } from 'src/ts/chatBindings.svelte'
     import Toggles from "./Toggles.svelte";
     import { changeChatTo } from "src/ts/globalApi.svelte";
+    import { isWorkingSetCharacterStub } from "src/ts/storage/workingSetCatalog";
     import { indexSideChatListRows, orderChatsByDroppedRows, orderFoldersByDroppedIds, type DroppedChatRow } from "./sideChatListRows";
 
     interface Props {
@@ -30,7 +31,9 @@
     let { chara = $bindable() }: Props = $props();
     let editMode = $state(false)
     let indexedRows = $derived(
-        indexSideChatListRows(chara.chats, chara.chatFolders),
+        isWorkingSetCharacterStub(chara)
+            ? { folders: [], ungrouped: [] }
+            : indexSideChatListRows(chara.chats, chara.chatFolders),
     )
 
     let chatsStb: Sortable[] = []

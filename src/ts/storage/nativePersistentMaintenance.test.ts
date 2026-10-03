@@ -198,7 +198,27 @@ describe('native persistent maintenance', () => {
         expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 60 * 60 * 1000)
         expect(mocks.invoke).not.toHaveBeenCalled()
         idleCallback?.()
-        await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('pds_snapshot_list'))
+        await vi.waitFor(() => expect(mocks.invoke.mock.calls).toEqual([
+            ['pds_snapshot_list'],
+            ['pds_message_object_sweep'],
+        ]))
+    })
+
+    it('sweeps stored message objects even when the snapshot check fails', async () => {
+        vi.useFakeTimers()
+        vi.stubGlobal('requestIdleCallback', undefined)
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+        const sweepError = new Error('sweep failed')
+        mocks.invoke
+            .mockRejectedValueOnce(new Error('snapshot list failed'))
+            .mockRejectedValueOnce(sweepError)
+
+        schedulePeriodicNativeSnapshot()
+        await vi.advanceTimersByTimeAsync(0)
+
+        expect(mocks.invoke.mock.calls).toEqual([['pds_snapshot_list'], ['pds_message_object_sweep']])
+        expect(consoleError).toHaveBeenCalledWith('Periodic native object sweep failed', sweepError)
+        consoleError.mockRestore()
     })
 
     it('falls back to a timer and logs maintenance failures', async () => {
@@ -218,14 +238,16 @@ describe('native persistent maintenance', () => {
     it('re-checks hourly so long sessions still create periodic snapshots', async () => {
         vi.useFakeTimers()
         vi.stubGlobal('requestIdleCallback', undefined)
-        mocks.invoke.mockResolvedValue([{ path: 'recent.db', bytes: 1, modifiedAt: Date.now() }])
+        mocks.invoke.mockImplementation(async (command: string) =>
+            command === 'pds_snapshot_list' ? [{ path: 'recent.db', bytes: 1, modifiedAt: Date.now() }] : undefined)
+        const calls = (command: string) => mocks.invoke.mock.calls.filter(([name]) => name === command).length
 
         schedulePeriodicNativeSnapshot()
         await vi.advanceTimersByTimeAsync(0)
-        expect(mocks.invoke).toHaveBeenCalledTimes(1)
+        expect([calls('pds_snapshot_list'), calls('pds_message_object_sweep')]).toEqual([1, 1])
 
         await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
-        expect(mocks.invoke).toHaveBeenCalledTimes(2)
+        expect([calls('pds_snapshot_list'), calls('pds_message_object_sweep')]).toEqual([2, 2])
     })
 
     it('reports an empty snapshot list without prompting', async () => {

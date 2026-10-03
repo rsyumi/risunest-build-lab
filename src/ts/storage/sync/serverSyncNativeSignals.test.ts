@@ -60,7 +60,12 @@ describe("native server sync signals", () => {
     const admission = start.slice(0, launch);
     expect(admission).toContain("server_sync_notify_stop(app.clone()).await?");
     expect(admission).toContain("store.lww_binding_authority()?!=request.binding_authority");
-    expect(admission.match(/cleanup_closed\.load\(Ordering::Acquire\)/g)).toHaveLength(2);
+    expect(admission.match(/cleanup_closed\.load\(Ordering::Acquire\)/g)).toHaveLength(1);
+    expect(admission).toContain("install_notification(start,");
+    const installStart = commandsSource.indexOf("fn install_notification(");
+    const install = commandsSource.slice(installStart, commandsSource.indexOf("*slot=Some(spawn(", installStart));
+    expect(install).toContain("self.cleanup_closed.load(Ordering::Acquire)");
+    expect(install).toContain("start.cancelled.load(Ordering::Acquire)");
     const stopStart = commandsSource.indexOf("pub(crate) async fn server_sync_notify_stop(");
     const stop = commandsSource.slice(stopStart, commandsSource.indexOf("pub(crate) async fn server_sync_notify_start("));
     expect(stop).toContain("job.abort();let _=job.await;");

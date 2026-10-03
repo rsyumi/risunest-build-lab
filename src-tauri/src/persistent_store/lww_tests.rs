@@ -68,6 +68,41 @@ fn change(parts: &[&str], time: u64, value: Value) -> Change {
 }
 
 #[test]
+fn empty_identity_selections_replace_and_commit_without_initializing_empty_owners() {
+    let (_dir, mut store) = store();
+    let stage = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root(&stage, &serde_json::json!({
+        "botPresetsId":"", "selectedPersona":"", "personas":[], "username":"retained"
+    })).unwrap();
+    let replaced = store.replace_commit(&stage, Some(0)).unwrap();
+    assert_eq!(replaced.revision, 1);
+    let root = store.read_root(None).unwrap().value;
+    assert_eq!(root["botPresetsId"], "");
+    assert_eq!(root["selectedPersona"], "");
+    assert_eq!(root["username"], "retained");
+    let outbox = store.lww_read_outbox(0.into(), 100).unwrap().entries;
+    for field in ["botPresetsId", "selectedPersona"] {
+        assert_eq!(outbox.iter().find(|entry| entry.key == unit_key(&["root", field]).unwrap()).unwrap().value,
+            inline(&serde_json::json!("")).unwrap());
+    }
+    assert!(outbox.iter().all(|entry| entry.key.components()[0] != "exists"));
+    save(&mut store, vec![
+        mutation(&["root", "botPresetsId"], serde_json::json!("missing-preset")),
+        mutation(&["root", "selectedPersona"], serde_json::json!("missing-persona")),
+    ]);
+    let cleared = save(&mut store, vec![
+        mutation(&["root", "botPresetsId"], serde_json::json!("")),
+        mutation(&["root", "selectedPersona"], serde_json::json!("")),
+    ]);
+    assert_eq!(cleared.revision, 3);
+    let root = store.read_root(None).unwrap().value;
+    assert_eq!(root["botPresetsId"], "");
+    assert_eq!(root["selectedPersona"], "");
+    assert_eq!(root["username"], "retained");
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM lww_initialization_scopes", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
 fn unchanged_units_emit_nothing_and_a_commit_shares_one_stamp() {
     let (_dir, mut store) = store();
     save(
@@ -1665,7 +1700,7 @@ fn same_batch_parent_creation_precedes_message_range_and_local_statics_never_pub
 #[test]
 fn archive_publishes_one_state_unit_and_shared_payload_excludes_local_fields() {
     use std::io::Read;
-    let (_, mut store) = store();
+    let (_directory, mut store) = store();
     create_conversation(&mut store, "char", "chat");
     save(
         &mut store,
@@ -1743,7 +1778,7 @@ fn archive_publishes_one_state_unit_and_shared_payload_excludes_local_fields() {
 }
 #[test]
 fn received_archive_retains_local_fields_and_holds_children_until_restore() {
-    let (_, mut source) = store();
+    let (_source_directory, mut source) = store();
     let (dir, mut target) = store();
     create_conversation(&mut source, "char", "chat");
     create_conversation(&mut target, "char", "chat");
@@ -1865,7 +1900,7 @@ fn archive_record_restore_keeps_both_bodies_but_publishes_filtered_body_only() {
         decode_logical_record, encode_logical_record_key, LogicalRecordEnvelope,
         LogicalRecordLocator,
     };
-    let (_, mut store) = store();
+    let (_directory, mut store) = store();
     create_conversation(&mut store, "char", "chat");
     save(
         &mut store,
@@ -2649,4 +2684,288 @@ fn explicit_new_device_empty_target_activates_empty_stage_without_republishing_l
         .unwrap()
         .entries
         .is_empty());
+}
+
+#[test]
+fn an_intent_that_can_no_longer_apply_is_closed_and_later_writes_proceed() {
+    let (dir, mut store) = store();
+    save(&mut store, vec![mutation(&["root", "language"], serde_json::json!("en"))]);
+    let revision = store.revision().unwrap();
+    let stale = Header { binding_authority: 0.into(), request_id: "stale-commit".into() };
+    let intent = Intent::Commit {
+        commit: WorkingSetCommit {
+            expected_revision: revision - 1,
+            unit_mutations: Some(vec![mutation(&["root", "language"], serde_json::json!("ko"))]),
+            ..Default::default()
+        },
+        aliases: vec![],
+    };
+    store.reserve_intent(&stale, &intent).unwrap();
+    save(&mut store, vec![mutation(&["root", "language"], serde_json::json!("ja"))]);
+    assert_eq!(store.read_root(None).unwrap().value["language"], "ja");
+    let complete: bool = store.device_store().unwrap().connection().query_row(
+        "SELECT complete FROM lww_intents WHERE request_id=?1", [&stale.request_id], |row| row.get(0),
+    ).unwrap();
+    assert!(complete);
+    let committed: bool = store.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM lww_requests WHERE request_id=?1)", [&stale.request_id], |row| row.get(0),
+    ).unwrap();
+    assert!(!committed);
+    drop(store);
+    let store = PersistentStore::open(dir.path()).unwrap();
+    assert_eq!(store.read_root(None).unwrap().value["language"], "ja");
+}
+
+#[test]
+fn a_character_field_edit_does_not_reproject_the_character_order() {
+    let (_, mut store) = store();
+    save(&mut store, vec![
+        mutation(&["exists", "character", "a"], serde_json::json!({"type":"character"})),
+        mutation(&["exists", "character", "b"], serde_json::json!({"type":"character"})),
+        mutation(&["order", "characters"], serde_json::json!(["b", "a"])),
+    ]);
+    assert_eq!(store.read_root(None).unwrap().value["characterOrder"], serde_json::json!(["b", "a"]));
+    store.connection.execute_batch("CREATE TEMP TABLE root_writes(n INTEGER);
+        CREATE TEMP TRIGGER count_root_writes AFTER UPDATE ON main.root BEGIN INSERT INTO root_writes VALUES(1); END;").unwrap();
+    save(&mut store, vec![mutation(&["character", "a", "name"], serde_json::json!("renamed"))]);
+    let writes: i64 = store.connection.query_row("SELECT count(*) FROM root_writes", [], |row| row.get(0)).unwrap();
+    assert_eq!(writes, 0);
+    save(&mut store, vec![mutation(&["exists", "character", "c"], serde_json::json!({"type":"character"}))]);
+    assert_eq!(store.read_root(None).unwrap().value["characterOrder"], serde_json::json!(["b", "a", "c"]));
+}
+
+#[test]
+fn a_drain_with_no_work_leaves_both_revisions_unchanged() {
+    let (_, mut store) = store();
+    let result = receive(&mut store, "held", vec![change(&["conversation", "missing", "chat", "name"], 1, serde_json::json!("held"))], vec![]);
+    assert_eq!(result.held_keys.len(), 1);
+    let device_revision = |store: &PersistentStore| -> i64 {
+        store.device_store().unwrap().connection().query_row("SELECT revision FROM device_meta WHERE singleton=1", [], |row| row.get(0)).unwrap()
+    };
+    let (revision, device) = (store.revision().unwrap(), device_revision(&store));
+    let header = Header { binding_authority: store.lww_binding_authority().unwrap(), request_id: "drain".into() };
+    let drained = store.lww_drain_deferred(&ApplyReceive { header, generating: vec![] }).unwrap();
+    assert_eq!(drained.held_keys.len(), 1);
+    assert!(drained.affected_keys.is_empty());
+    assert_eq!(drained.revision, revision);
+    assert_eq!(store.revision().unwrap(), revision);
+    assert_eq!(device_revision(&store), device);
+}
+
+#[test]
+fn ranges_for_one_conversation_in_one_commit_capture_once_from_their_pages() {
+    use super::super::message_pages::{capture_manifest, reset_capture_work, take_capture_work};
+    let message = |i: usize| serde_json::json!({"chatId":format!("m-{i}"),"data":format!("synthetic-{i}")});
+    let range = |start: i64, delete_count: i64, messages: Vec<Value>| super::super::ConversationMutation::ReplaceRange {
+        character_id: "char".into(), conversation_id: "chat".into(), start, delete_count, messages,
+        conversation: None, configured_index: None,
+    };
+    let count = 1024usize;
+    let end = count as i64;
+    let shapes: Vec<(&str, Vec<super::super::ConversationMutation>, usize)> = vec![
+        ("windowed", vec![range(0, 0, vec![]), range(end, 0, vec![message(count)])], 256),
+        ("two appends", vec![range(end, 0, vec![message(count)]), range(end + 1, 0, vec![message(count + 1)])], 256),
+        ("clamped appends", vec![range(end + 50, 3, vec![message(count)]), range(end + 50, 0, vec![message(count + 1)])], 256),
+        ("edit then append", vec![range(5, 1, vec![serde_json::json!({"chatId":"m-5","data":"edited"})]), range(end, 0, vec![message(count)])], 512),
+        ("delete then insert", vec![range(5, 1, vec![]), range(600, 0, vec![message(count), message(count + 1)])], 512),
+        ("insert then delete", vec![range(600, 0, vec![message(count), message(count + 1)]), range(5, 2, vec![])], 512),
+    ];
+    for (shape, ranges, bound) in shapes {
+        let (_dir, mut store) = store();
+        create_conversation(&mut store, "char", "chat");
+        store.commit(&WorkingSetCommit {
+            expected_revision: store.revision().unwrap(),
+            conversations: Some(vec![range(0, 0, (0..count).map(message).collect())]),
+            ..Default::default()
+        }).unwrap();
+        reset_capture_work();
+        store.commit(&WorkingSetCommit {
+            expected_revision: store.revision().unwrap(),
+            conversations: Some(ranges),
+            ..Default::default()
+        }).unwrap_or_else(|error| panic!("{shape}: {error:?}"));
+        let work = take_capture_work();
+        assert_eq!((work.successful_captures, work.failed_captures), (1, 0), "{shape}");
+        assert!(work.work.messages_read <= bound, "{shape}: {work:?}");
+        let key = UnitKey::new(&["messages", "char", "chat"]).unwrap();
+        let stored = read_unit(&store.connection, &key).unwrap().unwrap().1;
+        let tx = store.connection.transaction().unwrap();
+        let generation = active_generation(&tx).unwrap();
+        let fresh = capture_manifest(&tx, &generation, "char", "chat", None).unwrap();
+        drop(tx);
+        assert_eq!(stored, fresh, "{shape}");
+    }
+}
+
+#[test]
+fn superseded_message_pages_are_collected_only_after_the_grace_period() {
+    let (_dir, mut store) = store();
+    create_conversation(&mut store, "char", "chat");
+    let message = |i: usize| serde_json::json!({"chatId":format!("m-{i}"),"data":format!("synthetic-{i}")});
+    let append = |store: &mut PersistentStore, start: usize, messages: Vec<Value>| {
+        store.commit(&WorkingSetCommit {
+            expected_revision: store.revision().unwrap(),
+            conversations: Some(vec![super::super::ConversationMutation::ReplaceRange {
+                character_id: "char".into(), conversation_id: "chat".into(), start: start as i64, delete_count: 0,
+                messages, conversation: None, configured_index: None,
+            }]),
+            ..Default::default()
+        }).unwrap();
+    };
+    let referenced = |store: &PersistentStore| -> BTreeSet<String> {
+        let mut hashes = store.connection.prepare("SELECT hash FROM message_page_indexes").unwrap()
+            .query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<BTreeSet<_>, _>>().unwrap();
+        let body: Vec<u8> = store.connection.query_row("SELECT body FROM message_page_manifests", [], |row| row.get(0)).unwrap();
+        hashes.insert(risunest_sync_wire::hash(&body));
+        hashes
+    };
+    let present = |store: &PersistentStore, hash: &str| -> bool {
+        store.connection.query_row("SELECT EXISTS(SELECT 1 FROM message_page_objects WHERE hash=?1)", [hash], |row| row.get(0)).unwrap()
+    };
+    append(&mut store, 0, (0..40).map(message).collect());
+    let before = referenced(&store);
+    append(&mut store, 40, vec![message(40)]);
+    let after = referenced(&store);
+    let superseded = before.difference(&after).cloned().collect::<Vec<_>>();
+    assert!(!superseded.is_empty());
+    let now = 1_900_000_000_000i64;
+    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now, super::super::MESSAGE_PAGE_SWEEP_LIMIT).unwrap();
+    assert!(superseded.iter().all(|hash| present(&store, hash)));
+    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now + super::super::ASSET_GC_PRODUCT_MINIMUM_GRACE_MS - 1, super::super::MESSAGE_PAGE_SWEEP_LIMIT).unwrap();
+    assert!(superseded.iter().all(|hash| present(&store, hash)));
+    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now + super::super::ASSET_GC_PRODUCT_MINIMUM_GRACE_MS, super::super::MESSAGE_PAGE_SWEEP_LIMIT).unwrap();
+    for hash in &superseded {
+        assert!(!present(&store, hash), "superseded object {hash} survived maintenance");
+        let proofs: i64 = store.connection.query_row(
+            "SELECT (SELECT count(*) FROM message_page_proofs WHERE hash=?1)+(SELECT count(*) FROM message_page_verified_objects WHERE hash=?1)",
+            [hash], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(proofs, 0);
+    }
+    assert!(after.iter().all(|hash| present(&store, hash)));
+    let key = UnitKey::new(&["messages", "char", "chat"]).unwrap();
+    let value = read_unit(&store.connection, &key).unwrap().unwrap().1;
+    let UnitValue::Object { descriptor_hash, descriptor } = &value else { panic!() };
+    assert!(present(&store, descriptor_hash) && present(&store, &descriptor.object_hash));
+    super::super::message_pages::validate_manifest(&store.connection, &value).unwrap();
+}
+
+#[test]
+fn the_message_object_sweep_keeps_what_held_rows_archives_and_leases_need() {
+    let grace = super::super::ASSET_GC_PRODUCT_MINIMUM_GRACE_MS;
+    let limit = super::super::MESSAGE_PAGE_SWEEP_LIMIT;
+    let (_dir, mut store) = store();
+    let message = |owner: &str, i: usize| serde_json::json!({"chatId":format!("{owner}-{i}"),"data":format!("synthetic-{owner}-{i}")});
+    let append = |store: &mut PersistentStore, character: &str, start: usize, messages: Vec<Value>| {
+        store.commit(&WorkingSetCommit {
+            expected_revision: store.revision().unwrap(),
+            conversations: Some(vec![super::super::ConversationMutation::ReplaceRange {
+                character_id: character.into(), conversation_id: "chat".into(), start: start as i64, delete_count: 0,
+                messages, conversation: None, configured_index: None,
+            }]),
+            ..Default::default()
+        }).unwrap();
+    };
+    let held = Change {
+        key: unit_key(&["messages", "waiting", "chat"]).unwrap(),
+        stamp: stamp(2),
+        value: incoming_message_value(&store, "waiting", "chat", "held-message"),
+    };
+    let staged = receive(&mut store, "held", vec![change(&["exists", "conversation", "waiting", "chat"], 2, serde_json::json!(true)), held.clone()], vec![]);
+    assert!(staged.held_keys.contains(&held.key));
+    create_conversation(&mut store, "archived", "chat");
+    append(&mut store, "archived", 0, (0..40).map(|i| message("archived", i)).collect());
+    store.archive_character("archived", store.revision().unwrap(), 10).unwrap();
+    create_conversation(&mut store, "leased", "chat");
+    append(&mut store, "leased", 0, (0..40).map(|i| message("leased", i)).collect());
+    let lease = store.acquire_revision(store.revision().unwrap()).unwrap();
+    append(&mut store, "leased", 40, vec![message("leased", 40)]);
+    let leased: Vec<String> = {
+        let reader = &store.revision_leases[&lease.lease].connection;
+        let mut hashes = reader.prepare("SELECT hash FROM message_page_indexes WHERE character_id='leased'").unwrap()
+            .query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        let body: Vec<u8> = reader.query_row("SELECT body FROM message_page_manifests WHERE character_id='leased'", [], |row| row.get(0)).unwrap();
+        hashes.push(risunest_sync_wire::hash(&body));
+        hashes
+    };
+    let present = |store: &PersistentStore, hash: &str| -> bool {
+        store.connection.query_row("SELECT EXISTS(SELECT 1 FROM message_page_objects WHERE hash=?1)", [hash], |row| row.get(0)).unwrap()
+    };
+    let orphan = b"synthetic-unreferenced-object".to_vec();
+    let orphan_hash = risunest_sync_wire::hash(&orphan);
+    store.lww_put_object(&orphan_hash, &orphan).unwrap();
+
+    let now = 1_900_000_000_000i64;
+    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now, limit).unwrap();
+    assert!(!store.lww_verified_object_present(&orphan_hash).unwrap());
+    store.lww_put_object(&orphan_hash, &orphan).unwrap();
+    assert!(store.lww_verified_object_present(&orphan_hash).unwrap());
+    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now + grace, limit).unwrap();
+    assert!(present(&store, &orphan_hash), "a put after marking restarts the grace period");
+    assert!(leased.iter().all(|hash| present(&store, hash)), "a revision lease still reads these pages");
+    store.release_revision(&lease.lease).unwrap();
+
+    store.restore_character("archived", store.revision().unwrap()).unwrap();
+    let generation = active_generation(&store.connection).unwrap();
+    let restored: i64 = store.connection.query_row(
+        "SELECT count(*) FROM messages WHERE generation=?1 AND character_id='archived'", [&generation], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(restored, 40);
+    let parent = receive(&mut store, "parent", vec![change(&["exists", "character", "waiting"], 3, serde_json::json!({"type":"character"}))], vec![]);
+    assert!(parent.affected_keys.contains(&held.key));
+    let projected: String = store.connection.query_row(
+        "SELECT value FROM messages WHERE generation=?1 AND character_id='waiting'",
+        [active_generation(&store.connection).unwrap()], |row| row.get(0),
+    ).unwrap();
+    assert!(projected.contains("held-message"));
+    for character in ["archived", "leased", "waiting"] {
+        let value = read_unit(&store.connection, &unit_key(&["messages", character, "chat"]).unwrap()).unwrap().unwrap().1;
+        super::super::message_pages::validate_manifest(&store.connection, &value).unwrap();
+    }
+
+    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now + 2 * grace, limit).unwrap();
+    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now + 3 * grace, limit).unwrap();
+    assert!(!present(&store, &orphan_hash));
+    let current: BTreeSet<String> = store.connection.prepare("SELECT hash FROM message_page_indexes WHERE character_id='leased'").unwrap()
+        .query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<_, _>>().unwrap();
+    assert!(leased.iter().any(|hash| !current.contains(hash)));
+    for hash in leased.iter().filter(|hash| !current.contains(*hash)) {
+        assert!(!present(&store, hash), "{hash} outlived its lease");
+    }
+}
+
+#[test]
+fn an_unreadable_reference_node_stops_the_message_object_sweep() {
+    use risunest_sync_wire::descriptor::RecordDescriptor;
+    let grace = super::super::ASSET_GC_PRODUCT_MINIMUM_GRACE_MS;
+    let limit = super::super::MESSAGE_PAGE_SWEEP_LIMIT;
+    let (_dir, mut store) = store();
+    let put = |store: &PersistentStore, body: &[u8]| -> String {
+        let hash = risunest_sync_wire::hash(body);
+        store.lww_put_object(&hash, body).unwrap();
+        hash
+    };
+    let present = |store: &PersistentStore, hash: &str| -> bool {
+        store.connection.query_row("SELECT EXISTS(SELECT 1 FROM message_page_objects WHERE hash=?1)", [hash], |row| row.get(0)).unwrap()
+    };
+    let node = put(&store, b"synthetic-not-a-reference-page");
+    let body = put(&store, b"synthetic-record-body");
+    let orphan = put(&store, b"synthetic-unreferenced-object");
+    let value = UnitValue::object(RecordDescriptor {
+        object_hash: body.clone(), dependency_root: Some(node.clone()), relation_root: None,
+        dependencies: vec![], relations: vec![], scopes: vec![],
+    }).unwrap();
+    store.connection.execute(
+        "INSERT INTO snapshot_original_units(key,value) VALUES('synthetic',?1)", [serde_json::to_string(&value).unwrap()],
+    ).unwrap();
+    let now = 1_900_000_000_000i64;
+    assert!(store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now, limit).is_err());
+    assert!(store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now + grace, limit).is_err());
+    let marks: i64 = store.connection.query_row("SELECT count(*) FROM message_page_object_marks", [], |row| row.get(0)).unwrap();
+    assert_eq!(marks, 0);
+    assert!([&node, &body, &orphan].iter().all(|hash| present(&store, hash)));
+    store.connection.execute("DELETE FROM snapshot_original_units", []).unwrap();
+    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now + 2 * grace, limit).unwrap();
+    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now + 3 * grace, limit).unwrap();
+    assert!([&node, &body, &orphan].iter().all(|hash| !present(&store, hash)));
 }

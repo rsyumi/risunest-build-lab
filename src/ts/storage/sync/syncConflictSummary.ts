@@ -27,28 +27,6 @@ function contentSignature(character: CharacterLike): string {
     return `${character.name ?? ''}\u0000${chats.length}\u0000${messages}`
 }
 
-export function summarizeSyncConflict(local: Database, remote: Database): SyncConflictSummary {
-    const remoteById = new Map(remote.characters.map((character) => [character.chaId, character]))
-    const localOnlyNames: string[] = []
-    const changedNames: string[] = []
-    const matchedIds = new Set<string>()
-    for (const character of local.characters) {
-        const other = remoteById.get(character.chaId)
-        if (!other) {
-            localOnlyNames.push(characterName(character))
-            continue
-        }
-        matchedIds.add(character.chaId)
-        if (contentSignature(character) !== contentSignature(other)) {
-            changedNames.push(characterName(character))
-        }
-    }
-    const remoteOnlyNames = remote.characters
-        .filter((character) => !matchedIds.has(character.chaId))
-        .map(characterName)
-    return { localOnlyNames, remoteOnlyNames, changedNames }
-}
-
 export async function summarizePinnedSyncConflict(
     reader: PersistentRevisionReader,
     remote: Database,

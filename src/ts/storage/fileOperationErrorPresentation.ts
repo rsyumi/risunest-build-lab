@@ -23,6 +23,7 @@ export function presentFileOperationError(kind: NativeFileOperationKind, error: 
         : code === 'generation-active' ? text.generationBusy
         : ['server-sync-busy', 'library-operation-busy', 'library-file-operation-busy'].includes(String(code)) ? text.syncBusy
         : ['resolve-pending-operation-first', 'server-status-unavailable'].includes(String(code)) ? text.syncUnconfirmed
+        : code === 'sync-unavailable' ? text.syncUnavailable
         : error instanceof NativeFileJobActivationCommittedError ? options.committedMessage ?? language.risuSaveImportCommittedRefreshFailed
         : code === 'revision-conflict' ? language.risuSaveRevisionConflict
         : options.fallbackMessage ?? text.actionFailed
