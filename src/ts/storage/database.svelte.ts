@@ -2134,20 +2134,22 @@ function applyEffectivePreset(db: Database, preset: botPreset): void {
 }
 
 export async function activatePresetOverride(index: number | null): Promise<void> {
+    // The index names a preset in the library as it is now; it can move while awaiting.
+    const id = index === null ? null : getDatabase().botPresets[index]?.id
+    if (id !== null && !id) throw new Error('Preset was not found')
     const runtime = await import('./persistentDataRuntime.svelte')
     await runtime.flushPendingData('preset-chain')
-    if (index === null) {
+    if (id === null) {
         setEffectivePresetOverride(null)
         return
     }
-    const id = getDatabase().botPresets[index]?.id
-    if (!id) throw new Error('Preset was not found')
     const value = await runtime.getPersistentDataRuntime().store.readPreset(id)
     if (!value) throw new Error('Preset was not found')
     const db = getDatabase()
     const currentIndex = db.botPresets.findIndex(preset => preset.id === id)
     if (currentIndex < 0) throw new Error('Preset was not found')
-    db.botPresets[currentIndex] = value.value
+    // A loaded record may hold edits made during the read.
+    if (!runtime.isLoadedPreset(db.botPresets[currentIndex])) db.botPresets[currentIndex] = value.value
     setEffectivePresetOverride(id, db)
 }
 

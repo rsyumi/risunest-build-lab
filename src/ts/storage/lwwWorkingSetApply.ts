@@ -1,5 +1,5 @@
 import { sharedRootFields } from './persistentRootFields'
-import { createCatalogCharacterStub } from './workingSetCatalog'
+import { createCatalogCharacterStub, createPresetCatalogWorkingSetFromValues, isCatalogPresetWorkingSet } from './workingSetCatalog'
 import { createConversationSummaryStub, createConversationSummaryFromMetadata } from './conversationResidency'
 import type { Chat, Database, botPreset, character, groupChat } from './database.svelte'
 import type { PersistentRevisionReader, PersistentRoot } from './persistentDataStore'
@@ -65,6 +65,7 @@ export async function applyLwwWorkingSetUnits(
     }
     for (const [kind, id, field, metadataField] of keys) {
         if (kind === 'preset' && database.botPresets.some((value) => value?.['id'] === id)) await readPreset(id)
+        if (!isCatalogPresetWorkingSet(database.botPresets) && (kind === 'preset' || kind === 'exists' && id === 'preset')) await readPreset(kind === 'preset' ? id : field)
         if (kind === 'root' && id === 'botPresetsId' && typeof root?.botPresetsId === 'string') {
             await readPreset(root.botPresetsId)
             if (presets.get(root.botPresetsId) && !presetCatalog) presetCatalog = await store.queryPresets()
@@ -118,7 +119,8 @@ export async function applyLwwWorkingSetUnits(
             if (id === 'botPresetsId' && typeof before[id] === 'string') before[id] = Math.max(0, database.botPresets.findIndex((value) => value?.['id'] === before[id]))
             if (id === 'selectedPersona' && typeof before[id] === 'string') before[id] = Math.max(0, database.personas?.findIndex((value) => value.id === before[id]) ?? 0)
             patchField(database, before, remote, id)
-            ;(baseline.root as unknown as Record<string, unknown>)[id] = canonicalClone((root as unknown as Record<string, unknown>)[id])
+            if (Object.hasOwn(root, id)) (baseline.root as unknown as Record<string, unknown>)[id] = canonicalClone((root as unknown as Record<string, unknown>)[id])
+            else delete (baseline.root as unknown as Record<string, unknown>)[id]
         } else if (kind === 'character' || kind === 'group-members') {
             const live = charactersById.get(id)
             const before = baselineById.get(id)
@@ -144,18 +146,10 @@ export async function applyLwwWorkingSetUnits(
             if (kind === 'messages') {
                 if (!Object.hasOwn(before, 'message') || !Object.prototype.propertyIsEnumerable.call(live, 'message')) continue
                 const remote = conversations.get(pair(id, field))
-                if (remote) {
-                    const unchanged = canonicalJson(live.message) === canonicalJson(before.message)
-                    patchField(live, before, remote.value, 'message')
-                    if (unchanged) liveCharacter!.chats[liveCharacter!.chats.indexOf(live)] = { ...live }
-                }
+                if (remote) patchField(live, before, remote.value, 'message')
             } else {
                 const remote = metadata.get(pair(id, field))
-                if (remote) {
-                    const unchanged = canonicalJson({value:live[metadataField]}) === canonicalJson({value:before[metadataField]})
-                    patchField(live, before, remote.value.conversation, metadataField)
-                    if (unchanged) liveCharacter!.chats[liveCharacter!.chats.indexOf(live)] = {...live}
-                }
+                if (remote) patchField(live, before, remote.value.conversation, metadataField)
             }
         } else if (kind === 'preset') {
             const live = database.botPresets.find((value) => value?.['id'] === id)
@@ -228,9 +222,12 @@ export async function applyLwwWorkingSetUnits(
             const selectedId = database.botPresets[database.botPresetsId]?.['id']
             const catalog = presetCatalog!
             const byId = new Map(database.botPresets.filter(Boolean).map((value) => [value['id'], value]))
-            database.botPresets = catalog.items.map((summary) => byId.get(summary.id) ?? { id: summary.id, name: summary.name, image: summary.image } as unknown as botPreset)
+            const next = catalog.items.map((summary) => byId.get(summary.id) ?? canonicalClone(presets.get(summary.id)?.value ?? { id: summary.id, name: summary.name, image: summary.image }) as botPreset)
+            database.botPresets = isCatalogPresetWorkingSet(database.botPresets)
+                ? createPresetCatalogWorkingSetFromValues(next, catalog.revision, selectedId) : next
+            if (isCatalogPresetWorkingSet(database.botPresets)) for (let index = 0; index < next.length; index++) database.botPresets[index] = next[index]
             database.botPresetsId = Math.max(0, database.botPresets.findIndex((value) => value['id'] === selectedId))
-            if (baseline.presets) baseline.presets = catalog.items.map((summary) => baseline.presets!.find((value) => value['id'] === summary.id) ?? byId.get(summary.id)!).filter(Boolean)
+            if (baseline.presets) baseline.presets = catalog.items.map((summary, index) => baseline.presets!.find((value) => value['id'] === summary.id) ?? canonicalClone(presets.get(summary.id)?.value ?? byId.get(summary.id) ?? next[index]))
         } else if (kind === 'exists' && id === 'character') {
             const summary = summaries.get(field)
             if (summary && !charactersById.has(field)) database.characters.push(createCatalogCharacterStub(summary))

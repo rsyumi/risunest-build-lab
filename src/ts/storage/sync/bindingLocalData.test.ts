@@ -7,7 +7,7 @@ import { hasLocalBindingData, hasLocalSharedBindingData, inspectLocalBindingData
 import { normalizeDatabaseDefaults, type Database } from '../database.svelte'
 import { DBState } from 'src/ts/stores.svelte'
 function native() {
-    return { library: structuredClone(normalizeDatabaseDefaults({} as Database)), managedAliasCount: '0', ordinaryPluginValueCount: '0', hypaValueCount: '0', pluginLocalValueCount: '0', opaqueSharedUnitCount: '0', sharedVariables: {} }
+    return { library: structuredClone(normalizeDatabaseDefaults({} as Database)), managedAliasCount: '0', ordinaryPluginValueCount: '0', hypaValueCount: '0', pluginLocalValueCount: '0', opaqueSharedUnitCount: '0', sharedVariables: {}, pluginLocalParticipating: false }
 }
 DBState.db = native().library
 beforeEach(() => { invoke.mockReset(); DBState.db = native().library })
@@ -24,10 +24,14 @@ it('keeps native count strings exact without Number conversion', async () => {
     expect((await inspectLocalBindingData()).pluginLocalValueCount).toBe('9007199254740993')
     expect(await hasLocalBindingData()).toBe(true)
 })
-it('plugin-local-only content needs acknowledgement but no shared-state transfer', async () => {
-    invoke.mockResolvedValue({ ...native(), pluginLocalValueCount: '2' })
+it.each([false, true])('plugin-local-only content needs acknowledgement and a shared-state transfer only with participation %s', async participating => {
+    invoke.mockResolvedValue({ ...native(), pluginLocalValueCount: '2', pluginLocalParticipating: participating })
     expect(await hasLocalBindingData()).toBe(true)
-    expect(await hasLocalSharedBindingData()).toBe(false)
+    expect(await hasLocalSharedBindingData()).toBe(participating)
+})
+it.each([undefined, 1, 'true'])('rejects native plugin-local participation %s', async value => {
+    invoke.mockResolvedValue({ ...native(), pluginLocalParticipating: value })
+    await expect(hasLocalSharedBindingData()).rejects.toThrow('Invalid binding content')
 })
 it('counts Hypa memo content stored in the materialized library', async () => {
     const content = native()

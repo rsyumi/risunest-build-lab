@@ -477,3 +477,29 @@ fn late_binding_copy_trigger_failure_rolls_back_every_family_and_retries_exactly
     let last: String = store.connection.query_row("SELECT value FROM messages WHERE generation=?1 AND message_index=512", [active_generation(&store.connection).unwrap()], |row| row.get(0)).unwrap();
     assert_eq!(serde_json::from_str::<Value>(&last).unwrap(),values[512]);
 }
+
+#[test]
+fn binding_replacement_applies_large_shared_and_device_units_from_their_bodies() {
+    let dir = tempfile::tempdir().unwrap(); let mut store = PersistentStore::open(dir.path()).unwrap();
+    store.device_store_mut().unwrap().set_section_participating(crate::persistent_store::device_store::Section::LocalPlugins, true).unwrap();
+    let limit = risunest_sync_wire::unit::MAX_INLINE_UNIT_BYTES;
+    let object = |store: &PersistentStore, value: &Value| {
+        let body = risunest_sync_wire::payload_value::encode(value).unwrap();
+        let hash = risunest_sync_wire::hash(&body);
+        store.lww_put_object(&hash, &body).unwrap();
+        UnitValue::object(RecordDescriptor::content(hash)).unwrap()
+    };
+    let language = json!("l".repeat(limit + 1)); let plugin = "p".repeat(limit + 7);
+    let mut root = change(&["root","language"], Value::Null); root.value = object(&store, &language);
+    let mut local = change(&["plugin-local","synthetic-owner","string","large"], Value::Null); local.value = object(&store, &json!(plugin));
+    let incoming = vec![root.clone(), local.clone()];
+    let (header, inspection) = context(&store);
+    let stage = store.lww_stage_binding_units(&header, &inspection, &incoming, 7.into()).unwrap();
+    assert_eq!(catalog(&store, &stage.staging_id)["language"], language);
+    activate(&mut store, &header, &inspection, &stage);
+    assert_eq!(store.read_root(None).unwrap().value["language"], language);
+    assert_eq!(read_unit(&store.connection, &root.key).unwrap(), Some((root.stamp.clone(), root.value.clone())));
+    let device = store.device_store().unwrap().connection();
+    assert_eq!(read_unit(device, &local.key).unwrap(), Some((local.stamp.clone(), local.value.clone())));
+    assert_eq!(device.query_row("SELECT value FROM plugin_device_storage WHERE owner='synthetic-owner' AND space='string' AND key='large' AND tombstone=0", [], |r| r.get::<_,String>(0)).unwrap(), plugin);
+}

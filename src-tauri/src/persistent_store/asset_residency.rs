@@ -325,7 +325,7 @@ impl PersistentStore {
             .server_stored_config()?
             .ok_or_else(|| SyncError::new("server-not-bound", 409))?;
         let client = ServerClient::with_cancellation(config.resolve(&self.repository_root)?, cancellation.clone())?;
-        let head = client.resolve_identity(false)?;
+        let head = client.resolve_identity()?;
         check()?;
         config.endpoint = client.config().endpoint.clone();
         let inventory = self.residency_inventory(false)?;
@@ -481,7 +481,7 @@ impl PersistentStore {
                     continue;
                 };
                 let client = ServerClient::with_cancellation(proof.config.resolve(&self.repository_root)?, cancellation.clone())?;
-                let head = client.resolve_identity(false)?;
+                let head = client.resolve_identity()?;
                 check()?;
                 let objects = {
                     let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;

@@ -3,6 +3,7 @@ import { safeStructuredClone } from '../polyfill'
 import { v4 } from 'uuid'
 import { canonicalJson } from './saveCoordinatorHelpers'
 import { defineOwnEnumerableProperty } from './ownEnumerableProperty'
+import { isConversationSummaryStub } from './conversationResidency'
 
 export const presetMirrorMap = Object.fromEntries([
     ...('apiType localNetworkMode localNetworkTimeoutSec mainPrompt jailbreak globalNote temperature maxContext maxResponse frequencyPenalty PresensePenalty formatingOrder aiModel subModel currentPluginProvider textgenWebUIStreamURL textgenWebUIBlockingURL forceReplaceUrl promptPreprocess bias koboldURL proxyKey ooba ainconfig proxyRequestModel openrouterRequestModel promptTemplate NAIadventure NAIappendName localStopStrings autoSuggestPrompt autoSuggestPrefix autoSuggestClean customProxyRequestModel reverseProxyOobaArgs top_p promptSettings repetition_penalty min_p top_a openrouterProvider useInstructPrompt customPromptTemplateToggle templateDefaultVariables moduleIntergration top_k instructChatTemplate JinjaTemplate jsonSchemaEnabled jsonSchema strictJsonSchema extractJson groupOtherBotRole groupTemplate seperateParametersEnabled seperateParameters customAPIFormat systemContentReplacement systemRoleReplacement customFlags enableCustomFlags thinkingTokens thinkingType deepseekThinkingType adaptiveThinkingEffort deepseekReasoningEffort outputImageModal seperateModelsForAxModels seperateModels modelTools fallbackModels fallbackWhenBlankResponse verbosity dynamicOutput').split(' ').map(key => [key, key]),
@@ -19,6 +20,8 @@ export const protectedPresetGroups = {
 export type ProtectedPresetField = keyof typeof protectedPresetGroups
 
 type Snapshot = Record<string, unknown>
+type Conversation = Database['characters'][number]['chats'][number]
+interface ToggleBinding { characterId: string; conversationId: string }
 interface IdentityState {
     override: string | null
     presetId: string | undefined
@@ -27,7 +30,7 @@ interface IdentityState {
     persona: Snapshot
     flags: Snapshot
     variables: Record<string, string>
-    boundChat: Database['characters'][number]['chats'][number] | undefined
+    binding: ToggleBinding | undefined
 }
 const states = new WeakMap<Database, IdentityState>()
 const personaMirrorMap = { username: 'name', userIcon: 'icon', personaPrompt: 'personaPrompt', userNote: 'note' }
@@ -46,11 +49,22 @@ function state(db: Database): IdentityState {
             personaId: db.personas?.[db.selectedPersona]?.id,
             preset: snapshot(db, presetMirrorMap), persona: snapshot(db, personaMirrorMap),
             flags: Object.fromEntries(Object.values(protectedPresetGroups).map(key => [key, root(db)[key]])),
-            variables: { ...db.globalChatVariables }, boundChat: undefined,
+            variables: { ...db.globalChatVariables }, binding: undefined,
         }
         states.set(db, current)
     }
     return current
+}
+
+function boundConversation(db: Database, binding: ToggleBinding | undefined): Conversation | undefined {
+    if (!binding) return undefined
+    const chat = db.characters?.find(character => character.chaId === binding.characterId)?.chats
+        ?.find(chat => chat.id === binding.conversationId)
+    return chat && !isConversationSummaryStub(chat) ? chat : undefined
+}
+
+export function getEffectivePresetOverride(db: Database): string | null {
+    return states.get(db)?.override ?? null
 }
 
 export function getEffectivePresetId(db: Database): string | undefined {
@@ -149,26 +163,30 @@ export function flushEffectiveToggleEdits(db: Database): void {
     for (const key of new Set([...Object.keys(current.variables), ...Object.keys(db.globalChatVariables ?? {})])) {
         const value = db.globalChatVariables?.[key]
         if (value === current.variables[key]) continue
-        const target = key.startsWith('toggle_') && current.boundChat
-            ? (current.boundChat.savedToggleValues ??= {}) : explicit
+        const bound = key.startsWith('toggle_') && current.binding ? boundConversation(db, current.binding) : undefined
+        // Toggle edits for a bound conversation that is no longer resident never reach shared variables.
+        if (key.startsWith('toggle_') && current.binding && !bound) continue
+        const target = bound ? (bound.savedToggleValues ??= {}) : explicit
         if (value === undefined) delete target[key]
         else defineOwnEnumerableProperty(target, key, value)
     }
     current.variables = { ...db.globalChatVariables }
 }
 
-export function deriveEffectiveToggleVariables(db: Database, chat?: IdentityState['boundChat']): void {
+export function deriveEffectiveToggleVariables(db: Database, chat?: Conversation): void {
     const current = state(db)
     const explicit = getExplicitGlobalChatVariables(db)
     const variables = { ...explicit }
-    const bound = !db.disableToggleBinding && chat?.savedToggleValues !== undefined ? chat : undefined
+    const owner = !db.disableToggleBinding && chat?.savedToggleValues !== undefined && typeof chat.id === 'string'
+        ? db.characters?.find(character => character.chats?.includes(chat)) : undefined
+    const bound = owner ? chat : undefined
     if (bound) {
         for (const key of Object.keys(variables)) if (key.startsWith('toggle_')) delete variables[key]
         for (const [key, value] of Object.entries(bound.savedToggleValues)) if (key.startsWith('toggle_')) variables[key] = value
     }
     db.globalChatVariables = variables
     current.variables = { ...variables }
-    current.boundChat = bound
+    current.binding = owner ? { characterId: owner.chaId, conversationId: chat!.id! } : undefined
 }
 
 export function prepareImportedIdentityState(db: Database): void {
@@ -200,7 +218,12 @@ export function translateRootUnitIntents(db: Database, mutations: readonly UnitI
     const result: UnitIntent[] = []
     const current = state(db)
     const rootIntents = new Map(mutations.map(mutation => [mutation.key, mutation]))
-    const boundToggles = { ...current.boundChat?.savedToggleValues }
+    const bound = boundConversation(db, current.binding)
+    const boundTarget = (): boolean => {
+        if (current.binding && !bound) throw new Error('Bound conversation was not found')
+        return Boolean(bound)
+    }
+    const boundToggles = { ...bound?.savedToggleValues }
     let boundTogglesChanged = false
     const requestedValue = (field: string): unknown => {
         const mutation = rootIntents.get(JSON.stringify(['root', field]))
@@ -208,7 +231,7 @@ export function translateRootUnitIntents(db: Database, mutations: readonly UnitI
     }
     for (const mutation of mutations) {
         const parts: unknown = JSON.parse(mutation.key)
-        if (Array.isArray(parts) && parts[0] === 'toggle' && parts.length === 2 && current.boundChat) {
+        if (Array.isArray(parts) && parts[0] === 'toggle' && parts.length === 2 && boundTarget()) {
             if (mutation.type === 'delete') delete boundToggles[parts[1]]
             else boundToggles[parts[1]] = mutation.value as string
             boundTogglesChanged = true
@@ -243,12 +266,11 @@ export function translateRootUnitIntents(db: Database, mutations: readonly UnitI
             key = JSON.stringify(['persona', id, personaMirrorMap[field as keyof typeof personaMirrorMap]])
         } else if (field === 'globalChatVariables') {
             const incoming = mutation.type === 'set' ? mutation.value as Record<string, string> : {}
-            const bound = current.boundChat
             const toggles = { ...bound?.savedToggleValues }
             let boundChanged = false
             for (const variable of new Set([...Object.keys(db.globalChatVariables ?? {}), ...Object.keys(incoming)])) {
                 if (incoming[variable] === db.globalChatVariables?.[variable]) continue
-                if (variable.startsWith('toggle_') && bound) {
+                if (variable.startsWith('toggle_') && boundTarget()) {
                     if (incoming[variable] === undefined) delete toggles[variable]
                     else toggles[variable] = incoming[variable]
                     boundChanged = true
@@ -258,11 +280,8 @@ export function translateRootUnitIntents(db: Database, mutations: readonly UnitI
                         : { key: variableKey, type: 'set', value: incoming[variable] })
                 }
             }
-            if (boundChanged) {
-                const owner = db.characters.find(character => character.chats.includes(bound))
-                if (!owner) throw new Error('Bound conversation was not found')
-                result.push({ key: JSON.stringify(['conversation', owner.chaId, bound.id, 'savedToggleValues']), type: 'set', value: toggles })
-            }
+            if (boundChanged) result.push({ key: JSON.stringify(['conversation', current.binding!.characterId,
+                current.binding!.conversationId, 'savedToggleValues']), type: 'set', value: toggles })
             continue
         }
         result.push({ ...mutation, key })
@@ -279,11 +298,7 @@ export function translateRootUnitIntents(db: Database, mutations: readonly UnitI
             }
         }
     }
-    if (boundTogglesChanged) {
-        const bound = current.boundChat
-        const owner = db.characters.find(character => character.chats.includes(bound))
-        if (!owner) throw new Error('Bound conversation was not found')
-        result.push({ key: JSON.stringify(['conversation', owner.chaId, bound.id, 'savedToggleValues']), type: 'set', value: boundToggles })
-    }
+    if (boundTogglesChanged) result.push({ key: JSON.stringify(['conversation', current.binding!.characterId,
+        current.binding!.conversationId, 'savedToggleValues']), type: 'set', value: boundToggles })
     return [...new Map(result.map(mutation => [mutation.key, mutation])).values()]
 }

@@ -4,6 +4,10 @@ use risunest_sync_wire::{RemoteHead, Sequence};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
+/// How long journal bodies, operation receipts and superseded versions stay
+/// retained after an inactive device or an old write.
+const RETENTION_SECONDS: i64 = 604800;
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaintenanceResult {
@@ -325,6 +329,26 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// Asset and inlay units name their bodies inside inline values. An alias
+    /// that cannot be read stops maintenance rather than releasing its body.
+    fn root_alias_bodies(tx: &Connection) -> Result<()> {
+        let mut aliases = tx.prepare(
+            "SELECT json_extract(body,'$.value.bytes') FROM units WHERE json_extract(key,'$[0]') IN ('asset','inlay') AND json_extract(body,'$.value.kind')='inline'
+            UNION SELECT json_extract(body,'$.value.bytes') FROM state_pin_units WHERE json_extract(key,'$[0]') IN ('asset','inlay') AND json_extract(body,'$.value.kind')='inline'
+            UNION SELECT json_extract(body,'$.value.bytes') FROM journal WHERE json_extract(key,'$[0]') IN ('asset','inlay') AND json_extract(body,'$.value.kind')='inline'",
+        )?;
+        let mut root = tx.prepare("INSERT OR IGNORE INTO gc_roots VALUES(?1)")?;
+        let mut rows = aliases.query([])?;
+        while let Some(row) = rows.next()? {
+            let bytes: String = row.get(0)?;
+            if let Some(hash) =
+                super::lww::alias_object(&bytes).map_err(|_| Error::new("corrupt-metadata", 503))?
+            {
+                root.execute([hash])?;
+            }
+        }
+        Ok(())
+    }
     fn purge_revoked_devices(tx: &Connection) -> Result<()> {
         tx.execute(
             "DELETE FROM operations WHERE device IN (SELECT id FROM devices WHERE revoked=1)",
@@ -375,9 +399,10 @@ impl Store {
             .parse()
             .map_err(|_| Error::new("corrupt-metadata", 503))?;
         let mut floor = latest;
+        let expired = current - RETENTION_SECONDS;
         {
             let mut stmt = tx.prepare("SELECT ack FROM devices WHERE revoked=0 AND last_ack IS NOT NULL AND last_ack>?1 UNION ALL SELECT start_seq FROM state_pins")?;
-            for value in stmt.query_map([current - 604800], |r| r.get::<_, String>(0))? {
+            for value in stmt.query_map([expired], |r| r.get::<_, String>(0))? {
                 floor = floor.min(
                     value?
                         .parse()
@@ -389,7 +414,7 @@ impl Store {
         let oldest: Option<String> = tx
             .query_row(
                 "SELECT seq FROM journal WHERE created>?1 ORDER BY length(seq),seq LIMIT 1",
-                [current - 604800],
+                [expired],
                 |r| r.get(0),
             )
             .optional()?;
@@ -406,19 +431,30 @@ impl Store {
             "DELETE FROM journal WHERE (length(seq),seq)<=(?1,?2)",
             params![floor.to_string().len() as i64, floor.to_string()],
         )?;
+        // Receipts answer retries and settlement, which happen well inside the
+        // tail. A superseded version only guards equal-stamp collisions for the
+        // same period; the current version of every unit stays recorded.
+        tx.execute("DELETE FROM operations WHERE created<=?1", [expired])?;
+        tx.execute(
+            "DELETE FROM writer_versions WHERE created<=?1 AND NOT EXISTS(SELECT 1 FROM units WHERE units.key=writer_versions.key
+                AND json_extract(units.body,'$.stamp.writerId')=writer_versions.writer
+                AND json_extract(units.body,'$.stamp.physicalMs')=writer_versions.physical
+                AND json_extract(units.body,'$.stamp.logical')=writer_versions.logical)",
+            [expired],
+        )?;
         let floor = Sequence::from(floor);
         head.min_retained_seq = floor.clone();
-        for section in head.sections.values_mut() {
-            section.gc_floor = floor.clone();
-        }
         tx.execute("UPDATE library SET head=?1", [json(&head)?])?;
-        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS gc_roots(hash TEXT PRIMARY KEY); DELETE FROM gc_roots;
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS gc_roots(hash TEXT PRIMARY KEY); DELETE FROM gc_roots;
             INSERT OR IGNORE INTO gc_roots SELECT hash FROM object_leases;
             INSERT OR IGNORE INTO gc_roots SELECT hash FROM object_custody;
             INSERT OR IGNORE INTO gc_roots SELECT hash FROM uploads WHERE expires>unixepoch();
             INSERT OR IGNORE INTO gc_roots SELECT hash FROM upload_delta_bases;
-            INSERT OR IGNORE INTO gc_roots SELECT hash FROM download_delta_bases;
-            CREATE TEMP TABLE IF NOT EXISTS gc_versions(body TEXT); DELETE FROM gc_versions;
+            INSERT OR IGNORE INTO gc_roots SELECT hash FROM download_delta_bases;",
+        )?;
+        Self::root_alias_bodies(&tx)?;
+        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS gc_versions(body TEXT); DELETE FROM gc_versions;
             INSERT INTO gc_versions SELECT json_extract(body,'$.value') FROM units UNION ALL SELECT json_extract(body,'$.value') FROM state_pin_units UNION ALL SELECT json_extract(body,'$.value') FROM journal;
             INSERT OR IGNORE INTO gc_roots SELECT json_extract(body,'$.descriptor.objectHash') FROM gc_versions WHERE json_extract(body,'$.descriptor.objectHash') IS NOT NULL;
             INSERT OR IGNORE INTO gc_roots SELECT json_extract(body,'$.descriptorHash') FROM gc_versions WHERE json_extract(body,'$.descriptorHash') IS NOT NULL;
@@ -471,9 +507,6 @@ impl Store {
         let mut head = RemoteHead::genesis(prior.library_id, random_id()?)?;
         head.seq = prior.seq;
         head.min_retained_seq = head.seq.clone();
-        for section in head.sections.values_mut() {
-            section.gc_floor = head.seq.clone();
-        }
         tx.execute(
             "INSERT OR IGNORE INTO staging_trash SELECT upload,ordinal FROM upload_chunks",
             [],

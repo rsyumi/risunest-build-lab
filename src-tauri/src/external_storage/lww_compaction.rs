@@ -27,11 +27,35 @@ pub(crate) struct PublishedState {
     pub segments: Vec<(ObjectReceipt,segment::Segment)>,
 }
 
+pub(crate) const COMPACTION_TAKEOVER: std::time::Duration=std::time::Duration::from_secs(60);
+
+/// Which device compacts. The device that published last starts at once; any
+/// other foreground device takes over once compaction has stayed due for the
+/// takeover delay without a new retained checkpoint.
+#[derive(Default)]
+pub(crate) struct CompactionTurn {
+    due_since:Option<(std::time::Instant,BTreeSet<String>)>,
+    own_publication:Option<std::time::Instant>,
+    foreign_publication:Option<std::time::Instant>,
+}
+impl CompactionTurn {
+    pub(crate) fn published(&mut self,at:std::time::Instant) {self.own_publication=Some(at)}
+    pub(crate) fn observed_foreign(&mut self,at:std::time::Instant) {self.foreign_publication=Some(at)}
+    /// `due` names the retained checkpoints when compaction is due.
+    pub(crate) fn ready(&mut self,due:Option<BTreeSet<String>>,now:std::time::Instant)->bool {
+        let Some(coverage)=due else {self.due_since=None;return false};
+        if self.due_since.as_ref().is_none_or(|(_,since)|*since!=coverage) {self.due_since=Some((now,coverage));}
+        let last=self.own_publication.is_some_and(|own|self.foreign_publication.is_none_or(|foreign|own>=foreign));
+        last || self.due_since.as_ref().is_some_and(|(since,_)|now.saturating_duration_since(*since)>=COMPACTION_TAKEOVER)
+    }
+}
+
 fn maintenance_due(checkpoints:&[Checkpoint],segments:&[ObjectReceipt])->Result<bool> {
     let retained=lww_checkpoint::retained(checkpoints)?;
     if retained.len()>1 {return Ok(true);}
+    let checkpoints=checkpoints.iter().filter(|checkpoint|retained.contains(&checkpoint.snapshot_id));
     let mut coverage=super::lww_checkpoint::Coverage::new();
-    for checkpoint in checkpoints.iter().filter(|checkpoint|retained.contains(&checkpoint.snapshot_id)) {
+    for checkpoint in checkpoints {
         for (writer,prefix) in &checkpoint.covered_prefixes {
             let current=coverage.entry(writer.clone()).or_insert(risunest_sync_wire::stamp::DecimalU64(0));
             *current=(*current).max(*prefix);
@@ -125,10 +149,11 @@ fn live_published_objects(state:&PublishedState,capture:&mut super::capture::Cap
     Ok((live,conservative))
 }
 impl ExternalLwwEngine {
-    pub(crate) async fn maintenance_needed(&self,cancel:&Cancellation)->Result<bool> {
-        let mut checkpoints=Vec::new();
-        for receipt in self.snapshot_listing(cancel).await? {checkpoints.push(self.checkpoint(&receipt,cancel).await?.1);}
-        maintenance_due(&checkpoints,&self.listing(cancel).await?)
+    /// The retained checkpoints when compaction is due.
+    pub(crate) async fn maintenance_needed(&self,cancel:&Cancellation)->Result<Option<BTreeSet<String>>> {
+        let checkpoints=self.checkpoints(cancel).await?.into_iter().map(|(_,checkpoint)|checkpoint).collect::<Vec<_>>();
+        if !maintenance_due(&checkpoints,&self.listing(cancel).await?)? {return Ok(None)}
+        Ok(Some(lww_checkpoint::retained(&checkpoints)?))
     }
     pub(super) async fn refresh_packed_sources(&self,sources:&[super::lww_residency::PackedSource],directory:&Path,cancel:&Cancellation)->Result<Vec<super::lww_residency::PackedSource>> {
         let mut wanted=BTreeMap::new();
@@ -138,8 +163,7 @@ impl ExternalLwwEngine {
             }
             if wanted.insert(source.hash.clone(),source.byte_length).is_some() {return Err(segment::corrupt());}
         }
-        let mut checkpoints=Vec::new();
-        for receipt in self.snapshot_listing(cancel).await? {checkpoints.push(self.checkpoint(&receipt,cancel).await?.1);}
+        let mut checkpoints=self.checkpoints(cancel).await?.into_iter().map(|(_,checkpoint)|checkpoint).collect::<Vec<_>>();
         let retained=lww_checkpoint::retained(&checkpoints)?;
         checkpoints.sort_by(|a,b|a.snapshot_id.cmp(&b.snapshot_id));
         let mut refreshed=BTreeMap::new();let mut catalogs=BTreeMap::new();
@@ -301,14 +325,26 @@ impl ExternalLwwEngine {
         Ok(())
     }
     pub(crate) async fn snapshot_listing(&self,cancel:&Cancellation) -> Result<Vec<ObjectReceipt>> {
+        Ok(self.checkpoints(cancel).await?.into_iter().map(|(object,_)|object.receipt).collect())
+    }
+    /// Every published checkpoint, each read once.
+    pub(crate) async fn checkpoints(&self,cancel:&Cancellation) -> Result<Vec<(RemoteObject,Checkpoint)>> {
+        let mut output=Vec::new();
+        for receipt in self.snapshot_receipts(cancel).await? {
+            if let Some(found)=self.classified_checkpoint(&receipt,cancel).await? {output.push(found);}
+        }
+        Ok(output)
+    }
+    pub(crate) async fn snapshot_receipts(&self,cancel:&Cancellation) -> Result<Vec<ObjectReceipt>> {
         let mut output=Vec::new(); let mut cursor=None; let mut visited=BTreeSet::new();
         loop {
             let page=self.provider.list_objects(&self.repository,Collection::Snapshots,cursor.as_deref(),100,cancel).await?;
-            for receipt in page.objects {if self.classified_checkpoint(&receipt,cancel).await?.is_some() {output.push(receipt);}}
+            output.extend(page.objects);
             match page.next_cursor { Some(next) => { if !visited.insert(next.clone()) { return Err(segment::corrupt()); } cursor=Some(next); }, None=>break }
         }
         Ok(output)
     }
+    #[cfg(test)]
     pub(crate) async fn checkpoint(&self,receipt:&ObjectReceipt,cancel:&Cancellation)->Result<(RemoteObject,Checkpoint)> {self.classified_checkpoint(receipt,cancel).await?.ok_or_else(segment::corrupt)}
     pub(super) async fn classified_checkpoint(&self, receipt:&ObjectReceipt,cancel:&Cancellation) -> Result<Option<(RemoteObject,Checkpoint)>> {
         receipt.locator.validate_for(&self.repository)?;
@@ -338,8 +374,7 @@ impl ExternalLwwEngine {
     pub(crate) async fn published_state(&self,directory:&Path,cancel:&Cancellation) -> Result<PublishedState> {
         std::fs::create_dir_all(directory).map_err(error)?;
         let mut catalog=PublishedCatalog::create(&directory.join("published.sqlite"))?;
-        let mut snapshots=Vec::new();
-        for receipt in self.snapshot_listing(cancel).await? { snapshots.push(self.checkpoint(&receipt,cancel).await?); }
+        let snapshots=self.checkpoints(cancel).await?;
         let retained=lww_checkpoint::retained(&snapshots.iter().map(|(_,s)|s.clone()).collect::<Vec<_>>())?;
         let mut body_spool=super::capture::BackupDependencySpool::new(directory).map_err(error)?;
         let mut standalone=BTreeMap::new(); let mut standalone_roots=BTreeMap::new(); let mut asset_catalogs=Vec::new();
@@ -462,12 +497,37 @@ mod tests {
     use super::super::{fake,lww_tests::{CycleFixture,small_asset}};
 
     #[test]
+    fn the_last_publisher_compacts_first_and_another_device_takes_over_after_sixty_seconds() {
+        use std::time::{Duration,Instant};
+        let start=Instant::now();
+        let at=|seconds:u64|start+Duration::from_secs(seconds);
+        let coverage=|id:&str|Some(BTreeSet::from([id.to_owned()]));
+        let mut follower=CompactionTurn::default();
+        follower.published(at(0));follower.observed_foreign(at(1));
+        assert!(!follower.ready(coverage("a"),at(2)));
+        assert!(!follower.ready(coverage("a"),at(61)));
+        assert!(follower.ready(coverage("a"),at(62)),"no new checkpoint for sixty seconds");
+        assert!(!follower.ready(coverage("b"),at(70)),"a new retained checkpoint is published progress");
+        assert!(!follower.ready(coverage("b"),at(129)));
+        assert!(follower.ready(coverage("b"),at(130)));
+        assert!(!follower.ready(None,at(131)));
+        assert!(!follower.ready(coverage("b"),at(132)),"compaction that stopped being due starts a new wait");
+        let mut fresh=CompactionTurn::default();
+        assert!(!fresh.ready(coverage("a"),at(0)),"a restarted device does not know it published last");
+        assert!(fresh.ready(coverage("a"),at(60)));
+        let mut leader=CompactionTurn::default();
+        leader.observed_foreign(at(0));leader.published(at(1));
+        assert!(leader.ready(coverage("a"),at(2)));
+        assert!(!leader.ready(None,at(3)));
+    }
+
+    #[test]
     fn current_published_payload_is_captured_and_unreferenced_payload_is_left_out() {
         use risunest_sync_wire::{unit::{UnitKey,UnitValue},descriptor::RecordDescriptor,stamp::{Stamp,DecimalU64}};
         let directory=tempfile::tempdir().unwrap();let bytes=b"\"synthetic current data\"";let dead=b"\"synthetic retired data\"";
         let hash=risunest_sync_wire::hash(bytes);let dead_hash=risunest_sync_wire::hash(dead);
         let mut catalog=PublishedCatalog::create(&directory.path().join("published.sqlite")).unwrap();
-        catalog.merge(&crate::persistent_store::lww::Change{key:UnitKey::new(&["root","language"]).unwrap(),
+        catalog.merge(&crate::persistent_store::lww::Change{key:UnitKey::new(&["future-unit","current"]).unwrap(),
             stamp:Stamp{physical_ms:DecimalU64(1),logical:0,writer_id:"00000000-0000-4000-8000-000000000001".into()},
             value:UnitValue::object(RecordDescriptor::content(hash.clone())).unwrap()}).unwrap();
         let mut body_spool=super::super::capture::BackupDependencySpool::new(directory.path()).unwrap();
@@ -526,11 +586,11 @@ mod tests {
                 assert!(completed.compaction_capture_rows.unwrap()>0);
                 assert!(completed.compaction_catalog_merge_visits.unwrap()>=completed.compaction_capture_rows.unwrap());
                 let (_,checkpoint)=engine.checkpoint(&completed.reference.receipt,&cancel).await.unwrap();
-                assert!(!engine.maintenance_needed(&cancel).await.unwrap());
+                assert!(engine.maintenance_needed(&cancel).await.unwrap().is_none());
                 if local {
                     engine.compact_published(&work.path().join("equivalent"),"00000000-0000-4000-8000-000000000086",
                         &f.a.lww_clock_state().unwrap().writer_id,&fake::capabilities(true),&cancel,None).await.unwrap();
-                    assert!(!engine.maintenance_needed(&cancel).await.unwrap(),"equal-coverage checkpoints awaiting grace do not trigger compaction");
+                    assert!(engine.maintenance_needed(&cancel).await.unwrap().is_none(),"equal-coverage checkpoints awaiting grace do not trigger compaction");
                     let writer=f.a.lww_clock_state().unwrap().writer_id;
                     let mut covered=checkpoint.clone();covered.covered_prefixes.insert(writer.clone(),risunest_sync_wire::stamp::DecimalU64(100));
                     let receipts=(1..=100).map(|seq| {let mut receipt=completed.reference.receipt.clone();

@@ -117,7 +117,6 @@
         const reasons = strings.snapshotReasons
         if (reason === 'manual') return reasons.manual
         if (reason === 'periodic') return reasons.periodic
-        if (reason === 'pre-restore') return reasons.preRestore
         if (reason === "data-health-repair") return reasons.dataHealthRepair
         return ""
     }
@@ -205,7 +204,8 @@
                 onEmpty: () => { listed = false },
             })
         } catch (error) {
-            showActionError(error)
+            const syncUnavailable = typeof error === 'object' && error !== null && 'code' in error && error.code === 'sync-unavailable'
+            showActionError(error, syncUnavailable ? language.risuNest.backup.syncUnavailable : strings.actionFailed)
         } finally {
             restoringSnapshot = null
         }

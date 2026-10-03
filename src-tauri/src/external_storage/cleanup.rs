@@ -190,6 +190,11 @@ fn current_limit(
     Ok(None)
 }
 
+fn trusted_wall(context: &LeaseContext<'_>, started: ClockReading) -> Option<u64> {
+    let now = context.clock.reading();
+    (now.trusted && now.foreground && now.epoch == started.epoch).then_some(now.wall_ms)
+}
+
 async fn recheck(
     context: &LeaseContext<'_>, owner: &LeaseOwner, view: &dyn RepositoryView,
     before: &ObservedRoots, jobs: &JobRoots, cancel: &Cancellation,
@@ -227,8 +232,6 @@ pub(crate) async fn run(
     } else {
         None
     };
-    // Opening a run invalidates the interval before its first remote reading.
-    GcStore::open(context.root)?.begin_observation(context.connection_id)?;
     if let Some(reason) = refused {
         let outcome = CleanupOutcome::stopped(reason);
         record(context, &outcome)?;
@@ -266,17 +269,22 @@ pub(crate) async fn run(
     let result = owner.run(context, cancel, run_owned(
         context, request, time_not_before, &owner, started, view, source, cancel, &mut outcome,
     )).await;
-    let bookkeeping = (|| {
-        if result.is_err() || !matches!(outcome.stop_reason, StopReason::Complete | StopReason::Limit) {
-            GcStore::open(context.root)?.invalidate_observations(context.connection_id)?;
-        }
-        record(context, &outcome)
-    })();
+    let bookkeeping = record(context, &outcome);
     // A statistics failure must not turn 401, 429 or cancellation into a generic
-    // storage error. The observation began invalid, so failure cannot grant age.
+    // storage error.
     result?;
     bookkeeping?;
     Ok(outcome)
+}
+
+/// Without compaction an idle repository only gains unreachable inputs as they
+/// age, so cleanup revisits it once a day.
+pub(crate) const LWW_CLEANUP_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000;
+
+pub(crate) fn lww_cleanup_due(compacted: bool, last_run_ms: Option<u64>, now_ms: u64) -> bool {
+    compacted || last_run_ms.is_none_or(|last| {
+        now_ms.checked_sub(last).is_none_or(|elapsed| elapsed >= LWW_CLEANUP_INTERVAL_MS)
+    })
 }
 
 pub(crate) async fn run_lww(
@@ -305,10 +313,15 @@ async fn run_owned(
     let jobs = view.job_roots()?;
     let mut known_objects = view.known_objects()?;
     known_objects.extend(inventory.objects);
+    // Observations outlive this run, so they are stamped only with trusted time.
+    let Some(observed_at) = trusted_wall(context, started) else {
+        outcome.stop_reason = StopReason::Clock;
+        return Ok(());
+    };
     let marked = reachability::mark(context.root, source, MarkRequest {
         connection_id: context.connection_id, repository: context.repository,
         format_repository_id: &context.descriptor.repository_id,
-        now_ms: context.clock.reading().wall_ms,
+        now_ms: observed_at,
         roots: Roots {
             head: before.head.clone(), kept_points: before.kept_points.clone(),
             kept_bundles: before.kept_bundles.clone(), job_objects: jobs.objects.clone(),
@@ -444,7 +457,10 @@ async fn run_owned(
                 return Err(ProviderError::new(ErrorKind::Corrupt));
             }
         }
-        let observed_at = context.clock.reading().wall_ms;
+        let Some(observed_at) = trusted_wall(context, started) else {
+            outcome.stop_reason = StopReason::Clock;
+            return Ok(());
+        };
         let ages = GcStore::open(context.root)?.record_inventory_page_observations(
             context.connection_id,
             &absent,
@@ -532,9 +548,7 @@ async fn run_owned(
         } else if let Some(reason) = current_limit(context, request, time_not_before, owner, started, cancel)? {
             outcome.stop_reason = reason;
         } else {
-            let store = GcStore::open(context.root)?;
-            store.set_last_reachable_bytes(context.connection_id, marked.reachable_bytes)?;
-            store.finish_observation(context.connection_id)?;
+            GcStore::open(context.root)?.set_last_reachable_bytes(context.connection_id, marked.reachable_bytes)?;
         }
     }
     Ok(())
@@ -827,16 +841,49 @@ pub(crate) struct ConnectedDocuments<'a> {
     pub scratch: &'a Path,
 }
 
+type ListedCheckpoint=Option<(RemoteObject,super::lww_checkpoint::Checkpoint)>;
+/// One cleanup run reads each published checkpoint and segment once; rechecks
+/// only list again. A changed receipt is read again.
 pub(crate) struct LwwRepositoryView<'a> {
     pub engine:&'a super::lww_engine::ExternalLwwEngine,
     pub base:ConnectedRepositoryView<'a>,
     pub documents:ConnectedDocuments<'a>,
     native_bodies:std::sync::Mutex<BTreeMap<String,RemoteObject>>,
     known:std::sync::Mutex<Vec<RemoteObject>>,
+    checkpoints:std::sync::Mutex<BTreeMap<String,ListedCheckpoint>>,
+    segments:std::sync::Mutex<BTreeMap<String,(RemoteObject,DocumentNode)>>,
+}
+fn receipt_key(receipt:&ObjectReceipt)->Result<String> {
+    serde_json::to_string(receipt).map_err(|_|ProviderError::new(ErrorKind::Corrupt))
 }
 impl<'a> LwwRepositoryView<'a> {
     pub(crate) fn new(engine:&'a super::lww_engine::ExternalLwwEngine,base:ConnectedRepositoryView<'a>,documents:ConnectedDocuments<'a>)->Self {
-        Self{engine,base,documents,native_bodies:Default::default(),known:Default::default()}
+        Self{engine,base,documents,native_bodies:Default::default(),known:Default::default(),checkpoints:Default::default(),segments:Default::default()}
+    }
+    async fn checkpoint_document(&self,receipt:&ObjectReceipt)->Result<ListedCheckpoint> {
+        let key=receipt_key(receipt)?;
+        if let Some(found)=self.checkpoints.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?.get(&key) {return Ok(found.clone())}
+        let found=self.engine.classified_checkpoint(receipt,self.documents.cancel).await?;
+        self.checkpoints.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?.insert(key,found.clone());
+        Ok(found)
+    }
+    /// A published input this run already downloaded and authenticated.
+    fn verified(&self,object:&RemoteObject)->Result<Option<ObjectReceipt>> {
+        let key=receipt_key(&object.receipt)?;
+        Ok(match object.role {
+            ObjectRole::Segment=>self.segments.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?
+                .get(&key).map(|(current,_)|current.receipt.clone()),
+            ObjectRole::Snapshot|ObjectRole::SyncState=>self.checkpoints.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?
+                .get(&key).and_then(Option::as_ref).map(|(current,_)|current.receipt.clone()),
+            _=>None,
+        })
+    }
+    async fn segment_document(&self,receipt:&ObjectReceipt)->Result<(RemoteObject,DocumentNode)> {
+        let key=receipt_key(receipt)?;
+        if let Some(found)=self.segments.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?.get(&key) {return Ok(found.clone())}
+        let found=self.segment_node(receipt).await?;
+        self.segments.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?.insert(key,found.clone());
+        Ok(found)
     }
     fn standalone(&self,hash:&str,body:&super::lww_segment::LargeBody)->Result<RemoteObject> {
         let locator=body.locator.clone().ok_or_else(||ProviderError::new(ErrorKind::Corrupt))?;
@@ -886,11 +933,13 @@ impl RepositoryView for LwwRepositoryView<'_> {
             std::fs::create_dir_all(self.documents.scratch).map_err(|_|ProviderError::new(ErrorKind::Transient))?;
             let metadata=std::fs::symlink_metadata(self.documents.scratch).map_err(|_|ProviderError::new(ErrorKind::Transient))?;
             if !metadata.is_dir() || crate::trust_boundary::is_link_like(&metadata) {return Err(ProviderError::new(ErrorKind::Corrupt))}
-            let scratch=tempfile::tempdir_in(self.documents.scratch).map_err(|_|ProviderError::new(ErrorKind::Transient))?;
-            let state=self.engine.published_state(scratch.path(),cancel).await?;
-            let retained=super::lww_checkpoint::retained(&state.snapshots.iter().map(|(_,doc)|doc.clone()).collect::<Vec<_>>())?;
+            let mut checkpoints=Vec::new();
+            for receipt in self.engine.snapshot_receipts(cancel).await? {
+                if let Some(found)=self.checkpoint_document(&receipt).await? {checkpoints.push(found);}
+            }
+            let retained=super::lww_checkpoint::retained(&checkpoints.iter().map(|(_,doc)|doc.clone()).collect::<Vec<_>>())?;
             let mut coverage=super::lww_checkpoint::Coverage::new();let mut known=Vec::new();
-            for (object,document) in &state.snapshots {
+            for (object,document) in &checkpoints {
                 self.checkpoint_node(document)?;
                 if roots.points.insert(format!("lww/{}",object.object_id),object.clone()).is_some() {return Err(ProviderError::new(ErrorKind::Corrupt))}
                 if retained.contains(&document.snapshot_id) {
@@ -899,10 +948,16 @@ impl RepositoryView for LwwRepositoryView<'_> {
                 }
                 known.push(object.clone());
             }
-            for (receipt,document) in state.segments {
-                let (object,_)=self.segment_node(&receipt).await?;
+            let mut identities=BTreeMap::new();
+            for receipt in self.engine.listing(cancel).await? {
+                let name=receipt.locator.object.rsplit('/').next().ok_or_else(||ProviderError::new(ErrorKind::Corrupt))?;
+                let (writer,seq,hash)=super::contract::parse_segment_object_id(name)?;
+                if identities.insert((writer.to_owned(),seq),hash.to_owned()).is_some_and(|previous|previous!=hash) {
+                    return Err(ProviderError::new(ErrorKind::Corrupt));
+                }
+                let (object,_)=self.segment_document(&receipt).await?;
                 roots.points.insert(format!("lww/{}",object.object_id),object.clone());
-                if document.seq>coverage.get(&document.writer_id).copied().unwrap_or(risunest_sync_wire::stamp::DecimalU64(0)) {roots.kept_bundles.push(object.clone());}
+                if seq>coverage.get(writer).map_or(0,|prefix|prefix.0) {roots.kept_bundles.push(object.clone());}
                 known.push(object);
             }
             known.extend(self.native_bodies.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?.values().cloned());
@@ -941,9 +996,9 @@ impl DocumentSource for LwwRepositoryView<'_> {
     fn document<'a>(&'a self,object:&'a RemoteObject)->ProviderFuture<'a,DocumentNode> {
         Box::pin(async move {
             match object.role {
-                ObjectRole::Snapshot|ObjectRole::SyncState if !object.object_id.starts_with("snapshot-")=>{let (current,document)=self.engine.checkpoint(&object.receipt,self.documents.cancel).await?;
+                ObjectRole::Snapshot|ObjectRole::SyncState if !object.object_id.starts_with("snapshot-")=>{let (current,document)=self.checkpoint_document(&object.receipt).await?.ok_or_else(||ProviderError::new(ErrorKind::Corrupt))?;
                     if reachability::object_identity(&current,&self.engine.repository)?!=reachability::object_identity(object,&self.engine.repository)? {return Err(ProviderError::new(ErrorKind::Corrupt))}self.checkpoint_node(&document)},
-                ObjectRole::Segment=>{let (current,document)=self.segment_node(&object.receipt).await?;
+                ObjectRole::Segment=>{let (current,document)=self.segment_document(&object.receipt).await?;
                     if reachability::object_identity(&current,&self.engine.repository)?!=reachability::object_identity(object,&self.engine.repository)? {return Err(ProviderError::new(ErrorKind::Corrupt))}Ok(document)},
                 _=>self.documents.document(object).await,
             }
@@ -953,8 +1008,8 @@ impl DocumentSource for LwwRepositoryView<'_> {
         Box::pin(async move {
             let segment=self.known.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?.iter()
                 .any(|object|object.role==ObjectRole::Segment && object.receipt.locator==receipt.locator);
-            if segment {return self.segment_node(receipt).await}
-            if let Some((object,document))=self.engine.classified_checkpoint(receipt,self.documents.cancel).await? {
+            if segment {return self.segment_document(receipt).await}
+            if let Some((object,document))=self.checkpoint_document(receipt).await? {
                 return Ok((object,self.checkpoint_node(&document)?));
             }
             self.documents.listed(receipt).await
@@ -967,6 +1022,7 @@ impl DocumentSource for LwwRepositoryView<'_> {
     }
     fn probe<'a>(&'a self,object:&'a RemoteObject)->ProviderFuture<'a,Option<ObjectReceipt>> {
         Box::pin(async move {
+            if let Some(current)=self.verified(object)? {return Ok(Some(current))}
             if object.role!=ObjectRole::Segment && !self.native_body(object)? {
                 return if object.repository_id==self.engine.repository.repository_id {
                     self.documents.probe_for_repository(object,&self.engine.repository.repository_id).await
@@ -1129,24 +1185,19 @@ mod tests {
             assert!(body.stored(&connected.handle).is_err(),"native ciphertext is not a generic StoredObject envelope");
             assert!(validate_generic_body(&body,&connected.handle).is_err());
             let roots=Roots{head:observed.head,kept_points:observed.kept_points,kept_bundles:observed.kept_bundles,..Default::default()};
-            let gc=GcStore::open(f.directory_a.path()).unwrap();
-            gc.begin_observation("sender").unwrap();
             let first=reachability::mark(f.directory_a.path(),&view,reachability::MarkRequest{connection_id:"sender",repository:&connected.handle,
                 format_repository_id:&connected.stored.descriptor.repository_id,now_ms:1000,roots:roots.clone(),listed:listed.clone(),known_objects:known.clone(),retired_points:vec![]},&cancel).await.unwrap();
-            assert!(first.candidates.is_empty());gc.finish_observation("sender").unwrap();
-            gc.begin_observation("sender").unwrap();
+            assert!(first.candidates.is_empty());
             let marked=reachability::mark(f.directory_a.path(),&view,reachability::MarkRequest{connection_id:"sender",repository:&connected.handle,
                 format_repository_id:&connected.stored.descriptor.repository_id,now_ms:1000+leases::UNREACHABLE_GRACE_MS,roots:roots.clone(),listed:listed.clone(),known_objects:known.clone(),retired_points:vec![]},&cancel).await.unwrap();
             assert_eq!(marked.candidates.first().unwrap().object_id,body.object_id);
             assert!(marked.candidates.iter().skip(1).any(|object|object.role==ObjectRole::Segment));
-            gc.finish_observation("sender").unwrap();gc.begin_observation("sender").unwrap();
             let mut protected=roots;protected.job_references.push(body.clone());
             let retained=reachability::mark(f.directory_a.path(),&view,reachability::MarkRequest{connection_id:"sender",repository:&connected.handle,
                 format_repository_id:&connected.stored.descriptor.repository_id,now_ms:1000+leases::UNREACHABLE_GRACE_MS,
                 roots:protected,listed,known_objects:known,retired_points:vec![]},&cancel).await.unwrap();
             assert!(!retained.candidates.iter().any(|object|object.object_id==body.object_id));
             assert!(retained.candidates.iter().any(|object|object.role==ObjectRole::Segment),"a live body does not pin obsolete discovery parents");
-            gc.finish_observation("sender").unwrap();
             let clock=fake::FakeLeaseClock::new(1000+leases::UNREACHABLE_GRACE_MS);
             let context=LeaseContext{root:f.directory_a.path(),connection_id:"sender",writer_id:"collector",descriptor:&connected.stored.descriptor,
                 root_key:&connected.root_key,provider:connected.provider.as_ref(),repository:&connected.handle,clock:&clock,protection_supported:true,ledger:None};
@@ -1195,6 +1246,58 @@ mod tests {
         });
     }
     fn validate_generic_body(object:&RemoteObject,repository:&RepositoryHandle)->Result<()> {object.stored(repository).map(|_|())}
+
+    fn fixture_connection(f:&super::super::lww_tests::CycleFixture)->ConnectedRepository {
+        use super::super::contract::{ConnectionConfig,RemoteLocator};
+        ConnectedRepository {
+            stored:super::super::connection_store::StoredConnection {
+                id:"sender".into(),config:ConnectionConfig{provider:"synthetic".into(),profile:None,
+                    endpoint:"https://synthetic.invalid".into(),account_id:"fixture".into(),location:BTreeMap::new(),oauth_profile:None},
+                descriptor:f.sender.descriptor.clone(),descriptor_locator:RemoteLocator{connection_identity:f.sender.repository.connection_identity.clone(),collection:None,object:"descriptor".into()},
+                provider_repository_id:f.sender.repository.repository_id.clone(),credential_ref:"credential".into(),root_key_ref:"key".into(),recovery_key_ref:"recovery".into(),
+                retention_policy:None,capabilities:f.sender.capabilities.clone(),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
+            },provider:f.provider.clone(),handle:fake::repository(),
+            dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new([7;32]),
+        }
+    }
+
+    #[test]
+    fn lww_cleanup_reads_each_published_input_once() {
+        runtime().block_on(async {
+            use super::super::lww_tests::CycleFixture;
+            use crate::persistent_store::{lww::UnitMutation,WorkingSetCommit};
+            let mut f=CycleFixture::new();let cancel=Cancellation::default();
+            let language=|f:&mut CycleFixture,value:&str| {
+                f.a.commit(&WorkingSetCommit{expected_revision:f.a.revision().unwrap(),unit_mutations:Some(vec![UnitMutation::Set{
+                    key:risunest_sync_wire::unit::UnitKey::new(&["root","language"]).unwrap(),value:serde_json::json!(value)}]),..Default::default()}).unwrap();
+            };
+            for value in ["one","two","three"] {language(&mut f,value);f.publish_a().await;}
+            let directory=tempfile::tempdir().unwrap();
+            let completed=f.sender.compact_published(&directory.path().join("compaction"),"00000000-0000-4000-8000-0000000000a1",
+                &f.a.lww_clock_state().unwrap().writer_id,&f.sender.capabilities,&cancel,None).await.unwrap();
+            language(&mut f,"four");f.publish_a().await;
+            let segments=f.sender.listing(&cancel).await.unwrap().into_iter().map(|receipt|receipt.locator.object).collect::<Vec<_>>();
+            assert_eq!(segments.len(),4);
+            let checkpoint=completed.reference.receipt.locator.object.clone();
+            let reads=|f:&CycleFixture,ids:&[String]|ids.iter().map(|id|f.provider.read_attempts(id)).collect::<Vec<_>>();
+            let (segments_before,checkpoint_before)=(reads(&f,&segments),f.provider.read_attempts(&checkpoint));
+            let connected=fixture_connection(&f);
+            let cache=directory.path().join("cache");let scratch=directory.path().join("probe");
+            let clock=fake::FakeLeaseClock::new(super::super::runtime::now_ms());
+            let context=LeaseContext{root:f.directory_a.path(),connection_id:"sender",writer_id:"collector",descriptor:&connected.stored.descriptor,
+                root_key:&connected.root_key,provider:connected.provider.as_ref(),repository:&connected.handle,clock:&clock,protection_supported:true,ledger:None};
+            let request=CleanupRequest{job_id:"idle-cleanup",cleanup_supported:true,limits:CleanupLimits::default(),connection_time:&available_time};
+            let outcome=run_lww(&context,&request,&f.sender,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
+                now_ms:super::super::runtime::now_ms(),unfinished:vec![],cache_root:&cache},&scratch,&cancel).await.unwrap();
+            assert_eq!(outcome.stop_reason,StopReason::Complete);
+            assert_eq!(outcome.deleted_objects,0);
+            let segments_after=reads(&f,&segments);
+            for ((id,before),after) in segments.iter().zip(&segments_before).zip(&segments_after) {
+                assert_eq!(after-before,1,"segment {id} is read once per cleanup run");
+            }
+            assert!(f.provider.read_attempts(&checkpoint)-checkpoint_before<=1);
+        });
+    }
 
     const NOW: u64 = 1000 * 24 * 60 * leases::MINUTE_MS;
     fn available_time(_: Instant) -> Result<bool> { Ok(true) }
@@ -1344,6 +1447,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn idle_lww_cleanup_runs_only_after_compaction_or_a_long_interval() {
+        let start = NOW;
+        assert!(lww_cleanup_due(false, None, start));
+        assert!(!lww_cleanup_due(false, Some(start), start + 60_000));
+        assert!(!lww_cleanup_due(false, Some(start), start + LWW_CLEANUP_INTERVAL_MS - 1));
+        assert!(lww_cleanup_due(false, Some(start), start + LWW_CLEANUP_INTERVAL_MS));
+        assert!(lww_cleanup_due(true, Some(start), start + 60_000));
+        assert!(lww_cleanup_due(false, Some(start), start - 1), "a clock moved backward does not postpone cleanup");
+    }
     #[test]
     fn c_gc_waits_seven_days_and_deletes_parents_before_children() {
         runtime().block_on(async {
@@ -1597,7 +1710,7 @@ mod tests {
         });
     }
     #[test]
-    fn c_root_replacement_after_mark_prevents_deletion_and_resets_age() {
+    fn c_root_replacement_after_mark_prevents_deletion_but_keeps_age() {
         runtime().block_on(async {
             let h = Harness::new();
             h.age().await;
@@ -1605,7 +1718,42 @@ mod tests {
             assert_eq!(h.run().await.unwrap().stop_reason, StopReason::RootsChanged);
             assert!(h.payload_deletes().is_empty());
             h.view.change_at.store(usize::MAX, Ordering::SeqCst);
+            assert_eq!(h.run().await.unwrap().deleted_objects, 2);
+            assert_eq!(h.payload_deletes(), ["parent-catalog", "child-pack"]);
+        });
+    }
+    #[test]
+    fn c_hidden_or_yielded_runs_between_observations_keep_unreachable_age() {
+        runtime().block_on(async {
+            let h = Harness::new();
+            h.age().await;
+            h.clock.suspend();
+            assert_eq!(h.run().await.unwrap().stop_reason, StopReason::Lease);
+            h.clock.foreground();
+            h.clock.set_trusted(true);
+            assert_eq!(h.run().await.unwrap().deleted_objects, 2);
+
+            let h = Harness::new();
+            h.age().await;
+            h.provider.seed("unknown-protection", ObjectRole::Lease, b"broken".to_vec());
+            assert_eq!(h.run().await.unwrap().stop_reason, StopReason::Lease);
+            h.provider.forget("unknown-protection");
+            assert_eq!(h.run().await.unwrap().deleted_objects, 2);
+            assert!(h.payload_deletes().len() == 2);
+        });
+    }
+    #[test]
+    fn c_a_newly_reachable_object_still_loses_its_age() {
+        runtime().block_on(async {
+            let h = Harness::new();
+            h.age().await;
+            h.view.jobs.lock().unwrap().references.push(h.view.known[1].clone());
+            assert_eq!(h.run().await.unwrap().deleted_objects, 1);
+            h.view.jobs.lock().unwrap().references.clear();
             assert_eq!(h.run().await.unwrap().deleted_objects, 0);
+            assert_eq!(h.provider.delete_attempts("child-pack"), 0);
+            h.clock.advance(leases::UNREACHABLE_GRACE_MS);
+            assert_eq!(h.run().await.unwrap().deleted_objects, 1);
         });
     }
     #[test]
@@ -1683,12 +1831,14 @@ mod tests {
             h.provider.fail_delete("parent-catalog", DeleteFault::AppliedThenLost);
             assert_eq!(h.run().await.unwrap().stop_reason, StopReason::Uncertain);
             assert_eq!(h.run().await.unwrap().stop_reason, StopReason::Lease);
-            h.clock.advance(leases::LEASE_TTL_MS + leases::RELATIVE_CLOCK_ERROR_MS);
-            assert_eq!(h.run().await.unwrap().deleted_objects, 0);
-            assert_eq!(h.provider.delete_attempts("parent-catalog"), 1);
             assert_eq!(h.provider.delete_attempts("child-pack"), 0);
-            h.clock.advance(leases::UNREACHABLE_GRACE_MS);
+            h.clock.advance(leases::LEASE_TTL_MS + leases::RELATIVE_CLOCK_ERROR_MS);
+            // The parent is confirmed gone by probe, so its child keeps the age it had.
             assert_eq!(h.run().await.unwrap().deleted_objects, 1);
+            assert_eq!(h.provider.delete_attempts("parent-catalog"), 1);
+            assert_eq!(h.provider.delete_attempts("child-pack"), 1);
+            h.clock.advance(leases::UNREACHABLE_GRACE_MS);
+            assert_eq!(h.run().await.unwrap().deleted_objects, 0);
             assert_eq!(h.provider.delete_attempts("parent-catalog"), 1);
         });
     }

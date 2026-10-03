@@ -156,6 +156,12 @@ impl PersistentStoreState {
     }
 
     pub(crate) fn admit_renderer_operation(&self) -> StoreResult<RendererOperationGuard> {
+        self.try_admit_renderer_operation()?
+            .ok_or_else(renderer_gate_error)
+    }
+
+    /// Admits an operation unless device maintenance holds the gate.
+    fn try_admit_renderer_operation(&self) -> StoreResult<Option<RendererOperationGuard>> {
         let mut state = self
             .renderer_gate
             .state
@@ -164,12 +170,12 @@ impl PersistentStoreState {
                 message: format!("persistent renderer admission mutex poisoned: {error}"),
             })?;
         if state.maintenance_active {
-            return Err(renderer_gate_error());
+            return Ok(None);
         }
         state.operations += 1;
-        Ok(RendererOperationGuard {
+        Ok(Some(RendererOperationGuard {
             gate: Arc::clone(&self.renderer_gate),
-        })
+        }))
     }
 
     pub(crate) fn open_admitted_native_job_store(
@@ -412,7 +418,7 @@ fn with_store_mutex_mut_admitted<T>(
     operation(store)
 }
 
-pub(crate) fn replace_commit_with_snapshot(
+pub(crate) fn commit_staged_replacement(
     app: &AppHandle,
     staging_id: &str,
     expected_revision: Option<i64>,
@@ -434,9 +440,7 @@ pub(crate) fn pds_open(
 ) -> Result<PersistentStoreOpenResult, StoreError> {
     let operation_guard = state.admit_renderer_operation()?;
     let app_data_dir = crate::app_paths::data_root(&app).map_err(|message| StoreError::Store { message })?;
-    let opened = open_renderer_persistent_store_admitted(&state, &operation_guard, &app_data_dir)?;
-    crate::external_storage::receive_artifacts::reclaim_settled_later(&app);
-    Ok(opened)
+    open_renderer_persistent_store_admitted(&state, &operation_guard, &app_data_dir)
 }
 
 #[cfg(test)]
@@ -491,6 +495,29 @@ pub(crate) fn pds_asset_gc_maintenance(
     with_store_mut(state, |store| {
         store.asset_gc_product_maintenance_page(current_time_ms()?)
     })
+}
+
+/// Sweeps one batch of message objects in each store, continuing from each
+/// store's cursor. It skips while device maintenance holds the renderer gate.
+#[tauri::command(async)]
+pub(crate) fn pds_message_object_sweep(
+    app: AppHandle,
+    state: State<'_, PersistentStoreState>,
+) -> Result<(), StoreError> {
+    let Some(operation_guard) = state.try_admit_renderer_operation()? else {
+        return Ok(());
+    };
+    finish_storage_command(
+        "pds_message_object_sweep",
+        sweep_message_pages(
+            file_admission(&app).as_ref(), &state, &operation_guard, current_time_ms()?, SweepBudget::OneBatch,
+        ),
+    )
+}
+
+fn file_admission(app: &AppHandle) -> Option<Arc<crate::native_file_jobs::admission::Admission>> {
+    app.try_state::<crate::native_file_jobs::NativeFileJobState>()
+        .map(|jobs| Arc::clone(&jobs.admission))
 }
 
 #[tauri::command(async)]
@@ -895,7 +922,7 @@ pub(crate) fn pds_replace_commit(
     staging_id: String,
     expected_revision: Option<i64>,
 ) -> Result<RevisionResult, StoreError> {
-    replace_commit_with_snapshot(&app, &staging_id, expected_revision)
+    commit_staged_replacement(&app, &staging_id, expected_revision)
 }
 
 #[tauri::command(async)]
@@ -1195,13 +1222,54 @@ fn pds_asset_gc_preview_all(
 
 #[tauri::command(async)]
 pub(crate) fn pds_asset_gc_execute(
+    app: AppHandle,
     state: State<'_, PersistentStoreState>,
 ) -> Result<AssetGcMaintenanceResult, StoreError> {
     let operation_guard = state.admit_renderer_operation()?;
     finish_storage_command(
         "pds_asset_gc_execute",
-        pds_asset_gc_execute_all(&state, &operation_guard),
+        pds_asset_gc_execute_all(&state, &operation_guard).and_then(|result| {
+            sweep_message_pages(
+                file_admission(&app).as_ref(), &state, &operation_guard, current_time_ms()?, SweepBudget::UntilWrapped,
+            )?;
+            Ok(result)
+        }),
     )
+}
+
+/// How many batches each store gets in one sweep call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SweepBudget {
+    OneBatch,
+    UntilWrapped,
+}
+
+/// Message objects are swept only while no replacement or server sync holds
+/// the library, so a refused or missing permit ends the pass until next time.
+fn sweep_message_pages(
+    admission: Option<&Arc<crate::native_file_jobs::admission::Admission>>,
+    state: &PersistentStoreState,
+    operation_guard: &RendererOperationGuard,
+    now: i64,
+    budget: SweepBudget,
+) -> StoreResult<()> {
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    for target in [super::MessageObjectStore::Library, super::MessageObjectStore::Device] {
+        loop {
+            let Ok(_permit) = admission.file(false) else {
+                return Ok(());
+            };
+            let sweep = with_store_mutex_mut_admitted(state, operation_guard, |store| {
+                store.sweep_message_page_objects(target, now, super::MESSAGE_PAGE_SWEEP_LIMIT)
+            })?;
+            if sweep.wrapped || budget == SweepBudget::OneBatch {
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn pds_asset_gc_execute_all(
@@ -1214,6 +1282,7 @@ fn pds_asset_gc_execute_all(
         store.prepare_asset_gc_delete_marks()
     })?;
     let mut cursor = None;
+    let mut library = None;
     let mut result = AssetGcMaintenanceResult {
         candidate_count: 0,
         candidate_bytes: 0,
@@ -1224,7 +1293,7 @@ fn pds_asset_gc_execute_all(
         omitted: 0,
     };
     loop {
-        let page = pds_asset_gc_execute_page(state, operation_guard, &marks, cursor.as_deref(), now)?;
+        let page = pds_asset_gc_execute_page(state, operation_guard, &marks, &mut library, cursor.as_deref(), now)?;
         let page_result = asset_gc_result(page.report);
         result.candidate_count += page_result.candidate_count;
         result.candidate_bytes += page_result.candidate_bytes;
@@ -1243,11 +1312,12 @@ fn pds_asset_gc_execute_page(
     state: &PersistentStoreState,
     operation_guard: &RendererOperationGuard,
     marks: &crate::asset_repository::migration_gc::AssetGcMarks,
+    library: &mut Option<super::AssetGcLibraryRoots>,
     cursor: Option<&str>,
     now: i64,
 ) -> StoreResult<crate::asset_repository::migration_gc::AssetGcDryRunPage> {
     with_store_mutex_mut_admitted(state, operation_guard, |store| {
-        store.asset_gc_delete_marked_page_with_hook(marks, 1024, cursor, now, 7 * 24 * 60 * 60 * 1_000, |_| Ok(()))
+        store.asset_gc_delete_marked_page_reusing_library(marks, library, 1024, cursor, now, 7 * 24 * 60 * 60 * 1_000, |_| Ok(()))
     })
 }
 
@@ -1702,6 +1772,92 @@ mod tests {
         assert!(state.admit_renderer_operation().is_err());
         drop(maintenance);
         assert!(state.admit_renderer_operation().is_ok());
+    }
+
+    #[test]
+    fn message_object_sweep_waits_for_file_admission_and_covers_both_stores() {
+        use crate::native_file_jobs::admission::Admission;
+        let directory = tempdir().unwrap();
+        let store = PersistentStore::open(directory.path()).unwrap();
+        let orphan = b"synthetic-orphan-object".to_vec();
+        let hash = risunest_sync_wire::hash(&orphan);
+        store.lww_put_object(&hash, &orphan).unwrap();
+        super::super::message_pages::put_object(store.device_store().unwrap().connection(), &hash, &orphan).unwrap();
+        let state = PersistentStoreState::with_test_store(store);
+        let marks = || -> (i64, i64) {
+            let guard = state.store.lock().unwrap();
+            let store = guard.as_ref().unwrap();
+            let count = "SELECT count(*) FROM message_page_object_marks";
+            (
+                store.connection.query_row(count, [], |row| row.get(0)).unwrap(),
+                store.device_store().unwrap().connection().query_row(count, [], |row| row.get(0)).unwrap(),
+            )
+        };
+        let operation = state.admit_renderer_operation().unwrap();
+        let admission = Arc::new(Admission::default());
+        sweep_message_pages(None, &state, &operation, 1_000, SweepBudget::UntilWrapped).unwrap();
+        assert_eq!(marks(), (0, 0));
+        let exclusive = admission.file(true).unwrap();
+        sweep_message_pages(Some(&admission), &state, &operation, 1_000, SweepBudget::UntilWrapped).unwrap();
+        assert_eq!(marks(), (0, 0));
+        drop(exclusive);
+        let server = admission.server().unwrap();
+        sweep_message_pages(Some(&admission), &state, &operation, 1_000, SweepBudget::UntilWrapped).unwrap();
+        assert_eq!(marks(), (0, 0));
+        drop(server);
+        sweep_message_pages(Some(&admission), &state, &operation, 1_000, SweepBudget::UntilWrapped).unwrap();
+        assert_eq!(marks(), (1, 1));
+        drop(operation);
+        let maintenance = state.acquire_cleanup_maintenance(std::time::Duration::from_secs(1)).unwrap();
+        assert!(state.try_admit_renderer_operation().unwrap().is_none());
+        drop(maintenance);
+        assert!(state.try_admit_renderer_operation().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_periodic_sweep_visits_one_batch_per_store_and_resumes_from_the_cursor() {
+        use crate::native_file_jobs::admission::Admission;
+        let limit = super::super::MESSAGE_PAGE_SWEEP_LIMIT;
+        let open = || {
+            let directory = tempdir().unwrap();
+            let store = PersistentStore::open(directory.path()).unwrap();
+            for db in [&store.connection, store.device_store().unwrap().connection()] {
+                let tx = db.unchecked_transaction().unwrap();
+                for index in 0..=limit {
+                    let body = format!("synthetic-orphan-object-{index}").into_bytes();
+                    super::super::message_pages::put_object(&tx, &risunest_sync_wire::hash(&body), &body).unwrap();
+                }
+                tx.commit().unwrap();
+            }
+            (directory, PersistentStoreState::with_test_store(store))
+        };
+        let count = |state: &PersistentStoreState, table: &str| -> (usize, usize) {
+            let guard = state.store.lock().unwrap();
+            let store = guard.as_ref().unwrap();
+            let sql = format!("SELECT count(*) FROM {table}");
+            let read = |db: &rusqlite::Connection| db.query_row(&sql, [], |row| row.get::<_, i64>(0)).unwrap() as usize;
+            (read(&store.connection), read(store.device_store().unwrap().connection()))
+        };
+        let admission = Arc::new(Admission::default());
+
+        let (_periodic_directory, periodic) = open();
+        assert_eq!(count(&periodic, "message_page_objects"), (limit + 1, limit + 1));
+        let operation = periodic.admit_renderer_operation().unwrap();
+        sweep_message_pages(Some(&admission), &periodic, &operation, 1_000, SweepBudget::OneBatch).unwrap();
+        assert_eq!(count(&periodic, "message_page_object_marks"), (limit, limit), "a periodic sweep ran more than one batch");
+        assert_eq!(count(&periodic, "message_page_sweep_cursor"), (1, 1));
+        sweep_message_pages(Some(&admission), &periodic, &operation, 1_000, SweepBudget::OneBatch).unwrap();
+        assert_eq!(
+            count(&periodic, "message_page_object_marks"),
+            (limit + 1, limit + 1),
+            "the next periodic sweep did not continue from the cursor",
+        );
+        assert_eq!(count(&periodic, "message_page_sweep_cursor"), (0, 0));
+
+        let (_cleanup_directory, cleanup) = open();
+        let operation = cleanup.admit_renderer_operation().unwrap();
+        sweep_message_pages(Some(&admission), &cleanup, &operation, 1_000, SweepBudget::UntilWrapped).unwrap();
+        assert_eq!(count(&cleanup, "message_page_object_marks"), (limit + 1, limit + 1));
     }
 
     #[test]
@@ -2364,9 +2520,13 @@ mod tests {
         };
         let operation_guard = state.admit_renderer_operation().unwrap();
         super::super::ASSET_GC_ROOT_COLLECTIONS.with(|count| count.set((0, 0)));
+        super::super::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| count.set(0));
         let result = pds_asset_gc_execute_all(&state, &operation_guard).expect("execute complete cleanup");
         super::super::ASSET_GC_ROOT_COLLECTIONS.with(|count| {
             assert_eq!(count.get(), (1, 3), "one preliminary scan and one final check per deleting page");
+        });
+        super::super::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| {
+            assert_eq!(count.get(), 2, "an unchanged library is scanned once for marks and once for the final check");
         });
         assert!(state.store.try_lock().is_ok());
         drop(operation_guard);

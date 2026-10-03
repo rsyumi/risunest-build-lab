@@ -28,6 +28,7 @@ struct Context {
     session: tokio::sync::Mutex<Session>,
     cancel: Mutex<Cancellation>,
     maintenance:tokio::sync::Mutex<()>,
+    turn:Mutex<super::lww_compaction::CompactionTurn>,
 }
 static CONTEXTS: OnceLock<Mutex<BTreeMap<String, Arc<Context>>>> = OnceLock::new();
 fn context(id: &str) -> Result<Arc<Context>> {
@@ -50,11 +51,12 @@ fn context(id: &str) -> Result<Arc<Context>> {
                 }),
                 cancel: Mutex::new(Cancellation::default()),
                 maintenance:tokio::sync::Mutex::new(()),
+                turn:Mutex::new(Default::default()),
             })
         })
         .clone())
 }
-async fn open(app: &AppHandle, id: &str, session: &mut Session) -> Result<()> {
+async fn connect(app: &AppHandle, id: &str, session: &mut Session) -> Result<()> {
     if session.engine.is_none() {
         session.fresh_after = Instant::now();
         let connected =
@@ -80,6 +82,10 @@ async fn open(app: &AppHandle, id: &str, session: &mut Session) -> Result<()> {
             descriptor: connected.stored.descriptor,
         });
     }
+    Ok(())
+}
+async fn open(app: &AppHandle, id: &str, session: &mut Session) -> Result<()> {
+    connect(app, id, session).await?;
     let engine = session.engine.as_mut().ok_or_else(lww_segment::corrupt)?;
     if engine.admitted_upper().is_err() {
         let requests = &session
@@ -186,13 +192,15 @@ pub(crate) async fn external_lww_inspect(app: AppHandle, request: Request) -> Re
             &library_id,
         )
         .map_err(runtime::local_error)?;
-    let previous = store.lww_binding_state().map_err(runtime::local_error)?;
+    let previously_bound_library = store
+        .lww_previously_bound(&library_id, &target_id)
+        .map_err(runtime::local_error)?;
     Ok(Inspection {
         inspection_id,
         target_id,
-        library_id: library_id.clone(),
+        library_id,
         empty: objects.is_empty() && engine.snapshot_listing(&session.cancel).await?.is_empty(),
-        previously_bound_library: previous.library_id.as_deref() == Some(&library_id),
+        previously_bound_library,
     })
 }
 pub(crate) struct StageRequest {
@@ -317,6 +325,9 @@ pub(crate) async fn external_lww_publish(
             cancel,
         )
         .await?;
+    if result.segments.0 > 0 {
+        context.turn.lock().map_err(runtime::local_error)?.published(Instant::now());
+    }
     if let Some(target) = &request.exit_target {
         let identity = store.external_identity().map_err(runtime::local_error)?;
         if identity.library_epoch != target.library_epoch
@@ -342,7 +353,7 @@ pub(crate) async fn external_lww_receive(
     let mut session = context.session.lock().await;
     open(&app, &request.connection_id, &mut session).await?;
     let mut store = check(&app, &request, true)?;
-    session
+    let requests = session
         .engine
         .as_ref()
         .ok_or_else(lww_segment::corrupt)?
@@ -351,7 +362,12 @@ pub(crate) async fn external_lww_receive(
             request.header.binding_authority,
             &session.cancel,
         )
-        .await
+        .await?;
+    let own = store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
+    if requests.iter().any(|request| request.progress.writer_id.as_deref() != Some(own.as_str())) {
+        context.turn.lock().map_err(runtime::local_error)?.observed_foreign(Instant::now());
+    }
+    Ok(requests)
 }
 
 #[tauri::command]
@@ -364,7 +380,8 @@ pub(crate) async fn external_lww_maintenance(app:AppHandle,request:Request)->Res
     let store=check(&app,&request,true)?;
     let writer=store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
     let engine=session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
-    let compact=engine.maintenance_needed(&cancel).await?;
+    let due=engine.maintenance_needed(&cancel).await?;
+    let compact=context.turn.lock().map_err(runtime::local_error)?.ready(due,Instant::now());
     let root=runtime::root(&app)?;
     let stored=super::connection_store::ConnectionStore::open(&root)?.read(&request.connection_id)?;
     let job=uuid::Uuid::new_v4().to_string();
@@ -386,6 +403,10 @@ pub(crate) async fn external_lww_maintenance(app:AppHandle,request:Request)->Res
         Some(result.snapshot_id)
     } else {None};
     check(&app,&request,true)?;
+    let last_run=super::gc_store::GcStore::open(&root)?.last_run_ms(&request.connection_id)?;
+    if !super::cleanup::lww_cleanup_due(snapshot_id.is_some(),last_run,runtime::now_ms()) {
+        return Ok(Some(serde_json::json!({"snapshotId":snapshot_id,"cleanup":null})));
+    }
     let connected=connection_commands::open_connected_with_cancel(&app,&request.connection_id,&cancel).await?;
     if connected.handle.repository_id!=engine.repository.repository_id || connected.handle.connection_identity!=engine.repository.connection_identity || connected.stored.descriptor.repository_id!=engine.library {return Err(lww_segment::corrupt())}
     let cleanup=runtime::run_connected_cleanup(&app,&connected,&request.connection_id,&job,Some(engine),&cancel).await?;
@@ -393,7 +414,11 @@ pub(crate) async fn external_lww_maintenance(app:AppHandle,request:Request)->Res
     Ok(Some(serde_json::json!({"snapshotId":snapshot_id,"cleanup":cleanup})))
 }
 #[tauri::command]
-pub(crate) async fn external_lww_fence(app: AppHandle, connection_id: String) -> Result<()> {
+pub(crate) async fn external_lww_fence(
+    app: AppHandle,
+    connection_id: String,
+    new_device: bool,
+) -> Result<()> {
     let context = context(&connection_id)?;
     context
         .cancel
@@ -402,20 +427,34 @@ pub(crate) async fn external_lww_fence(app: AppHandle, connection_id: String) ->
         .cancel();
     let mut session = context.session.lock().await;
     session.cancel = Cancellation::default();
-    open(&app, &connection_id, &mut session).await?;
-    let mut store = runtime::native_store(&app)?;
-    session
-        .engine
-        .as_ref()
-        .ok_or_else(lww_segment::corrupt)?
-        .settle_publication(&mut store, &session.cancel)
-        .await?;
+    let fenced = fence(&app, &connection_id, &mut session, new_device).await;
     session.cancel.cancel();
     if let Some(engine) = session.engine.as_mut() {
         engine.invalidate_clock()
     }
     session.fresh_after = Instant::now();
-    Ok(())
+    fenced
+}
+/// Asks the repository about a sent segment only when one awaits an answer,
+/// so a binding change away from a repository that cannot be reached goes
+/// ahead without it.
+async fn fence(app: &AppHandle, id: &str, session: &mut Session, new_device: bool) -> Result<()> {
+    let mut store = runtime::native_store(app)?;
+    if !store
+        .external_lww_unconfirmed_dispatch()
+        .map_err(runtime::local_error)?
+    {
+        return Ok(());
+    }
+    if let Err(error) = connect(app, id, session).await {
+        return ExternalLwwEngine::fence_outcome(error, new_device);
+    }
+    session
+        .engine
+        .as_ref()
+        .ok_or_else(lww_segment::corrupt)?
+        .fence_binding_change(&mut store, new_device, &session.cancel)
+        .await
 }
 #[tauri::command]
 pub(crate) async fn external_lww_resume(connection_id: String) -> Result<()> {

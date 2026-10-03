@@ -801,6 +801,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::sync_selection::pds_lww_replace_from_target,
         persistent_store::commands::pds_open,
         persistent_store::commands::pds_asset_gc_maintenance,
+        persistent_store::commands::pds_message_object_sweep,
         persistent_store::commands::pds_read_root,
         persistent_store::commands::pds_query_presets,
         persistent_store::commands::pds_read_preset,
@@ -837,15 +838,11 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         #[cfg(any(windows, target_os = "linux", target_os = "ios", target_os = "macos"))]
         persistent_commit_raw::pds_commit_raw,
         persistent_store::lww_commands::pds_lww_read_outbox,
-        persistent_store::lww_commands::pds_lww_read_unit_state,
         persistent_store::lww_commands::pds_lww_queue_unit_state_page,
-        persistent_store::lww_commands::pds_lww_ack_outbox,
         persistent_store::lww_commands::pds_lww_stage_receive,
         persistent_store::lww_commands::pds_lww_apply_receive,
         persistent_store::lww_commands::pds_lww_finish_receive,
         persistent_store::lww_commands::pds_lww_drain_deferred,
-        persistent_store::lww_commands::pds_lww_clock_state,
-        persistent_store::lww_commands::pds_lww_retry_unpublished,
         persistent_store::lww_commands::pds_lww_commit_replacement,
         persistent_store::lww_commands::pds_lww_replace_target_as_new_device,
         #[cfg(windows)]

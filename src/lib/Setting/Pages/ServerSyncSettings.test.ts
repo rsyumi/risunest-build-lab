@@ -2,14 +2,14 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { languageEnglish } from 'src/lang/en'
-const f = vi.hoisted(() => ({ connect: vi.fn(), configure: vi.fn(), bind: vi.fn(), native: true }))
+const f = vi.hoisted(() => ({ connect: vi.fn(), configure: vi.fn(), bind: vi.fn(), native: true, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
 vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish, changeLanguage: vi.fn() }))
 vi.mock('src/ts/platform', () => ({ get isTauri() { return f.native } }))
 vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertError: vi.fn(), alertNormal: vi.fn(), openRisuAccountLogin: vi.fn() }))
 vi.mock('src/ts/storage/sync/serverSyncProduction', () => ({
     connectServerSync: f.connect, configureServerSyncConnection: f.configure, disconnectServerSync: vi.fn(), retryServerSync: vi.fn(),
     getServerSyncCacheUsage: vi.fn(), cleanupServerSyncCache: vi.fn(),
-    getServerSyncController: () => ({ snapshot: () => ({ status: { configured: false }, paused: false }), subscribe: () => () => {}, ensureStatus: vi.fn() }),
+    getServerSyncController: () => ({ snapshot: () => f.view, subscribe: () => () => {}, ensureStatus: vi.fn() }),
 }))
 vi.mock('src/ts/storage/sync/serverAssetResidency', () => ({ getAssetResidencyStatus: vi.fn(), setAssetResidencyPolicy: vi.fn(), evictLocalAssets: vi.fn(), cancelAssetResidencyOperation: vi.fn() }))
 vi.mock('src/ts/storage/sync/serverSyncRegistration', () => ({ parseServerRegistration: () => ({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }) }))
@@ -35,15 +35,22 @@ vi.mock('src/lib/Setting/ExternalStorage/ConnectionForm.svelte', () => ({ defaul
 vi.mock('src/lib/Others/Onboarding/onboardingWeave', () => ({ observeOnboardingWeave: () => () => {} }))
 vi.mock('src/ts/stores.svelte', () => ({ DBState: { db: { language: 'en' } } }))
 import ServerSyncSettings from './ServerSyncSettings.svelte'
-import Onboarding from 'src/lib/Others/Onboarding/Onboarding.svelte' 
+import Onboarding from 'src/lib/Others/Onboarding/Onboarding.svelte'
 let component: ReturnType<typeof mount> | undefined
 let host: HTMLDivElement
-beforeEach(() => { vi.clearAllMocks(); f.native = true; host = document.createElement('div'); document.body.append(host) })
+beforeEach(() => { vi.clearAllMocks(); f.native = true; f.view = { status: { configured: false }, paused: false }; host = document.createElement('div'); document.body.append(host) })
 afterEach(async () => { if (component) await unmount(component); component = undefined; host.remove() })
 const settle = async () => { for (let i = 0; i < 12; i++) await tick() }
 function click(text: string) { const button = [...host.querySelectorAll('button')].find(button => button.textContent?.trim() === text); expect(button).toBeDefined(); button!.click() }
 async function registration() { await tick(); const input = host.querySelector('textarea')!; input.value = 'synthetic-registration'; input.dispatchEvent(new Event('input', { bubbles: true })); await tick(); click(languageEnglish.risuNest.serverSync.readRegistration); await tick() }
-it.each([false, true])('uses the supplied onboarding action once with newDevice=%s', async newDevice => {
+const findButton = (text: string) => [...host.querySelectorAll('button')].find(button => button.textContent?.trim() === text)
+it.each([
+    { error: '', newDevice: false },
+    { error: 'writer-collision', newDevice: false },
+    { error: 'writer-collision', newDevice: true },
+    { error: 'equal-stamp-integrity', newDevice: true },
+])('uses the supplied onboarding action once with newDevice=$newDevice in state "$error"', async ({ error, newDevice }) => {
+    f.view = { status: { configured: true, bound: !!error }, paused: !!error, error }
     const connectTarget = vi.fn(async () => {})
     component = mount(ServerSyncSettings, { target: host, props: { connectTarget } })
     await registration()
@@ -51,6 +58,21 @@ it.each([false, true])('uses the supplied onboarding action once with newDevice=
     await settle()
     expect(connectTarget).toHaveBeenCalledExactlyOnceWith({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }, newDevice)
     expect(f.connect).not.toHaveBeenCalled()
+})
+it.each(['', 'server-unreachable', 'clock-skew', 'unauthorized'])('offers no new-device connection outside the duplicate-device recovery state ("%s")', async error => {
+    f.view = { status: { configured: true, bound: !!error }, paused: !!error, error }
+    component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+    await registration()
+    expect(findButton(languageEnglish.risuNest.serverSync.connect)).toBeDefined()
+    expect(findButton(languageEnglish.lwwSync.newDeviceAction)).toBeUndefined()
+})
+it('explains an item too large to send instead of the generic sync error', async () => {
+    f.view = { status: { configured: true, bound: true }, paused: true, error: 'unit-too-large' }
+    component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+    await settle()
+    const alert = host.querySelector('[role="alert"]')
+    expect(alert?.textContent).toBe(languageEnglish.lwwSync.unitTooLarge)
+    expect(alert?.textContent).not.toBe(languageEnglish.risuNest.serverSync.errorHelp)
 })
 it('keeps settings on the existing production action by default', async () => {
     component = mount(ServerSyncSettings, { target: host })

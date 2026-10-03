@@ -6,7 +6,6 @@ use super::{
     job_store::{DurableJob, JobCommandState, JobKind, JobStore, Session, StartJobRequest},
     leases,
     publication::PublicationMode,
-    receive_artifacts::{settlement_pass, SettlementPass},
 };
 use crate::persistent_store::{
     self,
@@ -254,9 +253,6 @@ fn apply_job_connection_status(connection: &mut Value, jobs: &[Value]) {
 fn job_summary(root: &std::path::Path, mut job: DurableJob) -> Value {
     job.summary["reason"] = json!(job.request.reason);
     job.summary["targetRevision"] = json!(job.request.target_revision);
-    if job.request.kind == JobKind::ResolveConflict {
-        job.summary["resolveRequest"] = json!({"conflictId":job.request.conflict_id,"choice":job.request.choice});
-    }
     if job.request.kind == JobKind::PinHistory {
         job.summary["pinRequest"] = json!({"snapshotId":job.request.snapshot_id});
     }
@@ -323,7 +319,6 @@ pub(crate) async fn external_storage_cancel_job(app: AppHandle, job_id: String) 
     if super::runtime_restore::application_started(&job) && !job.terminal() {
         return Ok(job.summary);
     }
-    job.receive_staging_id = None;
     if job.summary["state"] != "succeeded" {
         let mut pds = native_store(&app)?;
         let authoritative = pds.external_job(&job_id).map_err(local_error)?;
@@ -344,14 +339,6 @@ pub(crate) async fn external_storage_cancel_job(app: AppHandle, job_id: String) 
         store.put(&job)?;
     }
     super::runtime_restore::discard_finished_staging(&root(&app)?, &job);
-    let (pass_app, pass_claim) = (app.clone(), _claim.clone());
-    let connection = job.request.connection_id.clone();
-    let detached = tokio::task::spawn_blocking(move || {
-        super::receive_artifacts::detach_claimed(&pass_app, &pass_claim, &connection)
-    })
-    .await
-    .unwrap_or_default();
-    super::receive_artifacts::remove_detached_later(&app, detached);
     Ok(job.summary)
 }
 #[tauri::command]
@@ -361,7 +348,6 @@ pub(crate) async fn external_storage_start_job(
     job_id: Option<String>,
 ) -> Result<Value> {
     request.validate()?;
-    if matches!(request.kind, JobKind::Sync | JobKind::ResolveConflict) { return Err(ProviderError::new(ErrorKind::Unsupported)); }
     if let Some(id) = &job_id {
         if uuid::Uuid::parse_str(id).ok().is_none_or(|parsed| parsed.to_string() != *id)
         {
@@ -453,14 +439,11 @@ pub(crate) async fn external_storage_start_job(
         }
         return Ok(job_summary(&root, store.read(&pending.id)?));
     }
-    // Section publication is not wired yet, so a backup captures the library
-    // only and no device capture phase is scheduled.
-    let device = false;
     wait_for_settled_claim(&app, &request.connection_id).await?;
     let identity = native_store(&app)?
         .external_identity()
         .map_err(local_error)?;
-    let mut job = DurableJob::new(request, device, now_ms(), identity);
+    let mut job = DurableJob::new(request, false, now_ms(), identity);
     if let Some(id) = job_id {
         job = job.with_restore_id(id)?;
         if !store.insert_new(&job)? {
@@ -476,9 +459,7 @@ pub(crate) async fn external_storage_start_job(
     } else {
         store.put(&job)?;
     }
-    if !device {
-        wake_job(app, job.id.clone())?;
-    }
+    wake_job(app, job.id.clone())?;
     Ok(job.summary)
 }
 fn same_explicit_retry(job: &DurableJob, request: &StartJobRequest) -> bool {
@@ -494,11 +475,8 @@ fn pending_matches_request(job: &DurableJob, request: &StartJobRequest) -> bool 
     if job.request.connection_id != request.connection_id {
         return false;
     }
-    let publication_unknown = job.summary["state"] == "uncertain"
-        && job.summary["phase"] == "publication-unknown";
-    !publication_unknown
-        || (job.request.kind == request.kind
-            && matches!(request.kind, JobKind::Sync | JobKind::ResolveConflict))
+    // A publication whose outcome is unknown resumes only by its own id.
+    !(job.summary["state"] == "uncertain" && job.summary["phase"] == "publication-unknown")
 }
 fn same_requested_operation(existing: &StartJobRequest, incoming: &StartJobRequest) -> bool {
     if existing.kind != incoming.kind || existing.connection_id != incoming.connection_id {
@@ -516,13 +494,6 @@ fn same_requested_operation(existing: &StartJobRequest, incoming: &StartJobReque
                 && existing.point_observation == incoming.point_observation
                 && existing.confirm_other_device == incoming.confirm_other_device
                 && existing.confirm_last_retained == incoming.confirm_last_retained
-        }
-        JobKind::ResolveConflict => {
-            existing.conflict_id == incoming.conflict_id && existing.choice == incoming.choice
-        }
-        JobKind::Sync => {
-            (existing.reason.as_deref() == Some("automatic"))
-                == (incoming.reason.as_deref() == Some("automatic"))
         }
         JobKind::CheckRepository => existing.snapshot_id == incoming.snapshot_id,
         JobKind::Backup | JobKind::Cleanup => true,
@@ -548,8 +519,8 @@ pub(crate) async fn wait_for_job_release(app: &AppHandle, id: &str) -> Result<()
 }
 
 /// Waits while a job of `connection` that has already settled still holds its
-/// claim, as its receive bodies move aside, and returns whether it waited. A
-/// job still running is left to the caller's own checks.
+/// claim, and returns whether it waited. A job still running is left to the
+/// caller's own checks.
 async fn wait_for_settled_claim(app: &AppHandle, connection: &str) -> Result<bool> {
     let holder = app
         .state::<JobCommandState>()
@@ -597,8 +568,6 @@ pub(crate) fn require_admitted_library(
     if admitted.store_id != current.store_id
         || admitted.library_epoch != current.library_epoch
         || admitted.generation != current.generation
-        || (matches!(job.request.kind, JobKind::Sync | JobKind::ResolveConflict)
-            && admitted.selection_epoch != current.selection_epoch)
     {
         return Err(ProviderError::new(ErrorKind::PreconditionFailed));
     }
@@ -781,7 +750,6 @@ pub(crate) fn wake_job(app: AppHandle, id: String) -> Result<()> {
             let mut job = store.read(&id)?;
             match result {
                 Ok(result) => {
-                    let receive = result.get("receiveReady").and_then(Value::as_bool) == Some(true);
                     // A removal that left a request whose end is unknown keeps
                     // its marker, so the job stays open until that is resolved.
                     let unresolved =
@@ -789,16 +757,12 @@ pub(crate) fn wake_job(app: AppHandle, id: String) -> Result<()> {
                     let publication_unknown = unresolved
                         && result.get("reason").and_then(Value::as_str)
                             == Some("publication-unknown");
-                    job.summary["state"] = json!(if receive {
-                        "waiting"
-                    } else if unresolved {
+                    job.summary["state"] = json!(if unresolved {
                         "uncertain"
                     } else {
                         "succeeded"
                     });
-                    job.summary["phase"] = json!(if receive {
-                        "remote-apply"
-                    } else if publication_unknown {
+                    job.summary["phase"] = json!(if publication_unknown {
                         "publication-unknown"
                     } else if unresolved {
                         "removal-unknown"
@@ -874,30 +838,13 @@ pub(crate) fn wake_job(app: AppHandle, id: String) -> Result<()> {
             job.summary["updatedAtMs"] = json!(now_ms().to_string());
             Ok(job)
         })();
-        // The worker has returned. The claim keeps every job of this
-        // connection from starting while bodies move aside.
-        let pass = settled.as_ref().map_or(SettlementPass::Skip, settlement_pass);
-        let move_aside = || {
-            let (pass_app, pass_claim) = (app.clone(), claim.clone());
-            let connection = job.request.connection_id.clone();
-            tokio::task::spawn_blocking(move || {
-                super::receive_artifacts::detach_claimed(&pass_app, &pass_claim, &connection)
-            })
-        };
-        let mut detached = Vec::new();
-        if pass == SettlementPass::BeforeOutcome {
-            detached = move_aside().await.unwrap_or_default();
-        }
         let outcome_persisted = settled
             .and_then(|settled| JobStore::open(&root(&app)?)?.put(&settled))
             .is_ok();
         if !outcome_persisted {
             crate::nlog!("error", "External job outcome could not be persisted");
-        } else if pass == SettlementPass::AfterOutcome {
-            detached = move_aside().await.unwrap_or_default();
         }
         drop(claim);
-        super::receive_artifacts::remove_detached_later(&app, detached);
         if outcome_persisted {
             let cleaned = (|| -> Result<()> {
                 let root = root(&app)?;
@@ -1072,10 +1019,7 @@ async fn run_job(app: &AppHandle, id: &str, cancel: &Cancellation) -> Result<Val
     if let Some(result) = completed_job_result(&mut native_store(app)?, &job)? {
         return Ok(result);
     }
-    if matches!(
-        job.request.kind,
-        JobKind::Backup | JobKind::Sync | JobKind::ResolveConflict
-    ) {
+    if job.request.kind == JobKind::Backup {
         require_admitted_library(
             &job,
             &native_store(app)?
@@ -1088,7 +1032,7 @@ async fn run_job(app: &AppHandle, id: &str, cancel: &Cancellation) -> Result<Val
     // none of them are held back by it.
     if matches!(
         job.request.kind,
-        JobKind::Backup | JobKind::Sync | JobKind::ResolveConflict | JobKind::PinHistory
+        JobKind::Backup | JobKind::PinHistory
     ) {
         if let Some((owner, held)) = spool_budget_owner(&root(app)?, &store, &job)? {
             crate::nlog!(
@@ -1107,7 +1051,6 @@ async fn run_job(app: &AppHandle, id: &str, cancel: &Cancellation) -> Result<Val
         super::connection_commands::open_connected_with_cancel(app, &job.request.connection_id, cancel).await?;
     cancel.check()?;
     match job.request.kind {
-        JobKind::Sync | JobKind::ResolveConflict => Err(ProviderError::new(ErrorKind::Unsupported)),
         JobKind::Backup => {
             let root = root(app)?;
             let writer_id = native_store(app)?
@@ -1719,20 +1662,6 @@ mod tests {
     }
 
     #[test]
-    fn manual_unknown_recheck_preserves_exact_request_without_coalescing_new_sync() {
-        let mut job=automatic_job();
-        let mut manual=job.request.clone(); manual.reason=Some("manual".into());
-        assert!(!same_explicit_retry(&job,&manual));
-        job.summary["phase"]=json!("publication-unknown");
-        assert!(same_explicit_retry(&job,&manual));
-        assert!(!same_requested_operation(&job.request,&manual));
-        manual.target_revision=Some("2".into());
-        assert!(!same_explicit_retry(&job,&manual));
-        manual.target_revision=Some("1".into()); manual.connection_id="other".into();
-        assert!(!same_explicit_retry(&job,&manual));
-    }
-
-    #[test]
     fn connection_recovery_status_survives_reload_and_clears_after_verified_repair() {
         let jobs=vec![json!({"connectionId":"x","state":"waiting","updatedAtMs":"20",
             "error":{"action":"reauthenticate","retryable":false,"message":"Authorization required"}})];
@@ -1748,7 +1677,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_restore_or_conflict_choice_never_resumes_a_different_pending_request() {
+    fn a_new_restore_choice_never_resumes_a_different_pending_request() {
         let existing: StartJobRequest = serde_json::from_value(json!({"connectionId":"x", "kind":"restore", "snapshotId":"a", "restoreAreas":["library"]})).unwrap();
         let mut incoming = existing.clone();
         assert!(same_requested_operation(&existing, &incoming));
@@ -1760,14 +1689,10 @@ mod tests {
         incoming.restore_areas = existing.restore_areas.clone();
         incoming.target_revision = Some("2".into());
         assert!(!same_requested_operation(&existing, &incoming));
-        let existing: StartJobRequest = serde_json::from_value(json!({"connectionId":"x", "kind":"resolve-conflict", "conflictId":"conflict", "choice":"remote"})).unwrap();
-        let mut incoming = existing.clone();
-        incoming.choice = Some("local".into());
-        assert!(!same_requested_operation(&existing, &incoming));
     }
     fn automatic_job() -> DurableJob {
         let request = serde_json::from_value(json!({
-            "connectionId":"x", "kind":"sync", "reason":"automatic", "targetRevision":"1"
+            "connectionId":"x", "kind":"backup", "reason":"automatic", "targetRevision":"1"
         })).unwrap();
         DurableJob::new(request, false, 1, persistent_store::sync_selection::CaptureIdentity {
             store_id: "store".into(), library_epoch: "library".into(), generation: "generation".into(),
@@ -1945,12 +1870,16 @@ mod tests {
     }
 
     #[test]
-    fn detached_unknown_is_rechecked_only_by_the_same_publication_operation() {
+    fn a_detached_unknown_publication_resumes_only_by_its_own_id() {
         let mut unknown = automatic_job();
-        unknown.summary["state"] = json!("uncertain");
-        unknown.summary["phase"] = json!("publication-unknown");
         let same = unknown.request.clone();
         assert!(pending_matches_request(&unknown, &same));
+        let mut elsewhere = same.clone();
+        elsewhere.connection_id = "other".into();
+        assert!(!pending_matches_request(&unknown, &elsewhere));
+        unknown.summary["state"] = json!("uncertain");
+        unknown.summary["phase"] = json!("publication-unknown");
+        assert!(!pending_matches_request(&unknown, &same));
 
         let restore: StartJobRequest = serde_json::from_value(json!({
             "connectionId": unknown.request.connection_id,
@@ -1966,17 +1895,8 @@ mod tests {
 
 
     #[test]
-    fn automatic_sync_does_not_absorb_a_manual_sync_request() {
-        let automatic = automatic_job().request;
-        let mut manual = automatic.clone();
-        manual.reason = Some("manual".into());
-        assert!(!same_requested_operation(&automatic, &manual));
-        assert!(!same_requested_operation(&manual, &automatic));
-    }
-
-    #[test]
     fn interrupted_outcome_recovers_only_authoritative_completion() {
-        let request = serde_json::from_value(json!({"connectionId":"x","kind":"sync"})).unwrap();
+        let request = serde_json::from_value(json!({"connectionId":"x","kind":"backup"})).unwrap();
         let identity = persistent_store::sync_selection::CaptureIdentity {
             store_id: "store".into(),
             library_epoch: "library".into(),
@@ -1995,17 +1915,16 @@ mod tests {
         job.summary["state"] = json!("failed");
         settle_interrupted(
             &mut job,
-            Some(json!({"snapshotId":"snapshot", "receivedRevision":"5"})),
+            Some(json!({"snapshotId":"snapshot", "publishedRevision":"5"})),
             false,
         );
         assert_eq!(job.summary["state"], "succeeded");
-        assert_eq!(job.summary["result"]["receivedRevision"], "5");
-        assert!(job.summary["result"].get("publishedRevision").is_none());
+        assert_eq!(job.summary["result"], json!({"snapshotId":"snapshot", "publishedRevision":"5"}));
         assert!(job.summary.get("error").is_none());
     }
     #[test]
-    fn queued_job_allows_edits_but_rejects_replacement_and_sync_reselection() {
-        let request = serde_json::from_value(json!({"connectionId":"x","kind":"sync"})).unwrap();
+    fn queued_job_allows_edits_and_reselection_but_rejects_replacement() {
+        let request = serde_json::from_value(json!({"connectionId":"x","kind":"backup"})).unwrap();
         let identity = persistent_store::sync_selection::CaptureIdentity {
             store_id: "store".into(),
             library_epoch: "library".into(),
@@ -2013,20 +1932,21 @@ mod tests {
             selection_epoch: "selection".into(),
             revision: 5,
         };
-        let mut job = DurableJob::new(request, false, 1, identity.clone());
+        let job = DurableJob::new(request, false, 1, identity.clone());
         let mut current = identity;
         current.revision = 10;
         assert!(require_admitted_library(&job, &current).is_ok());
         current.selection_epoch = "another".into();
-        assert!(require_admitted_library(&job, &current).is_err());
-        job.request.kind = JobKind::Backup;
         assert!(require_admitted_library(&job, &current).is_ok());
         current.library_epoch = "replacement".into();
+        assert!(require_admitted_library(&job, &current).is_err());
+        current.library_epoch = "library".into();
+        current.generation = "replacement".into();
         assert!(require_admitted_library(&job, &current).is_err());
     }
     #[test]
     fn stale_and_hidden_sessions_never_publish() {
-        let mut request:StartJobRequest=serde_json::from_value(json!({"connectionId":"x","kind":"sync","reason":"automatic","session":"foreground","sessionId":"old"})).unwrap();
+        let mut request:StartJobRequest=serde_json::from_value(json!({"connectionId":"x","kind":"backup","reason":"automatic","session":"foreground","sessionId":"old"})).unwrap();
         assert!(require_session(
             &request,
             &Session {

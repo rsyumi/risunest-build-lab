@@ -223,4 +223,16 @@ describe('bootstrap recovery exclusions', () => {
             expect(startup.stages.mock.calls.flat()).toContain('service-worker')
         }
     })
+
+    it('attributes a fatal server sync startup failure to the sync stage', async () => {
+        startup.native = true
+        startup.exclusions = []
+        const failure = new Error('synthetic sync startup failure')
+        vi.mocked(installServerSyncProduction).mockRejectedValueOnce(failure)
+        await loadData()
+        expect(bootFailure.set).toHaveBeenLastCalledWith(expect.objectContaining({
+            stage: 'drive-sync', message: failure.message,
+        }))
+        expect(startup.external).not.toHaveBeenCalled()
+    })
 })

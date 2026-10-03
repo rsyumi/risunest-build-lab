@@ -14,6 +14,7 @@ use risunest_sync_wire::{
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
+use std::collections::HashSet;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE message_page_indexes (
@@ -35,6 +36,12 @@ CREATE TABLE message_page_proofs (
     message_count INTEGER NOT NULL, byte_length INTEGER NOT NULL,
     first_length INTEGER NOT NULL, ends_cut INTEGER NOT NULL, message_hashes TEXT NOT NULL
 );
+CREATE TABLE message_page_object_marks (
+    hash TEXT PRIMARY KEY, unreferenced_since INTEGER NOT NULL
+);
+CREATE TABLE message_page_sweep_cursor (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1), after_hash TEXT NOT NULL
+);
 CREATE TRIGGER message_page_objects_immutable_update BEFORE UPDATE ON message_page_objects
 BEGIN SELECT RAISE(ABORT,'message object is immutable'); END;
 CREATE TRIGGER message_page_objects_immutable_replace BEFORE INSERT ON message_page_objects
@@ -44,6 +51,7 @@ CREATE TRIGGER message_page_objects_invalidate AFTER DELETE ON message_page_obje
 BEGIN
     DELETE FROM message_page_verified_objects WHERE hash=OLD.hash;
     DELETE FROM message_page_proofs WHERE hash=OLD.hash;
+    DELETE FROM message_page_object_marks WHERE hash=OLD.hash;
 END;
 CREATE TRIGGER message_page_verified_objects_immutable BEFORE UPDATE ON message_page_verified_objects
 BEGIN SELECT RAISE(ABORT,'message verification is immutable'); END;
@@ -69,6 +77,106 @@ pub(super) struct MessageEdit {
     pub start: i64,
     pub delete_count: i64,
     pub insert_count: i64,
+}
+
+/// A changed span, in old and new message positions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DirtyRegion {
+    old_start: usize,
+    old_end: usize,
+    new_start: usize,
+    new_end: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Piece {
+    Old { start: usize, len: usize },
+    New { len: usize },
+}
+
+impl Piece {
+    fn len(self) -> usize {
+        match self {
+            Self::Old { len, .. } | Self::New { len } => len,
+        }
+    }
+    fn slice(self, offset: usize, len: usize) -> Self {
+        match self {
+            Self::Old { start, .. } => Self::Old { start: start + offset, len },
+            Self::New { .. } => Self::New { len },
+        }
+    }
+}
+
+fn pieces_between(pieces: &[Piece], from: usize, to: usize, out: &mut Vec<Piece>) {
+    let mut position = 0;
+    for &piece in pieces {
+        let (start, end) = (position, position + piece.len());
+        position = end;
+        let (low, high) = (from.max(start), to.min(end));
+        if low < high {
+            out.push(piece.slice(low - start, high - low));
+        }
+    }
+}
+
+/// Applies the edits in order to the old sequence and returns the spans that
+/// differ from it. Each edit is checked against the count the earlier ones left.
+fn dirty_regions(old_count: usize, count: usize, edits: &[MessageEdit]) -> StoreResult<Vec<DirtyRegion>> {
+    let invalid = || codec_error("invalid message page edit range");
+    let mut pieces = vec![Piece::Old { start: 0, len: old_count }];
+    let mut length = old_count;
+    for edit in edits {
+        let start = usize::try_from(edit.start).map_err(|_| invalid())?;
+        let deleted = usize::try_from(edit.delete_count).map_err(|_| invalid())?;
+        let inserted = usize::try_from(edit.insert_count).map_err(|_| invalid())?;
+        if start > length || deleted > length - start {
+            return Err(invalid());
+        }
+        let mut next = Vec::with_capacity(pieces.len() + 2);
+        pieces_between(&pieces, 0, start, &mut next);
+        next.push(Piece::New { len: inserted });
+        pieces_between(&pieces, start + deleted, length, &mut next);
+        pieces = next;
+        length = length - deleted + inserted;
+    }
+    if length != count {
+        return Err(invalid());
+    }
+    let mut merged: Vec<Piece> = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        match (merged.last_mut(), piece) {
+            (Some(Piece::New { len }), Piece::New { len: more }) => *len += more,
+            (Some(Piece::Old { start, len }), Piece::Old { start: next, len: more }) if *start + *len == next => *len += more,
+            _ => merged.push(piece),
+        }
+    }
+    // A region is a run of new pieces, or a gap between kept old pieces.
+    let mut regions = Vec::new();
+    let (mut old_position, mut new_position) = (0, 0);
+    let mut open: Option<(usize, usize)> = None;
+    for piece in merged.into_iter().chain([Piece::Old { start: old_count, len: 0 }]) {
+        match piece {
+            Piece::Old { start, len } => {
+                let (old_start, new_start) = open.take().unwrap_or((old_position, new_position));
+                if start != old_start || new_position != new_start {
+                    regions.push(DirtyRegion {
+                        old_start,
+                        old_end: start,
+                        new_start,
+                        new_end: new_position,
+                    });
+                }
+                old_position = start + len;
+                new_position += len;
+            }
+            Piece::New { len } => {
+                open.get_or_insert((old_position, new_position));
+                new_position += len;
+            }
+        }
+    }
+    Ok(regions)
 }
 
 pub(super) fn object_body(db: &Connection, hash: &str) -> StoreResult<Option<Vec<u8>>> {
@@ -113,6 +221,8 @@ pub(super) fn put_object(db: &Connection, hash: &str, body: &[u8]) -> StoreResul
     if !verified_object_present(db, hash)? {
         db.execute("INSERT INTO message_page_verified_objects(hash) VALUES(?1)", [hash])?;
     }
+    // Storing an object is a new use of it, so a pending collection stops.
+    db.execute("DELETE FROM message_page_object_marks WHERE hash=?1", [hash])?;
     Ok(())
 }
 
@@ -217,16 +327,16 @@ pub(super) fn capture_manifest(
     generation: &str,
     character: &str,
     conversation: &str,
-    edit: Option<MessageEdit>,
+    edits: Option<&[MessageEdit]>,
 ) -> StoreResult<UnitValue> {
     #[cfg(not(test))]
     {
-        capture(tx, generation, character, conversation, edit)
+        capture(tx, generation, character, conversation, edits)
     }
     #[cfg(test)]
     {
         let mut work = PageWork::default();
-        let result = capture(tx, generation, character, conversation, edit, &mut work);
+        let result = capture(tx, generation, character, conversation, edits, &mut work);
         record_capture_work(&work, result.is_ok());
         result
     }
@@ -289,10 +399,10 @@ pub(super) fn capture_with_work(
     generation: &str,
     character: &str,
     conversation: &str,
-    edit: Option<MessageEdit>,
+    edits: Option<&[MessageEdit]>,
 ) -> StoreResult<(UnitValue, PageWork)> {
     let mut work = PageWork::default();
-    let value = capture(tx, generation, character, conversation, edit, &mut work)?;
+    let value = capture(tx, generation, character, conversation, edits, &mut work)?;
     Ok((value, work))
 }
 
@@ -326,7 +436,7 @@ fn capture(
     generation: &str,
     character: &str,
     conversation: &str,
-    edit: Option<MessageEdit>,
+    edits: Option<&[MessageEdit]>,
     #[cfg(test)] work: &mut PageWork,
 ) -> StoreResult<UnitValue> {
     let count: Option<i64> = tx
@@ -347,156 +457,164 @@ fn capture(
     }
     let count_usize = usize::try_from(count).map_err(codec_error)?;
     let previous = load_pages(tx, generation, character, conversation)?;
-    let edit = edit.filter(|_| !previous.is_empty());
-    if let Some(edit) = edit {
-        let old_count = previous
-            .iter()
-            .try_fold(0i64, |count, p| {
-                count.checked_add(p.page.message_count as i64)
-            })
-            .ok_or_else(|| codec_error("message page count overflow"))?;
-        if edit.start < 0
-            || edit.delete_count < 0
-            || edit.insert_count < 0
-            || edit.start > old_count
-            || edit.delete_count > old_count - edit.start
-            || Some(count)
-                != old_count
-                    .checked_sub(edit.delete_count)
-                    .and_then(|v| v.checked_add(edit.insert_count))
-        {
-            return Err(codec_error("invalid message page edit range"));
+    let edits = edits.filter(|_| !previous.is_empty());
+    let regions = match edits {
+        Some(edits) => {
+            let old_count = previous
+                .iter()
+                .try_fold(0usize, |count, p| count.checked_add(p.page.message_count as usize))
+                .ok_or_else(|| codec_error("message page count overflow"))?;
+            Some(dirty_regions(old_count, count_usize, edits)?)
         }
-    }
-    let prefix = edit.map_or(0, |e| {
+        None => None,
+    };
+    let restart = |old_start: usize| {
         previous
-            .partition_point(|p| p.start < e.start as usize)
+            .partition_point(|p| p.start < old_start)
             .saturating_sub(1)
-    });
-    let mut pages = previous[..prefix].to_vec();
+    };
+    let (mut pages, mut position) = match regions.as_deref() {
+        Some([first, ..]) => {
+            let prefix = restart(first.old_start);
+            (previous[..prefix].to_vec(), previous.get(prefix).map_or(0, |p| p.start))
+        }
+        Some([]) => (previous.clone(), count_usize),
+        None => (Vec::new(), 0),
+    };
     #[cfg(test)]
     {
-        work.prefix_reused = prefix;
+        work.prefix_reused = pages.len();
     }
-    let mut position = if edit.is_some() {
-        previous.get(prefix).map_or(0, |p| p.start)
-    } else {
-        0
-    };
+    let mut region_index = 0;
     let mut statement = tx.prepare("SELECT message_index,canonical_hash,canonical_size FROM messages
         WHERE generation=?1 AND character_id=?2 AND conversation_id=?3 AND message_index>=?4 ORDER BY message_index")?;
-    let mut rows = statement.query(params![
-        generation,
-        character,
-        conversation,
-        position as i64
-    ])?;
-    let mut next = next_hash(tx, &mut rows, generation, character, conversation)?;
-    #[cfg(test)]
-    {
-        work.hash_rows_read += usize::from(next.is_some());
-    }
-    while let Some((_, _)) = &next {
-        let start = position;
-        let mut bytes = PAGE_PREFIX.to_vec();
-        let mut page_hashes = Vec::new();
-        loop {
-            let (index, hash) = next
-                .take()
-                .ok_or_else(|| codec_error("message page index is incomplete"))?;
-            if index != position {
-                return Err(codec_error("noncontiguous conversation messages"));
-            }
-            let body: String = tx.query_row(
-                "SELECT value FROM messages WHERE generation=?1 AND character_id=?2
-                AND conversation_id=?3 AND message_index=?4",
-                params![generation, character, conversation, position as i64],
-                |r| r.get(0),
-            )?;
-            let body = payload_value::canonicalize(body.as_bytes()).map_err(codec_error)?;
-            if {
-                #[cfg(test)]
-                crate::persistent_store::hash_work::observe("native_message_verify", body.len());
-                MessageHash::from_bytes(&body)
-            } != hash {
-                return Err(codec_error("cached message hash mismatch"));
-            }
-            if position > start {
-                bytes.push(b',');
-            }
-            bytes.extend(&body);
-            page_hashes.push(hash.clone());
-            #[cfg(test)]
-            {
-                work.messages_read += 1;
-            }
-            #[cfg(test)]
-            {
-                work.bytes_read += body.len() as u64;
-            }
-            position += 1;
-            next = next_hash(tx, &mut rows, generation, character, conversation)?;
-            #[cfg(test)]
-            {
-                work.hash_rows_read += usize::from(next.is_some());
-            }
-            let page_count = position - start;
-            if page_count == LOGICAL_MESSAGE_PAGE_SIZE
-                || (page_count >= MIN_PAGE_MESSAGES && hash.boundary().map_err(codec_error)?)
-                || bytes.len() + PAGE_SUFFIX.len() > MAX_PAGE_BYTES
-                || next.is_none()
-                || next.as_ref().is_some_and(|(_, h)| {
-                    bytes.len() as u64 + 1 + h.byte_length + PAGE_SUFFIX.len() as u64
-                        > MAX_PAGE_BYTES as u64
-                })
-            {
-                break;
-            }
+    'walk: while position < count_usize {
+        let mut rows = statement.query(params![
+            generation,
+            character,
+            conversation,
+            position as i64
+        ])?;
+        let mut next = next_hash(tx, &mut rows, generation, character, conversation)?;
+        #[cfg(test)]
+        {
+            work.hash_rows_read += usize::from(next.is_some());
         }
-        bytes.extend(PAGE_SUFFIX);
-        let object = {
-            let result = encoded_object(bytes);
-            #[cfg(test)]
-            crate::persistent_store::hash_work::encoded_object("native_page_identity", &result);
-            result
-        }.map_err(codec_error)?;
-        let boundary = PageBoundary {
-            start,
-            page: ManifestPage {
-                hash: object.hash.clone(),
-                message_count: (position - start) as u32,
-                byte_length: DecimalU64(object.size),
-            },
-        };
-        if let Some(edit) = edit {
-            let end = (edit.start + edit.insert_count) as usize;
-            if start >= end {
-                let old_start = (start as i64 - edit.insert_count + edit.delete_count) as usize;
-                if let Ok(old_page) = previous.binary_search_by_key(&old_start, |p| p.start) {
-                    if boundary.page == previous[old_page].page {
-                        for old in &previous[old_page..] {
-                            let mut page = old.clone();
-                            page.start = (page.start as i64 + edit.insert_count - edit.delete_count)
-                                as usize;
-                            pages.push(page);
-                            #[cfg(test)]
-                            {
-                                work.suffix_reused += 1;
+        while let Some((_, _)) = &next {
+            let start = position;
+            let mut bytes = PAGE_PREFIX.to_vec();
+            let mut page_hashes = Vec::new();
+            loop {
+                let (index, hash) = next
+                    .take()
+                    .ok_or_else(|| codec_error("message page index is incomplete"))?;
+                if index != position {
+                    return Err(codec_error("noncontiguous conversation messages"));
+                }
+                let body: String = tx.query_row(
+                    "SELECT value FROM messages WHERE generation=?1 AND character_id=?2
+                    AND conversation_id=?3 AND message_index=?4",
+                    params![generation, character, conversation, position as i64],
+                    |r| r.get(0),
+                )?;
+                let body = payload_value::canonicalize(body.as_bytes()).map_err(codec_error)?;
+                if {
+                    #[cfg(test)]
+                    crate::persistent_store::hash_work::observe("native_message_verify", body.len());
+                    MessageHash::from_bytes(&body)
+                } != hash {
+                    return Err(codec_error("cached message hash mismatch"));
+                }
+                if position > start {
+                    bytes.push(b',');
+                }
+                bytes.extend(&body);
+                page_hashes.push(hash.clone());
+                #[cfg(test)]
+                {
+                    work.messages_read += 1;
+                }
+                #[cfg(test)]
+                {
+                    work.bytes_read += body.len() as u64;
+                }
+                position += 1;
+                next = next_hash(tx, &mut rows, generation, character, conversation)?;
+                #[cfg(test)]
+                {
+                    work.hash_rows_read += usize::from(next.is_some());
+                }
+                let page_count = position - start;
+                if page_count == LOGICAL_MESSAGE_PAGE_SIZE
+                    || (page_count >= MIN_PAGE_MESSAGES && hash.boundary().map_err(codec_error)?)
+                    || bytes.len() + PAGE_SUFFIX.len() > MAX_PAGE_BYTES
+                    || next.is_none()
+                    || next.as_ref().is_some_and(|(_, h)| {
+                        bytes.len() as u64 + 1 + h.byte_length + PAGE_SUFFIX.len() as u64
+                            > MAX_PAGE_BYTES as u64
+                    })
+                {
+                    break;
+                }
+            }
+            bytes.extend(PAGE_SUFFIX);
+            let object = {
+                let result = encoded_object(bytes);
+                #[cfg(test)]
+                crate::persistent_store::hash_work::encoded_object("native_page_identity", &result);
+                result
+            }.map_err(codec_error)?;
+            let boundary = PageBoundary {
+                start,
+                page: ManifestPage {
+                    hash: object.hash.clone(),
+                    message_count: (position - start) as u32,
+                    byte_length: DecimalU64(object.size),
+                },
+            };
+            // Once a recomputed page lines up with an old page past the changed
+            // range, the old pages up to the next changed range are reused.
+            if let Some(regions) = regions.as_deref() {
+                while regions.get(region_index + 1).is_some_and(|next| next.new_start <= start) {
+                    region_index += 1;
+                }
+                let region = regions[region_index];
+                if start >= region.new_end {
+                    let old_start = start - region.new_end + region.old_end;
+                    if let Ok(old_page) = previous.binary_search_by_key(&old_start, |p| p.start) {
+                        let limit = regions
+                            .get(region_index + 1)
+                            .map_or(previous.len(), |next| restart(next.old_start));
+                        if old_page < limit && boundary.page == previous[old_page].page {
+                            for old in &previous[old_page..limit] {
+                                let mut page = old.clone();
+                                page.start = page.start - region.old_end + region.new_end;
+                                pages.push(page);
+                                #[cfg(test)]
+                                {
+                                    work.suffix_reused += 1;
+                                }
                             }
+                            if limit == previous.len() {
+                                position = count_usize;
+                                break 'walk;
+                            }
+                            position = previous[limit].start - region.old_end + region.new_end;
+                            region_index += 1;
+                            continue 'walk;
                         }
-                        position = count_usize;
-                        break;
                     }
                 }
             }
+            put_object(tx, &object.hash, &object.bytes)?;
+            store_page_proof(tx, &boundary.page, &page_hashes)?;
+            pages.push(boundary);
+            #[cfg(test)]
+            {
+                work.pages_written += 1;
+            }
         }
-        put_object(tx, &object.hash, &object.bytes)?;
-        store_page_proof(tx, &boundary.page, &page_hashes)?;
-        pages.push(boundary);
-        #[cfg(test)]
-        {
-            work.pages_written += 1;
-        }
+        break;
     }
     if position != count_usize {
         return Err(codec_error("conversation message count mismatch"));
@@ -765,7 +883,8 @@ pub(super) fn validate_manifest(db: &Connection, value: &UnitValue) -> StoreResu
 
 // Copied SQLite files cannot supply certificates for their own contents.
 pub(super) fn accept_copied_database(tx: &Transaction<'_>) -> StoreResult<()> {
-    tx.execute_batch("DELETE FROM message_page_proofs; DELETE FROM message_page_verified_objects;")?;
+    tx.execute_batch("DELETE FROM message_page_proofs; DELETE FROM message_page_verified_objects;
+        DELETE FROM message_page_object_marks; DELETE FROM message_page_sweep_cursor;")?;
     let mut messages = tx.prepare("SELECT generation,character_id,conversation_id,message_index,value,canonical_hash,canonical_size FROM messages")?;
     let mut rows = messages.query([])?;
     while let Some(row) = rows.next()? {
@@ -938,6 +1057,268 @@ impl From<risunest_external_storage_format::logical_records::LogicalRecordError>
 fn sql_i64(value: u64) -> StoreResult<i64> {
     i64::try_from(value).map_err(|_| codec_error("message size exceeds database integer range"))
 }
+/// Hashes that some stored row still needs.
+#[derive(Default)]
+pub(super) struct ObjectRoots {
+    hashes: HashSet<String>,
+    walked: HashSet<String>,
+}
+
+impl ObjectRoots {
+    fn insert(&mut self, hash: impl Into<String>) {
+        self.hashes.insert(hash.into());
+    }
+
+    fn value(&mut self, objects: &Connection, value: &UnitValue) -> StoreResult<()> {
+        let UnitValue::Object { descriptor_hash, descriptor } = value else {
+            return Ok(());
+        };
+        self.insert(descriptor_hash.as_str());
+        self.insert(descriptor.object_hash.as_str());
+        self.hashes.extend(descriptor.dependencies.iter().cloned());
+        for (root, relations) in [(&descriptor.dependency_root, false), (&descriptor.relation_root, true)] {
+            if let Some(root) = root {
+                self.tree(objects, root, relations)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn tree(&mut self, objects: &Connection, root: &str, relations: bool) -> StoreResult<()> {
+        use risunest_sync_wire::descriptor::ReferencePage;
+        let mut pending = vec![root.to_owned()];
+        while let Some(hash) = pending.pop() {
+            self.insert(hash.as_str());
+            if !self.walked.insert(hash.clone()) {
+                continue;
+            }
+            // A node this store does not hold has nothing below it here. A node
+            // it holds but cannot read stops the sweep, since what it names is
+            // unknown.
+            let Some(body) = object_body(objects, &hash)? else {
+                continue;
+            };
+            let page = risunest_sync_wire::canonical::decode::<ReferencePage>(&body, risunest_sync_wire::MAX_METADATA_BYTES)
+                .map_err(codec_error)?;
+            match page {
+                ReferencePage::Branches { children } => pending.extend(children),
+                ReferencePage::Objects { hashes } if !relations => self.hashes.extend(hashes),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Roots every unit value found anywhere inside a stored JSON body.
+    fn json(&mut self, objects: &Connection, value: &Value) -> StoreResult<()> {
+        let mut pending = vec![value];
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::Object(map) => {
+                    if map.get("kind").and_then(Value::as_str) == Some("object") && map.contains_key("descriptorHash") {
+                        let unit = serde_json::from_value::<UnitValue>(value.clone())?;
+                        self.value(objects, &unit)?;
+                        continue;
+                    }
+                    pending.extend(map.values());
+                }
+                Value::Array(items) => pending.extend(items),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn contains(&self, hash: &str) -> bool {
+        self.hashes.contains(hash)
+    }
+}
+
+/// Every hash that a library row, a revision lease's view of the library or of
+/// the device it pinned, or a device row references. The result roots the sweep
+/// of either store; tree nodes are read from `objects`, the store being swept.
+pub(super) fn object_roots<'a>(
+    library: &Connection,
+    leases: impl IntoIterator<Item = &'a Connection>,
+    device: &Connection,
+    objects: &Connection,
+) -> StoreResult<ObjectRoots> {
+    let mut roots = ObjectRoots::default();
+    library_object_roots(library, objects, &mut roots)?;
+    for lease in leases {
+        library_object_roots(lease, objects, &mut roots)?;
+        let pinned: bool = lease.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_database_list WHERE name='backup_device')",
+            [],
+            |row| row.get(0),
+        )?;
+        if pinned {
+            device_object_roots(lease, "backup_device", objects, &mut roots)?;
+        }
+    }
+    device_object_roots(device, "main", objects, &mut roots)?;
+    Ok(roots)
+}
+
+/// Collects the objects that library rows visible on `db` reference: page
+/// indexes and manifests of every generation, unit values in every unit table,
+/// and hashes kept by staged restores and external storage captures.
+fn library_object_roots(db: &Connection, objects: &Connection, roots: &mut ObjectRoots) -> StoreResult<()> {
+    for sql in [
+        "SELECT DISTINCT hash FROM message_page_indexes",
+        "SELECT manifest_hash FROM external_storage_captures",
+        "SELECT file_hash FROM external_storage_capture_files",
+        "SELECT content_hash FROM external_storage_base_records",
+        "SELECT hash FROM snapshot_restore_payloads",
+    ] {
+        let mut statement = db.prepare(sql)?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            roots.insert(row?);
+        }
+    }
+    let mut statement = db.prepare("SELECT body FROM message_page_manifests")?;
+    let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+    for row in rows {
+        roots.insert(risunest_sync_wire::hash(&row?));
+    }
+    drop(statement);
+    for sql in [
+        "SELECT value FROM lww_units WHERE json_extract(value,'$.kind')='object'",
+        "SELECT value FROM lww_outbox WHERE json_extract(value,'$.kind')='object'",
+        "SELECT value FROM lww_receive_rows WHERE status<>'done' AND json_extract(value,'$.kind')='object'",
+        "SELECT value FROM lww_binding_source_units WHERE json_extract(value,'$.kind')='object'",
+        "SELECT value FROM snapshot_original_units WHERE json_extract(value,'$.kind')='object'",
+        "SELECT value FROM snapshot_restore_units WHERE json_extract(value,'$.kind')='object'",
+    ] {
+        unit_value_roots(db, objects, sql, roots)?;
+    }
+    let mut statement = db.prepare("SELECT archived_object FROM characters WHERE archived_object IS NOT NULL")?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        let archived: super::archive::ArchivedObject = serde_json::from_str(&row?)?;
+        for hash in super::lww::archive_object_hashes(&archived)? {
+            roots.insert(hash);
+        }
+    }
+    Ok(())
+}
+
+/// Collects the objects that unfinished device rows in `schema` on `db`
+/// reference: device units, staged receives, unfinished intents and
+/// unpublished proofs.
+fn device_object_roots(db: &Connection, schema: &str, objects: &Connection, roots: &mut ObjectRoots) -> StoreResult<()> {
+    for sql in [
+        format!("SELECT value FROM {schema}.lww_units WHERE json_extract(value,'$.kind')='object'"),
+        format!("SELECT value FROM {schema}.lww_outbox WHERE json_extract(value,'$.kind')='object'"),
+        format!("SELECT value FROM {schema}.lww_receive_rows WHERE status<>'done' AND json_extract(value,'$.kind')='object'"),
+    ] {
+        unit_value_roots(db, objects, &sql, roots)?;
+    }
+    for sql in [
+        format!("SELECT body FROM {schema}.lww_receive WHERE finished=0"),
+        format!("SELECT body FROM {schema}.lww_intents WHERE complete=0"),
+        format!("SELECT entries FROM {schema}.lww_unpublished_proofs"),
+    ] {
+        let mut statement = db.prepare(&sql)?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            let body: Value = serde_json::from_str(&row?)?;
+            roots.json(objects, &body)?;
+        }
+    }
+    Ok(())
+}
+
+fn unit_value_roots(db: &Connection, objects: &Connection, sql: &str, roots: &mut ObjectRoots) -> StoreResult<()> {
+    let mut statement = db.prepare(sql)?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        let value: UnitValue = serde_json::from_str(&row?)?;
+        roots.value(objects, &value)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ObjectSweep {
+    pub(crate) marked: u64,
+    pub(crate) deleted: u64,
+    pub(crate) deleted_bytes: u64,
+    /// The pass reached the last object and starts from the first one next time.
+    pub(crate) wrapped: bool,
+}
+
+/// Visits up to `limit` objects of the store that `tx` writes, after its stored
+/// cursor. An object nothing references is marked the first time and deleted
+/// once it has stayed unreferenced for `grace_ms`; a referenced object loses
+/// its mark.
+pub(super) fn sweep_objects(
+    tx: &Transaction<'_>,
+    roots: &ObjectRoots,
+    now_ms: i64,
+    grace_ms: i64,
+    limit: usize,
+) -> StoreResult<ObjectSweep> {
+    let after: Option<String> = tx
+        .query_row("SELECT after_hash FROM message_page_sweep_cursor WHERE singleton=1", [], |row| row.get(0))
+        .optional()?;
+    let candidates: Vec<(String, i64, Option<i64>)> = {
+        let mut statement = tx.prepare(
+            "SELECT o.hash,length(o.body),m.unreferenced_since FROM message_page_objects o
+            LEFT JOIN message_page_object_marks m ON m.hash=o.hash
+            WHERE ?1 IS NULL OR o.hash>?1 ORDER BY o.hash LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![after, limit as i64], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    let mut sweep = ObjectSweep::default();
+    for (hash, size, mark) in &candidates {
+        if roots.contains(hash) {
+            if mark.is_some() {
+                tx.execute("DELETE FROM message_page_object_marks WHERE hash=?1", [hash])?;
+            }
+            continue;
+        }
+        match mark {
+            None => {
+                tx.execute("INSERT INTO message_page_object_marks VALUES(?1,?2)", params![hash, now_ms])?;
+                sweep.marked += 1;
+            }
+            Some(since) if now_ms.saturating_sub(*since) >= grace_ms => {
+                tx.execute("DELETE FROM message_page_objects WHERE hash=?1", [hash])?;
+                sweep.deleted += 1;
+                sweep.deleted_bytes += u64::try_from(*size).unwrap_or(0);
+            }
+            Some(_) => {}
+        }
+    }
+    match candidates.last() {
+        Some((last, _, _)) if candidates.len() == limit => {
+            tx.execute(
+                "INSERT INTO message_page_sweep_cursor VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET after_hash=excluded.after_hash",
+                [last],
+            )?;
+        }
+        _ => {
+            tx.execute("DELETE FROM message_page_sweep_cursor", [])?;
+            sweep.wrapped = true;
+        }
+    }
+    Ok(sweep)
+}
+
+/// A marked object may be collected soon, so callers that would otherwise skip
+/// fetching it treat it as absent and put it again, which clears the mark.
+pub(super) fn retained_object_present(db: &Connection, hash: &str) -> StoreResult<bool> {
+    Ok(verified_object_present(db, hash)?
+        && !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM message_page_object_marks WHERE hash=?1)",
+            [hash],
+            |row| row.get::<_, bool>(0),
+        )?)
+}
+
 fn sql_u64(value: i64, index: usize) -> rusqlite::Result<u64> {
     u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
 }
@@ -948,6 +1329,26 @@ fn sql_usize(value: i64, index: usize) -> rusqlite::Result<usize> {
 #[cfg(test)]
 mod capture_work_tests {
     use super::*;
+
+    #[test]
+    fn edits_resolve_to_the_spans_that_differ_from_the_old_sequence() {
+        let edit = |start, delete_count, insert_count| MessageEdit { start, delete_count, insert_count };
+        let region = |old_start, old_end, new_start, new_end| DirtyRegion { old_start, old_end, new_start, new_end };
+        assert_eq!(
+            dirty_regions(1024, 1025, &[edit(5, 1, 0), edit(600, 0, 2)]).unwrap(),
+            [region(5, 6, 5, 5), region(601, 601, 600, 602)],
+        );
+        assert_eq!(
+            dirty_regions(1024, 1024, &[edit(600, 0, 2), edit(5, 2, 0)]).unwrap(),
+            [region(5, 7, 5, 5), region(600, 600, 598, 600)],
+        );
+        assert_eq!(dirty_regions(10, 10, &[edit(0, 0, 0)]).unwrap(), []);
+        assert_eq!(dirty_regions(10, 11, &[edit(10, 0, 1)]).unwrap(), [region(10, 10, 10, 11)]);
+        assert_eq!(dirty_regions(10, 9, &[edit(9, 1, 0)]).unwrap(), [region(9, 10, 9, 9)]);
+        assert_eq!(dirty_regions(10, 10, &[edit(3, 2, 2), edit(4, 1, 1)]).unwrap(), [region(3, 5, 3, 5)]);
+        assert!(dirty_regions(10, 10, &[edit(11, 0, 0)]).is_err());
+        assert!(dirty_regions(10, 11, &[edit(0, 0, 0)]).is_err());
+    }
 
     fn fixture() -> Connection {
         let db = Connection::open_in_memory().unwrap();
@@ -1066,11 +1467,11 @@ mod capture_work_tests {
             "g",
             "c",
             "chat",
-            Some(MessageEdit {
+            Some(&[MessageEdit {
                 start: 2,
                 delete_count: 0,
                 insert_count: 1,
-            }),
+            }]),
         )
         .unwrap();
         let totals = take_capture_work();
@@ -1093,11 +1494,11 @@ mod capture_work_tests {
             "g",
             "c",
             "chat",
-            Some(MessageEdit {
+            Some(&[MessageEdit {
                 start: 4,
                 delete_count: 0,
                 insert_count: 1
-            })
+            }])
         )
         .is_err());
         let totals = take_capture_work();

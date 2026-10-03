@@ -61,6 +61,23 @@ describe('native external LWW adapter', () => {
         fixture.invoke.mockRejectedValueOnce({ kind: 'corrupt' })
         await expect(transport.receiveAvailableChanges(context())).rejects.toEqual({ kind: 'corrupt' })
     })
+    it('keeps checking after clock skew and stops only on corruption', async () => {
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        const receives = () => fixture.invoke.mock.calls.filter(call => call[0] === 'external_lww_receive').length
+        fixture.invoke.mockImplementation(async command => { if (command === 'external_lww_receive') throw { kind: 'clockSkew' } })
+        await vi.advanceTimersByTimeAsync(20_000); await settle()
+        const skewed = receives()
+        await vi.advanceTimersByTimeAsync(20_000); await settle()
+        expect(receives()).toBe(skewed + 1)
+        fixture.invoke.mockImplementation(async command => command === 'external_lww_receive' ? [] : undefined)
+        await vi.advanceTimersByTimeAsync(20_000); await settle()
+        expect(receives()).toBe(skewed + 2)
+        fixture.invoke.mockImplementation(async command => { if (command === 'external_lww_receive') throw { kind: 'corrupt' } })
+        await vi.advanceTimersByTimeAsync(20_000); await settle()
+        const corrupt = receives()
+        await vi.advanceTimersByTimeAsync(600_000); await settle()
+        expect(receives()).toBe(corrupt)
+    })
     it('publishes the actual generation-complete revision cause immediately over a pending ordinary debounce', async () => {
         dispose = await installExternalLwwAdapters(state()); await settle()
         fixture.invoke.mockClear(); fixture.mobile.mockClear(); fixture.flush.mockClear()
@@ -101,6 +118,17 @@ describe('native external LWW adapter', () => {
         await requestExternalLwwNow('sync')
         expect(fixture.flush).toHaveBeenCalledWith('external-lww-publish')
         expect(fixture.invoke.mock.calls.map(call => call[0])).toEqual(['external_lww_publish', 'external_lww_receive'])
+    })
+    it('tells the native fence whether a binding change makes this a new device', async () => {
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        const transport = fixture.registrations.get('sync')!
+        fixture.invoke.mockClear()
+        await transport.fenceOldJobs(context())
+        await transport.fenceOldJobs({ ...context(), mode: 'new-device' })
+        await externalLwwExitDrain('sync', 'selection', true)!.cancel('cancel-exit')
+        expect(fixture.invoke.mock.calls.filter(call => call[0] === 'external_lww_fence').map(call => call[1])).toEqual([
+            { connectionId: 'sync', newDevice: false }, { connectionId: 'sync', newDevice: true }, { connectionId: 'sync', newDevice: false },
+        ])
     })
     it('reconciles the authoritative revision when publication fails after native clock repair', async () => {
         dispose = await installExternalLwwAdapters(state()); await settle()

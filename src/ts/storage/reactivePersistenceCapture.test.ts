@@ -55,6 +55,24 @@ describe('production reactive persistence captures', () => {
         } finally { stringify.mockRestore() }
     })
 
+    it('returns an unchanged resident character without composing its JSON again', () => {
+        const state=fixture()
+        state.database.characters[0].chats[0].id='conversation'
+        state.database.characters[0].chats.push({id:'second',message:[{data:'second'}]} as never)
+        const cached=createPersistenceCanonicalCapture({root:()=>state.database,pluginStorage:()=>state.database.pluginCustomStorage,
+            presets:()=>state.database.botPresets,character:()=>state.database.characters[0],characters:()=>state.database.characters})
+        const before=cached.characters!().get('synthetic')!
+        const stringify=vi.spyOn(JSON,'stringify')
+        const join=vi.spyOn(Array.prototype,'join')
+        try {
+            expect(cached.characters!().get('synthetic')).toBe(before)
+            expect(stringify).not.toHaveBeenCalled()
+            expect(join).not.toHaveBeenCalled()
+        } finally { stringify.mockRestore(); join.mockRestore() }
+        state.database.characters[0].chats[1].note='changed'
+        expect(JSON.parse(cached.characters!().get('synthetic')!).chats[1].note).toBe('changed')
+    })
+
     it('keeps plugin storage ownership metadata out of the persistent root', () => {
         const state = fixture()
         state.database.pluginStorageMeta = {

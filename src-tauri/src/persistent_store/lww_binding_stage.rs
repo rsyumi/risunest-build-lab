@@ -304,8 +304,7 @@ fn copy_controls(source: &Connection, target: &Connection, change: &Change) -> S
             }.map_err(error)?;
             for page in manifest.pages { copy_required_object(source, target, &page.hash)?; }
         }
-        "archive" => { copy_required_object(source, target, &descriptor.object_hash)?; }
-        _ => {}
+        _ => { copy_required_object(source, target, &descriptor.object_hash)?; }
     }
     Ok(())
 }

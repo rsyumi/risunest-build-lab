@@ -164,7 +164,7 @@ function makeState(database: Database): PersistentDataRuntimeStateAdapter & {
             state.operationCheck?.()
             return state.operationActive
         },
-        getGeneratingConversation: () => state.generating,
+        getGeneratingConversations: () => state.generating ? [state.generating] : [],
         replaceDatabase: (database: Database) => {
             current = database
         },
@@ -340,6 +340,35 @@ describe('the working-set refresh drives the content change cursor', () => {
             .current()
             .characters.find((character) => character.chaId === 'char-a')!
         expect(selected.chats[0].message).toEqual([])
+    })
+
+    it('applies a change to the selected conversation while another conversation generates', async () => {
+        const { runtime, state, store, scripted } = await makeRuntime(
+            `targeted-other-generation-${crypto.randomUUID()}`,
+        )
+        await store.replaceFromDatabase(makeDatabase('Projected'), 1)
+        scripted.script(null, [])
+        await refresh(runtime, 2)
+
+        await store.commit({
+            expectedRevision: 2,
+            conversations: [{
+                type: 'replace-range', characterId: 'char-a', conversationId: 'chat-a',
+                start: 0, deleteCount: 0, messages: [{ role: 'char', data: 'remote', chatId: 'remote-1' }],
+            } as never],
+        })
+        state.operationActive = true
+        state.generating = { characterId: 'char-b', conversationId: 'chat-b' }
+        scripted.script({ revision: 3, afterRevision: 2 }, [
+            { kind: 'character', key1: 'char-a', key2: '' },
+            { kind: 'conversation', key1: 'char-a', key2: 'chat-a' },
+        ])
+        await refresh(runtime, 3)
+
+        expect(scripted.cursors).toEqual([1, 2, 3])
+        expect(state.current().characters[0].chats[0].message).toEqual([
+            { role: 'char', data: 'remote', chatId: 'remote-1' },
+        ])
     })
 
     it('persists the generated reply before it applies the held change', async () => {

@@ -7,7 +7,6 @@ export const languageEnglish = {
         "pluginDataDeletion": "Delete plugin data",
         "lorebookDeletion": "Delete lorebook folder and entries",
         "partialBackup": "Backup without other assets",
-        "incompleteRestore": "Restore without unavailable data",
         "onlySelectedMessage": "Delete only this message"
     },
 
@@ -75,34 +74,11 @@ export const languageEnglish = {
     portableBackup: {
         preservedSourceHelp:
             'These files are kept separately because the restored library does not need them. They do not sync automatically and can be deleted from the source preservation area.',
-        title: 'RisuNest backup',
         export: 'RisuNest full backup (.risunest)',
         restore: 'Restore backup file',
-        library: 'Library and attachments',
-        device: 'Device plugin data',
         localStorage: 'Plugin local storage',
         localData: 'Plugin local data',
         database: 'Plugin database',
-        settings: 'Device settings',
-        chooseExport: 'Choose what to back up',
-        chooseRestore: 'Choose what to restore',
-        helpExport:
-            'Selected device data is captured after restarting the app into maintenance mode.',
-        helpRestore:
-            'Selected areas replace the data on this device, including keys that exist only here. Unselected areas stay unchanged. No automatic backup will be kept. Back up your current data first if you want to keep it.',
-        helpRestoreFirstRun:
-            'Selected areas are brought onto this device. Unselected areas can be restored later from settings with the same file.',
-        damaged: 'This backup has {0} problems. You can still bring in the parts that are fine.',
-        choosePart: 'Restore selected items only',
-        choosePartHelp:
-            'The current library will be replaced with the selected items. Unselected items will not be restored.',
-        itemCharacters: 'Characters',
-        itemPresets: 'Presets',
-        itemPlugins: 'Plugin data',
-        itemDamaged: '{0} problems',
-        repair: 'This file preserves damaged source data. Its library cannot be activated until repaired.',
-        continue: 'Continue',
-        cancel: 'Cancel',
         dbOnly: 'Database only (.risudat)',
         risuai: 'Export for RisuAI (.bin)',
         pocket: 'Export for PocketRisu (.bin)',
@@ -133,14 +109,6 @@ export const languageEnglish = {
             "wait": 'Keep waiting',
             "stillRunning": 'The backup is still running. You can review it later.',
         },
-        "nextItems": 'Next',
-        "previousItems": 'Previous',
-        "searchItems": 'Search items',
-        "wholeLibrary": 'Entire library',
-        "excludeLibrary": "Do not include library",
-        "skipLibrary": 'Do not restore',
-        "danglingLinks": 'Links to unselected items will be restored with missing targets.',
-        "choosePartFirstRunHelp": 'The selected items will be imported into the library.',
     },
     previousResponseCandidate: 'Previous response',
     nextResponseCandidate: 'Next response',
@@ -1054,6 +1022,7 @@ export const languageEnglish = {
     syncConflictBackups: 'Account sync conflict backups',
     syncConflictNoBackups: "There are no sync conflict backups.",
     syncConflictRestoreConfirm: 'Replace the current database with this database-only backup? No automatic backup is created. Assets, cold-storage payloads, and inlays are not included.',
+    syncConflictRestoreScope: 'Assets, cold-storage payloads, and inlays are not included.',
     syncBackupEntry: "{date} / {side} / {count} characters",
     syncBackupDatabaseOnly: "database only, excludes assets, cold storage, and inlays",
     syncBackupSideLocal: "this device",
@@ -2378,11 +2347,6 @@ export const languageEnglish = {
             pendingHelp:
                 'The sync in progress has to finish before disconnecting. Select Sync now.',
             conflict: 'Conflicts need attention',
-            conflictCount: '{0} conflicting items',
-            conflictHelp:
-                'The same items were edited on this device and on the server. Choose one side for all conflicting items. Both sides are saved as conflict backups before applying.',
-            keepLocal: 'Keep this device',
-            keepRemote: 'Keep server version',
             busyHelp: 'Another operation is using the library. Wait for it to finish and try again.',
             errorHelp:
                 'Sync could not finish. Your edits on this device are unchanged. Try again.',
@@ -2542,11 +2506,9 @@ export const languageEnglish = {
             restoreSnapshot: 'Restore',
             snapshotReasons: {
             dataHealthRepair: "Before data repair",
-            serverSyncRecovery: "Before server comparison",
 
                 manual: 'Created manually',
                 periodic: 'Automatic',
-                preRestore: 'Kept before a restore',
             },
             counts: '{0} characters · {1} chats · {2} messages',
             subMetrics:
@@ -2722,6 +2684,8 @@ export const languageEnglish = {
                 'Synchronization is running or still needs recovery. Finish it before starting a backup or restore.',
             syncUnconfirmed:
                 'The synchronization outcome could not be confirmed. Resolve the pending operation before restoring.',
+            syncUnavailable:
+                'Sync is not connected, so the backup cannot be restored. Connect sync and try again.',
             title: 'Backup & restore',
             groupFiles: 'Backup files',
             filesHelp:
@@ -3101,13 +3065,13 @@ export const languageEnglish = {
         cancelAction: "Cancel",
         clockBlocked: "Sync stopped because the device and remote times differ. Correct the time and try again.",
         writerCollision: "Sync stopped because another device uses the same identity. Reconnect as a new device.",
+        unitTooLarge: "Sync stopped because an item on this device is too large to send to the server. Make the large item smaller and try again.",
         newDeviceAction: "Connect as new device",
         restoreTitle: "Restore the backup?",
         restoreDescriptionBound: "The current data will be cleared and replaced with the selected backup, and the restored data will sync remotely. Make a manual backup if needed.",
         restoreDescription: "The current data will be cleared and replaced with the selected backup. Make a manual backup if needed.",
         restoreAcknowledge: "Clear the current data",
         restoreAction: "Restore",
-        myboxSyncUnavailable: "MYBOX cannot be used for sync.",
     },
 } satisfies I18nTranslation;
 

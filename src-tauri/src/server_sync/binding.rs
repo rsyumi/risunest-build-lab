@@ -75,7 +75,7 @@ pub(crate) fn inspect(store: &PersistentStore, header: &Header) -> Result<Inspec
     assert_authority(store, header)?;
     let core = candidate(store)?;
     core.admission()?;
-    let head = core.client.resolve_identity(false)?;
+    let head = core.client.resolve_identity()?;
     let (_, pin): (_, StatePin) = core.client.json(
         reqwest::Method::POST,
         "state/pins",
@@ -113,8 +113,7 @@ pub(crate) fn inspect(store: &PersistentStore, header: &Header) -> Result<Inspec
     let target_id = risunest_sync_wire::hash(
         format!("{}:{}:{}", config.endpoint, config.library_id, head.epoch).as_bytes(),
     );
-    let state = store.lww_binding_state()?;
-    let previously_bound_library = state.library_id.as_deref() == Some(&config.library_id)
+    let previously_bound_library = store.lww_previously_bound(&config.library_id, &target_id)?
         && core.log.config("active")?.is_some_and(|old| {
             old.endpoint == config.endpoint && old.library_id == config.library_id
         })
@@ -147,6 +146,112 @@ pub(crate) fn inspect(store: &PersistentStore, header: &Header) -> Result<Inspec
         previously_bound_library,
     })
 }
+/// Moves the operation log with a binding switch. A retained binding keeps its pending
+/// publications and receive position under the new authority; any other switch detaches
+/// publications it never settled, leaving their acceptance unknown.
+pub(crate) fn carry_operation_log(
+    root: &std::path::Path,
+    old: DecimalU64,
+    new: DecimalU64,
+    retain: bool,
+) -> Result<()> {
+    if !root.join("server-sync/lww-operations.sqlite").exists() {
+        return Ok(());
+    }
+    let log = OperationLog::open(root)?;
+    let tx = log.0.unchecked_transaction()?;
+    let unacknowledged: Vec<(String, String, bool, String)> = {
+        let mut query = tx.prepare(
+            "SELECT id,intent,receipt IS NULL,digest FROM publications WHERE acknowledged=0",
+        )?;
+        let rows = query
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        rows
+    };
+    for (id, intent, pending, digest) in unacknowledged {
+        let mut publication: super::lww_client::Publication = serde_json::from_str(&intent)
+            .map_err(|_| SyncError::new("publication-integrity", 409))?;
+        if publication.authority != old {
+            continue;
+        }
+        if retain {
+            publication.authority = new;
+            for entry in &mut publication.entries {
+                entry.target_authority = new;
+            }
+            tx.execute(
+                "UPDATE publications SET intent=?2 WHERE id=?1",
+                rusqlite::params![
+                    id,
+                    serde_json::to_string(&publication)
+                        .map_err(|_| SyncError::new("publication-encoding", 409))?
+                ],
+            )?;
+        } else if pending {
+            tx.execute(
+                "UPDATE publications SET receipt=?2,acknowledged=1 WHERE id=?1 AND receipt IS NULL",
+                rusqlite::params![
+                    id,
+                    serde_json::json!({"kind":"binding-switched","bodyDigest":digest,"historicalAcceptance":"unknown"}).to_string()
+                ],
+            )?;
+        }
+    }
+    if retain {
+        use rusqlite::OptionalExtension;
+        let (old_text, new_text) = (old.0.to_string(), new.0.to_string());
+        tx.execute(
+            "UPDATE OR REPLACE bootstrap SET authority=?2 WHERE authority=?1",
+            rusqlite::params![old_text, new_text],
+        )?;
+        let page: Option<String> = tx
+            .query_row("SELECT body FROM receive_pages WHERE authority=?1", [&old_text], |r| r.get(0))
+            .optional()?;
+        if let Some(page) = page {
+            let mut page: StageReceive = serde_json::from_str(&page)
+                .map_err(|_| SyncError::new("receive-page-integrity", 409))?;
+            page.header.binding_authority = new;
+            tx.execute(
+                "UPDATE OR REPLACE receive_pages SET authority=?2,body=?3 WHERE authority=?1",
+                rusqlite::params![
+                    old_text,
+                    new_text,
+                    serde_json::to_string(&page)
+                        .map_err(|_| SyncError::new("receive-page-integrity", 409))?
+                ],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+/// Settles pending publications before a binding change. When a publication's server does not
+/// answer, the switch proceeds and carries or detaches that publication instead of waiting.
+pub(crate) fn fence_for_binding_change(core: &LwwClient, store: &mut PersistentStore) -> Result<()> {
+    for publication in core.log.pending()? {
+        if !answers(store.repository_root(), &publication)? {
+            return Ok(());
+        }
+    }
+    core.fence(store)
+}
+fn answers(root: &std::path::Path, publication: &super::lww_client::Publication) -> Result<bool> {
+    let client = super::client::ServerClient::new(publication.config.resolve(root)?)?;
+    let attempt = client.request_ambiguous_mutation(
+        reqwest::Method::GET,
+        &format!("operations/{}", publication.request.operation_id),
+        None,
+        &[],
+        MAX_METADATA_BYTES,
+    )?;
+    Ok(match attempt {
+        super::client::RequestAttempt::Response(reply) => !matches!(reply.status, 502..=504),
+        super::client::RequestAttempt::Failure { error, .. } => {
+            !super::client::is_ambiguous_transient(&error) && error.code != "directory-unreachable"
+        }
+    })
+}
 pub(crate) fn stage(
     store: &mut PersistentStore,
     header: &Header,
@@ -163,12 +268,12 @@ pub(crate) fn stage(
         target.config.resolve(store.repository_root())?,
     )?;
     core.access = Some(target.config.clone());
-    if core.client.resolve_identity(false)?.epoch != target.epoch {
+    if core.client.resolve_identity()?.epoch != target.epoch {
         return Err(SyncError::new("server-epoch-changed", 409));
     }
     let upper = core.admission()?;
     let (cursor, changes) = core.state(store, upper)?;
-    if core.client.resolve_identity(false)?.epoch != target.epoch {
+    if core.client.resolve_identity()?.epoch != target.epoch {
         return Err(SyncError::new("server-epoch-changed", 409));
     }
     assert_authority(store, header)?;
@@ -312,7 +417,7 @@ pub(crate) fn activate(
         target.config.resolve(store.repository_root())?,
     )?;
     core.access = Some(target.config.clone());
-    if core.client.resolve_identity(false)?.epoch != target.epoch {
+    if core.client.resolve_identity()?.epoch != target.epoch {
         return Err(SyncError::new("server-epoch-changed", 409));
     }
     store.server_save_config(&target.config)?;
@@ -705,5 +810,233 @@ mod tests {
             .unwrap()
             .entries
             .is_empty());
+    }
+    fn switch_to(store: &mut PersistentStore, target: SyncTarget, inspection_id: Option<String>) -> crate::persistent_store::sync_selection::BindingState {
+        let original = store.lww_binding_state().unwrap();
+        store
+            .switch_lww_binding(&crate::persistent_store::sync_selection::SwitchBindingRequest {
+                header: header(store),
+                expected_selection_epoch: original.selection_epoch,
+                target,
+                inspection_id,
+            })
+            .unwrap()
+    }
+    fn bound_client(store: &PersistentStore) -> LwwClient {
+        LocalServerFixture::reopen_client(store, std::sync::Arc::new(super::super::client::TestIoCounters::default())).unwrap()
+    }
+    #[test]
+    fn rebinding_the_same_library_publishes_offline_edits_and_keeps_receiving() {
+        use crate::server_sync::lww_tests::{drain_publications, receive_available};
+        let server = LocalServerFixture::new();
+        let (_a_root, mut a) = local();
+        let (_b_root, mut b) = local();
+        let peer = server.client(&b);
+        configure(&server, &a);
+        bind(&mut a);
+        let client = bound_client(&a);
+        save(&mut a, &["root", "language"], serde_json::json!("ja"));
+        drain_publications(&client, &mut a, &[]).unwrap();
+        save(&mut b, &["root", "askRemoval"], serde_json::json!(true));
+        drain_publications(&peer, &mut b, &[]).unwrap();
+        receive_available(&peer, &mut b, &[]).unwrap();
+        receive_available(&client, &mut a, &[]).unwrap();
+        assert_eq!(a.read_root(None).unwrap().value["askRemoval"], true);
+        save(&mut a, &["root", "language"], serde_json::json!("ko"));
+        switch_to(&mut a, SyncTarget::None, None);
+        save(&mut a, &["root", "askRemoval"], serde_json::json!(false));
+        let inspected = inspect(&a, &header(&a)).unwrap();
+        assert!(inspected.previously_bound_library);
+        let state = switch_to(&mut a, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
+        activate(&mut a, &Header { binding_authority: state.target_authority, request_id: uuid::Uuid::new_v4().to_string() }, None).unwrap();
+        let client = bound_client(&a);
+        drain_publications(&client, &mut a, &[]).unwrap();
+        receive_available(&client, &mut a, &[]).unwrap();
+        receive_available(&peer, &mut b, &[]).unwrap();
+        assert_eq!(b.read_root(None).unwrap().value["language"], "ko");
+        assert_eq!(b.read_root(None).unwrap().value["askRemoval"], false);
+        assert_eq!(a.read_root(None).unwrap().value["askRemoval"], false);
+        save(&mut b, &["root", "language"], serde_json::json!("en"));
+        drain_publications(&peer, &mut b, &[]).unwrap();
+        receive_available(&client, &mut a, &[]).unwrap();
+        assert_eq!(a.read_root(None).unwrap().value["language"], "en");
+    }
+    #[test]
+    fn switching_away_from_an_unreachable_server_never_settles_its_publication_with_the_next_one() {
+        use risunest_sync_wire::lww::{PushRequest, UnitChange};
+        let (_root, mut store) = local();
+        let dead = LocalServerFixture::new();
+        configure(&dead, &store);
+        bind(&mut store);
+        save(&mut store, &["root", "language"], serde_json::json!("ja"));
+        let core = bound_client(&store);
+        let authority = store.lww_binding_authority().unwrap();
+        let entries = store.lww_read_outbox(authority, 256).unwrap().entries;
+        let publication = super::super::lww_client::Publication {
+            authority,
+            request: PushRequest {
+                library_id: core.client.config().library_id,
+                writer_id: store.lww_clock_state().unwrap().writer_id,
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                changes: entries.iter().map(|e| UnitChange { key: e.key.clone(), stamp: e.stamp.clone(), value: e.value.clone() }).collect(),
+            },
+            entries,
+            config: store.server_stored_config().unwrap().unwrap(),
+        };
+        core.log.prepare(&publication).unwrap();
+        drop(core);
+        drop(dead);
+        let live = LocalServerFixture::new();
+        configure(&live, &store);
+        bind(&mut store);
+        save(&mut store, &["root", "askRemoval"], serde_json::json!(true));
+        let client = bound_client(&store);
+        crate::server_sync::lww_tests::drain_publications(&client, &mut store, &[]).unwrap();
+        assert!(store.lww_read_outbox(store.lww_binding_authority().unwrap(), 256).unwrap().entries.is_empty());
+    }
+    #[test]
+    fn a_switch_stopped_between_library_and_device_commits_recovers_every_retained_row() {
+        use crate::server_sync::lww_tests::{drain_publications, receive_available};
+        use risunest_sync_wire::lww::{PushRequest, UnitChange};
+        let server = LocalServerFixture::new();
+        let (root, mut store) = local();
+        configure(&server, &store);
+        bind(&mut store);
+        let client = bound_client(&store);
+        save(&mut store, &["root", "language"], serde_json::json!("ja"));
+        drain_publications(&client, &mut store, &[]).unwrap();
+        receive_available(&client, &mut store, &[]).unwrap();
+        save(&mut store, &["root", "language"], serde_json::json!("ko"));
+        let old = store.lww_binding_authority().unwrap();
+        let entries = store.lww_read_outbox(old, 256).unwrap().entries;
+        assert_eq!(entries.len(), 1);
+        let operation = uuid::Uuid::new_v4().to_string();
+        client.log.prepare(&super::super::lww_client::Publication {
+            authority: old,
+            request: PushRequest {
+                library_id: client.client.config().library_id,
+                writer_id: store.lww_clock_state().unwrap().writer_id,
+                operation_id: operation.clone(),
+                changes: entries.iter().map(|e| UnitChange { key: e.key.clone(), stamp: e.stamp.clone(), value: e.value.clone() }).collect(),
+            },
+            entries,
+            config: store.server_stored_config().unwrap().unwrap(),
+        }).unwrap();
+        let page = StageReceive {
+            header: Header { binding_authority: old, request_id: "synthetic-page".into() },
+            changes: vec![],
+            progress: Progress { kind: "server".into(), cursor: DecimalU64(1), writer_id: None },
+            admitted_time_upper_ms: DecimalU64(1),
+        };
+        client.log.0.execute("INSERT INTO receive_pages VALUES(?1,?2,NULL,1,0)", rusqlite::params![old.0.to_string(), serde_json::to_string(&page).unwrap()]).unwrap();
+        client.log.0.execute("INSERT INTO bootstrap VALUES(?1,'synthetic-pin',NULL,'1')", [old.0.to_string()]).unwrap();
+        let stamp = risunest_sync_wire::stamp::Stamp { physical_ms: 1.into(), logical: 0, writer_id: "00000000-0000-4000-8000-000000000001".into() };
+        let inline = |value: serde_json::Value| risunest_sync_wire::unit::UnitValue::inline(&serde_json::to_vec(&value).unwrap()).unwrap();
+        store.lww_stage_receive(&StageReceive {
+            header: Header { binding_authority: old, request_id: "synthetic-unfinished".into() },
+            changes: vec![
+                crate::persistent_store::lww::Change { key: risunest_sync_wire::unit::UnitKey::new(&["root", "askRemoval"]).unwrap(), stamp: stamp.clone(), value: inline(serde_json::json!(true)) },
+                crate::persistent_store::lww::Change { key: risunest_sync_wire::unit::UnitKey::new(&["plugin-local", "orphan", "string", "received"]).unwrap(), stamp, value: inline(serde_json::json!("remote")) },
+            ],
+            progress: Progress { kind: "server".into(), cursor: DecimalU64(2), writer_id: None },
+            admitted_time_upper_ms: DecimalU64(u64::MAX),
+        }).unwrap();
+        assert_eq!(store.lww_receive_row_counts("synthetic-unfinished").unwrap(), (1, 1));
+        drop(client);
+        let original = store.lww_binding_state().unwrap();
+        let request = crate::persistent_store::sync_selection::SwitchBindingRequest {
+            header: header(&store),
+            expected_selection_epoch: original.selection_epoch,
+            target: SyncTarget::None,
+            inspection_id: None,
+        };
+        store.stop_next_switch_after_library_commit();
+        assert!(store.switch_lww_binding(&request).is_err());
+        assert_eq!(store.lww_receive_row_counts("synthetic-unfinished").unwrap(), (0, 1));
+        drop(store);
+        let mut store = PersistentStore::open(root.path()).unwrap();
+        let new = store.lww_binding_authority().unwrap();
+        assert_eq!(new.0, old.0 + 1);
+        store.lww_recover_intents().unwrap();
+        for _ in 0..2 {
+            let state = store.switch_lww_binding(&request).unwrap();
+            assert_eq!((state.target.clone(), state.target_authority), (SyncTarget::None, new));
+            assert_eq!(state.progress.as_array().unwrap().len(), 1);
+            let outbox = store.lww_read_outbox(new, 256).unwrap().entries;
+            assert_eq!(outbox.len(), 1);
+            assert_eq!(outbox[0].target_authority, new);
+            let log = OperationLog::open(root.path()).unwrap();
+            let pending = log.pending().unwrap();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].request.operation_id, operation);
+            assert_eq!(pending[0].authority, new);
+            assert!(pending[0].entries.iter().all(|entry| entry.target_authority == new));
+            let (authority, body): (String, String) = log.0.query_row("SELECT authority,body FROM receive_pages", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            assert_eq!(authority, new.0.to_string());
+            assert_eq!(serde_json::from_str::<StageReceive>(&body).unwrap().header.binding_authority, new);
+            let bootstrap: Vec<String> = log.0.prepare("SELECT authority FROM bootstrap").unwrap().query_map([], |r| r.get(0)).unwrap().collect::<std::result::Result<_, _>>().unwrap();
+            assert_eq!(bootstrap, vec![new.0.to_string()]);
+            assert_eq!(store.lww_receive_row_counts("synthetic-unfinished").unwrap(), (0, 0));
+        }
+    }
+    #[test]
+    fn a_binding_change_fence_settles_answering_servers_and_leaves_unreachable_ones() {
+        use risunest_sync_wire::lww::{PushRequest, UnitChange};
+        for reachable in [true, false] {
+            let (_root, mut store) = local();
+            let mut server = Some(LocalServerFixture::new());
+            configure(server.as_ref().unwrap(), &store);
+            bind(&mut store);
+            save(&mut store, &["root", "language"], serde_json::json!("ja"));
+            let core = bound_client(&store);
+            let authority = store.lww_binding_authority().unwrap();
+            let entries = store.lww_read_outbox(authority, 256).unwrap().entries;
+            core.log.prepare(&super::super::lww_client::Publication {
+                authority,
+                request: PushRequest {
+                    library_id: core.client.config().library_id,
+                    writer_id: store.lww_clock_state().unwrap().writer_id,
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                    changes: entries.iter().map(|e| UnitChange { key: e.key.clone(), stamp: e.stamp.clone(), value: e.value.clone() }).collect(),
+                },
+                entries,
+                config: store.server_stored_config().unwrap().unwrap(),
+            }).unwrap();
+            if !reachable {
+                server.take();
+            }
+            fence_for_binding_change(&core, &mut store).unwrap();
+            assert_eq!(core.log.pending().unwrap().len(), usize::from(!reachable));
+        }
+    }
+    #[test]
+    fn a_rebind_stages_an_unfinished_receive_again_without_its_old_rows() {
+        use crate::server_sync::lww_tests::{drain_publications, receive_available};
+        let server = LocalServerFixture::new();
+        let (_a_root, mut a) = local();
+        let (_b_root, mut b) = local();
+        let peer = server.client(&b);
+        configure(&server, &a);
+        bind(&mut a);
+        let client = bound_client(&a);
+        save(&mut b, &["root", "language"], serde_json::json!("ja"));
+        drain_publications(&peer, &mut b, &[]).unwrap();
+        let receive = header(&a);
+        let page = client.receive_page(&mut a, &receive).unwrap();
+        assert!(!page.changes.is_empty());
+        a.lww_stage_receive(&page).unwrap();
+        let unfinished = page.header.request_id.clone();
+        assert_ne!(a.lww_receive_row_counts(&unfinished).unwrap().0, 0);
+        drop(client);
+        switch_to(&mut a, SyncTarget::None, None);
+        assert_eq!(a.lww_receive_row_counts(&unfinished).unwrap(), (0, 0));
+        let inspected = inspect(&a, &header(&a)).unwrap();
+        assert!(inspected.previously_bound_library);
+        let state = switch_to(&mut a, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
+        activate(&mut a, &Header { binding_authority: state.target_authority, request_id: uuid::Uuid::new_v4().to_string() }, None).unwrap();
+        assert_ne!(a.read_root(None).unwrap().value["language"], "ja");
+        let client = bound_client(&a);
+        receive_available(&client, &mut a, &[]).unwrap();
+        assert_eq!(a.read_root(None).unwrap().value["language"], "ja");
     }
 }

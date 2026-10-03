@@ -175,7 +175,7 @@ impl MediaProvider {
         if issuing.is_none() {
             let client = ServerClient::new(batch[0].proof.config.resolve(&self.root)?)?
                 .with_admission_retry(Arc::new(AdmissionRetry::new()));
-            let head = client.resolve_identity(false)?;
+            let head = client.resolve_identity()?;
             *issuing = Some(Issuer { key: issuer_key.to_owned(), client, head, expires: Instant::now() + Duration::from_secs(60) });
         }
         let issuer = issuing.as_ref().unwrap();

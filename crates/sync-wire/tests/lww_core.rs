@@ -88,12 +88,33 @@ fn payload_matches_javascript_keys_numbers_escaping_and_rejects_invalid_json() {
 
 #[test]
 fn user_key_components_can_be_empty_without_weakening_structural_ids() {
-    for components in [vec!["variable", ""], vec!["toggle", ""], vec!["plugin", "", ""], vec!["plugin-local", "", "v3", ""], vec!["order", "plugin-storage", ""], vec!["record", "plugins", ""]] {
+    for components in [vec!["variable", ""], vec!["toggle", "toggle_"], vec!["plugin", "", ""], vec!["plugin-local", "", "v3", ""], vec!["order", "plugin-storage", ""], vec!["record", "plugins", ""]] {
         let key = UnitKey::new(&components).unwrap();
         assert_eq!(UnitKey::try_from(key.as_str().to_owned()).unwrap(), key);
     }
     assert!(UnitKey::new(&["character", "", "name"]).is_err());
     assert!(UnitKey::new(&["", "field"]).is_err());
+}
+
+#[test]
+fn unknown_existence_kinds_and_order_scopes_are_well_formed_opaque_keys() {
+    for components in [vec!["exists", "lorebook", "x"], vec!["exists", "future", "owner", "x"], vec!["order", "lorebooks"], vec!["order", "future", "owner", ""]] {
+        let key = UnitKey::new(&components).unwrap();
+        assert_eq!(UnitKey::try_from(key.as_str().to_owned()).unwrap(), key);
+    }
+    for components in [vec!["exists", "lorebook"], vec!["exists", "lorebook", ""], vec!["exists", "", "x"], vec!["exists", "plugins", "x"], vec!["order"], vec!["order", ""]] {
+        assert!(UnitKey::new(&components).is_err(), "{components:?}");
+    }
+}
+
+#[test]
+fn toggle_and_variable_keys_are_split_by_the_toggle_prefix() {
+    for components in [["toggle", "toggle_mode"], ["toggle", "toggle_"], ["variable", "mode"], ["variable", "toggle"]] {
+        assert!(UnitKey::new(&components).is_ok(), "{components:?}");
+    }
+    for components in [["toggle", "mode"], ["toggle", ""], ["variable", "toggle_mode"]] {
+        assert_eq!(UnitKey::new(&components), Err(WireError("invalid-unit-key-shape")), "{components:?}");
+    }
 }
 
 #[test]
@@ -134,4 +155,22 @@ fn unit_value_strict_decode_preserves_canonical_wire_roundtrips() {
         assert_eq!(decoded.identity().unwrap(), value.identity().unwrap());
         assert_eq!(canonical::encode(&decoded).unwrap(), bytes);
     }
+}
+
+#[test]
+fn inline_values_are_bounded_by_decoded_canonical_bytes() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let string = |len: usize| format!("\"{}\"", "a".repeat(len - 2)).into_bytes();
+    let at_limit = string(MAX_INLINE_UNIT_BYTES);
+    let value = UnitValue::inline(&at_limit).unwrap();
+    value.validate().unwrap();
+    value.identity().unwrap();
+    let over = string(MAX_INLINE_UNIT_BYTES + 1);
+    assert_eq!(UnitValue::inline(&over).err(), Some(WireError("inline-unit-too-large")));
+    let forged = UnitValue::Inline { bytes: URL_SAFE_NO_PAD.encode(&over) };
+    assert_eq!(forged.validate(), Err(WireError("inline-unit-too-large")));
+    assert_eq!(forged.identity(), Err(WireError("inline-unit-too-large")));
+    // The bound applies to the canonical form, so whitespace cannot hide a large value.
+    let padded = format!("[{}0]", " ".repeat(MAX_INLINE_UNIT_BYTES)).into_bytes();
+    assert_eq!(UnitValue::inline(&padded).unwrap(), UnitValue::inline(b"[0]").unwrap());
 }

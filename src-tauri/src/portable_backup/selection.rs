@@ -1,12 +1,8 @@
-//! What an archive holds, and which of it an import brings in. A partial import keeps the whole
-//! settings record and chooses among the records that stand on their own, closing over what the
-//! chosen ones refer to so a selection does not quietly break itself.
+//! What an archive holds, grouped the way the import preview lists it.
 
 use super::*;
-use crate::lossless_f0::{scan_portable_fragment, F0ReferenceStatus, PortableFragment};
-use rusqlite::{Connection, OptionalExtension};
-use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use rusqlite::Connection;
+use std::collections::BTreeMap;
 
 /// One record an import can take or leave.
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
@@ -60,19 +56,6 @@ pub(crate) struct ArchiveSelection {
     /// Records the reader left out on purpose even though a chosen record refers to them. Their
     /// references come in broken, which the preview says before anything is staged.
     pub(crate) excluded: ArchiveExclusions,
-}
-
-/// A selection after closure, with what closing it added and what it still leaves broken.
-#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ClosedSelection {
-    pub(crate) characters: Vec<String>,
-    pub(crate) presets: Vec<String>,
-    pub(crate) plugins: Vec<PluginKey>,
-    /// Records closure pulled in because something chosen refers to them.
-    pub(crate) added: Vec<String>,
-    /// References that come in with nothing to point at, because the reader excluded the target.
-    pub(crate) dangling: Vec<String>,
 }
 
 fn counted(db: &Connection, sql: &str) -> Result<Vec<ArchiveEntry>> {
@@ -134,77 +117,6 @@ pub(crate) fn inventory(
         }
     }
     Ok(inventory)
-}
-
-fn character_detail(db: &Connection, id: &str) -> Result<Option<Value>> {
-    let serialized: Option<String> = db
-        .query_row(
-            "SELECT detail FROM characters WHERE character_id=?1",
-            [id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(serialized.and_then(|serialized| serde_json::from_str::<Value>(&serialized).ok()))
-}
-
-/// Adds the records a chosen record contains, unless the reader excluded them. A group names its
-/// members, and a member the reader left out is reported rather than quietly followed.
-pub(crate) fn close(db: &Connection, selection: &ArchiveSelection) -> Result<ClosedSelection> {
-    let excluded: BTreeSet<&str> = selection.excluded.characters.iter().map(String::as_str).collect();
-    let mut characters: BTreeSet<String> = selection
-        .characters
-        .iter()
-        .filter(|id| !excluded.contains(id.as_str()))
-        .cloned()
-        .collect();
-    let mut added = BTreeSet::new();
-    let mut dangling = BTreeSet::new();
-    let mut pending: Vec<String> = characters.iter().cloned().collect();
-    while let Some(id) = pending.pop() {
-        let Some(value) = character_detail(db, &id)? else {
-            continue;
-        };
-        let Ok(references) = scan_portable_fragment(PortableFragment::Character {
-            value: &value,
-            selected_chat: None,
-            has_chats: false,
-        }) else {
-            continue;
-        };
-        for reference in references {
-            if matches!(reference.status, F0ReferenceStatus::Invalid)
-                || reference.target_kind != "character"
-            {
-                continue;
-            }
-            let target = reference.target_key;
-            if excluded.contains(target.as_str()) {
-                dangling.insert(format!("character:{target}"));
-                continue;
-            }
-            if characters.insert(target.clone()) {
-                added.insert(target.clone());
-                pending.push(target);
-            }
-        }
-    }
-    Ok(ClosedSelection {
-        characters: characters.into_iter().collect(),
-        presets: selection
-            .presets
-            .iter()
-            .filter(|id| !selection.excluded.presets.contains(id))
-            .cloned()
-            .collect(),
-        plugins: selection
-            .plugins
-            .iter()
-            .filter(|key| !selection.excluded.plugins.contains(key))
-            .cloned()
-            .collect(),
-        added: added.into_iter().collect(),
-        dangling: dangling.into_iter().collect(),
-    })
 }
 
 #[cfg(test)]

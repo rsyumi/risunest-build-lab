@@ -100,20 +100,16 @@ describe('SqlitePersistentDataStore', () => {
         const header = {bindingAuthority:'authority', requestId:'request'}
         mocks.invoke.mockResolvedValue(undefined)
         await store.lwwReadOutbox({...header, limit:'64'})
-        await store.lwwAckOutbox({...header, entries:[]})
-        await store.lwwClockState(header)
-        await store.lwwRetryUnpublished({...header, proofId:'native-proof', correctedTimeMs:'9007199254740993'})
         await store.lwwStageReceive({...header, changes:[], progress:{kind:'external',cursor:'9007199254740993',writerId:'writer'}, admittedTimeUpperMs:'9007199254740993'})
         await store.lwwApplyReceive({...header, generating:[{characterId:'a',conversationId:'same'},{characterId:'b',conversationId:'same'}]})
         await store.lwwFinishReceive(header)
         await store.lwwDrainDeferred({...header,generating:[]})
         await store.lwwCommitReplacement({...header,stagingId:'staged'})
         expect(mocks.invoke.mock.calls.map(([command,args]) => [command,Object.keys(args)])).toEqual([
-            'pds_lww_read_outbox','pds_lww_ack_outbox','pds_lww_clock_state','pds_lww_retry_unpublished','pds_lww_stage_receive',
+            'pds_lww_read_outbox','pds_lww_stage_receive',
             'pds_lww_apply_receive','pds_lww_finish_receive','pds_lww_drain_deferred','pds_lww_commit_replacement',
         ].map((command) => [command,['request']]))
-        expect(mocks.invoke.mock.calls[3][1]).toEqual({request:{...header,proofId:'native-proof',correctedTimeMs:'9007199254740993'}})
-        expect(mocks.invoke.mock.calls[5][1]).toEqual({request:{...header,generating:[{characterId:'a',conversationId:'same'},{characterId:'b',conversationId:'same'}]}})
+        expect(mocks.invoke.mock.calls[2][1]).toEqual({request:{...header,generating:[{characterId:'a',conversationId:'same'},{characterId:'b',conversationId:'same'}]}})
     })
 
     it('reads owner pages with one native call per page and a pinned lease', async () => {

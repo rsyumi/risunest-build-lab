@@ -10,11 +10,9 @@ use std::{collections::HashMap, path::Path, sync::{Arc, Mutex}};
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum JobKind {
     Backup,
-    Sync,
     Restore,
     PinHistory,
     DeleteHistory,
-    ResolveConflict,
     Cleanup,
     CheckRepository,
 }
@@ -28,8 +26,6 @@ pub(crate) struct StartJobRequest {
     pub point_observation: Option<String>,
     pub confirm_other_device: Option<bool>,
     pub confirm_last_retained: Option<bool>,
-    pub conflict_id: Option<String>,
-    pub choice: Option<String>,
     pub restore_areas: Option<Vec<String>>,
     pub target_revision: Option<String>,
     pub session: Option<String>,
@@ -53,8 +49,6 @@ impl StartJobRequest {
                 || self.point_observation.is_some()
                 || self.confirm_other_device.is_some()
                 || self.confirm_last_retained.is_some()
-                || self.conflict_id.is_some()
-                || self.choice.is_some()
                 || self.restore_areas.is_some()
                 || self.target_revision.is_some())
         {
@@ -62,10 +56,7 @@ impl StartJobRequest {
         }
         // A check names at most the published state it reads.
         if self.kind == JobKind::CheckRepository
-            && (self.conflict_id.is_some()
-                || self.choice.is_some()
-                || self.restore_areas.is_some()
-                || self.target_revision.is_some())
+            && (self.restore_areas.is_some() || self.target_revision.is_some())
         {
             return Err(ProviderError::new(ErrorKind::Corrupt));
         }
@@ -82,12 +73,10 @@ impl StartJobRequest {
                     || self.confirm_last_retained.is_some()))
             || (delete_history
                 && (self.snapshot_id.is_some()
-                    || self.conflict_id.is_some()
-                    || self.choice.is_some()
                     || self.restore_areas.is_some()
                     || self.target_revision.is_some()))
             || !valid(&self.connection_id)
-            || [&self.snapshot_id, &self.point_id, &self.conflict_id, &self.session_id]
+            || [&self.snapshot_id, &self.point_id, &self.session_id]
                 .into_iter()
                 .flatten()
                 .any(|s| !valid(s))
@@ -104,10 +93,6 @@ impl StartJobRequest {
                 .session
                 .as_deref()
                 .is_some_and(|s| !["foreground", "exitDrain"].contains(&s))
-            || self
-                .choice
-                .as_deref()
-                .is_some_and(|s| !["local", "remote"].contains(&s))
             || self.restore_areas.as_ref().is_some_and(|areas| {
                 areas.len() > 5
                     || areas.iter().any(|s| {
@@ -136,16 +121,7 @@ pub(crate) struct DurableJob {
     pub capture_id: Option<String>,
     pub snapshot_id: String,
     pub admission_identity: CaptureIdentity,
-    pub receive_staging_id: Option<String>,
-    /// Set before the job writes a downloaded remote body under its directory
-    /// and cleared only once those bodies are gone.
-    pub receive_artifacts: Option<ReceiveArtifacts>,
     pub spool_released: bool,
-}
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum ReceiveArtifacts {
-    Held,
 }
 impl DurableJob {
     pub fn new(
@@ -165,8 +141,6 @@ impl DurableJob {
             capture_id: None,
             snapshot_id: uuid::Uuid::new_v4().to_string(),
             admission_identity,
-            receive_staging_id: None,
-            receive_artifacts: None,
             spool_released: false,
         }
     }
@@ -208,11 +182,6 @@ const FINISHED_RESTORE_PAGE_SQL: &str =
      WHERE json_extract(value,'$.request.kind')='restore'
        AND json_extract(value,'$.summary.state') IN ('succeeded','failed','cancelled')
        AND rowid>?1 ORDER BY rowid LIMIT ?2";
-const RECEIVE_ARTIFACT_PAGE_SQL: &str =
-    "SELECT rowid,value FROM external_requests
-     WHERE connection_id=?1 AND rowid>?2
-       AND json_extract(value,'$.receiveArtifacts')='held'
-     ORDER BY rowid LIMIT ?3";
 impl JobStore {
     pub fn open(root: &Path) -> Result<Self> {
         std::fs::create_dir_all(root).map_err(failure)?;
@@ -232,9 +201,6 @@ impl JobStore {
              ON external_requests(connection_id)
              WHERE COALESCE(json_extract(value,'$.summary.state'),'')
                  NOT IN ('succeeded','failed','cancelled');
-             CREATE INDEX IF NOT EXISTS external_requests_receive_artifacts
-             ON external_requests(connection_id)
-             WHERE json_extract(value,'$.receiveArtifacts')='held';
              CREATE INDEX IF NOT EXISTS external_requests_spool_owners
              ON external_requests(connection_id)
              WHERE json_extract(value,'$.spoolReleased')=0
@@ -254,10 +220,6 @@ impl JobStore {
              );
              CREATE TABLE IF NOT EXISTS external_history_cleanup(
                  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                 after_rowid INTEGER NOT NULL CHECK(after_rowid>=0)
-             );
-             CREATE TABLE IF NOT EXISTS external_receive_cleanup(
-                 connection_id TEXT PRIMARY KEY,
                  after_rowid INTEGER NOT NULL CHECK(after_rowid>=0)
              );
              CREATE TABLE IF NOT EXISTS external_restore_bodies(
@@ -366,9 +328,7 @@ impl JobStore {
         let job: DurableJob =
             serde_json::from_str(&bytes).map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
         job.request.validate()?;
-        if job.receive_staging_id.as_ref().is_some_and(|id| {
-            !id.starts_with("staging-") || id.len() > 128 || id.contains('\0')
-        }) || job.admission_identity.revision < 0
+        if job.admission_identity.revision < 0
             || [
                 &job.admission_identity.store_id,
                 &job.admission_identity.library_epoch,
@@ -454,9 +414,6 @@ impl JobStore {
                  WHERE rowid=?1
                    AND json_extract(value,'$.spoolReleased')=1
                    AND json_extract(value,'$.summary.state') IN ('succeeded','failed','cancelled')
-                   AND json_extract(value,'$.receiveArtifacts') IS NULL
-                   AND json_extract(value,'$.receiveStagingId') IS NULL
-                   AND json_extract(value,'$.summary.result.conflictId') IS NULL
                    AND rowid<COALESCE((SELECT rowid FROM external_requests
                        WHERE connection_id=?2
                          AND json_extract(value,'$.summary.state') IN ('succeeded','failed','cancelled')
@@ -513,62 +470,6 @@ impl JobStore {
         }).collect()
     }
 
-    /// Resuming the scan after restart also advances past long-lived owners.
-    pub fn receive_cleanup_after(&self, connection_id: &str) -> Result<i64> {
-        Ok(self.0.query_row(
-            "SELECT after_rowid FROM external_receive_cleanup WHERE connection_id=?1",
-            [connection_id], |row| row.get(0),
-        ).optional().map_err(failure)?.unwrap_or(0))
-    }
-    pub fn set_receive_cleanup_after(&self, connection_id: &str, after: i64) -> Result<()> {
-        if after == 0 {
-            self.0.execute(
-                "DELETE FROM external_receive_cleanup WHERE connection_id=?1",
-                [connection_id],
-            ).map_err(failure)?;
-        } else {
-            self.0.execute(
-                "INSERT INTO external_receive_cleanup(connection_id,after_rowid) VALUES(?1,?2)
-                 ON CONFLICT(connection_id) DO UPDATE SET after_rowid=excluded.after_rowid",
-                rusqlite::params![connection_id, after],
-            ).map_err(failure)?;
-        }
-        Ok(())
-    }
-    /// One indexed page of jobs that may still hold downloaded remote bodies.
-    pub fn list_holding_receive_artifacts(
-        &self,
-        connection_id: &str,
-        after: i64,
-        limit: usize,
-    ) -> Result<Vec<(i64, DurableJob)>> {
-        let mut statement = self
-            .0
-            .prepare(RECEIVE_ARTIFACT_PAGE_SQL)
-            .map_err(failure)?;
-        let rows = statement
-            .query_map(rusqlite::params![connection_id, after, limit as i64], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(failure)?;
-        rows.map(|row| {
-            let (cursor, value) = row.map_err(failure)?;
-            Ok((cursor, Self::decode(value)?))
-        })
-        .collect()
-    }
-    /// Forgets a job's receive hold without rewriting anything else in its row,
-    /// so a summary settled meanwhile stays as written.
-    pub fn release_receive_artifacts(&self, id: &str) -> Result<()> {
-        self.0
-            .execute(
-                "UPDATE external_requests SET value=json_set(value,'$.receiveArtifacts',NULL)
-                 WHERE id=?1 AND json_extract(value,'$.receiveArtifacts')='held'",
-                [id],
-            )
-            .map_err(failure)?;
-        Ok(())
-    }
     /// Every live job plus a bounded recent terminal history for renderer state.
     pub fn list_for_state(&self) -> Result<Vec<DurableJob>> {
         let mut result = self.list_pending()?;
@@ -604,18 +505,6 @@ pub(crate) struct JobClaim {
 impl JobClaim {
     pub(super) fn require_job(&self, state: &JobCommandState, job: &DurableJob) -> Result<()> {
         if self._owner.id != job.id || !Arc::ptr_eq(&self._owner.active, &state.active) {
-            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
-        }
-        Ok(())
-    }
-    /// Whether this claim is the one excluding every other job on `connection`
-    /// in this runtime instance.
-    pub(super) fn require_connection(&self, state: &JobCommandState, connection: &str) -> Result<()> {
-        if !Arc::ptr_eq(&self._owner.active, &state.active) {
-            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
-        }
-        let active = state.active.lock().map_err(failure)?;
-        if active.get(&self._owner.id).is_none_or(|(owned, _)| owned != connection) {
             return Err(ProviderError::new(ErrorKind::PreconditionFailed));
         }
         Ok(())
@@ -875,9 +764,6 @@ mod tests {
         input.restore_areas = Some(vec!["library".into()]);
         assert!(input.validate().is_err());
         input.restore_areas = None;
-        input.choice = Some("local".into());
-        assert!(input.validate().is_err());
-        input.choice = None;
         // The session a job runs under is set by the start path for every kind.
         input.session = Some("foreground".into());
         input.session_id = Some("session".into());
@@ -1030,50 +916,6 @@ mod tests {
     }
 
     #[test]
-    fn receive_artifact_pages_use_the_connection_index_and_resume_after_reopening() {
-        let root = tempfile::tempdir().unwrap();
-        let db = JobStore::open(root.path()).unwrap();
-        let mut ids = Vec::new();
-        for index in 0..24 {
-            let mut job = DurableJob::new(request(), false, 1, identity());
-            job.summary["state"] = json!("succeeded");
-            if index % 2 == 0 {
-                job.receive_artifacts = Some(ReceiveArtifacts::Held);
-                ids.push(job.id.clone());
-            }
-            db.put(&job).unwrap();
-        }
-        let first = db.list_holding_receive_artifacts("synthetic", 0, 8).unwrap();
-        assert_eq!(first.iter().map(|(_, job)| &job.id).collect::<Vec<_>>(),
-            ids[..8].iter().collect::<Vec<_>>());
-        let after = first.last().unwrap().0;
-        let second = db.list_holding_receive_artifacts("synthetic", after, 8).unwrap();
-        assert_eq!(second.iter().map(|(_, job)| &job.id).collect::<Vec<_>>(),
-            ids[8..].iter().collect::<Vec<_>>());
-        assert!(db.list_holding_receive_artifacts("another", 0, 8).unwrap().is_empty());
-        let detail: Vec<String> = db.0
-            .prepare(&format!("EXPLAIN QUERY PLAN {RECEIVE_ARTIFACT_PAGE_SQL}"))
-            .unwrap()
-            .query_map(rusqlite::params!["synthetic", after, 8], |row| row.get(3))
-            .unwrap().map(|row| row.unwrap()).collect();
-        assert!(detail.iter().any(|step| step.contains("external_requests_receive_artifacts")),
-            "receive page must use its partial index: {detail:?}");
-        assert!(!detail.iter().any(|step| step.contains("USE TEMP B-TREE")),
-            "receive page must not sort the entire history: {detail:?}");
-
-        db.set_receive_cleanup_after("synthetic", after).unwrap();
-        drop(db);
-        let reopened = JobStore::open(root.path()).unwrap();
-        assert_eq!(reopened.receive_cleanup_after("synthetic").unwrap(), after);
-        assert_eq!(reopened.receive_cleanup_after("another").unwrap(), 0);
-        reopened.set_receive_cleanup_after("synthetic", 0).unwrap();
-        assert_eq!(reopened.receive_cleanup_after("synthetic").unwrap(), 0);
-        assert_eq!(reopened.0.query_row(
-            "SELECT count(*) FROM external_receive_cleanup", [], |row| row.get::<_, i64>(0),
-        ).unwrap(), 0);
-    }
-
-    #[test]
     fn pending_lookup_uses_the_partial_index() {
         let root = tempfile::tempdir().unwrap();
         let db = JobStore::open(root.path()).unwrap();
@@ -1175,15 +1017,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = JobStore::open(root.path()).unwrap();
         let mut protected = Vec::new();
-        for kind in 0..3 {
+        for _ in 0..3 {
             let mut job = DurableJob::new(request(), false, 1, identity());
             job.summary["state"] = json!("failed");
-            job.spool_released = true;
-            match kind {
-                0 => job.receive_artifacts = Some(ReceiveArtifacts::Held),
-                1 => job.receive_staging_id = Some("staging-synthetic".into()),
-                _ => job.summary["result"] = json!({"conflictId":"conflict"}),
-            }
             protected.push(job.id.clone());
             store.put(&job).unwrap();
         }

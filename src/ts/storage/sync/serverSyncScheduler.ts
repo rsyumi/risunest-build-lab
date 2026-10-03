@@ -5,6 +5,7 @@ export interface ServerSyncSchedulerDependencies {
     disconnect(): Promise<void>
     retryClock?(): Promise<void>
     failed(error: unknown): void
+    recovered?(): void
 }
 
 const integrityCodes = ['clock-skew', 'incoming-clock-skew', 'accepted-clock-correction-required', 'writer-collision', 'equal-stamp-integrity', 'server-epoch-changed', 'unauthorized', 'invalid-device-token']
@@ -13,6 +14,8 @@ export function serverSyncErrorCode(error: unknown): string {
     if ('message' in error && typeof error.message === 'string' && integrityCodes.includes(error.message)) return error.message
     return 'code' in error ? String(error.code) : ''
 }
+const isCancellation = (error: unknown) => serverSyncErrorCode(error) === 'cancelled' || (typeof error === 'object' && !!error && 'name' in error && error.name === 'AbortError')
+type Lane = 'push' | 'pull' | 'connect'
 
 export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDependencies) {
     let foreground = false
@@ -31,13 +34,23 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
     let blockedCode = ''
     let checkingClock: Promise<boolean> | undefined
     let disconnecting: Promise<void> | undefined
+    let connecting: Promise<void> | undefined
+    const failedLanes = new Set<Lane>()
     const disconnect = () => {
-        if (!disconnecting) disconnecting = dependencies.disconnect().finally(() => { disconnecting = undefined })
+        if (!disconnecting) disconnecting = (async () => {
+            await dependencies.disconnect()
+            const started = connecting
+            // A start that was already running may finish after the stop, so stop again once it settles.
+            if (started) { await started; await dependencies.disconnect() }
+        })().finally(() => { disconnecting = undefined })
         return disconnecting
     }
     const code = serverSyncErrorCode
-    const fail = (error: unknown) => {
+    const succeeded = (lane: Lane) => { if (failedLanes.delete(lane) && failedLanes.size === 0 && !blocked) dependencies.recovered?.() }
+    const fail = (error: unknown, lane?: Lane) => {
+        if (isCancellation(error)) return
         if (blocked && blockedCode !== 'clock-skew') return
+        if (lane) failedLanes.add(lane)
         if ((typeof error === 'object' && error && 'retryable' in error && error.retryable === false && code(error) !== 'server-unreachable') || integrityCodes.includes(code(error))) {
             blocked = true
             blockedCode = code(error)
@@ -56,8 +69,8 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         clearTimeout(sendRetryTimer)
         if (!foreground || blocked) return Promise.resolve()
         if (sending) { pushAgain = true; return sending }
-        sending = dependencies.push().then(() => { sendRetryAttempt = 0 }).catch(error => {
-            fail(error)
+        sending = dependencies.push().then(() => { sendRetryAttempt = 0; succeeded('push') }).catch(error => {
+            fail(error, 'push')
             if (foreground && !blocked) sendRetryTimer = setTimeout(() => { void push().catch(() => {}) }, Math.min(30_000, 1000 * 2 ** sendRetryAttempt++))
             throw error
         }).finally(() => {
@@ -70,7 +83,7 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         clearTimeout(pullTimer)
         if ((!foreground && !completeAvailable) || blocked) return Promise.resolve()
         if (receiving) { pullAgain = true; return receiving }
-        receiving = dependencies.pull(completeAvailable).catch(error => { fail(error); throw error }).finally(() => {
+        receiving = dependencies.pull(completeAvailable).then(() => succeeded('pull'), error => { fail(error, 'pull'); throw error }).finally(() => {
             receiving = undefined
             if (pullAgain && foreground) { pullAgain = false; void pull().catch(() => {}) }
             else schedulePull()
@@ -78,8 +91,10 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         return receiving
     }
     const connect = () => {
-        if (!foreground || blocked) return
-        void dependencies.connect().catch(error => { fail(error); socket(false) })
+        if (!foreground || blocked || connecting) return
+        const attempt: Promise<void> = dependencies.connect().then(() => succeeded('connect'), error => { fail(error, 'connect'); socket(false) })
+            .finally(() => { if (connecting === attempt) connecting = undefined })
+        connecting = attempt
     }
     const socket = (value: boolean) => {
         connected = value
@@ -130,6 +145,7 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
             await pull(true)
         },
         retry() { blocked = false; blockedCode = ''; sendRetryAttempt = 0; connect(); void pull().catch(() => {}); return push() },
+        reset() { blocked = false; blockedCode = ''; sendRetryAttempt = 0; reconnectAttempt = 0; failedLanes.clear() },
         reportFailure: fail,
         isBlocked: () => blocked,
         isRunning: () => !!sending || !!receiving || !!checkingClock,

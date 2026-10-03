@@ -1363,7 +1363,7 @@ export class SaveCoordinator {
             const persistedMutation = { ...state.root,
                 botPresetsId: typeof state.presets[state.root.botPresetsId]?.['id'] === 'string' ? state.presets[state.root.botPresetsId]['id'] as string : state.root.botPresetsId,
                 selectedPersona: typeof state.root.personas?.[state.root.selectedPersona]?.id === 'string' ? state.root.personas![state.root.selectedPersona].id : state.root.selectedPersona }
-            const mutatedRoot = rebaseRootMutation({ ...presetRootBaseline, botPresetsId: rootValue.value.botPresetsId, selectedPersona: rootValue.value.selectedPersona }, persistedMutation, operationStart.root)
+            const mutatedRoot = rebaseRootMutation({ ...presetRootBaseline, botPresetsId: rootValue.value.botPresetsId, selectedPersona: rootValue.value.selectedPersona }, persistedMutation, rootValue.value)
             const committedRoot = rebaseConcurrentLiveDelta(
                 operationStart.root,
                 liveBeforeCommit.root,
@@ -1683,6 +1683,7 @@ export class SaveCoordinator {
         this.cancelDebounce()
         return this.enqueue(async () => {
             await this.flushIterations(reason, true)
+            const operationStart = this.capture()
             const residentBefore = this.captureResidentCharacter(characterId)
             const revision = this.revision
             const [rootValue, characterValue] = await Promise.all([
@@ -1706,7 +1707,7 @@ export class SaveCoordinator {
             const committedRoot = rebaseRootMutation(
                 rootValue.value,
                 state.root,
-                liveBeforeCommit.root,
+                rebaseRootMutation(operationStart.root, liveBeforeCommit.root, rootValue.value),
             )
             const rootChanged = canonicalJson(committedRoot) !== canonicalJson(rootValue.value)
             const committedDetail = deleting ? null : canonicalClone(state.character)
@@ -1737,7 +1738,7 @@ export class SaveCoordinator {
                         kind: deleting ? 'delete' : 'detail',
                         character: committedDetail,
                     },
-                    committedRoot,
+                    rebaseRootMutation(rootValue.value, committedRoot, operationStart.root),
                     {
                         preservePendingWork: true,
                         publish: false,
@@ -1763,7 +1764,7 @@ export class SaveCoordinator {
                     kind: deleting ? 'delete' : 'detail',
                     character: committedDetail,
                 },
-                committedRoot,
+                rebaseRootMutation(rootValue.value, committedRoot, operationStart.root),
             )
             await this.finishExplicitCommit(committed.revision)
             return true
@@ -1917,7 +1918,7 @@ export class SaveCoordinator {
                     }).map((loadout): PersistentUnitMutation => ({type:'set',key:JSON.stringify(['record','loadouts',loadout.id]),value:loadout})),
                 ],
             }
-            const committedBaselineRoot = canonicalClone(rootValue.value)
+            const committedBaselineRoot = this.capturePersistentBaselineRoot()
             if (orderChanged) {
                 if (committedRoot.characterOrder === undefined) delete committedBaselineRoot.characterOrder
                 else committedBaselineRoot.characterOrder = canonicalClone(committedRoot.characterOrder)
@@ -2195,6 +2196,7 @@ export class SaveCoordinator {
         this.cancelDebounce()
         return this.enqueue(async () => {
             await this.flushIterations(reason, true)
+            const operationStart = this.capture()
             const residentBefore = this.captureResidentCharacter(characterId)
             const revision = this.revision
             const [rootValue, characterValue] = await Promise.all([
@@ -2252,7 +2254,7 @@ export class SaveCoordinator {
                     committedRoot = rebaseRootMutation(
                         rootValue.value,
                         mutatedRoot,
-                        this.capture().root,
+                        rebaseRootMutation(operationStart.root, this.capture().root, rootValue.value),
                     )
                     commit.root = committedRoot
                 }
@@ -2295,7 +2297,7 @@ export class SaveCoordinator {
                     kind: current ? 'replace' : 'add',
                     character: replacement,
                 },
-                committedRoot,
+                rebaseRootMutation(rootValue.value, committedRoot, operationStart.root),
             )
             await this.finishExplicitCommit(committed.revision)
             return true

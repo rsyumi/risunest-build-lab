@@ -410,6 +410,10 @@ fn take_work(external: bool) -> NativeObservation {
     result.asset_body_opens = Some(result.body_asset_work.open_attempts);
     result.asset_body_bytes_read = Some(result.body_asset_work.read_bytes);
     for (hash, object) in bodies.objects {
+        if object.work == crate::asset_repository::body_io::BodyWork::default()
+            && object.owned_work == crate::asset_repository::body_io::BodyWork::default() {
+            continue;
+        }
         result.body_objects.insert(hash, ObjectBodyDomain {
             purposes:object.purposes.into_iter().map(|purpose| format!("{purpose:?}")).collect(),
             work:body_domain(object.work),
@@ -2199,13 +2203,15 @@ fn actual_body_observer_binding_counts_reads_and_preserves_catalog_only_scope() 
     let directory = tempfile::tempdir().unwrap();
     let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
     let object = cas.prepare_bytes(b"synthetic-body-data").unwrap();
-    reset_work(&[]);
+    let untouched = (0..1024).map(|index| format!("{index:064x}")).collect::<Vec<_>>();
+    reset_work(&untouched);
     assert_eq!(cas.stat_object(&object.content_hash).unwrap(), Some(19));
     let mut catalog = take_work(false);
     catalog.shared_head_reads = Some(0);
     assert_eq!(catalog.asset_body_opens, Some(0));
     assert_eq!(catalog.asset_body_bytes_read, Some(0));
     assert_eq!(catalog.body_stat_requests, 1);
+    assert!(catalog.body_objects.is_empty());
     catalog.validate_routine_invariants().unwrap();
 
     reset_work(std::slice::from_ref(&object.content_hash));
@@ -2220,6 +2226,8 @@ fn actual_body_observer_binding_counts_reads_and_preserves_catalog_only_scope() 
     assert_eq!(body.body_asset_work.read_bytes, 19);
     assert_eq!(body.body_control_work, BodyDomain::default());
     assert_eq!(body.body_scope_complete, Some(true));
+    assert_eq!(body.body_objects.len(), 1);
+    assert_eq!(body.body_objects[&object.content_hash].purposes, vec!["Control", "Asset"]);
     assert!(body.validate_routine_invariants().is_err());
 }
 
@@ -2229,7 +2237,8 @@ fn actual_body_observer_distinguishes_control_and_unknown_reads() {
     let directory = tempfile::tempdir().unwrap();
     let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
     let object = cas.prepare_bytes(b"synthetic-control-data").unwrap();
-    reset_work(&[]);
+    let untouched = (0..1024).map(|index| format!("{index:064x}")).collect::<Vec<_>>();
+    reset_work(&untouched);
     register_object_purpose(&object.content_hash, BodyPurpose::Control);
     assert_eq!(cas.read_object(&object.content_hash).unwrap().unwrap(), b"synthetic-control-data");
     let mut control = take_work(false);
@@ -2237,6 +2246,7 @@ fn actual_body_observer_distinguishes_control_and_unknown_reads() {
     assert_eq!(control.body_control_work.open_attempts, 1);
     assert_eq!(control.body_control_work.read_bytes, 22);
     assert_eq!(control.body_objects[&object.content_hash].purposes, vec!["Control"]);
+    assert_eq!(control.body_objects.len(), 1);
     assert_eq!(control.asset_body_opens, Some(0));
     control.validate_routine_invariants().unwrap();
 
@@ -2247,7 +2257,45 @@ fn actual_body_observer_distinguishes_control_and_unknown_reads() {
     assert_eq!(unknown.body_unknown_work.open_attempts, 1);
     assert_eq!(unknown.body_unknown_work.read_bytes, 22);
     assert_eq!(unknown.body_scope_complete, Some(false));
+    assert_eq!(unknown.body_objects.len(), 1);
+    assert!(unknown.body_objects[&object.content_hash].purposes.is_empty());
     assert!(unknown.validate_routine_invariants().is_err());
+}
+
+#[test]
+fn actual_body_observer_retains_failed_asset_and_owned_only_work() {
+    use crate::asset_repository::body_io::{register_object_purpose, BodyPurpose};
+    use sha2::{Digest, Sha256};
+    let directory = tempfile::tempdir().unwrap();
+    let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+    let missing = "ab".repeat(32);
+    reset_work(std::slice::from_ref(&missing));
+    {
+        let _object_scope = crate::asset_repository::body_io::object_scope(&missing);
+        let opened = std::fs::File::open(directory.path().join("missing-body"));
+        assert!(opened.is_err());
+        crate::asset_repository::body_io::open_result("managed", &opened);
+    }
+    let mut failed = take_work(false);
+    failed.shared_head_reads = Some(0);
+    assert_eq!(failed.body_objects.len(), 1);
+    assert_eq!(failed.body_objects[&missing].work.failed_opens, 1);
+    assert_eq!(failed.body_asset_work.open_attempts, 1);
+    assert!(failed.validate_routine_invariants().is_err());
+
+    let bytes = b"synthetic staged control";
+    let hash = hex::encode(Sha256::digest(bytes));
+    reset_work(&[]);
+    register_object_purpose(&hash, BodyPurpose::Control);
+    let staged = cas.stage_reader_expected(&mut bytes.as_slice(), &hash, bytes.len() as u64).unwrap();
+    drop(staged);
+    let owned = take_work(false);
+    assert_eq!(owned.body_scope_complete, Some(true));
+    assert_eq!(owned.body_objects.len(), 1);
+    assert_eq!(owned.body_objects[&hash].work, BodyDomain::default());
+    assert_eq!(owned.body_objects[&hash].owned_work.staging_written_bytes, bytes.len() as u64);
+    assert_eq!(owned.body_objects[&hash].owned_work.body_sha["cas_stage"].bytes, bytes.len() as u64);
+    owned.validate_costly_native_coverage().unwrap();
 }
 
 #[test]

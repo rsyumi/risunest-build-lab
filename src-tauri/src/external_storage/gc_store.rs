@@ -1,5 +1,7 @@
 //! Reconstructible unreachable observations and cleanup statistics.
 //! Neither lease ownership nor permission to delete survives in this database.
+//! An observation keeps its age across runs that stop early: a stopped run is
+//! no different from the time between two runs.
 use super::contract::{ErrorKind, ProviderError, RemoteLocator, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{collections::BTreeMap, path::Path};
@@ -49,7 +51,6 @@ impl GcStore {
                PRIMARY KEY(connection_id,target_id));
              CREATE TABLE IF NOT EXISTS cleanup_state(
                connection_id TEXT PRIMARY KEY,
-               observation_valid INTEGER NOT NULL DEFAULT 0 CHECK(observation_valid IN (0,1)),
                last_run_ms INTEGER,
                stopped_reason TEXT,
                last_reachable_bytes INTEGER,
@@ -68,7 +69,7 @@ impl GcStore {
                 "connection_id", "target_id", "identity", "first_unreachable_ms", "last_observed_ms",
             ][..]),
             ("cleanup_state", &[
-                "connection_id", "observation_valid", "last_run_ms", "stopped_reason",
+                "connection_id", "last_run_ms", "stopped_reason",
                 "last_reachable_bytes", "last_removed_count", "last_removed_bytes",
             ][..]),
             ("inventory_page_observations", &[
@@ -83,57 +84,6 @@ impl GcStore {
             }
         }
         Ok(Self(db))
-    }
-
-    /// A crash or incomplete survey must break the previous unreachable interval.
-    /// Only the execution that owns repository protection starts an observation.
-    pub(crate) fn begin_observation(&self, connection_id: &str) -> Result<()> {
-        let transaction = self.0.unchecked_transaction().map_err(storage)?;
-        let valid = transaction.query_row(
-            "SELECT observation_valid FROM cleanup_state WHERE connection_id=?1",
-            [connection_id], |row| row.get::<_, bool>(0),
-        ).optional().map_err(storage)?.unwrap_or(false);
-        if !valid {
-            transaction.execute("DELETE FROM observations WHERE connection_id=?1", [connection_id])
-                .map_err(storage)?;
-            transaction.execute(
-                "DELETE FROM inventory_page_observations WHERE connection_id=?1",
-                [connection_id],
-            ).map_err(storage)?;
-        }
-        transaction.execute(
-            "INSERT INTO cleanup_state(connection_id,observation_valid) VALUES(?1,0)
-             ON CONFLICT(connection_id) DO UPDATE SET observation_valid=0",
-            [connection_id],
-        ).map_err(storage)?;
-        transaction.commit().map_err(storage)
-    }
-
-    pub(crate) fn finish_observation(&self, connection_id: &str) -> Result<()> {
-        if self.0.execute(
-            "UPDATE cleanup_state SET observation_valid=1
-             WHERE connection_id=?1 AND observation_valid=0",
-            [connection_id],
-        ).map_err(storage)? != 1 {
-            return Err(corrupt());
-        }
-        Ok(())
-    }
-
-    pub(crate) fn invalidate_observations(&self, connection_id: &str) -> Result<()> {
-        let transaction = self.0.unchecked_transaction().map_err(storage)?;
-        transaction.execute("DELETE FROM observations WHERE connection_id=?1", [connection_id])
-            .map_err(storage)?;
-        transaction.execute(
-            "DELETE FROM inventory_page_observations WHERE connection_id=?1",
-            [connection_id],
-        ).map_err(storage)?;
-        transaction.execute(
-            "INSERT INTO cleanup_state(connection_id,observation_valid) VALUES(?1,0)
-             ON CONFLICT(connection_id) DO UPDATE SET observation_valid=0",
-            [connection_id],
-        ).map_err(storage)?;
-        transaction.commit().map_err(storage)
     }
 
     /// The input is the complete unreachable set, keyed by locator and immutable
@@ -251,6 +201,14 @@ impl GcStore {
         Ok(())
     }
 
+    pub(crate) fn last_run_ms(&self, connection_id: &str) -> Result<Option<u64>> {
+        let value = self.0.query_row(
+            "SELECT last_run_ms FROM cleanup_state WHERE connection_id=?1",
+            [connection_id], |row| row.get::<_, Option<i64>>(0),
+        ).optional().map_err(storage)?.flatten();
+        value.map(amount).transpose()
+    }
+
     pub(crate) fn last_reachable_bytes(&self, connection_id: &str) -> Result<Option<u64>> {
         let value = self.0.query_row(
             "SELECT last_reachable_bytes FROM cleanup_state WHERE connection_id=?1",
@@ -312,28 +270,23 @@ mod tests {
     }
 
     #[test]
-    fn c_only_complete_observations_preserve_age_across_restart() {
+    fn c_unreachable_age_survives_restart() {
         let root = tempfile::tempdir().unwrap();
         let objects = targets(&[("a", "one"), ("b", "two")]);
         let store = GcStore::open(root.path()).unwrap();
-        store.begin_observation("connection").unwrap();
         assert_eq!(store.record_observations("connection", &objects, 1000).unwrap()["a"], 1000);
-        store.finish_observation("connection").unwrap();
         drop(store);
         let store = GcStore::open(root.path()).unwrap();
-        store.begin_observation("connection").unwrap();
         assert_eq!(store.record_observations("connection", &objects, 2000).unwrap()["a"], 1000);
         drop(store);
         let store = GcStore::open(root.path()).unwrap();
-        store.begin_observation("connection").unwrap();
-        assert_eq!(store.record_observations("connection", &objects, 3000).unwrap()["a"], 3000);
+        assert_eq!(store.record_observations("connection", &objects, 3000).unwrap()["b"], 1000);
     }
 
     #[test]
     fn c_reachable_absent_changed_and_backward_clock_entries_reset_age() {
         let root = tempfile::tempdir().unwrap();
         let store = GcStore::open(root.path()).unwrap();
-        store.begin_observation("connection").unwrap();
         store.record_observations("connection", &targets(&[("a", "one"), ("b", "two")]), 1000).unwrap();
         let later = store.record_observations("connection", &targets(&[("a", "changed")]), 2000).unwrap();
         assert_eq!(later["a"], 2000);
@@ -349,13 +302,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = GcStore::open(root.path()).unwrap();
         let objects = targets(&[("a", "one")]);
-        store.begin_observation("a").unwrap();
-        store.begin_observation("b").unwrap();
         store.record_observations("a", &objects, 1000).unwrap();
         store.record_observations("b", &objects, 2000).unwrap();
         assert!(store.record_observations("a", &[("a".into(), "bad".into())].into(), 3000).is_err());
         assert_eq!(store.record_observations("a", &objects, 4000).unwrap()["a"], 1000);
-        store.invalidate_observations("a").unwrap();
+        store.forget_connection("a").unwrap();
         assert_eq!(store.record_observations("a", &objects, 5000).unwrap()["a"], 5000);
         assert_eq!(store.record_observations("b", &objects, 5000).unwrap()["a"], 2000);
         assert!(store.record_observations("b", &objects, u64::MAX).is_err());
@@ -370,11 +321,15 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>().unwrap();
         assert_eq!(tables, ["cleanup_state", "inventory_page_observations", "observations"]);
         assert_eq!(store.last_reachable_bytes("connection").unwrap(), None);
+        assert_eq!(store.last_run_ms("connection").unwrap(), None);
         store.set_last_reachable_bytes("connection", 512).unwrap();
+        assert_eq!(store.last_run_ms("connection").unwrap(), None);
         store.record_cleanup_run("connection", 1000, "complete", 1, 256).unwrap();
         assert_eq!(store.last_reachable_bytes("connection").unwrap(), Some(512));
+        assert_eq!(store.last_run_ms("connection").unwrap(), Some(1000));
         store.forget_connection("connection").unwrap();
         assert_eq!(store.last_reachable_bytes("connection").unwrap(), None);
+        assert_eq!(store.last_run_ms("connection").unwrap(), None);
     }
 
     #[test]
@@ -387,21 +342,19 @@ mod tests {
     }
 
     #[test]
-    fn inventory_page_age_survives_only_complete_unchanged_observations() {
+    fn inventory_page_age_survives_restart_while_unchanged() {
         let root = tempfile::tempdir().unwrap();
         let page = targets(&[("page", "identity")]);
         let changed = targets(&[("page", "changed")]);
         let store = GcStore::open(root.path()).unwrap();
-        store.begin_observation("connection").unwrap();
         assert_eq!(store.record_inventory_page_observations("connection", &page, 1000).unwrap()["page"], 1000);
-        store.finish_observation("connection").unwrap();
         drop(store);
 
         let store = GcStore::open(root.path()).unwrap();
-        store.begin_observation("connection").unwrap();
         assert_eq!(store.record_inventory_page_observations("connection", &page, 2000).unwrap()["page"], 1000);
         assert_eq!(store.record_inventory_page_observations("connection", &changed, 3000).unwrap()["page"], 3000);
-        store.invalidate_observations("connection").unwrap();
         assert_eq!(store.record_inventory_page_observations("connection", &page, 4000).unwrap()["page"], 4000);
+        assert!(store.record_inventory_page_observations("connection", &BTreeMap::new(), 5000).unwrap().is_empty());
+        assert_eq!(store.record_inventory_page_observations("connection", &page, 6000).unwrap()["page"], 6000);
     }
 }

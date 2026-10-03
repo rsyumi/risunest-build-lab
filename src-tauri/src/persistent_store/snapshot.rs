@@ -554,17 +554,11 @@ pub(super) fn collect_device_plugin_asset_roots(store: &super::PersistentStore) 
         Ok(())
     })?;
     let mut roots = roots.into_inner();
-    if !units.is_empty() {
-        let inventory = super::external_capture::original_unit_dependency_inventory(&units, &|hash| {
-            let length: Option<i64> = store.connection.query_row("SELECT length(body) FROM message_page_objects WHERE hash=?1", [hash], |row| row.get(0)).optional()?;
-            if length.is_some_and(|length| length < 0 || length as u64 > risunest_sync_wire::MAX_METADATA_BYTES as u64) { return Err(validation("plugin control exceeds its byte limit")); }
-            Ok(store.connection.query_row("SELECT body FROM message_page_objects WHERE hash=?1", [hash], |row| row.get(0)).optional()?)
-        }, &|hash| {
-            let size: Option<i64> = store.connection.query_row("SELECT byte_size FROM asset_objects WHERE object_hash=?1", [hash], |row| row.get(0)).optional()?;
-            size.map(|size| u64::try_from(size).map_err(|_| validation("plugin payload size is invalid"))).transpose()
-        }, &crate::local_backup::NeverCancelled, false, &mut |_, _, _| Ok(()));
-        match inventory {
-            Ok(inventory) => roots.object_hashes.extend(inventory.payloads.into_keys()),
+    // Plugin-local units are device units, so their large bodies live in the device store.
+    for value in units.values() {
+        match super::lww::json_value_resolved(store.device_store()?.connection(), value) {
+            Ok(Some(value)) => observe_json_value(&value, None, &mut roots),
+            Ok(None) => {}
             Err(_) => { roots.retain_all_objects = true; roots.blockers.insert("plugin-local-unscannable".into()); }
         }
     }
@@ -786,6 +780,10 @@ fn collect_lww_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet>
                     UnitValue::Inline {bytes} => {
                         let decoded=base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(bytes).map_err(|error|validation(error.to_string()))?;
                         observe_json_value(&serde_json::from_slice(&decoded)?,None,&mut roots);
+                    }
+                    UnitValue::Object {..} if super::external_capture::is_large_unit(&key) => {
+                        let value=super::lww::json_value_resolved(connection,&value)?.ok_or_else(||validation("large unit body is unavailable"))?;
+                        observe_json_value(&value,None,&mut roots);
                     }
                     UnitValue::Object {..} => {
                         let inventory=super::external_capture::original_unit_dependency_inventory(&[(key,value)].into_iter().collect(),&|hash| {

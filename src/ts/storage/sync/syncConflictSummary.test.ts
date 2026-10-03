@@ -8,7 +8,6 @@ import type {
 import {
     formatNameList,
     summarizePinnedSyncConflict,
-    summarizeSyncConflict,
 } from './syncConflictSummary'
 
 interface CharacterSeed {
@@ -21,50 +20,7 @@ function makeDatabase(characters: CharacterSeed[]): Database {
     return { characters } as unknown as Database
 }
 
-describe('summarizeSyncConflict', () => {
-    it('splits characters into local-only, remote-only, and changed groups', () => {
-        const local = makeDatabase([
-            { chaId: 'a', name: 'Alice', chats: [{ message: [1] }] },
-            { chaId: 'b', name: 'Bell', chats: [{ message: [] }] },
-            { chaId: 'c', name: 'Cory', chats: [{ message: [1, 2] }] },
-        ])
-        const remote = makeDatabase([
-            { chaId: 'a', name: 'Alice', chats: [{ message: [1] }] },
-            { chaId: 'c', name: 'Cory', chats: [{ message: [1, 2, 3] }] },
-            { chaId: 'd', name: 'Dana', chats: [] },
-        ])
-
-        expect(summarizeSyncConflict(local, remote)).toEqual({
-            localOnlyNames: ['Bell'],
-            remoteOnlyNames: ['Dana'],
-            changedNames: ['Cory'],
-        })
-    })
-
-    it('marks a character as changed when its name or chat count differs', () => {
-        const local = makeDatabase([
-            { chaId: 'a', name: 'Old name', chats: [{ message: [] }] },
-            { chaId: 'b', name: 'Same', chats: [{ message: [] }] },
-        ])
-        const remote = makeDatabase([
-            { chaId: 'a', name: 'New name', chats: [{ message: [] }] },
-            { chaId: 'b', name: 'Same', chats: [{ message: [] }, { message: [] }] },
-        ])
-
-        expect(summarizeSyncConflict(local, remote).changedNames).toEqual(['Old name', 'Same'])
-    })
-
-    it('falls back to the character id when the name is empty and tolerates missing arrays', () => {
-        const local = makeDatabase([{ chaId: 'no-name', name: '  ' }])
-        const remote = makeDatabase([])
-
-        expect(summarizeSyncConflict(local, remote)).toEqual({
-            localOnlyNames: ['no-name'],
-            remoteOnlyNames: [],
-            changedNames: [],
-        })
-    })
-
+describe('summarizePinnedSyncConflict', () => {
     it('reads late local descriptors from bounded pages without loading record bodies', async () => {
         const character = (
             id: string,

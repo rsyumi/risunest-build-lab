@@ -7,7 +7,7 @@ use risunest_sync_wire::{
     },
     stamp::{DecimalU64, MAX_CLOCK_SKEW_MS},
     unit::{compare_version, LwwDecision, UnitKey, UnitValue},
-    validate_id, MAX_METADATA_BYTES,
+    validate_hash, validate_id, MAX_METADATA_BYTES,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -65,30 +65,93 @@ fn operation(db: &Connection, device: &Device, id: &str) -> Result<Option<Operat
     .map(|body| parse(&body))
     .transpose()
 }
+/// A repeated operation answers exactly as it first did, rejection included.
+fn replay(db: &Connection, device: &Device, id: &str, digest: &str) -> Result<Option<PushReceipt>> {
+    let Some((body, status, key)) = db
+        .query_row(
+            "SELECT body,error_status,error_key FROM operations WHERE device=?1 AND operation=?2",
+            params![device.id, id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<u16>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let prior: OperationReceipt = parse(&body)?;
+    if prior.body_digest() != digest {
+        return Err(Error::new("operation-integrity", 409));
+    }
+    match prior {
+        OperationReceipt::Accepted { receipt, .. } => Ok(Some(receipt)),
+        OperationReceipt::Rejected { error, .. } => {
+            let mut rejection = Error::new(
+                rejection_code(&error),
+                status.ok_or(Error::new("corrupt-metadata", 503))?,
+            );
+            rejection.key = key;
+            Err(rejection)
+        }
+    }
+}
+/// Stored rejections carry codes the server itself produced, so this set stays small.
+fn rejection_code(code: &str) -> &'static str {
+    static CODES: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<&'static str>>> =
+        std::sync::OnceLock::new();
+    let mut codes = CODES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(code) = codes.get(code) {
+        return code;
+    }
+    let code: &'static str = Box::leak(code.to_owned().into_boxed_str());
+    codes.insert(code);
+    code
+}
 fn save_operation(
     db: &Connection,
     device: &Device,
     id: &str,
     receipt: &OperationReceipt,
+    rejection: Option<&Error>,
 ) -> Result<()> {
     db.execute(
-        "INSERT INTO operations VALUES(?1,?2,?3,?4)",
-        params![device.id, id, receipt.body_digest(), json(receipt)?],
+        "INSERT INTO operations(device,operation,digest,body,error_status,error_key) VALUES(?1,?2,?3,?4,?5,?6)",
+        params![
+            device.id,
+            id,
+            receipt.body_digest(),
+            json(receipt)?,
+            rejection.map(|error| error.status),
+            rejection.and_then(|error| error.key.as_deref())
+        ],
     )?;
     Ok(())
 }
-fn rejected_error(error: &str) -> Error {
-    Error::new(
-        match error {
-            "operation-cancelled" => "operation-cancelled",
-            "clock-skew" => "clock-skew",
-            "writer-collision" => "writer-collision",
-            "equal-stamp-integrity" => "equal-stamp-integrity",
-            "missing-dependency" => "missing-dependency",
-            _ => "operation-rejected",
-        },
-        409,
-    )
+/// The body an `asset` or `inlay` unit names. Garbage collection keeps it while
+/// the unit is retained, so a value that cannot be read is never accepted.
+pub(super) fn alias_object(bytes: &str) -> Result<Option<String>> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let invalid = || Error::new("invalid-alias", 400);
+    let decoded = URL_SAFE_NO_PAD.decode(bytes).map_err(|_| invalid())?;
+    let value: serde_json::Value = serde_json::from_slice(&decoded).map_err(|_| invalid())?;
+    match value.as_object().ok_or_else(invalid)?.get("objectHash") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(hash)) => {
+            validate_hash(hash).map_err(|_| invalid())?;
+            Ok(Some(hash.clone()))
+        }
+        Some(_) => Err(invalid()),
+    }
+}
+fn is_alias(key: &UnitKey) -> bool {
+    matches!(key.components()[0].as_str(), "asset" | "inlay")
 }
 
 impl Store {
@@ -100,13 +163,13 @@ impl Store {
     }
 
     pub fn push(&self, device: &Device, request: &PushRequest) -> Result<PushReceipt> {
-        self.push_at(device, request, time_ms()?)
+        self.push_at(device, request, time_ms)
     }
     pub(super) fn push_at(
         &self,
         device: &Device,
         request: &PushRequest,
-        now: u64,
+        clock: impl FnOnce() -> Result<u64>,
     ) -> Result<PushReceipt> {
         validate_id(&request.operation_id)?;
         let digest = request.digest()?;
@@ -114,20 +177,17 @@ impl Store {
             .objects_gate
             .lock()
             .map_err(|_| Error::new("storage-unavailable", 503))?;
+        // Admission time is read once the gate is held, so waiting behind
+        // maintenance cannot judge stamps against a stale clock.
+        let now = clock()?;
         {
             let db = self.reader()?;
             Self::require_device(&db, device)?;
             if request.library_id != Self::read_head(&db)?.library_id {
                 return Err(Error::new("library-mismatch", 403));
             }
-            if let Some(prior) = operation(&db, device, &request.operation_id)? {
-                if prior.body_digest() != digest {
-                    return Err(Error::new("operation-integrity", 409));
-                }
-                return match prior {
-                    OperationReceipt::Accepted { receipt, .. } => Ok(receipt),
-                    OperationReceipt::Rejected { error, .. } => Err(rejected_error(&error)),
-                };
+            if let Some(receipt) = replay(&db, device, &request.operation_id, &digest)? {
+                return Ok(receipt);
             }
         }
         // Immutable descriptor indexes may be prepared before the state transaction.
@@ -143,14 +203,8 @@ impl Store {
         if request.library_id != head.library_id {
             return Err(Error::new("library-mismatch", 403));
         }
-        if let Some(prior) = operation(&tx, device, &request.operation_id)? {
-            if prior.body_digest() != digest {
-                return Err(Error::new("operation-integrity", 409));
-            }
-            return match prior {
-                OperationReceipt::Accepted { receipt, .. } => Ok(receipt),
-                OperationReceipt::Rejected { error, .. } => Err(rejected_error(&error)),
-            };
+        if let Some(receipt) = replay(&tx, device, &request.operation_id, &digest)? {
+            return Ok(receipt);
         }
         let validation = (|| -> Result<Vec<UnitChange>> {
             preparation?;
@@ -193,6 +247,11 @@ impl Store {
                     return Err(Error::new("clock-skew", 409).for_key(change.key.as_str()));
                 }
                 let identity = change.value.identity()?;
+                if let UnitValue::Inline { bytes } = &change.value {
+                    if is_alias(&change.key) {
+                        alias_object(bytes).map_err(|error| error.for_key(change.key.as_str()))?;
+                    }
+                }
                 let prior: Option<String> = tx.query_row("SELECT identity FROM writer_versions WHERE writer=?1 AND key=?2 AND physical=?3 AND logical=?4",
                     params![change.stamp.writer_id,change.key.as_str(),change.stamp.physical_ms.0.to_string(),change.stamp.logical.to_string()], |r| r.get(0)).optional()?;
                 if prior.is_some_and(|old| old != identity) {
@@ -243,6 +302,7 @@ impl Store {
                         error: error.code.into(),
                         server_time_ms: now.into(),
                     },
+                    Some(&error),
                 )?;
                 tx.commit()?;
                 return Err(error);
@@ -255,7 +315,7 @@ impl Store {
         )?;
         for change in &request.changes {
             tx.execute(
-                "INSERT OR IGNORE INTO writer_versions VALUES(?1,?2,?3,?4,?5)",
+                "INSERT OR IGNORE INTO writer_versions(writer,key,physical,logical,identity) VALUES(?1,?2,?3,?4,?5)",
                 params![
                     change.stamp.writer_id,
                     change.key.as_str(),
@@ -328,6 +388,7 @@ impl Store {
                 body_digest: digest,
                 receipt: receipt.clone(),
             },
+            None,
         )?;
         tx.commit()?;
         drop(db);
@@ -359,13 +420,14 @@ impl Store {
             }
             return Ok(prior);
         }
+        let cancelled = Error::new("operation-cancelled", 409);
         let receipt = OperationReceipt::Rejected {
             operation_id: id.into(),
             body_digest: request.body_digest.clone(),
-            error: "operation-cancelled".into(),
+            error: cancelled.code.into(),
             server_time_ms: time_ms()?.into(),
         };
-        save_operation(&tx, device, id, &receipt)?;
+        save_operation(&tx, device, id, &receipt, Some(&cancelled))?;
         tx.commit()?;
         Ok(receipt)
     }

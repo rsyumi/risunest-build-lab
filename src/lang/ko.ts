@@ -7,7 +7,6 @@ export const languageKorean = {
         "pluginDataDeletion": "플러그인 데이터 삭제",
         "lorebookDeletion": "로어북 폴더와 항목 삭제",
         "partialBackup": "다른 에셋을 제외한 백업",
-        "incompleteRestore": "누락된 데이터를 제외한 복원",
         "onlySelectedMessage": "이 메시지만 삭제"
     },
 
@@ -71,34 +70,11 @@ export const languageKorean = {
     portableBackup: {
         preservedSourceHelp:
             '복원한 라이브러리에 필요하지 않은 파일을 원본 보존 영역에 별도 보관했습니다. 자동 동기화되지 않으며 해당 보존 영역에서 삭제할 수 있습니다.',
-        title: 'RisuNest 백업',
         export: 'RisuNest 전체 백업 (.risunest)',
         restore: '백업 파일 복원',
-        library: '라이브러리와 첨부 파일',
-        device: '기기 플러그인 데이터',
         localStorage: '플러그인 로컬 저장소',
         localData: '플러그인 로컬 데이터',
         database: '플러그인 데이터베이스',
-        settings: '기기 설정',
-        chooseExport: '백업할 영역 선택',
-        chooseRestore: '복원할 영역 선택',
-        helpExport:
-            '선택한 기기 데이터는 앱을 유지보수 모드로 재시작한 뒤 캡처합니다.',
-        helpRestore:
-            '선택한 영역은 이 기기에만 있는 키를 포함해 교체됩니다. 선택하지 않은 영역은 유지됩니다. 자동 백업은 남기지 않습니다. 기존 데이터를 보관하려면 먼저 직접 백업하세요.',
-        helpRestoreFirstRun:
-            '선택한 영역을 이 기기로 가져옵니다. 선택하지 않은 영역은 나중에 설정에서 같은 파일로 복원할 수 있습니다.',
-        damaged: '이 백업에는 문제가 {0}건 있습니다. 문제가 없는 항목을 가져올 수 있습니다.',
-        choosePart: '선택한 항목만 복원',
-        choosePartHelp:
-            '현재 라이브러리는 선택한 항목으로 교체되며, 선택하지 않은 항목은 복원되지 않습니다.',
-        itemCharacters: '캐릭터',
-        itemPresets: '프리셋',
-        itemPlugins: '플러그인 데이터',
-        itemDamaged: '문제 {0}건',
-        repair: '손상된 원본을 보존한 파일입니다. 데이터 점검에서 수정한 뒤 사용할 수 있습니다.',
-        continue: '계속',
-        cancel: '취소',
         dbOnly: 'DB만 내보내기 (.risudat)',
         risuai: 'RisuAI용 내보내기 (.bin)',
         pocket: 'PocketRisu용 내보내기 (.bin)',
@@ -129,14 +105,6 @@ export const languageKorean = {
             "wait": '계속 기다리기',
             "stillRunning": '백업 작업이 진행 중이며, 나중에 다시 확인할 수 있습니다.',
         },
-        "nextItems": '다음',
-        "previousItems": '이전',
-        "searchItems": '항목 검색',
-        "wholeLibrary": '전체 라이브러리',
-        "excludeLibrary": "라이브러리 제외",
-        "skipLibrary": '복원 안 함',
-        "danglingLinks": '선택하지 않은 항목을 가리키는 연결은 끊어진 상태로 복원됩니다.',
-        "choosePartFirstRunHelp": '선택한 항목을 라이브러리로 가져옵니다.',
     },
     previousResponseCandidate: '이전 응답',
     nextResponseCandidate: '다음 응답',
@@ -919,6 +887,7 @@ export const languageKorean = {
     "syncConflictBackups": '계정 동기화 충돌 백업',
     "syncConflictNoBackups": "저장된 동기화 충돌 백업이 없습니다.",
     "syncConflictRestoreConfirm": '현재 데이터베이스를 이 백업으로 교체하시겠습니까? 자동 백업은 만들지 않습니다. 에셋, 콜드 스토리지 데이터, 인레이는 포함되지 않습니다.',
+    "syncConflictRestoreScope": '에셋, 콜드 스토리지 데이터, 인레이는 포함되지 않습니다.',
     "syncBackupEntry": "{date} / {side} / 캐릭터 {count}개",
     "syncBackupDatabaseOnly": "데이터베이스 전용, 에셋, 콜드 스토리지, 인레이 제외",
     "syncBackupSideLocal": "이 기기",
@@ -2192,11 +2161,6 @@ export const languageKorean = {
             pendingHelp:
                 '진행 중이던 동기화를 마쳐야 연결을 해제할 수 있습니다. 지금 동기화를 누르세요.',
             conflict: '충돌 확인 필요',
-            conflictCount: '충돌 항목 {0}개',
-            conflictHelp:
-                '이 기기와 서버에서 같은 항목이 변경되었습니다. 모든 충돌 항목에 유지할 쪽을 선택하세요. 적용하기 전에 양쪽 내용이 충돌 백업으로 저장됩니다.',
-            keepLocal: '이 기기 내용 유지',
-            keepRemote: '서버 내용 유지',
             busyHelp: '다른 작업이 라이브러리를 사용하고 있습니다. 작업이 끝난 후 다시 시도하세요.',
             errorHelp:
                 '동기화를 마치지 못했습니다. 이 기기에서 고친 내용은 그대로 있습니다. 다시 시도하세요.',
@@ -2355,11 +2319,9 @@ export const languageKorean = {
             restoreSnapshot: '복원',
             snapshotReasons: {
             dataHealthRepair: "데이터 수정 전 보관",
-            serverSyncRecovery: "서버 비교 전 보관",
 
                 manual: '직접 만듦',
                 periodic: '자동',
-                preRestore: '복원 전 보관',
             },
             counts: '캐릭터 {0}개 · 대화 {1}개 · 메시지 {2}개',
             subMetrics:
@@ -2534,6 +2496,8 @@ export const languageKorean = {
                 '동기화가 실행 중이거나 복구가 필요합니다. 처리가 끝난 뒤 백업·복원을 다시 실행해주세요.',
             syncUnconfirmed:
                 '동기화 결과를 확정하지 못했습니다. 미확정 작업을 해결한 뒤 복원해주세요.',
+            syncUnavailable:
+                '동기화가 연결되지 않아 백업을 복원할 수 없습니다. 동기화를 연결한 후 다시 시도해주세요.',
             title: '백업·복원',
             groupFiles: '백업 파일',
             filesHelp:
@@ -2912,12 +2876,12 @@ export const languageKorean = {
         cancelAction: "취소",
         clockBlocked: "기기와 원격 간의 시간 차이가 있어 동기화가 중단되었습니다. 시간을 보정한 후 다시 시도해주세요.",
         writerCollision: "중복된 기기로 인해 동기화가 중단되었습니다. 새 기기로 다시 연결해주세요.",
+        unitTooLarge: "이 기기에 서버로 보내기에 너무 큰 항목이 있어 동기화가 중단되었습니다. 해당 항목의 크기를 줄인 후 다시 시도해주세요.",
         newDeviceAction: "새 기기로 연결",
         restoreTitle: "백업을 복원하시겠습니까?",
         restoreDescriptionBound: "현재 데이터를 초기화한 후 선택한 백업으로 복원하며, 복원한 내용은 원격으로 동기화됩니다. 백업이 필요한 경우 수동으로 백업해주세요.",
         restoreDescription: "현재 데이터를 초기화한 후 선택한 백업으로 복원합니다. 백업이 필요한 경우 수동으로 백업해주세요.",
         restoreAcknowledge: "현재 데이터 초기화",
         restoreAction: "복원",
-        myboxSyncUnavailable: "MYBOX는 동기화에 사용할 수 없습니다.",
     },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>

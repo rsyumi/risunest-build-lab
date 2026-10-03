@@ -3,9 +3,13 @@ const restoreAlerts = vi.hoisted(() => ({ confirm: vi.fn(), checkbox: vi.fn() })
 vi.mock('../alert', () => ({ alertConfirm: restoreAlerts.confirm, alertCheckboxConfirm: restoreAlerts.checkbox }))
 const deviceRestore = vi.hoisted(() => ({ flushDeviceStateBeforeRestore: vi.fn(async () => {}), refreshDeviceStateAfterRestore: vi.fn(async () => {}) }))
 vi.mock('./deviceStateRestore', () => deviceRestore)
-vi.mock('./sync/bindingRegistry', () => ({prepareBoundLibraryReplacement: async () => ({bound:false,state:{targetAuthority:'1'},fence:async()=>{},assertAuthority:async()=>{},resume:async()=>{}})}))
+const binding = vi.hoisted(() => ({ prepare: vi.fn() }))
+vi.mock('./sync/bindingRegistry', () => ({prepareBoundLibraryReplacement: binding.prepare}))
 vi.mock('../plugins/apiV3/v3.svelte', () => ({fencePluginExecutionForAuthorityReplacement:async()=>{},invalidatePluginCachesAfterAuthorityReplacement:async()=>{},restartPluginsAfterAuthorityReplacement:async()=>{}}))
-beforeEach(() => { restoreAlerts.checkbox.mockReset().mockResolvedValue({confirmed:true,checked:true}) })
+beforeEach(() => {
+    restoreAlerts.checkbox.mockReset().mockResolvedValue({confirmed:true,checked:true})
+    binding.prepare.mockReset().mockImplementation(async () => ({bound:false,state:{targetAuthority:'1'},fence:async()=>{},assertAuthority:async()=>{},resume:async()=>{}}))
+})
 
 it.each(['portable', 'block'] as const)('holds the write pause until the actual %s capture, then permits writes during export', async format => {
     let paused = false
@@ -2754,6 +2758,49 @@ describe('native file jobs', () => {
         expect(commands).not.toContain('native_file_job_finalize')
     })
 
+    it('cancels staged data and reports an unavailable bound sync target as sync-unavailable', async () => {
+        const commands: string[] = []
+        const statuses = [
+            {
+                ...status('waitingForInput'),
+                phase: 'awaiting-activation' as const,
+            },
+            status('cancelled'),
+        ]
+        binding.prepare.mockRejectedValue(
+            Object.assign(new Error('Sync is unavailable for library replacement'), { code: 'sync-unavailable' }),
+        )
+        const acquire = vi.fn()
+
+        await expect(
+            runNativeBlockRisuSaveRestore(
+                restoreRuntime(3, { acquire }),
+                { type: 'desktopPath', path: 'C:\\chosen\\backup.risudat' },
+                undefined,
+                {
+                    isTauri: () => true,
+                    invoke: async (command) => {
+                        commands.push(command)
+                        if (command === 'native_file_job_start')
+                            return { jobId: 'job-1' }
+                        if (command === 'native_file_job_status')
+                            return statuses.shift()
+                        if (command === 'native_file_job_cancel')
+                            return 'requested'
+                        if (command === 'native_file_job_forget') return true
+                        throw new Error(`Unexpected command: ${command}`)
+                    },
+                    wait: async () => undefined,
+                },
+            ),
+        ).rejects.toMatchObject({ name: 'NativeFileJobError', code: 'sync-unavailable' })
+
+        expect(restoreAlerts.checkbox).not.toHaveBeenCalled()
+        expect(acquire).not.toHaveBeenCalled()
+        expect(commands).toContain('native_file_job_cancel')
+        expect(commands).not.toContain('native_file_job_finalize')
+    })
+
     it('releases the replacement fence before plugin reload and acknowledgement', async () => {
         const events: string[] = []
         const observedPhases: string[] = []
@@ -4585,28 +4632,6 @@ it('cancels staged restore and waits for terminal settlement when the fresh prec
         'native_file_job_status',
         'native_file_job_forget',
     ])
-})
-
-it('cancels an incomplete legacy restore before acquiring the replacement fence', async () => {
-    const commands: string[] = []
-    const preview = { unavailableColdKeys: ['missing'], characterNames: ['Synthetic'], invalidInlays: ['inlay_aa.risuinlay'] }
-    const states = [{ ...status('waitingForInput'), phase: 'awaiting-activation', incompleteRestorePreview: preview }, status('cancelled')]
-    const acquire = vi.fn()
-    const confirmIncompleteRestore = vi.fn(async () => false)
-    await expect(runNativeLegacyLocalBackupRestore(
-        restoreRuntime(17, { acquire }), { type: 'desktopPath', path: 'synthetic.bin' },
-        { confirmIncompleteRestore },
-        { isTauri: () => true, wait: async () => undefined, invoke: async (command) => {
-            commands.push(command)
-            if (command === 'native_file_job_start') return { jobId: 'job-1' }
-            if (command === 'native_file_job_status') return states.shift()
-            return true
-        } },
-    )).rejects.toMatchObject({ name: 'AbortError' })
-    expect(confirmIncompleteRestore).toHaveBeenCalledWith(preview)
-    expect(acquire).not.toHaveBeenCalled()
-    expect(commands).toContain('native_file_job_cancel')
-    expect(commands).not.toContain('native_file_job_finalize')
 })
 
 it.each(['both', 'cold', 'inlay'] as const)('cancels default incomplete restore warnings in one dialog: %s', async kind => {

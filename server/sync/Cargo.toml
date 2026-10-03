@@ -27,6 +27,7 @@ getrandom = "0.2"
 tempfile = "3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"] }
 qrcode = { version = "0.14", default-features = false }
+base64 = "0.23.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading"] }
@@ -36,6 +37,5 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
-base64 = "0.23.1"
 minisign = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
