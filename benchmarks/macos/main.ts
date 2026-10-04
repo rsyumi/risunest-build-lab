@@ -14,6 +14,8 @@ import { persistence, reload, regex, guard, check, pause } from "./contracts";
 const report = (stage: string, result: unknown) =>
   invoke("macos_bench_report", { stage, result });
 const expectedKey = "macos-synthetic-expected";
+const failureDetail = (error: unknown) =>
+  error instanceof Error ? (error as Error & { detail?: unknown }).detail : undefined;
 async function until(predicate: () => Promise<boolean>, message: string) {
   const deadline = performance.now() + 60_000;
   while (!(await predicate())) {
@@ -135,6 +137,7 @@ async function verifyStored() {
     actual.revision === expected.revision &&
       actual.finalHash === expected.finalHash,
     "exact revision/hash survived reload or restart",
+    { expected, actual: { revision: actual.revision, finalHash: actual.finalHash } },
   );
   return actual;
 }
@@ -478,6 +481,7 @@ async function main() {
     check(
       persisted.value.message.at(-1)?.data === marker,
       "product working-set edit persisted through Rust",
+      { revision: persisted.revision, last: persisted.value.message.at(-1)?.data },
     );
     localStorage.setItem(
       "macos-app-expected",
@@ -534,15 +538,16 @@ async function main() {
           revision: number;
           value: { message: { data: string }[] };
         }>("pds_read_conversation", { characterId: "char-a", conversationId });
-        check(saved.value.message.at(-1)?.data === nativeMarker, "native quit saves the fresh product edit");
+        const read = { previous: persisted.revision, revision: saved.revision, last: saved.value.message.at(-1)?.data };
+        check(read.last === nativeMarker, "native quit saves the fresh product edit", read);
         check(Number.isSafeInteger(saved.revision) && saved.revision > persisted.revision,
-          "native quit advances the saved revision");
+          "native quit advances the saved revision", read);
         localStorage.setItem("macos-app-expected", JSON.stringify({
           conversationId, marker: nativeMarker, revision: saved.revision,
         }));
         await report("app-native-saved", { passed: true, revision: saved.revision });
       } catch (error) {
-        await report("failure", { passed: false, message: String(error) });
+        await report("failure", { passed: false, message: String(error), detail: failureDetail(error) });
         throw error;
       }
     };
@@ -570,17 +575,25 @@ async function main() {
     release();
   } else if (phase === "app-restart") {
     await invoke("pds_open");
-    const expected = JSON.parse(localStorage.getItem("macos-app-expected")!);
+    const stored = localStorage.getItem("macos-app-expected");
+    const expected = JSON.parse(stored!);
+    check(expected, "native quit expectation was stored", { stored });
     const saved = await invoke<{ revision: number; value: { message: { data: string }[] } }>(
       "pds_read_conversation",
       { characterId: "char-a", conversationId: expected.conversationId },
     );
+    const actual = {
+      revision: saved.revision,
+      messages: saved.value.message.length,
+      last: saved.value.message.at(-1)?.data,
+    };
     check(
-      saved.value.message.at(-1)?.data === expected.marker,
+      actual.last === expected.marker,
       "product UI edit survives quit and restart",
+      { stored, actual },
     );
     check(Number.isSafeInteger(expected.revision) && saved.revision === expected.revision,
-      "native quit saved revision survives restart exactly");
+      "native quit saved revision survives restart exactly", { stored, actual });
     await report("app-restart", { passed: true, revision: saved.revision });
     await invoke("macos_bench_quit");
   } else if (phase === "streaming") {
@@ -617,6 +630,7 @@ void main().catch(async (error) => {
           ? error
           : JSON.stringify(error),
     stack: error instanceof Error ? error.stack : undefined,
+    detail: failureDetail(error),
   });
   // The controller records the failure and terminates this isolated process.
 });

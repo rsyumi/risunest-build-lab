@@ -141,8 +141,8 @@
     {
       "path": "benchmarks/ios/contracts.ts",
       "mode": "100644",
-      "bytes": 8594,
-      "sha256": "609be8c6b832b5c3b1e1bdc80fd990dd562782c82937c362ed127bca03bf5d4e"
+      "bytes": 8734,
+      "sha256": "c7415c37b3f85c847e0513350a95dad39c6ec45787f6436e64d0c798dd52dc37"
     },
     {
       "path": "benchmarks/ios/index.html",
@@ -153,8 +153,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 14950,
-      "sha256": "881c147a9209f528c19714579b82e4cf8a9931439e7f0294c99f6a491730b9ac"
+      "bytes": 15096,
+      "sha256": "f92fe6a5afd782f5ce0a03109f09ffe58a9d5abeeb22be4947e7f006bacbc387"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -225,8 +225,8 @@
     {
       "path": "benchmarks/ios/productContracts.ts",
       "mode": "100644",
-      "bytes": 5984,
-      "sha256": "f1e93964ec6bed74257f4214064d04adda7622acd465b7f7e8ff6a7e129c0e22"
+      "bytes": 6319,
+      "sha256": "6d0df239410734eef09fda61f544a94b87d44619f2a749aa7895d365a9a3e311"
     },
     {
       "path": "benchmarks/ios/runtimeContracts.ts",
@@ -477,8 +477,8 @@
     {
       "path": "benchmarks/macos/contracts.ts",
       "mode": "100644",
-      "bytes": 7714,
-      "sha256": "479f83e3831645b1edc0749b9efdf861b89948c51aa69dd7b347f39243cb7825"
+      "bytes": 7854,
+      "sha256": "38f3adfdb745fe1c7f4d5bde540adc323e5aa8366a289c309110cc4e7862f8e8"
     },
     {
       "path": "benchmarks/macos/index.html",
@@ -489,8 +489,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 25276,
-      "sha256": "d607fe0c950f5c531c15fe17e9a1a0e89239183ed99ef01af2f7c4be247254e3"
+      "bytes": 26022,
+      "sha256": "174fa2b7fdc958fa1284e119af03be16e874cca10d05b66955c55ec7a84c5690"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
