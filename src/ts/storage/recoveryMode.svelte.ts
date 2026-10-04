@@ -99,15 +99,6 @@ export function finishBoot(bridge: BootAttemptBridge = nativeBridge): Promise<vo
     return completeBootAttempt(bridge)
 }
 
-/** Whether this document replaced one whose renderer stopped. Native code answers true once. */
-export async function takeRendererRecovery(): Promise<boolean> {
-    try {
-        return await invoke<boolean>('renderer_recovery_take')
-    } catch {
-        return false
-    }
-}
-
 export function toggleExclusion(exclusion: RecoveryExclusion): void {
     state.excluded = state.excluded.includes(exclusion)
         ? state.excluded.filter((item) => item !== exclusion)

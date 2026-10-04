@@ -86,6 +86,8 @@ impl Provider for HeldAssetTransfer {
         -> ProviderFuture<'a, ()> { self.inner.delete_object(repository, locator, cancel) }
     fn reconcile_upload<'a>(&'a self, repository: &'a RepositoryHandle, intent: &'a ObjectIntent, resume: Option<&'a ResumeState>, cancel: &'a Cancellation)
         -> ProviderFuture<'a, UploadResolution> { self.inner.reconcile_upload(repository, intent, resume, cancel) }
+    fn lookup_metadata<'a>(&'a self, repository: &'a RepositoryHandle, intent: &'a ObjectIntent, known: Option<&'a RemoteLocator>, cancel: &'a Cancellation)
+        -> ProviderFuture<'a, Option<ObjectReceipt>> { self.inner.lookup_metadata(repository, intent, known, cancel) }
     fn head_locator(&self, repository: &RepositoryHandle) -> Result<RemoteLocator> { self.inner.head_locator(repository) }
 }
 
@@ -219,6 +221,64 @@ fn two_actual_stores_publish_receive_and_quiet_listing() {
         assert_eq!(f.provider.read_count(), reads);
         assert_eq!(f.provider.transferred_body_bytes(), bytes);
         assert_eq!(f.publish_a().await.segments.0, 0);
+    })
+}
+fn assert_no_publication_pins_left(f: &CycleFixture) {
+    use crate::asset_repository::job_pins::{collect_durable_cas_job_roots, durable_cas_job_ids};
+    assert_eq!(durable_cas_job_ids(f.directory_a.path()).unwrap(), Vec::<String>::new());
+    let roots = collect_durable_cas_job_roots(f.directory_a.path());
+    assert!(roots.blockers.is_empty(), "{:?}", roots.blockers);
+}
+#[test]
+fn a_publication_that_cannot_seal_its_asset_pins_releases_them() {
+    run(async {
+        let mut f = CycleFixture::new();
+        small_asset(&mut f.a, "synthetic-seal-failure", &[43; 4096]);
+        rusqlite::Connection::open(f.directory_a.path().join("persistent/persistent.sqlite")).unwrap()
+            .execute_batch("CREATE TRIGGER fail_publication_seal BEFORE INSERT ON asset_objects
+                BEGIN SELECT RAISE(ABORT, 'synthetic'); END;").unwrap();
+        assert!(f.sender.publish(&mut f.a, DecimalU64(0), &[], &Cancellation::default()).await.is_err());
+        assert_no_publication_pins_left(&f);
+    })
+}
+#[test]
+fn a_publication_that_cannot_save_its_segment_releases_its_asset_pins() {
+    run(async {
+        let mut f = CycleFixture::new();
+        small_asset(&mut f.a, "synthetic-persist-failure", &[44; 4096]);
+        rusqlite::Connection::open(f.directory_a.path().join("persistent/device.sqlite")).unwrap()
+            .execute_batch("CREATE TRIGGER fail_publication_persist BEFORE INSERT ON external_lww_segments
+                BEGIN SELECT RAISE(ABORT, 'synthetic'); END;").unwrap();
+        assert!(f.sender.publish(&mut f.a, DecimalU64(0), &[], &Cancellation::default()).await.is_err());
+        assert_no_publication_pins_left(&f);
+    })
+}
+#[test]
+fn a_saved_publication_keeps_its_asset_pins_across_a_page_reload_until_it_is_sent() {
+    use crate::asset_repository::commands::{CasJobOwnerProbe, DurableCasJobState};
+    use crate::asset_repository::job_pins::durable_cas_job_ids;
+    run(async {
+        let mut f = CycleFixture::new();
+        small_asset(&mut f.a, "synthetic-saved-publication", &[45; 4096]);
+        f.provider.fail_upload_number(f.provider.upload_count() + 1, ErrorKind::Transient);
+        assert!(f.sender.publish(&mut f.a, DecimalU64(0), &[], &Cancellation::default()).await.is_err());
+        let root = f.directory_a.path().to_owned();
+        let journals = durable_cas_job_ids(&root).unwrap();
+        assert_eq!(journals.len(), 1);
+        let saved: bool = rusqlite::Connection::open(root.join("persistent/device.sqlite")).unwrap()
+            .query_row("SELECT EXISTS(SELECT 1 FROM external_lww_segments WHERE json_extract(metadata,'$.assetJob.jobId')=?1)",
+                [&journals[0]], |row| row.get(0)).unwrap();
+        assert!(saved);
+        let native_jobs = || -> std::result::Result<Vec<crate::native_file_jobs::JobStatus>, String> { Ok(Vec::new()) };
+        let open_store = || f.a.open_native_job_store().map_err(|error| error.to_string());
+        DurableCasJobState::default().sweep_after_page_start(&root, &CasJobOwnerProbe {
+            native_jobs: &native_jobs,
+            device_session_active: false,
+            open_store: &open_store,
+        }).unwrap();
+        assert_eq!(durable_cas_job_ids(&root).unwrap(), journals);
+        assert_eq!(f.publish_a().await.segments.0, 1);
+        assert_no_publication_pins_left(&f);
     })
 }
 #[test]
@@ -372,6 +432,7 @@ fn server_held_publication_keeps_captured_source_and_rejects_changed_authority()
                     let target = crate::persistent_store::sync_selection::SyncTarget::External("changed-source-target".into());
                     let inspection = store.register_lww_binding_inspection(state.target_authority, &target, "synthetic-next-repository", "synthetic-next-library").unwrap();
                     store.switch_lww_binding(&crate::persistent_store::sync_selection::SwitchBindingRequest {
+                        initial_publication: false,
                         header: crate::persistent_store::lww::Header { binding_authority: state.target_authority, request_id: "frozen-source-authority".into() },
                         expected_selection_epoch: state.selection_epoch, target, inspection_id: Some(inspection),
                     }).unwrap();
@@ -917,6 +978,7 @@ fn publisher_is_distinct_from_forwarded_unit_issuer() {
         let state =
             f.b.switch_lww_binding(
                 &crate::persistent_store::sync_selection::SwitchBindingRequest {
+                    initial_publication: false,
                     header: crate::persistent_store::lww::Header {
                         binding_authority: before.target_authority,
                         request_id: "forward-bind".into(),
@@ -1435,6 +1497,7 @@ fn switching_targets_uses_independent_sequences_and_ack_receipts_without_restamp
         let bound =
             f.a.switch_lww_binding(
                 &crate::persistent_store::sync_selection::SwitchBindingRequest {
+                    initial_publication: false,
                     header: crate::persistent_store::lww::Header {
                         binding_authority: before.target_authority,
                         request_id: "different-target".into(),
@@ -1667,6 +1730,7 @@ fn bind_external(store: &mut PersistentStore, engine: &ExternalLwwEngine, target
         _ => Some(store.register_lww_binding_inspection(before.target_authority, target, &engine.repository.connection_identity, &engine.library).unwrap()),
     };
     store.switch_lww_binding(&SwitchBindingRequest {
+        initial_publication: false,
         header: crate::persistent_store::lww::Header { binding_authority: before.target_authority, request_id: uuid::Uuid::new_v4().to_string() },
         expected_selection_epoch: before.selection_epoch, target: target.clone(), inspection_id,
     }).unwrap().target_authority
@@ -1796,6 +1860,10 @@ impl Provider for FlakyRemote {
         -> ProviderFuture<'a, UploadResolution> {
         Box::pin(async move { self.check()?; self.inner.reconcile_upload(repository, intent, resume, cancel).await })
     }
+    fn lookup_metadata<'a>(&'a self, repository: &'a RepositoryHandle, intent: &'a ObjectIntent, known: Option<&'a RemoteLocator>, cancel: &'a Cancellation)
+        -> ProviderFuture<'a, Option<ObjectReceipt>> {
+        Box::pin(async move { self.check()?; self.inner.lookup_metadata(repository, intent, known, cancel).await })
+    }
     fn head_locator(&self, repository: &RepositoryHandle) -> Result<RemoteLocator> { self.inner.head_locator(repository) }
 }
 /// Leaves the next segment sent without an answer: `landed` decides whether
@@ -1835,6 +1903,7 @@ fn bind_elsewhere(store: &mut PersistentStore) -> DecimalU64 {
     let before = store.lww_binding_state().unwrap();
     let inspection_id = store.register_lww_binding_inspection(before.target_authority, &target, "synthetic-account/elsewhere", "synthetic-elsewhere-library").unwrap();
     store.switch_lww_binding(&SwitchBindingRequest {
+        initial_publication: false,
         header: crate::persistent_store::lww::Header { binding_authority: before.target_authority, request_id: uuid::Uuid::new_v4().to_string() },
         expected_selection_epoch: before.selection_epoch, target, inspection_id: Some(inspection_id),
     }).unwrap().target_authority
@@ -1872,7 +1941,7 @@ fn unbinding_from_an_unreachable_repository_does_not_wait_for_a_sent_segment() {
     })
 }
 #[test]
-fn a_binding_fence_stops_only_for_a_refusal_or_a_damaged_segment() {
+fn a_binding_fence_stops_only_for_a_refusal_or_a_damaged_segment_and_passes_a_missing_repository() {
     run(async {
         let mut f = CycleFixture::new();
         set(&mut f.a, &["root", "language"], serde_json::json!("ko"));
@@ -1887,7 +1956,7 @@ fn a_binding_fence_stops_only_for_a_refusal_or_a_damaged_segment() {
             (ErrorKind::EndpointRejected, true, true),
             (ErrorKind::Unauthorized, false, true),
             (ErrorKind::ReauthRequired, false, true),
-            (ErrorKind::NotFound, false, false),
+            (ErrorKind::NotFound, true, true),
             (ErrorKind::RepositoryKeyUnavailable, false, false),
             (ErrorKind::Corrupt, false, false),
             (ErrorKind::Cancelled, false, false),
@@ -1955,6 +2024,163 @@ fn returning_to_a_repository_without_its_pending_state_counts_a_landed_segment_w
         assert_eq!(f.a.read_root(None).unwrap().value["askRemoval"], true);
         f.receive_b().await;
         assert_eq!(f.b.read_root(None).unwrap().value["language"], "ko");
+        assert_eq!(f.b.read_root(None).unwrap().value["askRemoval"], true);
+    })
+}
+#[test]
+fn an_owed_initial_publication_reaches_the_repository_after_a_stop() {
+    run(async {
+        use crate::persistent_store::sync_selection::{SwitchBindingRequest, SyncTarget};
+        let mut f = CycleFixture::new();
+        set(&mut f.a, &["root", "language"], serde_json::json!("ko"));
+        set(&mut f.a, &["root", "askRemoval"], serde_json::json!(true));
+        let before = f.a.lww_binding_state().unwrap();
+        let target = SyncTarget::External("repository".into());
+        let inspection_id = f.a.register_lww_binding_inspection(before.target_authority, &target, &f.sender.repository.connection_identity, &f.sender.library).unwrap();
+        let authority = f.a.switch_lww_binding(&SwitchBindingRequest {
+            header: crate::persistent_store::lww::Header { binding_authority: before.target_authority, request_id: uuid::Uuid::new_v4().to_string() },
+            expected_selection_epoch: before.selection_epoch, target, inspection_id: Some(inspection_id), initial_publication: true,
+        }).unwrap().target_authority;
+        let header = crate::persistent_store::lww::Header { binding_authority: authority, request_id: "synthetic-initial".into() };
+        // Stops between the library and device commits of a page, and between pages.
+        for commits in [1, 2, 3] {
+            f.a.stop_initial_queue_after_commits(1, commits);
+            assert!(f.a.lww_finish_initial_publication(&header).is_err());
+            assert!(f.a.lww_owed_initial_publication().unwrap().is_some());
+        }
+        f.a.stop_initial_queue_after_commits(1, usize::MAX);
+        assert!(f.a.lww_finish_initial_publication(&header).unwrap());
+        assert_eq!(f.a.lww_owed_initial_publication().unwrap(), None);
+        assert!(!f.a.lww_finish_initial_publication(&header).unwrap());
+        f.sender.publish(&mut f.a, authority, &[], &Cancellation::default()).await.unwrap();
+        assert!(f.a.lww_read_outbox(authority, 100).unwrap().entries.is_empty());
+        f.receive_b().await;
+        assert_eq!(f.b.read_root(None).unwrap().value["language"], "ko");
+        assert_eq!(f.b.read_root(None).unwrap().value["askRemoval"], true);
+    })
+}
+fn job_released(store: &PersistentStore, job: &crate::external_storage::journal::JobIdentity) -> bool {
+    match crate::asset_repository::job_pins::DurableCasJob::open(store.repository_root(), &job.job_id) {
+        Ok(_) => false,
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+fn writer_rows(store: &PersistentStore, table: &str, writer: &str) -> i64 {
+    store.device_store().unwrap().connection()
+        .query_row(&format!("SELECT count(*) FROM {table} WHERE writer=?1"), [writer], |r| r.get(0))
+        .unwrap()
+}
+#[test]
+fn a_new_device_switch_drops_the_old_writers_segments_and_releases_their_files() {
+    run(async {
+        use crate::persistent_store::sync_selection::SyncTarget;
+        let mut f = CycleFixture::new();
+        let target = SyncTarget::External("repository".into());
+        let first = bind_external(&mut f.a, &f.sender, &target);
+        set(&mut f.a, &["root", "language"], serde_json::json!("ja"));
+        f.sender.publish(&mut f.a, first, &[], &Cancellation::default()).await.unwrap();
+        small_asset(&mut f.a, "synthetic-asset", b"synthetic old writer asset");
+        let pending = send_unconfirmed(&mut f, first, false).await;
+        let job = pending.asset_job.clone().expect("the segment holds its asset");
+        let old_writer = f.a.lww_clock_state().unwrap().writer_id;
+        assert_eq!(writer_rows(&f.a, "external_lww_segments", &old_writer), 2);
+        assert_eq!(writer_rows(&f.a, "external_lww_sequences", &old_writer), 1);
+        bind_elsewhere(&mut f.a);
+        let (header, inspection) = binding_context(&f.a, &f.sender, "synthetic-new-device");
+        let stage = f.sender.stage_binding(&mut f.a, &header, &inspection, &Cancellation::default()).await.unwrap();
+        let preparation = f.a.prepare_lww_new_device(&header, &stage.staging_id).unwrap();
+        f.a.authorize_lww_new_device(&preparation.authorization_id).unwrap();
+        let result = f.a.lww_replace_target_as_new_device(&header, &stage.staging_id, &preparation.authorization_id).unwrap();
+        assert_ne!(result.writer_id, old_writer);
+        assert_eq!(writer_rows(&f.a, "external_lww_segments", &old_writer), 0);
+        assert_eq!(writer_rows(&f.a, "external_lww_sequences", &old_writer), 0);
+        assert!(job_released(&f.a, &job));
+    })
+}
+#[test]
+fn removing_a_connection_drops_its_settled_and_unsent_segments_and_keeps_a_sent_one_without_files() {
+    run(async {
+        use crate::persistent_store::sync_selection::SyncTarget;
+        let mut f = CycleFixture::new();
+        let target = SyncTarget::External("repository".into());
+        let first = bind_external(&mut f.a, &f.sender, &target);
+        set(&mut f.a, &["root", "language"], serde_json::json!("ja"));
+        f.sender.publish(&mut f.a, first, &[], &Cancellation::default()).await.unwrap();
+        small_asset(&mut f.a, "synthetic-asset", b"synthetic sent asset");
+        let sent = send_unconfirmed(&mut f, first, false).await;
+        let sent_job = sent.asset_job.clone().expect("the sent segment holds its asset");
+        let scope = f.sender.target_scope();
+        let writer = f.a.lww_clock_state().unwrap().writer_id;
+        f.a.external_lww_forget_target(&scope).unwrap();
+        let (kept, _) = f.a.external_lww_pending(&scope, &writer).unwrap().unwrap();
+        assert_eq!(kept.seq, sent.seq);
+        assert!(kept.dispatched && !kept.complete);
+        assert!(kept.asset_job.is_none() && kept.assets.is_empty() && kept.reused_assets.is_empty());
+        assert!(job_released(&f.a, &sent_job));
+        assert_eq!(writer_rows(&f.a, "external_lww_segments", &writer), 1);
+        assert_eq!(f.a.external_lww_next_sequence(&scope, &writer).unwrap(), sent.seq.0);
+        let arrays: bool = f.a.device_store().unwrap().connection().query_row(
+            "SELECT json_type(metadata,'$.assets')='array' AND json_type(metadata,'$.reusedAssets')='array' FROM external_lww_segments WHERE writer=?1",
+            [&writer], |r| r.get(0)).unwrap();
+        assert!(arrays);
+
+        let mut g = CycleFixture::new();
+        let bound = bind_external(&mut g.a, &g.sender, &target);
+        small_asset(&mut g.a, "synthetic-asset", b"synthetic unsent asset");
+        let unsent = seal_unsent(&mut g, bound).await;
+        let unsent_job = unsent.asset_job.clone().expect("the unsent segment holds its asset");
+        let writer = g.a.lww_clock_state().unwrap().writer_id;
+        g.a.external_lww_forget_target(&g.sender.target_scope()).unwrap();
+        assert_eq!(writer_rows(&g.a, "external_lww_segments", &writer), 0);
+        assert!(job_released(&g.a, &unsent_job));
+    })
+}
+#[test]
+fn a_landed_segment_that_cleanup_removed_after_a_checkpoint_keeps_its_sequence_on_return() {
+    run(async {
+        use crate::persistent_store::sync_selection::SyncTarget;
+        let mut f = CycleFixture::new();
+        let target = SyncTarget::External("repository".into());
+        let first = bind_external(&mut f.a, &f.sender, &target);
+        set(&mut f.a, &["root", "language"], serde_json::json!("ko"));
+        let pending = send_unconfirmed(&mut f, first, true).await;
+        let writer = f.a.lww_clock_state().unwrap().writer_id;
+        let job = tempfile::tempdir().unwrap();
+        f.sender.compact_published(job.path(), "00000000-0000-4000-8000-0000000000c1", &writer, &fake::capabilities(true), &Cancellation::default(), None).await.unwrap();
+        f.provider.forget(&pending.object_id);
+        bind_elsewhere(&mut f.a);
+        let rebound = bind_external(&mut f.a, &f.sender, &target);
+        set(&mut f.a, &["root", "askRemoval"], serde_json::json!(true));
+        assert_eq!(f.sender.publish(&mut f.a, rebound, &[], &Cancellation::default()).await.unwrap().segments.0, 1);
+        assert_eq!(f.provider.upload_attempts(&pending.object_id), 1);
+        assert_eq!(f.a.external_lww_next_sequence(&f.sender.target_scope(), &writer).unwrap(), pending.seq.0 + 2);
+        f.receive_b().await;
+        assert_eq!(f.b.read_root(None).unwrap().value["language"], "ko");
+        assert_eq!(f.b.read_root(None).unwrap().value["askRemoval"], true);
+    })
+}
+#[test]
+fn a_landed_segment_this_device_received_keeps_its_sequence_after_cleanup_removed_it() {
+    run(async {
+        use crate::persistent_store::sync_selection::SyncTarget;
+        let mut f = CycleFixture::new();
+        let target = SyncTarget::External("repository".into());
+        let first = bind_external(&mut f.a, &f.sender, &target);
+        set(&mut f.a, &["root", "language"], serde_json::json!("ko"));
+        let pending = send_unconfirmed(&mut f, first, true).await;
+        f.receive_b().await;
+        assert_eq!(f.b.read_root(None).unwrap().value["language"], "ko");
+        bind_elsewhere(&mut f.a);
+        let rebound = bind_external(&mut f.a, &f.sender, &target);
+        f.sender.receive_and_apply(&mut f.a, rebound, &[], &Cancellation::default()).await.unwrap();
+        let writer = f.a.lww_clock_state().unwrap().writer_id;
+        assert!(f.a.lww_receive_progress(rebound).unwrap().iter().any(|p| p.writer_id.as_deref() == Some(writer.as_str()) && p.cursor == pending.seq));
+        f.provider.forget(&pending.object_id);
+        set(&mut f.a, &["root", "askRemoval"], serde_json::json!(true));
+        assert_eq!(f.sender.publish(&mut f.a, rebound, &[], &Cancellation::default()).await.unwrap().segments.0, 1);
+        assert_eq!(f.provider.upload_attempts(&pending.object_id), 1);
+        assert_eq!(f.a.external_lww_next_sequence(&f.sender.target_scope(), &writer).unwrap(), pending.seq.0 + 2);
+        f.receive_b().await;
         assert_eq!(f.b.read_root(None).unwrap().value["askRemoval"], true);
     })
 }

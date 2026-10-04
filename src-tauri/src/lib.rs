@@ -14,17 +14,11 @@ mod boot_marker;
 mod windows_session;
 mod cold_payload_codec;
 mod data_health;
-#[cfg(any(windows, target_os = "linux"))]
-mod desktop_session;
 pub(crate) mod device_backup;
 mod external_storage;
 pub mod import_export_jobs;
 #[cfg(target_os = "ios")]
 mod ios_lifecycle;
-#[cfg(target_os = "linux")]
-mod linux_session;
-#[cfg(target_os = "linux")]
-mod linux_webview;
 #[allow(dead_code)]
 mod local_backup;
 mod logical_records;
@@ -54,8 +48,6 @@ mod publication_upload;
     target_os = "macos"
 ))]
 mod regex_shadow;
-#[cfg(not(target_os = "android"))]
-mod renderer_recovery;
 mod server_sync;
 mod trust_boundary;
 #[cfg(test)]
@@ -274,10 +266,6 @@ fn builder_with_main_window(
     let mut builder = tauri::Builder::default()
         .manage(native_startup_state)
         .plugin(tauri_plugin_opener::init());
-    #[cfg(not(target_os = "android"))]
-    {
-        builder = builder.manage(renderer_recovery::RendererRecovery::default());
-    }
     #[cfg(desktop)]
     {
         // Reject a second process before plugins with startup side effects run.
@@ -308,29 +296,9 @@ fn builder_with_main_window(
             .plugin(windows_appearance::init())
             .plugin(windows_webview::init());
     }
-    #[cfg(target_os = "linux")]
-    {
-        builder = builder.plugin(linux_webview::init());
-    }
     #[cfg(target_os = "macos")]
     {
         builder = builder.manage(macos_lifecycle::ExitState::default());
-    }
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    {
-        // Replaces Tauri's default handler, which only reloads.
-        builder = builder.on_web_content_process_terminate(|webview| {
-            if webview.label() == "main" {
-                crate::nlog!("error", "WebKit web content process ended");
-                renderer_recovery::renderer_exited(webview.app_handle());
-                // A quit that arrives before the reloaded document is ready no longer waits for it.
-                #[cfg(target_os = "macos")]
-                macos_lifecycle::document_started(webview.app_handle());
-            }
-            if let Err(error) = webview.reload() {
-                crate::nlog!("error", "Could not reload after the web content process ended: {error}");
-            }
-        });
     }
     #[cfg(target_os = "android")]
     {
@@ -393,7 +361,6 @@ fn builder_with_main_window(
             if webview.label() == "main"
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
             {
-                renderer_recovery::document_started(webview.app_handle());
                 if let Some(state) = webview.try_state::<persistent_store::PersistentStoreState>() {
                     if let Err(error) = state.reset_renderer_session() {
                         crate::nlog!(
@@ -446,8 +413,6 @@ fn builder_with_main_window(
                 ios_lifecycle::main_document_started(webview.app_handle());
                 #[cfg(target_os = "macos")]
                 macos_lifecycle::document_started(webview.app_handle());
-                #[cfg(target_os = "linux")]
-                renderer_recovery::document_started(webview.app_handle());
                 if let Some(state) = webview.try_state::<persistent_store::PersistentStoreState>() {
                     if let Err(error) = state.reset_renderer_session() {
                         crate::nlog!(
@@ -491,15 +456,14 @@ fn builder_with_main_window(
 
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_notification::init())
-            .plugin(tauri_plugin_updater::Builder::new()
+        builder = builder.plugin(tauri_plugin_updater::Builder::new()
             .relaunch_args(opened_files::relaunch_arguments(std::env::args_os(), std::env::current_dir().ok().as_deref()))
             .build());
     }
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(windows)]
     {
-        builder = builder.manage(desktop_session::SessionState::default())
-            .append_invoke_initialization_script(include_str!("desktop_lifecycle.js"));
+        builder = builder.manage(windows_session::SessionState::default())
+            .append_invoke_initialization_script(include_str!("windows_lifecycle.js"));
     }
 
     builder
@@ -542,8 +506,6 @@ fn builder_with_main_window(
                 renderer_access?;
                 #[cfg(windows)]
                 windows_session::install(app.handle())?;
-                #[cfg(target_os = "linux")]
-                linux_session::install(app.handle());
                 #[cfg(target_os = "macos")]
                 macos_lifecycle::install_native_quit(app.handle())?;
                 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -708,6 +670,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         external_storage::runtime::external_storage_get_job,
         external_storage::runtime_restore::external_storage_confirm_restore_adoption,
         external_storage::runtime::external_storage_cancel_job,
+        external_storage::runtime::external_storage_stop_restore,
         external_storage::runtime::external_storage_get_quota,
         external_storage::history::external_storage_list_history,
         external_storage::history_deletion::external_storage_prepare_history_delete,
@@ -720,12 +683,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         macos_lifecycle::macos_exit_response,
         #[cfg(desktop)]
         opened_files::desktop_relaunch,
-        #[cfg(any(windows, target_os = "linux"))]
-        desktop_session::desktop_flush_complete,
-        #[cfg(any(windows, target_os = "linux"))]
-        renderer_recovery::desktop_close_ack,
-        #[cfg(not(target_os = "android"))]
-        renderer_recovery::renderer_recovery_take,
+        #[cfg(windows)]
+        windows_session::desktop_flush_complete,
         native_startup_status,
         app_update::commands::app_update_environment,
         app_update::commands::app_update_check,
@@ -744,6 +703,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         server_sync::commands::server_sync_lww_activate,
         server_sync::commands::server_sync_lww_hydrate,
         server_sync::commands::server_sync_lww_inspect,
+        server_sync::commands::server_sync_lww_pending_binding,
         server_sync::commands::server_sync_lww_stage_target,
         server_sync::commands::server_sync_lww_prepare_new_device,
         server_sync::commands::server_sync_lww_prepare_fresh_writer,
@@ -754,6 +714,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         server_sync::commands::server_sync_notify_start,
         server_sync::commands::server_sync_notify_stop,
         server_sync::commands::server_sync_asset_policy,
+        server_sync::commands::asset_residency_download_remote,
         server_sync::commands::server_sync_asset_evict,
         server_sync::commands::server_sync_cache_usage,
         server_sync::commands::server_sync_cache_cleanup,
@@ -880,7 +841,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         #[cfg(any(windows, target_os = "linux", target_os = "ios", target_os = "macos"))]
         persistent_commit_raw::pds_commit_raw,
         persistent_store::lww_commands::pds_lww_read_outbox,
-        persistent_store::lww_commands::pds_lww_queue_unit_state_page,
+        persistent_store::lww_commands::pds_lww_finish_initial_publication,
         persistent_store::lww_commands::pds_lww_stage_receive,
         persistent_store::lww_commands::pds_lww_apply_receive,
         persistent_store::lww_commands::pds_lww_finish_receive,
@@ -985,11 +946,8 @@ pub fn handle_run_event(_app: &tauri::AppHandle, _event: tauri::RunEvent) {
     #[cfg(desktop)]
     if matches!(&_event, tauri::RunEvent::Exit) { opened_files::restart_on_exit(_app); }
     #[cfg(any(windows, target_os = "linux"))]
-    if let tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { api, .. }, .. } = &_event {
-        if label == "main" {
-            cancel_incomplete_boot(_app);
-            renderer_recovery::on_main_close_requested(_app, api);
-        }
+    if matches!(&_event, tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { .. }, .. } if label == "main") {
+        cancel_incomplete_boot(_app);
     }
     #[cfg(target_os = "ios")]
     if let tauri::RunEvent::Opened { urls } = &_event {

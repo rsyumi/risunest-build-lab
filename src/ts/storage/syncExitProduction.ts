@@ -1,4 +1,3 @@
-import { invoke } from '@tauri-apps/api/core'
 import { writable } from 'svelte/store'
 import type {
     SyncExitCoordinator,
@@ -37,13 +36,10 @@ export async function registerWindowCloseDrain(
     exitCoordinator: SyncExitCoordinator,
     reportError: (error: unknown) => void = (error) =>
         console.error('Window exit drain failed', error),
-    acknowledge: () => Promise<unknown> = () => invoke('desktop_close_ack'),
 ): Promise<() => void> {
     let closing = false
     let pending = false
     return window.onCloseRequested(async (event) => {
-        // A request left unanswered lets a repeated close destroy the window natively.
-        acknowledge().catch(() => {})
         if (closing) return
         event.preventDefault()
         if (pending) return

@@ -108,7 +108,7 @@ fn stage_count(store: &PersistentStore) -> i64 {
     store
         .connection
         .query_row(
-            "SELECT count(*) FROM root WHERE generation LIKE 'staging-%'",
+            "SELECT count(*) FROM generations WHERE state='staging'",
             [],
             |row| row.get(0),
         )
@@ -392,6 +392,76 @@ fn a_linked_record_body_in_the_content_store_is_not_a_snapshot_input() {
     assert_eq!(store.materialize(None).unwrap()["marker"], "local");
 }
 
+/// Bodies a snapshot names that this device holds only through a remote
+/// source are confirmed through one registry connection, and bodies held here
+/// ask the registry nothing.
+#[test]
+fn library_bodies_are_confirmed_through_at_most_one_registry_connection() {
+    use crate::external_storage::lww_residency::{forget_registry_opens, register_synthetic_source, registry_opens};
+    for remote_bodies in [3usize, 0] {
+        let (directory, mut store) = open_store();
+        let staging = directory.path().join("download");
+        fs::create_dir(&staging).unwrap();
+        let local = crate::asset_repository::PayloadCas::new(directory.path())
+            .unwrap()
+            .prepare_bytes(b"synthetic local body")
+            .unwrap();
+        // A registry exists either way, holding a body this snapshot does not name.
+        register_synthetic_source(directory.path(), &"f".repeat(64), 7);
+        let mut bodies = vec![(local.content_hash.clone(), local.byte_size)];
+        for index in 1..=remote_bodies {
+            let hash = format!("{index:064x}");
+            register_synthetic_source(directory.path(), &hash, 7);
+            bodies.push((hash, 7));
+        }
+        let (root, root_hash) = root_record(&staging, "remote");
+        let mut hashes = BTreeMap::from([(root.key.clone(), root_hash)]);
+        let mut records = vec![root];
+        for (index, (hash, size)) in bodies.iter().enumerate() {
+            let metadata = encode_asset_alias_metadata(&LogicalAssetAliasMetadata {
+                mime: "application/octet-stream".into(),
+                name: "payload.bin".into(),
+                ext: "bin".into(),
+                inlay_type: None,
+                width: None,
+                height: None,
+                metadata: json!({}),
+            })
+            .unwrap();
+            let (asset, record_hash) = write_record(
+                &staging,
+                LogicalRecordLocator::Asset {
+                    logical_key: format!("asset-{index}"),
+                },
+                LogicalRecordEnvelope::Asset {
+                    object_hash: Some(hash.clone()),
+                    size: *size,
+                    metadata,
+                },
+            );
+            hashes.insert(asset.key.clone(), record_hash);
+            records.push(asset);
+        }
+        let objects = bodies.iter().map(|(hash, size)| ExternalSnapshotObject {
+            content_hash: hash.clone(),
+            byte_length: *size,
+            source: ObjectSource::Library(hash.clone()),
+        });
+        let scope_id = library_fingerprint_domain();
+        let fingerprint = fingerprint(&scope_id, &hashes);
+        forget_registry_opens(directory.path());
+        let prepared = store
+            .prepare_external_snapshot_application(
+                &application(&staging, &scope_id, &fingerprint, 1),
+                records.into_iter().map(Ok),
+                objects.map(Ok),
+            )
+            .unwrap();
+        assert_eq!(registry_opens(directory.path()), usize::from(remote_bodies > 0), "{remote_bodies} remote bodies");
+        store.finish_prepared_replace(prepared).unwrap();
+    }
+}
+
 #[test]
 fn rejected_record_stream_rolls_back_the_whole_stage_and_preserves_live_library() {
     let (directory, mut store) = open_store();
@@ -537,10 +607,6 @@ fn connection_removal_cancels_local_jobs_releases_roots_and_deselects() {
         "INSERT INTO external_storage_capture_refs VALUES('capture-ready','ready')",
         [],
     ).unwrap();
-    store.connection.execute(
-        "INSERT INTO external_storage_bases VALUES('connection','repository','snapshot','commit','observation',?1)",
-        [&identity],
-    ).unwrap();
 
     store
         .external_prepare_connection_removal("connection")
@@ -562,17 +628,6 @@ fn connection_removal_cancels_local_jobs_releases_roots_and_deselects() {
             .connection
             .query_row(
                 "SELECT count(*) FROM external_storage_capture_refs",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        store
-            .connection
-            .query_row(
-                "SELECT count(*) FROM external_storage_bases WHERE connection_id='connection'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -1014,6 +1069,37 @@ fn one_long_conversation_is_staged_in_bounded_transactions() {
     assert_eq!(store.finish_prepared_replace(prepared).unwrap().revision, 2);
 }
 
+/// Activation reads no message to page an external stage: each conversation
+/// was paged as its last messages were staged, whether they arrived in the
+/// batch that wrote the conversation or several batches later.
+#[test]
+fn activating_an_external_stage_reads_no_messages_for_paging() {
+    for long in [true, false] {
+        let (directory, mut store) = open_store();
+        let prepared = if long {
+            let (staged, committed) =
+                stage_long_conversation(directory.path(), &mut store, 20_000, 0, &NeverCancelled, |_| {});
+            assert!(committed.len() >= 3, "{committed:?}");
+            staged.unwrap()
+        } else {
+            let staging = directory.path().join("download");
+            fs::create_dir(&staging).unwrap();
+            stage_wide(&mut store, &staging, 600, false).unwrap()
+        };
+        super::super::message_pages::reset_capture_work();
+        super::super::hash_work::reset_hash_work();
+        assert_eq!(store.finish_prepared_replace(prepared).unwrap().revision, 2);
+        let pages = super::super::message_pages::take_capture_work();
+        let hashes = super::super::hash_work::take_hash_work();
+        assert_eq!(pages.capture_calls, 0, "long {long}: {pages:?}");
+        assert_eq!(pages.work.messages_read, 0, "long {long}: {pages:?}");
+        assert_eq!(pages.work.pages_written, 0, "long {long}: {pages:?}");
+        for domain in ["native_message_verify", "native_page_identity"] {
+            assert!(!hashes.domains.contains_key(domain), "long {long}, {domain}: {hashes:?}");
+        }
+    }
+}
+
 /// F03. Heavy messages close a batch by their bytes, even inside one
 /// conversation.
 #[test]
@@ -1087,8 +1173,8 @@ fn staged_rows(store: &PersistentStore) -> (i64, i64) {
     store
         .connection
         .query_row(
-            "SELECT (SELECT count(*) FROM root WHERE generation LIKE 'staging-%'),
-                    (SELECT count(*) FROM messages WHERE generation LIKE 'staging-%')",
+            "SELECT (SELECT count(*) FROM generations WHERE state='staging'),
+                    (SELECT count(*) FROM messages WHERE generation IN (SELECT id FROM generations WHERE state='staging'))",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )

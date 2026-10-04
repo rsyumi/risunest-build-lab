@@ -37,7 +37,7 @@ vi.mock('./bindingProduction', async importOriginal => ({
     installSyncBindingFlow: f.install,
 }))
 vi.mock('../committedWorkingSetContinuation', () => ({ registerCommittedWorkingSetContinuation: f.continuation }))
-vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: vi.fn() }))
+vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: vi.fn(), confirmPreviousStorageFiles: vi.fn(async () => 'connect'), downloadPreviousStorageFiles: vi.fn() }))
 vi.mock('./bindingLocalData', () => ({ hasLocalBindingData: vi.fn(), hasLocalSharedBindingData: vi.fn() }))
 vi.mock('./bindingRegistry', () => ({ registerSyncBindingTransport: f.register, resumeCurrentSyncBinding: f.resumeCurrent, getSyncBindingTransport: vi.fn(), bindSyncTarget: vi.fn(), unbindSyncTarget: vi.fn() }))
 vi.mock('./bindingNative', () => ({ replaceNativeSyncBinding: vi.fn(), replaceNativeSyncBindingAsNewDevice: vi.fn() }))
@@ -262,13 +262,8 @@ describe('production server LWW composition', () => {
         const units = Array.from({ length: 640 }, (_, index) => `synthetic-unit-${index}`)
         const pending: string[] = []
         const batches: number[] = []
-        let queued = 0
         f.invoke.mockImplementation(async command => {
-            if (command === 'pds_lww_queue_unit_state_page') {
-                pending.push(...units.slice(queued, queued + 256))
-                queued = Math.min(units.length, queued + 256)
-                return { afterKey: units[queued - 1], hasMore: queued < units.length }
-            }
+            if (command === 'server_sync_lww_activate') { pending.push(...units); return null }
             if (command === 'server_sync_lww_push') {
                 const batch = pending.splice(0, 256)
                 if (!batch.length) return null
@@ -277,17 +272,21 @@ describe('production server LWW composition', () => {
             }
             return null
         })
+        f.invoke.mockClear()
         await f.transport!.publishInitialSharedState(context)
-        expect(queued).toBe(640); expect(pending).toEqual([]); expect(batches).toEqual([256, 256, 128])
-        expect(f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_push')).toHaveLength(4)
-        expect(f.invoke.mock.calls.some(([command]) => command === 'server_sync_lww_pull' || command === 'server_sync_notify_start')).toBe(false)
+        expect(pending).toEqual([]); expect(batches).toEqual([256, 256, 128])
+        const commands = f.invoke.mock.calls.map(([command]) => command)
+        expect(commands[0]).toBe('server_sync_lww_activate')
+        expect(commands.filter(command => command === 'server_sync_lww_push')).toHaveLength(4)
+        expect(commands).not.toContain('pds_lww_queue_unit_state_page')
+        expect(commands.some(command => command === 'server_sync_lww_pull' || command === 'server_sync_notify_start')).toBe(false)
     })
     it('stops initial publication at a generating-only null batch and leaves service start to G', async () => {
         Object.defineProperty(document, 'visibilityState', { value: 'visible' })
         f.generating = [{ characterId: 'synthetic-character', conversationId: 'synthetic-chat' }]
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
         const context = { state: { target: { kind: 'server' as const, connectionId: 'server' }, targetAuthority: '0', selectionEpoch: '0', libraryId: 'library', progress: null }, signal: new AbortController().signal }
-        f.invoke.mockImplementation(async command => command === 'pds_lww_queue_unit_state_page' ? { afterKey: null, hasMore: false } : null)
+        f.invoke.mockImplementation(async () => null)
         await f.transport!.publishInitialSharedState(context)
         const pushes = f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_push')
         expect(pushes).toHaveLength(1); expect(pushes[0][1]).toMatchObject({ generating: f.generating })

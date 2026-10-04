@@ -924,6 +924,72 @@ pub(crate) struct PersistentStore {
     // A device store that cannot be opened must not block the library, so the
     // failure is carried until something actually needs per-device state.
     device_store: Result<device_store::DeviceStore, String>,
+    message_object_roots: MessageObjectRootsCache,
+}
+
+/// The message object roots each sweep target last read, kept while neither
+/// connection has seen a change and the same revision leases are held.
+#[derive(Default)]
+struct MessageObjectRootsCache {
+    library: Option<(MessageObjectRootsToken, message_pages::ObjectRoots)>,
+    device: Option<(MessageObjectRootsToken, message_pages::ObjectRoots)>,
+    #[cfg(test)]
+    computed: usize,
+}
+
+/// Commits by other connections move `data_version`; this store's own
+/// writes move `total_changes`. Both are (library, device).
+#[derive(PartialEq, Eq)]
+struct MessageObjectRootsToken {
+    versions: (i64, i64),
+    changes: (u64, u64),
+    leases: Vec<String>,
+}
+
+impl MessageObjectRootsToken {
+    fn read(library: &Connection, device: &Connection, leases: Vec<String>) -> StoreResult<Self> {
+        let version = |db: &Connection| db.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0));
+        Ok(Self {
+            versions: (version(library)?, version(device)?),
+            changes: (library.total_changes(), device.total_changes()),
+            leases,
+        })
+    }
+}
+
+impl MessageObjectRootsCache {
+    fn roots(
+        &mut self,
+        target: MessageObjectStore,
+        token: MessageObjectRootsToken,
+        read: impl FnOnce() -> StoreResult<message_pages::ObjectRoots>,
+    ) -> StoreResult<&message_pages::ObjectRoots> {
+        let slot = match target {
+            MessageObjectStore::Library => &mut self.library,
+            MessageObjectStore::Device => &mut self.device,
+        };
+        let current = match slot.take() {
+            Some((cached, roots)) if cached == token => (cached, roots),
+            _ => {
+                let roots = read()?;
+                #[cfg(test)]
+                { self.computed += 1; }
+                (token, roots)
+            }
+        };
+        Ok(&slot.insert(current).1)
+    }
+
+    /// Moves the counters of roots that were current when the sweep began past
+    /// its own commit. Its cursor, marks and deletions reach no target's roots.
+    fn committed(&mut self, before: (u64, u64), library: &Connection, device: &Connection) {
+        let after = (library.total_changes(), device.total_changes());
+        for (token, _) in [&mut self.library, &mut self.device].into_iter().flatten() {
+            if token.changes == before {
+                token.changes = after;
+            }
+        }
+    }
 }
 
 /// One generation, held open for a diagnosis. It outlives the store mutex on purpose: a deep
@@ -1419,10 +1485,22 @@ impl PersistentStore {
             "INSERT OR IGNORE INTO meta (key, value) VALUES (?1, ?2)",
             params!["activeGeneration", "\"revision-0\""],
         )?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO root (generation, value) VALUES (?1, ?2)",
-            params!["revision-0", "{}"],
+        let seeded: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM generations WHERE state = 'active')",
+            [],
+            |row| row.get(0),
         )?;
+        if !seeded {
+            let active = active_generation(&transaction)?;
+            transaction.execute(
+                "INSERT INTO generations (id, state) VALUES (?1, 'active')",
+                [&active],
+            )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO root (generation, value) VALUES (?1, ?2)",
+                params![active, "{}"],
+            )?;
+        }
         transaction.commit()?;
         export::sweep_abandoned(&snapshots_dir)?;
         #[cfg(feature = "native-kei-upload-pilot")]
@@ -1439,6 +1517,7 @@ impl PersistentStore {
             database_path,
             snapshots_dir,
             device_store,
+            message_object_roots: MessageObjectRootsCache::default(),
         };
         if store.device_store.is_ok() {
             store.lww_recover_intents()?;
@@ -1466,6 +1545,7 @@ impl PersistentStore {
             database_path: self.database_path.clone(),
             snapshots_dir: self.snapshots_dir.clone(),
             device_store,
+            message_object_roots: MessageObjectRootsCache::default(),
         })
     }
 
@@ -2060,6 +2140,12 @@ impl PersistentStore {
         commit::replace_abort(&mut self.connection, staging_id)
     }
 
+    /// One bounded step of deleting libraries that an activation or the startup
+    /// sweep retired. Returns whether retired libraries remain.
+    pub(crate) fn purge_retired_batch(&mut self, limit_rows: usize) -> StoreResult<bool> {
+        commit::purge_retired_batch(&mut self.connection, limit_rows)
+    }
+
     pub(crate) fn acquire_revision(&mut self, revision: i64) -> StoreResult<LeaseResult> {
         let (lease, reader) = snapshot::acquire_revision(
             &self.database_path,
@@ -2250,6 +2336,7 @@ impl PersistentStore {
             &self.repository_root,
             job_id,
             CasJobKind::OfficialPublicationOrExportPreparation,
+            crate::asset_repository::job_pins::CasJobOwner::native_file_job(job_id),
             created_at_ms,
         )?;
         let pin_result = (|| -> StoreResult<()> {
@@ -2406,12 +2493,7 @@ impl PersistentStore {
     pub(crate) fn storage_stats(&self) -> StoreResult<PersistentStorageStats> {
         let transaction = self.connection.unchecked_transaction()?;
         let active = active_generation(&transaction)?;
-        let database_bytes = query_count_bytes(
-            &transaction,
-            "SELECT 1, page_count * page_size FROM pragma_page_count(), pragma_page_size()",
-            [],
-        )?
-        .bytes;
+        let database_bytes = snapshot::logical_database_bytes(&transaction)?;
         let asset_objects = query_count_bytes(
             &transaction,
             "SELECT COUNT(*), COALESCE(SUM(byte_size), 0) FROM asset_objects",
@@ -2726,8 +2808,9 @@ impl PersistentStore {
 
     /// One bounded pass over one store's message objects. Roots are read under the
     /// store lock and, for the store being swept, inside its write transaction, so
-    /// a reference committed before the pass is seen. Callers hold native file
-    /// admission so no replacement runs meanwhile.
+    /// a reference committed before the pass is seen. They are read again only
+    /// after a change on either connection or to the held leases. Callers hold
+    /// native file admission so no replacement runs meanwhile.
     pub(crate) fn sweep_message_page_objects(
         &mut self,
         target: MessageObjectStore,
@@ -2737,33 +2820,51 @@ impl PersistentStore {
         let Ok(device) = self.device_store.as_mut() else {
             return Ok(message_pages::ObjectSweep { wrapped: true, ..Default::default() });
         };
+        let mut lease_ids: Vec<String> = self.revision_leases.keys().cloned().collect();
+        lease_ids.sort();
         let leases = self.revision_leases.values().map(|lease| &lease.connection);
         if target == MessageObjectStore::Device {
             let transaction = device.transaction()?;
-            let roots = message_pages::object_roots(&self.connection, leases, &transaction, &transaction)?;
+            let token = MessageObjectRootsToken::read(&self.connection, &transaction, lease_ids)?;
+            let before = token.changes;
+            let roots = self.message_object_roots.roots(target, token, || {
+                message_pages::object_roots(&self.connection, leases, &transaction, &transaction)
+            })?;
             let sweep = message_pages::sweep_objects(
                 &transaction,
-                &roots,
+                roots,
                 now_ms,
                 ASSET_GC_PRODUCT_MINIMUM_GRACE_MS,
                 limit,
             )?;
             transaction.commit()?;
+            self.message_object_roots.committed(before, &self.connection, device.connection());
             return Ok(sweep);
         }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let roots = message_pages::object_roots(&transaction, leases, device.connection(), &transaction)?;
+        let token = MessageObjectRootsToken::read(&transaction, device.connection(), lease_ids)?;
+        let before = token.changes;
+        let roots = self.message_object_roots.roots(target, token, || {
+            message_pages::object_roots(&transaction, leases, device.connection(), &transaction)
+        })?;
         let sweep = message_pages::sweep_objects(
             &transaction,
-            &roots,
+            roots,
             now_ms,
             ASSET_GC_PRODUCT_MINIMUM_GRACE_MS,
             limit,
         )?;
         transaction.commit()?;
+        self.message_object_roots.committed(before, &self.connection, device.connection());
         Ok(sweep)
+    }
+
+    /// How many times a message object sweep read its roots.
+    #[cfg(test)]
+    pub(crate) fn message_object_roots_computed(&self) -> usize {
+        self.message_object_roots.computed
     }
 
     fn record_asset_gc_maintenance_cursor(&mut self, cursor: Option<&str>) -> StoreResult<()> {

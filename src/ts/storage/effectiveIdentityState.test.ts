@@ -166,6 +166,70 @@ describe('protected shared preset groups', () => {
     })
 })
 
+describe('mirror derivation without changed inputs', () => {
+    function objectDatabase(): Database {
+        const db = database()
+        Object.assign(db.botPresets[0], { promptTemplate: [{ type: 'plain', text: 'A' }], ooba: { top_p: 1 }, seperateModels: { memory: 'record' } })
+        return db
+    }
+    it('keeps every mirror field and the toggle variables when nothing changed', () => {
+        const db = objectDatabase()
+        let applied = 0
+        const counted = (target: Database, preset: botPreset) => { applied++; apply(target, preset) }
+        deriveEffectivePresetMirrors(db, counted)
+        deriveEffectivePersonaMirrors(db)
+        deriveEffectiveToggleVariables(db)
+        const fields = db as unknown as Record<string, unknown>
+        const keys = [...Object.keys(presetMirrorMap), 'username', 'userIcon', 'personaPrompt', 'userNote', 'globalChatVariables']
+        const before = new Map(keys.map(key => [key, fields[key]]))
+        for (let pass = 0; pass < 2; pass++) {
+            flushEffectivePresetEdits(db)
+            flushEffectivePersonaEdits(db)
+            flushEffectiveToggleEdits(db)
+            deriveEffectivePresetMirrors(db, counted)
+            deriveEffectivePersonaMirrors(db)
+            deriveEffectiveToggleVariables(db)
+        }
+        expect(applied).toBe(1)
+        for (const key of keys) expect(fields[key], key).toBe(before.get(key))
+    })
+    it('re-applies after the record, the selection or an unflushed mirror changed', () => {
+        const db = objectDatabase()
+        derive(db)
+        db.botPresets[0].promptTemplate = [{ type: 'plain', text: 'remote' }] as never
+        derive(db)
+        expect(db.promptTemplate).toEqual([{ type: 'plain', text: 'remote' }])
+        db.botPresetsId = 1
+        derive(db)
+        expect(db.mainPrompt).toBe('B')
+        db.mainPrompt = 'unflushed'
+        derive(db)
+        expect(db.mainPrompt).toBe('B')
+        db.globalChatVariables = { ...db.globalChatVariables, other: 'changed' }
+        const explicit = getExplicitGlobalChatVariables(db)
+        explicit.other = 'remote'
+        deriveEffectiveToggleVariables(db)
+        expect(db.globalChatVariables.other).toBe('remote')
+    })
+    it('re-applies when a protection is lifted or its value changes, and keeps an unchanged protected value', () => {
+        const db = objectDatabase()
+        derive(db)
+        db.doNotChangeSeperateModels = true
+        db.seperateModels = { memory: 'protected' } as never
+        flushEffectivePresetEdits(db)
+        derive(db)
+        const protectedValue = db.seperateModels
+        derive(db)
+        expect(db.seperateModels).toBe(protectedValue)
+        db.protectedPresetValues.seperateModels = { memory: 'remote protected' } as never
+        derive(db)
+        expect(db.seperateModels).toEqual({ memory: 'remote protected' })
+        db.doNotChangeSeperateModels = false
+        derive(db)
+        expect(db.seperateModels).toEqual({ memory: 'record' })
+    })
+})
+
 describe('explicit variables and bound effective toggles', () => {
     it('opening and closing a chat derives toggles without editing explicit variables', () => {
         const db = database()

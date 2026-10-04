@@ -187,6 +187,19 @@ pub(super) fn carry_pending_publications(db: &rusqlite::Connection, old: Decimal
     }
     Ok(())
 }
+/// Releases a segment's file protection. A journal that is already gone was
+/// released before.
+pub(crate) fn release_cas_job(
+    root: &std::path::Path,
+    job_id: &str,
+    outcome: crate::asset_repository::job_pins::CasReleaseOutcome,
+) -> StoreResult<()> {
+    match crate::asset_repository::job_pins::DurableCasJob::open(root, job_id) {
+        Ok(mut job) => job.release(outcome).map_err(super::lww::error),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(super::lww::error(error)),
+    }
+}
 impl PersistentStore {
     pub(super) fn external_lww_active_asset_roots(&self) -> StoreResult<crate::asset_repository::migration_gc::AssetRootSet> {
         let device = self.device_store()?;
@@ -364,6 +377,72 @@ impl PersistentStore {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+    /// Forgets what this device was sending to a removed connection's
+    /// repository. Settled and unsent segments go; a sent one that no answer
+    /// confirmed stays without its files, so returning to that repository
+    /// never gives its sequence to another segment.
+    pub(crate) fn external_lww_forget_target(&mut self, target: &str) -> StoreResult<()> {
+        let rows: Vec<(String, String, String)> = {
+            let mut statement = self
+                .device_store()?
+                .connection()
+                .prepare("SELECT writer,seq,metadata FROM external_lww_segments WHERE target=?1")?;
+            let rows = statement
+                .query_map([target], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        let mut kept = Vec::new();
+        let mut dropped = Vec::new();
+        for (writer, seq, metadata) in rows {
+            let mut publication: SealedPublication = serde_json::from_str(&metadata)?;
+            if !publication.complete {
+                if let Some(job) = publication.asset_job.take() {
+                    release_cas_job(&self.repository_root, &job.job_id, crate::asset_repository::job_pins::CasReleaseOutcome::Aborted)?;
+                }
+            }
+            if publication.dispatched && !publication.complete {
+                publication.assets.clear();
+                publication.reused_assets.clear();
+                kept.push((writer, seq, serde_json::to_string(&publication)?));
+            } else {
+                dropped.push((writer, seq));
+            }
+        }
+        let tx = self.device_store_mut()?.transaction()?;
+        for (writer, seq) in dropped {
+            tx.execute(
+                "DELETE FROM external_lww_segments WHERE target=?1 AND writer=?2 AND seq=?3",
+                params![target, writer, seq],
+            )?;
+        }
+        for (writer, seq, metadata) in kept {
+            tx.execute(
+                "UPDATE external_lww_segments SET metadata=?4 WHERE target=?1 AND writer=?2 AND seq=?3",
+                params![target, writer, seq, metadata],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    /// Releases the file protection of every unfinished segment a retired
+    /// writer captured. The rows go with the writer change that retires it.
+    pub(super) fn external_lww_release_writer_jobs(&self, writer: &str) -> StoreResult<()> {
+        let mut statement = self
+            .device_store()?
+            .connection()
+            .prepare("SELECT metadata FROM external_lww_segments WHERE writer=?1 AND complete=0")?;
+        let rows = statement
+            .query_map([writer], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for metadata in rows {
+            let publication: SealedPublication = serde_json::from_str(&metadata)?;
+            if let Some(job) = &publication.asset_job {
+                release_cas_job(&self.repository_root, &job.job_id, crate::asset_repository::job_pins::CasReleaseOutcome::Aborted)?;
+            }
+        }
         Ok(())
     }
     /// Whether the current binding has a segment this device sent that no

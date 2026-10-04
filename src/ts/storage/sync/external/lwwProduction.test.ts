@@ -130,6 +130,21 @@ describe('native external LWW adapter', () => {
             { connectionId: 'sync', newDevice: false }, { connectionId: 'sync', newDevice: true }, { connectionId: 'sync', newDevice: false },
         ])
     })
+    it('finishes an owed initial queue natively when the binding resumes and publishes it through the ordinary publication', async () => {
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        const transport = fixture.registrations.get('sync')!
+        fixture.invoke.mockClear()
+        await transport.resumeBinding(context())
+        expect(fixture.invoke.mock.calls.slice(0, 2)).toEqual([
+            ['pds_lww_finish_initial_publication', { request: { bindingAuthority: '4', requestId: expect.any(String) } }],
+            ['external_lww_resume', { connectionId: 'sync' }],
+        ])
+        fixture.invoke.mockClear(); fixture.flush.mockClear()
+        await transport.publishInitialSharedState(context())
+        expect(fixture.invoke.mock.calls.map(call => call[0])).toEqual(['external_lww_publish'])
+        expect(fixture.invoke.mock.calls[0][1]).not.toHaveProperty('initial')
+        expect(fixture.flush).not.toHaveBeenCalled()
+    })
     it('reconciles the authoritative revision when publication fails after native clock repair', async () => {
         dispose = await installExternalLwwAdapters(state()); await settle()
         const transport = fixture.registrations.get('sync')!

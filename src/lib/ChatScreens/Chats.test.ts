@@ -121,6 +121,8 @@ import { DBState, ReloadGUIPointer } from 'src/ts/stores.svelte'
 import { setRuntimePerformanceProfile } from 'src/ts/runtimePerformanceProfile'
 import ChatsHarness from './ChatsHarness.test.svelte'
 import { chatMountProbe, resetChatMountProbe } from './chatMountProbe.testSupport'
+import { discardEditorDraftsExcept, pendingEditorDrafts } from 'src/ts/chatEditorDrafts'
+import { openTextEditorPopup, textEditorPopup } from 'src/ts/gui/textEditorPopup.svelte'
 
 interface HarnessInstance {
     setMessages(messages: Message[]): void
@@ -309,6 +311,8 @@ describe('Chats imperative mount lifecycle', () => {
 
     beforeEach(() => {
         resetChatMountProbe()
+        discardEditorDraftsExcept(null, null)
+        textEditorPopup.request = null
         vi.mocked(alertNormal).mockClear()
         imageMocks.mode = 'normal'
         imageMocks.staleReject = undefined
@@ -1199,7 +1203,7 @@ describe('Chats imperative mount lifecycle', () => {
         await vi.waitFor(() => expect(session.pinCount('editor')).toBe(0))
     })
 
-    test('does not preserve pinned runtime across a new navigation generation', async () => {
+    test('brings an open editor back with its draft across a new navigation generation', async () => {
         const messages = [makeMessage(0), makeMessage(1)]
         const firstCharacter = makeCharacter(messages)
         const { source: firstSource } = makeViewportSource(firstCharacter)
@@ -1216,15 +1220,19 @@ describe('Chats imperative mount lifecycle', () => {
             (element) => element.dataset.message === 'message-0',
         )!
         const instance = Number(row.dataset.chatProbe)
+        chatMountProbe.activeEditors.add(instance)
+        chatMountProbe.editorDrafts.set(instance, { kind: 'original', draft: 'typed draft', evidence: structuredClone(messages[0]) })
         const editor = document.createElement('textarea')
+        editor.value = 'typed draft'
         row.append(editor)
         editor.focus()
+        editor.setSelectionRange(2, 5)
         const media = document.createElement('audio')
         row.append(media)
         media.dispatchEvent(new Event('play'))
 
         const replacementCharacter = makeCharacter(structuredClone(messages))
-        const { source: replacementSource } = makeViewportSource(replacementCharacter)
+        const { session: replacementSession, source: replacementSource } = makeViewportSource(replacementCharacter)
         ;(mounted as HarnessInstance).setViewportNavigationGeneration(1)
         ;(mounted as HarnessInstance).switchCharacterAndSource(
             replacementCharacter,
@@ -1236,6 +1244,14 @@ describe('Chats imperative mount lifecycle', () => {
         ).not.toBe(instance))
         expect(editor.isConnected).toBe(false)
         expect(media.isConnected).toBe(false)
+        const restored = probeElements(target).find((element) => element.dataset.message === 'message-0')!
+        expect(restored.dataset.restoredDraft).toBe('typed draft')
+        expect(chatMountProbe.restored).toEqual([{
+            instanceId: Number(restored.dataset.chatProbe),
+            draft: expect.objectContaining({ kind: 'original', draft: 'typed draft', index: 0, caret: [2, 5] }),
+        }])
+        expect(pendingEditorDrafts('character-id', 'chat-room-id')).toEqual([])
+        await vi.waitFor(() => expect(replacementSession.pinCount('editor')).toBe(1))
     })
 
     test('renders source rows and conversation count without reading a metadata-only shell body', async () => {
@@ -2195,21 +2211,116 @@ describe('Chats imperative mount lifecycle', () => {
         },
     )
 
-    test.each([true, false])('recovers an editor only when its selected conversation disappears: %s', async (removed) => {
+    test.each([true, false])('drops an open editor draft and its popup without a dialog when the conversation is removed (%s) or left', async (removed) => {
         const messages = [makeMessage(0), makeMessage(1)]
         const character = makeCharacter(messages)
         mounted = mount(ChatsHarness, { target, props: { initialMessages: messages, initialCharacter: character } })
         await vi.waitFor(() => expect(probeElements(target)).toHaveLength(2))
-        chatMountProbe.activeEditors.add(probeIdForMessage(target, 'message-0'))
+        const instance = probeIdForMessage(target, 'message-0')
+        const request = { value: 'typed in popup', save: vi.fn(async () => true) }
+        openTextEditorPopup(request)
+        chatMountProbe.activeEditors.add(instance)
+        chatMountProbe.editorDrafts.set(instance, {
+            kind: 'original', draft: 'typed in popup', evidence: structuredClone(messages[0]),
+            popup: { request, owner: { save: vi.fn(async () => true), input: vi.fn(), cancel: vi.fn() } },
+        })
         const replacement = makeCharacter([makeMessage(2)])
         replacement.chats[0].id = 'replacement-chat'
         if (!removed) replacement.chats.push(character.chats[0])
         ;(mounted as HarnessInstance).switchCharacter(replacement, replacement.chats[0].message)
         await vi.waitFor(() => expect(probeElements(target).some((node) => node.dataset.message === 'message-2')).toBe(true))
-        if (removed) {
-            expect(alertNormal).toHaveBeenCalledOnce()
-            expect(vi.mocked(alertNormal).mock.calls[0][0]).toContain('draft-0')
-        } else expect(alertNormal).not.toHaveBeenCalled()
+        expect(alertNormal).not.toHaveBeenCalled()
+        expect(textEditorPopup.request).toBeNull()
+        expect(request.save).not.toHaveBeenCalled()
+        expect(pendingEditorDrafts('character-id', 'chat-room-id')).toEqual([])
+        expect(chatMountProbe.restored).toEqual([])
+    })
+
+    test('brings an open editor back after a compatibility scope reset', async () => {
+        const messages = [makeMessage(0), makeMessage(1)]
+        mounted = mount(ChatsHarness, { target, props: { initialMessages: messages, initialCharacter: makeCharacter(messages) } })
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(2))
+        const instance = probeIdForMessage(target, 'message-1')
+        chatMountProbe.activeEditors.add(instance)
+        chatMountProbe.editorDrafts.set(instance, { kind: 'original', draft: 'kept', evidence: structuredClone(messages[1]) })
+        const replacement = makeCharacter(structuredClone(messages))
+        ;(mounted as HarnessInstance).switchCharacter(replacement, replacement.chats[0].message)
+        await vi.waitFor(() => expect(probeIdForMessage(target, 'message-1')).not.toBe(instance))
+        await vi.waitFor(() => expect(probeElements(target).find((node) => node.dataset.message === 'message-1')?.dataset.restoredDraft).toBe('kept'))
+        expect(chatMountProbe.restored).toHaveLength(1)
+    })
+
+    test('follows a moved message only when exactly one message carries its id', async () => {
+        const messages = [makeMessage(0), makeMessage(1)]
+        mounted = mount(ChatsHarness, { target, props: { initialMessages: messages, initialCharacter: makeCharacter(messages) } })
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(2))
+        const instance = probeIdForMessage(target, 'message-1')
+        chatMountProbe.activeEditors.add(instance)
+        chatMountProbe.editorDrafts.set(instance, { kind: 'original', draft: 'moved draft', evidence: structuredClone(messages[1]) })
+        const shifted = [makeMessage(7), makeMessage(8), ...structuredClone(messages)]
+        const replacement = makeCharacter(shifted)
+        ;(mounted as HarnessInstance).switchCharacter(replacement, shifted)
+        await vi.waitFor(() => expect(probeElements(target).find((node) => node.dataset.message === 'message-1')?.dataset.restoredDraft).toBe('moved draft'))
+        expect(chatMountProbe.restored.map(({ draft }) => draft.index)).toEqual([3])
+        expect(pendingEditorDrafts('character-id', 'chat-room-id')).toEqual([])
+    })
+
+    test.each([
+        ['a repeated message id', (moved: Message) => [makeMessage(7), makeMessage(8), moved, structuredClone(moved)]],
+        ['no message id', (moved: Message) => [makeMessage(7), makeMessage(8), moved]],
+    ] as const)('discards a moved draft without a dialog when its target is ambiguous: %s', async (name, arrange) => {
+        const edited = name === 'no message id' ? makeMessage(1, { chatId: undefined }) : makeMessage(1)
+        const messages = [makeMessage(0), edited]
+        mounted = mount(ChatsHarness, { target, props: { initialMessages: messages, initialCharacter: makeCharacter(messages) } })
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(2))
+        const instance = probeIdForMessage(target, 'message-1')
+        chatMountProbe.activeEditors.add(instance)
+        chatMountProbe.editorDrafts.set(instance, { kind: 'original', draft: 'ambiguous draft', evidence: structuredClone(edited) })
+        const shifted = arrange(structuredClone(edited))
+        ;(mounted as HarnessInstance).switchCharacter(makeCharacter(shifted), shifted)
+        await vi.waitFor(() => expect(pendingEditorDrafts('character-id', 'chat-room-id')).toEqual([]))
+        await tick()
+        expect(chatMountProbe.restored).toEqual([])
+        expect(probeElements(target).every((node) => node.dataset.restoredDraft === undefined)).toBe(true)
+        expect(alertNormal).not.toHaveBeenCalled()
+    })
+
+    test('brings an older edited message back into view when the chat is opened again', async () => {
+        const messages = Array.from({ length: 200 }, (_, index) => makeMessage(index))
+        const character = makeCharacter(messages)
+        mounted = mount(ChatsHarness, { target, props: { initialMessages: messages, initialCharacter: character } })
+        await vi.waitFor(() => expect(probeElements(target).some((node) => node.dataset.message === 'message-199')).toBe(true))
+        await expect((mounted as HarnessInstance).jumpTo(5)).resolves.toBe(true)
+        await vi.waitFor(() => expect(probeElements(target).some((node) => node.dataset.message === 'message-5')).toBe(true))
+        const instance = probeIdForMessage(target, 'message-5')
+        chatMountProbe.activeEditors.add(instance)
+        chatMountProbe.editorDrafts.set(instance, { kind: 'original', draft: 'older draft', evidence: structuredClone(messages[5]) })
+        await unmount(mounted)
+        expect(pendingEditorDrafts('character-id', 'chat-room-id')).toHaveLength(1)
+        expect(target.querySelector('[data-chat-probe]')).toBeNull()
+
+        mounted = mount(ChatsHarness, { target, props: { initialMessages: messages, initialCharacter: character } })
+        await vi.waitFor(() => expect(probeElements(target).find((node) => node.dataset.message === 'message-5')?.dataset.restoredDraft).toBe('older draft'))
+        expect(pendingEditorDrafts('character-id', 'chat-room-id')).toEqual([])
+        // The view moved to the draft, not only its pinned row.
+        await vi.waitFor(() => expect(probeElements(target).some((node) => node.dataset.message === 'message-6')).toBe(true))
+        expect(probeElements(target).some((node) => node.dataset.message === 'message-199')).toBe(false)
+    })
+
+    test('keeps an older windowed message with a draft loaded through a new navigation generation', async () => {
+        const messages = Array.from({ length: 200 }, (_, index) => makeMessage(index))
+        mounted = mount(ChatsHarness, { target, props: { initialCharacter: makeMetadataOnlyCharacter(), initialViewportSource: makePersistentViewportSource(messages) } })
+        await vi.waitFor(() => expect(probeElements(target).some((node) => node.dataset.message === 'message-199')).toBe(true))
+        await expect((mounted as HarnessInstance).jumpTo(5)).resolves.toBe(true)
+        await vi.waitFor(() => expect(probeElements(target).some((node) => node.dataset.message === 'message-5')).toBe(true))
+        const instance = probeIdForMessage(target, 'message-5')
+        chatMountProbe.activeEditors.add(instance)
+        chatMountProbe.editorDrafts.set(instance, { kind: 'original', draft: 'windowed draft', evidence: structuredClone(messages[5]) })
+        ;(mounted as HarnessInstance).setViewportNavigationGeneration(1)
+        ;(mounted as HarnessInstance).switchCharacterAndSource(makeMetadataOnlyCharacter(), makePersistentViewportSource(messages))
+        await vi.waitFor(() => expect(probeIdForMessage(target, 'message-5')).not.toBe(instance))
+        await vi.waitFor(() => expect(probeElements(target).find((node) => node.dataset.message === 'message-5')?.dataset.restoredDraft).toBe('windowed draft'))
+        expect(pendingEditorDrafts('character-id', 'chat-room-id')).toEqual([])
     })
 
     test.each(['middle', 'home'] as const)('seeks directly into a distant virtual gap: %s', async (position) => {

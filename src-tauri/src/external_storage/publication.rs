@@ -6,8 +6,3 @@ pub(crate) struct HeadObservation {
     pub authenticated_body_hash: String,
     pub version: Option<VersionToken>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PublicationMode {
-    Foreground,
-    ExitDrain,
-}

@@ -1265,6 +1265,60 @@ impl Provider for GitlabPackages {
         })
     }
 
+    fn lookup_metadata<'a>(
+        &'a self,
+        repository: &'a RepositoryHandle,
+        intent: &'a ObjectIntent,
+        known: Option<&'a RemoteLocator>,
+        cancel: &'a Cancellation,
+    ) -> ProviderFuture<'a, Option<ObjectReceipt>> {
+        Box::pin(async move {
+            cancel.check()?;
+            let context = self.context(repository)?;
+            intent.validate(repository)?;
+            let settings = &context.settings;
+            let placement = match known {
+                Some(locator) => {
+                    locator.validate_for(repository)?;
+                    let (role, placement) = settings.parse_object(&locator.object)?;
+                    if role != intent.role {
+                        return Err(corrupt());
+                    }
+                    placement
+                }
+                None => settings.place(intent.role, &intent.object_id)?,
+            };
+            let credential = self.credential(&context.secret).await?;
+            let Some(package_id) = self
+                .locate_package(settings, &credential, &placement.package, &placement.version, cancel)
+                .await?
+            else {
+                return Ok(None);
+            };
+            let files = self
+                .package_files(settings, &credential, package_id, cancel)
+                .await?;
+            let mut matching = files.iter().filter(|file| file.file_name == placement.file);
+            let Some(file) = matching.next() else {
+                return Ok(None);
+            };
+            if matching.next().is_some() {
+                return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+            }
+            Ok(Some(ObjectReceipt {
+                locator: known.cloned().unwrap_or_else(|| settings.locator(&placement)),
+                byte_length: file.size,
+                version: None,
+                checksum: file.file_sha256.as_ref().map(|value| Checksum {
+                    algorithm: "sha256".into(),
+                    value: value.to_ascii_lowercase(),
+                    provider_verified: value.eq_ignore_ascii_case(&intent.sha256),
+                }),
+                complete: true,
+            }))
+        })
+    }
+
     /// Generic packages offer no stable head, so no locator can name one.
     fn head_locator(&self, repository: &RepositoryHandle) -> Result<RemoteLocator> {
         self.context(repository)?;

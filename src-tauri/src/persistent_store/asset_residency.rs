@@ -3,6 +3,7 @@
 use super::{snapshot_archive, PersistentStore};
 use crate::{
     asset_repository::{object_physical_key, PayloadCas},
+    external_storage::lww_residency::RemoteBodies,
     server_sync::{
         client::ServerClient,
         residency::{AssetPolicy, Residency},
@@ -19,8 +20,49 @@ pub(crate) struct ResidencyStatus {
     local_bytes: u64,
     remote_bytes: u64,
     remote_objects: u64,
+    server_bytes: u64,
+    server_objects: u64,
+    external_objects: Vec<ExternalObjects>,
     unavailable_objects: u64,
     pub evicted_bytes: u64,
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExternalObjects {
+    connection_id: String,
+    objects: u64,
+}
+/// Where a body this device does not hold can be fetched from. The server
+/// comes first, as in hydration. A body counts for an external connection
+/// only while no other live connection holds it.
+enum Holder {
+    Server(u64),
+    External(String, u64),
+    Shared(u64),
+    Unavailable,
+}
+/// Bodies classified per registry question.
+const HOLDER_PAGE: usize = 1024;
+/// Connection IDs per connection root, read once per status or download.
+#[derive(Default)]
+struct Connections(std::collections::BTreeMap<std::path::PathBuf, BTreeSet<String>>);
+impl Connections {
+    fn contains(&mut self, root: &std::path::Path, id: &str) -> Result<bool> {
+        if !self.0.contains_key(root) {
+            // Opening the store would create it; a root without one holds no connection.
+            let ids = if root.join("external-connections.sqlite").is_file() {
+                crate::external_storage::connection_store::ConnectionStore::open(root)
+                    .and_then(|store| store.ids())
+                    .map_err(|_| SyncError::new("local-storage", 503))?
+                    .into_iter()
+                    .collect()
+            } else {
+                BTreeSet::new()
+            };
+            self.0.insert(root.to_owned(), ids);
+        }
+        Ok(self.0[root].contains(id))
+    }
 }
 struct Inventory {
     referenced: BTreeSet<String>,
@@ -37,6 +79,39 @@ impl ResidencyStatus {
 }
 
 impl PersistentStore {
+    pub(crate) fn asset_object_byte_size(&self, hash: &str) -> super::StoreResult<Option<u64>> {
+        let size: Option<i64> = self.connection.query_row(
+            "SELECT byte_size FROM asset_objects WHERE object_hash=?1", [hash], |row| row.get(0),
+        ).optional()?;
+        Ok(size.and_then(|size| u64::try_from(size).ok()))
+    }
+    /// Forgets the bodies a removed external connection held, with the catalog
+    /// rows of those that no local file, other source or server custody holds
+    /// any more, which GC would otherwise find missing.
+    pub(crate) fn forget_external_connection_bodies(&self, connection_id: &str) -> Result<()> {
+        let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+        let cas = PayloadCas::new(&self.repository_root)?;
+        let residency = match Residency::exists(&self.repository_root) {
+            true => Some(Residency::open(&self.repository_root)?),
+            false => None,
+        };
+        crate::external_storage::lww_residency::remove_connection_sources(&self.repository_root, connection_id, |orphans| {
+            let rows = self.connection.unchecked_transaction().map_err(std::io::Error::other)?;
+            for hash in orphans {
+                if cas.stat_object(hash)?.is_some() {
+                    continue;
+                }
+                if let Some(residency) = &residency {
+                    if residency.custody_size(hash).map_err(|error| std::io::Error::other(error.code))?.is_some() {
+                        continue;
+                    }
+                }
+                rows.execute("DELETE FROM asset_objects WHERE object_hash=?1", [hash]).map_err(std::io::Error::other)?;
+            }
+            rows.commit().map_err(std::io::Error::other)
+        })
+        .map_err(|error| SyncError { cause: Some(format!("{:?}", error.kind)), ..SyncError::new("local-storage", 503) })
+    }
     pub(crate) fn selected_character_asset_hashes(&self, character_id: &str) -> super::StoreResult<Vec<String>> {
         let generation = super::active_generation(&self.connection)?;
         let mut roots = crate::asset_repository::migration_gc::AssetRootSet::default();
@@ -119,6 +194,7 @@ impl PersistentStore {
         // roots independently of catalog membership; backup must do the same.
         let roots = snapshot_archive::Archive::open(&self.snapshots_dir)?.roots()?;
         let cas = PayloadCas::new(&self.repository_root)?;
+        let mut remote = crate::external_storage::lww_residency::RemoteBodies::open(&self.repository_root)?;
         let mut historical = BTreeSet::new();
         let mut manifests = BTreeSet::new();
         for root in roots {
@@ -128,7 +204,7 @@ impl PersistentStore {
         for manifest in manifests {
             // Ownership manifests must be available before their payload inventory is known.
             let registered=residency.as_ref().map(|residency|residency.object(&manifest,None)).transpose()?.flatten().is_some()
-                || crate::external_storage::lww_residency::stat(&self.repository_root,&manifest)?.is_some();
+                || remote.stat(&manifest)?.is_some();
             if registered && !hydration.hydrate_many_observed(std::slice::from_ref(&manifest),&check,&on_object_done)?.is_empty() {
                 return Err(SyncError::new("required-asset-unavailable",409));
             }
@@ -153,7 +229,7 @@ impl PersistentStore {
         for hash in inventory {
             check()?;
             if residency.as_ref().map(|residency|residency.object(&hash,None)).transpose()?.flatten().is_some()
-                || crate::external_storage::lww_residency::stat(&self.repository_root,&hash)?.is_some() {registered.push(hash);}
+                || remote.stat(&hash)?.is_some() {registered.push(hash);}
         }
         if !hydration.hydrate_many_outcomes_prioritized(&registered,&priority,&check,|_,_|on_object_done())?.is_empty() {
             return Err(SyncError::new("required-asset-unavailable",409));
@@ -231,31 +307,155 @@ impl PersistentStore {
             release_blocked,
         })
     }
+    /// Where each of `hashes`, none of them held here, can be fetched from.
+    fn residency_holders(
+        &self,
+        residency: &Residency,
+        remote: &mut RemoteBodies,
+        connections: &mut Connections,
+        hashes: &[String],
+    ) -> Result<Vec<Holder>> {
+        let mut server = Vec::with_capacity(hashes.len());
+        let mut external = Vec::new();
+        for hash in hashes {
+            let object = residency.object(hash, None)?;
+            if object.is_none() {
+                external.push(hash.as_str());
+            }
+            server.push(object.map(|object| Holder::Server(object.size)));
+        }
+        let mut registered = remote
+            .holders(&external)
+            .map_err(|_| std::io::Error::other("external-source-invalid"))?;
+        let mut holders = Vec::with_capacity(hashes.len());
+        for (hash, server) in hashes.iter().zip(server) {
+            if let Some(holder) = server {
+                holders.push(holder);
+                continue;
+            }
+            let Some(held) = registered.remove(hash) else {
+                holders.push(Holder::Unavailable);
+                continue;
+            };
+            let mut live = Vec::new();
+            for (root, id) in held.connections {
+                if connections.contains(&root, &id)? {
+                    live.push(id);
+                }
+            }
+            holders.push(match live.len() {
+                0 => Holder::Unavailable,
+                1 => Holder::External(live.remove(0), held.byte_length),
+                _ => Holder::Shared(held.byte_length),
+            });
+        }
+        Ok(holders)
+    }
     pub(crate) fn asset_residency_status(&self) -> Result<ResidencyStatus> {
         let residency = Residency::open(&self.repository_root)?;
         let inventory = self.residency_inventory(false)?;
         let cas = PayloadCas::new(&self.repository_root)?;
+        let mut connections = Connections::default();
         let mut status = ResidencyStatus {
             policy: self.device_store()?.asset_residency_policy()?,
             local_bytes: 0,
             remote_bytes: 0,
             remote_objects: 0,
+            server_bytes: 0,
+            server_objects: 0,
+            external_objects: Vec::new(),
             unavailable_objects: 0,
             evicted_bytes: 0,
         };
+        let mut external = std::collections::BTreeMap::<String, u64>::new();
+        let mut missing = Vec::new();
         for hash in inventory.referenced {
             if let Some(size) = cas.stat_object(&hash)? {
                 status.local_bytes += size;
-            } else if let Some(object) = residency.object(&hash, None)? {
-                status.remote_bytes += object.size;
-                status.remote_objects += 1;
-            } else if let Some(size) = crate::external_storage::lww_residency::stat(&self.repository_root, &hash)? {
-                status.remote_bytes += size;
-                status.remote_objects += 1;
-            } else {
-                status.unavailable_objects += 1;
+                continue;
+            }
+            missing.push(hash);
+        }
+        let mut remote = RemoteBodies::deferred(&self.repository_root);
+        for page in missing.chunks(HOLDER_PAGE) {
+            for holder in self.residency_holders(&residency, &mut remote, &mut connections, page)? {
+                match holder {
+                    Holder::Server(size) => {
+                        status.server_bytes += size;
+                        status.server_objects += 1;
+                        status.remote_bytes += size;
+                        status.remote_objects += 1;
+                    }
+                    Holder::External(connection_id, size) => {
+                        *external.entry(connection_id).or_default() += 1;
+                        status.remote_bytes += size;
+                        status.remote_objects += 1;
+                    }
+                    Holder::Shared(size) => {
+                        status.remote_bytes += size;
+                        status.remote_objects += 1;
+                    }
+                    Holder::Unavailable => status.unavailable_objects += 1,
+                }
             }
         }
+        status.external_objects = external
+            .into_iter()
+            .map(|(connection_id, objects)| ExternalObjects { connection_id, objects })
+            .collect();
+        Ok(status)
+    }
+    /// Downloads the bodies another storage holds without changing the policy:
+    /// every one, or only those `connection_id` holds and no other live
+    /// connection does. A body no storage holds is left as it is.
+    pub(crate) fn asset_residency_download_remote(
+        &self,
+        connection_id: Option<&str>,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        selected_character_id: Option<&str>,
+        check: impl Fn() -> Result<()>,
+    ) -> Result<ResidencyStatus> {
+        check()?;
+        let inventory = self.residency_inventory(false)?;
+        let cas = PayloadCas::new(&self.repository_root)?;
+        let residency = Residency::open(&self.repository_root)?;
+        let mut connections = Connections::default();
+        let mut targets = BTreeSet::new();
+        let mut missing = Vec::new();
+        for hash in inventory.referenced {
+            check()?;
+            if cas.stat_object(&hash)?.is_none() {
+                missing.push(hash);
+            }
+        }
+        let mut remote = RemoteBodies::deferred(&self.repository_root);
+        for page in missing.chunks(HOLDER_PAGE) {
+            check()?;
+            let holders = self.residency_holders(&residency, &mut remote, &mut connections, page)?;
+            for (hash, holder) in page.iter().zip(holders) {
+                let wanted = match holder {
+                    Holder::Server(_) | Holder::Shared(_) => connection_id.is_none(),
+                    Holder::External(holder, _) => connection_id.is_none_or(|wanted| wanted == holder),
+                    Holder::Unavailable => false,
+                };
+                if wanted {
+                    targets.insert(hash.clone());
+                }
+            }
+        }
+        let mut hydration = crate::server_sync::residency::HydrationSession::new(&self.repository_root, cancellation)?;
+        if let Some(character_id) = selected_character_id {
+            let selected = self.selected_character_asset_hashes(character_id)?.into_iter()
+                .filter(|hash| targets.contains(hash)).collect::<Vec<_>>();
+            if !hydration.hydrate_many(&selected, &check)?.is_empty() {
+                return Err(SyncError::new("required-asset-unavailable", 409));
+            }
+        }
+        if !hydration.hydrate_many(&targets.into_iter().collect::<Vec<_>>(), &check)?.is_empty() {
+            return Err(SyncError::new("required-asset-unavailable", 409));
+        }
+        let status = self.asset_residency_status()?;
+        check()?;
         Ok(status)
     }
     pub(crate) fn asset_residency_set_policy(

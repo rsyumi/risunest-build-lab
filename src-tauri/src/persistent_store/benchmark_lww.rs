@@ -319,6 +319,7 @@ fn bind(store: &mut PersistentStore, target: SyncTarget, target_id: &str, librar
     let state = store.lww_binding_state().unwrap();
     let inspection = store.register_lww_binding_inspection(state.target_authority, &target, target_id, library).unwrap();
     store.switch_lww_binding(&SwitchBindingRequest {
+        initial_publication: false,
         header: server_sync::lww_tests::header(store), expected_selection_epoch: state.selection_epoch,
         target, inspection_id: Some(inspection),
     }).unwrap();

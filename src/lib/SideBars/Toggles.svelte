@@ -15,7 +15,8 @@
     import PersonaBind from './PersonaBind.svelte'
     import ToggleBind from './ToggleBind.svelte'
     import CustomSideBar from "./CustomSidebar.svelte";
-    import { getGlobalChatVar, isLocallyHandledGlobalChatVar, removeLocallyHandledGlobalChatVar, setGlobalChatVar } from "src/ts/parser/chatVar.svelte";
+    import { getGlobalChatVar, isLocallyHandledGlobalChatVar } from "src/ts/parser/chatVar.svelte";
+    import { removeLocalToggleValue, setCharacterMemory, setLocalToggleMode, setToggleValue } from 'src/ts/sidebarToggles'
     import { toggleValueChanged } from 'src/ts/toggleBindings'
     import { PinIcon } from "@lucide/svelte";
     import { doingChat } from 'src/ts/process/generationState'
@@ -129,7 +130,7 @@
         <button
             disabled={$doingChat}
             onclick={() => {
-                removeLocallyHandledGlobalChatVar(`toggle_${toggle.key}`)
+                void removeLocalToggleValue(`toggle_${toggle.key}`)
             }}
         >
             📌
@@ -159,7 +160,7 @@
                     className="w-32 shrink-0"
                     value={getGlobalChatVarNH(`toggle_${toggle.key}`)}
                     onchange={(e) => {
-                        setGlobalChatVar(`toggle_${toggle.key}`, e.currentTarget.value)
+                        void setToggleValue(`toggle_${toggle.key}`, e.currentTarget.value)
                     }}
                 >
                     {#each toggle.options as option, i}
@@ -175,7 +176,7 @@
                     disabled={localEditBlocked(`toggle_${toggle.key}`)}
                     value={getGlobalChatVarNH(`toggle_${toggle.key}`)}
                     onchange={(e) => {
-                        setGlobalChatVar(`toggle_${toggle.key}`, e.currentTarget.value)
+                        void setToggleValue(`toggle_${toggle.key}`, e.currentTarget.value)
                     }}
                 />
             </div>
@@ -189,9 +190,9 @@
                     onchange={(e) => {
                         //check is div
                         if (e.currentTarget instanceof HTMLDivElement) {
-                            setGlobalChatVar(`toggle_${toggle.key}`, e.currentTarget.innerText)
+                            void setToggleValue(`toggle_${toggle.key}`, e.currentTarget.innerText)
                         } else {
-                            setGlobalChatVar(`toggle_${toggle.key}`, e.currentTarget.value)
+                            void setToggleValue(`toggle_${toggle.key}`, e.currentTarget.value)
                         }
                     }}
                 />
@@ -218,7 +219,7 @@
                 name={toggle.value}
                 highlight={isToggleDirty(toggle.key)}
                 onChange={(checked) => {
-                    setGlobalChatVar(`toggle_${toggle.key}`, checked ? '1' : '0')
+                    void setToggleValue(`toggle_${toggle.key}`, checked ? '1' : '0')
                 }}
             >
                 {@render localToggle(toggle)}
@@ -244,7 +245,8 @@
         {#if chara && (DBState.db.supaModelType !== 'none' || DBState.db.hanuraiEnable || DBState.db.hypaV3)}
             <SwitchInput
                 className={switchRow}
-                bind:check={chara.supaMemory}
+                check={chara.supaMemory}
+                onChange={(checked) => void setCharacterMemory(chara, checked)}
                 name={DBState.db.hypaV3
                     ? language.ToggleHypaMemory
                     : DBState.db.hanuraiEnable
@@ -265,7 +267,8 @@
     {#if chara && (DBState.db.supaModelType !== 'none' || DBState.db.hanuraiEnable || DBState.db.hypaV3)}
         <SwitchInput
             className={switchRow}
-            bind:check={chara.supaMemory}
+            check={chara.supaMemory}
+            onChange={(checked) => void setCharacterMemory(chara, checked)}
             name={DBState.db.hypaV3
                 ? language.ToggleHypaMemory
                 : DBState.db.hanuraiEnable
@@ -282,13 +285,7 @@
             check={getCurrentChat()?.useLocallySetGlobalVariables}
             disabled={$doingChat}
             name={language.localToggles}
-            onChange={(checked) => {
-                const chatIndx = DBState.db.characters[$selectedCharID].chatPage
-                const chat = DBState.db.characters[$selectedCharID].chats[chatIndx]
-                if (chat) {
-                    chat.useLocallySetGlobalVariables = checked
-                }
-            }}
+            onChange={(checked) => void setLocalToggleMode(checked)}
         />
     {/if}
 {/if}

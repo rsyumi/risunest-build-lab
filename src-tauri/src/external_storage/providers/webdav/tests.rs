@@ -783,6 +783,41 @@ fn a_lost_put_reconciles_from_the_stored_resource() {
 }
 
 #[test]
+fn object_metadata_reads_properties_and_never_the_body() {
+    runtime().block_on(async {
+        let object = format!("{}/packs/{}", encoded_root(), paths::encode_segment("pack-3"));
+        let harness = Harness::start(vec![
+            established_root(),
+            multistatus_reply(&[object_response(&object, 300, Some("\"pack-v3\""))]),
+            reply(404, &[], b""),
+        ]);
+        let repository = harness.opened().await;
+        let declared = intent(&repository, "pack-3", ObjectRole::Pack, &[7u8; 300]);
+        let found = harness
+            .provider
+            .lookup_metadata(&repository, &declared, None, &Cancellation::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.locator, locator(&repository, Some("packs"), "packs/pack-3"));
+        assert_eq!(found.byte_length, 300);
+        assert_eq!(found.version, Some(VersionToken("\"pack-v3\"".to_owned())));
+        assert!(found.checksum.is_none() && found.complete);
+        assert!(harness
+            .provider
+            .lookup_metadata(&repository, &declared, Some(&found.locator), &Cancellation::default())
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(harness.count(), 3);
+        for index in [1, 2] {
+            assert!(harness.line(index).starts_with("PROPFIND "));
+            assert_eq!(harness.header(index, "depth").as_deref(), Some("0"));
+        }
+    });
+}
+
+#[test]
 fn head_writes_send_one_conditional_request_and_read_back_the_same_bytes() {
     runtime().block_on(async {
         let head_path = format!("{}/head", encoded_root());
