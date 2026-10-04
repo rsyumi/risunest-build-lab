@@ -5673,8 +5673,8 @@
     {
       "path": "src-tauri/src/external_storage/lww_compaction.rs",
       "mode": "100644",
-      "bytes": 53452,
-      "sha256": "06bc5769d7609dcd587a32b306458a1eaca70540c79300c078e3ddc14867c27e"
+      "bytes": 53529,
+      "sha256": "e482fc4c0bff6c74cb8f939c7486ab3d8f25fcac63b4e77f029c6a06aab68597"
     },
     {
       "path": "src-tauri/src/external_storage/lww_engine.rs",
