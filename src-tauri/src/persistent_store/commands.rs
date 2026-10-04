@@ -38,7 +38,6 @@ pub(crate) struct PersistentStoreState {
     snapshot_operations: Mutex<()>,
     renderer_gate: Arc<RendererGate>,
     archive_operations: Mutex<HashMap<String, Arc<AtomicBool>>>,
-    retired_purge_started: AtomicBool,
 }
 
 struct ArchiveOperationGuard<'a> {
@@ -280,65 +279,7 @@ impl Default for PersistentStoreState {
             snapshot_operations: Mutex::new(()),
             renderer_gate: Arc::new(RendererGate::default()),
             archive_operations: Mutex::new(HashMap::new()),
-            retired_purge_started: AtomicBool::new(false),
         }
-    }
-}
-
-const RETIRED_PURGE_BATCH_ROWS: usize = 512;
-const RETIRED_PURGE_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
-const RETIRED_PURGE_BUSY: std::time::Duration = std::time::Duration::from_secs(1);
-const RETIRED_PURGE_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
-
-impl PersistentStoreState {
-    /// One bounded purge step that never waits for the store. Returns whether
-    /// retired libraries remain, or nothing while the store is busy, closed or
-    /// under device maintenance.
-    fn purge_retired_step(&self, limit_rows: usize) -> StoreResult<Option<bool>> {
-        let Some(_operation) = self.try_admit_renderer_operation()? else {
-            return Ok(None);
-        };
-        let mut store = match self.store.try_lock() {
-            Ok(store) => store,
-            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
-            Err(std::sync::TryLockError::Poisoned(error)) => {
-                return Err(StoreError::Store {
-                    message: format!("persistent store mutex poisoned: {error}"),
-                })
-            }
-        };
-        let Some(store) = store.as_mut() else {
-            return Ok(None);
-        };
-        store.purge_retired_batch(limit_rows).map(Some)
-    }
-}
-
-/// Deletes retired libraries in the background for the life of the process,
-/// starting with whatever an earlier run left behind.
-fn start_retired_purge(app: &AppHandle, state: &PersistentStoreState) {
-    if state.retired_purge_started.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let app = app.clone();
-    let spawned = std::thread::Builder::new()
-        .name("pds-retired-purge".to_owned())
-        .spawn(move || {
-            let state = app.state::<PersistentStoreState>();
-            loop {
-                let pause = match logged(
-                    "pds_retired_purge",
-                    state.purge_retired_step(RETIRED_PURGE_BATCH_ROWS),
-                ) {
-                    Ok(Some(true)) => RETIRED_PURGE_PAUSE,
-                    Ok(None) => RETIRED_PURGE_BUSY,
-                    Ok(Some(false)) | Err(_) => RETIRED_PURGE_IDLE,
-                };
-                std::thread::sleep(pause);
-            }
-        });
-    if spawned.is_err() {
-        state.retired_purge_started.store(false, Ordering::Release);
     }
 }
 
@@ -494,9 +435,7 @@ pub(crate) fn pds_open(
     logged("pds_open", (|| {
         let operation_guard = state.admit_renderer_operation()?;
         let app_data_dir = crate::app_paths::data_root(&app).map_err(|message| StoreError::Store { message })?;
-        let opened = open_renderer_persistent_store_admitted(&state, &operation_guard, &app_data_dir)?;
-        start_retired_purge(&app, &state);
-        Ok(opened)
+        open_renderer_persistent_store_admitted(&state, &operation_guard, &app_data_dir)
     })())
 }
 
@@ -942,6 +881,208 @@ pub(crate) fn pds_replace_put_presets(
     logged("pds_replace_put_presets", with_store_mut(state, |store| {
         store.replace_put_presets(&staging_id, &presets)
     }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_replace_add_presets(
+    state: State<'_, PersistentStoreState>,
+    staging_id: String,
+    presets: Vec<Value>,
+) -> Result<(), StoreError> {
+    logged("pds_replace_add_presets", with_store_mut(state, |store| {
+        store.replace_add_presets(&staging_id, &presets)
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_replace_add_plugin_storage_values(
+    state: State<'_, PersistentStoreState>,
+    staging_id: String,
+    values: Vec<super::PluginStorageValue>,
+) -> Result<(), StoreError> {
+    logged("pds_replace_add_plugin_storage_values", with_store_mut(state, |store| {
+        store.replace_add_plugin_storage_values(&staging_id, &values)
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_replace_add_plugin_storage(
+    state: State<'_, PersistentStoreState>,
+    staging_id: String,
+    storage: serde_json::Map<String, Value>,
+    meta: Option<serde_json::Map<String, Value>>,
+) -> Result<(), StoreError> {
+    logged("pds_replace_add_plugin_storage", with_store_mut(state, |store| {
+        store.replace_add_plugin_storage(&staging_id, &storage, meta.as_ref())
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_replace_put_character_detail(
+    state: State<'_, PersistentStoreState>,
+    staging_id: String,
+    detail: Value,
+    conversation_count: i64,
+) -> Result<(), StoreError> {
+    logged("pds_replace_put_character_detail", with_store_mut(state, |store| {
+        store.replace_put_character_detail(&staging_id, &detail, conversation_count)
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_replace_put_conversation(
+    state: State<'_, PersistentStoreState>,
+    staging_id: String,
+    character_id: String,
+    configured_index: i64,
+    conversation: Value,
+    message_count: i64,
+    last_message_time: Option<Value>,
+) -> Result<(), StoreError> {
+    logged("pds_replace_put_conversation", with_store_mut(state, |store| {
+        store.replace_put_conversation(
+            &staging_id,
+            &character_id,
+            configured_index,
+            &conversation,
+            message_count,
+            last_message_time.as_ref(),
+        )
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_replace_add_conversation_messages(
+    state: State<'_, PersistentStoreState>,
+    staging_id: String,
+    character_id: String,
+    conversation_id: String,
+    start: i64,
+    messages: Vec<Value>,
+) -> Result<(), StoreError> {
+    logged("pds_replace_add_conversation_messages", with_store_mut(state, |store| {
+        store.replace_add_conversation_messages(
+            &staging_id,
+            &character_id,
+            &conversation_id,
+            start,
+            &messages,
+        )
+    }))
+}
+
+/// A staged replace request assembled by the Android chunked transport. The
+/// tag names the command whose arguments it carries.
+#[cfg(any(test, target_os = "android"))]
+#[derive(serde::Deserialize)]
+#[serde(tag = "command", content = "args")]
+pub(crate) enum StagedReplaceRequest {
+    #[serde(rename = "pds_replace_put_root", rename_all = "camelCase")]
+    PutRoot {
+        staging_id: String,
+        root: Value,
+        plugin_storage_values: Option<Vec<super::PluginStorageValue>>,
+    },
+    #[serde(rename = "pds_replace_put_presets", rename_all = "camelCase")]
+    PutPresets { staging_id: String, presets: Vec<Value> },
+    #[serde(rename = "pds_replace_add_presets", rename_all = "camelCase")]
+    AddPresets { staging_id: String, presets: Vec<Value> },
+    #[serde(rename = "pds_replace_add_characters", rename_all = "camelCase")]
+    AddCharacters { staging_id: String, characters: Vec<Value> },
+    #[serde(rename = "pds_replace_put_character_detail", rename_all = "camelCase")]
+    PutCharacterDetail {
+        staging_id: String,
+        detail: Value,
+        conversation_count: i64,
+    },
+    #[serde(rename = "pds_replace_put_conversation", rename_all = "camelCase")]
+    PutConversation {
+        staging_id: String,
+        character_id: String,
+        configured_index: i64,
+        conversation: Value,
+        message_count: i64,
+        last_message_time: Option<Value>,
+    },
+    #[serde(rename = "pds_replace_add_conversation_messages", rename_all = "camelCase")]
+    AddConversationMessages {
+        staging_id: String,
+        character_id: String,
+        conversation_id: String,
+        start: i64,
+        messages: Vec<Value>,
+    },
+    #[serde(rename = "pds_replace_add_plugin_storage_values", rename_all = "camelCase")]
+    AddPluginStorageValues {
+        staging_id: String,
+        values: Vec<super::PluginStorageValue>,
+    },
+    #[serde(rename = "pds_replace_add_plugin_storage", rename_all = "camelCase")]
+    AddPluginStorage {
+        staging_id: String,
+        storage: serde_json::Map<String, Value>,
+        meta: Option<serde_json::Map<String, Value>>,
+    },
+}
+
+#[cfg(any(test, target_os = "android"))]
+impl StagedReplaceRequest {
+    pub(crate) fn apply(self, store: &mut PersistentStore) -> StoreResult<()> {
+        match self {
+            Self::PutRoot { staging_id, root, plugin_storage_values } => store
+                .replace_put_root_with_plugin_storage(
+                    &staging_id,
+                    &root,
+                    plugin_storage_values.as_deref(),
+                ),
+            Self::PutPresets { staging_id, presets } => {
+                store.replace_put_presets(&staging_id, &presets)
+            }
+            Self::AddPresets { staging_id, presets } => {
+                store.replace_add_presets(&staging_id, &presets)
+            }
+            Self::AddCharacters { staging_id, characters } => {
+                store.replace_add_characters(&staging_id, &characters)
+            }
+            Self::PutCharacterDetail { staging_id, detail, conversation_count } => {
+                store.replace_put_character_detail(&staging_id, &detail, conversation_count)
+            }
+            Self::PutConversation {
+                staging_id,
+                character_id,
+                configured_index,
+                conversation,
+                message_count,
+                last_message_time,
+            } => store.replace_put_conversation(
+                &staging_id,
+                &character_id,
+                configured_index,
+                &conversation,
+                message_count,
+                last_message_time.as_ref(),
+            ),
+            Self::AddConversationMessages {
+                staging_id,
+                character_id,
+                conversation_id,
+                start,
+                messages,
+            } => store.replace_add_conversation_messages(
+                &staging_id,
+                &character_id,
+                &conversation_id,
+                start,
+                &messages,
+            ),
+            Self::AddPluginStorageValues { staging_id, values } => {
+                store.replace_add_plugin_storage_values(&staging_id, &values)
+            }
+            Self::AddPluginStorage { staging_id, storage, meta } => {
+                store.replace_add_plugin_storage(&staging_id, &storage, meta.as_ref())
+            }
+        }
+    }
 }
 
 #[tauri::command(async)]
@@ -1785,7 +1926,6 @@ mod tests {
                             let inspection = store.register_lww_binding_inspection(current.target_authority,
                                 &next, "synthetic-other-target", "synthetic-other-library")?;
                             store.switch_lww_binding(&super::super::sync_selection::SwitchBindingRequest {
-                                initial_publication: false,
                                 header: super::super::lww::Header { binding_authority: current.target_authority, request_id: "overlap-switch".into() },
                                 expected_selection_epoch: current.selection_epoch, target: next, inspection_id: Some(inspection),
                             })?;
@@ -1930,71 +2070,6 @@ mod tests {
         let operation = cleanup.admit_renderer_operation().unwrap();
         sweep_message_pages(Some(&admission), &cleanup, &operation, 1_000, SweepBudget::UntilWrapped).unwrap();
         assert_eq!(count(&cleanup, "message_page_object_marks"), (limit + 1, limit + 1));
-    }
-
-    #[test]
-    fn a_sweep_pass_reads_message_object_roots_once_until_a_reference_changes() {
-        use super::super::MessageObjectStore::{Device, Library};
-        let directory = tempdir().unwrap();
-        let mut store = PersistentStore::open(directory.path()).unwrap();
-        let mut hashes = Vec::new();
-        for db in [&store.connection, store.device_store().unwrap().connection()] {
-            let tx = db.unchecked_transaction().unwrap();
-            for index in 0..6 {
-                let body = format!("synthetic-orphan-object-{index}").into_bytes();
-                let hash = risunest_sync_wire::hash(&body);
-                super::super::message_pages::put_object(&tx, &hash, &body).unwrap();
-                hashes.push(hash);
-            }
-            tx.commit().unwrap();
-        }
-        hashes.sort();
-        hashes.dedup();
-        let marked = |store: &PersistentStore, hash: &str| -> bool {
-            store.connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM message_page_object_marks WHERE hash=?1)", [hash], |row| row.get(0),
-            ).unwrap()
-        };
-        let batch = |store: &mut PersistentStore, target| store.sweep_message_page_objects(target, 1_000, 2).unwrap().wrapped;
-        let pass = |store: &mut PersistentStore, target| {
-            let mut batches = 1;
-            while !batch(store, target) { batches += 1; }
-            batches
-        };
-        let reference = |db: &rusqlite::Connection, capture: &str, hash: &str| {
-            db.execute("INSERT INTO external_storage_capture_files VALUES(?1,'synthetic-catalog',?2)", [capture, hash]).unwrap();
-        };
-
-        for target in [Library, Device] {
-            let computed = store.message_object_roots_computed();
-            assert!(pass(&mut store, target) >= 2);
-            assert_eq!(store.message_object_roots_computed() - computed, 1, "one pass read the roots more than once");
-        }
-        assert!(hashes.iter().all(|hash| marked(&store, hash)));
-        let computed = store.message_object_roots_computed();
-        assert!(!batch(&mut store, Library));
-        assert!(!batch(&mut store, Device));
-        assert_eq!(store.message_object_roots_computed(), computed, "the next single batch read the roots again");
-
-        reference(&store.connection, "synthetic-capture-own", &hashes[5]);
-        pass(&mut store, Library);
-        assert_eq!(store.message_object_roots_computed() - computed, 1);
-        assert!(!marked(&store, &hashes[5]), "a reference added between batches was not seen");
-
-        let computed = store.message_object_roots_computed();
-        let other = rusqlite::Connection::open(&store.database_path).unwrap();
-        reference(&other, "synthetic-capture-other", &hashes[3]);
-        drop(other);
-        pass(&mut store, Library);
-        assert_eq!(store.message_object_roots_computed() - computed, 1);
-        assert!(!marked(&store, &hashes[3]), "a reference another connection committed was not seen");
-
-        let computed = store.message_object_roots_computed();
-        let lease = store.acquire_revision(store.revision().unwrap()).unwrap();
-        assert!(!batch(&mut store, Library));
-        assert!(!batch(&mut store, Library));
-        assert_eq!(store.message_object_roots_computed() - computed, 1);
-        store.release_revision(&lease.lease).unwrap();
     }
 
     #[test]
@@ -2484,8 +2559,7 @@ mod tests {
                 .expect("stage abandoned root");
         }
 
-        let mut reopened = PersistentStore::open(directory.path()).expect("recover persistent store");
-        while reopened.purge_retired_batch(64).expect("purge retired libraries") {}
+        let reopened = PersistentStore::open(directory.path()).expect("recover persistent store");
         let revision_before_sweep = reopened.revision().expect("read revision before sweep");
         let root_before_sweep = reopened.read_root(None).expect("read root before sweep");
 
@@ -2510,40 +2584,6 @@ mod tests {
                 .expect("count swept P4 database staging rows");
             assert_eq!(remaining, 0, "{table}");
         }
-    }
-
-    #[test]
-    fn retired_purge_steps_skip_maintenance_and_a_held_store() {
-        let directory = tempdir().unwrap();
-        let mut store = PersistentStore::open(directory.path()).unwrap();
-        for username in ["first", "second"] {
-            let stage = store.replace_begin().unwrap();
-            store.replace_put_root(&stage.staging_id, &json!({ "username": username })).unwrap();
-            let revision = store.revision().unwrap();
-            store.replace_commit(&stage.staging_id, Some(revision)).unwrap();
-        }
-        let state = PersistentStoreState::with_test_store(store);
-        let maintenance = state.acquire_raw_capture().unwrap();
-        assert_eq!(state.purge_retired_step(1).unwrap(), None);
-        drop(maintenance);
-        {
-            let _held = state.store.lock().unwrap();
-            assert_eq!(state.purge_retired_step(1).unwrap(), None);
-        }
-        assert_eq!(state.purge_retired_step(1).unwrap(), Some(true));
-        let mut steps = 1;
-        while state.purge_retired_step(1).unwrap() == Some(true) {
-            steps += 1;
-        }
-        assert!(steps > 1);
-        let store = state.store.lock().unwrap();
-        let retired: i64 = store
-            .as_ref()
-            .unwrap()
-            .connection
-            .query_row("SELECT COUNT(*) FROM generations WHERE state <> 'active'", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(retired, 0);
     }
 
     #[test]
@@ -2670,7 +2710,6 @@ mod tests {
             snapshot_operations: Mutex::new(()),
             renderer_gate: Arc::new(RendererGate::default()),
             archive_operations: Mutex::new(HashMap::new()),
-            retired_purge_started: AtomicBool::new(false),
         });
         let barrier = Arc::new(Barrier::new(3));
         let active = Arc::new(AtomicUsize::new(0));
@@ -2746,7 +2785,6 @@ mod tests {
             directory.path(),
             "preview-released-job",
             CasJobKind::LocalBackupRestore,
-            crate::asset_repository::job_pins::CasJobOwner::for_test(),
             0,
         )
         .expect("begin released journal fixture");

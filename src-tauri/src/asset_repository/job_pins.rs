@@ -7,11 +7,10 @@ use crate::persistent_store::asset_object_catalog::{
 use crate::persistent_store::PersistentStore;
 use crate::trust_boundary::{is_link_like, is_lower_hex_256, sync_directory};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 const DURABLE_CAS_JOB_VERSION: u32 = 1;
 const MAX_DURABLE_CAS_JOB_JOURNALS: usize = 4_096;
@@ -39,109 +38,6 @@ pub(crate) enum CasReleaseOutcome {
     Aborted,
 }
 
-/// What started a journal, so a later sweep can tell whether it still runs.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum CasJobOwnerKind {
-    PageWrite,
-    ContentImport,
-    NativeFileJob,
-    SnapshotExport,
-    ExternalPublication,
-    ExternalCompaction,
-    ExternalRestore,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct CasJobOwner {
-    pub(crate) kind: CasJobOwnerKind,
-    pub(crate) id: String,
-    /// The process instance that started the journal.
-    pub(crate) process: String,
-}
-
-impl CasJobOwner {
-    fn current(kind: CasJobOwnerKind, id: &str) -> Self {
-        Self {
-            kind,
-            id: id.to_owned(),
-            process: process_instance().to_owned(),
-        }
-    }
-
-    pub(crate) fn page_write(id: &str) -> Self {
-        Self::current(CasJobOwnerKind::PageWrite, id)
-    }
-
-    pub(crate) fn content_import(id: &str) -> Self {
-        Self::current(CasJobOwnerKind::ContentImport, id)
-    }
-
-    pub(crate) fn native_file_job(id: &str) -> Self {
-        Self::current(CasJobOwnerKind::NativeFileJob, id)
-    }
-
-    pub(crate) fn snapshot_export(id: &str) -> Self {
-        Self::current(CasJobOwnerKind::SnapshotExport, id)
-    }
-
-    pub(crate) fn external_publication(id: &str) -> Self {
-        Self::current(CasJobOwnerKind::ExternalPublication, id)
-    }
-
-    pub(crate) fn external_compaction(id: &str) -> Self {
-        Self::current(CasJobOwnerKind::ExternalCompaction, id)
-    }
-
-    pub(crate) fn external_restore(id: &str) -> Self {
-        Self::current(CasJobOwnerKind::ExternalRestore, id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test() -> Self {
-        Self::native_file_job("synthetic-test-owner")
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_another_process(kind: CasJobOwnerKind, id: &str) -> Self {
-        Self {
-            kind,
-            id: id.to_owned(),
-            process: "synthetic-earlier-process".to_owned(),
-        }
-    }
-
-    pub(crate) fn started_in_this_process(&self) -> bool {
-        self.process == process_instance()
-    }
-
-    fn validate(&self) -> io::Result<()> {
-        validate_job_id(&self.id)?;
-        validate_job_id(&self.process)
-    }
-}
-
-/// Identifies this run of the app; journals carry it to tell a page reload
-/// apart from a restart.
-pub(crate) fn process_instance() -> &'static str {
-    static INSTANCE: OnceLock<String> = OnceLock::new();
-    INSTANCE.get_or_init(|| uuid::Uuid::new_v4().to_string())
-}
-
-/// How many handles of this process have each journal open.
-fn open_handles() -> std::sync::MutexGuard<'static, HashMap<PathBuf, usize>> {
-    static HANDLES: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
-    HANDLES
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn track_open_handle(journal_path: &Path) {
-    *open_handles().entry(journal_path.to_owned()).or_default() += 1;
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PinDescriptor {
     byte_size: u64,
@@ -160,7 +56,6 @@ pub(crate) struct DurableCasJob {
 struct JobState {
     job_id: String,
     kind: CasJobKind,
-    owner: CasJobOwner,
     created_at_ms: i64,
     pins: BTreeMap<String, PinDescriptor>,
     sealed: bool,
@@ -176,7 +71,6 @@ enum JobJournalRecord {
         sequence: u64,
         job_id: String,
         job_kind: CasJobKind,
-        owner: CasJobOwner,
         created_at_ms: i64,
     },
     Pin {
@@ -204,11 +98,9 @@ impl DurableCasJob {
         repository_root: &Path,
         job_id: &str,
         kind: CasJobKind,
-        owner: CasJobOwner,
         created_at_ms: i64,
     ) -> io::Result<Self> {
         validate_job_id(job_id)?;
-        owner.validate()?;
         if created_at_ms < 0 {
             return invalid_data("CAS job creation time must be nonnegative");
         }
@@ -227,20 +119,17 @@ impl DurableCasJob {
                 sequence: 0,
                 job_id: job_id.to_owned(),
                 job_kind: kind,
-                owner: owner.clone(),
                 created_at_ms,
             },
             true,
         )?;
         let _ = sync_directory(&directory)?;
-        track_open_handle(&journal_path);
         Ok(Self {
             repository_root,
             journal_path,
             state: JobState {
                 job_id: job_id.to_owned(),
                 kind,
-                owner,
                 created_at_ms,
                 pins: BTreeMap::new(),
                 sealed: false,
@@ -265,24 +154,11 @@ impl DurableCasJob {
             recover_incomplete_tail_already_guarded(&mut file, valid_length)?;
         }
         let state = inspected.state;
-        track_open_handle(&journal_path);
         Ok(Self {
             repository_root,
             journal_path,
             state,
         })
-    }
-
-    pub(crate) fn owner(&self) -> &CasJobOwner {
-        &self.state.owner
-    }
-
-    /// Whether another handle of this process, besides this one, has the
-    /// journal open.
-    pub(crate) fn held_elsewhere(&self) -> bool {
-        open_handles()
-            .get(&self.journal_path)
-            .is_some_and(|count| *count > 1)
     }
 
     pub(crate) fn prepare_bytes(
@@ -668,59 +544,6 @@ impl DurableCasJob {
     }
 }
 
-impl Drop for DurableCasJob {
-    fn drop(&mut self) {
-        let mut handles = open_handles();
-        if let Some(count) = handles.get_mut(&self.journal_path) {
-            *count -= 1;
-            if *count == 0 {
-                handles.remove(&self.journal_path);
-            }
-        }
-    }
-}
-
-/// A journal's owner and progress, read without repairing it.
-#[derive(Clone, Debug)]
-pub(crate) struct DurableCasJobOwnership {
-    pub(crate) owner: CasJobOwner,
-    pub(crate) sealed: bool,
-}
-
-/// Reads a journal without truncating an incomplete tail, which may be a
-/// record its running job is still writing. `None` means it is gone.
-pub(crate) fn inspect_durable_cas_job(
-    repository_root: &Path,
-    job_id: &str,
-) -> io::Result<Option<DurableCasJobOwnership>> {
-    validate_job_id(job_id)?;
-    let Some((_, directory)) = job_pin_directory(repository_root, false)? else {
-        return Ok(None);
-    };
-    let mut file = match File::open(directory.join(format!("job-{job_id}.journal"))) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let state = inspect_job_state(&mut file, Some(job_id))?.state;
-    if state.released {
-        return Ok(None);
-    }
-    Ok(Some(DurableCasJobOwnership {
-        owner: state.owner,
-        sealed: state.sealed,
-    }))
-}
-
-/// Whether a handle of this process has the journal open.
-pub(crate) fn durable_cas_job_held(repository_root: &Path, job_id: &str) -> io::Result<bool> {
-    validate_job_id(job_id)?;
-    let Some((_, directory)) = job_pin_directory(repository_root, false)? else {
-        return Ok(false);
-    };
-    Ok(open_handles().contains_key(&directory.join(format!("job-{job_id}.journal"))))
-}
-
 /// The IDs of the journals present now, without reading them.
 pub(crate) fn durable_cas_job_ids(repository_root: &Path) -> io::Result<Vec<String>> {
     let Some((_, directory)) = job_pin_directory(repository_root, false)? else {
@@ -1087,7 +910,6 @@ fn apply_record(
             sequence,
             job_id,
             job_kind,
-            owner,
             created_at_ms,
         } => {
             if state.is_some()
@@ -1099,11 +921,9 @@ fn apply_record(
             }
             validate_job_id(&job_id)?;
             validate_identity(expected_job_id, &job_id)?;
-            owner.validate()?;
             *state = Some(JobState {
                 job_id,
                 kind: job_kind,
-                owner,
                 created_at_ms,
                 pins: BTreeMap::new(),
                 sealed: false,
@@ -1203,7 +1023,7 @@ fn invalid_data<T>(message: impl Into<String>) -> io::Result<T> {
 mod tests {
     use super::{
         collect_durable_cas_job_roots, collect_durable_cas_job_roots_read_only, write_record,
-        CasJobKind, CasJobOwner, CasJobOwnerKind, CasObjectRole, CasReleaseOutcome, DurableCasJob, JobJournalRecord,
+        CasJobKind, CasObjectRole, CasReleaseOutcome, DurableCasJob, JobJournalRecord,
         DURABLE_CAS_JOB_VERSION, MAX_DURABLE_CAS_JOB_JOURNALS, read_job_state, root_set_from_state,
     };
     use crate::asset_repository::owner_manifest_codec::{
@@ -1226,7 +1046,7 @@ mod tests {
         let (ready_sent, ready_received) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             ready_sent.send(()).expect("signal begin attempt");
-            let job = DurableCasJob::begin(&root, "coordinated-job", CasJobKind::LocalBackupRestore, CasJobOwner::for_test(), 1)
+            let job = DurableCasJob::begin(&root, "coordinated-job", CasJobKind::LocalBackupRestore, 1)
                 .expect("begin coordinated job");
             sent.send(job).expect("send coordinated job");
         });
@@ -1312,7 +1132,6 @@ mod tests {
             directory.path(),
             "catalog-coordinated-job",
             CasJobKind::DirectAssetOrInlayWrite,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin catalog coordinated job");
@@ -1376,7 +1195,6 @@ mod tests {
             directory.path(),
             "aborted-catalog-job",
             CasJobKind::LocalBackupRestore,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin aborted job");
@@ -1425,7 +1243,6 @@ mod tests {
             directory.path(),
             "failed-abort-catalog-job",
             CasJobKind::LocalBackupRestore,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin failed abort job");
@@ -1471,7 +1288,6 @@ mod tests {
             directory.path(),
             "missing-store-abort-job",
             CasJobKind::LocalBackupRestore,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin missing store job");
@@ -1536,7 +1352,6 @@ mod tests {
             directory.path(),
             "content-import-1",
             CasJobKind::CardOrModuleContentImport,
-            CasJobOwner::for_test(),
             10,
         )
         .expect("begin durable job");
@@ -1578,7 +1393,6 @@ mod tests {
             directory.path(),
             "recoverable-job",
             CasJobKind::LocalBackupRestore,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin recoverable job");
@@ -1633,7 +1447,6 @@ mod tests {
             directory.path(),
             "coordinated-tail-recovery",
             CasJobKind::LocalBackupRestore,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin coordinated recovery job");
@@ -1692,7 +1505,6 @@ mod tests {
             directory.path(),
             "backup-import-1",
             CasJobKind::LocalBackupRestore,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin peer job");
@@ -1742,7 +1554,6 @@ mod tests {
             directory.path(),
             "released-job",
             CasJobKind::LocalBackupRestore,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin releasable job");
@@ -1774,7 +1585,6 @@ mod tests {
             directory.path(),
             "release-retry-job",
             CasJobKind::LocalBackupRestore,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin release retry job");
@@ -1810,7 +1620,6 @@ mod tests {
             directory.path(),
             "collector-cleanup-job",
             CasJobKind::LocalBackupRestore,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin collector cleanup job");
@@ -1852,7 +1661,6 @@ mod tests {
             directory.path(),
             "coordinated-release-retry",
             CasJobKind::LocalBackupRestore,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin coordinated release retry job");
@@ -1898,7 +1706,6 @@ mod tests {
             directory.path(),
             "future-version-job",
             CasJobKind::LocalBackupRestore,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin version fixture");
@@ -1916,7 +1723,6 @@ mod tests {
                 sequence: 0,
                 job_id: "future-version-job".to_owned(),
                 job_kind: CasJobKind::LocalBackupRestore,
-                owner: CasJobOwner::for_test(),
                 created_at_ms: 1,
             },
             true,
@@ -1931,84 +1737,10 @@ mod tests {
     }
 
     #[test]
-    fn a_begin_record_without_an_owner_is_corrupt() {
-        let directory = tempfile::tempdir().expect("create ownerless directory");
-        let job = DurableCasJob::begin(
-            directory.path(),
-            "ownerless-job",
-            CasJobKind::LocalBackupRestore,
-            CasJobOwner::for_test(),
-            1,
-        )
-        .expect("begin ownerless fixture");
-        let journal_path = job.journal_path().to_path_buf();
-        drop(job);
-        let mut file = OpenOptions::new()
-            .truncate(true)
-            .write(true)
-            .open(&journal_path)
-            .expect("replace journal");
-        super::journal_frame::write_frame(
-            &mut file,
-            &serde_json::json!({
-                "type": "begin", "version": DURABLE_CAS_JOB_VERSION, "sequence": 0,
-                "job_id": "ownerless-job", "job_kind": "local-backup-restore", "created_at_ms": 1,
-            }),
-            true,
-            &super::JOURNAL_LABELS,
-        )
-        .expect("write ownerless record");
-        drop(file);
-
-        assert!(DurableCasJob::open(directory.path(), "ownerless-job").is_err());
-        assert!(super::inspect_durable_cas_job(directory.path(), "ownerless-job").is_err());
-        assert!(collect_durable_cas_job_roots(directory.path())
-            .blockers
-            .contains("job-pin-corrupt:ownerless-job"));
-    }
-
-    #[test]
-    fn a_journal_keeps_its_owner_and_counts_the_handles_that_hold_it() {
-        let directory = tempfile::tempdir().expect("create owner directory");
-        let owner = CasJobOwner::from_another_process(CasJobOwnerKind::ExternalRestore, "restore-owner");
-        assert!(!owner.started_in_this_process());
-        assert!(CasJobOwner::for_test().started_in_this_process());
-        let first = DurableCasJob::begin(
-            directory.path(),
-            "owned-job",
-            CasJobKind::LocalBackupRestore,
-            owner.clone(),
-            1,
-        )
-        .expect("begin owned job");
-        assert!(!first.held_elsewhere());
-        let second = DurableCasJob::open(directory.path(), "owned-job").expect("reopen owned job");
-        assert_eq!(second.owner(), &owner);
-        assert!(first.held_elsewhere() && second.held_elsewhere());
-        drop(first);
-        assert!(!second.held_elsewhere());
-        assert!(super::durable_cas_job_held(directory.path(), "owned-job").unwrap());
-        let journal_path = second.journal_path().to_path_buf();
-        drop(second);
-        assert!(!super::durable_cas_job_held(directory.path(), "owned-job").unwrap());
-
-        let mut torn = OpenOptions::new().append(true).open(&journal_path).expect("open journal");
-        torn.write_all(&[0x40, 0, 0]).expect("append a torn frame");
-        drop(torn);
-        let length = std::fs::metadata(&journal_path).unwrap().len();
-        let inspected = super::inspect_durable_cas_job(directory.path(), "owned-job")
-            .expect("inspect torn journal")
-            .expect("unreleased journal");
-        assert_eq!(inspected.owner, owner);
-        assert!(!inspected.sealed);
-        assert_eq!(std::fs::metadata(&journal_path).unwrap().len(), length);
-    }
-
-    #[test]
     fn metadata_only_pin_journal_accepts_more_than_one_hundred_thousand_unique_objects() {
         let mut journal=tempfile::tempfile().unwrap();
         let id="synthetic-uncapped-pins";
-        write_record(&mut journal,&JobJournalRecord::Begin {version:1,sequence:0,job_id:id.into(),job_kind:CasJobKind::LocalBackupRestore,owner:CasJobOwner::for_test(),created_at_ms:0},false).unwrap();
+        write_record(&mut journal,&JobJournalRecord::Begin {version:1,sequence:0,job_id:id.into(),job_kind:CasJobKind::LocalBackupRestore,created_at_ms:0},false).unwrap();
         for position in 1..=100_001u64 {
             write_record(&mut journal,&JobJournalRecord::Pin {sequence:position,job_id:id.into(),object_hash:format!("{position:064x}"),byte_size:position,object_role:CasObjectRole::DirectObject,published_by_job:false},false).unwrap();
         }
@@ -2028,7 +1760,6 @@ mod tests {
             directory.path(),
             "separate-owner-job",
             CasJobKind::LocalBackupRestore,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin CAS liveness job");
@@ -2051,7 +1782,6 @@ mod tests {
             identity_directory.path(),
             "identity-a",
             CasJobKind::CardOrModuleContentImport,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin identity job");
@@ -2069,7 +1799,6 @@ mod tests {
             order_directory.path(),
             "record-order",
             CasJobKind::OfficialPublicationOrExportPreparation,
-            CasJobOwner::for_test(),
             1,
         )
         .expect("begin order job");

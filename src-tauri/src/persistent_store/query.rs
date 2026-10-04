@@ -1044,19 +1044,6 @@ pub(super) fn materialize_with_target(
     connection: &Connection,
     revision: Option<i64>,
 ) -> StoreResult<(Value, ReadTarget)> {
-    materialize_current(connection, revision, true)
-}
-
-/// The current library with every character's `chats` left out.
-pub(super) fn materialize_without_chats(connection: &Connection) -> StoreResult<(Value, ReadTarget)> {
-    materialize_current(connection, None, false)
-}
-
-fn materialize_current(
-    connection: &Connection,
-    revision: Option<i64>,
-    chats: bool,
-) -> StoreResult<(Value, ReadTarget)> {
     let transaction = connection.unchecked_transaction()?;
     let actual = current_revision(&transaction)?;
     let expected = revision.unwrap_or(actual);
@@ -1064,7 +1051,7 @@ fn materialize_current(
         return Err(StoreError::RevisionConflict { expected, actual });
     }
     let generation = active_generation(&transaction)?;
-    let value = materialize_generation(&transaction, &generation, chats)?
+    let value = materialize_generation(&transaction, &generation, Content::Library)?
         .ok_or(StoreError::RevisionConflict { expected, actual })?;
     transaction.commit()?;
     Ok((
@@ -1076,11 +1063,35 @@ fn materialize_current(
     ))
 }
 
+/// The current root fields and presets with the number of characters, for the
+/// binding check. Character details and plugin storage values are left out.
+pub(super) fn binding_library(connection: &Connection) -> StoreResult<(Value, u64, ReadTarget)> {
+    let transaction = connection.unchecked_transaction()?;
+    let revision = current_revision(&transaction)?;
+    let generation = active_generation(&transaction)?;
+    let value = materialize_generation(&transaction, &generation, Content::Binding)?
+        .ok_or(StoreError::RevisionConflict { expected: revision, actual: revision })?;
+    let characters: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM characters WHERE generation = ?1 AND archived_object IS NULL",
+        [&generation],
+        |row| row.get(0),
+    )?;
+    transaction.commit()?;
+    Ok((value, characters as u64, ReadTarget { revision, generation }))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Content {
+    Library,
+    /// Root fields and presets, with an empty character list.
+    Binding,
+}
+
 pub(super) fn materialize_target(
     connection: &Connection,
     target: &ReadTarget,
 ) -> StoreResult<Value> {
-    let value = materialize_generation(connection, &target.generation, true)?.ok_or_else(|| {
+    let value = materialize_generation(connection, &target.generation, Content::Library)?.ok_or_else(|| {
         StoreError::Store {
             message: "Persistent lease generation is missing its root".to_owned(),
         }
@@ -1091,7 +1102,7 @@ pub(super) fn materialize_target(
 pub(super) fn materialize_staging(connection: &Connection, staging_id: &str) -> StoreResult<Value> {
     let transaction = connection.unchecked_transaction()?;
     super::commit::require_staging(&transaction, staging_id)?;
-    let value = materialize_generation(&transaction, staging_id, true)?.ok_or_else(|| {
+    let value = materialize_generation(&transaction, staging_id, Content::Library)?.ok_or_else(|| {
         StoreError::Validation {
             message: "Staging generation does not exist".to_owned(),
         }
@@ -1103,7 +1114,7 @@ pub(super) fn materialize_staging(connection: &Connection, staging_id: &str) -> 
 fn materialize_generation(
     connection: &Connection,
     generation: &str,
-    chats: bool,
+    content: Content,
 ) -> StoreResult<Option<Value>> {
     let root: Option<String> = connection
         .query_row(
@@ -1120,6 +1131,11 @@ fn materialize_generation(
         "Persistent root must be an object",
     )?;
     database.shift_remove("account");
+    if content == Content::Binding {
+        database.insert("characters".to_owned(), Value::Array(Vec::new()));
+        database.insert("botPresets".to_owned(), Value::Array(bot_presets(connection, generation)?));
+        return Ok(Some(Value::Object(database)));
+    }
     let character_records = {
         let mut statement = connection.prepare(
             "SELECT character_id, detail FROM characters
@@ -1137,10 +1153,6 @@ fn materialize_generation(
             serde_json::from_str(&detail)?,
             "Character detail must be an object",
         )?;
-        if !chats {
-            characters.push(Value::Object(character));
-            continue;
-        }
         let conversation_records = {
             let mut statement = connection.prepare(
                 "SELECT conversation_id, detail FROM conversations
@@ -1165,23 +1177,24 @@ fn materialize_generation(
         characters.push(Value::Object(character));
     }
     database.insert("characters".to_owned(), Value::Array(characters));
-    let presets = {
-        let mut statement = connection.prepare(
-            "SELECT value FROM bot_presets WHERE generation = ?1 ORDER BY configured_index ASC",
-        )?;
-        let presets = statement
-            .query_map([&generation], |row| row.get::<_, String>(0))?
-            .map(|row| Ok(serde_json::from_str(&row?)?))
-            .collect::<StoreResult<Vec<_>>>()?;
-        presets
-    };
-    database.insert("botPresets".to_owned(), Value::Array(presets));
+    database.insert("botPresets".to_owned(), Value::Array(bot_presets(connection, generation)?));
     let plugin_storage = super::export::materialized_plugin_storage(connection, &generation)?;
     database.insert(
         "pluginCustomStorage".to_owned(),
         Value::Object(plugin_storage),
     );
     Ok(Some(Value::Object(database)))
+}
+
+fn bot_presets(connection: &Connection, generation: &str) -> StoreResult<Vec<Value>> {
+    let mut statement = connection.prepare(
+        "SELECT value FROM bot_presets WHERE generation = ?1 ORDER BY configured_index ASC",
+    )?;
+    let presets = statement
+        .query_map([generation], |row| row.get::<_, String>(0))?
+        .map(|row| Ok(serde_json::from_str(&row?)?))
+        .collect::<StoreResult<Vec<_>>>()?;
+    Ok(presets)
 }
 
 fn page_input(limit: i64, cursor: Option<&str>) -> StoreResult<(i64, i64)> {

@@ -12,6 +12,7 @@ vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).langu
 import { persistentLocalSaveFailure } from 'src/ts/storage/persistentDataRuntime.svelte'
 import { languageEnglish } from 'src/lang/en'
 import Banner from './PersistentLocalSaveFailure.svelte'
+import { PayloadTooLargeError } from 'src/ts/storage/nativePersistenceValue'
 const failure = persistentLocalSaveFailure as ReturnType<typeof writable<unknown | null>>
 let component: ReturnType<typeof mount>
 beforeEach(() => { failure.set(null); state.retry.mockReset(); component = mount(Banner, { target: document.body }) })
@@ -44,4 +45,8 @@ it('offers storage recovery for quota failures', async () => {
     failure.set(new DOMException('private database', 'QuotaExceededError')); await tick()
     expect(document.body.textContent).toContain(languageEnglish.risuNest.localSaveFailure.storage)
     expect(document.body.textContent).not.toContain('private database')
+})
+it('asks to remove what was just added when a save is too large', async () => {
+    failure.set(new PayloadTooLargeError('commit', 70 * 1024 * 1024)); await tick()
+    expect(document.body.textContent).toContain(languageEnglish.risuNest.localSaveFailure.tooLarge)
 })

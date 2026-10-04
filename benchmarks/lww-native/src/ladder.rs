@@ -983,7 +983,7 @@ fn serverless_group(recorder:&Recorder,library:&Path,work:&Path,settings:&Settin
         let stage_header=lww::Header {binding_authority:before.target_authority.clone(),request_id:uuid::Uuid::new_v4().to_string()};
         let staged=engine.stage_binding(&mut store,&stage_header,&inspection,&cancel).await.at("stage binding")?;
         let staged_ms=window.elapsed();
-        let switched=store.switch_lww_binding(&SwitchBindingRequest { initial_publication: false,header:lww::Header {
+        let switched=store.switch_lww_binding(&SwitchBindingRequest {header:lww::Header {
             binding_authority:before.target_authority.clone(),request_id:uuid::Uuid::new_v4().to_string()},
             expected_selection_epoch:before.selection_epoch.clone(),target,inspection_id:Some(inspection)}).at("switch binding")?;
         let switched_ms=window.elapsed();

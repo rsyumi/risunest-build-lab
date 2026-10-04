@@ -502,7 +502,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "runs in the observer child process"]
     async fn actual_tcp_no_content_and_full_content_length_bodies_complete() {
         let _reset = Reset::new();
         let root = tempfile::tempdir().unwrap();
@@ -579,7 +578,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "runs in the observer child process"]
     async fn exact_length_completion_without_eof_poll_preserves_prefix_drop_failure() {
         use futures_util::StreamExt;
         let _reset = Reset::new();
@@ -622,7 +620,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "runs in the observer child process"]
     async fn actual_tcp_raw_media_ranges_zero_and_exact_missing_subset() {
         use risunest_sync_connect::media::{MediaObject, MediaRequest, MediaSigner};
         let _reset = Reset::new();
@@ -754,7 +751,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "runs in the observer child process"]
     async fn actual_tcp_first_read_barrier_keeps_foreground_body_requests_running() {
         let _reset = Reset::new();
         let root = tempfile::tempdir().unwrap();
@@ -852,7 +848,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "runs in the observer child process"]
     async fn actual_tcp_dangling_read_barrier_end_cancels_and_cannot_reset() {
         let _reset = Reset::new();
         let root = tempfile::tempdir().unwrap();
@@ -923,7 +918,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "runs in the observer child process"]
     async fn all_router_barrier_tracks_held_media_and_rejects_late_admission() {
         let _reset = Reset::new();
         let root = tempfile::tempdir().unwrap();
@@ -979,7 +973,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "runs in the observer child process"]
     async fn queued_body_work_cannot_be_hidden_by_zero_active_workers() {
         let _reset = Reset::new();
         let root = tempfile::tempdir().unwrap();

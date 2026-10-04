@@ -1,7 +1,7 @@
 use super::snapshot_archive::Archive;
 use super::{
     active_generation, current_revision, CheckpointMode, ReadTarget, SnapshotCreated, SnapshotInfo,
-    StoreError, StoreResult, DATABASE_FILE,
+    StoreError, StoreResult, DATABASE_FILE, GENERATION_TABLES,
 };
 use crate::asset_repository::migration_gc::AssetRootSet;
 use crate::asset_repository::PayloadCas;
@@ -156,8 +156,6 @@ fn prepare_restore_candidate(persistent_dir: &Path, target: &Path) -> StoreResul
     let result = (|| -> StoreResult<()> {
         let mut connection = Connection::open(&candidate)?;
         super::schema::initialize(&mut connection)?;
-        // A snapshot can hold a partly purged retired library, which restore never reads.
-        while super::commit::purge_retired_batch(&mut connection, 4096)? {}
         let transaction = connection.transaction()?;
         super::message_pages::accept_copied_database(&transaction)?;
         transaction.commit()?;
@@ -219,9 +217,9 @@ pub(super) fn sweep_temporary_generations(
     transaction.execute("DELETE FROM snapshot_leases", [])?;
     let active = active_generation(&transaction)?;
     let mut statement = transaction.prepare(
-        "SELECT id FROM generations WHERE state = 'staging'
-         UNION SELECT generation FROM root
-         WHERE generation NOT IN (SELECT id FROM generations)",
+        "SELECT generation FROM root
+         WHERE generation LIKE 'staging-%'
+            OR generation LIKE 'snapshot-%'",
     )?;
     let mut stale = statement
         .query_map([], |row| row.get::<_, String>(0))?
@@ -239,7 +237,7 @@ pub(super) fn sweep_temporary_generations(
         )?;
         let snapshot_stage: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM snapshot_restore_stages WHERE stage_id=?1 AND state='staged')",[&generation],|row|row.get(0))?;
         if generation != active && retained_stage != Some(generation.as_str()) && !binding_stage && !snapshot_stage {
-            super::commit::retire_generation(&transaction, &generation)?;
+            delete_generation(&transaction, &generation)?;
         }
     }
     transaction.commit()?;
@@ -499,38 +497,20 @@ pub(super) fn snapshot_path_is_link_or_reparse(path: &Path) -> StoreResult<bool>
     }
 }
 
-/// Database page bytes less the values retired generations still store. Those
-/// rows only wait for the purge, so a size estimate leaves them out.
-pub(super) fn logical_database_bytes(connection: &Connection) -> StoreResult<u64> {
+fn delete_generation(transaction: &rusqlite::Transaction<'_>, generation: &str) -> StoreResult<()> {
+    for (table, _) in GENERATION_TABLES.iter().rev() {
+        transaction.execute(
+            &format!("DELETE FROM {table} WHERE generation = ?1"),
+            [generation],
+        )?;
+    }
+    Ok(())
+}
+
+fn logical_database_bytes(connection: &Connection) -> StoreResult<u64> {
     let page_count: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
     let page_size: i64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
-    let pages = (page_count.max(0) as u64).saturating_mul(page_size.max(0) as u64);
-    let retired: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM generations WHERE state = 'retired')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !retired {
-        return Ok(pages);
-    }
-    let mut held = 0u64;
-    for (table, columns) in super::GENERATION_TABLES {
-        let values = columns
-            .split(',')
-            .map(|column| format!("coalesce(octet_length({}),0)", column.trim()))
-            .collect::<Vec<_>>()
-            .join("+");
-        let bytes: i64 = connection.query_row(
-            &format!(
-                "SELECT coalesce(sum({values}),0) FROM {table}
-                 WHERE generation IN (SELECT id FROM generations WHERE state = 'retired')"
-            ),
-            [],
-            |row| row.get(0),
-        )?;
-        held = held.saturating_add(bytes.max(0) as u64);
-    }
-    Ok(pages.saturating_sub(held))
+    Ok((page_count as u64).saturating_mul(page_size as u64))
 }
 
 pub(super) fn collect_asset_roots(
@@ -538,7 +518,7 @@ pub(super) fn collect_asset_roots(
 ) -> StoreResult<AssetRootSet> {
     #[cfg(test)]
     ASSET_ROOT_SCANS.with(|count| count.set(count.get() + 1));
-    collect_library_asset_roots(connection, None)
+    collect_asset_roots_scoped(connection, None, None)
 }
 
 pub(super) fn collect_plugin_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet> {
@@ -596,7 +576,7 @@ pub(super) fn merge_asset_roots(target: &mut AssetRootSet, source: AssetRootSet)
 }
 
 pub(super) fn collect_asset_roots_with_plugin_cache(connection: &Connection, plugins: &AssetRootSet) -> StoreResult<AssetRootSet> {
-    collect_library_asset_roots(connection, Some(plugins))
+    collect_asset_roots_scoped(connection, None, Some(plugins))
 }
 
 pub(super) fn collect_preserved_source_roots(repository:&Path)->AssetRootSet {
@@ -633,68 +613,70 @@ fn collect_asset_roots_for_generation(
     connection: &Connection,
     generation: &str,
 ) -> StoreResult<AssetRootSet> {
-    collect_generation_asset_roots(connection, generation, None)
-}
-
-/// Generation tables whose rows can reference a CAS object. The other
-/// generation tables hold prune candidates copied from `asset_aliases` and the
-/// message page structure, whose objects live outside the CAS.
-pub(super) const ROOT_GENERATION_TABLES: [&str; 8] = [
-    "root",
-    "bot_presets",
-    "characters",
-    "conversations",
-    "messages",
-    "plugin_storage",
-    "asset_aliases",
-    "asset_owner_heads",
-];
-
-/// Every generation's roots, including staged and retired ones, and the
-/// logical-sync manifests, which are meaningless for a single generation.
-fn collect_library_asset_roots(
-    connection: &Connection,
-    plugins: Option<&AssetRootSet>,
-) -> StoreResult<AssetRootSet> {
-    let mut roots = AssetRootSet::default();
-    let query = ROOT_GENERATION_TABLES
-        .map(|table| format!("SELECT generation FROM {table}"))
-        .join(" UNION ");
-    let mut statement = connection.prepare(&query)?;
-    let generations = statement.query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    for generation in generations {
-        merge_asset_roots(&mut roots, collect_generation_asset_roots(connection, &generation, plugins)?);
-    }
-    if table_exists(connection, "server_sync_objects")? {
-        scan_optional_hash_column(connection, "SELECT hash FROM server_sync_objects", [],
-            HashTarget::Object, &mut roots)?;
-    }
-    merge_asset_roots(&mut roots, collect_lww_asset_roots(connection)?);
-    Ok(roots)
+    collect_asset_roots_scoped(connection, Some(generation), None)
 }
 
 // One scanner serves both the global GC-root collection and the per-generation
-// publication pinning so the two table lists can never drift apart.
-fn collect_generation_asset_roots(
+// publication pinning so the two table lists can never drift apart. The global
+// scope additionally covers the logical-sync manifests, which are meaningless
+// for a single generation.
+fn collect_asset_roots_scoped(
     connection: &Connection,
-    generation: &str,
+    generation: Option<&str>,
     plugins: Option<&AssetRootSet>,
 ) -> StoreResult<AssetRootSet> {
     let mut roots = AssetRootSet::default();
-    let scope_params: &[&dyn rusqlite::ToSql] = &[&generation];
+    if generation.is_none() {
+        let query = ["root", "bot_presets", "characters", "conversations", "messages",
+            "plugin_storage", "asset_aliases", "asset_owner_heads"]
+            .map(|table| format!("SELECT generation FROM {table}"))
+            .join(" UNION ");
+        let mut statement = connection.prepare(&query)?;
+        let generations = statement.query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for generation in generations {
+            let scoped = collect_asset_roots_scoped(connection, Some(&generation), plugins)?;
+            roots.manifest_hashes.extend(scoped.manifest_hashes);
+            roots.object_hashes.extend(scoped.object_hashes);
+            roots.legacy_asset_keys.extend(scoped.legacy_asset_keys);
+            roots.inlay_ids.extend(scoped.inlay_ids);
+            roots.cold_keys.extend(scoped.cold_keys);
+            roots.blockers.extend(scoped.blockers);
+            roots.retain_all_objects |= scoped.retain_all_objects;
+        }
+        if table_exists(connection, "server_sync_objects")? {
+            scan_optional_hash_column(connection, "SELECT hash FROM server_sync_objects", [],
+                HashTarget::Object, &mut roots)?;
+        }
+        merge_asset_roots(&mut roots, collect_lww_asset_roots(connection)?);
+        return Ok(roots);
+    }
+    let scope_params: Vec<&dyn rusqlite::ToSql> = generation
+        .as_ref()
+        .map(|generation| vec![generation as &dyn rusqlite::ToSql])
+        .unwrap_or_default();
+    let scope_params = scope_params.as_slice();
+    let scoped = generation.is_some();
 
     scan_optional_hash_column(
         connection,
-        "SELECT manifest_hash FROM asset_owner_heads
-         WHERE generation = ?1 AND present = 1",
+        if scoped {
+            "SELECT manifest_hash FROM asset_owner_heads
+         WHERE generation = ?1 AND present = 1"
+        } else {
+            "SELECT manifest_hash FROM asset_owner_heads WHERE present = 1"
+        },
         scope_params,
         HashTarget::Manifest,
         &mut roots,
     )?;
     scan_asset_alias_roots(
         connection,
-        "SELECT logical_key, object_hash FROM asset_aliases WHERE generation = ?1",
+        if scoped {
+            "SELECT logical_key, object_hash FROM asset_aliases WHERE generation = ?1"
+        } else {
+            "SELECT logical_key, object_hash FROM asset_aliases"
+        },
         scope_params,
         &mut roots,
     )?;
@@ -702,11 +684,26 @@ fn collect_generation_asset_roots(
     // the asset hashes it recorded are the only roots that hold those bytes.
     scan_archived_object_roots(
         connection,
-        "SELECT archived_object FROM characters
-         WHERE generation = ?1 AND archived_object IS NOT NULL",
+        if scoped {
+            "SELECT archived_object FROM characters
+         WHERE generation = ?1 AND archived_object IS NOT NULL"
+        } else {
+            "SELECT archived_object FROM characters WHERE archived_object IS NOT NULL"
+        },
         scope_params,
         &mut roots,
     )?;
+    if !scoped {
+        if table_exists(connection, "server_sync_objects")? {
+            scan_optional_hash_column(
+                connection,
+                "SELECT hash FROM server_sync_objects",
+                [],
+                HashTarget::Object,
+                &mut roots,
+            )?;
+        }
+    }
 
     for (table, column) in [
         ("root", "value"),
@@ -717,14 +714,28 @@ fn collect_generation_asset_roots(
         ("plugin_storage", "value"),
     ] {
         if table == "plugin_storage" && plugins.is_some() { continue; }
-        let query = format!("SELECT {column} FROM {table} WHERE generation = ?1");
+        let query = if scoped {
+            format!("SELECT {column} FROM {table} WHERE generation = ?1")
+        } else {
+            format!("SELECT {column} FROM {table}")
+        };
         scan_json_column(connection, &query, scope_params, &mut roots)?;
     }
     if let Some(plugins) = plugins {
-        merge_asset_roots(&mut roots, plugins.clone());
+        roots.manifest_hashes.extend(plugins.manifest_hashes.iter().cloned());
+        roots.object_hashes.extend(plugins.object_hashes.iter().cloned());
+        roots.legacy_asset_keys.extend(plugins.legacy_asset_keys.iter().cloned());
+        roots.inlay_ids.extend(plugins.inlay_ids.iter().cloned());
+        roots.cold_keys.extend(plugins.cold_keys.iter().cloned());
+        roots.blockers.extend(plugins.blockers.iter().cloned());
+        roots.retain_all_objects |= plugins.retain_all_objects;
     }
     for table in ["bot_presets", "characters"] {
-        let query = format!("SELECT image FROM {table} WHERE generation = ?1 AND image IS NOT NULL");
+        let query = if scoped {
+            format!("SELECT image FROM {table} WHERE generation = ?1 AND image IS NOT NULL")
+        } else {
+            format!("SELECT image FROM {table} WHERE image IS NOT NULL")
+        };
         scan_text_column(connection, &query, scope_params, &mut roots)?;
     }
     let mut aliases = connection.prepare(

@@ -744,6 +744,45 @@ describe('Android SAF bridge', () => {
         expect(listeners.size).toBe(0)
     })
 
+    it('rejects a dismissed picker with AbortError where DOMException.code has only a getter', async () => {
+        // WebViews define code as a getter without a setter; the test DOM does not.
+        const original = Object.getOwnPropertyDescriptor(DOMException.prototype, 'code')
+        Object.defineProperty(DOMException.prototype, 'code', { get: () => 20, configurable: true })
+        try {
+            const listeners = new Set<(event: Event) => void>()
+            const promise = copyNativeExportToAndroidSaf({
+                sourcePath: '/data/user/0/io.github.rsyumi.risunest/files/native-file-jobs/handoffs/risu-dataset-11111111-1111-4111-8111-111111111111.json',
+                suggestedName: 'dataset.json',
+            }, {
+                createRequestId: () => 'request-6',
+                bridge: { copyExport: vi.fn() },
+                addEventListener: (_name, listener) => listeners.add(listener),
+                removeEventListener: (_name, listener) => listeners.delete(listener),
+            })
+            for (const listener of listeners) {
+                listener(new CustomEvent('risu-android-saf-destination', { detail: {
+                    requestId: 'request-6',
+                    exportId: '11111111-1111-4111-8111-111111111111',
+                    sourceKind: 'risuSave',
+                    state: 'cancelled',
+                    code: 'cancelled',
+                    warningCodes: [],
+                } satisfies AndroidSafDestinationEvent }))
+            }
+
+            await expect(promise).rejects.toMatchObject({
+                name: 'AbortError',
+                requestId: 'request-6',
+                code: 'cancelled',
+                warningCodes: [],
+            })
+            expect(listeners.size).toBe(0)
+        } finally {
+            if (original) Object.defineProperty(DOMException.prototype, 'code', original)
+            else delete (DOMException.prototype as { code?: unknown }).code
+        }
+    })
+
     it('reports matching destination progress and ignores other requests', async () => {
         const listeners = new Map<string, Set<(event: Event) => void>>()
         const onProgress = vi.fn()

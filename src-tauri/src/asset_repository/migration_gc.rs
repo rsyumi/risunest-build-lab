@@ -128,12 +128,9 @@ pub(crate) fn mark_asset_roots_with_remote(
     remote: impl Fn(&str) -> io::Result<Option<u64>>,
 ) -> io::Result<AssetGcMarks> {
     let marks = collect_asset_root_marks(cas, roots)?;
-    // The lookups still run, so a repository or registry that cannot be read stops marking.
-    // A referenced body that is neither local nor held remotely, such as one only a removed
-    // connection held, has nothing left to protect and stays marked.
     for hash in &marks.marked_hashes {
-        if cas.stat_object(hash)?.is_none() {
-            remote(hash)?;
+        if cas.stat_object(hash)?.is_none() && remote(hash)?.is_none() {
+            return invalid_data("marked CAS object is missing");
         }
     }
     Ok(marks)
@@ -152,10 +149,9 @@ pub(crate) fn mark_asset_roots_with_remote_scan(
             break;
         }
         let local_sizes = scan.stat_objects(batch.iter().copied())?;
-        // As in `mark_asset_roots_with_remote`, a body held nowhere stays marked.
         for (hash, local_size) in batch.into_iter().zip(local_sizes) {
-            if local_size.is_none() {
-                remote(hash)?;
+            if local_size.is_none() && remote(hash)?.is_none() {
+                return invalid_data("marked CAS object is missing");
             }
         }
     }
@@ -280,12 +276,9 @@ fn sweep_asset_candidates_with_local(
             return invalid_data("asset GC candidate is invalid or duplicated");
         }
         let physical = local(&candidate.object_hash)?;
-        let actual_size = match physical {
-            Some(size) => size,
-            None => remote(&candidate.object_hash)?.ok_or_else(|| {
-                io::Error::new(ErrorKind::InvalidData, "asset GC candidate is missing")
-            })?,
-        };
+        let actual_size = physical.or(remote(&candidate.object_hash)?).ok_or_else(|| {
+            io::Error::new(ErrorKind::InvalidData, "asset GC candidate is missing")
+        })?;
         if actual_size != candidate.byte_size {
             return invalid_data("asset GC candidate size mismatch");
         }
@@ -484,86 +477,6 @@ mod tests {
         let error = dry_run_mark_and_sweep(&cas, [], [roots], 100, 10)
             .expect_err("corrupt root manifest must abort the mark pass");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn sweep_asks_for_a_remote_source_only_when_the_local_file_is_missing() {
-        let directory = tempfile::tempdir().expect("temporary repository");
-        let cas = PayloadCas::new(directory.path()).expect("open payload CAS");
-        let local = cas.prepare_bytes(b"local-candidate").unwrap();
-        let remote_only = AssetGcCandidate {
-            object_hash: "ab".repeat(32),
-            byte_size: 7,
-            created_at_ms: 0,
-        };
-        let asked = std::cell::RefCell::new(Vec::new());
-        let report = super::dry_run_mark_and_sweep_with_remote(
-            &cas,
-            [candidate(&local, 0), remote_only.clone()],
-            [AssetRootSet::default()],
-            100,
-            10,
-            |hash| {
-                asked.borrow_mut().push(hash.to_owned());
-                Ok((hash == remote_only.object_hash).then_some(remote_only.byte_size))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(asked.into_inner(), vec![remote_only.object_hash]);
-        assert_eq!(report.potential_delete_hashes, vec![local.content_hash]);
-    }
-
-    #[test]
-    fn marking_passes_over_a_referenced_body_that_is_neither_local_nor_remote() {
-        let directory = tempfile::tempdir().expect("temporary repository");
-        let cas = PayloadCas::new(directory.path()).expect("open payload CAS");
-        let referenced = cas.prepare_bytes(b"referenced-local").unwrap();
-        let unreferenced = cas.prepare_bytes(b"unreferenced-local").unwrap();
-        let gone = "cd".repeat(32);
-        let mut roots = AssetRootSet::default();
-        roots
-            .object_hashes
-            .extend([referenced.content_hash.clone(), gone.clone()]);
-        let candidates = [candidate(&referenced, 0), candidate(&unreferenced, 0)];
-
-        let report = super::dry_run_mark_and_sweep_with_remote(
-            &cas,
-            candidates.clone(),
-            [roots.clone()],
-            100,
-            10,
-            |_| Ok(None),
-        )
-        .expect("a reference no source holds any more must not stop marking");
-        assert_eq!(
-            report.marked_hashes,
-            sorted([referenced.content_hash.clone(), gone.clone()])
-        );
-        assert_eq!(
-            report.potential_delete_hashes,
-            vec![unreferenced.content_hash.clone()]
-        );
-
-        let scan = PayloadCas::new(directory.path())
-            .expect("open payload CAS")
-            .into_read_scan();
-        let marks = super::mark_asset_roots_with_remote_scan(&scan, [roots], |_| Ok(None))
-            .expect("a reference no source holds any more must not stop a scanned mark pass");
-        let scanned = super::sweep_asset_candidates_with_remote_scan(
-            &scan,
-            candidates,
-            &marks,
-            100,
-            10,
-            |_| Ok(None),
-        )
-        .unwrap();
-        assert_eq!(scanned.marked_hashes, report.marked_hashes);
-        assert_eq!(
-            scanned.potential_delete_hashes,
-            vec![unreferenced.content_hash]
-        );
     }
 
     fn candidate(

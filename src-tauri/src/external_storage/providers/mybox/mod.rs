@@ -1293,41 +1293,6 @@ impl Provider for Mybox {
         })
     }
 
-    fn lookup_metadata<'a>(
-        &'a self,
-        repository: &'a RepositoryHandle,
-        intent: &'a ObjectIntent,
-        known: Option<&'a RemoteLocator>,
-        cancel: &'a Cancellation,
-    ) -> ProviderFuture<'a, Option<ObjectReceipt>> {
-        Box::pin(async move {
-            cancel.check()?;
-            let context = self.context(repository)?;
-            intent.validate(repository)?;
-            let (folder, name) = match known {
-                Some(locator) => {
-                    locator.validate_for(repository)?;
-                    let (folder, name) = config::parse_locator(locator)?;
-                    (folder, name.to_owned())
-                }
-                None => (
-                    config::role_folder(intent.role),
-                    config::object_name(&intent.object_id)?,
-                ),
-            };
-            let Some(entry) = self.lookup(context, folder, &name, cancel).await? else {
-                return Ok(None);
-            };
-            Ok(Some(ObjectReceipt {
-                locator: config::locator(&context.identity, folder, &name),
-                byte_length: entry.size,
-                version: None,
-                checksum: None,
-                complete: true,
-            }))
-        })
-    }
-
     fn head_locator(&self, repository: &RepositoryHandle) -> Result<RemoteLocator> {
         let context = self.context(repository)?;
         Ok(config::locator(&context.identity, config::HEADS, HEAD_NAME))

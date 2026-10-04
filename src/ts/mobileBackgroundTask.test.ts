@@ -117,7 +117,7 @@ describe('mobile background task lifetime', () => {
         const native = {
             startJob: vi.fn(async () => job), getJob: vi.fn(() => terminal.promise), cancelJob: vi.fn(async () => ({ ...job, state: 'cancelled' as const })),
         }
-        const controller = createExternalStorageController(native, { supported: true, selection: { kind: 'none', selectionEpoch: '0', paused: false }, connections: [], jobs: [] } as ExternalStorageState, { wait: async () => {} })
+        const controller = createExternalStorageController(native, { supported: true, selection: { kind: 'none', selectionEpoch: '0', paused: false, decisionRequired: false }, connections: [], jobs: [] } as ExternalStorageState, { wait: async () => {} })
         const result = runWithMobileBackgroundTask('backup', backgroundTask => controller.request({ connectionId: 'connection', kind: 'backup', targetRevision: '1', reason: 'manual', session: { kind: 'foreground', id: 'session' }, backgroundTask }))
         await vi.waitFor(() => expect(bridge.progress).toHaveBeenCalledWith('task-1', 50))
         expect(bridge.begin).toHaveBeenCalledOnce()

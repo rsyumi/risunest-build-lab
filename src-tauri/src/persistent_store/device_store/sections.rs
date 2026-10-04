@@ -179,8 +179,58 @@ pub(crate) struct SectionApplyOutcome {
     pub kept: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SectionCursor {
+    pub applied_generation: Sequence,
+    pub applied_gc_floor: Sequence,
+    pub observed_max_write_clock: Sequence,
+}
+
+impl SectionCursor {
+    /// Whether this lineage has carried the section to this device. A cursor
+    /// reset to no commit at all says the markers this device holds came from
+    /// this lineage while nothing it holds has reached the remote state.
+    pub(crate) fn joined(&self) -> bool {
+        self.applied_generation > Sequence::from(0u64)
+    }
+}
+
 fn setting_is_local(key: &str) -> bool {
     LOCAL_SETTING_KEYS.contains(&key)
+}
+
+/// Keys whose current value no remote has been told about. A restore uses them
+/// to tell its own interrupted attempt apart from a value some remote already
+/// carries, and publication uses them to decide whether it owes one at all. A
+/// row reissued above the version it was published at counts as unpublished.
+fn unpublished_keys(
+    db: &Connection,
+    section: Section,
+) -> StoreResult<BTreeSet<(String, String, String)>> {
+    let mut keys = BTreeSet::new();
+    match section {
+        Section::Hypa => {
+            let mut statement = db.prepare(
+                "SELECT cache_key FROM hypa_embeddings
+                    WHERE published_clock IS NULL OR published_clock<>write_clock",
+            )?;
+            let mut query = statement.query([])?;
+            while let Some(row) = query.next()? {
+                keys.insert((row.get(0)?, String::new(), String::new()));
+            }
+        }
+        Section::LocalPlugins => {
+            let mut statement = db.prepare(
+                "SELECT owner,space,key FROM plugin_device_storage
+                    WHERE published_clock IS NULL OR published_clock<>write_clock",
+            )?;
+            let mut query = statement.query([])?;
+            while let Some(row) = query.next()? {
+                keys.insert((row.get(0)?, row.get(1)?, row.get(2)?));
+            }
+        }
+    }
+    Ok(keys)
 }
 
 /// The stored marker pair. The schema keeps the two columns set or unset
@@ -990,6 +1040,44 @@ impl PreparedSectionRows {
     }
 }
 
+fn read_cursor(db: &Connection, connection_id: &str, library_lineage: &str, section: Section) -> StoreResult<Option<SectionCursor>> {
+    let stored: Option<(String, String, String)> = db.query_row(
+        "SELECT applied_generation,applied_gc_floor,observed_max_write_clock FROM device_remote_cursors
+            WHERE connection_id=?1 AND library_lineage=?2 AND section=?3",
+        params![connection_id, library_lineage, section.as_str()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional()?;
+    stored.map(|(generation, floor, observed)| Ok(SectionCursor {
+        applied_generation: sequence(&generation)?, applied_gc_floor: sequence(&floor)?,
+        observed_max_write_clock: sequence(&observed)?,
+    })).transpose()
+}
+
+fn record_cursor(tx: &Transaction<'_>, connection_id: &str, library_lineage: &str, section: Section, cursor: &SectionCursor) -> StoreResult<()> {
+    if connection_id.is_empty() || library_lineage.is_empty() {
+        return Err(invalid("Section cursor identity is missing"));
+    }
+    let current = read_cursor(tx, connection_id, library_lineage, section)?;
+    let merged = match current {
+        Some(current) => SectionCursor {
+            applied_generation: cursor.applied_generation.clone().max(current.applied_generation),
+            applied_gc_floor: cursor.applied_gc_floor.clone().max(current.applied_gc_floor),
+            observed_max_write_clock: cursor.observed_max_write_clock.clone().max(current.observed_max_write_clock),
+        },
+        None => cursor.clone(),
+    };
+    tx.execute(
+        "INSERT INTO device_remote_cursors(connection_id,library_lineage,section,
+            applied_generation,applied_gc_floor,observed_max_write_clock) VALUES (?1,?2,?3,?4,?5,?6)
+            ON CONFLICT(connection_id,library_lineage,section) DO UPDATE SET
+                applied_generation=excluded.applied_generation,applied_gc_floor=excluded.applied_gc_floor,
+                observed_max_write_clock=excluded.observed_max_write_clock",
+        params![connection_id, library_lineage, section.as_str(), merged.applied_generation.as_str(),
+            merged.applied_gc_floor.as_str(), merged.observed_max_write_clock.as_str()],
+    )?;
+    Ok(())
+}
+
 fn mark_row_version(tx: &Connection, section: Section, key: &SectionKey, version: &SectionEntryVersion, published: bool) -> StoreResult<()> {
     let clock = published.then_some(version.write_clock.as_str());
     match section {
@@ -1393,6 +1481,13 @@ impl DeviceStore {
                 super::begin_mutation_remote(&transaction)?;
                 super::super::lww::activate_plugin_local_units(&transaction)?;
                 super::finish_mutation_remote(&transaction)?;
+                // Keep lineage identity for removal markers, but treat the
+                // section as not yet exchanged after a pause.
+                transaction.execute(
+                    "UPDATE device_remote_cursors SET applied_generation='0',applied_gc_floor='0'
+                        WHERE section=?1",
+                    [section.as_str()],
+                )?;
             }
         }
         transaction.commit()?;
@@ -1465,6 +1560,40 @@ impl DeviceStore {
         Ok(rows)
     }
 
+    /// Whether a participating section holds a write this remote lineage has
+    /// not seen. A device value can change without the library changing, so
+    /// this is what makes a section-only edit reach the remote at all.
+    pub(crate) fn sections_await_publication(
+        &self,
+        connection_id: &str,
+        library_lineage: &str,
+    ) -> StoreResult<bool> {
+        for section in [Section::Hypa, Section::LocalPlugins] {
+            let state = self.section_state(section)?;
+            if !state.participating {
+                continue;
+            }
+            match self
+                .read_section_cursor(connection_id, library_lineage, section)?
+                .filter(SectionCursor::joined)
+            {
+                Some(_) => {
+                    if !unpublished_keys(&self.connection, section)?.is_empty() {
+                        return Ok(true);
+                    }
+                }
+                // A lineage this device never exchanged with holds none of its
+                // rows, however far the local counter has already travelled.
+                None => {
+                    if state.max_write_clock > Sequence::from(0u64) {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Merges a received section. The higher `(write_clock, writer_id)` wins,
     /// the same version with different content is refused, and a received row
     /// keeps the version it arrived with instead of becoming a local write.
@@ -1492,6 +1621,32 @@ impl DeviceStore {
         transaction.commit()?;
         Ok(outcome)
     }
+
+    pub(crate) fn read_section_cursor(
+        &self,
+        connection_id: &str,
+        library_lineage: &str,
+        section: Section,
+    ) -> StoreResult<Option<SectionCursor>> {
+        read_cursor(&self.connection, connection_id, library_lineage, section)
+    }
+
+    /// The applied point of one section on one remote lineage. A cursor never
+    /// moves backwards, so a replayed apply cannot lose ground.
+    pub(crate) fn write_section_cursor(
+        &mut self,
+        connection_id: &str,
+        library_lineage: &str,
+        section: Section,
+        cursor: &SectionCursor,
+    ) -> StoreResult<()> {
+        let tx = self.transaction()?;
+        record_cursor(&tx, connection_id, library_lineage, section, cursor)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+
 }
 
 /// `published` is false for a restored value: it is a new local write that no

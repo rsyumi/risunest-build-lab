@@ -1973,35 +1973,6 @@ fn forbidden_with_large_server_clock_difference_reports_clock_skew() {
 }
 
 #[test]
-fn object_metadata_heads_the_key_and_reports_the_service_checksum() {
-    runtime().block_on(async {
-        let test = dependencies();
-        let spool = Spool::of(64);
-        let cancel = Cancellation::default();
-        let checksum = base64_of(&spool.sha256);
-        let server = WireServer::start(vec![
-            one_descriptor(),
-            reply(200, &[("ETag", "\"pack-tag\""), ("x-amz-checksum-sha256", &checksum)], vec![0; 64]),
-            reply(404, &[], Vec::new()),
-        ]);
-        let (provider, handle) = opened(&test, "aws", &server).await;
-        let intent = spool.intent(&handle, "pack-1", ObjectRole::Pack);
-        let found = provider.lookup_metadata(&handle, &intent, None, &cancel).await.unwrap().unwrap();
-        assert_eq!(found.locator.object, "packs/pack-1");
-        assert_eq!(found.byte_length, 64);
-        assert_eq!(found.version, Some(VersionToken("\"pack-tag\"".into())));
-        let reported = found.checksum.clone().unwrap();
-        assert!(reported.provider_verified && reported.value == spool.sha256);
-        assert!(provider.lookup_metadata(&handle, &intent, Some(&found.locator), &cancel).await.unwrap().is_none());
-        let records = server.requests.lock().unwrap();
-        assert_eq!(records.len(), 3);
-        for record in &records[1..] {
-            assert!(line(record).starts_with("HEAD ") && line(record).contains(&format!("/{PREFIX}/packs/pack-1 ")));
-        }
-    });
-}
-
-#[test]
 fn ambiguous_lease_copies_are_not_filtered_as_foreign() {
     runtime().block_on(async {
         let test = dependencies();

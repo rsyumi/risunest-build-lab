@@ -53,6 +53,7 @@ export const unsupportedExternalStorageState: ExternalStorageState = {
         kind: 'none',
         selectionEpoch: '0',
         paused: false,
+        decisionRequired: false,
     },
     connections: [],
     jobs: [],
@@ -194,10 +195,6 @@ export class ExternalStorageBridge {
         return this.native('external_storage_cancel_job', { jobId })
     }
 
-    stopRestore(jobId: string): Promise<ExternalJobSummary> {
-        return this.native('external_storage_stop_restore', { jobId })
-    }
-
     getJob(jobId: string): Promise<ExternalJobSummary> {
         return this.native('external_storage_get_job', { jobId })
     }
@@ -210,7 +207,7 @@ export class ExternalStorageBridge {
 
 
     setExecutionSession(request: {
-        kind: 'foreground' | 'hidden'
+        kind: 'foreground' | 'hidden' | 'exitDrain'
         id: string
     }): Promise<void> {
         return this.native('external_storage_set_execution_session', {

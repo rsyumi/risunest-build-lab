@@ -1,6 +1,5 @@
 import { expect, it, vi } from 'vitest'
-const previousFiles = vi.hoisted(() => ({ confirm: vi.fn(), download: vi.fn() }))
-vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: vi.fn(async () => true), confirmPreviousStorageFiles: previousFiles.confirm, downloadPreviousStorageFiles: previousFiles.download }))
+vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: vi.fn(async () => true) }))
 vi.mock('./bindingLocalData', () => ({ hasLocalBindingData: vi.fn(async () => true), hasLocalSharedBindingData: vi.fn(async () => true) }))
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { IndexedDbPersistentDataStore } from '../indexedDbPersistentDataStore'
@@ -48,34 +47,6 @@ it.each(['server', 'external'] as const)('composes persisted %s startup ownershi
         expect(nextSignal.aborted).toBe(true); expect(next.fenceOldJobs).toHaveBeenCalledOnce()
         expect(state.target).toEqual({ kind: 'none' })
     } finally { installed.dispose(); releaseOld(); releaseNext() }
-})
-
-it('asks about files held only by the previous storage before switching to an empty target', async () => {
-    let state: SyncBindingState = { target: { kind: 'none' }, targetAuthority: '0', selectionEpoch: 'none', libraryId: null, progress: null }
-    const incoming = { kind: 'external' as const, connectionId: 'incoming' }
-    const adapter = {
-        inspectTarget: vi.fn(async () => ({ inspectionId: 'inspection', targetId: 'target', libraryId: 'library', empty: true, previouslyBoundLibrary: false })),
-        pullAvailableState: vi.fn(), replaceFromTarget: vi.fn(), publishInitialSharedState: vi.fn(async () => {}),
-        resumeBinding: vi.fn(async () => {}), fenceOldJobs: vi.fn(async () => {}),
-    }
-    const release = registerSyncBindingTransport(incoming, adapter)
-    const switchTarget = vi.fn<SyncBindingDependencies['native']['switchTarget']>(async (_expected, target, inspection) => {
-        state = { ...state, target, libraryId: inspection?.libraryId ?? null, targetAuthority: '1' }; return state
-    })
-    previousFiles.confirm.mockResolvedValue('download-then-connect')
-    previousFiles.download.mockResolvedValue(undefined)
-    const installed = installSyncBindingFlow({
-        native: { state: async () => structuredClone(state), assertAuthority: async () => {}, switchTarget },
-        plugins: { fenceExecution: async () => {}, invalidateCaches: async () => {}, restart: async () => {} },
-        withPausedWrites: operation => operation(), beginActivatedLibraryGuard: () => ({ complete() {}, async abortUnchanged() {} }),
-        refreshActivatedLibrary: async () => {}, recovery: { setLifecycle() {}, registerFailure() {} },
-    })
-    try {
-        expect(await bindSyncTarget(incoming)).toMatchObject({ kind: 'bound' })
-        expect(previousFiles.confirm).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ target: incoming }))
-        expect(previousFiles.download).toHaveBeenCalledOnce()
-        expect(previousFiles.download.mock.invocationCallOrder[0]).toBeLessThan(switchTarget.mock.invocationCallOrder[0])
-    } finally { installed.dispose(); release() }
 })
 
 async function harness() {
@@ -246,7 +217,7 @@ it.each(['request', 'authority'])('rejects wrong initialized switch %s proof bef
     h.dependencies.native.switchTarget = async (...args) => { await switchTarget(...args); throw Error('response lost') }
     await expect(h.flow.bind(h.target, h.transport)).rejects.toThrow('response lost')
     if (change === 'authority') h.changeAuthority()
-    else h.dependencies.native.switchTarget = (previous, target, inspection, _requestId, initialPublication) => switchTarget(previous, target, inspection, 'different-request', initialPublication)
+    else h.dependencies.native.switchTarget = (previous, target, inspection) => switchTarget(previous, target, inspection, 'different-request')
     expect((await h.runtime.retryCommittedWorkingSetRefresh())?.projection).toBe('refresh-required')
     expect(h.events).not.toContain('projection')
     expect(h.transport.publishInitialSharedState).not.toHaveBeenCalled()
@@ -298,7 +269,7 @@ it.each(['request', 'target'])('rejects changed %s in an uncertain switch replay
     h.dependencies.native.switchTarget = async (...args) => { await switchTarget(...args); throw Error('response lost') }
     await expect(h.flow.bind(h.target, h.transport)).rejects.toThrow('response lost')
     h.dependencies.native.switchTarget = async (...args) => {
-        if (change === 'request') return switchTarget(args[0], args[1], args[2], 'changed-request', args[4])
+        if (change === 'request') return switchTarget(args[0], args[1], args[2], 'changed-request')
         return { ...await switchTarget(...args), target: { kind: 'external', connectionId: 'unrelated' } }
     }
     expect((await h.runtime.retryCommittedWorkingSetRefresh())?.projection).toBe('refresh-required')

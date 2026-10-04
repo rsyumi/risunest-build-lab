@@ -4,7 +4,6 @@ import type { SyncBindingState } from './bindingFlow'
 
 const f = vi.hoisted(() => ({
     invoke: vi.fn(), offline: true, repairError: undefined as unknown, activationError: undefined as unknown, fenceError: undefined as unknown,
-    configured: true, pending: null as unknown, inspectError: undefined as unknown,
     binding: undefined as unknown as SyncBindingState,
     runtime: { revision: 0, getStorageAuthorityEpoch: () => 'storage', subscribeActiveConversationViewportSource: () => () => {}, setActivatedLibraryRecoveryLifecycle() {}, markCommittedWorkingSetRefreshRequired() {} },
 }))
@@ -13,7 +12,7 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: async () => () => {} }))
 vi.mock('src/ts/platform', () => ({ isTauri: true }))
 vi.mock('src/ts/stores.svelte', () => ({ selectedCharID: { subscribe: (run: (value: number) => void) => { run(-1); return () => {} } } }))
 vi.mock('../database.svelte', () => ({ getDatabase: () => ({ characters: [] }) }))
-vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: async () => true, confirmPreviousStorageFiles: async () => 'connect', downloadPreviousStorageFiles: async () => {} }))
+vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: async () => true }))
 vi.mock('./bindingLocalData', () => ({ hasLocalBindingData: async () => false, hasLocalSharedBindingData: async () => false }))
 vi.mock('../persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: () => f.runtime,
@@ -30,7 +29,7 @@ vi.mock('@lucide/svelte', () => ({ LoaderCircleIcon: () => {} }))
 vi.mock('./serverSyncRegistrationInbox', () => ({ serverRegistrationInbox: { changed: { subscribe: () => () => {} }, releaseConsumed() {}, take: () => undefined } }))
 vi.mock('./serverSyncQr', () => ({ canScanServerRegistration: false, createServerQrScanner: () => ({ cancel() {} }) }))
 vi.mock('./serverAssetResidency', () => ({ getAssetResidencyStatus: async () => undefined, setAssetResidencyPolicy: vi.fn(), evictLocalAssets: vi.fn(), cancelAssetResidencyOperation: vi.fn() }))
-vi.mock('src/lang', () => ({ language: { loading: 'Loading', lwwSync: { concurrentEditNotice: 'Concurrent edits', clockBlocked: 'Clock blocked', writerCollision: 'Writer blocked', bindingIncomplete: 'Binding incomplete' }, risuNest: { serverSync: { title: 'Sync', description: 'Sync library', connect: 'Connect and sync', syncNow: 'Sync now', disconnect: 'Disconnect', disconnected: 'Stopped', ready: 'Ready', errorHelp: 'Connection failed', management: {}, residency: {} } } } }))
+vi.mock('src/lang', () => ({ language: { loading: 'Loading', lwwSync: { concurrentEditNotice: 'Concurrent edits', clockBlocked: 'Clock blocked', writerCollision: 'Writer blocked' }, risuNest: { serverSync: { title: 'Sync', description: 'Sync library', syncNow: 'Sync now', disconnect: 'Disconnect', disconnected: 'Stopped', ready: 'Ready', errorHelp: 'Connection failed', management: {}, residency: {} } } } }))
 
 let production: typeof import('./serverSyncProduction')
 let ui: typeof import('svelte')
@@ -40,20 +39,13 @@ const commands = () => f.invoke.mock.calls.map(([command]) => command)
 const button = (text: string) => [...document.querySelectorAll('button')].find(value => value.textContent?.trim() === text)
 beforeEach(async () => {
     vi.resetModules(); f.invoke.mockReset(); f.offline = true; f.repairError = undefined; f.activationError = undefined; f.fenceError = undefined
-    f.configured = true; f.pending = null; f.inspectError = undefined
     f.binding = { target: { kind: 'server', connectionId: 'server' }, targetAuthority: '4', selectionEpoch: 'persisted', libraryId: 'library', progress: null }
     Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
     f.invoke.mockImplementation(async (command, args) => {
         if (command === 'pds_lww_binding_state') return structuredClone(f.binding)
-        if (command === 'server_sync_status') return { configured: f.configured, writerId: 'writer', bindingAuthority: f.binding.targetAuthority, libraryId: 'library', deviceId: 'device' }
+        if (command === 'server_sync_status') return { configured: true, writerId: 'writer', bindingAuthority: f.binding.targetAuthority, libraryId: 'library', deviceId: 'device' }
         if (command === 'server_sync_lww_activate' && f.activationError) throw f.activationError
         if (command === 'server_sync_lww_activate' && f.offline) throw { code: 'server-unreachable', status: 503, retryable: true }
-        if (command === 'server_sync_lww_activate') f.configured = true
-        if (command === 'server_sync_lww_pending_binding') return structuredClone(f.pending)
-        if (command === 'server_sync_lww_inspect') {
-            if (f.inspectError) throw f.inspectError
-            return { inspectionId: 'inspection', targetId: 'target', libraryId: 'library', empty: true, previouslyBoundLibrary: false, registrationChanged: false, serverRestored: false }
-        }
         if (command === 'server_sync_lww_retry' && f.repairError) throw f.repairError
         if (command === 'server_sync_lww_fence' && f.fenceError) throw f.fenceError
         if (command === 'pds_lww_switch_target') {
@@ -170,52 +162,5 @@ describe('persisted server offline startup', () => {
         expect(commands()).not.toContain('server_sync_notify_start')
         expect(commands()).not.toContain('pds_lww_switch_target')
         expect(f.binding).toEqual(before)
-    })
-})
-
-describe('first binding stopped after its target switch', () => {
-    const pending = (serverEmpty: boolean) => ({ endpoint: 'https://synthetic.invalid', libraryId: 'library', epoch: 'epoch', serverEmpty })
-    beforeEach(() => { f.configured = false; f.offline = false })
-    it('finishes on its own through the binding flow while the server is still empty', async () => {
-        f.pending = pending(true)
-        await production.installServerSyncProduction()
-        expect(commands()).toContain('server_sync_lww_inspect'); expect(commands()).toContain('server_sync_lww_activate')
-        expect(commands()).not.toContain('server_sync_configure'); expect(commands()).not.toContain('pds_lww_switch_target')
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { configured: true, bound: true }, bindingIncomplete: false })
-        await settings()
-        expect(document.body.textContent).not.toContain('Binding incomplete')
-    })
-    it('waits for Connect when the server may no longer be the empty one it inspected, and Connect finishes it', async () => {
-        f.pending = pending(false)
-        await production.installServerSyncProduction()
-        expect(commands()).toContain('server_sync_lww_pending_binding')
-        expect(commands()).not.toContain('server_sync_lww_inspect'); expect(commands()).not.toContain('server_sync_lww_activate')
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { configured: false }, bindingIncomplete: true })
-        await settings()
-        expect(document.body.textContent).toContain('Binding incomplete')
-        expect(button('Sync now')).toBeUndefined()
-        button('Connect and sync')!.click()
-        await vi.waitFor(() => expect(document.body.textContent).not.toContain('Binding incomplete'))
-        expect(commands()).toContain('server_sync_lww_inspect'); expect(commands()).toContain('server_sync_lww_activate')
-        expect(commands()).not.toContain('server_sync_configure'); expect(commands()).not.toContain('pds_lww_switch_target')
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { configured: true }, bindingIncomplete: false })
-        expect(document.body.textContent).not.toContain('Binding incomplete')
-    })
-    it('keeps startup going and waits for Connect when finishing on its own fails', async () => {
-        f.pending = pending(true); f.inspectError = { code: 'server-unreachable', status: 503, retryable: true }
-        await expect(production.installServerSyncProduction()).resolves.toBeUndefined()
-        expect(commands()).not.toContain('server_sync_lww_activate')
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { configured: false }, bindingIncomplete: true })
-    })
-    it('changes nothing when no first binding stopped', async () => {
-        await production.installServerSyncProduction()
-        expect(commands()).toContain('server_sync_lww_pending_binding')
-        expect(commands()).not.toContain('server_sync_lww_inspect')
-        expect(production.getServerSyncController().snapshot().bindingIncomplete).toBe(false)
-    })
-    it('never looks for a stopped first binding once the server is configured', async () => {
-        f.configured = true
-        await production.installServerSyncProduction()
-        expect(commands()).not.toContain('server_sync_lww_pending_binding')
     })
 })

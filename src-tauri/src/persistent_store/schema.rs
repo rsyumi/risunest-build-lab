@@ -11,32 +11,13 @@ CREATE TABLE plugin_gc_revision (
 "#;
 
 fn plugin_gc_revision_trigger_sql(event: &str) -> String {
-    // Purging a retired library only removes roots, so cached plugin roots stay a superset.
-    let condition = if event == "DELETE" {
-        "\n        WHEN NOT EXISTS (SELECT 1 FROM generations WHERE id = OLD.generation AND state = 'retired')"
-    } else {
-        ""
-    };
-    format!("CREATE TRIGGER plugin_gc_revision_{} AFTER {event} ON plugin_storage{condition}
+    format!("CREATE TRIGGER plugin_gc_revision_{} AFTER {event} ON plugin_storage
         BEGIN
             SELECT CASE WHEN (SELECT COUNT(*) FROM plugin_gc_revision WHERE singleton = 1) != 1
                 THEN RAISE(ABORT, 'plugin GC revision is unavailable') END;
             UPDATE plugin_gc_revision SET revision = revision + 1 WHERE singleton = 1;
         END", event.to_ascii_lowercase())
 }
-
-// Every library generation has one state. Activation flips states instead of moving rows,
-// and a retired generation keeps its rows until the background purge removes them.
-const GENERATION_STATE_TABLE_SQL: &str = r#"
-CREATE TABLE generations (
-    id TEXT PRIMARY KEY CHECK (length(id) > 0),
-    state TEXT NOT NULL CHECK (state IN ('staging', 'active', 'retired'))
-)
-"#;
-
-const GENERATION_ACTIVE_INDEX_SQL: &str = r#"
-CREATE UNIQUE INDEX generations_active ON generations (state) WHERE state = 'active'
-"#;
 
 const PLUGIN_CLAIM_ELIGIBILITY_TABLE_SQL: &str = r#"
 CREATE TABLE plugin_claim_eligibility (
@@ -271,8 +252,6 @@ fn create_schema(connection: &mut Connection) -> StoreResult<()> {
     transaction.execute_batch(ASSET_OBJECT_DELETION_INDEX_SQL)?;
     transaction.execute_batch(ASSET_ALIAS_REPLACEMENT_CANDIDATE_TABLE_SQL)?;
     transaction.execute_batch(ASSET_GC_MAINTENANCE_STATE_TABLE_SQL)?;
-    transaction.execute_batch(GENERATION_STATE_TABLE_SQL)?;
-    transaction.execute_batch(GENERATION_ACTIVE_INDEX_SQL)?;
     transaction.execute_batch(PLUGIN_GC_REVISION_TABLE_SQL)?;
     transaction.execute("INSERT INTO plugin_gc_revision (singleton, revision) VALUES (1, 0)", [])?;
     for event in ["INSERT", "UPDATE", "DELETE"] {
@@ -308,10 +287,6 @@ fn validate_schema(connection: &Connection) -> StoreResult<()> {
         return Err(StoreError::Validation { message: "plugin GC revision row is invalid".to_owned() });
     }
     super::lww::validate_schema(connection)?;
-    validate_object_sql(connection, "table", "generations", GENERATION_STATE_TABLE_SQL,
-        "generation state table definition is invalid")?;
-    validate_object_sql(connection, "index", "generations_active", GENERATION_ACTIVE_INDEX_SQL,
-        "generation state index definition is invalid")?;
     validate_object_sql(connection, "table", "plugin_claim_eligibility",
         PLUGIN_CLAIM_ELIGIBILITY_TABLE_SQL, "plugin claim eligibility table definition is invalid")?;
     super::server_sync_journal::validate_schema(connection)?;

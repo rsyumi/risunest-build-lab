@@ -6,16 +6,14 @@ import { createMutationGatedPersistentDataStore } from '../mutationGatedPersiste
 
 function setup(options: Partial<InspectedSyncTarget> & { nonDefault?: boolean; confirm?: boolean } = {}) {
     const events: string[] = []
-    const initialPublications: boolean[] = []
     let state: SyncBindingState = { target: { kind: 'none' }, targetAuthority: '0', selectionEpoch: 'old', libraryId: null, progress: null }
     const record = (name: string) => async () => { events.push(name) }
     const deps: SyncBindingDependencies = {
         native: {
             state: async () => structuredClone(state),
             assertAuthority: async expected => { if (expected.targetAuthority !== state.targetAuthority) throw Error('stale authority') },
-            switchTarget: async (expected, target, inspection, _requestId, initialPublication) => {
+            switchTarget: async (expected, target, inspection) => {
                 if (expected.targetAuthority !== state.targetAuthority) throw Error('stale authority')
-                initialPublications.push(initialPublication)
                 events.push('switch'); state = { ...state, target, libraryId: inspection?.libraryId ?? state.libraryId, targetAuthority: String(Number(state.targetAuthority) + 1) }; return structuredClone(state)
             },
         },
@@ -33,7 +31,7 @@ function setup(options: Partial<InspectedSyncTarget> & { nonDefault?: boolean; c
         pullAvailableState: async () => { events.push('stage'); return { targetId: 'target', libraryId: 'library', stagingId: 'validated', receiveId: 'receive' } },
         replaceFromTarget: record('activate-database'), publishInitialSharedState: record('publish'), resumeBinding: record('resume'), fenceOldJobs: record('jobs-fence'),
     }
-    return { events, initialPublications, deps, transport, flow: createSyncBindingFlow(deps), changeAuthority: () => { state.targetAuthority = 'changed' }, setState: (next: SyncBindingState) => { state = next } }
+    return { events, deps, transport, flow: createSyncBindingFlow(deps), changeAuthority: () => { state.targetAuthority = 'changed' }, setState: (next: SyncBindingState) => { state = next } }
 }
 const target = { kind: 'server', connectionId: 'connection' } as const
 
@@ -408,42 +406,6 @@ describe('transport-neutral first binding', () => {
         await s.flow.bind(target, s.transport)
         expect(s.events).not.toContain('publish'); expect(s.events).not.toContain('plugin-fence')
         expect(s.events.filter(event => event === 'resume')).toHaveLength(1)
-        expect(s.initialPublications).toEqual([false])
-    })
-    it('decides the initial publication while writes are paused and carries it with the switch', async () => {
-        const s = setup({ empty: true })
-        let shared = true
-        s.deps.hasNonDefaultSharedData = async () => { s.events.push('shared-check'); return shared }
-        s.deps.refreshActivatedLibrary = async () => { s.events.push('refresh'); shared = false }
-        await s.flow.bind(target, s.transport)
-        expect(s.events).toEqual(['inspect', 'jobs-fence', 'pause-flush', 'shared-check', 'gate', 'switch', 'refresh', 'publish', 'resume'])
-        expect(s.initialPublications).toEqual([true])
-    })
-    it.each([
-        { name: 'a replacement', options: { empty: false } },
-        { name: 'a same-library rebind', options: { empty: false, previouslyBoundLibrary: true } },
-    ])('owes no initial publication for $name', async ({ options }) => {
-        const s = setup(options)
-        const check = vi.spyOn(s.deps, 'hasNonDefaultSharedData')
-        await s.flow.bind(target, s.transport)
-        expect(s.initialPublications).toEqual([false])
-        expect(check).not.toHaveBeenCalled()
-        expect(s.events).not.toContain('publish')
-    })
-    it('resumes a binding whose switch already committed without deciding or publishing again', async () => {
-        const s = setup({ empty: true })
-        s.setState({ target, targetAuthority: '5', selectionEpoch: 'switched', libraryId: 'library', progress: null })
-        const check = vi.spyOn(s.deps, 'hasNonDefaultSharedData')
-        await s.flow.bind(target, s.transport)
-        expect(s.events).toEqual(['inspect', 'jobs-fence', 'pause-flush', 'gate', 'resume'])
-        expect(check).not.toHaveBeenCalled()
-        expect(s.initialPublications).toEqual([])
-    })
-    it('unbinding owes no initial publication', async () => {
-        const s = setup({ previouslyBoundLibrary: true })
-        s.setState({ target, targetAuthority: '5', selectionEpoch: 'bound', libraryId: 'library', progress: null })
-        await s.flow.unbind()
-        expect(s.initialPublications).toEqual([false])
     })
     it('same-library recovery resumes without staging or resetting namespaces', async () => {
         const s = setup({ previouslyBoundLibrary: true }); await s.flow.bind(target, s.transport)
@@ -684,67 +646,4 @@ it('drains coordinator-queued plugin mutations before acquiring pause', async ()
     s.deps.plugins.fenceExecution = async () => { await queuedSetter; expect(paused).toBe(false) }
     s.deps.withPausedWrites = async operation => { paused = true; try { return await operation() } finally { paused = false } }
     await s.flow.bind(target,s.transport)
-})
-
-describe('files held only by the previous storage', () => {
-    const next = { kind: 'external', connectionId: 'next' } as const
-    function ask(s: ReturnType<typeof setup>, choice: 'connect' | 'download-then-connect' | 'cancel', download: () => Promise<void> = async () => {}) {
-        const confirm = vi.fn<NonNullable<SyncBindingDependencies['confirmPreviousStorageFiles']>>(async () => { s.events.push('previous-files'); return choice })
-        s.deps.confirmPreviousStorageFiles = confirm
-        s.deps.downloadPreviousStorageFiles = async () => { s.events.push('download'); await download() }
-        return confirm
-    }
-    async function boundElsewhere() {
-        const s = setup({ empty: true }); await s.flow.bind(target, s.transport); s.events.length = 0
-        return s
-    }
-    it('asks once before the switch of a first binding to an empty target and connects as usual', async () => {
-        const s = setup({ empty: true })
-        const confirm = ask(s, 'connect')
-        expect(await s.flow.bind(target, s.transport)).toMatchObject({ kind: 'bound', action: 'initialized' })
-        expect(s.events).toEqual(['inspect', 'previous-files', 'jobs-fence', 'pause-flush', 'gate', 'switch', 'refresh', 'publish', 'resume'])
-        expect(confirm).toHaveBeenCalledOnce()
-        expect(confirm.mock.calls[0][0]).toMatchObject({ target, state: { targetAuthority: '0' } })
-    })
-    it('stays unconnected when the dialog is cancelled', async () => {
-        const s = await boundElsewhere()
-        ask(s, 'cancel')
-        expect(await s.flow.bind(next, s.transport)).toEqual({ kind: 'cancelled' })
-        expect(s.events).toEqual(['inspect', 'previous-files'])
-        expect(await s.deps.native.state()).toMatchObject({ target, targetAuthority: '1' })
-    })
-    it('downloads the files after fencing the previous binding and before the switch', async () => {
-        const s = await boundElsewhere()
-        ask(s, 'download-then-connect')
-        expect(await s.flow.bind(next, s.transport)).toMatchObject({ kind: 'bound', action: 'initialized' })
-        expect(s.events).toEqual(['inspect', 'previous-files', 'jobs-fence', 'download', 'pause-flush', 'gate', 'switch', 'refresh', 'publish', 'resume'])
-    })
-    it('does not switch and resumes the previous binding when the download fails', async () => {
-        const s = await boundElsewhere()
-        const cause = { code: 'required-asset-unavailable' }
-        ask(s, 'download-then-connect', async () => { throw cause })
-        const failure = await s.flow.bind(next, s.transport).catch(error => error)
-        expect(failure).toMatchObject({ code: 'previous-files-download-failed', cause })
-        expect(s.events).toEqual(['inspect', 'previous-files', 'jobs-fence', 'download', 'resume'])
-        expect(await s.deps.native.state()).toMatchObject({ target, targetAuthority: '1' })
-    })
-    it('stays unconnected without an error when the download is cancelled', async () => {
-        const s = await boundElsewhere()
-        ask(s, 'download-then-connect', async () => { throw { code: 'cancelled' } })
-        expect(await s.flow.bind(next, s.transport)).toEqual({ kind: 'cancelled' })
-        expect(s.events).toEqual(['inspect', 'previous-files', 'jobs-fence', 'download', 'resume'])
-        expect(await s.deps.native.state()).toMatchObject({ target, targetAuthority: '1' })
-    })
-    it.each([
-        { name: 'a replacement from a non-empty target', options: { empty: false }, prepare: () => {} },
-        { name: 'a rebind to the library this device was bound to', options: { empty: true, previouslyBoundLibrary: true }, prepare: () => {} },
-        { name: 'a binding resumed after its switch', options: { empty: true }, prepare: (s: ReturnType<typeof setup>) => s.setState({ target, targetAuthority: '9', selectionEpoch: 'same', libraryId: 'library', progress: null }) },
-    ])('does not ask for $name', async ({ options, prepare }) => {
-        const s = setup(options)
-        prepare(s)
-        const confirm = ask(s, 'cancel')
-        expect(await s.flow.bind(target, s.transport)).toMatchObject({ kind: 'bound' })
-        expect(confirm).not.toHaveBeenCalled()
-        expect(s.events).not.toContain('download')
-    })
 })

@@ -1037,7 +1037,6 @@ fn begin_content_cas_session(
         repository_root,
         &job.id(),
         CasJobKind::CardOrModuleContentImport,
-        crate::asset_repository::job_pins::CasJobOwner::content_import(&job.id()),
         created_at_ms,
     )
     .map_err(|error| NativeJobError::new("store-error", error.to_string()))
@@ -1338,7 +1337,7 @@ mod inline_asset_tests {
         let state = super::super::NativeFileJobState::initialize(root.path().join("native-file-jobs"));
         let job = state.registry.create(super::super::JobKind::PrepareContentImport).unwrap();
         let id = job.id();
-        let session = DurableCasJob::begin(root.path(), &id, CasJobKind::CardOrModuleContentImport, crate::asset_repository::job_pins::CasJobOwner::for_test(), 1).unwrap();
+        let session = DurableCasJob::begin(root.path(), &id, CasJobKind::CardOrModuleContentImport, 1).unwrap();
         job.start(JobPhase::ReadingSource).unwrap();
         job.finish_content_job(Ok(PreparedContent {
             format: PreparedContentFormat::PngCard, metadata: serde_json::json!({"chara":"synthetic"}),

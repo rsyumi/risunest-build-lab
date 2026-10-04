@@ -181,64 +181,7 @@ pub(crate) struct PreparedRemoteSnapshot {
 /// Where a downloaded snapshot's record bodies live. The apply attaches to
 /// this same directory beside the staging root.
 fn content_store(staging_root: &Path) -> Result<ContentStore> {
-    #[cfg(test)]
-    CONTENT_STORE_OPENS.lock().unwrap().push(staging_root.to_owned());
     ContentStore::open(&staging_root.join("external-storage")).map_err(transient)
-}
-
-/// Every staging directory a content store was opened for.
-#[cfg(test)]
-pub(super) static CONTENT_STORE_OPENS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
-
-/// Whether staging has to survive a restart. A restore resumes from its
-/// staging directory; scratch staging is thrown away with the work that made
-/// it, so its writes skip the syncs and its records the content store.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Durability {
-    Durable,
-    Scratch,
-}
-
-/// Where a placement puts records. Durable staging opens its content store up
-/// front; scratch staging opens one only when a record arrives, since bodies
-/// placed as files never touch it.
-struct Placement {
-    root: PathBuf,
-    content: Option<ContentStore>,
-    durability: Durability,
-}
-
-impl Placement {
-    fn open(staging_root: &Path, durability: Durability) -> Result<Self> {
-        let content = match durability {
-            Durability::Durable => Some(content_store(staging_root)?),
-            Durability::Scratch => None,
-        };
-        Ok(Self {
-            root: staging_root.to_path_buf(),
-            content,
-            durability,
-        })
-    }
-
-    fn content(&mut self) -> Result<&mut ContentStore> {
-        let content = match self.content.take() {
-            Some(content) => content,
-            None => content_store(&self.root)?,
-        };
-        Ok(self.content.insert(content))
-    }
-
-    fn commit(&mut self) -> Result<()> {
-        match &mut self.content {
-            Some(content) => content.commit().map_err(transient),
-            None => Ok(()),
-        }
-    }
-
-    fn durable(&self) -> bool {
-        self.durability == Durability::Durable
-    }
 }
 
 #[cfg(test)]
@@ -313,16 +256,6 @@ fn publish_verified(
     expected_length: u64,
     expected_sha256: &str,
 ) -> Result<()> {
-    publish_verified_with(partial, destination, expected_length, expected_sha256, Durability::Durable)
-}
-
-fn publish_verified_with(
-    partial: &Path,
-    destination: &Path,
-    expected_length: u64,
-    expected_sha256: &str,
-    durability: Durability,
-) -> Result<()> {
     if destination.exists() {
         if verify(destination, expected_length, expected_sha256)? {
             fs::remove_file(partial).map_err(transient)?;
@@ -355,9 +288,7 @@ fn publish_verified_with(
         }
         Err(error) => return Err(transient(error)),
     }
-    if durability == Durability::Durable {
-        crate::trust_boundary::sync_directory(destination.parent().unwrap()).map_err(transient)?;
-    }
+    crate::trust_boundary::sync_directory(destination.parent().unwrap()).map_err(transient)?;
     Ok(())
 }
 
@@ -366,7 +297,6 @@ async fn download_ciphertext(
     downloads: &Path,
     provider: &dyn Provider,
     repository: &RepositoryHandle,
-    durability: Durability,
     cancel: &Cancellation,
 ) -> Result<PathBuf> {
     object.stored(repository)?;
@@ -409,12 +339,11 @@ async fn download_ciphertext(
     )? {
         return Err(corrupt("snapshot ciphertext hash differs"));
     }
-    publish_verified_with(
+    publish_verified(
         &partial,
         &destination,
         object.receipt.byte_length,
         &object.ciphertext_sha256,
-        durability,
     )?;
     Ok(destination)
 }
@@ -425,19 +354,6 @@ pub(super) async fn open_object(
     staging_root: &Path,
     provider: &dyn Provider,
     repository: &RepositoryHandle,
-    cancel: &Cancellation,
-) -> Result<PathBuf> {
-    open_object_with(object, root_key, staging_root, provider, repository, Durability::Durable, cancel).await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn open_object_with(
-    object: &RemoteObject,
-    root_key: &[u8; 32],
-    staging_root: &Path,
-    provider: &dyn Provider,
-    repository: &RepositoryHandle,
-    durability: Durability,
     cancel: &Cancellation,
 ) -> Result<PathBuf> {
     let downloads = staging_root.join("downloads");
@@ -455,7 +371,7 @@ async fn open_object_with(
     if destination.exists() {
         fs::remove_file(&destination).map_err(transient)?;
     }
-    let ciphertext = download_ciphertext(object, &downloads, provider, repository, durability, cancel).await?;
+    let ciphertext = download_ciphertext(object, &downloads, provider, repository, cancel).await?;
     let partial = plaintext.join(format!("{}.partial", object.plaintext_sha256));
     if partial.exists() {
         fs::remove_file(&partial).map_err(transient)?;
@@ -483,9 +399,7 @@ async fn open_object_with(
         let header =
             wire::open_envelope(&mut input, &mut output, &key, object_copy.plaintext_length)
                 .map_err(super::packaging::format_error)?;
-        if durability == Durability::Durable {
-            output.sync_all().map_err(transient)?;
-        }
+        output.sync_all().map_err(transient)?;
         drop(output);
         let expected_role = match object_copy.role {
             ObjectRole::Segment => return Err(ProviderError::new(ErrorKind::Unsupported)),
@@ -520,12 +434,11 @@ async fn open_object_with(
     .await
     .map_err(transient)??;
     drop(cpu);
-    publish_verified_with(
+    publish_verified(
         &partial,
         &destination,
         object.plaintext_length,
         &object.plaintext_sha256,
-        durability,
     )?;
     Ok(destination)
 }
@@ -798,18 +711,6 @@ fn resolve_entries(
     library: Option<LocalLibrary>,
     cancel: &Cancellation,
 ) -> Result<Vec<ResolvedEntry>> {
-    resolve_entries_in(entries, staging_root, Some(content), library, cancel)
-}
-
-/// Resolves entries against `content` when there is one. Without it no
-/// record counts as held, so every record is placed again.
-fn resolve_entries_in(
-    entries: Vec<CompleteEntry>,
-    staging_root: &Path,
-    content: Option<&ContentStore>,
-    library: Option<LocalLibrary>,
-    cancel: &Cancellation,
-) -> Result<Vec<ResolvedEntry>> {
     let prove = library.as_ref().is_some_and(|library| library.prove);
     let library = library
         .map(|library| PayloadCas::new(&library.root))
@@ -826,7 +727,7 @@ fn resolve_entries_in(
             // staging file was, by its length and then by its content.
             wire::CatalogEntryKind::Record => {
                 let length = i64::try_from(entry.byte_length).map_err(corrupt)?;
-                let held = content.is_some_and(|content| content.validate(&digest, length, true).is_ok());
+                let held = content.validate(&digest, length, true).is_ok();
                 (None, held.then(|| ObjectSource::Captured(digest.clone())))
             }
             wire::CatalogEntryKind::Object => {
@@ -1036,7 +937,7 @@ fn read_chunk(
 fn place_whole(
     mut input: Option<(&mut fs::File, u64)>,
     item: &Pending,
-    placement: &mut Placement,
+    content: &mut ContentStore,
 ) -> Result<()> {
     let ResolvedEntry {
         entry,
@@ -1061,7 +962,7 @@ fn place_whole(
         if bytes.len() as u64 != entry.byte_length {
             return Err(corrupt("restored entry integrity failed"));
         }
-        return placement.content()?.put(digest, &bytes).map_err(corrupt);
+        return content.put(digest, &bytes).map_err(corrupt);
     };
     let partial = destination.with_extension("partial");
     if partial.exists() {
@@ -1086,9 +987,7 @@ fn place_whole(
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| corrupt("restored entry length overflow"))?;
     }
-    if placement.durable() {
-        output.sync_all().map_err(transient)?;
-    }
+    output.sync_all().map_err(transient)?;
     drop(output);
     // The bytes were hashed as they were written and the length is what was
     // written, so reading the file back to learn the same two things is a
@@ -1097,7 +996,7 @@ fn place_whole(
     if actual != entry.content_sha256 || written != entry.byte_length {
         return Err(corrupt("restored entry integrity failed"));
     }
-    publish_verified_with(&partial, destination, entry.byte_length, digest, placement.durability)
+    publish_verified(&partial, destination, entry.byte_length, digest)
 }
 
 /// Packs placed since the last flush. Their markers wait until what they
@@ -1121,18 +1020,15 @@ impl PlacedGroup {
     /// Makes what the group placed durable, then marks its packs done. The
     /// apply reads the content store on its own connection, and a marked pack
     /// is not read again.
-    fn flush(&mut self, staging_root: &Path, placement: &mut Placement) -> Result<()> {
-        let touched = std::mem::take(&mut self.touched);
-        if placement.durable() {
-            for digest in touched {
-                let file = OpenOptions::new()
-                    .write(true)
-                    .open(assembly_path(staging_root, &digest))
-                    .map_err(transient)?;
-                file.sync_all().map_err(transient)?;
-            }
+    fn flush(&mut self, staging_root: &Path, content: &mut ContentStore) -> Result<()> {
+        for digest in std::mem::take(&mut self.touched) {
+            let file = OpenOptions::new()
+                .write(true)
+                .open(assembly_path(staging_root, &digest))
+                .map_err(transient)?;
+            file.sync_all().map_err(transient)?;
         }
-        placement.commit()?;
+        content.commit().map_err(transient)?;
         for pack in self.packs.drain(..) {
             fs::write(marker_path(staging_root, &pack)?, b"").map_err(transient)?;
         }
@@ -1149,7 +1045,7 @@ fn place_pack(
     plaintext: &Path,
     pending: &[Pending],
     users: &[usize],
-    placement: &mut Placement,
+    content: &mut ContentStore,
     touched: &mut BTreeSet<String>,
 ) -> Result<()> {
     let mut input = crate::trust_boundary::open_regular_source(plaintext).map_err(corrupt)?;
@@ -1157,7 +1053,7 @@ fn place_pack(
     for &index in users {
         let item = &pending[index];
         if !item.spread() {
-            place_whole(Some((&mut input, input_length)), item, placement)?;
+            place_whole(Some((&mut input, input_length)), item, content)?;
             continue;
         }
         let path = assembly_path(staging_root, &item.resolved.digest);
@@ -1187,8 +1083,8 @@ fn place_pack(
 /// the bytes are the same. One that is not what its catalog names takes the
 /// markers of all its entries' packs with it, so the next attempt reads
 /// exactly those packs again.
-fn finish_assemblies(staging_root: &Path, pending: &[Pending], durability: Durability) -> Result<()> {
-    let mut content = Placement::open(staging_root, durability)?;
+fn finish_assemblies(staging_root: &Path, pending: &[Pending]) -> Result<()> {
+    let mut content = content_store(staging_root)?;
     let mut shared: BTreeMap<&str, Vec<&Pending>> = BTreeMap::new();
     for item in pending {
         if item.packs.is_empty() {
@@ -1237,16 +1133,16 @@ fn finish_assemblies(staging_root: &Path, pending: &[Pending], durability: Durab
             return Err(transient("restored entry integrity failed"));
         };
         if let Some(bytes) = bytes {
-            content.content()?.put(digest, &bytes).map_err(corrupt)?;
+            content.put(digest, &bytes).map_err(corrupt)?;
         }
         match file {
             Some(destination) => {
-                publish_verified_with(&path, destination, entry.byte_length, digest, durability)?
+                publish_verified(&path, destination, entry.byte_length, digest)?
             }
             None => fs::remove_file(&path).map_err(transient)?,
         }
     }
-    content.commit()?;
+    content.commit().map_err(transient)?;
     Ok(())
 }
 
@@ -1264,24 +1160,6 @@ async fn turn_over_packs(
     provider: &dyn Provider,
     repository: &RepositoryHandle,
     progress: &PhaseProgress,
-    cancel: &Cancellation,
-) -> Result<(
-    BTreeMap<String, PreparedRecord>,
-    BTreeMap<String, PreparedObject>,
-)> {
-    turn_over_packs_with(plan, packs, root_key, staging_root, provider, repository, progress, Durability::Durable, cancel).await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn turn_over_packs_with(
-    plan: Vec<ResolvedEntry>,
-    packs: &BTreeMap<String, RemoteObject>,
-    root_key: &[u8; 32],
-    staging_root: &Path,
-    provider: &dyn Provider,
-    repository: &RepositoryHandle,
-    progress: &PhaseProgress,
-    durability: Durability,
     cancel: &Cancellation,
 ) -> Result<(
     BTreeMap<String, PreparedRecord>,
@@ -1342,7 +1220,7 @@ async fn turn_over_packs_with(
     );
     let opened_root = staging_root.to_path_buf();
     let mut content = Some(
-        spawn_blocking(move || Placement::open(&opened_root, durability))
+        spawn_blocking(move || content_store(&opened_root))
             .await
             .map_err(transient)??,
     );
@@ -1359,7 +1237,7 @@ async fn turn_over_packs_with(
                 continue;
             }
             let plaintext =
-                open_object_with(pack, root_key, staging_root, provider, repository, durability, cancel).await?;
+                open_object(pack, root_key, staging_root, provider, repository, cancel).await?;
             #[cfg(test)]
             record_turnover(staging_root, &required);
             // Decrypting was all the ciphertext was for.
@@ -1432,7 +1310,7 @@ async fn turn_over_packs_with(
     let finish_root = staging_root.to_path_buf();
     let finish_pending = pending.clone();
     let cpu = cpu_permit().await?;
-    spawn_blocking(move || finish_assemblies(&finish_root, &finish_pending, durability))
+    spawn_blocking(move || finish_assemblies(&finish_root, &finish_pending))
         .await
         .map_err(transient)??;
     drop(cpu);
@@ -1689,7 +1567,7 @@ pub(crate) async fn download_control_catalogs(
     provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation,
 ) -> Result<Vec<PreparedObject>> {
     let mut objects=BTreeMap::new();let mut roots=BTreeMap::new();
-    for (index,catalog) in catalogs.iter().enumerate() {
+    for catalog in catalogs {
         cancel.check()?;
         if catalog.header.repository_id!=repository.repository_id || catalog.header.role!=wire::ObjectRole::Catalog {
             return Err(corrupt("control catalog scope differs"));
@@ -1699,7 +1577,7 @@ pub(crate) async fn download_control_catalogs(
             continue;
         }
         let remote=RemoteObject::from_stored(catalog,repository)?;
-        let stage=staging_root.join(index.to_string());
+        let stage=staging_root.join(&catalog.header.object_id);
         let (records,controls)=download_checkpoint_data(&remote,&stage,root_key,provider,repository,cancel).await?;
         if !records.is_empty() {return Err(corrupt("control catalog contains unit records"));}
         for mut control in controls {
@@ -1742,7 +1620,7 @@ pub(crate) async fn admit_data_catalogs(
     if catalogs.is_empty() {return Ok(Vec::new());}
     let stage=tempfile::tempdir().map_err(transient)?;
     let mut hashes=BTreeSet::new();let mut roots=BTreeMap::new();
-    for (index,catalog) in catalogs.iter().enumerate() {
+    for catalog in catalogs {
         cancel.check()?;
         if catalog.header.repository_id!=repository.repository_id || catalog.header.role!=wire::ObjectRole::Catalog {return Err(corrupt("control catalog scope differs"));}
         if let Some(previous)=roots.insert(catalog.header.object_id.clone(),catalog.clone()) {
@@ -1754,7 +1632,7 @@ pub(crate) async fn admit_data_catalogs(
             if complete {hashes.extend(known);continue;}
         }
         let remote=RemoteObject::from_stored(catalog,repository)?;
-        let directory=stage.path().join(index.to_string());ensure_directory(&directory)?;
+        let directory=stage.path().join(&catalog.header.object_id);ensure_directory(&directory)?;
         let (entries,packs,_)=read_catalog(&remote,wire::CatalogKind::Records,root_key,&directory,provider,repository,cancel).await?;
         let mut required=BTreeSet::new();let mut missing=Vec::new();
         for entry in entries {
@@ -1787,25 +1665,9 @@ pub(crate) async fn download_packed_body(hash:&str,length:u64,chunks:Vec<wire::S
     let path=download_packed_body_file(hash,length,chunks,packs,stage,key,provider,repository,cancel).await?;
     std::fs::read(path).map_err(transient)
 }
-pub(crate) async fn download_packed_body_files<O:std::borrow::Borrow<wire::StoredObject>>(
-    sources:&[super::lww_residency::PackedSource<O>],staging_root:&Path,root_key:&[u8;32],
+pub(crate) async fn download_packed_body_files(
+    sources:&[super::lww_residency::PackedSource],staging_root:&Path,root_key:&[u8;32],
     provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation,
-)->Result<BTreeMap<String,PathBuf>> {
-    download_packed_body_files_with(sources,staging_root,root_key,provider,repository,Durability::Durable,cancel).await
-}
-
-/// Downloads bodies into staging that is discarded with the work that asked
-/// for them, so nothing here is synced.
-pub(crate) async fn download_packed_body_files_scratch<O:std::borrow::Borrow<wire::StoredObject>>(
-    sources:&[super::lww_residency::PackedSource<O>],staging_root:&Path,root_key:&[u8;32],
-    provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation,
-)->Result<BTreeMap<String,PathBuf>> {
-    download_packed_body_files_with(sources,staging_root,root_key,provider,repository,Durability::Scratch,cancel).await
-}
-
-async fn download_packed_body_files_with<O:std::borrow::Borrow<wire::StoredObject>>(
-    sources:&[super::lww_residency::PackedSource<O>],staging_root:&Path,root_key:&[u8;32],
-    provider:&dyn Provider,repository:&RepositoryHandle,durability:Durability,cancel:&Cancellation,
 )->Result<BTreeMap<String,PathBuf>> {
     ensure_directory(staging_root)?;
     let mut packs=BTreeMap::new();let mut entries=Vec::new();let mut hashes=BTreeSet::new();
@@ -1813,17 +1675,17 @@ async fn download_packed_body_files_with<O:std::borrow::Borrow<wire::StoredObjec
         cancel.check()?;super::lww_residency::validate_packed_source(source,repository)?;
         if !hashes.insert(source.hash.clone()) {return Err(corrupt("duplicate body"));}
         for stored in &source.packs {
-            let pack=RemoteObject::from_stored(stored.borrow(),repository)?;
+            let pack=RemoteObject::from_stored(stored,repository)?;
             if let Some(previous)=packs.insert(pack.object_id.clone(),pack.clone()) {
                 if previous!=pack {return Err(corrupt("conflicting pack"));}
             }
         }
         entries.push(CompleteEntry {kind:wire::CatalogEntryKind::Object,key:format!("object/{}",source.hash),content_sha256:hex::decode(&source.hash).map_err(corrupt)?.try_into().map_err(|_|corrupt("body hash"))?,byte_length:source.byte_length,chunks:source.chunks.clone()});
     }
-    let content=(durability==Durability::Durable).then(||content_store(staging_root)).transpose()?;
-    let mut plan=resolve_entries_in(entries,staging_root,content.as_ref(),None,cancel)?;
+    let content=content_store(staging_root)?;
+    let mut plan=resolve_entries(entries,staging_root,&content,None,cancel)?;
     for resolved in &mut plan {resolved.destination=Some(staging_root.join(format!("{}.payload",resolved.digest)));}
-    let (_,objects)=turn_over_packs_with(plan,&packs,root_key,staging_root,provider,repository,&PhaseProgress::silent(),durability,cancel).await?;
+    let (_,objects)=turn_over_packs(plan,&packs,root_key,staging_root,provider,repository,&PhaseProgress::silent(),cancel).await?;
     objects.into_iter().map(|(hash,object)|match object.source {ObjectSource::File(path)=>Ok((hash,path)),_=>Err(corrupt("body source"))}).collect()
 }
 
@@ -1835,9 +1697,9 @@ pub(crate) async fn download_packed_body_file(
     let mut packs=BTreeMap::new();
     for stored in &stored_packs { let pack=RemoteObject::from_stored(stored,repository)?; packs.insert(pack.object_id.clone(),pack); }
     let entry=CompleteEntry {kind:wire::CatalogEntryKind::Object,key:format!("object/{hash}"),content_sha256:hex::decode(hash).map_err(corrupt)?.try_into().map_err(|_|corrupt("body hash"))?,byte_length:length,chunks};
-    // Every caller reads the body out of throwaway staging, so it is placed as scratch.
-    let plan=resolve_entries_in(vec![entry],staging_root,None,None,cancel)?;
-    let (_,objects)=turn_over_packs_with(plan,&packs,root_key,staging_root,provider,repository,&PhaseProgress::silent(),Durability::Scratch,cancel).await?;
+    let content=content_store(staging_root)?;
+    let plan=resolve_entries(vec![entry],staging_root,&content,None,cancel)?;
+    let (_,objects)=turn_over_packs(plan,&packs,root_key,staging_root,provider,repository,&PhaseProgress::silent(),cancel).await?;
     let body=objects.get(hash).ok_or_else(||corrupt("body missing"))?;
     match &body.source { ObjectSource::File(path)=>Ok(path.clone()), _=>Err(corrupt("body source")) }
 }
@@ -1903,7 +1765,7 @@ pub(crate) struct DatabaseFirstSnapshot {
     pub required:BTreeSet<String>,
     pub present:BTreeSet<String>,
     pub missing:BTreeSet<String>,
-    pub sources:Vec<super::lww_residency::SharedPackedSource>,
+    pub sources:Vec<super::lww_residency::PackedSource>,
 }
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn admit_asset_catalogs(
@@ -1915,16 +1777,13 @@ pub(crate) async fn admit_asset_catalogs(
     let metadata=rusqlite::Connection::open_with_flags(store.repository_root().join("persistent/persistent.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(transient)?;
     let cas=PayloadCas::new(store.repository_root()).map_err(transient)?;
-    let mut planned=BTreeMap::<String,super::lww_residency::SharedPackedSource>::new();let mut proofs=Vec::new();
-    let mut interner=super::lww_residency::ObjectInterner::default();
+    let mut planned=BTreeMap::<String,super::lww_residency::PackedSource>::new();let mut proofs=Vec::new();
     for catalog in catalogs {
         if catalog.header.repository_id!=repository.repository_id || catalog.header.role!=wire::ObjectRole::Catalog {
             return Err(corrupt("asset catalog repository or role differs"));
         }
         let root=RemoteObject::from_stored(catalog,repository)?;
         let (entries,packs,_)=read_catalog(&root,wire::CatalogKind::Assets,root_key,scratch.path(),provider,repository,cancel).await?;
-        let shared_catalog=interner.intern(catalog.clone());
-        let mut shared_packs=BTreeMap::<String,super::lww_residency::SharedObject>::new();
         let mut witnessed=Vec::new();
         for entry in entries {
             cancel.check()?;
@@ -1937,16 +1796,10 @@ pub(crate) async fn admit_asset_catalogs(
                 return Err(corrupt("immutable asset size differs"));
             }
             let ids=entry.chunks.iter().map(|chunk|chunk.pack_id.as_str()).collect::<BTreeSet<_>>();
-            let mut references=Vec::with_capacity(ids.len());
-            for id in ids {
-                if let Some(shared)=shared_packs.get(id) {references.push(shared.clone());continue;}
-                let Some(pack)=packs.get(id) else {continue};
-                let shared=interner.intern(pack.stored(repository)?);
-                shared_packs.insert(id.to_owned(),shared.clone());references.push(shared);
-            }
+            let references=packs.iter().filter(|(id,_)|ids.contains(id.as_str())).map(|(_,pack)|pack.stored(repository)).collect::<Result<Vec<_>>>()?;
             let source=super::lww_residency::PackedSource{hash:hash.clone(),byte_length:entry.byte_length,
                 library_id:library_id.into(),connection_id:connection_id.into(),connection_root:connection_root.into(),
-                protected_snapshot:protected_segment.into(),catalog:shared_catalog.clone(),chunks:entry.chunks,packs:references};
+                protected_snapshot:protected_segment.into(),catalog:catalog.clone(),chunks:entry.chunks,packs:references};
             super::lww_residency::validate_packed_source(&source,repository)?;
             witnessed.push((hash.clone(),source.byte_length));
             if let Some(previous)=planned.get(&hash) {
@@ -1990,9 +1843,7 @@ pub(crate) async fn download_snapshot_database_first(snapshot:&RemoteObject,stag
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ).map_err(transient)?;
     let mut required=BTreeSet::new();let mut present=BTreeSet::new();let mut missing=BTreeSet::new();
-    let mut sources=Vec::new();let mut stored_packs=BTreeMap::<String,super::lww_residency::SharedObject>::new();
-    let mut interner=super::lww_residency::ObjectInterner::default();
-    let catalog=interner.intern(document.library.asset_catalog.clone());
+    let mut sources=Vec::new();
     for entry in entries {
         if entry.kind!=wire::CatalogEntryKind::Object {return Err(corrupt("asset catalog kind"));}
         let hash=hex::encode(entry.content_sha256);
@@ -2012,14 +1863,8 @@ pub(crate) async fn download_snapshot_database_first(snapshot:&RemoteObject,stag
             missing.insert(hash.clone());
         }
         let ids=entry.chunks.iter().map(|chunk|chunk.pack_id.as_str()).collect::<BTreeSet<_>>();
-        let mut references=Vec::with_capacity(ids.len());
-        for id in ids {
-            if let Some(stored)=stored_packs.get(id) {references.push(stored.clone());continue;}
-            let Some(pack)=packs.get(id) else {continue};
-            let stored=interner.intern(pack.stored(repository)?);
-            stored_packs.insert(id.to_owned(),stored.clone());references.push(stored);
-        }
-        let source=super::lww_residency::PackedSource {hash:hash.clone(),byte_length:entry.byte_length,library_id:snapshot.repository_id.clone(),connection_id:connection_id.into(),connection_root:connection_root.into(),protected_snapshot:snapshot.object_id.clone(),catalog:catalog.clone(),chunks:entry.chunks,packs:references};
+        let references=packs.iter().filter(|(id,_)|ids.contains(id.as_str())).map(|(_,pack)|pack.stored(repository)).collect::<Result<Vec<_>>>()?;
+        let source=super::lww_residency::PackedSource {hash:hash.clone(),byte_length:entry.byte_length,library_id:snapshot.repository_id.clone(),connection_id:connection_id.into(),connection_root:connection_root.into(),protected_snapshot:snapshot.object_id.clone(),catalog:document.library.asset_catalog.clone(),chunks:entry.chunks,packs:references};
         super::lww_residency::validate_packed_source(&source,repository)?;
         sources.push(source);
         objects.push(PreparedObject{content_hash:hash.clone(),byte_length:entry.byte_length,source:ObjectSource::Library(hash)});

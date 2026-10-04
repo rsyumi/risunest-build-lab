@@ -974,6 +974,38 @@ describe('chat list operations', () => {
         expect(new Set(imported.message.map((message: any) => message.chatId)).size).toBe(2)
     })
 
+    it('imports a risuChat file without decoding it through Buffer', async () => {
+        const character = buildSelectedCharacter()
+        mocks.editWindowedChatList.mockReturnValue({ kind: 'unsupported' })
+        const message = [
+            { role: 'user', data: '"Synthetic line." 한글 🐿️', chatId: 'synthetic-msg-0', time: 1710000000000 },
+            { role: 'char', data: '*Synthetic action.* 한글 🐿️', chatId: 'synthetic-msg-1', time: 1710000000001 },
+        ]
+        mocks.selectSingleFile.mockResolvedValueOnce({
+            name: 'synthetic-chat.json',
+            data: new TextEncoder().encode(JSON.stringify({
+                type: 'risuChat',
+                ver: 2,
+                data: { id: 'synthetic-source', name: 'Synthetic import', note: '', localLore: [], message },
+                folders: [],
+            })),
+        })
+        const bufferFrom = vi.spyOn(Buffer, 'from')
+        let bufferCalls: number
+        try {
+            await importChat()
+        } finally {
+            bufferCalls = bufferFrom.mock.calls.length
+            bufferFrom.mockRestore()
+        }
+
+        const imported = character.chats[0]
+        expect(imported.name).toBe('Synthetic import')
+        expect(imported.id).not.toBe('synthetic-source')
+        expect(imported.message).toEqual(message)
+        expect(bufferCalls).toBe(0)
+    })
+
     it('keeps the selected chat when another chat is removed', async () => {
         const character = buildSelectedCharacter()
 

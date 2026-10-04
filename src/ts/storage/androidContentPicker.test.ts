@@ -18,6 +18,7 @@ vi.mock('./database.svelte', () => ({ getDatabase: () => ({ characters: [{ chaId
 import { importAndroidContentFromPicker, importReplayedAndroidContentSpool } from './androidContentPicker'
 
 const source = { token: 'synthetic-token', displayName: 'synthetic.json', bytes: 100 }
+const encoded = (text: string) => new TextEncoder().encode(text).buffer
 beforeEach(() => {
     vi.resetAllMocks()
     mocks.controller = new AbortController()
@@ -40,7 +41,7 @@ describe('Android bounded JSON compatibility replay', () => {
         ['regex module', { type: 'regex', data: [] }, 'module'],
         ['ambiguous preset', { type: 'risu', data: {} }, 'character'],
     ] as const)('uses the same converter for picker and external %s', async (_name, json, destination) => {
-        mocks.invoke.mockResolvedValue(JSON.stringify(json))
+        mocks.invoke.mockResolvedValue(encoded(JSON.stringify(json)))
         const external = await importReplayedAndroidContentSpool(source, 'auto')
         const picked = await importAndroidContentFromPicker(destination)
         expect(external).toBe(picked)
@@ -61,15 +62,39 @@ describe('Android bounded JSON compatibility replay', () => {
         expect(mocks.module).not.toHaveBeenCalled()
         expect(mocks.discard).toHaveBeenCalledExactlyOnceWith(source.token)
     })
+    it('hands converters the bytes the native reader returned', async () => {
+        const text = '﻿{"name":"Synthetic é"}'
+        mocks.invoke.mockResolvedValue(encoded(text))
+        await importReplayedAndroidContentSpool(source, 'character')
+        expect(mocks.character).toHaveBeenCalledWith({
+            name: source.displayName,
+            data: new TextEncoder().encode(text),
+        })
+    })
+    it('accepts the bytes as a number array', async () => {
+        mocks.invoke.mockResolvedValue([...new TextEncoder().encode('{"entries":{}}')])
+        await expect(importReplayedAndroidContentSpool(source, 'auto')).resolves.toBe('module')
+        expect(mocks.module).toHaveBeenCalledWith({
+            name: source.displayName,
+            data: new TextEncoder().encode('{"entries":{}}'),
+        })
+    })
+    it('rejects bytes that are not UTF-8 before any converter executes', async () => {
+        mocks.invoke.mockResolvedValue(Uint8Array.of(0x7b, 0xff, 0x7d).buffer)
+        await expect(importReplayedAndroidContentSpool(source, 'auto')).rejects.toBeInstanceOf(TypeError)
+        expect(mocks.character).not.toHaveBeenCalled()
+        expect(mocks.module).not.toHaveBeenCalled()
+        expect(mocks.discard).toHaveBeenCalledExactlyOnceWith(source.token)
+    })
     it('discards malformed JSON exactly once', async () => {
-        mocks.invoke.mockResolvedValue('{')
+        mocks.invoke.mockResolvedValue(encoded('{'))
         await expect(importReplayedAndroidContentSpool(source, 'auto')).rejects.toBeInstanceOf(SyntaxError)
         expect(mocks.discard).toHaveBeenCalledExactlyOnceWith(source.token)
     })
     it('discards cancelled metadata before any converter executes', async () => {
         mocks.invoke.mockImplementation(async () => {
             mocks.controller.abort()
-            return '{}'
+            return encoded('{}')
         })
         await expect(importReplayedAndroidContentSpool(source, 'auto')).rejects.toMatchObject({ name: 'AbortError' })
         expect(mocks.character).not.toHaveBeenCalled()

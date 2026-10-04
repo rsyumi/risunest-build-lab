@@ -4,6 +4,7 @@ import { hasNonDefaultBindingData, validateBindingCount, type BindingLocalConten
 
 interface NativeBindingContent {
     library: Record<string, unknown>
+    characterCount: string
     managedAliasCount: string
     ordinaryPluginValueCount: string
     hypaValueCount: string
@@ -16,7 +17,7 @@ interface NativeBindingContent {
 
 async function readLocalBindingData(): Promise<{ content: BindingLocalContent; pluginLocalParticipating: boolean }> {
     const { pluginLocalParticipating, ...native } = await invoke<NativeBindingContent>('pds_lww_binding_content')
-    for (const key of ['managedAliasCount', 'ordinaryPluginValueCount', 'hypaValueCount', 'pluginLocalValueCount', 'opaqueSharedUnitCount'] as const) {
+    for (const key of ['characterCount', 'managedAliasCount', 'ordinaryPluginValueCount', 'hypaValueCount', 'pluginLocalValueCount', 'opaqueSharedUnitCount'] as const) {
         validateBindingCount(native[key])
     }
     if (typeof pluginLocalParticipating !== 'boolean') throw new Error('Invalid binding content')

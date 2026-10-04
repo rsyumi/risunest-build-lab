@@ -174,7 +174,7 @@ fn inventory_lookup_finds_later_releases_after_gaps_and_rejects_duplicates() {
             let provider = adapter(dependencies().dependencies);
             let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
             let intent = object_intent(&handle, ObjectRole::Pack, "object", bytes);
-            let result = provider.lookup_metadata(&handle, &intent, None, &Cancellation::default()).await;
+            let result = provider.lookup_object(&handle, &intent, &Cancellation::default()).await;
             if duplicate {
                 assert_eq!(result.unwrap_err().kind, ErrorKind::PreconditionFailed);
             } else {
@@ -183,32 +183,6 @@ fn inventory_lookup_finds_later_releases_after_gaps_and_rejects_duplicates() {
             let requests = server.requests.lock().unwrap();
             assert_eq!(requests.len(), 4);
             assert!(requests.iter().all(|request| method_of(request) == "GET"));
-        }
-    });
-}
-
-#[test]
-fn object_metadata_reads_the_asset_record_of_a_known_locator() {
-    runtime().block_on(async {
-        let bytes = b"inventory-payload";
-        let mut replies = existing_repository_replies();
-        replies.push(reply(200, asset(90, "pack-object", bytes.len() as u64, Some(digest_of(bytes)))));
-        replies.push(reply(404, json!({ "message": "Not Found" })));
-        let server = github_server(replies);
-        let provider = adapter(dependencies().dependencies);
-        let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
-        let intent = object_intent(&handle, ObjectRole::Pack, "object", bytes);
-        let locator = RemoteLocator { connection_identity: handle.connection_identity.clone(), collection: Some(job_tag("job-1", 9)), object: "40/90".into() };
-        let found = provider.lookup_metadata(&handle, &intent, Some(&locator), &Cancellation::default()).await.unwrap().unwrap();
-        assert_eq!(found.locator, locator);
-        assert_eq!(found.byte_length, bytes.len() as u64);
-        assert!(found.complete && found.checksum.unwrap().provider_verified);
-        assert!(provider.lookup_metadata(&handle, &intent, Some(&locator), &Cancellation::default()).await.unwrap().is_none());
-        let requests = server.requests.lock().unwrap();
-        assert_eq!(requests.len(), 3);
-        for request in &requests[1..] {
-            assert!(head_line(request).starts_with("GET ") && head_line(request).contains("/releases/assets/90 "));
-            assert!(request.headers.contains(api::JSON_ACCEPT) && !request.headers.contains(api::BINARY_ACCEPT));
         }
     });
 }

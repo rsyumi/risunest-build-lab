@@ -3,10 +3,12 @@ import {
     NativeCommitTransport,
     isLargeCommit,
     LARGE_COMMIT_BYTES,
+    STAGED_REQUEST_BYTES,
     type CommitEnvelope,
     type CommitTransportDependencies,
     type SharedWebview,
 } from './nativeCommitTransport'
+import { MAX_NATIVE_REQUEST_BYTES, PayloadTooLargeError } from './nativePersistenceValue'
 
 function fixture(large = true): CommitEnvelope {
     return {
@@ -185,19 +187,29 @@ describe('native commit transport', () => {
         },
     )
 
-    it.each(['linux', 'ios', 'macos'] as const)(
-        'does not turn the Windows shared-buffer budget into a %s save limit',
+    it.each(['windows', 'android', 'linux', 'ios', 'macos'] as const)(
+        'refuses a commit above the request limit on %s before sending anything',
         async (os) => {
-            const h = harness({ windows: false, [os]: true })
-            const bytes = new Uint8Array(64 * 1024 * 1024 + 1)
-            h.encode.mockResolvedValueOnce(bytes)
-            await h.transport.commit(fixture())
-            expect(h.invoke).toHaveBeenCalledTimes(1)
-            expect(h.invoke.mock.calls[0][0]).toBe('pds_commit_raw')
-            expect(h.invoke.mock.calls[0][1]).toBe(bytes)
+            const h = harness({ windows: os === 'windows', [os]: true })
+            h.encode.mockResolvedValueOnce(new Uint8Array(MAX_NATIVE_REQUEST_BYTES + 1))
+            const refused = h.transport.commit(fixture())
+            await expect(refused).rejects.toBeInstanceOf(PayloadTooLargeError)
+            await expect(refused).rejects.toMatchObject({ code: 'payload-too-large', kind: 'commit', byteLength: MAX_NATIVE_REQUEST_BYTES + 1 })
+            expect(h.invoke).not.toHaveBeenCalled()
             expect(h.webview.addEventListener).not.toHaveBeenCalled()
+            await expect(h.transport.commit(fixture(false))).resolves.toBeDefined()
         },
     )
+
+    it.each(['linux', 'ios', 'macos'] as const)('sends a commit at the request limit raw on %s', async (os) => {
+        const h = harness({ windows: false, [os]: true })
+        const bytes = new Uint8Array(MAX_NATIVE_REQUEST_BYTES)
+        h.encode.mockResolvedValueOnce(bytes)
+        await h.transport.commit(fixture())
+        expect(h.invoke).toHaveBeenCalledTimes(1)
+        expect(h.invoke.mock.calls[0][0]).toBe('pds_commit_raw')
+        expect(h.invoke.mock.calls[0][1]).toBe(bytes)
+    })
 
     it('falls back before submission for non-cloneable values, but propagates encoding failures', async () => {
         const h = harness()
@@ -260,12 +272,6 @@ describe('native commit transport', () => {
             'pds_commit_android_cancel',
         ])
         expect(h.webview.addEventListener).not.toHaveBeenCalled()
-    })
-    it('retains JSON saves above the Android assembly limit, without raw number arrays', async () => {
-        const h = harness({ windows: false, android: true })
-        h.encode.mockResolvedValueOnce(new Uint8Array(64 * 1024 * 1024 + 1))
-        await h.transport.commit(fixture())
-        expect(h.invoke).toHaveBeenCalledExactlyOnceWith('pds_commit', fixture())
     })
     it('preserves Android clone fallback, errors and queue recovery', async () => {
         const h = harness({
@@ -369,5 +375,80 @@ describe('native commit transport', () => {
         release(new Uint8Array([1]))
         await Promise.all([first, second])
         expect(h.invoke.mock.calls.at(-1)?.[0]).toBe('pds_commit')
+    })
+})
+
+describe('staged replace requests', () => {
+    const head = '{"command":"pds_replace_put_root","args":'
+    const request = (username: string) => ({ stagingId: 'staging-1', root: { username } })
+    const overBudget = request('한글 🐿️'.repeat(Math.ceil(STAGED_REQUEST_BYTES / 14)))
+
+    it('refuses a request above the native limit on every target before sending it', async () => {
+        const large = request('x'.repeat(MAX_NATIVE_REQUEST_BYTES))
+        for (const target of ['windows', 'android', 'linux', 'ios', 'macos'] as const) {
+            const h = harness({ windows: false, [target]: true })
+            const error = await h.transport.stage('pds_replace_put_root', 'root', large).catch((caught) => caught)
+            expect(error).toBeInstanceOf(PayloadTooLargeError)
+            expect(error).toMatchObject({ kind: 'root' })
+            expect(h.invoke).not.toHaveBeenCalled()
+        }
+    })
+
+    it('sends a request whose body is exactly at the limit', async () => {
+        const fill = MAX_NATIVE_REQUEST_BYTES - head.length - JSON.stringify(request('')).length - 1
+        const h = harness({ windows: false, linux: true })
+        const exact = request('x'.repeat(fill))
+        await h.transport.stage('pds_replace_put_root', 'root', exact)
+        expect(h.invoke).toHaveBeenCalledTimes(1)
+        expect(h.invoke.mock.calls[0][0]).toBe('pds_replace_put_root')
+        expect(h.invoke.mock.calls[0][1]).toBe(exact)
+        await expect(h.transport.stage('pds_replace_put_root', 'root', request('x'.repeat(fill + 1))))
+            .rejects.toMatchObject({ code: 'payload-too-large', byteLength: MAX_NATIVE_REQUEST_BYTES + 1 })
+        expect(h.invoke).toHaveBeenCalledTimes(1)
+    })
+
+    it('sends only an Android request above the ordinary budget in chunks to the replace finish', async () => {
+        const windows = harness()
+        await windows.transport.stage('pds_replace_put_root', 'root', overBudget)
+        expect(windows.invoke.mock.calls).toEqual([['pds_replace_put_root', overBudget]])
+
+        const h = harness({ windows: false, android: true })
+        const small = request('small')
+        await h.transport.stage('pds_replace_put_root', 'root', small)
+        expect(h.invoke.mock.calls).toEqual([['pds_replace_put_root', small]])
+        h.invoke.mockClear()
+        await h.transport.stage('pds_replace_put_root', 'root', overBudget)
+        const commands = h.invoke.mock.calls.map(([command]) => command)
+        expect(commands[0]).toBe('pds_commit_android_open')
+        expect(commands.slice(-2)).toEqual(['pds_replace_android_finish', 'pds_commit_android_cancel'])
+        const chunks = h.invoke.mock.calls.filter(([command]) => command === 'pds_commit_android_chunk')
+        expect(chunks.length).toBeGreaterThan(1)
+        expect(JSON.parse(chunks.map(([, args]) => args.chunk).join(''))).toEqual({
+            command: 'pds_replace_put_root',
+            args: overBudget,
+        })
+        const id = h.invoke.mock.calls[0][1].id
+        expect(h.invoke.mock.calls.at(-2)).toEqual(['pds_replace_android_finish', { id }])
+    })
+
+    it('sends Android chunked requests in turn with commits', async () => {
+        const h = harness({ windows: false, android: true })
+        let release!: (bytes: Uint8Array<ArrayBuffer>) => void
+        h.encode.mockImplementationOnce(() => new Promise((resolve) => { release = resolve }))
+        const commit = h.transport.commit(fixture())
+        const staged = h.transport.stage('pds_replace_put_root', 'root', overBudget)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(h.invoke).not.toHaveBeenCalled()
+        release(new TextEncoder().encode('{}'))
+        await Promise.all([commit, staged])
+        const commands = h.invoke.mock.calls.map(([command]) => command)
+        expect(commands.slice(0, 5)).toEqual([
+            'pds_commit_android_open',
+            'pds_commit_android_chunk',
+            'pds_commit_android_finish',
+            'pds_commit_android_cancel',
+            'pds_commit_android_open',
+        ])
+        expect(commands.at(-2)).toBe('pds_replace_android_finish')
     })
 })

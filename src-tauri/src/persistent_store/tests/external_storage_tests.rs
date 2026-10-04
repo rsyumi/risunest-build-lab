@@ -216,6 +216,7 @@ fn external_replacement_keeps_library_identity_and_invalidates_old_captures() {
     let current_selection = selection::read(&store.connection).unwrap();
     assert_eq!(current_selection.target, selected.target);
     assert_eq!(current_selection.epoch, selected.epoch);
+    assert_eq!(current_selection.decision_required, selected.decision_required);
     let current_clock = store.lww_clock_state().unwrap();
     assert_eq!(current_clock.writer_id, clock.writer_id);
     assert_eq!(current_clock.binding_authority, clock.binding_authority);
