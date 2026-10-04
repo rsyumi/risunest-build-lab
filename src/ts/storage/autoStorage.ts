@@ -1,6 +1,6 @@
 import localforage from "localforage"
 import { OpfsStorage } from "./opfsStorage"
-import { alertStore } from "../alert"
+import { alertClear, alertStore } from "../alert"
 import { getDeviceMarkers } from "./deviceMarkers"
 
 export class AutoStorage{
@@ -67,10 +67,7 @@ export class AutoStorage{
                         i += 1
                     }
                     this.realStorage = opfs
-                    alertStore.set({
-                        type: "none",
-                        msg: ""
-                    })
+                    alertClear()
                     await forage.setItem("migrated", true)
                     return
                 }

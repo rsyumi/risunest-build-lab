@@ -174,6 +174,8 @@ import Chat from './Chat.svelte'
 import Chats from './Chats.svelte'
 import { alertToast } from 'src/ts/alert'
 import ChatCaptureBatchHarness from './ChatCaptureBatchHarness.test.svelte'
+import { chatViewEvents } from 'src/ts/plugins/chatViewHost.svelte'
+import type { ChatViewEvent } from 'src/ts/plugins/chatViewEvents'
 
 function context(overrides: Record<string, unknown> = {}) {
     const character = {
@@ -1149,6 +1151,33 @@ describe('Chat frozen capture presentation', () => {
             }
         },
     )
+
+    test('reports the edited row to chat view listeners again when its inline editor closes', async () => {
+        const harness = mountRetainedEditChats({ risunestChatEditPopup: false })
+        const events: ChatViewEvent[] = []
+        chatViewEvents.forOwner('editor-view-test').register((event) => { events.push(event) })
+        const editedRow = { index: 1, messageId: 'edited-row', role: 'char' }
+        try {
+            const row = await harness.editedRow()
+            await vi.waitFor(() => expect(events.some((event) => event.type === 'rows' && event.mounted.some((entry) => entry.messageId === 'edited-row'))).toBe(true))
+            events.length = 0
+
+            row.querySelector<HTMLButtonElement>('.button-icon-edit')!.click()
+            await vi.waitFor(() => expect(row.querySelector('textarea.message-edit-area')).not.toBeNull())
+            row.querySelector<HTMLButtonElement>('.button-icon-edit')!.click()
+            await vi.waitFor(() => expect(row.querySelector('textarea.message-edit-area')).toBeNull())
+            await vi.waitFor(() => expect(events).toContainEqual({
+                type: 'rows', characterId: 'retained-owner', conversationId: 'retained-chat',
+                mounted: [], unmounted: [], rerendered: [editedRow],
+            }))
+            expect(harness.conversation.message[1].data).toBe('Original edited row')
+        } finally {
+            chatViewEvents.forOwner('editor-view-test').dispose()
+            if (mounted) await unmount(mounted)
+            mounted = undefined
+            harness.source.dispose()
+        }
+    })
 
     test('saves an open popup after a committed refresh started a new navigation generation', async () => {
         const harness = mountRetainedEditChats({})

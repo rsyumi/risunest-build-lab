@@ -2,10 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { SandboxHost } from './factory'
 import {
+    createProductionPluginDatabaseAccess,
+    linkPluginQueryAbortSignals,
+} from '../pluginDatabaseAccess'
+import {
     executePluginV3,
     getV3PluginInstance,
     loadV3Plugins,
 } from './v3.svelte'
+import { additionalMessageButtons } from '../messageButtons.svelte'
+import { chatViewEvents } from '../chatViewHost.svelte'
 
 const mocks = vi.hoisted(() => ({
     database: null as any,
@@ -13,6 +19,10 @@ const mocks = vi.hoisted(() => ({
     confirm: vi.fn(async () => true),
     permissionValues: new Map<string, unknown>(),
     providers: new Map<string, Function>(),
+    patchConversation: vi.fn(async (): Promise<unknown> => ({ status: 'applied', revision: 4 })),
+    listHostTools: vi.fn(async (_owner: string): Promise<unknown> => ({ scope: 'scope', tools: [] })),
+    callHostTool: vi.fn(async (_owner: string, _request: unknown, _signal?: AbortSignal): Promise<unknown> => []),
+    chatViewFrames: [] as Array<() => void>,
 }))
 
 const ownedStorageStub = {
@@ -130,6 +140,30 @@ vi.mock('../pluginChatOutputListeners', () => ({
     registerChatOutputListener: vi.fn(), removeChatOutputListener: vi.fn(),
 }))
 vi.mock('src/ts/conversationMutations', () => ({ appendCurrentConversationMessage: vi.fn() }))
+vi.mock('../hostToolHost', () => ({
+    hostToolBridge: {
+        forPlugin: (owner: string) => ({
+            listTools: () => mocks.listHostTools(owner),
+            callTool: (request: unknown, signal?: AbortSignal) => mocks.callHostTool(owner, request, signal),
+        }),
+    },
+    registerOwnedPluginMCP: vi.fn(),
+}))
+vi.mock('../chatViewHost.svelte', async () => {
+    const { createChatViewEvents } = await import('../chatViewEvents')
+    let nextId = 0
+    return {
+        chatViewEvents: createChatViewEvents({
+            readConversation: () => ({ characterId: 'char', conversationId: 'conv', characterIndex: 1, chatIndex: 0 }),
+            watchConversation: () => () => undefined,
+            requestFrame: (callback) => { mocks.chatViewFrames.push(callback) },
+            createId: () => `chat-view-${++nextId}`,
+        }),
+    }
+})
+vi.mock('../conversationPatchAccess', () => ({
+    createConversationPatchAccess: () => ({ patchConversation: mocks.patchConversation }),
+}))
 
 const pluginName = 'dom-rpc-fixture'
 const happyDOMWindow = window as unknown as Window & {
@@ -234,7 +268,7 @@ describe('Plugin v3 real iframe DOM/RPC bridge', () => {
 globalThis.ImageBitmap = class {};
 function __postToParent(message) {
     const source = parent.document.querySelector('iframe[data-risu-test-frame="${frameId}"]').contentWindow;
-    const data = JSON.parse(JSON.stringify(message));
+    const data = __cloneForParent(message);
     parent.dispatchEvent(new parent.MessageEvent('message', { data, source }));
 }
 `
@@ -250,6 +284,7 @@ function __postToParent(message) {
             this.setAttribute('data-risu-test-frame', frameId)
             const child = this.contentWindow!
             const childRealm = child as any
+            childRealm.__cloneForParent = (message: unknown) => structuredClone(message)
             vi.spyOn(child, 'postMessage').mockImplementation((data) => {
                 child.dispatchEvent(new childRealm.MessageEvent('message', {
                     data: structuredClone(data),
@@ -404,6 +439,282 @@ function __postToParent(message) {
         await loadV3Plugins([])
 
         expect(document.querySelectorAll('iframe[data-risu-plugin-frame]')).toHaveLength(0)
+    })
+
+    describe('plugin channel IPC', () => {
+        const ipcScript = (channel: string) => `
+            globalThis.received = [];
+            globalThis.rpcReady = risuai.addPluginChannelListener(${JSON.stringify(channel)}, (message, meta) => {
+                globalThis.received.push({ message, sender: meta.sender, channel: meta.channel });
+            });
+        `
+
+        async function startIpcPlugins(plugins: { name: string; allowedIPC: string[]; channel?: string }[]): Promise<void> {
+            const records = plugins.map((plugin) => ({
+                name: plugin.name,
+                script: ipcScript(plugin.channel ?? 'inbox'),
+                allowedIPC: plugin.allowedIPC,
+            }))
+            mocks.database = { aiModel: 'fixture-model', characters: [], plugins: records }
+            await loadV3Plugins(records as any)
+            await Promise.all(guestEvaluations)
+            for (const plugin of plugins) await guest(plugin.name, 'await globalThis.rpcReady; return true')
+        }
+
+        async function post(sender: string, receiver: string, channel: string, message: unknown): Promise<unknown> {
+            return guest(sender, `
+                const result = await risuai.postPluginChannelMessage(${JSON.stringify(receiver)}, ${JSON.stringify(channel)}, ${JSON.stringify(message)});
+                return result === undefined ? 'resolved' : 'unexpected';
+            `)
+        }
+
+        async function received(name: string) {
+            return JSON.parse(String(await guest(name, 'return JSON.stringify(globalThis.received)'))) as {
+                message: unknown
+                sender: string
+                channel: string
+            }[]
+        }
+
+        async function settle(): Promise<void> {
+            for (let attempt = 0; attempt < 20; attempt += 1) {
+                await new Promise<void>((resolve) => setTimeout(resolve, 0))
+            }
+        }
+
+        it('delivers both ways between a wildcard plugin and a client that names it, with the host-attested sender', async () => {
+            vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+            await startIpcPlugins([
+                { name: 'hub', allowedIPC: ['hub', '*'] },
+                { name: 'client', allowedIPC: ['client', 'hub'] },
+            ])
+
+            expect(await post('client', 'hub', 'inbox', { register: true })).toBe('resolved')
+            expect(await post('hub', 'client', 'inbox', { reply: true })).toBe('resolved')
+
+            expect(await waitFor(() => received('hub'), (value) => value.length === 1)).toEqual([
+                { message: { register: true }, sender: 'client', channel: 'inbox' },
+            ])
+            expect(await waitFor(() => received('client'), (value) => value.length === 1)).toEqual([
+                { message: { reply: true }, sender: 'hub', channel: 'inbox' },
+            ])
+        })
+
+        it('keeps the two-sided rule when only one side lists the other or a wildcard', async () => {
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+            await startIpcPlugins([
+                { name: 'hub', allowedIPC: ['hub', '*'] },
+                { name: 'stranger', allowedIPC: ['stranger'] },
+                { name: 'one-sided', allowedIPC: ['one-sided', 'plain'] },
+                { name: 'plain', allowedIPC: ['plain'] },
+            ])
+
+            expect(await post('stranger', 'hub', 'inbox', 1)).toBe('resolved')
+            expect(await post('hub', 'stranger', 'inbox', 2)).toBe('resolved')
+            expect(await post('one-sided', 'plain', 'inbox', 3)).toBe('resolved')
+            expect(await post('plain', 'one-sided', 'inbox', 4)).toBe('resolved')
+            expect(await post('hub', 'missing-plugin', 'inbox', 5)).toBe('resolved')
+            await settle()
+
+            for (const name of ['hub', 'stranger', 'one-sided', 'plain']) {
+                expect(await received(name)).toEqual([])
+            }
+            expect(warn.mock.calls.filter(([text]) => String(text).includes('Attempted to send message'))).toHaveLength(5)
+        })
+
+        it('delivers between plugins that name each other without a wildcard', async () => {
+            await startIpcPlugins([
+                { name: 'left', allowedIPC: ['left', 'right'] },
+                { name: 'right', allowedIPC: ['right', 'left'] },
+            ])
+
+            expect(await post('left', 'right', 'inbox', 'hello')).toBe('resolved')
+
+            expect(await waitFor(() => received('right'), (value) => value.length === 1)).toEqual([
+                { message: 'hello', sender: 'left', channel: 'inbox' },
+            ])
+        })
+
+        it('keeps listeners apart when plugin and channel names concatenate to the same string', async () => {
+            await startIpcPlugins([
+                { name: 'sender', allowedIPC: ['*'] },
+                { name: 'a', allowedIPC: ['*'], channel: 'bc' },
+                { name: 'ab', allowedIPC: ['*'], channel: 'c' },
+            ])
+
+            expect(await post('sender', 'a', 'bc', 'for a')).toBe('resolved')
+            expect(await post('sender', 'ab', 'c', 'for ab')).toBe('resolved')
+
+            expect(await waitFor(() => received('a'), (value) => value.length === 1)).toEqual([
+                { message: 'for a', sender: 'sender', channel: 'bc' },
+            ])
+            expect(await waitFor(() => received('ab'), (value) => value.length === 1)).toEqual([
+                { message: 'for ab', sender: 'sender', channel: 'c' },
+            ])
+        })
+    })
+
+    it('reaches the private conversation context read from the guest with the db decision', async () => {
+        const name = 'context-reader'
+        const readConversationContext = vi.fn(async () => ({ revision: 7, characterId: 'char' }))
+        vi.mocked(createProductionPluginDatabaseAccess).mockReturnValueOnce({ readConversationContext } as never)
+        vi.mocked(linkPluginQueryAbortSignals).mockImplementation((...signals) => {
+            const controller = new AbortController()
+            for (const signal of signals) signal?.addEventListener('abort', () => controller.abort(signal.reason))
+            return { signal: controller.signal, dispose() {} }
+        })
+        mocks.confirm.mockResolvedValueOnce(false)
+        await startFixture(name, 'globalThis.rpcReady = Promise.resolve()')
+
+        const result = await guest(name, `
+            const context = await risuai.risunestReadConversationContext({
+                characterId: 'char',
+                conversationId: 'conv',
+                include: { persona: true },
+                messages: { limit: 2 },
+            });
+            return JSON.stringify(context);
+        `)
+
+        expect(JSON.parse(String(result))).toEqual({ revision: 7, characterId: 'char' })
+        expect(mocks.confirm).toHaveBeenCalledTimes(1)
+        expect(readConversationContext).toHaveBeenCalledWith(
+            expect.objectContaining({
+                target: { characterId: 'char', conversationId: 'conv' },
+                messages: { window: { limit: 2 }, extraFields: [] },
+            }),
+            { allowPrivate: false, signal: expect.any(AbortSignal) },
+        )
+    })
+
+    it('reaches the private conversation patch from the guest with removals kept', async () => {
+        const name = 'conversation-patcher'
+        vi.mocked(linkPluginQueryAbortSignals).mockImplementation(() => ({ signal: new AbortController().signal, dispose() {} }))
+        await startFixture(name, 'globalThis.rpcReady = Promise.resolve()')
+
+        const result = await guest(name, `
+            const outcome = await risuai.risunestPatchConversation({
+                characterId: 'char',
+                conversationId: 'conv',
+                mutationId: 'guest-patch',
+                messages: [{ index: 0, messageId: 'm0', expected: { __old: undefined }, set: { __tr: 'text', __gone: undefined } }],
+            });
+            return JSON.stringify(outcome);
+        `)
+
+        expect(JSON.parse(String(result))).toEqual({ status: 'applied', revision: 4 })
+        const [request] = mocks.patchConversation.mock.calls[0] as unknown as [{ messages: { expected: object; set: object }[] }]
+        expect(request).toMatchObject({ characterId: 'char', conversationId: 'conv', mutationId: 'guest-patch' })
+        expect(Object.hasOwn(request.messages[0].set, '__gone')).toBe(true)
+        expect(Object.hasOwn(request.messages[0].expected, '__old')).toBe(true)
+    })
+
+    it('reaches the private host tools from the guest under the db permission', async () => {
+        vi.mocked(linkPluginQueryAbortSignals).mockImplementation(() => ({ signal: new AbortController().signal, dispose() {} }))
+        const listed = { scope: 'scope-a', tools: [{ source: 'internal:dice', sourceName: 'Dice', name: 'rollDice', inputSchema: { type: 'object' } }] }
+        mocks.listHostTools.mockResolvedValueOnce(listed)
+        mocks.callHostTool.mockResolvedValueOnce([{ type: 'text', text: 'Rolled 1d6: 4' }])
+        await startFixture('tool-caller', 'globalThis.rpcReady = Promise.resolve()')
+
+        const result = JSON.parse(String(await guest('tool-caller', `
+            const list = await risuai.risunestListHostTools();
+            const content = await risuai.risunestCallHostTool({ scope: list.scope, source: 'internal:dice', name: 'rollDice', arguments: { notation: '1d6' } });
+            return JSON.stringify({ list, content });
+        `)))
+        expect(result).toEqual({ list: listed, content: [{ type: 'text', text: 'Rolled 1d6: 4' }] })
+        expect(mocks.listHostTools).toHaveBeenCalledWith('tool-caller')
+        expect(mocks.callHostTool).toHaveBeenCalledWith('tool-caller',
+            { scope: 'scope-a', source: 'internal:dice', name: 'rollDice', arguments: { notation: '1d6' } }, expect.any(AbortSignal))
+
+        mocks.confirm.mockResolvedValue(false)
+        await startFixture('denied-tool-caller', 'globalThis.rpcReady = Promise.resolve()')
+        const errors = JSON.parse(String(await guest('denied-tool-caller', `
+            const errors = [];
+            for (const call of [() => risuai.risunestListHostTools(), () => risuai.risunestCallHostTool({ scope: 's', source: 'internal:dice', name: 'rollDice' })]) {
+                try { await call(); } catch (error) { errors.push(error.message); }
+            }
+            return JSON.stringify(errors);
+        `))) as string[]
+        expect(errors).toHaveLength(2)
+        for (const error of errors) expect(error).toContain('db permission')
+        expect(mocks.listHostTools).toHaveBeenCalledTimes(1)
+        expect(mocks.callHostTool).toHaveBeenCalledTimes(1)
+    })
+
+    it('registers message buttons with roles and hands the clicked message to the guest', async () => {
+        const name = 'message-buttons'
+        await startFixture(name, `
+            globalThis.targets = [];
+            globalThis.rpcReady = (async () => {
+                await risuai.registerButton({ name: 'Translate', icon: '<b>T</b>', iconType: 'html', location: 'message', id: 'translate', roles: ['char', 'char'] },
+                    (target) => { globalThis.targets.push(target); });
+                await risuai.registerButton({ name: 'Both', icon: '', iconType: 'none', location: 'message', id: 'both' }, () => {});
+            })();
+        `)
+        const buttons = () => additionalMessageButtons.map(({ id, name, roles }) => ({ id, name, roles }))
+        expect(buttons()).toEqual([{ id: 'translate', name: 'Translate', roles: ['char'] }, { id: 'both', name: 'Both', roles: undefined }])
+
+        const target = { characterIndex: 1, chatIndex: 0, messageIndex: 4123, messageId: 'm-4123', role: 'char', characterId: 'char', conversationId: 'conv' }
+        await additionalMessageButtons[0].callback(target)
+        expect(JSON.parse(String(await guest(name, 'return JSON.stringify(globalThis.targets)')))).toEqual([target])
+
+        await guest(name, `await risuai.registerButton({ name: 'Translated', icon: '', iconType: 'none', id: 'translate', roles: ['user'] }, () => {}); return true`)
+        expect(buttons()).toEqual([{ id: 'translate', name: 'Translated', roles: ['user'] }, { id: 'both', name: 'Both', roles: undefined }])
+
+        const errors = JSON.parse(String(await guest(name, `
+            const errors = [];
+            for (const roles of [[], ['system'], 'char']) {
+                try { await risuai.registerButton({ name: 'Bad', icon: '', iconType: 'none', location: 'message', roles }, () => {}); }
+                catch (error) { errors.push(error.message); }
+            }
+            return JSON.stringify(errors);
+        `))) as string[]
+        expect(errors).toHaveLength(3)
+        for (const error of errors) expect(error).toContain('options.roles')
+        expect(additionalMessageButtons).toHaveLength(2)
+
+        await guest(name, `await risuai.unregisterUIPart('both'); return true`)
+        expect(buttons().map(({ id }) => id)).toEqual(['translate'])
+        await loadV3Plugins([])
+        expect(additionalMessageButtons).toHaveLength(0)
+    })
+
+    it('delivers chat view events to the guest until unregisterUIPart or unload', async () => {
+        const name = 'chat-view'
+        await startFixture(name, `
+            globalThis.viewEvents = [];
+            globalThis.rpcReady = (async () => {
+                globalThis.viewId = (await risuai.risunestOnChatView((event) => { globalThis.viewEvents.push(event); })).id;
+            })();
+        `)
+        const reporter = chatViewEvents.createReporter()
+        const report = (index: number) => ({
+            characterId: 'char', conversationId: 'conv', index, message: { role: 'char', chatId: `m-${index}` }, streaming: false,
+        })
+        const runFrames = () => { for (const frame of mocks.chatViewFrames.splice(0)) frame() }
+        const received = async () => JSON.parse(String(await guest(name, 'return JSON.stringify(globalThis.viewEvents)')))
+        try {
+            reporter.rendered('row-4', report(4))
+            runFrames()
+            await vi.waitFor(async () => expect(await received()).toEqual([
+                { type: 'conversation', characterId: 'char', conversationId: 'conv', characterIndex: 1, chatIndex: 0 },
+                { type: 'rows', characterId: 'char', conversationId: 'conv', mounted: [{ index: 4, messageId: 'm-4', role: 'char' }], unmounted: [], rerendered: [] },
+            ]))
+
+            await guest(name, 'await risuai.unregisterUIPart(globalThis.viewId); return true')
+            reporter.rendered('row-5', report(5))
+            expect(mocks.chatViewFrames).toHaveLength(0)
+            expect(await received()).toHaveLength(2)
+
+            await guest(name, 'await risuai.risunestOnChatView(() => {}); return true')
+            expect(mocks.chatViewFrames).toHaveLength(1)
+            runFrames()
+            await loadV3Plugins([])
+            reporter.rendered('row-6', report(6))
+            expect(mocks.chatViewFrames).toHaveLength(0)
+        } finally {
+            reporter.dispose()
+        }
     })
 
     it('does not log RPC request or response payloads when DEV is false', async () => {

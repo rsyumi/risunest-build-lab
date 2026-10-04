@@ -185,6 +185,7 @@ import { SelectedConversationPromotionStaleError } from '../storage/activeWorkin
 import { PersistentMutationFencedError } from '../storage/saveCoordinator'
 import { DBState, selectedCharID } from '../stores.svelte'
 import { doingChat, sendChat } from './index.svelte'
+import { isGenerationRequestPhaseOpen, trackConversationPatch } from './generationRequestPhase'
 
 function deferred<T>() {
     let resolve!: (value: T) => void
@@ -910,6 +911,52 @@ describe('sendChat generation session integration', () => {
             expect(session.pinCount('transaction')).toBe(0)
         },
     )
+
+    it('applies the response only after a plugin patch admitted during the request lands', async () => {
+        const { chat, currentCharacter, session } = installDatabase()
+        const target = { characterId: currentCharacter.chaId, conversationId: chat.id! }
+        let release: (() => void) | undefined
+        let openDuringRequest = false
+        mocks.modelResponse = () => {
+            openDuringRequest = isGenerationRequestPhaseOpen(target)
+            release = trackConversationPatch(target)
+            return streamingResponse('answer')
+        }
+
+        const sending = sendChat()
+        while (!release) await Promise.resolve()
+        for (let tick = 0; tick < 20; tick++) await Promise.resolve()
+        expect(openDuringRequest).toBe(true)
+        expect(isGenerationRequestPhaseOpen(target)).toBe(false)
+        expect(chat.message.map((message) => message.data)).toEqual(['hello'])
+        const next = JSON.parse(JSON.stringify(chat))
+        next.message[0].__translation = 'record'
+        next.scriptstate = { $bridge: 'on' }
+        expect(session.adoptPersistedMetadata(next, 2)).toBe(true)
+        release()
+
+        await expect(sending).resolves.toBe(true)
+        const completed = DBState.db.characters[0].chats[0]
+        expect(completed.message.at(-1)?.data).toBe('answer')
+        expect(completed.message[0]).toMatchObject({ data: 'hello', __translation: 'record' })
+        expect(completed.scriptstate).toEqual({ $bridge: 'on' })
+    })
+
+    it('closes the request phase when the provider request throws', async () => {
+        const { chat, currentCharacter } = installDatabase()
+        const target = { characterId: currentCharacter.chaId, conversationId: chat.id! }
+        let openDuringRequest = false
+        mocks.modelResponse = () => {
+            openDuringRequest = isGenerationRequestPhaseOpen(target)
+            throw new Error('provider failed')
+        }
+
+        await sendChat().catch(() => undefined)
+
+        expect(openDuringRequest).toBe(true)
+        expect(mocks.modelRequestCount).toBe(1)
+        expect(isGenerationRequestPhaseOpen(target)).toBe(false)
+    })
 
     it('does not append after character navigation while the model request is pending', async () => {
         const second = makeCharacter(makeChat(), 'character-b')

@@ -18,6 +18,7 @@ import { readFile } from '@tauri-apps/plugin-fs'
 import type { NativeFileJobOptions, NativeFileJobSource } from '../storage/nativeFileJobs'
 import { importDesktopNativeModulePath } from '../storage/nativeModuleFileRoute'
 import { assertModuleMCPImportAllowed, StdioModuleImportError } from './mcp/moduleImport'
+import { selectConversationModules } from './moduleSelection'
 
 export interface MCPModule{
     url: string
@@ -489,50 +490,13 @@ function getModuleById(id:string){
     return null
 }
 
-function getModuleByIds(ids:string[]){
-    const db = getDatabase()
-    const idSet = new Set(ids)
-    const modules = (db.modules ?? []).filter(m =>
-        idSet.has(m.id) || (m.namespace && idSet.has(m.namespace))
-    )
-    return deduplicateModuleById(modules)
-}
-
-function deduplicateModuleById(modules:RisuModule[]){
-    let ids:string[] = []
-    let newModules:RisuModule[] = []
-    for(let i=0;i<modules.length;i++){
-        if(ids.includes(modules[i].id)){
-            continue
-        }
-        ids.push(modules[i].id)
-        newModules.push(modules[i])
-    }
-    return newModules
-}
-
 export function getModules(){
-    const currentChat = getCurrentChat()
-    const character = getCurrentCharacter()
-    const persona = checkPersonaBinded()
-    const db = getDatabase()
-    let ids = db.enabledModules ?? []
-    if (currentChat){
-        ids = ids.concat(currentChat.modules ?? [])
-    }
-    if(character && character.modules){
-        ids = ids.concat(character.modules)
-    }
-    if(db.moduleIntergration){
-        const intList = db.moduleIntergration.split(',').map((s) => s.trim())
-        ids = ids.concat(intList)
-    }
-    const modules = getModuleByIds(ids)
-    if (persona?.embeddedModule) {
-        modules.push(persona.embeddedModule)
-    }
-    return deduplicateModuleById(modules)
-
+    return selectConversationModules(
+        getDatabase(),
+        getCurrentChat()?.modules,
+        getCurrentCharacter()?.modules,
+        checkPersonaBinded(),
+    )
 }
 
 export function getModuleLorebooks() {

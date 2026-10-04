@@ -68,6 +68,11 @@ import {
     type PluginConversationQuery,
     type PluginFullObjectCallContext,
 } from "../pluginDatabaseAccess";
+import { createRisunestPrivateApi } from './risunestPrivateApi';
+import { chatViewEvents } from '../chatViewHost.svelte';
+import { conversationPatchAccess } from '../conversationPatchHost';
+import { hostToolBridge, registerOwnedPluginMCP } from '../hostToolHost';
+import { additionalMessageButtons, normalizeMessageButtonRoles, type MessageButtonDef, type MessageButtonTarget } from '../messageButtons.svelte';
 
 /*
     V3 API for RisuAI Plugins
@@ -88,7 +93,12 @@ import {
         - Note that Class or Callbacks inside arrays or objects are not supported
 */
 
-const pluginChannel = new Map<string, Function>();
+// Listeners by receiver plugin name, then channel name.
+const pluginChannel = new Map<string, Map<string, Function>>();
+
+function allowsIPC(allowedIPC: readonly string[] | undefined, pluginName: string): boolean {
+    return !!allowedIPC && (allowedIPC.includes(pluginName) || allowedIPC.includes('*'));
+}
 const documentEventListeners: Array<{
     target: EventTarget
     type: string
@@ -764,6 +774,14 @@ const makeRisuaiAPIV3 = (
         epoch: permissionEpoch,
         decisions: new Map(),
     }
+    const risunest = createRisunestPrivateApi({
+        databaseAccess,
+        patchAccess: conversationPatchAccess,
+        hostTools: hostToolBridge.forPlugin(plugin.name),
+        chatView: chatViewEvents.forOwner(plugin.name),
+        hasDatabasePermission: () => getPluginPermission(permissionContext, 'db', 'periodically'),
+        lifetimeSignal: pluginLifetime.signal,
+    })
     const fullObjectContext = (): PluginFullObjectCallContext => ({
         pluginName: plugin.name,
         signal: pluginLifetime.signal,
@@ -945,6 +963,16 @@ const makeRisuaiAPIV3 = (
                 linked.dispose()
             }
         },
+        risunestReadConversationContext: (input?: unknown) =>
+            risunest.readConversationContext(input),
+        risunestPatchConversation: (input?: unknown) =>
+            risunest.patchConversation(input),
+        risunestListHostTools: () =>
+            risunest.listHostTools(),
+        risunestCallHostTool: (input?: unknown) =>
+            risunest.callHostTool(input),
+        risunestOnChatView: (callback?: unknown) =>
+            risunest.onChatView(callback),
 
         installPlugin: handlePluginInstallViaPlugin,
 
@@ -1219,10 +1247,11 @@ const makeRisuaiAPIV3 = (
                 name: string,
                 icon: string,
                 iconType: 'html'|'img'|'none',
-                location?: 'action'|'chat'|'hamburger',
-                id?: string
+                location?: 'action'|'chat'|'hamburger'|'message',
+                id?: string,
+                roles?: ('user'|'char')[]
             },
-            callback: () => void
+            callback: (target?: MessageButtonTarget) => void
         ) => {
             if (!arg || typeof arg !== 'object' || Array.isArray(arg)) {
                 throw new Error('registerButton: first argument must be an options object');
@@ -1239,15 +1268,16 @@ const makeRisuaiAPIV3 = (
                 throw new Error("icon must be a string");
             }
             const id = providedId || v4()
-            const menuDef:MenuDef = {
+            const menuDef:MessageButtonDef = {
                 name,
                 icon,
                 iconType,
                 callback,
-                id
+                id,
+                roles: normalizeMessageButtonRoles(arg.roles)
             }
 
-            const buttonStores = [additionalFloatingActionButtons, additionalHamburgerMenu, additionalChatMenu]
+            const buttonStores = [additionalFloatingActionButtons, additionalHamburgerMenu, additionalChatMenu, additionalMessageButtons]
             for(const store of buttonStores){
                 const existingIndex = store.findIndex(item => item.id === id)
                 if(existingIndex !== -1){
@@ -1282,6 +1312,14 @@ const makeRisuaiAPIV3 = (
                     addPluginUnloadCallback(
                         plugin.name,
                         makeMenuUnloadCallback(menuDef.id, additionalChatMenu)
+                    )
+                    break
+                }
+                case 'message':{
+                    additionalMessageButtons.push(menuDef)
+                    addPluginUnloadCallback(
+                        plugin.name,
+                        makeMenuUnloadCallback(menuDef.id, additionalMessageButtons)
                     )
                     break
                 }
@@ -1328,7 +1366,7 @@ const makeRisuaiAPIV3 = (
             addPluginUnloadCallback(plugin.name, () => removePluginChatPanels(plugin.name));
             return {id};
         },
-        registerMCP: registerMCPModule,
+        registerMCP: (...args: Parameters<typeof registerMCPModule>) => registerOwnedPluginMCP(plugin.name, ...args),
         unregisterMCP: unregisterMCPModule,
         unregisterUIPart: (id: string) => {
             const removeFromMenuStore = (menuStore: MenuDef[]) => {
@@ -1342,7 +1380,9 @@ const makeRisuaiAPIV3 = (
             removeFromMenuStore(additionalFloatingActionButtons);
             removeFromMenuStore(additionalHamburgerMenu);
             removeFromMenuStore(additionalChatMenu);
+            removeFromMenuStore(additionalMessageButtons);
             removeChatPanel(id);
+            risunest.unregisterUIPart(id);
         },
         log: (message:string) => {
             console.log(`[RisuAI Plugin: ${plugin.name}] ${message}`);
@@ -1635,9 +1675,16 @@ const makeRisuaiAPIV3 = (
             return true;
         },
         addPluginChannelListener: (channelName: string, callback: Function) => {
-            pluginChannel.set(plugin.name + channelName, callback);
+            let channels = pluginChannel.get(plugin.name);
+            if(!channels){
+                channels = new Map();
+                pluginChannel.set(plugin.name, channels);
+            }
+            channels.set(channelName, callback);
             addPluginUnloadCallback(plugin.name, () => {
-                pluginChannel.delete(plugin.name + channelName);
+                const current = pluginChannel.get(plugin.name);
+                current?.delete(channelName);
+                if(current?.size === 0) pluginChannel.delete(plugin.name);
             })
         },
         postPluginChannelMessage: (pluginName: string, channelName: string, message: any) => {
@@ -1650,18 +1697,18 @@ const makeRisuaiAPIV3 = (
                 return;
             }
 
-            if(!receiverPlugin.allowedIPC?.includes(currentPluginName)){
+            if(!allowsIPC(receiverPlugin.allowedIPC, currentPluginName)){
                 console.warn(`[RisuAI Plugin: ${currentPluginName}] Attempted to send message to plugin '${pluginName}' but receiver plugin does not allow IPC communication from this plugin. declare //@allowed-ipc ${currentPluginName} in the reciver plugin script to allow IPC communication.`);
                 return;
             }
 
-            if(!plugin.allowedIPC?.includes(receiverPlugin.name)){
+            if(!allowsIPC(plugin.allowedIPC, receiverPlugin.name)){
                 console.warn(`[RisuAI Plugin: ${currentPluginName}] Attempted to send message to plugin '${pluginName}' but the sender plugin does not allow IPC communication to this plugin. declare //@allowed-ipc ${receiverPlugin.name} in the sender plugin script to allow IPC communication.`);
                 return;
             }
 
 
-            const callback = pluginChannel.get(pluginName + channelName);
+            const callback = pluginChannel.get(pluginName)?.get(channelName);
             if(callback){
                 callback(message, {
                     sender: currentPluginName,

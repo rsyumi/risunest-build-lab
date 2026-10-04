@@ -124,6 +124,16 @@ pub fn manager_executable() -> Result<PathBuf> {
     Ok(current.parent().ok_or("executable-unavailable")?.join(name))
 }
 
+/// The manager build that Task Scheduler and detached update helpers run.
+/// Windows uses the windowless sibling so these runs open no console window.
+pub fn background_manager_executable(manager: &Path) -> PathBuf {
+    if cfg!(windows) {
+        manager.with_file_name("risunest-sync-manager-background.exe")
+    } else {
+        manager.to_owned()
+    }
+}
+
 pub fn process(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let command = Command::new(program);
     #[cfg(windows)]

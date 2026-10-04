@@ -118,7 +118,7 @@ test('CAS-applies ordered trigger mutations and preserves an empty string value'
     expect(chat.message).toEqual([
         { role: 'user', data: '', chatId: 'message-0' },
         { role: 'char', data: 'one', chatId: 'message-1' },
-        { role: 'char', data: 'tail' },
+        { role: 'char', data: 'tail', chatId: expect.any(String) },
     ])
     expect(session.version).toBe(1)
     expect(session.activePinReasons).toEqual([])

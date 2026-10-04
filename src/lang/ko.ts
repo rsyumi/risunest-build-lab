@@ -2016,6 +2016,7 @@ export const languageKorean = {
             serviceWorker: '오프라인 기능 준비 중',
             ui: '화면 준비 중',
             elapsed: (seconds: number) => `${seconds}초 경과`,
+            rendererRecovered: 'WebView 렌더러가 중단되어 화면을 다시 불러왔습니다.',
         },
         serverSync: {
             registrationCode: '등록 코드',

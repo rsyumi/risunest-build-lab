@@ -1120,6 +1120,16 @@ export class ActiveConversationSession {
         return this.generationContinuationStart
     }
 
+    /** Whether a commit of metadata and unknown message fields would be adopted now; it changes nothing. */
+    get canAdoptPersistedMetadata(): boolean {
+        return (
+            this.active &&
+            !this.transactionActive &&
+            this.sessionVersion === this.persistedSessionVersion &&
+            (this.compatibilityFallback || this.residency.canAdoptPersistedMetadata)
+        )
+    }
+
     adoptPersistedMetadata(replacement: Chat, revision: DataRevision): boolean {
         this.assertActive()
         if (

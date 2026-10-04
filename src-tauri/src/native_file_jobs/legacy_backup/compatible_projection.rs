@@ -346,6 +346,10 @@ fn project_node(
                         }
                         Err(error) => return Err(error),
                     }
+                } else if key.starts_with("__") && schema["types"]["Message"].as_str() == Some(id) {
+                    // Plugin-owned message fields: both targets keep unknown
+                    // message fields in their own data, and their plugins write them.
+                    out.insert(key.clone(), value.clone());
                 } else {
                     losses.add("unsupported-structural-field", 1);
                 }
@@ -608,6 +612,21 @@ mod tests {
             assert!(result.get("unknownRoot").is_none());
             assert_eq!(result["pluginCustomStorage"], value["pluginCustomStorage"]);
             assert!(result["plugins"][0].get("unknownPluginField").is_none());
+        }
+    }
+
+    #[test]
+    fn compatible_projection_keeps_plugin_owned_message_fields_only() {
+        for target in [CompatibilityTarget::RisuAi, CompatibilityTarget::PocketRisu] {
+            let mut projector = Projector::new(target).unwrap();
+            let value = json!({"message":[{"role":"char","data":"synthetic","chatId":"m1","__plugin":{"record":[1,"two",null]},"__flag":true,"surprise":1}],"__chatField":1});
+            let result = projector.project("Chat", &value).unwrap();
+            let message = &result["message"][0];
+            assert_eq!(message["__plugin"], value["message"][0]["__plugin"]);
+            assert_eq!(message["__flag"], true);
+            assert!(message.get("surprise").is_none());
+            assert!(result.get("__chatField").is_none());
+            assert_eq!(projector.losses.0.get("unsupported-structural-field"), Some(&2));
         }
     }
 

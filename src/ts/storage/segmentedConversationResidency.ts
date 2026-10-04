@@ -252,6 +252,10 @@ export class SegmentedConversationResidency {
         return true
     }
 
+    get canAdoptPersistedMetadata(): boolean {
+        return this.dirtyRecords.length === 0 && this.pendingSaveAttempts.size === 0
+    }
+
     adoptPersistedMetadata(
         revision: DataRevision,
         version: number,

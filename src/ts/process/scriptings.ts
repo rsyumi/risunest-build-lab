@@ -413,7 +413,7 @@ export async function runScripted(code:string, arg:{
                 }
                 ensureScriptingConversation()
                 let roleData:'user'|'char' = role === 'user' ? 'user' : 'char'
-                ScriptingEngineState.chat.message.push({role: roleData, data: value ?? ''})
+                ScriptingEngineState.chat.message.push({role: roleData, data: value ?? '', chatId: v4()})
             })
             declareAPI('insertChat', (id:string, index:number, role:string, value:string) => {
                 if(!ScriptingSafeIds.has(id)){
@@ -421,7 +421,7 @@ export async function runScripted(code:string, arg:{
                 }
                 ensureScriptingConversation()
                 let roleData:'user'|'char' = role === 'user' ? 'user' : 'char'
-                ScriptingEngineState.chat.message.splice(index, 0, {role: roleData, data: value ?? ''})
+                ScriptingEngineState.chat.message.splice(index, 0, {role: roleData, data: value ?? '', chatId: v4()})
             })
 
             declareAPI('getTokens', async (id:string, value:string) => {
@@ -502,6 +502,7 @@ export async function runScripted(code:string, arg:{
                         ...original,
                         role: v.role,
                         data: v.data,
+                        chatId: original?.chatId ?? v4(),
                     }
                 })
             })

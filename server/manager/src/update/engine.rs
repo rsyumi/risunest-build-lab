@@ -501,7 +501,7 @@ fn classify_health(status: &Value) -> HealthObservation {
 }
 
 pub(super) fn copy_helper(root: &Path) -> Result<PathBuf> {
-    let current = platform::manager_executable()?;
+    let current = platform::background_manager_executable(&platform::manager_executable()?);
     if !current.is_file() {
         return Err("manager-executable-missing".into());
     }
@@ -963,6 +963,15 @@ async fn run_inner_locked(root: &Path, server: &Path, mode: RunMode) -> Result<R
             "cloudflared"
         }),
     ];
+    // A scheduled run executes the windowless manager from the install itself.
+    #[cfg(windows)]
+    live_processes.push(
+        install.join(
+            platform::background_manager_executable(&manager)
+                .file_name()
+                .ok_or("manager-path-invalid")?,
+        ),
+    );
     if mode == RunMode::Manual {
         let invoker = std::env::current_exe().map_err(|_| "executable-unavailable".to_owned())?;
         if invoker.parent() == Some(install.as_path()) {
