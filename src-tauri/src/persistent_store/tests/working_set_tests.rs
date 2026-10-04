@@ -2971,7 +2971,8 @@ fn reopen_invalidates_runtime_and_legacy_leases_then_reclaims_inactive_generatio
         .expect("seed rollback-compatible legacy lease");
     drop(store);
 
-    let store = PersistentStore::open(directory.path()).expect("reopen after runtime lease drop");
+    let mut store = PersistentStore::open(directory.path()).expect("reopen after runtime lease drop");
+    while store.purge_retired_batch(256).expect("purge inactive generations") {}
     assert!(matches!(
         store.read_root(Some(&lease.lease)),
         Err(StoreError::SnapshotReleased)

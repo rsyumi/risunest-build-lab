@@ -1185,6 +1185,48 @@ impl Provider for S3Provider {
         })
     }
 
+    fn lookup_metadata<'a>(
+        &'a self,
+        repository: &'a RepositoryHandle,
+        intent: &'a ObjectIntent,
+        known: Option<&'a RemoteLocator>,
+        cancel: &'a Cancellation,
+    ) -> ProviderFuture<'a, Option<ObjectReceipt>> {
+        Box::pin(async move {
+            cancel.check()?;
+            let context = context_of(repository)?;
+            intent.validate(repository)?;
+            let (key, locator) = match known {
+                Some(locator) => {
+                    locator.validate_for(repository)?;
+                    (context.key(&locator.object)?, locator.clone())
+                }
+                None => intent_locator(repository, context, intent)?,
+            };
+            let credentials = self.credentials(context).await?;
+            let Some(existing) = self.head_object(context, &credentials, &key, cancel).await? else {
+                return Ok(None);
+            };
+            let checksum = match existing.checksum_sha256.filter(|_| context.profile.checksum_header) {
+                Some(remote) => {
+                    let value = hex::encode(
+                        base64::engine::general_purpose::STANDARD.decode(&remote).map_err(|_| corrupt())?,
+                    );
+                    let provider_verified = value == intent.sha256;
+                    Some(Checksum { algorithm: "sha256".into(), value, provider_verified })
+                }
+                None => None,
+            };
+            Ok(Some(ObjectReceipt {
+                locator,
+                byte_length: existing.byte_length,
+                version: existing.version,
+                checksum,
+                complete: true,
+            }))
+        })
+    }
+
     fn head_locator(&self, repository: &RepositoryHandle) -> Result<RemoteLocator> {
         context_of(repository)?;
         Ok(RemoteLocator {

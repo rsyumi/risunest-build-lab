@@ -134,6 +134,7 @@
         getCurrentViewportSource: () =>
             persistentRuntime.getActiveConversationViewportSource(),
         captureWindowedMessageMutation: (target, index, evidence) => persistentRuntime.captureWindowedMessageMutation(target, index, evidence),
+        acquirePersistentRevision: (revision) => persistentRuntime.store.acquireRevision(revision),
     })
     let viewportBindingRevision = $state(0)
     const selectedConversationViewport = new SelectedConversationViewportBinding(

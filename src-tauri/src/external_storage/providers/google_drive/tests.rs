@@ -354,6 +354,10 @@ impl DocumentSource for UnusedCleanupDocuments {
     fn probe<'a>(&'a self, _: &'a RemoteObject) -> ProviderFuture<'a, Option<ObjectReceipt>> {
         Box::pin(async { Err(ProviderError::new(ErrorKind::Corrupt)) })
     }
+
+    fn metadata<'a>(&'a self, _: &'a RemoteObject) -> ProviderFuture<'a, Option<ObjectReceipt>> {
+        Box::pin(async { Err(ProviderError::new(ErrorKind::Corrupt)) })
+    }
 }
 
 #[test]
@@ -2462,6 +2466,33 @@ fn segment_preallocation_accepts_the_full_hash_name_and_sends_no_body() {
     });
 }
 
+
+#[test]
+fn object_metadata_reads_file_fields_and_never_the_media() {
+    runtime().block_on(async {
+        let bytes = b"sealed-pack";
+        let file = json!({ "id": "pack-file", "size": bytes.len().to_string(), "version": "3", "sha256Checksum": hash(bytes),
+            "appProperties": { "risunestRole": "pack", "risunestObjectId": "pack-1" } });
+        let mut replies = open_existing_replies();
+        replies.extend([control_reply(vec![file]), error_reply(404, "notFound")]);
+        let server = WireServer::start(replies);
+        let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+        let cancel = Cancellation::default();
+        let (provider, repository) = opened(&server, &test, &cancel).await;
+        let opened = request_lines(&server).len();
+        let intent = intent(&repository, "pack-1", ObjectRole::Pack, bytes);
+        let found = provider.lookup_metadata(&repository, &intent, None, &cancel).await.unwrap().unwrap();
+        assert_eq!((found.locator.object.as_str(), found.locator.collection.as_deref()), ("pack-file", None));
+        assert_eq!(found.byte_length, bytes.len() as u64);
+        assert_eq!(found.version, Some(VersionToken("3".into())));
+        assert!(found.checksum.clone().unwrap().provider_verified && found.complete);
+        assert!(provider.lookup_metadata(&repository, &intent, Some(&found.locator), &cancel).await.unwrap().is_none());
+        let lines = request_lines(&server);
+        assert_eq!(lines.len(), opened + 2);
+        assert!(lines[opened..].iter().all(|line| line.starts_with("GET ") && !line.contains("alt=media")));
+        assert!(lines[opened + 1].contains("/files/pack-file?"));
+    });
+}
 
 #[test]
 fn distinct_drive_hash_variants_stop_reconciliation_and_both_remain_listable() {

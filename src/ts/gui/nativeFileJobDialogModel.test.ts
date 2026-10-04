@@ -135,17 +135,6 @@ describe('nativeFileJobDialogModel', () => {
         expect(model.terminal?.details).toBe(`[${code}] synthetic detail`)
     })
 
-    it('names the kind of an item too large to import', () => {
-        for (const [kind, item] of Object.entries(copy.tooLargeItems)) {
-            const model = buildNativeFileJobDialogModel(null, outcome({ state: 'failed', error: {
-                code: 'payload-too-large', message: 'synthetic detail', recoveryRequired: false, itemKind: kind,
-            } }), 0)
-            expect(model.terminal?.reason).toBe(copy.reasonTooLarge.replace('{0}', item))
-        }
-        expect(failureReason('payload-too-large', 'import', 'commit')).toBe(copy.reasonUnknown)
-        expect(failureReason('payload-too-large')).toBe(copy.reasonUnknown)
-    })
-
     it('asks to connect sync when a bound restore cannot reach its sync target', () => {
         const model = buildNativeFileJobDialogModel(null, outcome({ state: 'failed', error: { code: 'sync-unavailable', message: 'synthetic detail', recoveryRequired: false } }), 0)
         expect(model.terminal?.reason).toBe(languageEnglish.risuNest.backup.syncUnavailable)
@@ -357,12 +346,12 @@ describe('nativeFileJobDialogModel', () => {
             fillTemplate(copy.currentItem, 'assets/a.png'),
         )
 
-        const staging = buildNativeFileJobDialogModel(
+        const decoding = buildNativeFileJobDialogModel(
             running({
                 status: status({
                     detail: detail(
-                        'staging-characters',
-                        { stageCompleted: 4, stageTotal: 9 },
+                        'decoding-database',
+                        { stageCompleted: 4096, stageTotal: 8192, stageUnit: 'bytes' },
                         {
                             ...counts,
                             entriesTotal: 12,
@@ -377,28 +366,26 @@ describe('nativeFileJobDialogModel', () => {
                     'preparing-attachments',
                     'reading-database',
                     'decoding-database',
-                    'staging-characters',
                 ],
             }),
             null,
             1_000,
         )
-        expect(stageIds(staging)).toEqual([
+        expect(stageIds(decoding)).toEqual([
             'reading-archive:done',
             'preparing-attachments:done',
             'reading-database:done',
-            'decoding-database:done',
-            'staging-characters:active',
+            'decoding-database:active',
             'finalizing-staging:pending',
             'activating:pending',
             'refreshing-app:pending',
             'reloading-plugins:pending',
         ])
-        expect(staging.currentItem).toBe('')
-        expect(staging.counters[0].value).toBe(
+        expect(decoding.currentItem).toBe('')
+        expect(decoding.counters[0].value).toBe(
             fillTemplate(copy.itemsOf, '4', '9'),
         )
-        expect(staging.counters[1].value).toBe('2')
+        expect(decoding.counters[1].value).toBe('2')
     })
 
     it('labels a RisuAI backup only once every entry has been classified', () => {
@@ -818,7 +805,6 @@ describe('nativeFileJobDialogModel', () => {
             'preparing-attachments',
             'reading-database',
             'decoding-database',
-            'staging-characters',
             'finalizing-staging',
             'awaiting-activation',
             'activating',

@@ -14,14 +14,12 @@ type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>
 
 /** Use native binary messages when registered, otherwise bounded UTF-8 strings.
  * Android's ordinary invoke serializes typed arrays as JSON number arrays.
- * `finish` names the command that consumes the assembled bytes.
  */
-export async function sendAndroidCommit<T = { revision: number }>(
+export async function sendAndroidCommit(
     bytes: Uint8Array,
     invoke: Invoke,
     bridge: AndroidBinaryCommitBridge | null | undefined = getAndroidBinaryCommitBridge(),
-    finish = 'pds_commit_android_finish',
-): Promise<T> {
+): Promise<{ revision: number }> {
     if (!bytes.length || bytes.length > MAX_ANDROID_COMMIT_BYTES)
         throw new Error('Invalid Android persistence payload size')
     const id = crypto.randomUUID()
@@ -65,7 +63,7 @@ export async function sendAndroidCommit<T = { revision: number }>(
             offset = end
         }
         // An error after finish may have committed. Never fall back or replay here.
-        return await invoke<T>(finish, { id })
+        return await invoke('pds_commit_android_finish', { id })
     } finally {
         sender?.close()
         // Client-owned ID also cleans up an open whose response was lost.

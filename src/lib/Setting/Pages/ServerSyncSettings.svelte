@@ -3,13 +3,14 @@
     import { language } from 'src/lang'
     import { alertCheckboxConfirm, alertConfirm } from 'src/ts/alert'
     import { isTauri } from 'src/ts/platform'
-    import { connectServerSync, disconnectServerSync, holdServerSync, retryServerSync, getServerSyncController, getServerSyncCacheUsage, cleanupServerSyncCache, type ServerSyncCacheUsage } from 'src/ts/storage/sync/serverSyncProduction'
+    import { completeServerSyncBinding, connectServerSync, disconnectServerSync, holdServerSync, retryServerSync, getServerSyncController, getServerSyncCacheUsage, cleanupServerSyncCache, type ServerSyncCacheUsage } from 'src/ts/storage/sync/serverSyncProduction'
     import { parseServerRegistration } from 'src/ts/storage/sync/serverSyncRegistration'
     import { serverRegistrationInbox } from 'src/ts/storage/sync/serverSyncRegistrationInbox'
     import { canScanServerRegistration, createServerQrScanner } from 'src/ts/storage/sync/serverSyncQr'
     import { getAssetResidencyStatus, setAssetResidencyPolicy, evictLocalAssets, cancelAssetResidencyOperation, type AssetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency'
     import { describeBlockedReason } from 'src/ts/storage/sync/blockedReasonText'
     import type { ServerConfig } from 'src/ts/storage/sync/serverSync'
+    import { PREVIOUS_FILES_DOWNLOAD_FAILED } from 'src/ts/storage/sync/bindingFlow'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingButton from '../RisuNest/SettingButton.svelte'
@@ -38,7 +39,10 @@
         if (['clock-skew', 'incoming-clock-skew', 'accepted-clock-correction-required'].includes(token)) return language.lwwSync.clockBlocked
         if (writerRecoveryCodes.includes(token)) return language.lwwSync.writerCollision
         if (token === 'unit-too-large') return language.lwwSync.unitTooLarge
-        if (token.startsWith('credential-')) return copy.credentialUnavailable
+        if (token === 'device-credential-unavailable') return copy.credentialUnavailable
+        if (token === 'unauthorized' || token === 'invalid-device-token') return language.lwwSync.registrationRevoked
+        if (token === PREVIOUS_FILES_DOWNLOAD_FAILED) return language.lwwSync.downloadFailedNotConnected
+        if (token === 'previous-storage-unavailable') return language.lwwSync.previousStorageUnavailable
         if (token.startsWith('qr-')) return token.includes('permission') ? copy.cameraDenied : copy.cameraUnavailable
         return copy.errorHelp
     }
@@ -46,7 +50,8 @@
     async function run(operation: () => Promise<unknown>) {
         if (busy) return
         busy = true; failure = ''
-        try { await operation(); await refresh() } catch (error) { failure = message(error) } finally { busy = false }
+        // A failure the operation already explained stays over a later refresh error.
+        try { await operation(); await refresh() } catch (error) { failure ||= message(error) } finally { busy = false }
     }
     function readCode() { try { candidate = parseServerRegistration(code); code = ''; failure = '' } catch { failure = copy.registrationInvalid } }
     async function scan() { scanning = true; try { candidate = await scanner.scan(() => {}); failure = '' } catch (error) { failure = message(error) } finally { scanning = false } }
@@ -54,9 +59,9 @@
     async function downloadAll() { downloading = true; try { await setAssetResidencyPolicy('full') } finally { downloading = false } }
     async function downloadHeld() { const release = await holdServerSync(); try { await downloadAll() } finally { await release() } }
     async function disconnect() {
-        let remoteObjects = 0
-        try { remoteObjects = (await getAssetResidencyStatus()).remoteObjects } catch {}
-        if (!remoteObjects) return disconnectServerSync()
+        let serverObjects = 0
+        try { serverObjects = (await getAssetResidencyStatus()).serverObjects } catch {}
+        if (!serverObjects) return disconnectServerSync()
         const choice = await alertCheckboxConfirm({ title: copy.disconnectTitle, description: copy.disconnectRemoteOnly, checkboxLabel: copy.downloadThenDisconnect, actionLabel: copy.disconnect, cancelLabel: language.cancel, requireChecked: false })
         if (!choice.confirmed) return
         if (!choice.checked) return disconnectServerSync()
@@ -66,7 +71,7 @@
                 if (errorCode(error) === 'cancelled') return
                 // Files that are on neither this device nor the server fail the download but are not lost by disconnecting.
                 let remaining: number | undefined
-                try { remaining = (await getAssetResidencyStatus()).remoteObjects } catch {}
+                try { remaining = (await getAssetResidencyStatus()).serverObjects } catch {}
                 if (remaining !== 0) { failure = copy.downloadFailedKeptConnection; return }
             }
             await disconnectServerSync()
@@ -78,7 +83,7 @@
         if (!isTauri) return
         dispose = controller.subscribe(value => { view = value })
         inboxDispose = serverRegistrationInbox.changed.subscribe(() => { const pending = serverRegistrationInbox.take(); if (pending) candidate = pending })
-        void refresh().catch(error => { failure = message(error) })
+        void refresh().catch(error => { failure ||= message(error) })
     })
     onDestroy(() => { dispose(); inboxDispose(); scanner.cancel(); serverRegistrationInbox.releaseConsumed() })
 </script>
@@ -107,9 +112,15 @@
                 <SettingButton onclick={() => { candidate = undefined }} disabled={busy}>{copy.discardRegistration}</SettingButton>
             </div>
         {/if}
+        {#if view.bindingIncomplete}
+            <p role="status" class="mt-2 text-sm">{language.lwwSync.bindingIncomplete}</p>
+            <div class="mt-2 flex flex-wrap gap-2">
+                <SettingButton onclick={() => void run(completeServerSyncBinding)} disabled={busy}>{copy.connect}</SettingButton>
+            </div>
+        {/if}
         {#if view.status.bound}
             <div class="mt-2 flex flex-wrap gap-2">
-                <SettingButton onclick={() => void run(retryServerSync)} disabled={busy}>{copy.syncNow}</SettingButton>
+                {#if !view.bindingIncomplete}<SettingButton onclick={() => void run(retryServerSync)} disabled={busy}>{copy.syncNow}</SettingButton>{/if}
                 <SettingButton onclick={() => void run(disconnect)} disabled={busy}>{copy.disconnect}</SettingButton>
             </div>
         {/if}
@@ -118,7 +129,7 @@
     {#if residency && view.status.configured}
         <SettingGroup title={copy.residency.title} description={copy.residency.description}>
             <SettingRow label={copy.residency.local}><span>{bytes(residency.localBytes)}</span></SettingRow>
-            <SettingRow label={copy.residency.remoteOnly}><span>{bytes(residency.remoteBytes)}</span></SettingRow>
+            <SettingRow label={copy.residency.remoteOnly}><span>{bytes(residency.serverBytes)}</span></SettingRow>
             <SettingRow label={copy.residency.unavailable}><span>{residency.unavailableObjects}</span></SettingRow>
             <div class="flex flex-wrap gap-2">
                 <SettingButton onclick={() => void run(() => setAssetResidencyPolicy('full'))} disabled={busy || residency.policy === 'full'}>{copy.residency.full}</SettingButton>

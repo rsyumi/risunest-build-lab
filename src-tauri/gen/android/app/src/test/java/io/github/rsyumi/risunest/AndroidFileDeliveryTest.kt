@@ -16,7 +16,6 @@ class AndroidFileDeliveryTest {
       "character.charx" to "application/x-risunest", "module.risum" to "application/x-risunest",
       "backup.risunest" to "application/x-risunest", "backup.risudat" to "application/x-risunest",
       "character.json" to "application/json", "chat.txt" to "text/plain",
-      "chat.html" to "text/html", "chat.HTM" to "text/html", "subtitle.vtt" to "application/octet-stream",
       "backup.bin" to "application/octet-stream", "archive.zip.bin" to "application/octet-stream",
       "unknown" to "application/octet-stream",
     )

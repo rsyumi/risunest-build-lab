@@ -50,13 +50,13 @@ impl CompactionTurn {
     }
 }
 
-fn maintenance_due(checkpoints:&[Checkpoint],segments:&[ObjectReceipt])->Result<bool> {
+fn maintenance_due<C:lww_checkpoint::Covering>(checkpoints:&[C],segments:&[ObjectReceipt])->Result<bool> {
     let retained=lww_checkpoint::retained(checkpoints)?;
     if retained.len()>1 {return Ok(true);}
-    let checkpoints=checkpoints.iter().filter(|checkpoint|retained.contains(&checkpoint.snapshot_id));
+    let checkpoints=checkpoints.iter().filter(|checkpoint|retained.contains(checkpoint.snapshot_id()));
     let mut coverage=super::lww_checkpoint::Coverage::new();
     for checkpoint in checkpoints {
-        for (writer,prefix) in &checkpoint.covered_prefixes {
+        for (writer,prefix) in checkpoint.covered_prefixes() {
             let current=coverage.entry(writer.clone()).or_insert(risunest_sync_wire::stamp::DecimalU64(0));
             *current=(*current).max(*prefix);
         }
@@ -148,12 +148,51 @@ fn live_published_objects(state:&PublishedState,capture:&mut super::capture::Cap
     }
     Ok((live,conservative))
 }
+/// The snapshots one connection already classified, keyed by the receipt that
+/// names their bytes. An ordinary snapshot is kept as not a checkpoint.
+#[derive(Default)]
+pub(crate) struct CheckpointSummaries {
+    scope:String,
+    classified:BTreeMap<ReceiptKey,Option<lww_checkpoint::CheckpointSummary>>,
+}
+type ReceiptKey=(String,Option<String>,String,u64,Option<String>);
+fn receipt_key(receipt:&ObjectReceipt)->ReceiptKey {
+    (receipt.locator.connection_identity.clone(),receipt.locator.collection.clone(),receipt.locator.object.clone(),
+        receipt.byte_length,receipt.version.as_ref().map(|version|version.0.clone()))
+}
 impl ExternalLwwEngine {
     /// The retained checkpoints when compaction is due.
+    #[cfg(test)]
     pub(crate) async fn maintenance_needed(&self,cancel:&Cancellation)->Result<Option<BTreeSet<String>>> {
-        let checkpoints=self.checkpoints(cancel).await?.into_iter().map(|(_,checkpoint)|checkpoint).collect::<Vec<_>>();
+        self.maintenance_needed_cached(&Default::default(),cancel).await
+    }
+    /// `maintenance_needed` reading only the snapshots `cache` has not classified.
+    pub(crate) async fn maintenance_needed_cached(&self,cache:&tokio::sync::Mutex<CheckpointSummaries>,cancel:&Cancellation)->Result<Option<BTreeSet<String>>> {
+        let checkpoints=self.checkpoint_summaries(cache,cancel).await?;
         if !maintenance_due(&checkpoints,&self.listing(cancel).await?)? {return Ok(None)}
         Ok(Some(lww_checkpoint::retained(&checkpoints)?))
+    }
+    /// Every published checkpoint's summary. Only a snapshot whose receipt
+    /// `cache` has not classified is read.
+    pub(crate) async fn checkpoint_summaries(&self,cache:&tokio::sync::Mutex<CheckpointSummaries>,cancel:&Cancellation)->Result<Vec<lww_checkpoint::CheckpointSummary>> {
+        let mut cache=cache.lock().await;
+        let scope=format!("{}\n{}\n{}",self.target_scope(),self.repository.repository_id,self.descriptor.repository_id);
+        if cache.scope!=scope {*cache=CheckpointSummaries{scope,classified:BTreeMap::new()};}
+        let mut classified=BTreeMap::new();let mut output=Vec::new();
+        for receipt in self.snapshot_receipts(cancel).await? {
+            receipt.locator.validate_for(&self.repository)?;
+            let key=receipt_key(&receipt);
+            // An incomplete receipt is never answered from the cache, so it is refused.
+            let known=if receipt.complete {cache.classified.get(&key).cloned()} else {None};
+            let summary=match known {
+                Some(summary)=>summary,
+                None=>self.classified_checkpoint(&receipt,cancel).await?.map(|(_,checkpoint)|lww_checkpoint::CheckpointSummary::of(&checkpoint)),
+            };
+            output.extend(summary.clone());
+            classified.insert(key,summary);
+        }
+        cache.classified=classified;
+        Ok(output)
     }
     pub(super) async fn refresh_packed_sources(&self,sources:&[super::lww_residency::PackedSource],directory:&Path,cancel:&Cancellation)->Result<Vec<super::lww_residency::PackedSource>> {
         let mut wanted=BTreeMap::new();
@@ -256,7 +295,7 @@ impl ExternalLwwEngine {
             let id=journal.job_id();
             let mut job=match DurableCasJob::open(&self.connection_root,id) {
                 Ok(job)=>job,Err(failure) if failure.kind()==std::io::ErrorKind::NotFound=>DurableCasJob::begin(&self.connection_root,id,
-                    CasJobKind::OfficialPublicationOrExportPreparation,self.admitted_upper()? as i64).map_err(error)?,
+                    CasJobKind::OfficialPublicationOrExportPreparation,crate::asset_repository::job_pins::CasJobOwner::external_compaction(id),self.admitted_upper()? as i64).map_err(error)?,
                 Err(failure)=>return Err(error(failure)),
             };
             job.pin_existing_batch(&cas,&repack.iter().map(|source|(source.hash.clone(),source.byte_length,CasObjectRole::DirectObject)).collect::<Vec<_>>()).map_err(error)?;
@@ -383,10 +422,10 @@ impl ExternalLwwEngine {
         let retained=lww_checkpoint::retained(&snapshots.iter().map(|(_,s)|s.clone()).collect::<Vec<_>>())?;
         let mut body_spool=super::capture::BackupDependencySpool::new(directory).map_err(error)?;
         let mut standalone=BTreeMap::new(); let mut standalone_roots=BTreeMap::new(); let mut asset_catalogs=Vec::new();
-        for (root,snapshot) in &snapshots {
+        for (index,(root,snapshot)) in snapshots.iter().enumerate() {
             if !retained.contains(&snapshot.snapshot_id) { continue; }
             let data=RemoteObject::from_stored(&snapshot.library.record_catalog,&self.repository)?;
-            let stage=directory.join(&snapshot.snapshot_id);
+            let stage=directory.join(format!("c{index}"));
             let (records,objects)=super::snapshot_restore::download_checkpoint_data(&data,&stage,&self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
             let mut proof=PublishedCatalog::create(&stage.join("proof.sqlite"))?;
             let content=super::content_store::ContentStore::open(&stage.join("external-storage")).map_err(error)?;
@@ -420,7 +459,7 @@ impl ExternalLwwEngine {
         let mut history=PublishedCatalog::create(&directory.join("history.sqlite"))?;
         catalog.visit_changes(&mut |change|history.merge(&change))?;
         let upper=self.admitted_upper()?.checked_add(300_000).ok_or_else(segment::corrupt)?;
-        for ((writer,seq),variants) in groups {
+        for (index,((writer,seq),variants)) in groups.into_iter().enumerate() {
             let mut identity=None; let mut winner=None;
             for receipt in variants {
                 let name=receipt.locator.object.rsplit('/').next().ok_or_else(segment::corrupt)?;
@@ -436,7 +475,7 @@ impl ExternalLwwEngine {
                 if catalog.include_segment(&payload)? {
                     for (hash,bytes) in &payload.message_pages { body_spool.push(hash,&URL_SAFE_NO_PAD.decode(bytes).map_err(error)?,crate::persistent_store::external_capture::BackupBodyRole::Control).map_err(error)?; }
                     let controls=super::snapshot_restore::download_control_catalogs(&payload.data_catalogs,
-                        &directory.join(format!("segment-data-{writer}-{seq}")),&self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
+                        &directory.join(format!("s{index}")),&self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
                     for control in controls {
                         let super::content_store::ObjectSource::File(path)=control.source else {return Err(segment::corrupt());};
                         let bytes=std::fs::read(path).map_err(error)?;
@@ -553,6 +592,59 @@ mod tests {
         let reference=capture.durable_reference("synthetic",directory.path()).unwrap();
         let roots=super::super::capture::registered_capture_roots([&reference],directory.path()).unwrap();
         assert!(roots.assets.object_hashes.contains(&hash));assert!(!roots.assets.object_hashes.contains(&dead_hash));
+    }
+
+    fn deepest_path(directory:&Path)->usize {
+        let mut deepest=directory.as_os_str().len();
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path=entry.unwrap().path();
+            deepest=deepest.max(if path.is_dir() {deepest_path(&path)} else {path.as_os_str().len()});
+        }
+        deepest
+    }
+
+    #[test]
+    fn maintenance_compaction_stays_within_windows_path_limits_under_a_long_app_data_root() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            use crate::persistent_store::{WorkingSetCommit,ConversationMutation,lww::UnitMutation};
+            use risunest_sync_wire::unit::UnitKey;
+            let mut f=CycleFixture::new();let cancel=Cancellation::default();
+            f.a.commit(&WorkingSetCommit{expected_revision:f.a.revision().unwrap(),unit_mutations:Some(vec![
+                UnitMutation::Set{key:UnitKey::new(&["exists","character","char"]).unwrap(),value:serde_json::json!({"type":"character"})},
+                UnitMutation::Set{key:UnitKey::new(&["exists","conversation","char","conv"]).unwrap(),value:serde_json::json!(true)},
+            ]),..Default::default()}).unwrap();
+            let messages=(0..40).map(|index|serde_json::json!({"chatId":format!("synthetic-depth-{index}"),"data":"x".repeat(128*1024)})).collect();
+            f.a.commit(&WorkingSetCommit{expected_revision:f.a.revision().unwrap(),conversations:Some(vec![ConversationMutation::ReplaceRange{
+                character_id:"char".into(),conversation_id:"conv".into(),start:0,delete_count:0,messages,conversation:None,configured_index:None,
+            }]),..Default::default()}).unwrap();
+            f.publish_a().await;
+            let writer=f.a.lww_clock_state().unwrap().writer_id;
+            let published=f.sender.listing(&cancel).await.unwrap().remove(0);
+            let (_,seq,_)=parse_segment_object_id(&published.locator.object).unwrap();
+            let payload=segment::open(&f.provider.contents(&published.locator.object).unwrap(),&f.sender.library,&writer,seq,&f.sender.root_key).unwrap();
+            assert_eq!(payload.data_catalogs.len(),1,"the compacted segment carries a data catalog");
+            let base=tempfile::tempdir().unwrap();
+            let base_length=base.path().as_os_str().len();
+            assert!(base_length<59,"temporary directory {base_length} characters long");
+            let root=base.path().join("r".repeat(66-base_length-1));
+            assert_eq!(root.as_os_str().len(),66);
+            let first="00000000-0000-4000-8000-000000000084";
+            let directory=root.join("external-storage").join("maintenance").join(first);
+            let completed=f.sender.compact_published(&directory,first,&writer,&fake::capabilities(true),&cancel,None).await.unwrap();
+            let (_,checkpoint)=f.sender.checkpoint(&completed.reference.receipt,&cancel).await.unwrap();
+            assert_eq!(checkpoint.covered_prefixes.get(&writer).unwrap().0,seq);
+            f.a.commit(&WorkingSetCommit{expected_revision:f.a.revision().unwrap(),unit_mutations:Some(vec![
+                UnitMutation::Set{key:UnitKey::new(&["root","language"]).unwrap(),value:serde_json::json!("en")},
+            ]),..Default::default()}).unwrap();
+            f.publish_a().await;
+            let second="00000000-0000-4000-8000-000000000083";
+            let again=root.join("external-storage").join("maintenance").join(second);
+            let completed=f.sender.compact_published(&again,second,&writer,&fake::capabilities(true),&cancel,None).await.unwrap();
+            let (_,checkpoint)=f.sender.checkpoint(&completed.reference.receipt,&cancel).await.unwrap();
+            assert_eq!(checkpoint.covered_prefixes.get(&writer).unwrap().0,seq+1);
+            let deepest=deepest_path(&root);
+            assert!(deepest<260,"staging path reaches {deepest} characters");
+        });
     }
 
     #[test]

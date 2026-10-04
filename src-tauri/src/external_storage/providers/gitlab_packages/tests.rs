@@ -1258,6 +1258,34 @@ fn reconciliation_uses_the_stored_object_rather_than_local_progress() {
 }
 
 #[test]
+fn object_metadata_lists_package_files_without_downloading_an_undigested_file() {
+    runtime().block_on(async {
+        let payload = b"undigested".to_vec();
+        let file = format!("pack-{}", encoded("pack-m"));
+        let version = format!("v0-{}", encoded("pack-m"));
+        let listing = format!("[{}]", package_json(11, &format!("{PACKAGE}.pack"), &version));
+        let harness = fixture(vec![
+            marker_present(),
+            json(200, "[]"),
+            json(200, &listing),
+            json(200, &format!("[{}]", file_json(&file, payload.len(), None))),
+            json(200, "[]"),
+        ]);
+        let (repository, _) = harness.open(OpenMode::Existing).await.unwrap();
+        let opened = harness.lines().len();
+        let intent = object_intent(&repository, ObjectRole::Pack, "pack-m", &payload);
+        let found = harness.provider.lookup_metadata(&repository, &intent, None, &harness.cancel).await.unwrap().unwrap();
+        assert_eq!(found.locator.object, format!("{PACKAGE}.pack/{version}/{file}"));
+        assert_eq!(found.byte_length, payload.len() as u64);
+        assert!(found.checksum.is_none() && found.complete);
+        assert!(harness.provider.lookup_metadata(&repository, &intent, Some(&found.locator), &harness.cancel).await.unwrap().is_none());
+        let lines = harness.lines();
+        assert_eq!(lines.len(), opened + 3, "metadata never downloads the file");
+        assert!(lines[opened..].iter().all(|line| line.starts_with("GET ")));
+    });
+}
+
+#[test]
 fn cancelling_an_in_flight_download_stops_the_transfer() {
     runtime().block_on(async {
         let harness = fixture(

@@ -67,7 +67,6 @@ vi.mock('src/ts/storage/sync/external/bridge', () => ({
                 kind: 'none',
                 selectionEpoch: 'test-selection',
                 paused: false,
-                decisionRequired: false,
             },
             connections: [],
             jobs: [],

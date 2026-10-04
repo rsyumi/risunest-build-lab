@@ -431,7 +431,7 @@ describe('received unit projection into the selected conversation', () => {
             lwwStageReceive: vi.fn(async () => undefined),
             lwwApplyReceive: vi.fn(async () => {
                 const affectedKeys = receive(persisted)
-                return { revision: ++revision, affectedKeys, heldKeys: [], deferredKeys: [] }
+                return { revision: affectedKeys.length ? ++revision : revision, affectedKeys, heldKeys: [], deferredKeys: [] }
             }),
             lwwFinishReceive: vi.fn(async () => undefined),
         } as unknown as PersistentDataStore
@@ -462,6 +462,17 @@ describe('received unit projection into the selected conversation', () => {
         const applyReceive = () => runtime.applyLwwReceive({ bindingAuthority: '1', requestId: 'selected-receive', changes: [], progress: { kind: 'server', cursor: '1' }, admittedTimeUpperMs: '100' })
         return { database, runtime, session, chat, version, events, applyReceive }
     }
+
+    it('leaves the selected conversation alone for a receive that affected nothing', async () => {
+        const { database, runtime, session, chat, version, events, applyReceive } = await selectedConversationReceiveHarness(() => [])
+        const revision = runtime.revision
+        await applyReceive()
+        expect(runtime.revision).toBe(revision)
+        expect(database.characters[0].chats[0]).toBe(chat)
+        expect(runtime.getActiveConversationSession()).toBe(session)
+        expect(session.version).toBe(version)
+        expect(events).toEqual([])
+    })
 
     it('signals the selected session for a received conversation field without replacing its object', async () => {
         const { database, runtime, session, chat, version, events, applyReceive } = await selectedConversationReceiveHarness((persisted) => {

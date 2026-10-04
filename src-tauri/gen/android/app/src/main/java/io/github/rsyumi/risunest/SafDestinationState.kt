@@ -26,8 +26,7 @@ internal enum class SafDestinationPhase(val wireName: String) {
 internal enum class SafDestinationSourceKind(val wireName: String) {
   RISU_SAVE("risuSave"),
   LEGACY_BACKUP("legacyBackup"),
-  SCREENSHOT("screenshot"),
-  DOWNLOAD("download");
+  SCREENSHOT("screenshot");
 
   companion object {
     fun fromWireName(value: String): SafDestinationSourceKind? =

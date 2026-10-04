@@ -9,8 +9,8 @@ use http::{
 use jni::errors::Result as JniResult;
 pub use jni::{
   self,
-  objects::{GlobalRef, JByteArray, JClass, JMap, JObject, JString},
-  sys::{jboolean, jint, jlong, jobject, jstring},
+  objects::{GlobalRef, JClass, JMap, JObject, JString},
+  sys::{jboolean, jint, jobject, jstring},
   JNIEnv,
 };
 pub use ndk;
@@ -19,8 +19,8 @@ use std::os::fd::{AsFd, AsRawFd};
 
 use super::{
   main_pipe::{MainPipe, MAIN_PIPE},
-  response_bodies, ASSET_LOADER_DOMAIN, EVAL_CALLBACKS, IPC, ON_LOAD_HANDLER, PACKAGE,
-  REQUEST_HANDLER, TITLE_CHANGE_HANDLER, URL_LOADING_OVERRIDE, WITH_ASSET_LOADER,
+  ASSET_LOADER_DOMAIN, EVAL_CALLBACKS, IPC, ON_LOAD_HANDLER, REQUEST_HANDLER, TITLE_CHANGE_HANDLER,
+  URL_LOADING_OVERRIDE, WITH_ASSET_LOADER,
 };
 
 use crate::PageLoadEvent;
@@ -87,16 +87,6 @@ macro_rules! android_binding {
       handleReceivedTitle,
       [JString, JString],
     );
-    // RisuNest: reads and frees a streamed response body.
-    android_fn!(
-      $domain,
-      $package,
-      Rust,
-      responseStreamRead,
-      [jlong, JByteArray, jint, jint],
-      jint
-    );
-    android_fn!($domain, $package, Rust, responseStreamRelease, [jlong]);
   }};
 }
 
@@ -238,7 +228,11 @@ fn handle_request(
         headers_map
       };
 
-      let stream = response_input_stream(env, response.into_body())?;
+      let bytes = response.body();
+
+      let byte_array_input_stream = env.find_class("java/io/ByteArrayInputStream")?;
+      let byte_array = env.byte_array_from_slice(bytes)?;
+      let stream = env.new_object(byte_array_input_stream, "([B)V", &[(&byte_array).into()])?;
 
       let reason_phrase = env.new_string(reason_phrase)?;
 
@@ -254,62 +248,6 @@ fn handle_request(
   }
 
   Ok(*JObject::null())
-}
-
-// RisuNest: a body above the threshold is read from native memory piece by
-// piece instead of being copied into one Java array.
-fn response_input_stream<'local>(
-  env: &mut JNIEnv<'local>,
-  bytes: std::borrow::Cow<'static, [u8]>,
-) -> JniResult<JObject<'local>> {
-  if bytes.len() <= response_bodies::STREAM_THRESHOLD {
-    let byte_array_input_stream = env.find_class("java/io/ByteArrayInputStream")?;
-    let byte_array = env.byte_array_from_slice(&bytes)?;
-    return env.new_object(byte_array_input_stream, "([B)V", &[(&byte_array).into()]);
-  }
-  let length = bytes.len() as jlong;
-  let handle = response_bodies::register(bytes);
-  let class = format!("{}/RustResponseStream", PACKAGE.get().unwrap());
-  env
-    .new_object(class, "(JJ)V", &[handle.into(), length.into()])
-    .inspect_err(|_| {
-      response_bodies::release(handle);
-    })
-}
-
-#[allow(non_snake_case)]
-pub unsafe fn responseStreamRead(
-  mut env: JNIEnv,
-  _: JClass,
-  handle: jlong,
-  buffer: JByteArray,
-  offset: jint,
-  count: jint,
-) -> jint {
-  let max = usize::try_from(count).unwrap_or(0);
-  let read = response_bodies::read_with(handle, max, |piece| {
-    env.set_byte_array_region(&buffer, offset, as_jbytes(piece))
-  });
-  match read {
-    Some(Ok(0)) => -1,
-    Some(Ok(read)) => read as jint,
-    // The failed JNI call left its exception pending for the caller.
-    Some(Err(_)) => -1,
-    None => {
-      let _ = env.throw_new("java/io/IOException", "Response body was released");
-      -1
-    }
-  }
-}
-
-fn as_jbytes(bytes: &[u8]) -> &[i8] {
-  // SAFETY: `u8` and `i8` have the same size and alignment.
-  unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast(), bytes.len()) }
-}
-
-#[allow(non_snake_case)]
-pub unsafe fn responseStreamRelease(_: JNIEnv, _: JClass, handle: jlong) {
-  response_bodies::release(handle);
 }
 
 #[allow(non_snake_case)]

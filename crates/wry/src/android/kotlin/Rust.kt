@@ -43,8 +43,4 @@ object Rust {
     @JvmStatic external fun onEval(webviewId: String, id: Int, result: String)
 
     @JvmStatic external fun handleReceivedTitle(webviewId: String, title: String)
-
-    // RisuNest: streamed response bodies.
-    @JvmStatic external fun responseStreamRead(handle: Long, buffer: ByteArray, offset: Int, count: Int): Int
-    @JvmStatic external fun responseStreamRelease(handle: Long)
 }

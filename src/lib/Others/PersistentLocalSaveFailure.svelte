@@ -13,7 +13,6 @@
     } as Record<string, string>)[error.area] ?? copy.data : copy.data)
     const message = $derived(error?.code === 'unsaveable-value'
         ? copy.invalid.replace('{0}', area)
-        : error?.code === 'payload-too-large' ? copy.tooLarge
         : error?.name === 'QuotaExceededError' ? copy.storage : copy.failed)
 
     async function retry() {

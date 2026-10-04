@@ -261,6 +261,7 @@ describe('RisuNest native command integration', () => {
             'server_sync_lww_prepare_new_device',
             'server_sync_lww_prepare_fresh_writer',
             'server_sync_lww_activate_new_device',
+            'server_sync_lww_pending_binding',
             'server_sync_lww_retry',
             'server_sync_lww_drain',
             'server_sync_cancel',

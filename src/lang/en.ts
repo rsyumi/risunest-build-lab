@@ -1927,7 +1927,6 @@ export const languageEnglish = {
             failed: 'Changes could not be saved. Retry saving before closing the app.',
             invalid: '{0} could not be saved. Check this data, then retry saving.',
             storage: 'Changes could not be saved. Free storage space, then retry saving.',
-            tooLarge: 'Changes are too large to save. Delete the large chat or data you just added, then retry saving.',
             settings: 'Settings', conversation: 'Chat', presets: 'Presets', plugins: 'Plugin data', assets: 'Assets', data: 'Data',
         },
         account: {
@@ -2760,7 +2759,6 @@ export const languageEnglish = {
             stagePreparingAttachments: 'Preparing attachments',
             stageReadingDatabase: 'Reading database',
             stageDecodingDatabase: 'Decoding database',
-            stageStagingCharacters: 'Saving characters',
             stageFinalizingStaging: 'Saving settings and presets',
             stageAssignPluginValues: 'Assign plugin values',
             stageActivating: 'Applying data',
@@ -2807,10 +2805,6 @@ export const languageEnglish = {
                 'Other changes happened during the import, so it could not be applied. Try again.',
             reasonStoreError: 'A storage error stopped the import.',
             reasonUnknown: 'An unknown error occurred.',
-            reasonTooLarge: '{0} is too large to import.',
-            tooLargeItems: {
-                root: 'Settings data', preset: 'A preset', character: 'A character', conversation: 'A chat', message: 'A message', 'plugin-value': 'Plugin data',
-            },
             warningCleanupFailed:
                 'A temporary file could not be cleaned up. It will be retried at startup.',
             warningUpstreamRestoreLosses: 'Some cold storage or inlay data could not be restored. Review the restored data.',
@@ -3070,7 +3064,6 @@ export const languageEnglish = {
 
     "syncConflictBackupUnreadable": 'This backup could not be read. Select another backup.',
     "chatMessageActionFailed": "The message changed while the action was in progress. Please try again.",
-    "chatDraftConversationRemoved": "The conversation containing your edit was removed. Copy your unsaved text.",
     "groupCharactersChangeFailed": "Could not change the group characters. Please try again.",
     "regexScriptTimeout": "Regex script execution timed out.",
     "generationInterruptedInBackground": "Response generation was interrupted in the background.",
@@ -3093,6 +3086,13 @@ export const languageEnglish = {
         restoreDescription: "The current data will be cleared and replaced with the selected backup. Make a manual backup if needed.",
         restoreAcknowledge: "Clear the current data",
         restoreAction: "Restore",
+        previousFilesTitle: "Connect?",
+        previousFilesDescription: "Some files are stored only on the server or external storage used before. Connecting also saves them to the new target. To also keep them on this device, choose Download, then connect.",
+        downloadThenConnect: "Download, then connect",
+        downloadFailedNotConnected: "The files could not be downloaded, so the connection was not made. Try again, or connect without downloading.",
+        previousStorageUnavailable: "Files kept only on the server or external storage used before could not be fetched, so sync stopped. Try again when it can be reached.",
+        registrationRevoked: "This device's registration was removed on the server, so it cannot sync. Register this device again on the server, then enter the new registration code.",
+        bindingIncomplete: "The connection was not completed. Press Connect and sync to finish it.",
     },
 } satisfies I18nTranslation;
 

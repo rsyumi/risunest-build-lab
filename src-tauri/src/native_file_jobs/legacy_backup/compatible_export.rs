@@ -43,6 +43,7 @@ pub(crate) fn export_compatible_local_backup(
                 &repository_root,
                 &job.id(),
                 CasJobKind::OfficialPublicationOrExportPreparation,
+                crate::asset_repository::job_pins::CasJobOwner::native_file_job(&job.id()),
                 now_millis(),
             )
             .map_err(io_job_error)?,

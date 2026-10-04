@@ -5,7 +5,6 @@ const state = vi.hoisted(() => ({
     isTauri: false,
     isTauriIOS: false,
     exportIOSFile: vi.fn(),
-    downloadThroughAndroidSaf: vi.fn(async (_name: string, _data: Uint8Array) => true),
     isTauriMobile: false,
     blobStore: null as any,
     database: { characters: [] as any[] },
@@ -16,7 +15,6 @@ const state = vi.hoisted(() => ({
 }))
 
 vi.mock('./storage/iosFiles', () => ({ downloadIOSFile: vi.fn(), exportIOSFile: state.exportIOSFile }))
-vi.mock('./storage/androidSafDownload', () => ({ downloadThroughAndroidSaf: state.downloadThroughAndroidSaf }))
 vi.mock('./storage/nativePaths', () => ({ iosStagingPath: async () => '/synthetic/staging/owned', nativeDataPath: async () => '/synthetic/data' }))
 vi.mock('./platform', () => ({
     get isTauriIOS() { return state.isTauriIOS },
@@ -597,15 +595,13 @@ describe('LocalWriter streamed backup entries', () => {
         expect(remove).not.toHaveBeenCalled()
     })
 
-    test('hands an Android download to the picker bridge and reports its cancellation', async () => {
+    test('reports native picker cancellation without writing', async () => {
         state.isTauri = true
         state.isTauriMobile = true
-        state.downloadThroughAndroidSaf.mockResolvedValueOnce(false)
+        vi.mocked(save).mockResolvedValueOnce(null)
 
-        await expect(downloadFile('chat:1.txt', 'text')).resolves.toBe(false)
+        await expect(downloadFile('capture.png', Uint8Array.of(1))).resolves.toBe(false)
 
-        expect(state.downloadThroughAndroidSaf).toHaveBeenCalledWith('chat_1.txt', new TextEncoder().encode('text'))
-        expect(save).not.toHaveBeenCalled()
         expect(writeFile).not.toHaveBeenCalled()
     })
 

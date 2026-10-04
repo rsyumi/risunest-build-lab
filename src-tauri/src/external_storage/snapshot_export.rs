@@ -192,10 +192,12 @@ fn create_verified_snapshot_backup(
     probe: &dyn CancellationProbe,
     source_build: &str,
 ) -> std::result::Result<String, crate::portable_backup::Error> {
+    let id = uuid::Uuid::new_v4().to_string();
     let mut pins = DurableCasJob::begin(
         store.repository_root(),
-        &uuid::Uuid::new_v4().to_string(),
+        &id,
         CasJobKind::OfficialPublicationOrExportPreparation,
+        crate::asset_repository::job_pins::CasJobOwner::snapshot_export(&id),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

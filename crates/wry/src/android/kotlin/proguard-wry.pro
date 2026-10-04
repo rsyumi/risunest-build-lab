@@ -33,8 +33,3 @@
 -keep class {{package-unescaped}}.RustWebChromeClient,{{package-unescaped}}.RustWebViewClient {
   public <init>(...);
 }
-
-# RisuNest: constructed from Rust for streamed response bodies.
--keep class {{package-unescaped}}.RustResponseStream {
-  public <init>(...);
-}

@@ -50,9 +50,7 @@ function libraryProjection(library: JsonRecord): unknown {
 }
 
 export interface BindingLocalContent {
-    /** The native store sends character details only as this count. */
     library: JsonRecord
-    characterCount: string
     factoryLibrary: JsonRecord
     sharedVariables?: JsonRecord
     factorySharedVariables?: JsonRecord
@@ -80,8 +78,6 @@ export function hasNonDefaultBindingData(content: BindingLocalContent): boolean 
     const pluginLocal = validateBindingCount(content.pluginLocalValueCount)
     const aliases = validateBindingCount(content.managedAliasCount)
     const factoryAliases = validateBindingCount(content.factoryManagedAliasCount)
-    // A factory library has no characters, so any character is user data.
-    if (validateBindingCount(content.characterCount) !== '0') return true
     if (opaque !== '0') return true
     for (const [key,value] of Object.entries(content.protectedValues ?? {})) {
         if (JSON.stringify(canonical(value)) !== JSON.stringify(canonical(content.factoryLibrary[key]))) return true

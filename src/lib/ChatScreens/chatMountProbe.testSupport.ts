@@ -1,3 +1,5 @@
+import type { ChatEditorDraft } from 'src/ts/chatEditorDrafts'
+
 export interface ChatProbeMount {
     instanceId: number
     message: string
@@ -29,6 +31,8 @@ export const chatMountProbe = {
     }[],
     throwNextMount: false,
     activeEditors: new Set<number>(),
+    editorDrafts: new Map<number, Omit<ChatEditorDraft, 'index' | 'caret'>>(),
+    restored: [] as { instanceId: number; draft: ChatEditorDraft }[],
 }
 
 export function resetChatMountProbe() {
@@ -39,4 +43,6 @@ export function resetChatMountProbe() {
     chatMountProbe.displayUpdates = []
     chatMountProbe.throwNextMount = false
     chatMountProbe.activeEditors = new Set()
+    chatMountProbe.editorDrafts = new Map()
+    chatMountProbe.restored = []
 }

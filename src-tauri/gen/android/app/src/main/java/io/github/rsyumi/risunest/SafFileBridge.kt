@@ -68,12 +68,6 @@ private val MANAGED_CHARACTER_CARD_NAME = Regex(
 private val MANAGED_RISU_MODULE_NAME = Regex(
   "risu-module-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.risum",
 )
-private val MANAGED_DOWNLOAD_NAME = Regex(
-  "risu-download-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.bin",
-)
-private val MANAGED_DATASET_NAME = Regex(
-  "risu-dataset-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.json",
-)
 private const val MANAGED_SCREENSHOT_FILE = "archive.zip.part"
 private const val MANAGED_SCREENSHOT_OWNERSHIP = "ownership"
 private const val MANAGED_SCREENSHOT_READY = "ready"
@@ -556,12 +550,6 @@ private val MANAGED_HANDOFF_KINDS = listOf(
   ManagedHandoffKind(MANAGED_RISU_MODULE_NAME, SafDestinationSourceKind.RISU_SAVE) { id ->
     listOf("risu-module-$id.risum")
   },
-  ManagedHandoffKind(MANAGED_DATASET_NAME, SafDestinationSourceKind.RISU_SAVE) { id ->
-    listOf("risu-dataset-$id.json")
-  },
-  ManagedHandoffKind(MANAGED_DOWNLOAD_NAME, SafDestinationSourceKind.DOWNLOAD) { id ->
-    listOf("risu-download-$id.bin")
-  },
 )
 
 internal fun resolveManagedExportSource(appDataRoot: File, sourcePath: String): File? {
@@ -730,32 +718,16 @@ private class SafSpoolException(
   cause: Throwable? = null,
 ) : IOException(message, cause)
 
-internal fun safeSafDisplayName(name: String): String = safeDisplayName(name) { safe ->
-  NATIVE_FILE_JOB_SPOOL_SUFFIXES.firstOrNull { extension ->
-    safe.endsWith(extension, ignoreCase = true)
-  }?.let { extension -> safe.takeLast(extension.length) } ?: ""
-}
-
-private fun safeDisplayName(name: String, keptSuffix: (String) -> String): String {
+internal fun safeSafDisplayName(name: String): String {
   val leaf = name.substringAfterLast('/').substringAfterLast('\\')
   val safe = java.text.Normalizer.normalize(leaf, java.text.Normalizer.Form.NFC)
     .filterNot { it.isISOControl() || it in '\u202a'..'\u202e' || it in '\u2066'..'\u2069' }
   if (safe.isBlank() || safe == "." || safe == "..") return "opened-file"
   if (safe.codePointCount(0, safe.length) <= MAX_DISPLAY_NAME_CHARS) return safe
-  val suffix = keptSuffix(safe)
+  val suffix = NATIVE_FILE_JOB_SPOOL_SUFFIXES.firstOrNull { extension ->
+    safe.endsWith(extension, ignoreCase = true)
+  }?.let { extension -> safe.takeLast(extension.length) } ?: ""
   return safe.substring(0, safe.offsetByCodePoints(0, MAX_DISPLAY_NAME_CHARS - suffix.length)) + suffix
-}
-
-// A download keeps the extension the app gave it, also when a long name is cut.
-internal fun safDestinationPickerName(name: String, sourceKind: SafDestinationSourceKind): String {
-  if (sourceKind != SafDestinationSourceKind.DOWNLOAD) return safeSafDestinationName(name)
-  return safeDisplayName(name) { safe ->
-    val extension = safe.substringAfterLast('.', "")
-    if (
-      extension.length in 1..16 &&
-      extension.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' }
-    ) ".$extension" else ""
-  }
 }
 
 internal fun safeSafDestinationName(name: String): String {

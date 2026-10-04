@@ -130,7 +130,6 @@ import {
     runNativeCharacterCharxExport,
     runNativeCharacterCardExport,
     runNativeRisuModuleExport,
-    runNativeDatasetExport,
     runNativeOfficialPublicationAttempt,
     resumeNativeOfficialPublication,
     type NativeFileJobStatus,
@@ -1108,125 +1107,6 @@ describe('native file jobs', () => {
             ['native_file_job_forget', { jobId: 'risum-export' }],
         ])
         expect(JSON.stringify(calls)).not.toContain('Uint8Array')
-    })
-
-    it('hands a revision-pinned dataset to Android SAF and cleans both receipts', async () => {
-        const calls: Array<[string, Record<string, unknown> | undefined]> = []
-        const handoffPath =
-            'C:\\app\\native-file-jobs\\handoffs\\risu-dataset-123e4567-e89b-42d3-a456-426614174007.json'
-        const copies: unknown[] = []
-        const result = await runNativeDatasetExport(
-            {
-                destination: {
-                    type: 'androidSaf',
-                    suggestedName: 'dataset.json',
-                },
-                expectedRevision: 45,
-            },
-            {},
-            {
-                isTauri: () => true,
-                invoke: async (command, args) => {
-                    calls.push([command, args])
-                    if (command === 'native_file_job_start')
-                        return { jobId: 'dataset-export' }
-                    if (command === 'native_file_job_status')
-                        return {
-                            jobId: 'dataset-export',
-                            kind: 'export-dataset',
-                            state: 'succeeded',
-                            phase: 'complete',
-                            progress: { completedBytes: 11, completedItems: 2 },
-                            result: {
-                                revision: 45,
-                                sourceBytes: 11,
-                                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'f'.repeat(64),
-                                characterCount: 2,
-                                presetCount: 0,
-                                warningCodes: [],
-                                handoffPath,
-                            },
-                        }
-                    if (command === 'native_dataset_export_handoff_cleanup')
-                        return true
-                    if (command === 'native_file_job_forget') return true
-                    throw new Error(`Unexpected command: ${command}`)
-                },
-                wait: async () => undefined,
-                copyToAndroidSaf: async (request) => {
-                    copies.push(request)
-                    return { bytes: 11, warningCodes: [] }
-                },
-            },
-        )
-        expect(result.handoffPath).toBeUndefined()
-        expect(copies).toEqual([
-            expect.objectContaining({ sourcePath: handoffPath, suggestedName: 'dataset.json' }),
-        ])
-        expect(calls).toEqual([
-            [
-                'native_file_job_start',
-                { request: { kind: 'export-dataset', expectedRevision: 45 } },
-            ],
-            ['native_file_job_status', { jobId: 'dataset-export' }],
-            ['native_dataset_export_handoff_cleanup', { path: handoffPath }],
-            ['native_file_job_forget', { jobId: 'dataset-export' }],
-        ])
-    })
-
-    it('writes a desktop dataset to its exact destination without a handoff', async () => {
-        const calls: Array<[string, Record<string, unknown> | undefined]> = []
-        await runNativeDatasetExport(
-            {
-                destination: { type: 'desktopPath', path: 'C:\\Users\\me\\Downloads\\dataset.json' },
-                expectedRevision: 46,
-            },
-            {},
-            {
-                isTauri: () => true,
-                invoke: async (command, args) => {
-                    calls.push([command, args])
-                    if (command === 'native_file_job_start')
-                        return { jobId: 'dataset-desktop' }
-                    if (command === 'native_file_job_status')
-                        return {
-                            jobId: 'dataset-desktop',
-                            kind: 'export-dataset',
-                            state: 'succeeded',
-                            phase: 'complete',
-                            progress: { completedBytes: 2, completedItems: 0 },
-                            result: {
-                                revision: 46,
-                                sourceBytes: 2,
-                                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
-                                characterCount: 0,
-                                presetCount: 0,
-                                warningCodes: [],
-                            },
-                        }
-                    if (command === 'native_file_job_forget') return true
-                    throw new Error(`Unexpected command: ${command}`)
-                },
-                wait: async () => undefined,
-                copyToAndroidSaf: async () => {
-                    throw new Error('A desktop dataset must not use Android SAF')
-                },
-            },
-        )
-        expect(calls).toEqual([
-            [
-                'native_file_job_start',
-                {
-                    request: {
-                        kind: 'export-dataset',
-                        destination: 'C:\\Users\\me\\Downloads\\dataset.json',
-                        expectedRevision: 46,
-                    },
-                },
-            ],
-            ['native_file_job_status', { jobId: 'dataset-desktop' }],
-            ['native_file_job_forget', { jobId: 'dataset-desktop' }],
-        ])
     })
 
     it('assigns the plugin values a save left unowned before the replacement is applied', async () => {
