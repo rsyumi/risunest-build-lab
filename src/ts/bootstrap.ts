@@ -831,13 +831,6 @@ export async function loadData() {
         registerAndroidScreenshotPublicationRecovery()
         LoadingStatusState.startedAt = null
         loadedStore.set(true)
-        if (isTauri && !isTauriAndroid) {
-            void takeRendererRecovery().then(async (recovered) => {
-                if (!recovered) return
-                await waitAlert()
-                alertNormal(language.risuNest.startup.rendererRecovered)
-            })
-        }
         setTimeout(() => {
             void runtime.expirePersistentTrash().catch((error) => console.error('Trash expiry failed', error))
         }, 0)
@@ -868,8 +861,15 @@ export async function loadData() {
           installIOSPersistenceLifecycle((reason) => flushLifecycle(reason, true));
         }
         if (!excluded('modules')) moduleUpdate()
-        void alertTOS().then((accepted) => {
-            if (accepted === false) location.reload()
+        void alertTOS().then(async (accepted) => {
+            if (accepted === false) {
+                location.reload()
+                return
+            }
+            if (isTauri && !isTauriAndroid && await takeRendererRecovery()) {
+                await waitAlert()
+                alertNormal(language.risuNest.startup.rendererRecovered)
+            }
         })
     } catch (error) {
         console.error('RisuNest startup failed', error)
