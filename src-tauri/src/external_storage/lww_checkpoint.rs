@@ -96,20 +96,52 @@ pub(super) mod nested_metadata {
 pub(crate) fn covers(left: &Coverage, right: &Coverage) -> bool {
     right.iter().all(|(writer, prefix)| left.get(writer).copied().unwrap_or(DecimalU64(0)) >= *prefix)
 }
-pub(crate) fn retained(checkpoints: &[Checkpoint]) -> Result<BTreeSet<String>> {
+/// What decides whether a checkpoint is retained.
+pub(crate) trait Covering {
+    fn snapshot_id(&self) -> &str;
+    fn covered_prefixes(&self) -> &Coverage;
+    fn state_identity(&self) -> &str;
+}
+impl Covering for Checkpoint {
+    fn snapshot_id(&self) -> &str { &self.snapshot_id }
+    fn covered_prefixes(&self) -> &Coverage { &self.covered_prefixes }
+    fn state_identity(&self) -> &str { &self.state_identity }
+}
+/// The part of a checkpoint that receive and maintenance checks read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CheckpointSummary {
+    pub snapshot_id: String,
+    pub covered_prefixes: Coverage,
+    pub state_identity: String,
+}
+impl CheckpointSummary {
+    pub(crate) fn of(checkpoint: &Checkpoint) -> Self {
+        Self {
+            snapshot_id: checkpoint.snapshot_id.clone(),
+            covered_prefixes: checkpoint.covered_prefixes.clone(),
+            state_identity: checkpoint.state_identity.clone(),
+        }
+    }
+}
+impl Covering for CheckpointSummary {
+    fn snapshot_id(&self) -> &str { &self.snapshot_id }
+    fn covered_prefixes(&self) -> &Coverage { &self.covered_prefixes }
+    fn state_identity(&self) -> &str { &self.state_identity }
+}
+pub(crate) fn retained<C: Covering>(checkpoints: &[C]) -> Result<BTreeSet<String>> {
     let mut result = BTreeSet::new();
     for candidate in checkpoints {
         let mut dominated = false;
         for other in checkpoints {
-            if candidate.snapshot_id == other.snapshot_id { continue; }
-            if !covers(&other.covered_prefixes, &candidate.covered_prefixes) { continue; }
-            if covers(&candidate.covered_prefixes, &other.covered_prefixes) {
-                if candidate.state_identity != other.state_identity { return Err(segment::corrupt()); }
-                if other.snapshot_id > candidate.snapshot_id { continue; }
+            if candidate.snapshot_id() == other.snapshot_id() { continue; }
+            if !covers(other.covered_prefixes(), candidate.covered_prefixes()) { continue; }
+            if covers(candidate.covered_prefixes(), other.covered_prefixes()) {
+                if candidate.state_identity() != other.state_identity() { return Err(segment::corrupt()); }
+                if other.snapshot_id() > candidate.snapshot_id() { continue; }
             }
             dominated = true;
         }
-        if !dominated { result.insert(candidate.snapshot_id.clone()); }
+        if !dominated { result.insert(candidate.snapshot_id().to_owned()); }
     }
     Ok(result)
 }
@@ -125,7 +157,8 @@ impl PublishedCatalog {
         let file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(sql)?;
         file.sync_all().map_err(sql)?;
         let db = Connection::open(path).map_err(sql)?;
-        db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
+        // A catalog is scratch rebuilt from the remote state and never reopened, so its writes skip durability.
+        db.execute_batch("PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;
             CREATE TABLE units(key TEXT PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE versions(key TEXT NOT NULL,stamp TEXT NOT NULL,identity TEXT NOT NULL,PRIMARY KEY(key,stamp));
             CREATE TABLE retirements(key TEXT PRIMARY KEY,body TEXT NOT NULL);").map_err(sql)?;

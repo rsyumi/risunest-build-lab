@@ -173,9 +173,11 @@ pub(crate) fn hash_backup_body(bytes:&[u8], domain:&'static str) -> String {
 pub(crate) fn published_json_asset_roots(bytes:&[u8])->StoreResult<crate::asset_repository::migration_gc::AssetRootSet> {
     let mut roots=crate::asset_repository::migration_gc::AssetRootSet::default();
     if bytes.len()>risunest_sync_wire::MAX_METADATA_BYTES {
-        if let Ok(messages)=verified_large_message_page(bytes) {
-            for value in messages {super::snapshot::observe_json_value(&value,None,&mut roots);}
-            return Ok(roots);
+        if bytes.starts_with(risunest_external_storage_format::message_pages::PAGE_PREFIX) {
+            if let Ok(messages)=verified_large_message_page(bytes) {
+                for value in messages {super::snapshot::observe_json_value(&value,None,&mut roots);}
+                return Ok(roots);
+            }
         }
         verified_large_unit_body(bytes)?;
     }
@@ -1317,6 +1319,23 @@ mod hydration_tests {
         let mut damaged=page.clone();damaged[1]=b' ';
         reset_hash_work();
         assert!(verified_oversized_control(&damaged).is_err());
+        assert_eq!(take_hash_work(),Default::default());
+    }
+
+    #[test]
+    fn published_asset_roots_decode_only_a_body_with_the_message_page_prefix() {
+        use crate::persistent_store::hash_work::{reset_hash_work, take_hash_work};
+        let asset="a".repeat(64);
+        let message=serde_json::json!({"role":"user","content":"x".repeat(risunest_sync_wire::MAX_METADATA_BYTES),"asset":asset});
+        let page=risunest_external_storage_format::logical_records::encode_message_page(&[message.clone()]).unwrap().bytes;
+        let large=risunest_sync_wire::payload_value::encode(&serde_json::json!([asset,"x".repeat(risunest_sync_wire::MAX_METADATA_BYTES)])).unwrap();
+        reset_hash_work();
+        published_json_asset_roots(&page).unwrap();
+        let work=take_hash_work();
+        assert_eq!(work.domains["native_large_message_page_decode_identity"].calls,1);
+        assert!(work.incomplete.is_empty());
+        reset_hash_work();
+        assert!(published_json_asset_roots(&large).unwrap().object_hashes.contains(&asset));
         assert_eq!(take_hash_work(),Default::default());
     }
 

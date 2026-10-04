@@ -4,6 +4,7 @@
     import { chatMountProbe } from './chatMountProbe.testSupport'
     import type { BoundedLiveChatParserProjection } from 'src/ts/selectedConversationLiveParserProjection'
     import type { ChatDisplayRefresh } from 'src/ts/chatDisplayRefresh'
+    import type { ChatEditorDraft } from 'src/ts/chatEditorDrafts'
 
     let {
         message,
@@ -14,6 +15,7 @@
         bookmarked = false,
         parserProjection,
         parserAbortSignal,
+        restoredEditor,
     }: {
         message: string
         idx: number
@@ -23,6 +25,7 @@
         bookmarked?: boolean
         parserProjection?: BoundedLiveChatParserProjection
         parserAbortSignal?: AbortSignal
+        restoredEditor?: ChatEditorDraft
     } = $props()
 
     const instanceId = chatMountProbe.nextInstanceId++
@@ -52,13 +55,22 @@
         })
     }
 
+    let restored = $state<ChatEditorDraft | undefined>()
+
     export function updateViewportBinding() {}
-    export function takeEditorDraft() {
-        return hasActiveEditor() ? `draft-${idx}` : null
+    export function captureEditorDraft() {
+        const open = chatMountProbe.editorDrafts.get(instanceId) ?? restored
+        return open ? { ...open, index: idx, caret: undefined } : null
+    }
+    export function restoreEditor(draft: ChatEditorDraft) {
+        restored = draft
+        chatMountProbe.restored.push({ instanceId, draft })
     }
     export function hasActiveEditor() {
-        return chatMountProbe.activeEditors.has(instanceId)
+        return chatMountProbe.activeEditors.has(instanceId) || restored !== undefined
     }
+    const initialEditor = untrack(() => restoredEditor)
+    if (initialEditor) restoreEditor(initialEditor)
     export function refreshMessageDisplay(state: ChatDisplayRefresh) {
         message = state.message
         parserProjection = state.parserProjection
@@ -107,4 +119,5 @@
     data-streaming-text={displayedStreamingText}
     data-bookmarked={bookmarked}
     data-refresh-count={refreshCount}
+    data-restored-draft={restored?.draft}
 ></div>

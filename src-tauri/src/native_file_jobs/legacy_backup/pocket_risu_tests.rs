@@ -65,6 +65,7 @@ impl StrictLocalBackupDatabaseRestore for Import<'_> {
             self.root,
             &self.job.id(),
             CasJobKind::LocalBackupRestore,
+            crate::asset_repository::job_pins::CasJobOwner::for_test(),
             now_millis(),
         )
         .unwrap();
@@ -369,6 +370,7 @@ fn plan(
         directory.path(),
         &Uuid::new_v4().to_string(),
         CasJobKind::LocalBackupRestore,
+        crate::asset_repository::job_pins::CasJobOwner::for_test(),
         now_millis(),
     )
     .unwrap();

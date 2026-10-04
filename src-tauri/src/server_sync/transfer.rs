@@ -43,6 +43,16 @@ pub(crate) struct Transfer<'a> {
     #[cfg(test)]
     pending_timeout: std::time::Duration,
     base_sizes: std::cell::RefCell<Option<(Vec<String>, Vec<(String, u64)>)>>,
+    held: Option<&'a dyn HeldBodies>,
+}
+/// Bodies this device does not hold that a server or external storage holds.
+/// An upload asks the target first and fetches only what it lacks.
+pub(crate) trait HeldBodies {
+    fn size(&self, hash: &str) -> Option<u64>;
+    /// Writes the verified body into `destination`; `Ok(false)` when no
+    /// storage holds it.
+    fn fetch(&self, hash: &str, size: u64, destination: &Cache) -> Result<bool>;
+    fn scratch(&self) -> Result<tempfile::TempDir>;
 }
 pub(crate) struct UploadTarget {
     pub hash: String,
@@ -250,7 +260,12 @@ impl<'a> Transfer<'a> {
             #[cfg(test)]
             pending_timeout: std::time::Duration::from_secs(120),
             base_sizes: std::cell::RefCell::new(None),
+            held: None,
         })
+    }
+    pub(crate) fn with_held(mut self, held: &'a dyn HeldBodies) -> Self {
+        self.held = Some(held);
+        self
     }
     /// Job cancellation is borrowed by the coordinating thread. Chunk workers
     /// finish their bounded requests before the next batch is admitted.
@@ -363,11 +378,17 @@ impl<'a> Transfer<'a> {
             self.ensure_active()?;
             let mut descriptors = Vec::with_capacity(page.len());
             let mut sizes = std::collections::BTreeMap::new();
+            let mut elsewhere = BTreeSet::new();
             for hash in &page {
-                let size = self
-                    .cache
-                    .stat_object(hash)?
-                    .ok_or_else(|| SyncError::new("cached-object-missing", 409))?;
+                let size = match self.cache.stat_object(hash)? {
+                    Some(size) => size,
+                    None => {
+                        elsewhere.insert(hash.as_str());
+                        self.held
+                            .and_then(|held| held.size(hash))
+                            .ok_or_else(|| SyncError::new("cached-object-missing", 409))?
+                    }
+                };
                 descriptors.push(serde_json::json!({"hash":hash,"size":size.to_string()}));
                 sizes.insert(hash.as_str(), size);
             }
@@ -394,9 +415,12 @@ impl<'a> Transfer<'a> {
                 .filter(|h| !absent.contains(h.as_str()))
                 .cloned()
                 .collect::<Vec<_>>();
-            let mut candidates = BTreeSet::new();
-            for target in missing
+            let (fetched, local): (Vec<String>, Vec<String>) = missing
                 .missing
+                .into_iter()
+                .partition(|target| elsewhere.contains(target.as_str()));
+            let mut candidates = BTreeSet::new();
+            for target in local
                 .iter()
                 .filter(|target| !contexts[target.as_str()].base_lease)
             {
@@ -421,7 +445,7 @@ impl<'a> Transfer<'a> {
             let mut frames = Vec::new();
             let mut used = 8usize;
             let mut materialized = 0usize;
-            for target in &missing.missing {
+            for target in &local {
                 self.ensure_active()?;
                 let base_candidates = contexts[target.as_str()].bases.as_ref();
                 let size = sizes[target.as_str()];
@@ -488,8 +512,47 @@ impl<'a> Transfer<'a> {
                 frames.push(frame);
             }
             self.send_frames(&frames)?;
+            if let Some(held) = self.held.filter(|_| !fetched.is_empty()) {
+                self.upload_fetched(held, &fetched, &sizes)?;
+            }
         }
         self.ensure_active()
+    }
+    /// Fetches a bounded group of bodies at a time into a scratch cache and
+    /// uploads it from there, so a body this device does not keep never
+    /// enters its library.
+    fn upload_fetched(
+        &self,
+        held: &dyn HeldBodies,
+        targets: &[String],
+        sizes: &std::collections::BTreeMap<&str, u64>,
+    ) -> Result<()> {
+        const GROUP_BYTES: u64 = 64 * 1024 * 1024;
+        let mut remaining = targets.iter().peekable();
+        while remaining.peek().is_some() {
+            self.ensure_active()?;
+            let scratch = held.scratch()?;
+            let cache = Cache::open(scratch.path())?;
+            let mut group = Vec::new();
+            let mut bytes = 0u64;
+            while let Some(target) = remaining.next_if(|target| {
+                group.is_empty() || bytes.saturating_add(sizes[target.as_str()]) <= GROUP_BYTES
+            }) {
+                let size = sizes[target.as_str()];
+                if !held.fetch(target, size, &cache)? {
+                    return Err(SyncError::new("cached-object-missing", 409));
+                }
+                bytes = bytes.saturating_add(size);
+                group.push(target.clone());
+            }
+            let transfer = Transfer::new(self.client, &cache)?;
+            let transfer = match self.check {
+                Some(check) => transfer.with_check(check),
+                None => transfer,
+            };
+            transfer.upload_with_hints(&group, &[], false, &std::collections::BTreeMap::new())?;
+        }
+        Ok(())
     }
     fn send_frames(&self, frames: &[Frame]) -> Result<()> {
         self.ensure_active()?;

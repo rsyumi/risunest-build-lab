@@ -140,6 +140,64 @@ it.each(['desktop', 'mobile'] as const)('browses and edits the mounted %s chat l
     expect(savedConversation?.value.totalMessages).toBe(5000)
 }, 60_000)
 
+it.each(['desktop', 'mobile'] as const)('saves the %s chat list toggle edits of a windowed conversation', async (surface) => {
+    const current = await mountSurface(surface)
+    await waitForLatest()
+    const { language } = await import('src/lang')
+    const db = current.database.getDatabase()
+    db.customPromptTemplateToggle = 'probe=Probe toggle'
+    db.hypaV3 = true
+    if (surface === 'mobile') current.stores.MobileSideBar.set(1)
+    else mounted!.showMenu(true)
+    const toggleSwitch = async (name: string) => {
+        let input: HTMLInputElement | null = null
+        await vi.waitFor(() => {
+            const label = [...target.querySelectorAll('label')].find((node) => node.textContent?.trim() === name)
+            input = label ? target.querySelector<HTMLInputElement>(`#${CSS.escape(label.getAttribute('for')!)}`) : null
+            expect(input?.disabled).toBe(false)
+        })
+        input!.click()
+    }
+    const selectedChat = () => current.selected().chats[current.selected().chatPage]
+    const savedChat = async () =>
+        (await current.raw.readConversationMetadata(interactionCharacterId, interactionConversationId))?.value.conversation
+
+    await toggleSwitch(language.localToggles)
+    await vi.waitFor(() => expect(selectedChat().useLocallySetGlobalVariables).toBe(true))
+    await toggleSwitch('Probe toggle')
+    await vi.waitFor(() => expect(selectedChat().GLGlobalVariables?.toggle_probe).toBe('1'))
+    await current.runtime.flushPendingData('sidebar-local-toggles')
+    expect((await savedChat())?.useLocallySetGlobalVariables).toBe(true)
+    expect((await savedChat())?.GLGlobalVariables?.toggle_probe).toBe('1')
+    expect(db.globalChatVariables.toggle_probe).toBeUndefined()
+
+    await toggleSwitch(language.localToggles)
+    await vi.waitFor(() => expect(selectedChat().useLocallySetGlobalVariables).toBe(false))
+    const pin = await vi.waitFor(() => {
+        const button = [...target.querySelectorAll('button')].find((node) => node.textContent?.trim() === '📌')
+        expect(button).toBeDefined()
+        return button!
+    })
+    pin.click()
+    await vi.waitFor(() => expect(selectedChat().GLGlobalVariables?.toggle_probe).toBeUndefined())
+    await current.runtime.flushPendingData('sidebar-unpin-toggle')
+    expect((await savedChat())?.useLocallySetGlobalVariables).toBe(false)
+    expect((await savedChat())?.GLGlobalVariables?.toggle_probe).toBeUndefined()
+    expect(current.fullReads).toEqual([])
+
+    await toggleSwitch(language.ToggleHypaMemory)
+    await vi.waitFor(() => expect(current.selected().supaMemory).toBe(true))
+    await current.runtime.flushPendingData('sidebar-memory-toggle')
+    expect((await current.raw.readCharacter(interactionCharacterId))?.value.supaMemory).toBe(true)
+
+    // Later edits of the same chat still save.
+    expect(await current.characters.editSelectedChatList(interactionCharacterId, 'after-sidebar-toggles', (owner) => {
+        owner.chats[owner.chatPage].name = 'Renamed after toggles'
+        return null
+    })).toBe(true)
+    expect((await savedChat())?.name).toBe('Renamed after toggles')
+}, 60_000)
+
 it('applies delayed folder color and deletion by identity after persisted folder order changes', async () => {
     const current = await mountSurface('desktop')
     await waitForLatest()

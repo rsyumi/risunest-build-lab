@@ -1648,7 +1648,8 @@ fn payload_alias_abort_and_reopen_sweep_remove_all_staged_rows() {
         .replace_put_asset_aliases(&abandoned.staging_id, &[alias])
         .expect("stage abandoned alias");
     drop(store);
-    let store = PersistentStore::open(directory.path()).expect("reopen persistent store");
+    let mut store = PersistentStore::open(directory.path()).expect("reopen persistent store");
+    while store.purge_retired_batch(256).expect("purge abandoned stage") {}
     let abandoned_rows: i64 = store
         .connection
         .query_row(
@@ -2181,4 +2182,77 @@ fn pinned_publication_account_mismatch_releases_reader_and_cleans_export_files()
         .is_empty());
     let exports_dir = store.snapshots_dir.parent().unwrap().join("exports");
     assert_eq!(fs::read_dir(exports_dir).unwrap().count(), 0);
+}
+
+#[test]
+fn alias_pages_seek_past_aliases_of_the_same_kind() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let directory = tempfile::tempdir().expect("create alias page directory");
+    let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
+    let staging = store.replace_begin().expect("begin staged replacement");
+    let aliases = (0..2048u32)
+        .map(|index| AssetAlias {
+            key: format!("asset-{index:05}"),
+            object_hash: Some(format!("{index:064x}")),
+            kind: "asset".to_owned(),
+            size: 1,
+            mime: "application/octet-stream".to_owned(),
+            name: "Asset".to_owned(),
+            ext: "bin".to_owned(),
+            inlay_type: None,
+            width: None,
+            height: None,
+            metadata: json!({}),
+        })
+        .collect::<Vec<_>>();
+    for batch in aliases.chunks(256) {
+        store
+            .replace_put_asset_aliases(&staging.staging_id, batch)
+            .expect("stage aliases");
+    }
+    store
+        .replace_commit(&staging.staging_id, Some(0))
+        .expect("activate aliases");
+    let mut cursor = None;
+    let mut steps = Vec::new();
+    let mut listed = 0;
+    loop {
+        let counted = Arc::new(AtomicUsize::new(0));
+        let counter = counted.clone();
+        store
+            .connection
+            .progress_handler(
+                64,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .expect("count page steps");
+        let page = store
+            .list_asset_alias_page(
+                &AssetAliasListQuery {
+                    kind: None,
+                    limit: 256,
+                    cursor,
+                },
+                None,
+            )
+            .expect("list alias page");
+        store
+            .connection
+            .progress_handler(64, None::<fn() -> bool>)
+            .expect("stop counting");
+        steps.push(counted.load(Ordering::Relaxed));
+        listed += page.items.len();
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(listed, aliases.len());
+    // A page that walked from the first alias to its cursor would cost several first pages.
+    assert!(steps.iter().all(|&step| step <= steps[0] * 2), "{steps:?}");
 }

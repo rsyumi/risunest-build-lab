@@ -15,6 +15,7 @@
     import { createNativeSyncBindingBridge } from 'src/ts/storage/sync/bindingNative'
     import { requestExternalLwwNow, subscribeExternalLwwFailures, supportsExternalLwwNewDevice } from 'src/ts/storage/sync/external/lwwProduction'
     import BindingTargetSwitch from 'src/ts/storage/sync/BindingTargetSwitch.svelte'
+    import { PREVIOUS_FILES_DOWNLOAD_FAILED } from 'src/ts/storage/sync/bindingFlow'
     import { language } from 'src/lang'
     import { externalJobIsActive, externalJobIsPaused, externalJobProgress, mergeExternalHistoryItems } from 'src/ts/storage/sync/external/connection'
     import {
@@ -23,6 +24,7 @@
         resumeExternalStorageJob,
         requestExternalStorageRestore,
         requestExternalStorageDeleteHistory,
+        stopExternalStorageRestore,
     } from 'src/ts/storage/sync/external/production'
     import type {
         ExternalConnectionResult,
@@ -37,6 +39,7 @@
         ExternalSnapshotExportProgress,
     } from 'src/ts/storage/sync/external/types'
     import { externalRestoreAreas } from 'src/ts/storage/sync/external/restoreScope'
+    import { downloadRemoteAssets, getAssetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency'
     import ConnectionForm from './ConnectionForm.svelte'
     import { externalConnectionTitle, externalErrorKind, externalErrorMessage, externalStorageStrings } from './strings'
 
@@ -64,6 +67,7 @@
     let historyCursor = $state<Record<string, string | undefined>>({})
     let historyLoading = $state<Record<string, boolean>>({})
     let quota = $state<Record<string, ExternalQuotaSummary>>({})
+    let remoteOnly = $state<Record<string, number>>({})
     let recoveryKey = $state('')
     let recoveryPanel = $state<HTMLDivElement | undefined>()
     let connectionSettings = $state<ExternalConnectionSettingsMaterial | null>(null)
@@ -81,7 +85,9 @@
             else await unbindSyncTarget()
             await refreshExternalStorageProductionState()
             await refresh()
-        } catch (reason) { error = externalErrorMessage(strings, reason) }
+        } catch (reason) {
+            error = externalErrorKind(reason) === PREVIOUS_FILES_DOWNLOAD_FAILED ? language.lwwSync.downloadFailedNotConnected : externalErrorMessage(strings, reason)
+        }
         finally { busy = false }
     }
     async function syncNow(connection: ExternalConnectionSummary): Promise<void> {
@@ -306,6 +312,16 @@
         } catch (reason) { error = externalErrorMessage(strings, reason) }
     }
 
+    async function stopRestore(job: ExternalJobSummary): Promise<void> {
+        if (busy || !(await alertConfirm(`${strings.stopRestoreTitle}\n${strings.stopRestoreDescription}`))) return
+        busy = true
+        try {
+            await stopExternalStorageRestore(job.id)
+            await refresh(true)
+        } catch (reason) { error = externalErrorMessage(strings, reason) }
+        finally { busy = false }
+    }
+
 
     async function setAutomaticWork(connection: ExternalConnectionSummary, enabled: boolean): Promise<void> {
         if (!storageState || busy) return
@@ -339,9 +355,25 @@
         expanded[connection.id] = kind
         try {
             if (kind === 'history') await loadHistory(connection, false)
-            if (kind === 'quota') quota[connection.id] = await bridge.getQuota(connection.id)
+            if (kind === 'quota') {
+                void loadRemoteOnlyFiles(connection)
+                quota[connection.id] = await bridge.getQuota(connection.id)
+            }
         } catch (reason) {
             error = externalErrorMessage(strings, reason)
+        }
+    }
+
+    /** Files only this connection holds, as the residency status counts them. */
+    async function remoteOnlyFiles(connection: ExternalConnectionSummary): Promise<number> {
+        return (await getAssetResidencyStatus()).externalObjects.find(entry => entry.connectionId === connection.id)?.objects ?? 0
+    }
+
+    async function loadRemoteOnlyFiles(connection: ExternalConnectionSummary): Promise<void> {
+        try {
+            remoteOnly[connection.id] = await remoteOnlyFiles(connection)
+        } catch {
+            delete remoteOnly[connection.id]
         }
     }
 
@@ -404,10 +436,34 @@
     }
 
     async function removeConnection(connection: ExternalConnectionSummary): Promise<void> {
-        if (!(await alertConfirm(`${strings.remove}: ${externalConnectionTitle(strings, connection)}`))) return
+        let held = 0
+        try {
+            held = await remoteOnlyFiles(connection)
+        } catch {}
+        let download = false
+        if (held) {
+            const choice = await alertCheckboxConfirm({
+                title: strings.removeRemoteOnlyTitle,
+                description: strings.removeRemoteOnly,
+                checkboxLabel: strings.downloadThenRemove,
+                actionLabel: strings.remove,
+                cancelLabel: strings.cancel,
+                requireChecked: false,
+            })
+            if (!choice.confirmed) return
+            download = choice.checked
+        } else if (!(await alertConfirm(`${strings.remove}: ${externalConnectionTitle(strings, connection)}`))) return
         busy = true
         activeAction = `remove:${connection.id}`
         try {
+            if (download) {
+                try {
+                    await downloadRemoteAssets(connection.id)
+                } catch (reason) {
+                    if (externalErrorKind(reason) !== 'cancelled') error = strings.downloadFailedKeptConnection
+                    return
+                }
+            }
             await bridge.removeConnection(connection.id)
             await refreshExternalStorageProductionState()
             await refresh(true)
@@ -535,6 +591,17 @@
         return storageState?.jobs.find(job => job.connectionId === connection.id)
     }
 
+    function unfinishedRestore(job: ExternalJobSummary | undefined): boolean {
+        return job?.kind === 'restore' && job.state === 'uncertain'
+    }
+
+    // An unfinished restore reports its own error through the connection, which
+    // its message replaces.
+    function restoreReportsError(connection: ExternalConnectionSummary, job: ExternalJobSummary | undefined): boolean {
+        return unfinishedRestore(job) && connection.lastError?.code === job?.error?.code
+            && connection.lastError?.reason === job?.error?.reason
+    }
+
     function connectionTone(connection: ExternalConnectionSummary): 'connected' | 'working' | 'paused' | 'attention' {
         const job = activeJob(connection)
         if (job && (externalJobIsPaused(job) || job.state === 'uncertain')) return 'attention'
@@ -650,17 +717,21 @@
                     </div>
                 </div>
 
-                {#if connection.lastError}<p class="text-sm text-danger-400">{errorLabel(connection.lastError)}</p>{/if}
+                {#if connection.lastError && !restoreReportsError(connection, job)}<p class="text-sm text-danger-400">{errorLabel(connection.lastError)}</p>{/if}
                 {#if syncFailures.has(connection.id)}
                     {@const failure = syncFailures.get(connection.id)}
-                    <p class="text-sm text-danger-400" role="status">{externalErrorKind(failure) === 'clockSkew' ? language.lwwSync.clockBlocked : externalErrorMessage(strings, failure)}</p>
+                    <p class="text-sm text-danger-400" role="status">{externalErrorKind(failure) === 'clockSkew' ? language.lwwSync.clockBlocked
+                        : externalErrorKind(failure) === 'previousStorageUnavailable' ? language.lwwSync.previousStorageUnavailable
+                        : externalErrorMessage(strings, failure)}</p>
                     {#if ['clockSkew', 'corrupt'].includes(externalErrorKind(failure) ?? '') && supportsExternalLwwNewDevice(connection.id)}
                         <BindingTargetSwitch target={{kind:'external',connectionId:connection.id}} options={{mode:'new-device'}} label={language.lwwSync.newDeviceAction} onBound={() => refreshExternalStorageProductionState().then(() => refresh())} onError={reason => error = externalErrorMessage(strings, reason)} />
                     {/if}
                 {/if}
-                {#if job && (!externalJobIsActive(job) || externalJobIsPaused(job)) && job.state !== 'succeeded' && !connection.lastError}<p class="text-sm text-danger-400" role="status">{jobLabel(job)}</p>{/if}
+                {#if job && (!externalJobIsActive(job) || externalJobIsPaused(job)) && job.state !== 'succeeded' && !connection.lastError && !unfinishedRestore(job)}<p class="text-sm text-danger-400" role="status">{jobLabel(job)}</p>{/if}
 
-                {#if job?.result?.decisionRequired || job?.state === 'uncertain'}
+                {#if unfinishedRestore(job)}
+                    <p class="text-sm" role="status">{strings.restoreUnfinished}</p>
+                {:else if job?.state === 'uncertain'}
                     <p class="text-sm" role="status">{strings.publicationDecision}</p>
                 {/if}
 
@@ -707,6 +778,7 @@
                     {#if connection.purpose === 'backup'}<SettingButton busy={activeAction === `backup:${connection.id}`} disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'backup')}>{strings.runBackup}</SettingButton>
                     {:else if storageState.selection.kind === 'external' && storageState.selection.connectionId === connection.id}<SettingButton disabled={busy} onclick={() => syncNow(connection)}>{strings.sync}</SettingButton>{/if}
                     {#if job && externalJobIsActive(job)}<SettingButton variant="secondary" onclick={() => cancelJob(job)}>{strings.cancel}</SettingButton>{/if}
+                    {#if job && unfinishedRestore(job)}<SettingButton variant="secondary" disabled={busy} onclick={() => stopRestore(job)}>{strings.stopRestore}</SettingButton>{/if}
                 </div>
 
                 <div class="tabs" role="tablist">
@@ -741,23 +813,29 @@
                     {@const usage = quota[connection.id]}
                     {@const retention = connection.retentionPolicy}
                     <div class="usage" role="tabpanel" id="{connection.id}-quota-panel" aria-labelledby="{connection.id}-quota-tab">
-                        {#if usage}
+                        {#if usage || remoteOnly[connection.id] !== undefined}
                             <dl class="kv">
-                                <dt>{strings.usedByService}</dt>
-                                <dd>{#if usage.storage.providerPhysicalKnown && usage.storage.providerPhysicalBytes !== null}{bytes(usage.storage.providerPhysicalBytes ?? undefined)}{:else}{strings.unknownUsage} <span class="text-textcolor2">({strings.unknownUsageHelp})</span>{/if}</dd>
-                                <dt>{strings.uploadedLowerBound}</dt>
-                                <dd>{atLeast(usage.storage.locallyUploadedBytesLowerBound)} · {strings.files.replace('{0}', usage.storage.locallyUploadedObjectCountLowerBound)}</dd>
-                                {#if usage.storage.latestReachable}
-                                    <dt>{strings.latestReachable}</dt>
-                                    <dd>{atLeast(usage.storage.latestReachable.knownDirectBytes)}</dd>
+                                {#if usage}
+                                    <dt>{strings.usedByService}</dt>
+                                    <dd>{#if usage.storage.providerPhysicalKnown && usage.storage.providerPhysicalBytes !== null}{bytes(usage.storage.providerPhysicalBytes ?? undefined)}{:else}{strings.unknownUsage} <span class="text-textcolor2">({strings.unknownUsageHelp})</span>{/if}</dd>
+                                    <dt>{strings.uploadedLowerBound}</dt>
+                                    <dd>{atLeast(usage.storage.locallyUploadedBytesLowerBound)} · {strings.files.replace('{0}', usage.storage.locallyUploadedObjectCountLowerBound)}</dd>
+                                    {#if usage.storage.latestReachable}
+                                        <dt>{strings.latestReachable}</dt>
+                                        <dd>{atLeast(usage.storage.latestReachable.knownDirectBytes)}</dd>
+                                    {/if}
+                                {/if}
+                                {#if remoteOnly[connection.id] !== undefined}
+                                    <dt>{strings.remoteOnlyFiles}</dt>
+                                    <dd>{remoteOnly[connection.id]}</dd>
                                 {/if}
                             </dl>
-                            {#if usage.buckets.length > 0}
-                                <p>{strings.requestUsage}</p>
-                                <dl class="kv">
-                                    {#each usage.buckets as bucket (bucket.id)}<dt>{bucket.id}</dt><dd>{bucket.used} / {bucket.limit} {bucket.unit}</dd>{/each}
-                                </dl>
-                            {/if}
+                        {/if}
+                        {#if usage && usage.buckets.length > 0}
+                            <p>{strings.requestUsage}</p>
+                            <dl class="kv">
+                                {#each usage.buckets as bucket (bucket.id)}<dt>{bucket.id}</dt><dd>{bucket.used} / {bucket.limit} {bucket.unit}</dd>{/each}
+                            </dl>
                         {/if}
                         {#if connection.capabilities.snapshotDiscovery && connection.capabilities.leaseOperations && connection.capabilities.deleteObjects}
                             <SettingButton busy={activeAction === `cleanup:${connection.id}`} disabled={busy || connection.status !== 'ready' || storageState.jobs.some(job => job.connectionId === connection.id && externalJobIsActive(job))} onclick={() => runJob(connection, 'cleanup')}>{strings.cleanup}</SettingButton>

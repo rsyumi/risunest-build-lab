@@ -227,7 +227,6 @@ export type NativeFileJobStage =
     | 'preparing-attachments'
     | 'reading-database'
     | 'decoding-database'
-    | 'staging-characters'
     | 'finalizing-staging'
     | 'assign-plugin-values'
     | 'awaiting-activation'

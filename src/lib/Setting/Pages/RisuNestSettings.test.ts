@@ -73,10 +73,11 @@ describe('RisuNest settings navigation', () => {
         }
     })
 
-    it('groups the settings tab as performance, streaming, attachments, update, platform, diagnostics', () => {
+    it('groups the settings tab as performance, UI, streaming, attachments, update, platform, diagnostics', () => {
         const panel = between(pageSource, "{#if activeTab === 'settings'}", "{:else if activeTab === 'storage'}")
         inOrder(panel, [
             '<RisuNestPerformanceSettings />',
+            'items={risuNestUiSettingsItems}',
             'items={risuNestStreamingSettingsItems}',
             'items={risuNestInlaySettingsItems}',
             '<RisuNestUpdateSettings />',
@@ -260,6 +261,7 @@ describe('RisuNest native command integration', () => {
             'server_sync_lww_prepare_new_device',
             'server_sync_lww_prepare_fresh_writer',
             'server_sync_lww_activate_new_device',
+            'server_sync_lww_pending_binding',
             'server_sync_lww_retry',
             'server_sync_lww_drain',
             'server_sync_cancel',

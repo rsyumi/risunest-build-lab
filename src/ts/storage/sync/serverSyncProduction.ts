@@ -48,6 +48,8 @@ export function disposeNativeSyncBindings(): void { disposeServer?.(); disposeSe
 
 type Status = { configured: boolean; libraryId?: string | null; deviceId?: string | null; writerId: string; bindingAuthority: string }
 let status: Status = { configured: false, writerId: '', bindingAuthority: '0' }
+type PendingBinding = { endpoint: string; libraryId: string; epoch: string; serverEmpty: boolean }
+let bindingIncomplete = false
 let persistedBinding: BindingContext['state'] | undefined
 let context: BindingContext | undefined
 let error = ''
@@ -182,14 +184,7 @@ const transport: SyncBindingTransport = {
     async publishInitialSharedState(c) {
         context = c
         await invoke('server_sync_lww_activate', { request: header() })
-        let afterKey: string | null = null
-        for (;;) {
-            c.signal.throwIfAborted()
-            if (c !== context) throw new Error('Sync binding changed')
-            const page = await invoke<{ afterKey: string | null; hasMore: boolean }>('pds_lww_queue_unit_state_page', { request: { ...header(), afterKey, limit: '256' } })
-            if (!page.hasMore) break
-            afterKey = page.afterKey
-        }
+        checkContext(c)
         foreground = document.visibilityState !== 'hidden'
         await pushAvailable(c, true)
     },
@@ -202,6 +197,8 @@ const transport: SyncBindingTransport = {
 export async function receiveAvailableServerChanges(): Promise<void> { await scheduler.receiveAvailableChanges() }
 export async function configureServerSyncConnection(config: ServerConfig): Promise<void> { await invoke('server_sync_configure', { config }); error = '' }
 export async function connectServerSync(config: ServerConfig, newDevice = false): Promise<void> { await configureServerSyncConnection(config); await bindSyncTarget({ kind: 'server', connectionId: 'server' }, newDevice ? { mode: 'new-device' } : {}); await controller.ensureStatus() }
+/** Finishes a first binding that stopped after its target switch, with the saved registration. */
+export async function completeServerSyncBinding(): Promise<void> { await bindSyncTarget({ kind: 'server', connectionId: 'server' }); await controller.ensureStatus() }
 export async function disconnectServerSync(): Promise<void> { await unbindSyncTarget(); context = undefined; await controller.ensureStatus() }
 /** Stops automatic sync until the returned release runs, so an asset download is not refused as busy. */
 export const holdServerSync = () => controller.beginReplacement()
@@ -233,10 +230,21 @@ export async function installServerSyncProduction(): Promise<void> {
             // A fenced binding that cannot reach its server keeps the local library usable until retry.
             if (!failures(value).every(transientTransportFailure)) throw value
         }
+    } else if (current.target.kind === 'server') await completeInterruptedBinding()
+}
+// The user already chose to connect, so a server still as empty as when it was inspected
+// is bound without asking again. Anything else waits for Connect in settings.
+async function completeInterruptedBinding(): Promise<void> {
+    const pending = await invoke<PendingBinding | null>('server_sync_lww_pending_binding')
+    if (!pending) return
+    if (pending.serverEmpty) {
+        try { await completeServerSyncBinding(); if (status.configured) return }
+        catch { /* Connect in settings retries with the saved registration and reports the failure. */ }
     }
+    bindingIncomplete = true; changed()
 }
 
-const snapshot = () => ({ status: { ...status, bound: persistedBinding?.target.kind === 'server' || !!context && !context.signal.aborted }, running: scheduler.isRunning() || !!hydrating, paused: !context || context.signal.aborted || scheduler.isBlocked(), replacing, draining: false, error })
+const snapshot = () => ({ status: { ...status, bound: persistedBinding?.target.kind === 'server' || !!context && !context.signal.aborted }, running: scheduler.isRunning() || !!hydrating, paused: !context || context.signal.aborted || scheduler.isBlocked(), replacing, draining: false, error, bindingIncomplete })
 const controller = {
     snapshot,
     subscribe: (listener: (value: ReturnType<typeof snapshot>) => void) => { listeners.add(listener); listener(controller.snapshot()); return () => { listeners.delete(listener) } },
@@ -249,7 +257,11 @@ const controller = {
     },
     confirmReplacement: async () => {},
     holdAutomaticSync: () => { foreground = false; if (hydrating) hydrationPending = true; void scheduler.fence() },
-    ensureStatus: async () => { if (isTauri) { [status,persistedBinding] = await Promise.all([invoke<Status>('server_sync_status'),invoke<BindingContext['state']>('pds_lww_binding_state')]) } changed() },
+    ensureStatus: async () => {
+        if (isTauri) { [status,persistedBinding] = await Promise.all([invoke<Status>('server_sync_status'),invoke<BindingContext['state']>('pds_lww_binding_state')]) }
+        if (status.configured || persistedBinding?.target.kind !== 'server') bindingIncomplete = false
+        changed()
+    },
 }
 export function getServerSyncController() { return controller }
 export function createServerSyncExitDrainAdapter(id = 'server', _fence?: RetainableReplacementFence): SyncExitDrainAdapter {

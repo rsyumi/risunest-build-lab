@@ -795,6 +795,7 @@ fn native_library_stage_survives_reopen_and_marker_prevents_second_activation() 
         root.path(),
         "library-recovery-job",
         crate::asset_repository::job_pins::CasJobKind::LocalBackupRestore,
+        crate::asset_repository::job_pins::CasJobOwner::for_test(),
         0,
     )
     .unwrap();

@@ -721,6 +721,7 @@ export function normalizeDatabaseDefaults(data:Database): Database {
     data.streamingThoughtMode ??= 'recent'
     data.streamingDeferDisplayProcessing ??= false
     data.chatMessageOverflowScope ??= 'latest'
+    data.risunestChatEditPopup ??= true
     data.echoMessage ??= "Echo Message"
     data.echoDelay ??= 0
     if(!isTauri){
@@ -1305,6 +1306,7 @@ export interface Database{
     streamingThoughtMode?: StreamingThoughtMode
     streamingDeferDisplayProcessing?: boolean
     chatMessageOverflowScope?: ChatMessageOverflowScope
+    risunestChatEditPopup?: boolean
     pluginDevelopMode?: boolean
     echoMessage?:string
     echoDelay?:number

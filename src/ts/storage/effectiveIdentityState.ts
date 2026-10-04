@@ -29,6 +29,7 @@ interface IdentityState {
     preset: Snapshot
     persona: Snapshot
     flags: Snapshot
+    applied: string | undefined
     variables: Record<string, string>
     binding: ToggleBinding | undefined
 }
@@ -49,7 +50,7 @@ function state(db: Database): IdentityState {
             personaId: db.personas?.[db.selectedPersona]?.id,
             preset: snapshot(db, presetMirrorMap), persona: snapshot(db, personaMirrorMap),
             flags: Object.fromEntries(Object.values(protectedPresetGroups).map(key => [key, root(db)[key]])),
-            variables: { ...db.globalChatVariables }, binding: undefined,
+            applied: undefined, variables: { ...db.globalChatVariables }, binding: undefined,
         }
         states.set(db, current)
     }
@@ -108,15 +109,25 @@ export function deriveEffectivePresetMirrors(db: Database, apply: (db: Database,
     if (current.override && !db.botPresets?.some(preset => preset.id === current.override)) current.override = null
     const id = getEffectivePresetId(db)
     const preset = id ? db.botPresets?.find(preset => preset.id === id) : undefined
+    const flags = Object.fromEntries(Object.values(protectedPresetGroups).map(key => [key, root(db)[key]]))
+    const applied = canonicalJson({ id: id ?? null, preset: preset ?? null, flags, protected: db.protectedPresetValues ?? null })
+    // The same inputs over unedited mirrors would rewrite every field with equal copies.
+    if (applied === current.applied && Object.keys(presetMirrorMap).every(key => equal(root(db)[key], current.preset[key]))) {
+        current.presetId = id
+        current.flags = flags
+        return
+    }
     if (preset) apply(db, preset)
     for (const [key, flag] of Object.entries(protectedPresetGroups)) {
-        if (root(db)[flag] && Object.hasOwn(db.protectedPresetValues ?? {}, key)) {
-            root(db)[key] = clone(db.protectedPresetValues[key as ProtectedPresetField])
+        const value = db.protectedPresetValues?.[key as ProtectedPresetField]
+        if (root(db)[flag] && Object.hasOwn(db.protectedPresetValues ?? {}, key) && !equal(root(db)[key], value)) {
+            root(db)[key] = clone(value)
         }
     }
     current.presetId = id
+    current.applied = applied
     current.preset = snapshot(db, presetMirrorMap)
-    current.flags = Object.fromEntries(Object.values(protectedPresetGroups).map(key => [key, root(db)[key]]))
+    current.flags = flags
 }
 
 export function setEffectivePresetOverride(db: Database, id: string | null, apply: (db: Database, preset: botPreset) => void): void {
@@ -146,7 +157,10 @@ export function deriveEffectivePersonaMirrors(db: Database): void {
     const current = state(db)
     const persona = db.personas?.[db.selectedPersona]
     if (persona) {
-        for (const [key, field] of Object.entries(personaMirrorMap)) root(db)[key] = clone((persona as unknown as Snapshot)[field])
+        for (const [key, field] of Object.entries(personaMirrorMap)) {
+            const value = (persona as unknown as Snapshot)[field]
+            if (!equal(root(db)[key], value)) root(db)[key] = clone(value)
+        }
     }
     current.personaId = persona?.id
     current.persona = snapshot(db, personaMirrorMap)
@@ -184,7 +198,7 @@ export function deriveEffectiveToggleVariables(db: Database, chat?: Conversation
         for (const key of Object.keys(variables)) if (key.startsWith('toggle_')) delete variables[key]
         for (const [key, value] of Object.entries(bound.savedToggleValues)) if (key.startsWith('toggle_')) variables[key] = value
     }
-    db.globalChatVariables = variables
+    if (!equal(db.globalChatVariables, variables)) db.globalChatVariables = variables
     current.variables = { ...variables }
     current.binding = owner ? { characterId: owner.chaId, conversationId: chat!.id! } : undefined
 }

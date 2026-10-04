@@ -295,6 +295,7 @@ impl PersistentStore {
         Ok((
             changes,
             BindingSelectionChange {
+                initial_publication: false,
                 expected_epoch: source_epoch,
                 new_epoch: Uuid::new_v4().to_string(),
                 target: target_connection,
@@ -351,7 +352,10 @@ impl PersistentStore {
             Some(selection_change),
             None,
         )?;
+        crate::server_sync::carry_operation_log(&self.repository_root, header.binding_authority, new_authority, false)
+            .map_err(|failure| error(failure.code))?;
         self.copy_device_unit_bodies(changes)?;
+        self.external_lww_release_writer_jobs(old_writer_id)?;
         let tx = self.device_store_mut()?.transaction()?;
         verify(&tx, header.binding_authority)?;
         let current_writer: String = tx.query_row(
@@ -364,6 +368,10 @@ impl PersistentStore {
         }
         reset_target_device(&tx, header, changes, new_authority)?;
         tx.execute("DELETE FROM lww_progress", [])?;
+        // The retired writer never sends again, so its unsettled segments and
+        // sequences are dropped instead of waiting for an answer forever.
+        tx.execute("DELETE FROM external_lww_segments WHERE writer=?1", [old_writer_id])?;
+        tx.execute("DELETE FROM external_lww_sequences WHERE writer=?1", [old_writer_id])?;
         tx.execute(
             "UPDATE device_meta SET writer_id=?1,revision=revision+1 WHERE singleton=1",
             [writer_id],

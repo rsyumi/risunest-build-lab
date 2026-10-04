@@ -1,5 +1,5 @@
 <div 
-    class={"border border-darkborderc relative n-scroll focus-within:border-borderc rounded-md shadow-xs text-textcolor bg-transparent focus-within:ring-borderc focus-within:ring-2 focus-within:outline-hidden transition-colors duration-200 z-20 focus-within:z-40" + ((className) ? (' ' + className) : '')} 
+    class={"border border-darkborderc relative flex flex-col n-scroll focus-within:border-borderc rounded-md shadow-xs text-textcolor bg-transparent focus-within:ring-borderc focus-within:ring-2 focus-within:outline-hidden transition-colors duration-200 z-20 focus-within:z-40" + ((className) ? (' ' + className) : '')} 
     class:text-sm={size === 'sm' || (size === 'default' && $textAreaTextSize === 1)}
     class:text-md={size === 'md' || (size === 'default' && $textAreaTextSize === 2)}
     class:text-lg={size === 'lg' || (size === 'default' && $textAreaTextSize === 3)}
@@ -38,8 +38,10 @@
         hideAutoComplete()
     }}
 >
+    <div class="relative min-h-0 w-full flex-1">
     {#if !highlight || $disableHighlight}
         <textarea
+            bind:this={textareaDom}
             class="w-full h-full bg-transparent focus-within:outline-hidden resize-none absolute top-0 left-0 z-50 overflow-y-auto"
             class:px-4={padding}
             class:py-2={padding}
@@ -67,44 +69,22 @@
                 }
                 onchange(e)
             }}
-            onkeydown={async (e) => {
+            onkeydown={(e) => {
                 if (isCompositionKey(e)) return;
                 if(
-                    (shortcutModifier(e) || e.shiftKey || e.altKey)
+                    !insidePopupEditor
+                    && (shortcutModifier(e) || e.shiftKey || e.altKey)
                     && hotkeyMatches(DBState.db.hotkeys.find(hk => hk.action === 'popupEditor'), e)
                 ){
                     e.preventDefault()
-                    popUpEditorStore.value = value
-                    popUpEditorStore.mode = 'default'
-                    popUpEditorStore.language = popupLanguage
-                    popUpEditorStore.open = true
-
-                    //lazy wait
-                    while(popUpEditorStore.open){
-                        await sleep(100)
-                    }
-
-                    value = popUpEditorStore.value
-                    onInput()
+                    openTextEditor()
                 }
             }}
 
             oncontextmenu={(e) => {
-                if(DBState.db.longPressToPopupEditor){
+                if(!insidePopupEditor && DBState.db.longPressToPopupEditor){
                     e.preventDefault()
-                    popUpEditorStore.value = value
-                    popUpEditorStore.mode = 'default'
-                    popUpEditorStore.language = popupLanguage
-                    popUpEditorStore.open = true
-
-                    //lazy wait
-                    const checkInterval = setInterval(() => {
-                        if(!popUpEditorStore.open){
-                            value = popUpEditorStore.value
-                            onInput()
-                            clearInterval(checkInterval)
-                        }
-                    }, 100)
+                    openTextEditor()
                 }
             }}
 ></textarea>
@@ -129,6 +109,20 @@
         translate="no"
     >{value ?? ''}</div>
 {/if}
+    </div>
+    {#if !insidePopupEditor}
+    <div class="flex shrink-0 justify-end border-t border-darkborderc px-1 py-0.5 text-textcolor2">
+        <button
+            type="button"
+            class="rounded p-1 transition-colors duration-200 hover:text-textcolor focus:outline-hidden focus-visible:ring-2 focus-visible:ring-borderc"
+            title={language.risuNest.textEditor.open}
+            aria-label={language.risuNest.textEditor.open}
+            onclick={openTextEditor}
+        >
+            <Maximize2Icon size={14} />
+        </button>
+    </div>
+    {/if}
     <div class="hidden absolute z-100 bg-bgcolor border border-darkborderc p-2 flex-col" bind:this={autoCompleteDom}>
         {#each autocompleteContents as content, i}
             <button class="w-full text-left py-1 px-2 bg-bgcolor" class:text-blue-500={selectingAutoComplete === i} onclick={() => {
@@ -141,11 +135,15 @@
     import { textAreaSize, textAreaTextSize } from 'src/ts/gui/guisize'
     import { highlighter, getNewHighlightId, removeHighlight, AllCBS } from 'src/ts/gui/highlight'
     import { sleep } from 'src/ts/util';
-    import { onDestroy, onMount } from 'svelte';
-  import { DBState, disableHighlight, popUpEditorStore } from 'src/ts/stores.svelte';
+    import { onDestroy, onMount, tick } from 'svelte';
+  import { DBState, disableHighlight } from 'src/ts/stores.svelte';
   import { isMobile } from 'src/ts/platform'
     import { hotkeyMatches } from 'src/ts/hotkey';
     import { isCompositionKey, shortcutModifier } from 'src/ts/hotkeyModifier';
+    // A leaf input imported almost everywhere; the per-icon path avoids loading the whole icon set.
+    import Maximize2Icon from '@lucide/svelte/icons/maximize-2'
+    import { language } from 'src/lang'
+    import { cancelTextEditorPopup, isInsideTextEditorPopup, openTextEditorPopup, type TextEditorPopupRequest } from 'src/ts/gui/textEditorPopup.svelte'
     interface Props {
         size?: 'xs'|'sm'|'md'|'lg'|'xl'|'default';
         autocomplete?: 'on'|'off';
@@ -191,6 +189,10 @@
     let autoCompleteDom: HTMLDivElement = $state()
     let autocompleteContents:string[] = $state([])
     let inputDom: HTMLDivElement = $state()
+    let textareaDom: HTMLTextAreaElement = $state()
+    let editorRequest: TextEditorPopupRequest | null = null
+    // Opening an editor from a field inside the editor would replace it and drop its draft.
+    const insidePopupEditor = isInsideTextEditorPopup()
 
     const autoComplete = () => {
         if(isMobile){
@@ -282,8 +284,33 @@
         highlighter(highlightDom, highlightId)
     })
 
+    function openTextEditor() {
+        const request: TextEditorPopupRequest = {
+            value: value ?? '',
+            language: popupLanguage,
+            preview: popupLanguage === 'markdown',
+            save: async (next) => {
+                editorRequest = null
+                value = next
+                onInput()
+                await tick()
+                // Fields that persist only from the change event read the new text from the element.
+                const target = textareaDom ?? inputDom
+                if (target) onchange({ currentTarget: target })
+                return true
+            },
+            cancel: () => {
+                editorRequest = null
+            },
+        }
+        editorRequest = request
+        openTextEditorPopup(request)
+    }
+
     onDestroy(() => {
         removeHighlight(highlightId)
+        // The field this text belongs to is gone, so saving would write into whatever the binding points at now.
+        if (editorRequest) cancelTextEditorPopup(editorRequest)
     })
 
     const highlightChange = async (value:string, highlightId:number) => {

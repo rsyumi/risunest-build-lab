@@ -28,7 +28,8 @@ struct Session {
 struct Context {
     session: tokio::sync::Mutex<Session>,
     cancel: Mutex<Cancellation>,
-    maintenance:tokio::sync::Mutex<()>,
+    maintenance:tokio::sync::Mutex<Session>,
+    checkpoints:tokio::sync::Mutex<super::lww_compaction::CheckpointSummaries>,
     turn:Mutex<super::lww_compaction::CompactionTurn>,
 }
 static CONTEXTS: OnceLock<Mutex<BTreeMap<String, Arc<Context>>>> = OnceLock::new();
@@ -51,7 +52,8 @@ fn context(id: &str) -> Result<Arc<Context>> {
                     cancel: Cancellation::default(),
                 }),
                 cancel: Mutex::new(Cancellation::default()),
-                maintenance:tokio::sync::Mutex::new(()),
+                maintenance:tokio::sync::Mutex::new(Session{engine:None,dependencies:None,fresh_after:Instant::now(),cancel:Cancellation::default()}),
+                checkpoints:Default::default(),
                 turn:Mutex::new(Default::default()),
             })
         })
@@ -293,7 +295,6 @@ pub(crate) async fn external_lww_stage_binding(
 pub(crate) async fn external_lww_publish(
     app: AppHandle,
     request: Request,
-    initial: bool,
 ) -> Result<PublicationResult> {
     logged("external_lww_publish", async move {
         let state = app.state::<crate::persistent_store::PersistentStoreState>();
@@ -312,17 +313,10 @@ pub(crate) async fn external_lww_publish(
                 return Err(ProviderError::new(ErrorKind::PreconditionFailed));
             }
         }
-        if initial {
-            let mut after = None;
-            loop {
-                let page = store
-                    .lww_queue_unit_state_page(&request.header, after.as_ref(), 4096)
-                    .map_err(runtime::local_error)?;
-                if !page.has_more {
-                    break;
-                }
-                after = page.after_key;
-            }
+        if request.exit_target.is_none() {
+            store
+                .lww_finish_initial_publication(&request.header)
+                .map_err(runtime::local_error)?;
         }
         let Session { engine, cancel, .. } = &mut *session;
         let result = engine
@@ -369,9 +363,10 @@ pub(crate) async fn external_lww_receive(
             .engine
             .as_ref()
             .ok_or_else(lww_segment::corrupt)?
-            .receive_requests(
+            .receive_requests_cached(
                 &mut store,
                 request.header.binding_authority,
+                &context.checkpoints,
                 &session.cancel,
             )
             .await?;
@@ -387,46 +382,65 @@ pub(crate) async fn external_lww_receive(
 pub(crate) async fn external_lww_maintenance(app:AppHandle,request:Request)->Result<Option<serde_json::Value>> {
     logged("external_lww_maintenance", async move {
         let context=context(&request.connection_id)?;
-        let Ok(_maintenance)=context.maintenance.try_lock() else {return Ok(None)};
+        let Ok(mut session)=context.maintenance.try_lock() else {return Ok(None)};
         let cancel=context.cancel.lock().map_err(runtime::local_error)?.clone();
-        let mut session=Session{engine:None,dependencies:None,fresh_after:Instant::now(),cancel:cancel.clone()};
-        open(&app,&request.connection_id,&mut session).await?;
-        let store=check(&app,&request,true)?;
-        let writer=store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
-        let engine=session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
-        let due=engine.maintenance_needed(&cancel).await?;
-        let compact=context.turn.lock().map_err(runtime::local_error)?.ready(due,Instant::now());
-        let root=runtime::root(&app)?;
-        let stored=super::connection_store::ConnectionStore::open(&root)?.read(&request.connection_id)?;
-        let job=uuid::Uuid::new_v4().to_string();
-        let protection=super::leases::LeaseContext{root:&root,connection_id:&request.connection_id,writer_id:&writer,descriptor:&stored.descriptor,root_key:&engine.root_key,provider:engine.provider.as_ref(),repository:&engine.repository,clock:super::leases::system_clock(),protection_supported:stored.capabilities.lease_operations,ledger:Some(app.state::<super::job_store::JobCommandState>().lease_ledger()?)};
-        let snapshot_id=if compact {
-            let owner=match super::leases::admit_shared_work(&protection,&job,&cancel).await? {
-                super::leases::Admission::Admitted(owner)=>owner,
-                super::leases::Admission::Yield{..}=>return Ok(None),
-                super::leases::Admission::UnsupportedProtection=>return Err(ProviderError::new(ErrorKind::Unsupported)),
-            };
-            let directory=root.join("external-storage").join("maintenance").join(&job);
-            let result=owner.run(&protection,&cancel,async {
-                if let Some(reason)=owner.recheck(&protection,&cancel).await? {return Err(super::leases::yield_error(reason));}
-                check(&app,&request,true)?;
-                let completed=engine.compact_published(&directory,&job,&writer,&stored.capabilities,&cancel,Some((&owner,&protection))).await?;
-                check(&app,&request,true)?;
-                Ok(completed)
-            }).await?;
-            Some(result.snapshot_id)
-        } else {None};
-        check(&app,&request,true)?;
-        let last_run=super::gc_store::GcStore::open(&root)?.last_run_ms(&request.connection_id)?;
-        if !super::cleanup::lww_cleanup_due(snapshot_id.is_some(),last_run,runtime::now_ms()) {
-            return Ok(Some(serde_json::json!({"snapshotId":snapshot_id,"cleanup":null})));
+        let result=maintain(&app,&request,&context,&mut session,&cancel).await;
+        if result.is_err() {
+            session.engine=None;
+            session.dependencies=None;
         }
-        let connected=connection_commands::open_connected_with_cancel(&app,&request.connection_id,&cancel).await?;
-        if connected.handle.repository_id!=engine.repository.repository_id || connected.handle.connection_identity!=engine.repository.connection_identity || connected.stored.descriptor.repository_id!=engine.library {return Err(lww_segment::corrupt())}
-        let cleanup=runtime::run_connected_cleanup(&app,&connected,&request.connection_id,&job,Some(engine),&cancel).await?;
-        check(&app,&request,true)?;
-        Ok(Some(serde_json::json!({"snapshotId":snapshot_id,"cleanup":cleanup})))
+        result
     }.await)
+}
+/// One maintenance tick on the engine kept from earlier ticks. A replaced
+/// cancellation or an expired clock admission takes a fresh clock sample, and
+/// a changed connection or any failure connects again.
+async fn maintain(app:&AppHandle,request:&Request,context:&Context,session:&mut Session,cancel:&Cancellation)->Result<Option<serde_json::Value>> {
+    let root=runtime::root(app)?;
+    let stored=super::connection_store::ConnectionStore::open(&root)?.read(&request.connection_id)?;
+    if session.engine.as_ref().is_some_and(|engine|engine.descriptor!=stored.descriptor) {
+        session.engine=None;
+        session.dependencies=None;
+    }
+    if !session.cancel.same(cancel) || session.engine.as_ref().is_some_and(|engine|engine.admitted_upper().is_err()) {
+        if let Some(engine)=session.engine.as_mut() {engine.invalidate_clock();}
+        session.fresh_after=Instant::now();
+    }
+    session.cancel=cancel.clone();
+    open(app,&request.connection_id,session).await?;
+    let store=check(app,request,true)?;
+    let writer=store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
+    let engine=session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
+    let due=engine.maintenance_needed_cached(&context.checkpoints,cancel).await?;
+    let compact=context.turn.lock().map_err(runtime::local_error)?.ready(due,Instant::now());
+    let job=uuid::Uuid::new_v4().to_string();
+    let protection=super::leases::LeaseContext{root:&root,connection_id:&request.connection_id,writer_id:&writer,descriptor:&stored.descriptor,root_key:&engine.root_key,provider:engine.provider.as_ref(),repository:&engine.repository,clock:super::leases::system_clock(),protection_supported:stored.capabilities.lease_operations,ledger:Some(app.state::<super::job_store::JobCommandState>().lease_ledger()?)};
+    let snapshot_id=if compact {
+        let owner=match super::leases::admit_shared_work(&protection,&job,cancel).await? {
+            super::leases::Admission::Admitted(owner)=>owner,
+            super::leases::Admission::Yield{..}=>return Ok(None),
+            super::leases::Admission::UnsupportedProtection=>return Err(ProviderError::new(ErrorKind::Unsupported)),
+        };
+        let directory=root.join("external-storage").join("maintenance").join(&job);
+        let result=owner.run(&protection,cancel,async {
+            if let Some(reason)=owner.recheck(&protection,cancel).await? {return Err(super::leases::yield_error(reason));}
+            check(app,request,true)?;
+            let completed=engine.compact_published(&directory,&job,&writer,&stored.capabilities,cancel,Some((&owner,&protection))).await?;
+            check(app,request,true)?;
+            Ok(completed)
+        }).await?;
+        Some(result.snapshot_id)
+    } else {None};
+    check(app,request,true)?;
+    let last_run=super::gc_store::GcStore::open(&root)?.last_run_ms(&request.connection_id)?;
+    if !super::cleanup::lww_cleanup_due(snapshot_id.is_some(),last_run,runtime::now_ms()) {
+        return Ok(Some(serde_json::json!({"snapshotId":snapshot_id,"cleanup":null})));
+    }
+    let connected=connection_commands::open_connected_with_cancel(app,&request.connection_id,cancel).await?;
+    if connected.handle.repository_id!=engine.repository.repository_id || connected.handle.connection_identity!=engine.repository.connection_identity || connected.stored.descriptor.repository_id!=engine.library {return Err(lww_segment::corrupt())}
+    let cleanup=runtime::run_connected_cleanup(app,&connected,&request.connection_id,&job,Some(engine),cancel).await?;
+    check(app,request,true)?;
+    Ok(Some(serde_json::json!({"snapshotId":snapshot_id,"cleanup":cleanup})))
 }
 #[tauri::command]
 pub(crate) async fn external_lww_fence(

@@ -569,8 +569,8 @@ impl ExternalLwwEngine {
                     let sha256 = String::new();
                     let object_id = String::new();
                     let assets = assets.into_values().collect::<Vec<_>>();
-                    let asset_job = if assets.is_empty() && controls.is_empty() && reused_controls.is_empty() && reused_assets.is_empty() {
-                        None
+                    let (asset_job, mut asset_pins) = if assets.is_empty() && controls.is_empty() && reused_controls.is_empty() && reused_assets.is_empty() {
+                        (None, None)
                     } else {
                         let job = super::journal::JobIdentity {
                             job_id,
@@ -584,14 +584,18 @@ impl ExternalLwwEngine {
                         let mut pins = crate::asset_repository::job_pins::DurableCasJob::begin(
                             &root, &job.job_id,
                             crate::asset_repository::job_pins::CasJobKind::OfficialPublicationOrExportPreparation,
+                            crate::asset_repository::job_pins::CasJobOwner::external_publication(&job.job_id),
                             super::runtime::now_ms() as i64,
                         ).map_err(transient)?;
-                        pins.pin_existing_batch(&cas, &assets.iter().filter(|asset| asset.local_pin).map(|asset| (
+                        let sealed = pins.pin_existing_batch(&cas, &assets.iter().filter(|asset| asset.local_pin).map(|asset| (
                             asset.content_hash.clone(), asset.byte_length,
                             crate::asset_repository::job_pins::CasObjectRole::DirectObject,
-                        )).collect::<Vec<_>>()).map_err(transient)?;
-                        pins.seal(store, super::runtime::now_ms() as i64).map_err(transient)?;
-                        Some(job)
+                        )).collect::<Vec<_>>()).and_then(|()| pins.seal(store, super::runtime::now_ms() as i64));
+                        if let Err(error) = sealed {
+                            let _ = pins.release(crate::asset_repository::job_pins::CasReleaseOutcome::Aborted);
+                            return Err(transient(error));
+                        }
+                        (Some(job), Some(pins))
                     };
                     let frozen_controls = frozen_controls.into_values().collect::<Vec<_>>();
                     let publication = SealedPublication {
@@ -618,9 +622,13 @@ impl ExternalLwwEngine {
                         dispatched: false,
                         complete: false,
                     };
-                    store
-                        .external_lww_persist(&publication, &bytes)
-                        .map_err(store_error)?;
+                    if let Err(error) = store.external_lww_persist(&publication, &bytes) {
+                        if let Some(pins) = asset_pins.as_mut() {
+                            let _ = pins.release(crate::asset_repository::job_pins::CasReleaseOutcome::Aborted);
+                        }
+                        return Err(store_error(error));
+                    }
+                    drop(asset_pins);
                     staged.keep();
                     (publication, bytes)
                 }
@@ -826,7 +834,7 @@ impl ExternalLwwEngine {
                     let source = if let Some(proof) = &asset.remote_source {
                         let spool = super::lww_residency::spool_frozen_remote_body(
                             proof, &root.join("external-storage").join("lww-publications").join(&job.job_id), cancel,
-                        ).await?.into_temp_path();
+                        ).await.map_err(Self::held_body_error)?.into_temp_path();
                         Self::check_publication_authority(store, &publication)?;
                         let source = super::content_store::ObjectSource::File(spool.to_path_buf());
                         spools.push(spool);
@@ -1091,6 +1099,20 @@ impl ExternalLwwEngine {
             else if error.code == "binding-authority-changed" || error.code == "binding-authority-unavailable" { ErrorKind::PreconditionFailed }
             else { ErrorKind::Transient })
     }
+    /// A body the server or external storage that holds it could not provide.
+    fn held_body_error(error: ProviderError) -> ProviderError {
+        match error.kind {
+            ErrorKind::Cancelled | ErrorKind::PreconditionFailed | ErrorKind::Corrupt
+                | ErrorKind::LocalStorageFull | ErrorKind::LocalPermissionDenied => error,
+            _ => ProviderError { kind: ErrorKind::PreviousStorageUnavailable, http_status: None, retry_at_ms: None,
+                oauth_error: None, oauth_error_description: None, cause: error.cause },
+        }
+    }
+    fn held_server_body_error(error: crate::server_sync::SyncError, cancel: &Cancellation) -> ProviderError {
+        if error.code == "local-storage-full" { return ProviderError::new(ErrorKind::LocalStorageFull); }
+        let cause = ErrorCause(Some(error.code.clone()));
+        Self::held_body_error(ProviderError { cause, ..Self::body_source_error(error, cancel) })
+    }
     async fn open_frozen_server_body(
         store: &mut PersistentStore, asset: &FrozenAsset, job: &super::journal::JobIdentity,
         authority: DecimalU64, cancel: &Cancellation,
@@ -1109,7 +1131,7 @@ impl ExternalLwwEngine {
             std::fs::create_dir_all(&scratch).map_err(transient)?;
             let check = || Self::check_frozen_body_authority(&store, authority, &cancel);
             crate::server_sync::residency::open_transient_server_proof_with_check(&root, &scratch, &proof, &check)
-                .map_err(|error| Self::body_source_error(error, &cancel))?.ok_or_else(segment::corrupt)
+                .map_err(|error| Self::held_server_body_error(error, &cancel))?.ok_or_else(segment::corrupt)
         }).await.map_err(transient)?
     }
     async fn read_frozen_standalone(
@@ -1126,7 +1148,7 @@ impl ExternalLwwEngine {
         } else if let Some(proof) = &asset.remote_source {
             let spool = super::lww_residency::spool_frozen_remote_body(
                 proof, &store.repository_root().join("external-storage").join("lww-publications").join(&job.job_id), cancel,
-            ).await?;
+            ).await.map_err(Self::held_body_error)?;
             Self::check_frozen_body_authority(store, authority, cancel).map_err(|error| Self::body_source_error(error, cancel))?;
             super::lww_residency::read_frozen_body_spool(proof, &spool, cancel)?
         } else {
@@ -1225,15 +1247,16 @@ impl ExternalLwwEngine {
             Err(error) => Self::fence_outcome(error, new_device),
         }
     }
-    /// Only an unreachable repository lets a binding change go ahead without
-    /// an answer, and a refusal of this device does too when the change makes
-    /// it a new device.
+    /// Only an unreachable or missing repository lets a binding change go
+    /// ahead without an answer, and a refusal of this device does too when the
+    /// change makes it a new device.
     pub(crate) fn fence_outcome(error: ProviderError, new_device: bool) -> Result<()> {
         match error.kind {
             ErrorKind::Transient
             | ErrorKind::RateLimited
             | ErrorKind::DailyQuotaExhausted
-            | ErrorKind::EndpointRejected => Ok(()),
+            | ErrorKind::EndpointRejected
+            | ErrorKind::NotFound => Ok(()),
             ErrorKind::Unauthorized | ErrorKind::ReauthRequired if new_device => Ok(()),
             _ => Err(error),
         }
@@ -1311,7 +1334,8 @@ impl ExternalLwwEngine {
             match self.reconcile_sent(&publication, &sealed, cancel).await? {
                 Settlement::Landed => true,
                 Settlement::Conflict => return Err(segment::corrupt()),
-                Settlement::Nothing | Settlement::Missing => false,
+                Settlement::Nothing => false,
+                Settlement::Missing => self.landed_before_cleanup(store, &publication, cancel).await?,
             }
         } else {
             false
@@ -1325,11 +1349,39 @@ impl ExternalLwwEngine {
             } else {
                 crate::asset_repository::job_pins::CasReleaseOutcome::Aborted
             };
-            crate::asset_repository::job_pins::DurableCasJob::open(store.repository_root(), &job.job_id)
-                .and_then(|mut pins| pins.release(outcome))
-                .map_err(transient)?;
+            crate::persistent_store::external_lww::release_cas_job(store.repository_root(), &job.job_id, outcome)
+                .map_err(store_error)?;
         }
         Ok(())
+    }
+    /// A sent segment the repository no longer holds may have landed and been
+    /// removed after a checkpoint covered it. Its sequence is reused only when
+    /// no checkpoint covers it and this device has not received it either.
+    async fn landed_before_cleanup(
+        &self,
+        store: &mut PersistentStore,
+        publication: &SealedPublication,
+        cancel: &Cancellation,
+    ) -> Result<bool> {
+        let authority = store.lww_binding_authority().map_err(store_error)?;
+        let received = store
+            .lww_receive_progress(authority)
+            .map_err(store_error)?
+            .into_iter()
+            .any(|progress| {
+                progress.kind == "external"
+                    && progress.writer_id.as_deref() == Some(publication.writer.as_str())
+                    && progress.cursor >= publication.seq
+            });
+        if received {
+            return Ok(true);
+        }
+        Ok(self.checkpoints(cancel).await?.into_iter().any(|(_, checkpoint)| {
+            checkpoint
+                .covered_prefixes
+                .get(&publication.writer)
+                .is_some_and(|prefix| *prefix >= publication.seq)
+        }))
     }
     async fn include_objects(
         &self,
@@ -1725,16 +1777,27 @@ impl ExternalLwwEngine {
             .authorize_lww_new_device(&preparation.authorization_id)
             .map_err(store_error)
     }
+    #[cfg(test)]
     pub(crate) async fn receive_requests(
         &self,
         store: &mut PersistentStore,
         authority: DecimalU64,
         cancel: &Cancellation,
     ) -> Result<Vec<StageReceive>> {
+        self.receive_requests_cached(store, authority, &Default::default(), cancel).await
+    }
+    /// `receive_requests` reading only the snapshots `checkpoints` has not classified.
+    pub(crate) async fn receive_requests_cached(
+        &self,
+        store: &mut PersistentStore,
+        authority: DecimalU64,
+        checkpoints: &tokio::sync::Mutex<super::lww_compaction::CheckpointSummaries>,
+        cancel: &Cancellation,
+    ) -> Result<Vec<StageReceive>> {
         let progress=store.lww_receive_progress(authority).map_err(store_error)?;
         let current=progress.into_iter().filter(|p|p.kind=="external").filter_map(|p|p.writer_id.map(|w|(w,p.cursor))).collect::<BTreeMap<_,_>>();
         let mut covered=BTreeMap::new();
-        for (_,snapshot) in self.checkpoints(cancel).await? {
+        for snapshot in self.checkpoint_summaries(checkpoints, cancel).await? {
             for (writer,prefix) in snapshot.covered_prefixes {
                 let value=covered.entry(writer).or_insert(DecimalU64(0));
                 *value=(*value).max(prefix);

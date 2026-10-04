@@ -3471,7 +3471,6 @@ pub(crate) enum JobStage {
     PreparingAttachments,
     ReadingDatabase,
     DecodingDatabase,
-    StagingCharacters,
     FinalizingStaging,
     AwaitingActivation,
     Activating,
@@ -3664,7 +3663,9 @@ fn verify_portable_body_receipt(repository:&Path,request:&PortableBodyRetryReque
         if authority!=request.binding_authority {return Ok(false);}
         let header=crate::persistent_store::lww::Header {request_id:request.job_id.clone(),binding_authority:serde_json::from_value(serde_json::json!(request.binding_authority))?};
         let receipt=crate::persistent_store::lww::completed_device_replacement_receipt(&library,&device,&header,&request.staging_id)?;
-        Ok(receipt.is_some_and(|receipt|receipt.revision.to_string()==request.activation_revision && generation==format!("revision-{}",receipt.revision)))
+        let activated=crate::persistent_store::lww::activated_receipt(&library,&request.job_id)?;
+        Ok(receipt.is_some_and(|receipt|receipt.revision.to_string()==request.activation_revision
+            && activated.as_ref().is_some_and(|(activated_revision,activated)|*activated_revision==receipt.revision && *activated==generation)))
     })().map_err(native_store_error)?;
     if !valid {return Err(NativeJobError::new("invalid-activation-receipt","Portable activated library identity differs"));}
     Ok(())
@@ -5423,6 +5424,7 @@ mod tests {
             repository_root,
             job_id,
             CasJobKind::OfficialPublicationOrExportPreparation,
+            crate::asset_repository::job_pins::CasJobOwner::for_test(),
             1,
         )
         .unwrap();
@@ -7302,6 +7304,7 @@ mod tests {
             repository_root,
             &job.id(),
             CasJobKind::CardOrModuleContentImport,
+            crate::asset_repository::job_pins::CasJobOwner::for_test(),
             1,
         )
         .unwrap();

@@ -41,6 +41,14 @@ pub(crate) struct StagedTarget {
     staging_id: String,
     receive_id: String,
 }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingBinding {
+    endpoint: String,
+    library_id: String,
+    epoch: String,
+    server_empty: bool,
+}
 #[derive(Serialize, Deserialize)]
 struct VerifiedStage {
     target: VerifiedTarget,
@@ -73,11 +81,7 @@ fn assert_authority(store: &PersistentStore, header: &Header) -> Result<()> {
     }
     Ok(())
 }
-pub(crate) fn inspect(store: &PersistentStore, header: &Header) -> Result<Inspection> {
-    assert_authority(store, header)?;
-    let core = candidate(store)?;
-    core.admission()?;
-    let head = core.client.resolve_identity()?;
+fn first_state_page(core: &LwwClient) -> Result<StatePage> {
     let (_, pin): (_, StatePin) = core.client.json(
         reqwest::Method::POST,
         "state/pins",
@@ -104,19 +108,27 @@ pub(crate) fn inspect(store: &PersistentStore, header: &Header) -> Result<Inspec
     if page.pin_id != pin.pin_id || page.start_seq != pin.start_seq {
         return Err(SyncError::new("invalid-state-page", 502));
     }
+    Ok(page)
+}
+pub(crate) fn inspect(store: &PersistentStore, header: &Header) -> Result<Inspection> {
+    assert_authority(store, header)?;
+    let core = candidate(store)?;
+    core.admission()?;
+    let head = core.client.resolve_identity()?;
+    let page = first_state_page(&core)?;
     let config = core
         .access
         .ok_or_else(|| SyncError::new("server-unconfigured", 409))?;
     #[cfg(test)]
     super::hash_metrics::record(
         "c_binding_target_identity",
-        format!("{}:{}:{}", config.endpoint, config.library_id, head.epoch).len(),
+        format!("{}:{}", config.library_id, head.epoch).len(),
     );
-    let target_id = risunest_sync_wire::hash(
-        format!("{}:{}:{}", config.endpoint, config.library_id, head.epoch).as_bytes(),
-    );
-    let same_library =
-        |old: &StoredConfig| old.endpoint == config.endpoint && old.library_id == config.library_id;
+    // A server is identified by its library and epoch, so another spelling of
+    // its address reaches the same target.
+    let target_id =
+        risunest_sync_wire::hash(format!("{}:{}", config.library_id, head.epoch).as_bytes());
+    let same_library = |old: &StoredConfig| old.library_id == config.library_id;
     let active = core.log.verified::<VerifiedTarget>("bindings", "active").ok();
     let previously_bound_library = store.lww_previously_bound(&config.library_id, &target_id)?
         && core.log.config("active")?.is_some_and(|old| same_library(&old))
@@ -153,6 +165,45 @@ pub(crate) fn inspect(store: &PersistentStore, header: &Header) -> Result<Inspec
         registration_changed,
         server_restored,
     })
+}
+/// Reports a first binding that stopped after its target switch: the target is this
+/// server and a registration is saved, but no binding was ever activated. The server
+/// counts as still empty only when it is the library and epoch that were inspected and
+/// holds no unit; any failure to tell counts as not empty.
+pub(crate) fn pending_binding(store: &PersistentStore) -> Result<Option<PendingBinding>> {
+    let state = store.lww_binding_state()?;
+    if state.target != SyncTarget::Server("server".into()) || store.server_stored_config()?.is_some() {
+        return Ok(None);
+    }
+    let log = OperationLog::open(store.repository_root())?;
+    if log.verified::<VerifiedTarget>("bindings", "active").is_ok() {
+        return Ok(None);
+    }
+    let Some(saved) = log.config("candidate")? else {
+        return Ok(None);
+    };
+    let Ok(selected) = log.verified::<VerifiedTarget>("bindings", "selected") else {
+        return Ok(None);
+    };
+    let still_empty = || -> Result<bool> {
+        if saved.library_id != selected.config.library_id
+            || state.library_id.as_deref() != Some(&selected.config.library_id)
+        {
+            return Ok(false);
+        }
+        let core = candidate(store)?;
+        let head = core.client.resolve_identity()?;
+        Ok(head.library_id == selected.config.library_id
+            && head.epoch == selected.epoch
+            && first_state_page(&core)?.items.is_empty())
+    };
+    let server_empty = still_empty().unwrap_or(false);
+    Ok(Some(PendingBinding {
+        endpoint: selected.config.endpoint,
+        library_id: selected.config.library_id,
+        epoch: selected.epoch,
+        server_empty,
+    }))
 }
 /// Moves the operation log with a binding switch. A retained binding keeps its pending
 /// publications and receive position under the new authority; any other switch detaches
@@ -234,31 +285,40 @@ pub(crate) fn carry_operation_log(
     tx.commit()?;
     Ok(())
 }
+/// The stored registration's credential, or none when this device can no longer read it.
+fn readable(stored: &StoredConfig, root: &std::path::Path) -> Result<Option<super::client::ServerConfig>> {
+    match stored.resolve(root) {
+        Ok(config) => Ok(Some(config)),
+        Err(error) if error.code == "device-credential-unavailable" => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+/// Settles the stored registration's pending publications before a binding change. Without a
+/// readable credential nothing can be asked, and the change goes ahead.
+pub(crate) fn fence_stored(store: &mut PersistentStore, new_device: bool) -> Result<()> {
+    let Some(stored) = store.server_stored_config()? else {
+        return Ok(());
+    };
+    let Some(config) = readable(&stored, store.repository_root())? else {
+        return Ok(());
+    };
+    let mut core = LwwClient::new(store.repository_root(), config)?;
+    core.access = Some(stored);
+    if new_device {
+        core.fence_new_device(store)
+    } else {
+        fence_for_binding_change(&core, store)
+    }
+}
 /// Settles pending publications before a binding change. When a publication's server does not
 /// answer, the switch proceeds and carries or detaches that publication instead of waiting.
 pub(crate) fn fence_for_binding_change(core: &LwwClient, store: &mut PersistentStore) -> Result<()> {
     for publication in core.log.pending()? {
-        if !answers(store.repository_root(), &publication)? {
+        if !core.answers(&publication)? {
             return Ok(());
         }
     }
     core.fence(store)
-}
-fn answers(root: &std::path::Path, publication: &super::lww_client::Publication) -> Result<bool> {
-    let client = super::client::ServerClient::new(publication.config.resolve(root)?)?;
-    let attempt = client.request_ambiguous_mutation(
-        reqwest::Method::GET,
-        &format!("operations/{}", publication.request.operation_id),
-        None,
-        &[],
-        MAX_METADATA_BYTES,
-    )?;
-    Ok(match attempt {
-        super::client::RequestAttempt::Response(reply) => !matches!(reply.status, 502..=504),
-        super::client::RequestAttempt::Failure { error, .. } => {
-            !super::client::is_ambiguous_transient(&error) && error.code != "directory-unreachable"
-        }
-    })
 }
 pub(crate) fn stage(
     store: &mut PersistentStore,
@@ -316,32 +376,24 @@ pub(crate) fn prepare_new_device(
         return Err(SyncError::new("binding-stage-integrity", 409));
     }
     let old = store.server_stored_config()?;
-    if let Some(old) = &old {
-        LwwClient::new(
-            store.repository_root(),
-            old.resolve(store.repository_root())?,
-        )?
-        .fence_new_device(store)?;
+    let old_config = match &old {
+        Some(old) => readable(old, store.repository_root())?,
+        None => None,
+    };
+    if let Some(config) = &old_config {
+        LwwClient::new(store.repository_root(), config.clone())?.fence_new_device(store)?;
     }
     let preparation = store.prepare_lww_new_device(header, staging_id)?;
     let core = LwwClient::new(
         store.repository_root(),
         stage.target.config.resolve(store.repository_root())?,
     )?;
-    let same = old.as_ref().is_some_and(|old| {
-        old.library_id == stage.target.config.library_id
-            && old.endpoint == stage.target.config.endpoint
-    });
-    let former_token = if same {
-        Some(
-            old.as_ref()
-                .unwrap()
-                .resolve(store.repository_root())?
-                .token,
-        )
-    } else {
-        None
-    };
+    let same = old
+        .as_ref()
+        .is_some_and(|old| old.library_id == stage.target.config.library_id);
+    // An old credential this device cannot read leaves that registration listed on the server.
+    let former_token = old_config.filter(|_| same).map(|config| config.token);
+    let former = former_token.is_some();
     let (_, receipt): (_, NewDeviceClaimReceipt) = core.client.json(
         reqwest::Method::POST,
         "session/claim-writer",
@@ -358,7 +410,7 @@ pub(crate) fn prepare_new_device(
         || receipt.device_id != stage.target.config.device_id
         || receipt.library_id != stage.target.config.library_id
         || receipt.epoch != stage.target.epoch
-        || (same && !receipt.former_credential_inactive)
+        || receipt.former_credential_inactive != former
     {
         return Err(SyncError::new("new-device-registration-integrity", 409));
     }
@@ -371,7 +423,7 @@ pub(crate) fn prepare_new_device(
         if same {
             core.detach_inactive(old, &preparation.authorization_id)?;
         } else {
-            core.fence(store)?;
+            core.fence_new_device(store)?;
         }
     }
     store.authorize_lww_new_device(&preparation.authorization_id)?;
@@ -434,12 +486,12 @@ pub(crate) fn prepare_fresh_writer(
     let old = store
         .server_stored_config()?
         .filter(|old| {
-            old.endpoint == target.config.endpoint
-                && old.library_id == target.config.library_id
-                && old.device_id != target.config.device_id
+            old.library_id == target.config.library_id && old.device_id != target.config.device_id
         })
         .ok_or_else(|| SyncError::new("registration-unchanged", 409))?;
-    LwwClient::new(&root, old.resolve(&root)?)?.fence_new_device(store)?;
+    if let Some(config) = readable(&old, &root)? {
+        LwwClient::new(&root, config)?.fence_new_device(store)?;
+    }
     let reservation_id = fresh_writer_record("fresh-writer", &target.config);
     let reservation = match claim_record::<FreshWriterReservation>(&log, &reservation_id)? {
         Some(reservation) => reservation,
@@ -453,6 +505,26 @@ pub(crate) fn prepare_fresh_writer(
             reservation
         }
     };
+    complete_fresh_writer(store, &log, header.binding_authority, &target, &old, &reservation)?;
+    Ok(NewDevicePreparation {
+        authorization_id: reservation.authorization_id,
+        writer_id: reservation.writer_id,
+    })
+}
+/// The steps after a fresh-writer reservation: the new registration claims the reserved writer,
+/// the old registration's publications are detached, and the reserved writer replaces the old one.
+fn complete_fresh_writer(
+    store: &mut PersistentStore,
+    log: &OperationLog,
+    authority: DecimalU64,
+    target: &VerifiedTarget,
+    old: &StoredConfig,
+    reservation: &FreshWriterReservation,
+) -> Result<()> {
+    let root = store.repository_root().to_owned();
+    // An old credential this device cannot read leaves that registration listed on the server.
+    let former_token = readable(old, &root)?.map(|config| config.token);
+    let former = former_token.is_some();
     let core = LwwClient::new(&root, target.config.resolve(&root)?)?;
     let (_, receipt): (_, NewDeviceClaimReceipt) = core.client.json(
         reqwest::Method::POST,
@@ -461,7 +533,7 @@ pub(crate) fn prepare_fresh_writer(
         Some(&NewDeviceClaimRequest {
             writer_id: reservation.writer_id.clone(),
             authorization_id: reservation.authorization_id.clone(),
-            former_token: Some(old.resolve(&root)?.token),
+            former_token,
         }),
         &[],
     )?;
@@ -474,7 +546,7 @@ pub(crate) fn prepare_fresh_writer(
         || receipt.device_id != target.config.device_id
         || receipt.library_id != target.config.library_id
         || receipt.epoch != target.epoch
-        || !receipt.former_credential_inactive
+        || receipt.former_credential_inactive != former
     {
         return Err(SyncError::new("new-device-registration-integrity", 409));
     }
@@ -483,16 +555,33 @@ pub(crate) fn prepare_fresh_writer(
         &fresh_writer_record("fresh-writer-claim", &target.config),
         &receipt,
     )?;
-    core.detach_inactive(&old, &reservation.authorization_id)?;
-    store.lww_adopt_fresh_writer(
-        header.binding_authority,
-        &reservation.old_writer_id,
-        &reservation.writer_id,
+    core.detach_inactive(old, &reservation.authorization_id)?;
+    store.lww_adopt_fresh_writer(authority, &reservation.old_writer_id, &reservation.writer_id)?;
+    Ok(())
+}
+/// Finishes a fresh-writer swap that stopped after its reservation, so startup installs the new
+/// registration instead of falling back to the old one.
+fn resume_fresh_writer(
+    store: &mut PersistentStore,
+    log: &OperationLog,
+    authority: DecimalU64,
+    target: &VerifiedTarget,
+    old: &StoredConfig,
+) -> Result<()> {
+    let writer = store.lww_clock_state()?.writer_id;
+    if claimed_fresh_writer(log, target)?.is_some_and(|claimed| claimed == writer) {
+        return Ok(());
+    }
+    let reservation = claim_record::<FreshWriterReservation>(
+        log,
+        &fresh_writer_record("fresh-writer", &target.config),
     )?;
-    Ok(NewDevicePreparation {
-        authorization_id: reservation.authorization_id,
-        writer_id: reservation.writer_id,
-    })
+    match reservation {
+        Some(reservation) if reservation.old_writer_id == writer => {
+            complete_fresh_writer(store, log, authority, target, old, &reservation)
+        }
+        _ => Ok(()),
+    }
 }
 pub(crate) fn activate(
     store: &mut PersistentStore,
@@ -520,11 +609,18 @@ pub(crate) fn activate(
         // A new registration to the stored library is installed only with the writer it
         // claimed, so the old writer never publishes under the new device.
         let stored = store.server_stored_config()?;
+        if let (Some(target), Some(old)) = (&selected, &stored) {
+            if old.library_id == target.config.library_id
+                && old.device_id != target.config.device_id
+                && target.authority == header.binding_authority
+            {
+                resume_fresh_writer(store, &log, header.binding_authority, target, old)?;
+            }
+        }
         let selected = match selected {
             Some(target)
                 if stored.as_ref().is_some_and(|stored| {
-                    stored.endpoint == target.config.endpoint
-                        && stored.library_id == target.config.library_id
+                    stored.library_id == target.config.library_id
                         && stored.device_id != target.config.device_id
                 }) =>
             {
@@ -539,9 +635,12 @@ pub(crate) fn activate(
             .filter(|target| {
                 state.library_id.as_deref() == Some(&target.config.library_id)
                     && (target.authority.0.checked_add(1) == Some(header.binding_authority.0)
-                        || active
-                            .as_ref()
-                            .is_some_and(|active| active.target_id == target.target_id))
+                        || match active.as_ref() {
+                            Some(active) => active.target_id == target.target_id,
+                            // A first binding stopped after its target switch is retried
+                            // without another switch.
+                            None => target.authority == header.binding_authority,
+                        })
             })
             .or(active)
             .ok_or_else(|| SyncError::new("binding-integrity", 409))?;
@@ -567,6 +666,12 @@ pub(crate) fn activate(
     }
     store.server_save_config(&target.config)?;
     log.save_config("active", &target.config)?;
+    for kind in ["fresh-writer", "fresh-writer-claim"] {
+        log.0.execute(
+            "DELETE FROM claims WHERE id=?1",
+            [fresh_writer_record(kind, &target.config)],
+        )?;
+    }
     log.0.execute(
         "INSERT INTO bindings VALUES('active',?1) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
         [serde_json::to_string(&target).map_err(|_| SyncError::new("binding-integrity", 409))?],
@@ -601,6 +706,7 @@ pub(crate) fn activate(
         store.lww_finish_receive(&receive.header)?;
         core.acknowledge_cursor(stage.cursor)?;
     }
+    store.lww_finish_initial_publication(header)?;
     Ok(())
 }
 
@@ -627,6 +733,7 @@ pub(crate) fn first_binding_cycle(
         if inspected.empty { return Err(SyncError::new("fixture-nonempty-target-required",409)); }
         let staged = stage(store, &super::lww_tests::header(store), &inspected.inspection_id, None)?;
         let next = store.switch_lww_binding(&crate::persistent_store::sync_selection::SwitchBindingRequest {
+            initial_publication: false,
             header: super::lww_tests::header(store),
             expected_selection_epoch: original.selection_epoch,
             target: SyncTarget::Server("server".into()),
@@ -722,6 +829,7 @@ mod tests {
         let state = store
             .switch_lww_binding(
                 &crate::persistent_store::sync_selection::SwitchBindingRequest {
+                    initial_publication: false,
                     header: request,
                     expected_selection_epoch: original.selection_epoch,
                     target: SyncTarget::Server("server".into()),
@@ -780,6 +888,7 @@ mod tests {
         let next = target
             .switch_lww_binding(
                 &crate::persistent_store::sync_selection::SwitchBindingRequest {
+                    initial_publication: false,
                     header: header(&target),
                     expected_selection_epoch: original.selection_epoch,
                     target: SyncTarget::Server("server".into()),
@@ -960,6 +1069,7 @@ mod tests {
         let original = store.lww_binding_state().unwrap();
         store
             .switch_lww_binding(&crate::persistent_store::sync_selection::SwitchBindingRequest {
+                initial_publication: false,
                 header: header(store),
                 expected_selection_epoch: original.selection_epoch,
                 target,
@@ -1093,6 +1203,7 @@ mod tests {
         drop(client);
         let original = store.lww_binding_state().unwrap();
         let request = crate::persistent_store::sync_selection::SwitchBindingRequest {
+            initial_publication: false,
             header: header(&store),
             expected_selection_epoch: original.selection_epoch,
             target: SyncTarget::None,
@@ -1187,6 +1298,71 @@ mod tests {
         receive_available(&client, &mut a, &[]).unwrap();
         assert_eq!(a.read_root(None).unwrap().value["language"], "ja");
     }
+    #[test]
+    fn a_first_binding_stopped_after_its_target_switch_activates_when_retried() {
+        use crate::server_sync::lww_tests::{drain_publications, receive_available};
+        let server = LocalServerFixture::new();
+        let (_a_root, mut a) = local();
+        let (_b_root, mut b) = local();
+        let peer = server.client(&b);
+        configure(&server, &a);
+        let inspected = inspect(&a, &header(&a)).unwrap();
+        assert!(inspected.empty);
+        switch_to(&mut a, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
+        // The app stops here. The retry finds the target already switched and switches no further.
+        let retried = inspect(&a, &header(&a)).unwrap();
+        assert!(retried.empty && !retried.previously_bound_library);
+        resume(&mut a);
+        assert!(a.server_stored_config().unwrap().is_some());
+        let client = bound_client(&a);
+        save(&mut a, &["root", "language"], serde_json::json!("ja"));
+        drain_publications(&client, &mut a, &[]).unwrap();
+        receive_available(&peer, &mut b, &[]).unwrap();
+        assert_eq!(b.read_root(None).unwrap().value["language"], "ja");
+    }
+    #[test]
+    fn a_first_binding_stopped_after_its_switch_is_reported_with_whether_the_server_is_still_empty() {
+        use crate::server_sync::lww_tests::drain_publications;
+        let gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server = vanishing_server(gone.clone());
+        let (_a_root, mut a) = local();
+        let (_b_root, mut b) = local();
+        let config = configure(&server, &a);
+        assert!(pending_binding(&a).unwrap().is_none());
+        let inspected = inspect(&a, &header(&a)).unwrap();
+        assert!(inspected.empty);
+        assert!(pending_binding(&a).unwrap().is_none());
+        switch_to(&mut a, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
+        let peer = server.client(&b);
+        let epoch = peer.client.resolve_identity().unwrap().epoch;
+        let pending = pending_binding(&a).unwrap().unwrap();
+        assert_eq!(pending.endpoint, config.endpoint);
+        assert_eq!(pending.library_id, config.library_id);
+        assert_eq!(pending.epoch, epoch);
+        assert!(pending.server_empty);
+        gone.store(true, std::sync::atomic::Ordering::SeqCst);
+        let unreachable = pending_binding(&a).unwrap().unwrap();
+        assert!(!unreachable.server_empty);
+        gone.store(false, std::sync::atomic::Ordering::SeqCst);
+        save(&mut b, &["root", "language"], serde_json::json!("ja"));
+        drain_publications(&peer, &mut b, &[]).unwrap();
+        let published = pending_binding(&a).unwrap().unwrap();
+        assert!(!published.server_empty);
+        assert_eq!(published.epoch, epoch);
+        resume(&mut a);
+        assert!(pending_binding(&a).unwrap().is_none());
+    }
+    #[test]
+    fn a_stopped_first_binding_to_a_server_restored_since_is_not_still_empty() {
+        let server = LocalServerFixture::new();
+        let (_root, mut a) = local();
+        configure(&server, &a);
+        let inspected = inspect(&a, &header(&a)).unwrap();
+        switch_to(&mut a, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
+        assert!(pending_binding(&a).unwrap().unwrap().server_empty);
+        server.server.rotate_restored_epoch().unwrap();
+        assert!(!pending_binding(&a).unwrap().unwrap().server_empty);
+    }
     fn fresh_writer(store: &mut PersistentStore, inspection_id: &str) -> Result<NewDevicePreparation> {
         let request = header(store);
         prepare_fresh_writer(store, &request, inspection_id)
@@ -1225,6 +1401,183 @@ mod tests {
     fn resume(store: &mut PersistentStore) {
         let request = header(store);
         activate(store, &request, None).unwrap();
+    }
+    fn switch_owing_initial_publication(store: &mut PersistentStore, inspection_id: String) -> Header {
+        let original = store.lww_binding_state().unwrap();
+        let state = store
+            .switch_lww_binding(&crate::persistent_store::sync_selection::SwitchBindingRequest {
+                header: header(store),
+                expected_selection_epoch: original.selection_epoch,
+                target: SyncTarget::Server("server".into()),
+                inspection_id: Some(inspection_id),
+                initial_publication: true,
+            })
+            .unwrap();
+        Header { binding_authority: state.target_authority, request_id: uuid::Uuid::new_v4().to_string() }
+    }
+    fn server_keys(server: &LocalServerFixture, config: &super::super::client::ServerConfig) -> std::collections::BTreeSet<String> {
+        let device = server.server.authenticate(&config.library_id, &config.token).unwrap();
+        let pin = server.server.create_state_pin(&device).unwrap();
+        let page = server.server.state_page(&device, &pin.pin_id, None, 1024).unwrap();
+        server.server.release_state_pin(&device, &pin.pin_id).unwrap();
+        assert!(page.next_key.is_none());
+        page.items.into_iter().map(|item| item.key.as_str().to_owned()).collect()
+    }
+    #[test]
+    fn an_initial_publication_stopped_between_pages_or_commits_finishes_when_the_binding_resumes() {
+        use crate::server_sync::lww_tests::drain_publications;
+        let mut published = Vec::new();
+        for stop in [None, Some(1), Some(2), Some(3)] {
+            let server = LocalServerFixture::new();
+            let (root, mut a) = local();
+            save(&mut a, &["root", "language"], serde_json::json!("ko"));
+            save(&mut a, &["root", "askRemoval"], serde_json::json!(true));
+            let config = configure(&server, &a);
+            let inspected = inspect(&a, &header(&a)).unwrap();
+            assert!(inspected.empty);
+            let request = switch_owing_initial_publication(&mut a, inspected.inspection_id);
+            assert_eq!(a.lww_owed_initial_publication().unwrap(), Some(request.binding_authority.0.to_string()));
+            if let Some(commits) = stop {
+                a.stop_initial_queue_after_commits(1, commits);
+                assert!(activate(&mut a, &request, None).is_err());
+                drop(a);
+                a = PersistentStore::open(root.path()).unwrap();
+                assert!(a.lww_owed_initial_publication().unwrap().is_some());
+                a.stop_initial_queue_after_commits(1, usize::MAX);
+                resume(&mut a);
+            } else {
+                activate(&mut a, &request, None).unwrap();
+            }
+            assert_eq!(a.lww_owed_initial_publication().unwrap(), None);
+            drain_publications(&bound_client(&a), &mut a, &[]).unwrap();
+            assert!(outbox(&a).is_empty());
+            published.push(server_keys(&server, &config));
+        }
+        assert!(published[0].iter().any(|key| key.contains("language")));
+        assert!(published[0].iter().any(|key| key.contains("askRemoval")));
+        for keys in &published[1..] {
+            assert_eq!(keys, &published[0]);
+        }
+    }
+    #[test]
+    fn a_switch_owes_an_initial_publication_only_when_asked_and_a_later_switch_clears_it() {
+        let server = LocalServerFixture::new();
+        let (_root, mut a) = local();
+        save(&mut a, &["root", "language"], serde_json::json!("ko"));
+        configure(&server, &a);
+        let inspected = inspect(&a, &header(&a)).unwrap();
+        let state = switch_to(&mut a, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
+        assert_eq!(a.lww_owed_initial_publication().unwrap(), None);
+        activate(&mut a, &Header { binding_authority: state.target_authority, request_id: uuid::Uuid::new_v4().to_string() }, None).unwrap();
+        assert!(outbox(&a).is_empty());
+        switch_to(&mut a, SyncTarget::None, None);
+        let original = a.lww_binding_state().unwrap();
+        assert!(a
+            .switch_lww_binding(&crate::persistent_store::sync_selection::SwitchBindingRequest {
+                header: header(&a),
+                expected_selection_epoch: original.selection_epoch,
+                target: SyncTarget::None,
+                inspection_id: None,
+                initial_publication: true,
+            })
+            .is_err());
+        let inspected = inspect(&a, &header(&a)).unwrap();
+        switch_owing_initial_publication(&mut a, inspected.inspection_id);
+        assert!(a.lww_owed_initial_publication().unwrap().is_some());
+        switch_to(&mut a, SyncTarget::None, None);
+        assert_eq!(a.lww_owed_initial_publication().unwrap(), None);
+    }
+    /// A server that, once `gone` is set, answers every request with an empty 404 the way an
+    /// address that no longer serves this library does.
+    fn vanishing_server(gone: std::sync::Arc<std::sync::atomic::AtomicBool>) -> LocalServerFixture {
+        use axum::response::IntoResponse;
+        LocalServerFixture::with_router(move |router| {
+            router.layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let gone = gone.clone();
+                    async move {
+                        if gone.load(std::sync::atomic::Ordering::SeqCst) {
+                            axum::http::StatusCode::NOT_FOUND.into_response()
+                        } else {
+                            next.run(request).await
+                        }
+                    }
+                },
+            ))
+        })
+    }
+    fn pending_publication(core: &LwwClient, store: &PersistentStore) {
+        use risunest_sync_wire::lww::{PushRequest, UnitChange};
+        let authority = store.lww_binding_authority().unwrap();
+        let entries = store.lww_read_outbox(authority, 256).unwrap().entries;
+        core.log
+            .prepare(&super::super::lww_client::Publication {
+                authority,
+                request: PushRequest {
+                    library_id: core.client.config().library_id,
+                    writer_id: store.lww_clock_state().unwrap().writer_id,
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                    changes: entries.iter().map(|e| UnitChange { key: e.key.clone(), stamp: e.stamp.clone(), value: e.value.clone() }).collect(),
+                },
+                entries,
+                config: store.server_stored_config().unwrap().unwrap(),
+            })
+            .unwrap();
+    }
+    #[test]
+    fn an_address_answering_an_empty_not_found_never_blocks_a_binding_change_and_a_missing_operation_still_cancels() {
+        let gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server = vanishing_server(gone.clone());
+        let (_root, mut store) = local();
+        configure(&server, &store);
+        bind(&mut store);
+        save(&mut store, &["root", "language"], serde_json::json!("ja"));
+        let core = bound_client(&store);
+        pending_publication(&core, &store);
+        gone.store(true, std::sync::atomic::Ordering::SeqCst);
+        fence_for_binding_change(&core, &mut store).unwrap();
+        let pending = core.log.pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        let unreachable = core.settle(&pending[0]).unwrap_err();
+        assert_eq!((unreachable.code.as_str(), unreachable.status), ("server-unreachable", 503));
+        assert_eq!(core.log.pending().unwrap().len(), 1);
+        gone.store(false, std::sync::atomic::Ordering::SeqCst);
+        fence_for_binding_change(&core, &mut store).unwrap();
+        assert!(core.log.pending().unwrap().is_empty());
+    }
+    #[test]
+    fn a_new_device_switch_away_from_an_address_answering_an_empty_not_found_publishes_on_the_new_server() {
+        let gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let old = vanishing_server(gone.clone());
+        let (_root, mut a) = local();
+        configure(&old, &a);
+        bind(&mut a);
+        save(&mut a, &["root", "language"], serde_json::json!("ja"));
+        let core = bound_client(&a);
+        pending_publication(&core, &a);
+        drop(core);
+        gone.store(true, std::sync::atomic::Ordering::SeqCst);
+        let live = LocalServerFixture::new();
+        let fresh = configure(&live, &a);
+        let inspected = inspect(&a, &header(&a)).unwrap();
+        assert!(!inspected.previously_bound_library);
+        let request = header(&a);
+        let staged = stage(&mut a, &request, &inspected.inspection_id, None).unwrap();
+        let prepared = prepare_new_device(&mut a, &request, &staged.staging_id).unwrap();
+        let result = a
+            .lww_replace_target_as_new_device(&request, &staged.staging_id, &prepared.authorization_id)
+            .unwrap();
+        let next = Header { binding_authority: result.binding_authority, request_id: uuid::Uuid::new_v4().to_string() };
+        activate(&mut a, &next, Some((&prepared.authorization_id, &result.writer_id))).unwrap();
+        assert_eq!(a.server_stored_config().unwrap().unwrap().device_id, fresh.device_id);
+        save(&mut a, &["root", "language"], serde_json::json!("ko"));
+        let client = bound_client(&a);
+        assert!(client.push(&mut a, &next, &[]).unwrap().is_some());
+        assert!(client.log.pending().unwrap().is_empty());
+        let (_peer_root, mut peer) = local();
+        let receiver = live.client(&peer);
+        crate::server_sync::lww_tests::receive_available(&receiver, &mut peer, &[]).unwrap();
+        assert_eq!(peer.read_root(None).unwrap().value["language"], "ko");
     }
     #[test]
     fn a_new_registration_after_unbinding_publishes_every_retained_edit_with_its_original_stamp() {
@@ -1310,6 +1663,106 @@ mod tests {
         assert_eq!(server_unit(&server, &fresh, &retained[0].0).unwrap().stamp, retained[0].1);
         assert!(server.server.authenticate(&old.library_id, &old.token).is_err());
     }
+    /// Saves `config` as the candidate under another spelling of its endpoint.
+    fn configure_endpoint(
+        store: &PersistentStore,
+        config: &super::super::client::ServerConfig,
+        endpoint: &str,
+    ) -> super::super::client::ServerConfig {
+        let config = super::super::client::ServerConfig { endpoint: endpoint.into(), ..config.clone() };
+        let stored = StoredConfig::persist(store.repository_root(), &config).unwrap();
+        OperationLog::open(store.repository_root()).unwrap().save_config("candidate", &stored).unwrap();
+        config
+    }
+    #[test]
+    fn a_rebind_under_another_endpoint_spelling_keeps_unsent_edits_and_receive_progress() {
+        use crate::server_sync::lww_tests::{drain_publications, receive_available};
+        let server = LocalServerFixture::new();
+        let (_a_root, mut a) = local();
+        let (_b_root, mut b) = local();
+        let peer = server.client(&b);
+        let registration = configure(&server, &a);
+        bind(&mut a);
+        let client = bound_client(&a);
+        save(&mut b, &["root", "askRemoval"], serde_json::json!(true));
+        drain_publications(&peer, &mut b, &[]).unwrap();
+        receive_available(&client, &mut a, &[]).unwrap();
+        drop(client);
+        let progress = a.lww_receive_progress(a.lww_binding_authority().unwrap()).unwrap();
+        assert!(!progress.is_empty());
+        save(&mut a, &["root", "language"], serde_json::json!("ko"));
+        switch_to(&mut a, SyncTarget::None, None);
+        let retained = outbox(&a);
+        assert_eq!(retained.len(), 1);
+        configure_endpoint(&a, &registration, &format!("{}/", server.endpoint));
+        let inspected = inspect(&a, &header(&a)).unwrap();
+        assert!(inspected.previously_bound_library);
+        assert!(!inspected.registration_changed && !inspected.server_restored);
+        let state = switch_to(&mut a, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
+        activate(&mut a, &Header { binding_authority: state.target_authority, request_id: uuid::Uuid::new_v4().to_string() }, None).unwrap();
+        assert_eq!(outbox(&a), retained);
+        assert_eq!(
+            serde_json::to_value(a.lww_receive_progress(state.target_authority).unwrap()).unwrap(),
+            serde_json::to_value(&progress).unwrap(),
+        );
+        let client = bound_client(&a);
+        drain_publications(&client, &mut a, &[]).unwrap();
+        assert!(outbox(&a).is_empty());
+        assert_eq!(server_unit(&server, &registration, &retained[0].0).unwrap().stamp, retained[0].1);
+    }
+    #[test]
+    fn a_pending_publication_under_an_old_endpoint_spelling_settles_through_the_current_one() {
+        use crate::server_sync::lww_tests::drain_publications;
+        use risunest_sync_wire::lww::{PushRequest, UnitChange};
+        let server = LocalServerFixture::new();
+        let (_root, mut a) = local();
+        let registration = configure(&server, &a);
+        bind(&mut a);
+        save(&mut a, &["root", "language"], serde_json::json!("ko"));
+        let retained = outbox(&a);
+        let authority = a.lww_binding_authority().unwrap();
+        let entries = a.lww_read_outbox(authority, 256).unwrap().entries;
+        let gone = LocalServerFixture::new();
+        let unreachable = super::super::client::ServerConfig { endpoint: gone.endpoint.clone(), ..registration.clone() };
+        drop(gone);
+        let client = bound_client(&a);
+        client.log.prepare(&super::super::lww_client::Publication {
+            authority,
+            request: PushRequest {
+                library_id: registration.library_id.clone(),
+                writer_id: a.lww_clock_state().unwrap().writer_id,
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                changes: entries.iter().map(|e| UnitChange { key: e.key.clone(), stamp: e.stamp.clone(), value: e.value.clone() }).collect(),
+            },
+            entries,
+            config: StoredConfig::persist(a.repository_root(), &unreachable).unwrap(),
+        }).unwrap();
+        drain_publications(&client, &mut a, &[]).unwrap();
+        assert!(client.log.pending().unwrap().is_empty());
+        assert!(outbox(&a).is_empty());
+        assert_eq!(server_unit(&server, &registration, &retained[0].0).unwrap().stamp, retained[0].1);
+    }
+    #[test]
+    fn a_new_registration_under_another_endpoint_spelling_keeps_the_binding_and_publishes_unsent_edits() {
+        let server = LocalServerFixture::new();
+        let (_root, mut a) = local();
+        let old = configure(&server, &a);
+        let bound = bind(&mut a);
+        save(&mut a, &["root", "language"], serde_json::json!("ko"));
+        let retained = outbox(&a);
+        let (fresh, _) = server.candidate(&a);
+        let fresh = configure_endpoint(&a, &fresh, &format!("{}/", server.endpoint));
+        let inspected = fresh_inspection(&a);
+        let prepared = fresh_writer(&mut a, &inspected.inspection_id).unwrap();
+        resume(&mut a);
+        assert_eq!(a.lww_binding_authority().unwrap(), bound.binding_authority);
+        assert_eq!(a.server_stored_config().unwrap().unwrap().device_id, fresh.device_id);
+        assert_eq!(a.lww_clock_state().unwrap().writer_id, prepared.writer_id);
+        let receipt = push_now(&bound_client(&a), &mut a).unwrap().unwrap();
+        assert_eq!(receipt.accepted_keys, vec![retained[0].0.clone()]);
+        assert_eq!(server_unit(&server, &fresh, &retained[0].0).unwrap().stamp, retained[0].1);
+        assert!(server.server.authenticate(&old.library_id, &old.token).is_err());
+    }
     #[test]
     fn a_new_registration_after_the_old_one_was_revoked_still_publishes_unsent_edits() {
         let server = LocalServerFixture::new();
@@ -1358,7 +1811,7 @@ mod tests {
         assert_eq!(server_unit(&server, &fresh, &next[0].0).unwrap().stamp, next[0].1);
     }
     #[test]
-    fn a_fresh_writer_claim_stopped_before_the_swap_never_publishes_the_old_writer_and_recovers() {
+    fn a_fresh_writer_swap_stopped_after_its_claim_finishes_at_startup_without_publishing_the_old_writer() {
         let server = LocalServerFixture::new();
         let (root, mut a) = local();
         let old = configure(&server, &a);
@@ -1377,25 +1830,79 @@ mod tests {
         assert!(server.server.authenticate(&old.library_id, &old.token).is_err());
         drop(a);
         let mut a = PersistentStore::open(root.path()).unwrap();
-        let request = header(&a);
-        assert_eq!(activate(&mut a, &request, None).unwrap_err().status, 401);
-        assert_eq!(a.server_stored_config().unwrap().unwrap().device_id, old.device_id);
-        assert_eq!(push_now(&bound_client(&a), &mut a).unwrap_err().status, 401);
-        assert_eq!(outbox(&a), retained);
         let reserved: FreshWriterReservation = OperationLog::open(root.path())
             .unwrap()
             .verified("claims", &format!("fresh-writer:{}:{}", fresh.library_id, fresh.device_id))
             .unwrap();
         assert_eq!(reserved.old_writer_id, old_writer);
-        let inspected = fresh_inspection(&a);
-        let prepared = fresh_writer(&mut a, &inspected.inspection_id).unwrap();
-        assert_eq!(prepared.writer_id, reserved.writer_id);
-        assert_eq!(a.lww_clock_state().unwrap().writer_id, reserved.writer_id);
         resume(&mut a);
         assert_eq!(a.server_stored_config().unwrap().unwrap().device_id, fresh.device_id);
+        assert_eq!(a.lww_clock_state().unwrap().writer_id, reserved.writer_id);
+        assert_eq!(outbox(&a), retained);
+        let log = OperationLog::open(root.path()).unwrap();
+        for kind in ["fresh-writer", "fresh-writer-claim"] {
+            let id = format!("{kind}:{}:{}", fresh.library_id, fresh.device_id);
+            assert!(!log.0.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [&id], |r| r.get::<_, bool>(0)).unwrap());
+        }
         let receipt = push_now(&bound_client(&a), &mut a).unwrap().unwrap();
         assert_eq!(receipt.accepted_keys, vec![retained[0].0.clone()]);
         assert_eq!(server_unit(&server, &fresh, &retained[0].0).unwrap().stamp, retained[0].1);
+    }
+    #[test]
+    fn a_new_registration_whose_old_credential_cannot_be_read_still_swaps_the_writer_and_publishes_unsent_edits() {
+        let server = LocalServerFixture::new();
+        let (root, mut a) = local();
+        let old = configure(&server, &a);
+        bind(&mut a);
+        save(&mut a, &["root", "language"], serde_json::json!("ko"));
+        let core = bound_client(&a);
+        pending_publication(&core, &a);
+        drop(core);
+        let retained = outbox(&a);
+        a.server_stored_config().unwrap().unwrap().remove(root.path()).unwrap();
+        fence_stored(&mut a, false).unwrap();
+        fence_stored(&mut a, true).unwrap();
+        let fresh = configure(&server, &a);
+        let inspected = fresh_inspection(&a);
+        let prepared = fresh_writer(&mut a, &inspected.inspection_id).unwrap();
+        resume(&mut a);
+        assert_eq!(a.lww_clock_state().unwrap().writer_id, prepared.writer_id);
+        assert_eq!(a.server_stored_config().unwrap().unwrap().device_id, fresh.device_id);
+        let client = bound_client(&a);
+        let receipt = push_now(&client, &mut a).unwrap().unwrap();
+        assert_eq!(receipt.accepted_keys, vec![retained[0].0.clone()]);
+        assert!(client.log.pending().unwrap().is_empty());
+        assert_eq!(server_unit(&server, &fresh, &retained[0].0).unwrap().stamp, retained[0].1);
+        assert!(server.server.authenticate(&old.library_id, &old.token).is_ok());
+    }
+    #[test]
+    fn a_new_device_registration_whose_old_credential_cannot_be_read_replaces_this_device() {
+        let server = LocalServerFixture::new();
+        let (root, mut a) = local();
+        let old = configure(&server, &a);
+        bind(&mut a);
+        save(&mut a, &["root", "language"], serde_json::json!("ja"));
+        let core = bound_client(&a);
+        pending_publication(&core, &a);
+        drop(core);
+        a.server_stored_config().unwrap().unwrap().remove(root.path()).unwrap();
+        let fresh = configure(&server, &a);
+        let inspected = inspect(&a, &header(&a)).unwrap();
+        assert!(inspected.registration_changed);
+        let request = header(&a);
+        let staged = stage(&mut a, &request, &inspected.inspection_id, None).unwrap();
+        let prepared = prepare_new_device(&mut a, &request, &staged.staging_id).unwrap();
+        let result = a
+            .lww_replace_target_as_new_device(&request, &staged.staging_id, &prepared.authorization_id)
+            .unwrap();
+        let next = Header { binding_authority: result.binding_authority, request_id: uuid::Uuid::new_v4().to_string() };
+        activate(&mut a, &next, Some((&prepared.authorization_id, &result.writer_id))).unwrap();
+        assert_eq!(a.server_stored_config().unwrap().unwrap().device_id, fresh.device_id);
+        save(&mut a, &["root", "language"], serde_json::json!("ko"));
+        let client = bound_client(&a);
+        assert!(client.push(&mut a, &next, &[]).unwrap().is_some());
+        assert!(client.log.pending().unwrap().is_empty());
+        assert!(server.server.authenticate(&old.library_id, &old.token).is_ok());
     }
     #[test]
     fn inspecting_a_new_registration_never_installs_it_with_the_old_writer() {

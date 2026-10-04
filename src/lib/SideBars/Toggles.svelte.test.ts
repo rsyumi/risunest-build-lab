@@ -17,6 +17,21 @@ vi.mock('src/ts/storage/database.svelte', () => ({
     getCurrentChat: () => DBState.db.characters[0].chats[0],
 }))
 vi.mock('src/ts/process/modules', () => ({ getModuleToggles: () => '' }))
+// The persistent writes are covered by Chat.windowedInteractions.test.ts; here they apply in memory.
+vi.mock('src/ts/chatBindings.svelte', async () => {
+    const { get } = await import('svelte/store')
+    const { doingChat } = await import('src/ts/process/generationState')
+    const { applyConversationBindingPatch } = await import('src/ts/storage/conversationBinding')
+    const { DBState } = await import('src/ts/stores.svelte')
+    return {
+        captureChatBindingTarget: () => ({ conversation: DBState.db.characters[0].chats[0], isCurrent: () => true }),
+        conversationMutationBlockedByGeneration: () => get(doingChat),
+        updateChatBinding: async (conversation: object, patch: object) => {
+            applyConversationBindingPatch(conversation, patch)
+        },
+    }
+})
+vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({ mutatePersistentCharacterDetail: async () => false }))
 vi.mock('src/ts/util', () => ({
     parseToggleSyntax: () => [{ type: syntax.type, key: 'example', value: 'Example toggle', options: ['A', 'B'] }],
 }))

@@ -42,6 +42,8 @@ type CompleteCharacter = character | groupChat
 
 const CONVERSATION_HYDRATION_CONCURRENCY = 8
 const RELATED_CHARACTER_HYDRATION_CONCURRENCY = 4
+const WINDOWED_PUBLISH_SETTLE_ATTEMPTS = 8
+const WINDOWED_CHARACTER_ACTIVATION_RETRIES = 3
 
 class MissingCharacterError extends Error {}
 
@@ -206,7 +208,7 @@ interface WindowedCharacterHydration {
     selectedSummary: ConversationSummary
 }
 
-type WindowedCharacterActivationResult = boolean | 'complete-fallback'
+type WindowedCharacterActivationResult = boolean | 'complete-fallback' | 'retry'
 type WindowedCharacterHydrationResult =
     WindowedCharacterHydration | 'complete-fallback' | null
 
@@ -1126,11 +1128,24 @@ export class ActiveWorkingSet {
         options: CharacterActivationOptions = {},
     ): Promise<boolean> {
         if (this.canDirectlyActivateWindowed(options)) {
-            const expectedFallbackGeneration = this.navigationGeneration + 1
-            const direct = await this.activateWindowedCharacter(id, options)
-            if (direct !== 'complete-fallback') return direct
-            if (this.navigationGeneration !== expectedFallbackGeneration)
-                return false
+            for (let attempt = 0; ; attempt++) {
+                const expectedFallbackGeneration = this.navigationGeneration + 1
+                const direct = await this.activateWindowedCharacter(id, options)
+                if (direct === 'retry') {
+                    // Background persistence moved the revision under this
+                    // activation; read again unless a newer navigation started.
+                    if (
+                        attempt < WINDOWED_CHARACTER_ACTIVATION_RETRIES &&
+                        this.navigationGeneration === expectedFallbackGeneration
+                    )
+                        continue
+                    return false
+                }
+                if (direct !== 'complete-fallback') return direct
+                if (this.navigationGeneration !== expectedFallbackGeneration)
+                    return false
+                break
+            }
         }
         const preparation = this.prepareCompleteNavigation(
             `activate-character:${id}`,
@@ -1360,6 +1375,12 @@ export class ActiveWorkingSet {
         if (relatedValues.some((value) => value === undefined)) {
             return 'complete-fallback'
         }
+        const settled = await this.settleBeforeWindowedPublish(
+            generation,
+            revision,
+            mutationGeneration,
+        )
+        if (settled !== true) return settled
 
         const normalized = this.normalizeCharacterCandidate(
             hydrated.character,
@@ -1609,6 +1630,14 @@ export class ActiveWorkingSet {
                 id,
             )
         if (
+            (await this.settleBeforeWindowedPublish(
+                generation,
+                revision,
+                mutationGeneration,
+            )) !== true
+        )
+            return false
+        if (
             characterId !== this.dependencies.getSelectedCharacterId() ||
             !this.isCurrentWindowedActivation(
                 generation,
@@ -1744,6 +1773,39 @@ export class ActiveWorkingSet {
                 undefined &&
             this.dependencies.captureActivationRollback !== undefined
         )
+    }
+
+    // A sync receive or a scheduled flush can queue coordinator work while an
+    // activation reads, and the selection transition refuses pending work.
+    // Waits for that work, then reports whether the reads are still current.
+    // A newer navigation ends the wait; persistent pending work is left for
+    // the transition to report.
+    private async settleBeforeWindowedPublish(
+        generation: number,
+        revision: DataRevision,
+        mutationGeneration: number,
+    ): Promise<boolean | 'retry'> {
+        for (
+            let attempt = 0;
+            attempt < WINDOWED_PUBLISH_SETTLE_ATTEMPTS &&
+            this.dependencies.coordinator.hasPendingPersistenceWork === true;
+            attempt++
+        ) {
+            await this.dependencies.coordinator.flushPendingData(
+                'activate-selection',
+            )
+            if (generation !== this.navigationGeneration) return false
+        }
+        if (
+            generation !== this.navigationGeneration ||
+            this.dependencies.canActivateWorkingSet?.() === false
+        )
+            return false
+        return revision === this.dependencies.coordinator.revision &&
+            mutationGeneration ===
+                this.dependencies.coordinator.mutationGeneration
+            ? true
+            : 'retry'
     }
 
     private isCurrentWindowedActivation(

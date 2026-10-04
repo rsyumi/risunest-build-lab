@@ -1,6 +1,8 @@
-import type {
-    CapturedChatMessageTarget,
-    CurrentChatMessageTarget,
+import {
+    queryChatMessageTargetsByIdsWithStatus,
+    type AnchoredChatMessageUiContext,
+    type CapturedChatMessageTarget,
+    type CurrentChatMessageTarget,
 } from './chatMessageUi'
 import type { ActiveConversationSession } from './storage/activeConversationSession'
 import type { Message } from './storage/database.svelte'
@@ -32,6 +34,7 @@ export interface SelectedConversationOperationsDependencies {
     captureCurrent(): CurrentChatMessageTarget | null
     getCurrentSession(): ActiveConversationSession | null
     getCurrentViewportSource(): ConversationViewportSource | null
+    acquirePersistentRevision?: AnchoredChatMessageUiContext['acquirePersistentRevision']
 }
 
 export interface CompleteSelectedConversationAuthority extends CurrentChatMessageTarget {
@@ -92,6 +95,8 @@ export interface SelectedConversationOperations {
         intent: SelectedConversationMessageEditIntent,
         reason: string,
     ): Promise<AcquiredMessageMutationTarget | null>
+    /** The only message carrying `messageId`; null when it is missing, repeated or the selection moved. */
+    findUniqueMessage(messageId: string): Promise<{ absoluteIndex: number; message: Readonly<Message> } | null>
 }
 
 interface StartedCompleteConversation<T> {
@@ -207,7 +212,7 @@ export function createSelectedConversationOperations(
         rebindMessageEditIntent(intent, input) {
             if (!isEqual(intent.messageEvidence, input.message)) return intent
             const rebound = this.captureMessageEditIntent(input)
-            if (!rebound || !matchesSelection(intent.selection, rebound.selection)) return intent
+            if (!rebound || !matchesConversation(intent.selection, rebound.selection)) return intent
             return Object.freeze({ ...rebound, messageEvidence: intent.messageEvidence })
         },
         async acquireCompleteMessageTargetForIntent(
@@ -215,7 +220,9 @@ export function createSelectedConversationOperations(
             reason,
         ): Promise<AcquiredMessageMutationTarget | null> {
             const selection = dependencies.captureSelectedConversationTarget()
-            if (!selection || !matchesSelection(intent.selection, selection)) {
+            // A committed refresh starts a new navigation generation; the evidence below
+            // still has to match before the same message is edited.
+            if (!selection || !matchesConversation(intent.selection, selection)) {
                 throw new SelectedConversationPromotionStaleError()
             }
             const controller = await dependencies.captureWindowedMessageMutation?.(selection, intent.absoluteIndex, intent.messageEvidence)
@@ -240,6 +247,29 @@ export function createSelectedConversationOperations(
             if (matchesEvidence) return acquired
             acquired.release()
             return null
+        },
+        async findUniqueMessage(messageId) {
+            const acquirePersistentRevision = dependencies.acquirePersistentRevision
+            if (!acquirePersistentRevision) return null
+            const context: AnchoredChatMessageUiContext = {
+                captureCurrent: dependencies.captureCurrent,
+                getCurrentSession: dependencies.getCurrentSession,
+                captureSelectedConversationTarget: dependencies.captureSelectedConversationTarget,
+                acquirePersistentRevision,
+                acquireCompleteConversation(reason, target) {
+                    const selection = target ?? dependencies.captureSelectedConversationTarget()
+                    if (!selection) throw new SelectedConversationPromotionStaleError()
+                    return dependencies.acquireCompleteConversation(reason, selection)
+                },
+            }
+            const first = await queryChatMessageTargetsByIdsWithStatus(context, [messageId], 'first')
+            const last = await queryChatMessageTargetsByIdsWithStatus(context, [messageId], 'last')
+            const found = first.targets[0]
+            if (
+                first.status !== 'current' || last.status !== 'current' ||
+                !found || last.targets[0]?.absoluteIndex !== found.absoluteIndex
+            ) return null
+            return { absoluteIndex: found.absoluteIndex, message: found.message }
         },
     }
 
@@ -316,6 +346,13 @@ function captureExactCompleteAuthority(
         selection: recaptured,
         session,
     }
+}
+
+function matchesConversation(
+    left: SelectedConversationTarget,
+    right: SelectedConversationTarget,
+): boolean {
+    return left.characterId === right.characterId && left.conversationId === right.conversationId
 }
 
 function matchesSelection(

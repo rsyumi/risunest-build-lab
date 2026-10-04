@@ -432,6 +432,61 @@ describe('selected conversation complete-operation gateway', () => {
         expect(rebound.messageEvidence).toBe(intent.messageEvidence)
     })
 
+    it('promotes an edit intent after a committed refresh started a new navigation generation', async () => {
+        const current = makeCurrent()
+        const harness = makeHarness({
+            current,
+            selection: makeSelection('character-a', 'conversation-a', 1, 7),
+            onAcquire: (_reason, target) => makeLease(current, target).lease,
+        })
+        const intent = harness.operations.captureMessageEditIntent({
+            absoluteIndex: 1,
+            sourceToken: 'persistent-source',
+            sourceVersion: 3,
+            rowKey: 'persistent-source|3|1' as ConversationViewportKey,
+            message: { role: 'char', data: 'one' },
+        })!
+        const refreshed = makeSelection('character-a', 'conversation-a', 2, 7)
+        harness.setSelection(refreshed)
+
+        const acquired = await harness.operations.acquireCompleteMessageTargetForIntent(intent, 'save-windowed-edit')
+
+        expect(harness.acquireCompleteConversation).toHaveBeenCalledWith('save-windowed-edit', refreshed)
+        expect(acquired?.target.message.data).toBe('one')
+        acquired?.release()
+    })
+
+    it('rebinds an edit intent across navigation generations of the same conversation', () => {
+        const harness = makeHarness()
+        const input = { absoluteIndex: 1, sourceToken: 'persistent-source', sourceVersion: 3, rowKey: 'persistent-source|3|1' as ConversationViewportKey, message: { role: 'char' as const, data: 'one' } }
+        const intent = harness.operations.captureMessageEditIntent(input)!
+        harness.setSelection(makeSelection('character-a', 'conversation-a', 2, 7))
+        const row = { key: 'shifted' as ConversationViewportKey, absoluteIndex: 2, message: input.message, sourceVersion: 4 }
+        harness.setViewportSnapshot({ sourceToken: 'persistent-source', version: 4, storeRevision: 7, totalMessages: 4, keyAt: () => row.key, indexOfKey: () => 2, rowAt: () => row })
+
+        const rebound = harness.operations.rebindMessageEditIntent(intent, { ...input, absoluteIndex: 2, rowKey: row.key, sourceVersion: 4 })
+
+        expect(rebound.absoluteIndex).toBe(2)
+        expect(rebound.selection.navigationGeneration).toBe(2)
+        expect(rebound.messageEvidence).toBe(intent.messageEvidence)
+    })
+
+    it.each([
+        ['unique', ['other-a', 'target', 'other-b'], 1],
+        ['repeated', ['target', 'other', 'target'], null],
+        ['missing', ['other-a', 'other-b', 'other-c'], null],
+    ] as const)('finds a message by id only when exactly one message carries it (%s)', async (_case, ids, expected) => {
+        const messages = ids.map((chatId, index): Message => ({ role: 'char', data: `message ${index}`, chatId }))
+        const harness = makeHarness({ current: makeCurrent('character-a', 'conversation-a', messages) })
+        const operations = createSelectedConversationOperations({ ...harness.dependencies, acquirePersistentRevision: vi.fn() })
+
+        const found = await operations.findUniqueMessage('target')
+
+        expect(found?.absoluteIndex ?? null).toBe(expected)
+        if (expected !== null) expect(found?.message).toEqual(messages[expected])
+        await expect(harness.operations.findUniqueMessage('target')).resolves.toBeNull()
+    })
+
     it('does not retarget an edit intent after the selected conversation changes', async () => {
         const original = makeSelection('character-a', 'conversation-a', 1, 7)
         const harness = makeHarness({ selection: original })

@@ -346,12 +346,12 @@ describe('nativeFileJobDialogModel', () => {
             fillTemplate(copy.currentItem, 'assets/a.png'),
         )
 
-        const staging = buildNativeFileJobDialogModel(
+        const decoding = buildNativeFileJobDialogModel(
             running({
                 status: status({
                     detail: detail(
-                        'staging-characters',
-                        { stageCompleted: 4, stageTotal: 9 },
+                        'decoding-database',
+                        { stageCompleted: 4096, stageTotal: 8192, stageUnit: 'bytes' },
                         {
                             ...counts,
                             entriesTotal: 12,
@@ -366,28 +366,26 @@ describe('nativeFileJobDialogModel', () => {
                     'preparing-attachments',
                     'reading-database',
                     'decoding-database',
-                    'staging-characters',
                 ],
             }),
             null,
             1_000,
         )
-        expect(stageIds(staging)).toEqual([
+        expect(stageIds(decoding)).toEqual([
             'reading-archive:done',
             'preparing-attachments:done',
             'reading-database:done',
-            'decoding-database:done',
-            'staging-characters:active',
+            'decoding-database:active',
             'finalizing-staging:pending',
             'activating:pending',
             'refreshing-app:pending',
             'reloading-plugins:pending',
         ])
-        expect(staging.currentItem).toBe('')
-        expect(staging.counters[0].value).toBe(
+        expect(decoding.currentItem).toBe('')
+        expect(decoding.counters[0].value).toBe(
             fillTemplate(copy.itemsOf, '4', '9'),
         )
-        expect(staging.counters[1].value).toBe('2')
+        expect(decoding.counters[1].value).toBe('2')
     })
 
     it('labels a RisuAI backup only once every entry has been classified', () => {
@@ -807,7 +805,6 @@ describe('nativeFileJobDialogModel', () => {
             'preparing-attachments',
             'reading-database',
             'decoding-database',
-            'staging-characters',
             'finalizing-staging',
             'awaiting-activation',
             'activating',

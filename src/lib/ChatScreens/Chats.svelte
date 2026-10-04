@@ -46,7 +46,14 @@
     import { yieldToMainThread } from 'src/ts/ui/yieldToUi'
     import LoadingIndicator from 'src/lib/UI/GUI/LoadingIndicator.svelte'
     import { language } from 'src/lang'
-    import { alertNormal } from 'src/ts/alert'
+    import {
+        discardEditorDraft,
+        discardEditorDraftsExcept,
+        keepEditorDraft,
+        pendingEditorDrafts,
+        takeEditorDraft,
+        type ChatEditorDraft,
+    } from 'src/ts/chatEditorDrafts'
     import cloneDeep from 'lodash/cloneDeep'
     import isEqual from 'lodash/isEqual'
 
@@ -104,7 +111,8 @@
         hasStreamingPreview?: () => boolean
         refreshMessageDisplay?: (state: ChatDisplayRefresh) => void
         hasActiveEditor?: () => boolean
-        takeEditorDraft?: () => string | null
+        captureEditorDraft?: () => Omit<ChatEditorDraft, 'caret'> | null
+        restoreEditor?: (draft: ChatEditorDraft) => void
         refreshParserProjection?: (projection?: BoundedLiveChatParserProjection) => void
         refreshConversationStartParser?: (totalMessages?: number) => void
         updateConversationStartPresentation?: (state: { resolvedImage: string }) => void
@@ -803,16 +811,11 @@
         const currentChat = currentCharacter.chats?.[currentCharacter.chatPage]
         const conversationIdentity = currentConversationHandoffIdentity()
         if (activeScope !== scope || !currentChat) {
-            if (renderedOwnerId === currentCharacter.chaId && renderedConversationId &&
-                !currentCharacter.chats.some((chat) => chat.id === renderedConversationId)) {
-                const drafts = [...mountInstances.values()].flatMap((instance) => {
-                    if (!instance.hasActiveEditor?.()) return []
-                    const draft = instance.takeEditorDraft?.()
-                    return draft === null || draft === undefined ? [] : [draft]
-                })
-                if (drafts.length) alertNormal(`${language.chatDraftConversationRemoved}\n\n${drafts.join('\n\n')}`)
-            }
-            resetViewport(scope, !currentChat || renderedConversationIdentity !== conversationIdentity)
+            const resetScroll = !currentChat || renderedConversationIdentity !== conversationIdentity
+            resetViewport(scope, resetScroll)
+            // Drafts of a conversation that was left or removed are dropped without asking.
+            discardEditorDraftsExcept(currentCharacter.chaId ?? null, currentChat?.id ?? null)
+            if (resetScroll) scheduleEditorDraftJump()
         }
         renderedConversationIdentity = conversationIdentity
         renderedOwnerId = currentCharacter.chaId
@@ -855,6 +858,7 @@
                       pendingMissingRowsAnchor ??
                       viewportAnchor ??
                       captureDomAnchor())
+        settleEditorDrafts(currentChat, sourceSnapshot)
         releaseClosedEditorPins()
         const budget = getRuntimePerformanceBudgets().chatMountedMessageBudget
         const result = buildChatViewport({
@@ -1137,9 +1141,14 @@
                         releaseRowRuntimeState(key, true)
                         unmountInstance(key)
                         element.replaceChildren()
-                        const instance = mount(Chat, {
+                        const restoredEditor = renderedOwnerId !== null && renderedConversationId !== null
+                            ? takeEditorDraft(renderedOwnerId, renderedConversationId, index, message)
+                            : null
+                        const instance: ChatInstance = mount(Chat, {
                             target: element,
                             props: {
+                                restoredEditor: restoredEditor ?? undefined,
+                                onEditorOpen: () => holdOpenedEditor(instance),
                                 message: message.data,
                                 viewportRow,
                                 captureViewportTarget:
@@ -1180,6 +1189,8 @@
                             },
                         })
                         mountInstances.set(key, instance)
+                        if (restoredEditor) holdRestoredEditor(key, element, restoredEditor)
+                        else if (pendingConversationDrafts().some((draft) => draft.index === index)) queueProjectionReconcile()
                         renderSignatures.set(key, renderSignature)
                         if (parserProjectionState) {
                             parserProjectionState.needsRemount = false
@@ -1562,8 +1573,143 @@
     function unmountInstance(key: string): void {
         const instance = mountInstances.get(key)
         if (!instance) return
+        keepEditorDraftOf(key, instance)
         unmount(instance)
         mountInstances.delete(key)
+    }
+
+    // Every row teardown passes here, so an open editor's draft is kept for the
+    // next mount of the same message instead of being lost with the row.
+    function keepEditorDraftOf(key: string, instance: ChatInstance): void {
+        const captured = untrack(() => instance.captureEditorDraft?.())
+        if (!captured || renderedOwnerId === null || renderedConversationId === null) return
+        const focused = document.activeElement
+        const caret = focused instanceof HTMLTextAreaElement && mountedElements.get(key)?.contains(focused)
+            ? [focused.selectionStart, focused.selectionEnd] as const
+            : undefined
+        keepEditorDraft(renderedOwnerId, renderedConversationId, { ...captured, caret })
+    }
+
+    const restoredDrafts = new WeakSet<ChatEditorDraft>()
+
+    function holdRestoredEditor(key: string, element: HTMLElement, draft: ChatEditorDraft): void {
+        restoredDrafts.add(draft)
+        const reasons = pinReasons.get(key) ?? new Set<ChatViewportPinReason>()
+        reasons.add('editor')
+        pinReasons.set(key, reasons)
+        blurredEditorPins.add(key)
+        if (!draft.caret) return
+        const caret = draft.caret
+        void tick().then(() => {
+            const focused = document.activeElement
+            if (focused && focused !== document.body && !element.contains(focused)) return
+            const editor = element.querySelector<HTMLTextAreaElement>('textarea.message-edit-area')
+            if (!editor) return
+            editor.focus({ preventScroll: true })
+            editor.setSelectionRange(caret[0], caret[1])
+        })
+    }
+
+    // An editor opened without focus in the row, such as through the popup
+    // hotkey, still keeps its row until it closes.
+    function holdOpenedEditor(instance: ChatInstance): void {
+        const key = [...mountInstances].find(([, value]) => value === instance)?.[0]
+        if (key === undefined) return
+        blurredEditorPins.add(key)
+        addPin(key, 'editor')
+    }
+
+    function pendingConversationDrafts(): readonly ChatEditorDraft[] {
+        const conversationId = currentCharacter.chats?.[currentCharacter.chatPage]?.id
+        return conversationId ? pendingEditorDrafts(currentCharacter.chaId, conversationId) : []
+    }
+
+    const relocatingDrafts = new WeakSet<ChatEditorDraft>()
+
+    // Keeps each kept draft's row loaded, hands the draft to a mounted row that
+    // shows exactly its message, and otherwise looks the message up by its id.
+    function settleEditorDrafts(
+        currentChat: character['chats'][number] | groupChat['chats'][number],
+        sourceSnapshot: ConversationViewportSnapshot | null,
+    ): void {
+        const conversationId = currentChat.id
+        if (!conversationId) return
+        for (const draft of pendingEditorDrafts(currentCharacter.chaId, conversationId)) {
+            if (relocatingDrafts.has(draft)) continue
+            const key = currentMessageKey(draft.index, sourceSnapshot)
+            if (key === undefined) {
+                relocateEditorDraft(conversationId, draft)
+                continue
+            }
+            const reasons = pinReasons.get(key) ?? new Set<ChatViewportPinReason>()
+            reasons.add('editor')
+            pinReasons.set(key, reasons)
+            blurredEditorPins.add(key)
+            const message = sourceSnapshot ? sourceSnapshot.rowAt(draft.index)?.message : messages?.[draft.index]
+            if (!message) continue
+            if (!isEqual(message, draft.evidence)) {
+                relocateEditorDraft(conversationId, draft)
+                continue
+            }
+            const instance = mountInstances.get(key)
+            const element = mountedElements.get(key)
+            if (!instance || !element || pendingRowMounts.has(key)) continue
+            if (hasActiveEditor(key)) {
+                discardEditorDraft(currentCharacter.chaId, conversationId, draft)
+                continue
+            }
+            const taken = takeEditorDraft(currentCharacter.chaId, conversationId, draft.index, message)
+            if (!taken) continue
+            untrack(() => instance.restoreEditor?.(taken))
+            holdRestoredEditor(key, element, taken)
+        }
+    }
+
+    // A draft whose index no longer holds its message follows the message only
+    // when exactly one message carries its id and still equals what was edited.
+    function relocateEditorDraft(conversationId: string, draft: ChatEditorDraft): void {
+        const ownerId = currentCharacter.chaId
+        const messageId = draft.evidence.chatId
+        if (!messageId) {
+            discardEditorDraft(ownerId, conversationId, draft)
+            return
+        }
+        relocatingDrafts.add(draft)
+        const generation = navigationGeneration
+        const settle = (found: { absoluteIndex: number; message: Readonly<Message> } | null) => {
+            relocatingDrafts.delete(draft)
+            if (destroyed || generation !== navigationGeneration) return
+            if (!pendingEditorDrafts(ownerId, conversationId).includes(draft)) return
+            if (!found || !isEqual(found.message, draft.evidence)) {
+                discardEditorDraft(ownerId, conversationId, draft)
+                return
+            }
+            draft.index = found.absoluteIndex
+            reconcileViewport()
+        }
+        let lookup: Promise<{ absoluteIndex: number; message: Readonly<Message> } | null>
+        if (activeViewportSource) {
+            lookup = selectedConversationOperations?.findUniqueMessage(messageId) ?? Promise.resolve(null)
+        } else {
+            const indices = (messages ?? []).flatMap((message, index) => message.chatId === messageId ? [index] : [])
+            lookup = Promise.resolve(indices.length === 1 ? { absoluteIndex: indices[0], message: messages![indices[0]] } : null)
+        }
+        // Settles after the current reconcile, which is still running.
+        void lookup.then(settle, () => settle(null))
+    }
+
+    // Coming back to the chat starts at the latest messages; an older message
+    // with a kept draft is brought into view instead.
+    function scheduleEditorDraftJump(): void {
+        const draft = pendingConversationDrafts()[0]
+        if (!draft) return
+        const generation = navigationGeneration
+        void tick().then(() => {
+            if (destroyed || generation !== navigationGeneration) return
+            // The pinned row may already have taken the draft; a discarded one is not followed.
+            if (!restoredDrafts.has(draft) && !pendingConversationDrafts().includes(draft)) return
+            void jumpTo(draft.index)
+        })
     }
 
     function removeMountedRow(key: string): void {
@@ -1849,8 +1995,9 @@
     }
 
     function releaseClosedEditorPins(): void {
+        const draftKeys = new Set(pendingConversationDrafts().map((draft) => currentMessageKey(draft.index)))
         for (const key of blurredEditorPins) {
-            if (hasActiveEditor(key)) continue
+            if (hasActiveEditor(key) || draftKeys.has(key)) continue
             blurredEditorPins.delete(key)
             const row = mountedElements.get(key)
             if (row && document.activeElement instanceof Node && row.contains(document.activeElement)) continue

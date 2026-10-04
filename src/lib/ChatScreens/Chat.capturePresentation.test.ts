@@ -11,6 +11,8 @@ import type { SelectedConversationOperations } from 'src/ts/selectedConversation
 import { createSelectedConversationOperations } from 'src/ts/selectedConversationOperations'
 import { SynchronousSessionConversationViewportSource } from 'src/ts/conversationViewportSource'
 import type { SelectedConversationTarget } from 'src/ts/storage/activeWorkingSet.svelte'
+import { cancelTextEditorPopup, textEditorPopup } from 'src/ts/gui/textEditorPopup.svelte'
+import { discardEditorDraftsExcept, keepEditorDraft, pendingEditorDrafts, type ChatEditorDraft } from 'src/ts/chatEditorDrafts'
 
 const live = vi.hoisted(() => ({
     db: {} as Record<string, any>,
@@ -124,6 +126,8 @@ vi.mock('../../lang', () => ({
     language: {
         branchedText: 'Branched from {}',
         noMessage: 'No message',
+        editTranslation: 'Edit translation',
+        editTranslationSave: 'Save translation',
         cancel: 'Cancel',
         confirm: 'Confirm',
         chatMessageActionFailed: 'Message action failed',
@@ -370,6 +374,8 @@ describe('Chat frozen capture presentation', () => {
             if (mounted) await unmount(mounted)
         } finally {
             mounted = undefined
+            textEditorPopup.request = null
+            discardEditorDraftsExcept(null, null)
             vi.useRealTimers()
             document.body.replaceChildren()
             TestIntersectionObserver.instance = undefined
@@ -905,7 +911,8 @@ describe('Chat frozen capture presentation', () => {
             vi.mocked(alertToast).mockClear()
             runtime.activeSession = session
             live.db = { ...live.db, theme: 'cardboard', characters: [owner], translator: '', clickToEdit: false,
-                useChatCopy: false, enableBookmark: false, askRemoval: false, instantRemove: false }
+                useChatCopy: false, enableBookmark: false, askRemoval: false, instantRemove: false,
+                risunestChatEditPopup: false }
             vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
             try {
                 mounted = mount(Chats, { target, props: {
@@ -965,6 +972,201 @@ describe('Chat frozen capture presentation', () => {
             }
         },
     )
+
+    test.each(['save-unchanged', 'save-conflict'] as const)(
+        'saves the popup draft to the retained row after an earlier insertion (%s)',
+        async (action) => {
+            const messages: Message[] = [
+                { role: 'user', data: 'Earlier row', chatId: 'earlier-row' },
+                { role: 'char', data: 'Original edited row', chatId: 'edited-row' },
+                { role: 'user', data: 'Later row', chatId: 'later-row' },
+            ]
+            const conversation = { id: 'popup-chat', message: messages, note: '', localLore: [], bookmarks: [] } as ChatRecord
+            const owner = {
+                type: 'character', chaId: 'popup-owner', name: 'Synthetic popup owner', chatPage: 0,
+                firstMessage: '', firstMsgIndex: -1, image: '', customscript: [], virtualscript: '',
+                additionalAssets: [], emotionImages: [], triggerscript: [], chats: [conversation], ttsMode: 'none',
+            } as unknown as character
+            const session = new ActiveConversationSession({
+                characterId: owner.chaId, conversationId: conversation.id!, conversation, storeRevision: 7,
+            })
+            const current = () => ({ character: owner, conversation })
+            const source = new SynchronousSessionConversationViewportSource({ session, captureCurrent: current })
+            const selection = {
+                characterId: owner.chaId, conversationId: conversation.id!, navigationGeneration: 1, storeRevision: 7,
+            } as SelectedConversationTarget
+            const operations = createSelectedConversationOperations({
+                captureCurrent: current,
+                captureSelectedConversationTarget: () => selection,
+                getCurrentSession: () => session,
+                getCurrentViewportSource: () => source,
+                acquireCompleteConversation: async (reason) => ({ reason, target: selection, session, release: vi.fn() }),
+            })
+            const acquireEdit = vi.spyOn(operations, 'acquireCompleteMessageTargetForIntent')
+            vi.mocked(alertToast).mockClear()
+            runtime.activeSession = session
+            live.db = { ...live.db, theme: '', characters: [owner], translator: '', clickToEdit: false,
+                useChatCopy: false, enableBookmark: false, askRemoval: false, instantRemove: false }
+            vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+            try {
+                mounted = mount(Chats, { target, props: {
+                    currentCharacter: owner, viewportSource: source, selectedConversationOperations: operations,
+                    onReroll: () => {}, unReroll: () => {}, currentUsername: 'User', userIcon: '',
+                } })
+                const row = await vi.waitFor(() => {
+                    const element = [...target.querySelectorAll<HTMLElement>('[data-chat-render-key]')]
+                        .find((node) => node.textContent?.includes('Original edited row'))
+                    expect(element).toBeDefined()
+                    expect(element!.querySelector('.button-icon-edit')).not.toBeNull()
+                    return element!
+                })
+                row.querySelector<HTMLButtonElement>('.button-icon-edit')!.click()
+                const request = textEditorPopup.request!
+                expect(request.value).toBe('Original edited row')
+                request.input?.('Popup draft')
+                session.replaceRange(session.positionAt(0), 0, [{ role: 'user', data: 'Inserted above', chatId: 'inserted-row' }])
+                if (action === 'save-conflict') {
+                    session.edit(session.locate(2), { ...session.readMessage(session.locate(2)), data: 'Concurrent edited row' })
+                }
+                await vi.waitFor(() => expect(row.dataset.chatViewportIndex).toBe('3'))
+                expect(row.querySelector('.message-edit-area')).toBeNull()
+
+                if (action === 'save-unchanged') {
+                    await expect(request.save('Popup draft')).resolves.toBe(true)
+                    expect(conversation.message[2].data).toBe('Popup draft')
+                    expect(acquireEdit).toHaveBeenCalledWith(expect.objectContaining({ absoluteIndex: 2 }), 'edit-message')
+                } else {
+                    await expect(request.save('Popup draft')).resolves.toBe(false)
+                    expect(alertToast).toHaveBeenCalledWith('Message action failed')
+                    expect(conversation.message[2].data).toBe('Concurrent edited row')
+                }
+                expect(conversation.message[1].data).toBe('Earlier row')
+                expect(conversation.message[3].data).toBe('Later row')
+            } finally {
+                if (mounted) await unmount(mounted)
+                mounted = undefined
+                source.dispose()
+            }
+        },
+    )
+
+    function mountRetainedEditChats(db: Record<string, unknown>) {
+        const messages: Message[] = [
+            { role: 'user', data: 'Earlier row', chatId: 'earlier-row' },
+            { role: 'char', data: 'Original edited row', chatId: 'edited-row' },
+            { role: 'user', data: 'Later row', chatId: 'later-row' },
+        ]
+        const conversation = { id: 'retained-chat', message: messages, note: '', localLore: [], bookmarks: [] } as ChatRecord
+        const owner = {
+            type: 'character', chaId: 'retained-owner', name: 'Synthetic retained owner', chatPage: 0,
+            firstMessage: '', firstMsgIndex: -1, image: '', customscript: [], virtualscript: '',
+            additionalAssets: [], emotionImages: [], triggerscript: [], chats: [conversation], ttsMode: 'none',
+        } as unknown as character
+        const session = new ActiveConversationSession({
+            characterId: owner.chaId, conversationId: conversation.id!, conversation, storeRevision: 7,
+        })
+        const current = () => ({ character: owner, conversation })
+        const source = new SynchronousSessionConversationViewportSource({ session, captureCurrent: current })
+        const state = {
+            selection: {
+                characterId: owner.chaId, conversationId: conversation.id!, navigationGeneration: 1, storeRevision: 7,
+            } as SelectedConversationTarget,
+        }
+        const operations = createSelectedConversationOperations({
+            captureCurrent: current,
+            captureSelectedConversationTarget: () => state.selection,
+            getCurrentSession: () => session,
+            getCurrentViewportSource: () => source,
+            acquireCompleteConversation: async (reason) => ({ reason, target: state.selection, session, release: vi.fn() }),
+        })
+        vi.mocked(alertToast).mockClear()
+        runtime.activeSession = session
+        live.db = { ...live.db, theme: '', characters: [owner], translator: '', clickToEdit: false,
+            useChatCopy: false, enableBookmark: false, askRemoval: false, instantRemove: false, ...db }
+        vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+        const mountList = () => {
+            mounted = mount(Chats, { target, props: {
+                currentCharacter: owner, viewportSource: source, selectedConversationOperations: operations,
+                onReroll: () => {}, unReroll: () => {}, currentUsername: 'User', userIcon: '',
+            } })
+        }
+        let editedIndex: string | undefined
+        const editedRow = () => vi.waitFor(() => {
+            const element = editedIndex === undefined
+                ? [...target.querySelectorAll<HTMLElement>('[data-chat-viewport-index]')]
+                    .find((node) => node.textContent?.includes('Original edited row'))
+                : target.querySelector<HTMLElement>(`[data-chat-viewport-index="${editedIndex}"]`)
+            expect(element?.querySelector('.button-icon-edit')).toBeTruthy()
+            editedIndex = element!.dataset.chatViewportIndex
+            return element!
+        })
+        mountList()
+        return { owner, conversation, session, source, state, mountList, editedRow }
+    }
+
+    test.each(['saved', 'refused'] as const)(
+        'brings an inline editor back after the chat list is rebuilt and saves it only against an unchanged message (%s)',
+        async (outcome) => {
+            const harness = mountRetainedEditChats({ risunestChatEditPopup: false })
+            try {
+                ;(await harness.editedRow()).querySelector<HTMLButtonElement>('.button-icon-edit')!.click()
+                const editor = await vi.waitFor(() => {
+                    const element = target.querySelector<HTMLTextAreaElement>('textarea.message-edit-area')
+                    expect(element).not.toBeNull()
+                    return element!
+                })
+                editor.value = 'Inline draft'
+                editor.dispatchEvent(new Event('input', { bubbles: true }))
+                await tick()
+                await unmount(mounted!)
+                mounted = undefined
+                expect(pendingEditorDrafts(harness.owner.chaId, 'retained-chat')).toHaveLength(1)
+
+                harness.state.selection = { ...harness.state.selection, navigationGeneration: 2 }
+                harness.mountList()
+                const row = await harness.editedRow()
+                await vi.waitFor(() => expect(row.querySelector<HTMLTextAreaElement>('textarea.message-edit-area')?.value).toBe('Inline draft'))
+                expect(pendingEditorDrafts(harness.owner.chaId, 'retained-chat')).toEqual([])
+                if (outcome === 'refused') {
+                    harness.session.edit(harness.session.locate(1), { ...harness.session.readMessage(harness.session.locate(1)), data: 'Concurrent edited row' })
+                    await tick()
+                }
+                row.querySelector<HTMLButtonElement>('.button-icon-edit')!.click()
+
+                if (outcome === 'saved') {
+                    await vi.waitFor(() => expect(harness.conversation.message[1].data).toBe('Inline draft'))
+                    await vi.waitFor(() => expect(target.querySelector('textarea.message-edit-area')).toBeNull())
+                    expect(alertToast).not.toHaveBeenCalled()
+                } else {
+                    await vi.waitFor(() => expect(alertToast).toHaveBeenCalledWith('Message action failed'))
+                    expect(harness.conversation.message[1].data).toBe('Concurrent edited row')
+                    expect(target.querySelector<HTMLTextAreaElement>('textarea.message-edit-area')?.value).toBe('Inline draft')
+                }
+            } finally {
+                if (mounted) await unmount(mounted)
+                mounted = undefined
+                harness.source.dispose()
+            }
+        },
+    )
+
+    test('saves an open popup after a committed refresh started a new navigation generation', async () => {
+        const harness = mountRetainedEditChats({})
+        try {
+            ;(await harness.editedRow()).querySelector<HTMLButtonElement>('.button-icon-edit')!.click()
+            const request = textEditorPopup.request!
+            request.input?.('Popup draft')
+            harness.state.selection = { ...harness.state.selection, navigationGeneration: 2 }
+
+            await expect(request.save('Popup draft')).resolves.toBe(true)
+            expect(harness.conversation.message[1].data).toBe('Popup draft')
+            expect(alertToast).not.toHaveBeenCalled()
+        } finally {
+            if (mounted) await unmount(mounted)
+            mounted = undefined
+            harness.source.dispose()
+        }
+    })
 
     test('refuses an actual partial save after a source handoff without reverting the external prefix or suffix', async () => {
         const original = 'Original prefix\nSelected block\nOriginal suffix'
@@ -1069,7 +1271,8 @@ describe('Chat frozen capture presentation', () => {
             expect(conversation.message[0].data.endsWith('\nExternal suffix')).toBe(true)
             expect(document.querySelector('.partial-edit-modal textarea')).toBe(editor)
             expect(editor.value).toBe('Recoverable partial draft')
-            expect((mounted as { takeEditorDraft(): string | null }).takeEditorDraft()).toBe('Recoverable partial draft')
+            // Partial edits are not carried across a row teardown.
+            expect((mounted as { captureEditorDraft(): unknown }).captureEditorDraft()).toBeNull()
         } finally {
             window.getSelection()?.removeAllRanges()
             if (mounted) await unmount(mounted)
@@ -1089,6 +1292,7 @@ describe('Chat frozen capture presentation', () => {
             useChatCopy: false,
             enableBookmark: false,
             clickToEdit: false,
+            risunestChatEditPopup: false,
         }
         mounted = mount(Chat, {
             target,
@@ -1159,6 +1363,7 @@ describe('Chat frozen capture presentation', () => {
                 useChatCopy: false,
                 enableBookmark: false,
                 clickToEdit: false,
+                risunestChatEditPopup: false,
             }
             mounted = mount(Chat, {
                 target,
@@ -1217,6 +1422,233 @@ describe('Chat frozen capture presentation', () => {
                 expect(hasActiveEditor()).toBe(true)
                 expect(target.querySelector<HTMLTextAreaElement>('.message-edit-area')?.value)
                     .toBe('Kept after long press')
+            }
+        },
+    )
+
+    function mountPopupEditHarness(
+        theme: string,
+        options: { harness?: ReturnType<typeof makeWindowedEditHarness>, props?: Record<string, unknown>, db?: Record<string, unknown> } = {},
+    ) {
+        const harness = options.harness ?? makeWindowedEditHarness()
+        live.db = {
+            ...live.db,
+            theme,
+            characters: [harness.metadataCharacter],
+            translator: '',
+            useChatCopy: false,
+            enableBookmark: false,
+            clickToEdit: false,
+            ...options.db,
+        }
+        mounted = mount(Chat, {
+            target,
+            props: {
+                message: harness.message.data,
+                name: 'Live Character',
+                role: 'char',
+                idx: 1,
+                totalLength: 2,
+                isLastMemory: false,
+                viewportRow: {
+                    key: 'row-1' as ConversationViewportKey,
+                    absoluteIndex: 1,
+                    message: harness.message,
+                    sourceVersion: 3,
+                },
+                viewportSourceToken: 'source-a',
+                selectedConversationOperations: harness.operations,
+                captureViewportTarget: () => null,
+                ...options.props,
+            },
+        })
+        return harness
+    }
+
+    interface RowEditor {
+        hasActiveEditor(): boolean
+        captureEditorDraft(): Omit<ChatEditorDraft, 'caret'> | null
+        refreshMessageDisplay(state: { message: string, totalMessages: number }): void
+    }
+
+    const hasPopupRowEditor = () => (mounted as { hasActiveEditor(): boolean }).hasActiveEditor()
+
+    async function openPopupEditor() {
+        const editButton = await vi.waitFor(() => {
+            const button = target.querySelector<HTMLButtonElement>('.button-icon-edit')
+            expect(button).not.toBeNull()
+            return button!
+        })
+        editButton.click()
+        const request = textEditorPopup.request
+        expect(request).not.toBeNull()
+        return { editButton, request: request! }
+    }
+
+    test.each(['', 'cardboard'])(
+        'edits the message in the popup editor by default and saves against the original row target (theme "%s")',
+        async (theme) => {
+            const harness = mountPopupEditHarness(theme)
+            const { editButton, request } = await openPopupEditor()
+
+            expect(request.value).toBe('Original viewport message')
+            expect(hasPopupRowEditor()).toBe(true)
+            await tick()
+            expect(target.querySelector('.message-edit-area')).toBeNull()
+            // A torn-down row keeps the popup's draft, not the text it opened with.
+            request.input?.('Typed in popup')
+            expect((mounted as { captureEditorDraft(): unknown }).captureEditorDraft()).toMatchObject({
+                kind: 'original', draft: 'Typed in popup', popup: { request },
+            })
+
+            // The edit hotkey clicks the row button behind the popup; it must not save the stale draft.
+            editButton.click()
+            await tick()
+            expect(harness.acquireCompleteMessageTargetForIntent).not.toHaveBeenCalled()
+            expect(textEditorPopup.request).toBe(request)
+
+            await expect(request.save('Saved in popup')).resolves.toBe(true)
+            expect(harness.completeConversation.message[1].data).toBe('Saved in popup')
+            expect(harness.acquireCompleteMessageTargetForIntent).toHaveBeenCalledWith(
+                expect.objectContaining({ rowKey: 'row-1' }),
+                'edit-message',
+            )
+            expect(harness.release).toHaveBeenCalledOnce()
+            expect(hasPopupRowEditor()).toBe(false)
+        },
+    )
+
+    test('keeps the popup editor open when its save is refused', async () => {
+        const harness = mountPopupEditHarness('')
+        harness.acquireCompleteMessageTargetForIntent.mockResolvedValueOnce(null as never)
+        vi.mocked(alertToast).mockClear()
+        const { request } = await openPopupEditor()
+
+        await expect(request.save('Refused edit')).resolves.toBe(false)
+        expect(alertToast).toHaveBeenCalledWith('Message action failed')
+        expect(harness.completeConversation.message[1].data).toBe('Original viewport message')
+        expect(hasPopupRowEditor()).toBe(true)
+        await tick()
+        expect(target.querySelector('.message-edit-area')).toBeNull()
+
+        await expect(request.save('Accepted edit')).resolves.toBe(true)
+        expect(harness.completeConversation.message[1].data).toBe('Accepted edit')
+        expect(hasPopupRowEditor()).toBe(false)
+    })
+
+    test('leaves the message unchanged when the popup editor is cancelled', async () => {
+        const harness = mountPopupEditHarness('')
+        const { editButton, request } = await openPopupEditor()
+
+        cancelTextEditorPopup(request)
+        expect(textEditorPopup.request).toBeNull()
+        expect(hasPopupRowEditor()).toBe(false)
+        expect(harness.acquireCompleteMessageTargetForIntent).not.toHaveBeenCalled()
+        expect(harness.completeConversation.message[1].data).toBe('Original viewport message')
+
+        editButton.click()
+        expect(textEditorPopup.request).not.toBeNull()
+        expect(textEditorPopup.request).not.toBe(request)
+        expect(hasPopupRowEditor()).toBe(true)
+    })
+
+    test('hands an open popup to the remounted row, which saves it with a fresh intent', async () => {
+        const harness = mountPopupEditHarness('')
+        vi.mocked(alertToast).mockClear()
+        const { request } = await openPopupEditor()
+        request.input?.('Typed before teardown')
+        const captured = (mounted as unknown as RowEditor).captureEditorDraft()!
+        await unmount(mounted!)
+        mounted = undefined
+        expect(textEditorPopup.request).toBe(request)
+
+        mountPopupEditHarness('', { harness, props: { restoredEditor: captured } })
+        expect(hasPopupRowEditor()).toBe(true)
+        expect(harness.captureMessageEditIntent).toHaveBeenCalledTimes(2)
+        await expect(request.save('Saved by the new row')).resolves.toBe(true)
+        expect(harness.completeConversation.message[1].data).toBe('Saved by the new row')
+        expect(alertToast).not.toHaveBeenCalled()
+        expect(hasPopupRowEditor()).toBe(false)
+    })
+
+    test('saves a popup whose row is gone and forgets the kept draft', async () => {
+        const harness = mountPopupEditHarness('')
+        const { request } = await openPopupEditor()
+        request.input?.('Typed before teardown')
+        keepEditorDraft('character-a', 'conversation-a', (mounted as unknown as RowEditor).captureEditorDraft()!)
+        await unmount(mounted!)
+        mounted = undefined
+
+        await expect(request.save('Saved without a row')).resolves.toBe(true)
+        expect(harness.completeConversation.message[1].data).toBe('Saved without a row')
+        expect(pendingEditorDrafts('character-a', 'conversation-a')).toEqual([])
+    })
+
+    test('closes a kept popup when the remounted row cannot edit the message', async () => {
+        const harness = mountPopupEditHarness('')
+        const { request } = await openPopupEditor()
+        const captured = (mounted as unknown as RowEditor).captureEditorDraft()!
+        await unmount(mounted!)
+        mounted = undefined
+        harness.captureMessageEditIntent.mockReturnValueOnce(null as never)
+
+        mountPopupEditHarness('', { harness, props: { restoredEditor: captured } })
+        expect(hasPopupRowEditor()).toBe(false)
+        expect(textEditorPopup.request).toBeNull()
+        expect(request.value).toBe('Original viewport message')
+    })
+
+    test.each(['unchanged', 'changed'] as const)(
+        'saves a restored translation draft under its kept key only while the source is %s',
+        async (source) => {
+            const { getLLMCache, setLLMCache } = await import('../../ts/translator/translator')
+            vi.mocked(getLLMCache).mockResolvedValue('Cached translation')
+            vi.mocked(setLLMCache).mockClear()
+            vi.mocked(alertToast).mockClear()
+            const db = { translator: 'llm', translatorType: 'llm', translateBeforeHTMLFormatting: true }
+            const harness = mountPopupEditHarness('', { db })
+            const translationEditor = () => target.querySelector<HTMLTextAreaElement>('textarea.message-edit-area')
+            const translationButton = (label: string) => [...target.querySelectorAll<HTMLButtonElement>('button')]
+                .find((button) => button.textContent?.includes(label))
+            ;(await vi.waitFor(() => {
+                const button = target.querySelector<HTMLButtonElement>('.button-icon-translate')
+                expect(button).not.toBeNull()
+                return button!
+            })).click()
+            ;(await vi.waitFor(() => {
+                expect(translationButton('Edit translation')).toBeDefined()
+                return translationButton('Edit translation')!
+            })).click()
+            const opened = await vi.waitFor(() => {
+                expect(translationEditor()?.value).toBe('Cached translation')
+                return translationEditor()!
+            })
+            opened.value = 'Restored translation'
+            opened.dispatchEvent(new Event('input', { bubbles: true }))
+            const captured = (mounted as unknown as RowEditor).captureEditorDraft()!
+            expect(captured).toMatchObject({ kind: 'translation', draft: 'Restored translation' })
+            const key = vi.mocked(getLLMCache).mock.calls.at(-1)![0]
+            expect(captured.translationKey).toBe(key)
+            await unmount(mounted!)
+            mounted = undefined
+
+            mountPopupEditHarness('', { harness, db, props: { restoredEditor: captured } })
+            await tick()
+            expect(translationEditor()?.value).toBe('Restored translation')
+            if (source === 'changed') {
+                (mounted as unknown as RowEditor).refreshMessageDisplay({ message: 'Changed source message', totalMessages: 2 })
+                await tick()
+            }
+            translationButton('Save translation')!.click()
+
+            if (source === 'unchanged') {
+                await vi.waitFor(() => expect(setLLMCache).toHaveBeenCalledWith(key, 'Restored translation'))
+                await vi.waitFor(() => expect(translationEditor()).toBeNull())
+                expect(alertToast).not.toHaveBeenCalled()
+            } else {
+                await vi.waitFor(() => expect(alertToast).toHaveBeenCalledWith('Message action failed'))
+                expect(setLLMCache).not.toHaveBeenCalled()
+                expect(translationEditor()?.value).toBe('Restored translation')
             }
         },
     )

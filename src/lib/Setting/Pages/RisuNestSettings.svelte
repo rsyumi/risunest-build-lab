@@ -1,7 +1,7 @@
 <script lang="ts">
     import { get } from 'svelte/store'
     import { language } from 'src/lang'
-    import { risuNestInlaySettingsItems, risuNestStreamingSettingsItems } from 'src/ts/setting/risuNestSettingsData'
+    import { risuNestInlaySettingsItems, risuNestStreamingSettingsItems, risuNestUiSettingsItems } from 'src/ts/setting/risuNestSettingsData'
     import {
         RISUNEST_SETTINGS_TABS,
         risuNestSettingsTabRequest,
@@ -88,6 +88,7 @@
     <div role="tabpanel" id="risunest-panel-{activeTab}" aria-labelledby="risunest-tab-{activeTab}" data-risunest-panel={activeTab}>
         {#if activeTab === 'settings'}
             <RisuNestPerformanceSettings />
+            <RisuNestSettingRows items={risuNestUiSettingsItems} />
             <RisuNestSettingRows items={risuNestStreamingSettingsItems} />
             <RisuNestSettingRows items={risuNestInlaySettingsItems} />
             {#if isTauri}

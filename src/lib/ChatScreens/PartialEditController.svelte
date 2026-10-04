@@ -55,9 +55,6 @@
     let editText = $state('');
     let saving = $state(false);
 
-    export function takeEditorDraft(): string | null {
-        return isEditing ? editText : null;
-    }
     let textareaRef: HTMLTextAreaElement | null = $state(null);
     let focusTimer: ReturnType<typeof setTimeout> | undefined;
     let scrollTimer: ReturnType<typeof setTimeout> | undefined;

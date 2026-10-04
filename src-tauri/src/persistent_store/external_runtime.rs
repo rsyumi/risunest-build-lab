@@ -47,12 +47,10 @@ mod tests {
         identity
     }
     #[test]
-    fn backup_completion_never_advances_or_replaces_the_sync_head_base() {
+    fn backup_completion_records_its_point_and_refuses_another_snapshot() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = PersistentStore::open(directory.path()).unwrap();
         let identity = capture(&mut store);
-        let encoded = serde_json::to_string(&identity).unwrap();
-        store.connection.execute("INSERT INTO external_storage_bases VALUES('destination','repository','sync-snapshot','sync-commit','authenticated-head',?1)",[encoded]).unwrap();
         store
             .external_prepare_backup("backup", "destination", "repository", "capture", "point")
             .unwrap();
@@ -63,11 +61,6 @@ mod tests {
         assert_eq!(job.connection_id, "destination");
         assert_eq!(job.phase, "complete");
         assert!(store.external_job("missing").unwrap().is_none());
-        let base: (String, String) = store.connection.query_row(
-            "SELECT snapshot_id,head_observation FROM external_storage_bases WHERE connection_id='destination'",
-            [], |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
-        assert_eq!(base, ("sync-snapshot".into(), "authenticated-head".into()));
         assert_eq!(
             store.external_backup_result("backup").unwrap(),
             Some(("backup-snapshot".into(), identity))
@@ -269,10 +262,6 @@ impl PersistentStore {
         )?;
         tx.execute(
             "DELETE FROM external_storage_capture_refs WHERE job_id IN (SELECT id FROM external_storage_jobs WHERE connection_id=?1 AND phase!='publicationUnknown')",
-            [connection],
-        )?;
-        tx.execute(
-            "DELETE FROM external_storage_bases WHERE connection_id=?1",
             [connection],
         )?;
         let selection = sync_selection::read(&tx)?;
