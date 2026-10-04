@@ -1227,6 +1227,7 @@ fn a_new_target_initialization_preserves_received_issuers_under_its_authenticate
     target
         .switch_lww_binding(
             &crate::persistent_store::sync_selection::SwitchBindingRequest {
+                initial_publication: false,
                 header: request,
                 expected_selection_epoch: original.selection_epoch,
                 target: crate::persistent_store::sync_selection::SyncTarget::Server(

@@ -640,9 +640,72 @@ fn capture_key(
     }
     Ok(())
 }
+pub(in crate::persistent_store) fn character_ids(tx: &Transaction<'_>, generation: &str) -> StoreResult<Vec<String>> {
+    let mut statement = tx.prepare("SELECT character_id FROM characters WHERE generation=?1")?;
+    let ids = statement.query_map([generation], |row| row.get(0))?.collect::<Result<_, _>>()?;
+    Ok(ids)
+}
+/// Every unit of one character, with conversations read from their stored
+/// manifests.
+pub(in crate::persistent_store) fn capture_character_units(
+    tx: &Transaction<'_>,
+    generation: &str,
+    id: &str,
+) -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
+    let mut out = BTreeMap::new();
+    capture_character(tx, generation, id, true, true, &mut out)?;
+    Ok(out)
+}
+/// Every unit outside the characters: root, presets, plugin storage and
+/// asset aliases.
+pub(in crate::persistent_store) fn capture_shared(
+    tx: &Transaction<'_>,
+    generation: &str,
+) -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
+    let mut out = BTreeMap::new();
+    capture_root(tx, generation, &mut out)?;
+    capture_presets(tx, generation, &mut out)?;
+    let plugins: Vec<(String, String)> = {
+        let mut s =
+            tx.prepare("SELECT owner,storage_key FROM plugin_storage WHERE generation=?1")?;
+        let v = s
+            .query_map([generation], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        v
+    };
+    for (owner, key) in plugins {
+        capture_key(tx, generation, &unit_key(&["plugin", &owner, &key])?, &mut out)?;
+    }
+    let owners: Vec<String> = {
+        let mut q = tx.prepare("SELECT DISTINCT owner FROM plugin_storage WHERE generation=?1")?;
+        let rows = q
+            .query_map([generation], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        rows
+    };
+    for owner in owners {
+        capture_plugin_order(tx, generation, &owner, &mut out)?;
+    }
+    let aliases: Vec<(String, String)> = {
+        let mut s = tx.prepare("SELECT kind,logical_key FROM asset_aliases WHERE generation=?1")?;
+        let v = s
+            .query_map([generation], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        v
+    };
+    for (kind, key) in aliases {
+        capture_key(tx, generation, &unit_key(&[&kind, &key])?, &mut out)?;
+    }
+    Ok(out)
+}
+/// The whole library in one map, as replacements captured it before they
+/// merged one character at a time. With `current_manifests`, a conversation
+/// that already has a page manifest is read from it rather than paged again.
+#[cfg(test)]
 pub(in crate::persistent_store) fn capture_all(
     db: &mut Connection,
     generation: &str,
+    current_manifests: bool,
 ) -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
     let tx = db.transaction()?;
     let mut out = BTreeMap::new();
@@ -656,7 +719,7 @@ pub(in crate::persistent_store) fn capture_all(
         v
     };
     for id in ids {
-        capture_character(&tx, generation, &id, true, false, &mut out)?;
+        capture_character(&tx, generation, &id, true, current_manifests, &mut out)?;
     }
     let plugins: Vec<(String, String)> = {
         let mut s =
@@ -865,6 +928,59 @@ pub(in crate::persistent_store) fn apply(
 ) -> StoreResult<()> {
     apply_value(tx, generation, key, value, false)
 }
+/// The character whose detail `apply` patches for this key, when the patch
+/// touches nothing else.
+pub(in crate::persistent_store) fn character_detail_key(key: &UnitKey) -> Option<String> {
+    let mut p = key.components();
+    (matches!(p[0].as_str(), "character" | "group-members") && known(key)).then(|| p.swap_remove(1))
+}
+pub(in crate::persistent_store) fn character_detail(
+    tx: &Transaction<'_>,
+    generation: &str,
+    id: &str,
+) -> StoreResult<Value> {
+    text_value(
+        tx,
+        "SELECT detail FROM characters WHERE generation=?1 AND character_id=?2",
+        params![generation, id],
+    )?
+    .ok_or_else(|| error("parent-missing"))
+}
+/// Patches a held character detail the way `apply` would, for a key that
+/// `character_detail_key` accepts.
+pub(in crate::persistent_store) fn patch_character_detail(
+    tx: &Transaction<'_>,
+    detail: &mut Value,
+    key: &UnitKey,
+    value: &UnitValue,
+) -> StoreResult<()> {
+    patch_character(detail, &key.components(), json_value_resolved(tx, value)?, false)
+}
+fn patch_character(v: &mut Value, p: &[String], next: Option<Value>, local: bool) -> StoreResult<()> {
+    if p[0] == "group-members" {
+        for field in ["characters", "characterTalks", "characterActive"] {
+            patch(
+                v,
+                field,
+                next.as_ref().and_then(|v| v.get(field)).cloned(),
+            )?;
+        }
+    } else if p[2] == "statics" {
+        let messages = if local {
+            None
+        } else {
+            v.get("statics").and_then(|v| v.get("messages")).cloned()
+        };
+        let mut next = next.unwrap_or(json!({}));
+        if let Some(messages) = messages {
+            patch(&mut next, "messages", Some(messages))?;
+        }
+        patch(v, "statics", Some(next))?;
+    } else {
+        patch(v, &p[2], next)?;
+    }
+    Ok(())
+}
 fn apply_value(
     tx: &Transaction<'_>,
     generation: &str,
@@ -946,34 +1062,8 @@ fn apply_value(
             write_root(tx, generation, &v)?;
         }
         "character" | "group-members" => {
-            let mut v = text_value(
-                tx,
-                "SELECT detail FROM characters WHERE generation=?1 AND character_id=?2",
-                params![generation, p[1]],
-            )?
-            .ok_or_else(|| error("parent-missing"))?;
-            if p[0] == "group-members" {
-                for field in ["characters", "characterTalks", "characterActive"] {
-                    patch(
-                        &mut v,
-                        field,
-                        next.as_ref().and_then(|v| v.get(field)).cloned(),
-                    )?;
-                }
-            } else if p[2] == "statics" {
-                let messages = if local {
-                    None
-                } else {
-                    v.get("statics").and_then(|v| v.get("messages")).cloned()
-                };
-                let mut next = next.unwrap_or(json!({}));
-                if let Some(messages) = messages {
-                    patch(&mut next, "messages", Some(messages))?;
-                }
-                patch(&mut v, "statics", Some(next))?;
-            } else {
-                patch(&mut v, &p[2], next)?;
-            }
+            let mut v = character_detail(tx, generation, &p[1])?;
+            patch_character(&mut v, &p, next, local)?;
             commit::put_character_detail(tx, generation, &v)?;
         }
         "conversation" => {

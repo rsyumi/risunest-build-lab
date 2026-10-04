@@ -184,6 +184,7 @@ impl PersistentStore {
             "SELECT EXISTS(SELECT 1 FROM lww_binding_stages WHERE receive_id=?1)",
             [&header.request_id], |row| row.get::<_,bool>(0),
         )? { return Err(error("binding-source-missing")); }
+        let retried = existing.is_some();
         let staging_id = if let Some((id, authority, inspection, old_digest, upper)) = existing {
             if authority != header.binding_authority.0.to_string() || inspection != inspection_id
                 || old_digest != digest || upper != admitted_upper_ms.0.to_string()
@@ -209,6 +210,7 @@ impl PersistentStore {
             self.connection.execute("ATTACH DATABASE ?1 AS binding_incoming", [path.to_string_lossy().as_ref()])?;
             let copied = (|| -> StoreResult<()> {
                 let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                super::commit::begin_generation(&tx, &id)?;
                 for &(table, _) in GENERATION_TABLES {
                     copy_binding_table(&tx, table, &id)?;
                 }
@@ -218,7 +220,6 @@ impl PersistentStore {
                 for (change, status) in changes.iter().zip(statuses) {
                     tx.execute("INSERT INTO lww_binding_source_units VALUES(?1,?2,?3,?4,?5)", params![id,change.key.as_str(),serde_json::to_string(&change.stamp)?,serde_json::to_string(&change.value)?,status])?;
                 }
-                let catalog_digest = crate::persistent_store::sync_selection::binding_stage_digest(&tx, &id)?;
                 tx.execute("INSERT INTO lww_binding_stages VALUES(?1,?2,?3,?4,NULL,?5)", params![id,inspection_id,header.request_id,serde_json::to_string(&changes)?,catalog_digest])?;
                 tx.commit()?;
                 Ok(())
@@ -233,7 +234,8 @@ impl PersistentStore {
             return Err(error("synthetic-after-binding-copy"));
         }
         let changes = changes.into_iter().cloned().collect::<Vec<_>>();
-        self.register_lww_binding_stage(inspection_id, &staging_id, &header.request_id, &changes)?;
+        // A fresh copy recorded the stage digest in the transaction that wrote the stage.
+        self.register_lww_binding_stage_with(inspection_id, &staging_id, &header.request_id, &changes, retried)?;
         Ok(BindingUnitStage { staging_id, source_digest: digest })
     }
 }
@@ -339,17 +341,30 @@ fn copy_reference_tree(
     }
 }
 
+/// A stage that a binding received; only a target replacement may activate it.
+pub(in crate::persistent_store) fn is_binding_stage(db: &Connection, staging_id: &str) -> StoreResult<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM lww_binding_stages WHERE staging_id=?1) OR EXISTS(SELECT 1 FROM lww_binding_sources WHERE staging_id=?1)",
+        [staging_id], |row| row.get(0),
+    )?)
+}
+
 pub(in crate::persistent_store) fn validate_binding_source(db: &Connection, staging_id: &str, header: &Header, received: &[Change]) -> StoreResult<()> {
     let source: Option<(String, String, String, String, String, String)> = db.query_row("SELECT request_id,source_digest,status_digest,catalog_digest,authority,inspection_id FROM lww_binding_sources WHERE staging_id=?1", [staging_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).optional()?;
-    let (request_id, digest, expected_status, expected_catalog, authority, inspection) = source.ok_or_else(|| error("binding-source-missing"))?;
+    let (request_id, digest, expected_status, _, authority, inspection) = source.ok_or_else(|| error("binding-source-missing"))?;
     let receipt: Option<(String,String,String,String)> = db.query_row("SELECT s.receive_id,s.inspection_id,i.source_authority,s.changes FROM lww_binding_stages s JOIN lww_binding_inspections i USING(inspection_id) WHERE s.staging_id=?1", [staging_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
     let (receive_id, receipt_inspection, source_authority, encoded) = receipt.ok_or_else(|| error("binding-source-association"))?;
     let original_authority: DecimalU64 = wire(authority.clone().try_into())?;
+    let received = sorted_source(received)?;
+    let received_matches = source_digest(&received)? == digest;
+    let encoded = serde_json::from_str::<Vec<Change>>(&encoded)?;
+    let encoded = sorted_source(&encoded)?;
+    let encoded_matches = if received_matches { encoded == received } else { source_digest(&encoded)? == digest };
     if receive_id != request_id || receipt_inspection != inspection || source_authority != authority
         || (header.binding_authority != original_authority && original_authority.0.checked_add(1) != Some(header.binding_authority.0))
-        || source_digest(&sorted_source(&serde_json::from_str::<Vec<Change>>(&encoded)?)?)? != digest
+        || !encoded_matches
     { return Err(error("binding-source-association")); }
-    if request_id != header.request_id || source_digest(&sorted_source(received)?)? != digest {
+    if request_id != header.request_id || !received_matches {
         return Err(error("binding-source-integrity"));
     }
     let mut stmt = db.prepare("SELECT key,stamp,value,status FROM lww_binding_source_units WHERE staging_id=?1 ORDER BY key")?;
@@ -361,9 +376,9 @@ pub(in crate::persistent_store) fn validate_binding_source(db: &Connection, stag
         statuses.push((key.clone(),status));
         frozen.push(Change { key: wire(key.try_into())?, stamp: serde_json::from_str(&stamp)?, value: serde_json::from_str(&value)? });
     }
-    if source_digest(&sorted_source(&frozen)?)? != digest
+    // The stage catalog is proved by `validate_binding_stage_content`.
+    if sorted_source(&frozen)? != received
         || status_digest(&statuses.iter().map(|(key,status)| (key.as_str(),status.as_str())).collect::<Vec<_>>())? != expected_status
-        || catalog_digest(db, staging_id)? != expected_catalog
     { return Err(error("binding-source-integrity")); }
     Ok(())
 }

@@ -4480,6 +4480,7 @@ dependencies = [
  "risunest-sync-connect",
  "risunest-sync-server",
  "risunest-sync-wire",
+ "rmp",
  "rmpv",
  "rusqlite",
  "rustls",

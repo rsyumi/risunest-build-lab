@@ -4329,6 +4329,7 @@ dependencies = [
  "risunest-small-object-store",
  "risunest-sync-connect",
  "risunest-sync-wire",
+ "rmp",
  "rmpv",
  "rusqlite",
  "rustls",

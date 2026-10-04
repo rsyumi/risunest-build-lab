@@ -193,6 +193,16 @@ impl Provider for QuotaProvider {
             .reconcile_upload(repository, intent, resume, cancel)
     }
 
+    fn lookup_metadata<'a>(
+        &'a self,
+        repository: &'a RepositoryHandle,
+        intent: &'a ObjectIntent,
+        known: Option<&'a RemoteLocator>,
+        cancel: &'a Cancellation,
+    ) -> ProviderFuture<'a, Option<ObjectReceipt>> {
+        self.inner.lookup_metadata(repository, intent, known, cancel)
+    }
+
     fn head_locator(&self, repository: &RepositoryHandle) -> Result<RemoteLocator> {
         self.inner.head_locator(repository)
     }

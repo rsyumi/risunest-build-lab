@@ -3,11 +3,18 @@ use crate::store::{Device, Store};
 
 static FIXTURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Set on the child test process that runs the observer tests.
+const OBSERVER_CHILD: &str = "RISUNEST_SOURCE_OBSERVER_CHILD";
+
 pub(crate) struct Reset {
     _fixture: std::sync::MutexGuard<'static, ()>,
 }
 impl Reset {
     pub(crate) fn new() -> Self {
+        assert!(
+            std::env::var_os(OBSERVER_CHILD).is_some(),
+            "observer tests run through observer_tests_run_alone_in_a_child_process"
+        );
         let fixture = FIXTURE.lock_unpoisoned();
         install();
         assert!(registry().lock_unpoisoned().active.is_none());
@@ -37,6 +44,44 @@ impl Drop for Reset {
         }
     }
 }
+/// The registry is process-wide, and work a test does without a scope of its
+/// own is charged to whichever scope is active. The observer tests therefore
+/// run alone in a child test process, one at a time, and the rest of the
+/// suite stays parallel.
+#[test]
+fn observer_tests_run_alone_in_a_child_process() {
+    let run = |listing: bool| {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--test-threads=1"])
+            .args(listing.then_some("--list"))
+            .args([
+                "source_observer::tests::",
+                "source_observer::read_barrier::tests::",
+                "source_observer_harness::tests::",
+            ])
+            .env(OBSERVER_CHILD, "1")
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{text}");
+        text
+    };
+    let listed = run(true)
+        .lines()
+        .filter(|line| line.ends_with(": test"))
+        .count();
+    assert!(listed > 0);
+    let report = run(false);
+    assert!(
+        report.contains(&format!("test result: ok. {listed} passed; 0 failed;")),
+        "{report}"
+    );
+}
+
 fn role(hash: &str, purposes: &[&str]) -> Role {
     Role {
         hash: hash.into(),
@@ -105,6 +150,7 @@ fn conserved(snapshot: &Snapshot) {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn actual_file_inline_and_cross_thread_source_work_conserves() {
     let _reset = Reset::new();
     let (root, store, _, inline, file) = seeded();
@@ -144,6 +190,7 @@ fn actual_file_inline_and_cross_thread_source_work_conserves() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn failed_prefix_hash_and_live_reader_cannot_be_reset() {
     let _reset = Reset::new();
     let root = tempfile::tempdir().unwrap();
@@ -185,6 +232,7 @@ fn failed_prefix_hash_and_live_reader_cannot_be_reset() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn unknown_object_failed_open_and_pending_drop_are_incomplete() {
     let _reset = Reset::new();
     let root = tempfile::tempdir().unwrap();
@@ -209,6 +257,7 @@ fn unknown_object_failed_open_and_pending_drop_are_incomplete() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn worker_lifetime_late_work_and_overflow_fail_closed() {
     let _reset = Reset::new();
     let root = tempfile::tempdir().unwrap();
@@ -253,6 +302,7 @@ fn worker_lifetime_late_work_and_overflow_fail_closed() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn ingress_inline_comparison_is_separate_and_corruption_preserves_body_work() {
     let _reset = Reset::new();
     let (root, store, device, inline, _) = seeded();
@@ -293,6 +343,7 @@ fn ingress_inline_comparison_is_separate_and_corruption_preserves_body_work() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn structural_recipe_adapter_preserves_actual_encode_and_negative_results() {
     let _reset = Reset::new();
     use risunest_sync_wire::{
@@ -397,6 +448,7 @@ fn structural_recipe_adapter_preserves_actual_encode_and_negative_results() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn actual_fitting_full_and_delta_transfer_sha_domains_are_observed() {
     use crate::store::TransferRequest;
     let _reset = Reset::new();
@@ -463,6 +515,7 @@ fn actual_fitting_full_and_delta_transfer_sha_domains_are_observed() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn actual_streamed_download_and_chunk_upload_hash_domains_conserve() {
     use crate::store::{DeltaProgress, TransferRequest, UploadManifest};
     let _reset = Reset::new();
@@ -562,6 +615,7 @@ fn actual_streamed_download_and_chunk_upload_hash_domains_conserve() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn actual_read_error_preserves_prefix_and_escaped_path_is_incomplete() {
     let _reset = Reset::new();
     let root = tempfile::tempdir().unwrap();
@@ -598,6 +652,7 @@ fn actual_read_error_preserves_prefix_and_escaped_path_is_incomplete() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn dropped_actual_pending_async_read_preserves_known_prefix() {
     use std::sync::mpsc;
     let _reset = Reset::new();
@@ -651,6 +706,7 @@ fn dropped_actual_pending_async_read_preserves_known_prefix() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn noncontiguous_actual_reads_and_selections_keep_every_range() {
     let _reset = Reset::new();
     let root = tempfile::tempdir().unwrap();
@@ -682,6 +738,7 @@ fn noncontiguous_actual_reads_and_selections_keep_every_range() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn actual_failed_seek_preserves_prefix_and_is_incomplete() {
     let _reset = Reset::new();
     let root = tempfile::tempdir().unwrap();
@@ -708,6 +765,7 @@ fn actual_failed_seek_preserves_prefix_and_is_incomplete() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn actual_unresolved_and_mismatched_source_roots_cannot_report_complete_zero() {
     let _reset = Reset::new();
     let (root, store, _, inline, _) = seeded();
@@ -748,6 +806,7 @@ fn actual_unresolved_and_mismatched_source_roots_cannot_report_complete_zero() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn actual_inline_sql_with_no_root_and_unattributed_upload_sha_fail_closed() {
     use crate::store::UploadManifest;
     let _reset = Reset::new();
@@ -812,6 +871,7 @@ fn actual_inline_sql_with_no_root_and_unattributed_upload_sha_fail_closed() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn actual_reader_opened_before_scope_cannot_hide_reads_inside_scope() {
     let _reset = Reset::new();
     let root = tempfile::tempdir().unwrap();
@@ -841,6 +901,7 @@ fn actual_reader_opened_before_scope_cannot_hide_reads_inside_scope() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn actual_unscoped_pending_async_seek_cannot_report_complete_zero() {
     let _reset = Reset::new();
     let root = tempfile::tempdir().unwrap();
@@ -874,6 +935,7 @@ fn actual_unscoped_pending_async_seek_cannot_report_complete_zero() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn actual_sync_first_read_barrier_is_one_shot_and_scoped() {
     let _reset = Reset::new();
     let (root, store, _, _, body) = seeded();
@@ -951,6 +1013,7 @@ fn actual_sync_first_read_barrier_is_one_shot_and_scoped() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn actual_held_sync_read_cancel_unblocks_and_reset_cannot_erase_failure() {
     let _reset = Reset::new();
     let (root, store, _, _, body) = seeded();
@@ -997,6 +1060,7 @@ fn actual_held_sync_read_cancel_unblocks_and_reset_cannot_erase_failure() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn actual_source_read_before_arm_and_nonasset_scope_are_rejected() {
     let _reset = Reset::new();
     let (root, store, _, _, body) = seeded();
@@ -1037,6 +1101,7 @@ fn actual_source_read_before_arm_and_nonasset_scope_are_rejected() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn actual_empty_read_buffer_does_not_trigger_source_first_body_read() {
     let _reset = Reset::new();
     let root = tempfile::tempdir().unwrap();
@@ -1082,6 +1147,7 @@ fn actual_empty_read_buffer_does_not_trigger_source_first_body_read() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn a_failed_scope_check_leaves_the_next_test_a_clean_observer() {
     let reset = Reset::new();
     let root = tempfile::tempdir().unwrap();
@@ -1095,6 +1161,7 @@ fn a_failed_scope_check_leaves_the_next_test_a_clean_observer() {
 }
 
 #[test]
+#[ignore = "runs in the observer child process"]
 fn a_panicking_observer_test_does_not_poison_the_next_one() {
     let failed = std::thread::spawn(|| {
         let _reset = Reset::new();

@@ -1,13 +1,13 @@
 use super::*;
 
 #[test]
-fn bounded_generation_replacement_rolls_back_deleted_and_partly_moved_batches() {
+fn activation_leaves_the_previous_library_rows_in_place_for_the_purge() {
     let directory = tempfile::tempdir().unwrap();
     let mut store = PersistentStore::open(directory.path()).unwrap();
     let seed = stage_root(&mut store, "Original");
     store.replace_commit(&seed, Some(0)).unwrap();
     let stage = stage_root(&mut store, "Replacement");
-    for (generation, value) in [("revision-1", "1"), (stage.as_str(), "2")] {
+    for (generation, value) in [(seed.as_str(), "1"), (stage.as_str(), "2")] {
         let transaction = store.connection.transaction().unwrap();
         for index in 0..513 {
             transaction.execute(
@@ -19,15 +19,16 @@ fn bounded_generation_replacement_rolls_back_deleted_and_partly_moved_batches() 
     }
     store
         .connection
-        .execute_batch(
-            "CREATE TRIGGER reject_later_batch BEFORE UPDATE ON plugin_storage
-         WHEN NEW.generation='revision-2' AND OLD.storage_key='synthetic-0300'
-         BEGIN SELECT RAISE(ABORT,'synthetic later batch failure'); END;",
-        )
+        .execute_batch(&format!(
+            "CREATE TRIGGER reject_previous_update BEFORE UPDATE ON plugin_storage WHEN OLD.generation='{seed}'
+             BEGIN SELECT RAISE(ABORT,'synthetic previous library update'); END;
+             CREATE TRIGGER reject_previous_delete BEFORE DELETE ON plugin_storage WHEN OLD.generation='{seed}'
+             BEGIN SELECT RAISE(ABORT,'synthetic previous library delete'); END;"
+        ))
         .unwrap();
-    assert!(store.replace_commit(&stage, Some(1)).is_err());
-    assert_eq!(store.revision().unwrap(), 1);
-    for (generation, value) in [("revision-1", "1"), (stage.as_str(), "2")] {
+    store.replace_commit(&stage, Some(1)).unwrap();
+    assert_eq!(store.revision().unwrap(), 2);
+    for (generation, value) in [(seed.as_str(), "1"), (stage.as_str(), "2")] {
         let count: i64 = store
             .connection
             .query_row(
@@ -38,29 +39,28 @@ fn bounded_generation_replacement_rolls_back_deleted_and_partly_moved_batches() 
             .unwrap();
         assert_eq!(count, 513);
     }
+    store
+        .connection
+        .execute_batch("DROP TRIGGER reject_previous_update; DROP TRIGGER reject_previous_delete;")
+        .unwrap();
+    while store.purge_retired_batch(100).unwrap() {}
     assert_eq!(
         store
             .connection
             .query_row::<i64, _, _>(
-                "SELECT count(*) FROM plugin_storage WHERE generation='revision-2'",
-                [],
+                "SELECT count(*) FROM plugin_storage WHERE generation=?1",
+                [&seed],
                 |row| row.get(0),
             )
             .unwrap(),
         0
     );
-    store
-        .connection
-        .execute_batch("DROP TRIGGER reject_later_batch")
-        .unwrap();
-    store.replace_commit(&stage, Some(1)).unwrap();
-    assert_eq!(store.revision().unwrap(), 2);
     assert_eq!(
         store
             .connection
             .query_row::<i64, _, _>(
-                "SELECT count(*) FROM plugin_storage WHERE generation='revision-2' AND value='2'",
-                [],
+                "SELECT count(*) FROM plugin_storage WHERE generation=?1 AND value='2'",
+                [&stage],
                 |row| row.get(0),
             )
             .unwrap(),
@@ -88,9 +88,8 @@ fn ordinary_replacement_retry_returns_its_receipt_without_replacing_later_edits(
     assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(), before);
     assert_eq!(serde_json::to_value(store.lww_read_outbox(store.lww_binding_authority().unwrap(), 100).unwrap()).unwrap(), pending);
     assert!(store.replace_commit(&stage, Some(2)).is_err());
-    store.connection.execute("INSERT INTO root VALUES(?1,'{}')", [&stage]).unwrap();
-    assert!(store.replace_commit(&stage, Some(1)).is_err());
-    store.connection.execute("DELETE FROM root WHERE generation=?1", [&stage]).unwrap();
+    assert!(store.replace_put_root(&stage, &json!({"username":"Reused stage"})).is_err());
+    assert_eq!(store.replace_commit(&stage, Some(1)).unwrap().revision, 2);
     store.device_store_mut().unwrap().connection().execute(
         "UPDATE lww_clock SET binding_authority='1' WHERE singleton=1", [],
     ).unwrap();
@@ -106,7 +105,7 @@ fn unfinished_ordinary_replacement_rejects_changed_stage_before_recovery() {
     store.replace_commit(&seed, Some(0)).unwrap();
     let stage = stage_root(&mut store, "Replacement");
     store.connection.execute_batch(
-        "CREATE TRIGGER reject_replacement BEFORE DELETE ON root WHEN OLD.generation='revision-1'
+        "CREATE TRIGGER reject_replacement BEFORE UPDATE ON generations
          BEGIN SELECT RAISE(ABORT,'synthetic replacement failure'); END;",
     ).unwrap();
     assert!(store.replace_commit(&stage, Some(1)).is_err());
@@ -131,7 +130,8 @@ fn ordinary_replacement_receipt_rejects_another_source_kind_even_with_matching_d
         "SELECT body FROM lww_intents WHERE request_id=?1", [&stage], |row| row.get(0),
     ).unwrap();
     let mut body: Value = serde_json::from_str(&body).unwrap();
-    body["source_units"] = json!({});
+    assert_eq!(body["source_units"], Value::Null);
+    body["source_units"] = json!({ "rows": 0, "digest": "0".repeat(64) });
     let body = serde_json::to_string(&body).unwrap();
     let digest = risunest_sync_wire::hash(body.as_bytes());
     store.device_store().unwrap().connection().execute(

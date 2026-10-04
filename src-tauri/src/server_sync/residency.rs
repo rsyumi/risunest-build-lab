@@ -1,6 +1,7 @@
 //! Device-local payload custody. This is physical residency metadata, not a
 //! logical record or a synchronized preference. Credentials remain OS-protected.
 use super::{credentials::StoredConfig, Result, SyncError};
+use crate::persistent_store::asset_object_catalog::{AssetObjectRegistrar, AssetObjectRegistration};
 use risunest_sync_wire::{hash, validate_hash, RemoteHead, Sequence};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -86,7 +87,8 @@ pub(crate) struct RemoteObject {
 
 pub(crate) struct Residency {
     db: Connection,
-    root: PathBuf,
+    /// The body registry `gc_size` falls back to, opened when first asked.
+    remote: std::cell::RefCell<crate::external_storage::lww_residency::RemoteBodies>,
 }
 
 impl Residency {
@@ -138,7 +140,7 @@ impl Residency {
             return Err(SyncError::new("incompatible-residency-store", 409));
         }
         hold_anchor(root, &path);
-        Ok(Self { db, root: root.to_path_buf() })
+        Ok(Self { db, remote: std::cell::RefCell::new(crate::external_storage::lww_residency::RemoteBodies::deferred(root)) })
     }
     /// A fresh registration restores access to the same library's historical
     /// custody. Keep its original owner ID for eventual retention release.
@@ -259,7 +261,11 @@ impl Residency {
         self.lookup(digest, None, false)
             .map(|object| object.map(|object| object.size))
             .map_err(|error| std::io::Error::other(error.code))
-            .and_then(|size| match size { Some(size) => Ok(Some(size)), None => crate::external_storage::lww_residency::stat(&self.root, digest) })
+            .and_then(|size| match size { Some(size) => Ok(Some(size)), None => self.remote.borrow_mut().stat(digest) })
+    }
+    /// The custody half of `gc_size`.
+    pub(crate) fn custody_size(&self, digest: &str) -> Result<Option<u64>> {
+        Ok(self.lookup(digest, None, false)?.map(|object| object.size))
     }
     pub fn page(&self, after: &str) -> Result<Vec<(String, String, u64)>> {
         let mut statement=self.db.prepare("SELECT context||'/'||hash,hash,size FROM objects WHERE state!='released' AND context||'/'||hash>?1 ORDER BY context,hash LIMIT 128")?;
@@ -520,17 +526,22 @@ pub(crate) struct HydrationSession {
     cache: Option<super::cache::Cache>,
     directory: Option<tempfile::TempDir>,
     cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    catalog: Option<AssetObjectRegistrar>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HydrationOutcome { AlreadyLocal, Downloaded }
 impl HydrationSession {
     pub(crate) fn new(root: &Path, cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Result<Self> {
-        Ok(Self { root: std::fs::canonicalize(root)?, residency: None, clients: Default::default(), cache: None, directory: None, cancellation })
+        Ok(Self { root: std::fs::canonicalize(root)?, residency: None, clients: Default::default(), cache: None, directory: None, cancellation, catalog: None })
     }
     pub(crate) fn open(&mut self, digest: &str, check: &dyn Fn() -> Result<()>) -> Result<Option<std::fs::File>> {
+        check()?;
+        let cas = crate::asset_repository::PayloadCas::new(&self.root)?;
+        // A body already here is read as it is, without a catalog write per open.
+        if let Some(file) = cas.open_object(digest)? { return Ok(Some(file)); }
         if !self.hydrate_many(&[digest.to_owned()], check)?.is_empty() { return Ok(None); }
         check()?;
-        Ok(crate::asset_repository::PayloadCas::new(&self.root)?.open_object(digest)?)
+        Ok(cas.open_object(digest)?)
     }
     pub(crate) fn hydrate_many(&mut self, digests: &[String], check: &dyn Fn() -> Result<()>) -> Result<Vec<String>> {
         self.hydrate_many_outcomes(digests, check, |_, _| {})
@@ -551,23 +562,36 @@ impl HydrationSession {
             let hashes = page.iter().collect::<std::collections::BTreeSet<_>>();
             let locks = hashes.iter().map(|hash| hydration_lock(&self.root, hash)).collect::<Result<Vec<_>>>()?;
             let guards = locks.iter().map(|lock| lock_with_check(lock, check)).collect::<Result<Vec<_>>>()?;
-            let mut objects = Vec::new();
-            for hash in hashes {
+            for hash in &hashes {
                 check()?;
                 validate_hash(hash)?;
-                {
-                    let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
-                    if cas.stat_object(hash)?.is_some() {
-                        opened(hash, HydrationOutcome::AlreadyLocal);
+            }
+            if self.residency.is_none() && Residency::exists(&self.root) { self.residency = Some(Residency::open(&self.root)?); }
+            let mut local = Vec::new();
+            let mut objects = Vec::new();
+            {
+                // A row goes in before its body's file and stands on the custody that supplies it
+                // until the file arrives. A release drops, under this lock, the rows of bodies it
+                // leaves without a file, so custody is read under it too.
+                let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+                let mut rows = Vec::with_capacity(hashes.len());
+                for hash in hashes {
+                    if let Some(size) = cas.stat_object(hash)? {
+                        rows.push(AssetObjectRegistration { object_hash: hash.clone(), byte_size: size });
+                        local.push(hash);
                         continue;
                     }
+                    let Some(proof) = self.residency.as_ref().map(|residency| residency.object(hash, None)).transpose()?.flatten() else {
+                        external.insert(hash.clone());
+                        continue;
+                    };
+                    rows.push(AssetObjectRegistration { object_hash: hash.clone(), byte_size: proof.size });
+                    objects.push(proof);
                 }
-                if self.residency.is_none() && Residency::exists(&self.root) { self.residency = Some(Residency::open(&self.root)?); }
-                let Some(proof) = self.residency.as_ref().map(|residency| residency.object(hash, None)).transpose()?.flatten() else {
-                    external.insert(hash.clone());
-                    continue;
-                };
-                objects.push(proof);
+                register(&mut self.catalog, &self.root, &rows)?;
+            }
+            for hash in local {
+                opened(hash, HydrationOutcome::AlreadyLocal);
             }
             server_pages.push(objects);
             drop(guards);
@@ -601,7 +625,7 @@ impl HydrationSession {
                         check()?;
                         let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
                         check()?;
-                        let outcome = cas.publish_staged(staged);
+                        let outcome = publish_registered(&cas, &mut self.catalog, &self.root, staged);
                         check()?;
                         outcome?;
                         opened(hash, HydrationOutcome::Downloaded);
@@ -635,7 +659,7 @@ impl HydrationSession {
                         {
                             let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
                             check()?;
-                            let outcome = cas.publish_staged(staged);
+                            let outcome = publish_registered(&cas, &mut self.catalog, &self.root, staged);
                             check()?;
                             outcome?;
                             opened(&object.hash, HydrationOutcome::Downloaded);
@@ -655,6 +679,36 @@ impl HydrationSession {
         }
         Ok(unavailable)
     }
+}
+
+/// Registers the catalog rows not already in place, through the one catalog
+/// connection a session keeps.
+fn register(catalog: &mut Option<AssetObjectRegistrar>, root: &Path, rows: &[AssetObjectRegistration]) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    if catalog.is_none() {
+        *catalog = Some(AssetObjectRegistrar::open(root)?);
+    }
+    let created_at_ms = i64::try_from(crate::external_storage::runtime::now_ms())
+        .map_err(|_| SyncError::new("clock-overflow", 409))?;
+    match catalog.as_mut() {
+        Some(catalog) => Ok(catalog.register_missing(rows, created_at_ms)?),
+        None => Ok(()),
+    }
+}
+
+/// Publishes a staged body and registers it again in the same hold, so a row a
+/// release took while the body was fetched is back before anything else runs.
+/// Called under the repository mutation lock.
+fn publish_registered(
+    cas: &crate::asset_repository::PayloadCas,
+    catalog: &mut Option<AssetObjectRegistrar>,
+    root: &Path,
+    staged: crate::asset_repository::StagedPayload,
+) -> Result<()> {
+    let published = cas.publish_staged(staged)?;
+    register(catalog, root, &[AssetObjectRegistration { object_hash: published.content_hash, byte_size: published.byte_size }])
 }
 
 pub(crate) fn with_hydration_lock<T>(
