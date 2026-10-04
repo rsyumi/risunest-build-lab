@@ -14,6 +14,13 @@ describe('ExternalStorageBridge', () => {
         ])
     })
 
+    it('stops an unfinished restore by its job ID', async () => {
+        const invoke = vi.fn(async () => ({}))
+        const bridge = new ExternalStorageBridge({ supported: () => true, invoke })
+        await bridge.stopRestore('unfinished-restore')
+        expect(invoke).toHaveBeenCalledWith('external_storage_stop_restore', { jobId: 'unfinished-restore' })
+    })
+
     it('keeps pause commands separate from job admission', async () => {
         const invoke = vi.fn(async () => true)
         const bridge = new ExternalStorageBridge({ supported: () => true, invoke })
@@ -42,7 +49,6 @@ describe('ExternalStorageBridge', () => {
                 connectionId: 'connection',
                 selectionEpoch: 'selection-epoch',
                 paused: false,
-                decisionRequired: false,
             },
         }
         const invoke = vi.fn(async () => capture)
@@ -177,9 +183,9 @@ describe('ExternalStorageBridge', () => {
     it('forwards the opaque execution session identity', async () => {
         const invoke = vi.fn(async () => undefined)
         const bridge = new ExternalStorageBridge({ supported: () => true, invoke })
-        await bridge.setExecutionSession({ kind: 'exitDrain', id: 'session-uuid' })
+        await bridge.setExecutionSession({ kind: 'foreground', id: 'session-uuid' })
         expect(invoke).toHaveBeenCalledWith('external_storage_set_execution_session', {
-            request: { kind: 'exitDrain', id: 'session-uuid' },
+            request: { kind: 'foreground', id: 'session-uuid' },
         })
     })
 

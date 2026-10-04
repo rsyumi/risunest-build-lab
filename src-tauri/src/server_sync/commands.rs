@@ -187,6 +187,25 @@ fn server_sync_asset_policy_operation<R: tauri::Runtime>(app: &AppHandle<R>, pol
     })
 }
 #[tauri::command]
+pub(crate) async fn asset_residency_download_remote(
+    app: AppHandle,
+    connection_id: Option<String>,
+    selected_character_id: Option<String>,
+) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
+    logged_blocking("asset-download", move || {
+        let _admission = claim_library(&app)?;
+        let state = app.state::<ServerSyncCommandState>();
+        let (_running, cancelled) = state.claim_preparation()?;
+        job_store(&app)?.asset_residency_download_remote(connection_id.as_deref(), Some(cancelled.clone()), selected_character_id.as_deref(), || {
+            if cancelled.load(Ordering::Acquire) {
+                Err(SyncError::new("cancelled", 409))
+            } else {
+                Ok(())
+            }
+        })
+    }).await
+}
+#[tauri::command]
 pub(crate) async fn server_sync_asset_evict(
     app: AppHandle,
 ) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
@@ -259,13 +278,15 @@ pub(crate) async fn server_sync_lww_ack(app:AppHandle,request:crate::persistent_
 pub(crate) async fn server_sync_cancel(app:AppHandle)->Result<()> {recorded("cancel",app.state::<ServerSyncCommandState>().cancel())}
 #[tauri::command]
 pub(crate) async fn server_sync_lww_fence(app:AppHandle,new_device:bool)->Result<()> {
-    logged_blocking("fence",move|| {let state=app.state::<ServerSyncCommandState>();if !state.cleanup_drained()?{return Err(SyncError::new("server-sync-busy",409));}let mut store=job_store(&app)?;if store.server_stored_config()?.is_none(){return Ok(());}let core=lww_client(&store)?;if new_device{core.fence_new_device(&mut store)}else{super::binding::fence_for_binding_change(&core,&mut store)}}).await
+    logged_blocking("fence",move|| {let state=app.state::<ServerSyncCommandState>();if !state.cleanup_drained()?{return Err(SyncError::new("server-sync-busy",409));}let mut store=job_store(&app)?;super::binding::fence_stored(&mut store,new_device)}).await
 }
 
 #[tauri::command]
 pub(crate) async fn server_sync_lww_activate(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
     logged_blocking("activate",move|| {super::binding::activate(&mut job_store(&app)?,&request,None)}).await
 }
+#[tauri::command]
+pub(crate) async fn server_sync_lww_pending_binding(app:AppHandle)->Result<Option<super::binding::PendingBinding>> {logged_blocking("pending-binding",move||{super::binding::pending_binding(&job_store(&app)?)}).await}
 #[tauri::command]
 pub(crate) async fn server_sync_lww_inspect(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<super::binding::Inspection> {logged_blocking("inspect",move||{super::binding::inspect(&job_store(&app)?,&request)}).await}
 #[tauri::command]

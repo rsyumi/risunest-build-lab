@@ -266,11 +266,9 @@ impl PersistentStore {
     }
     pub(crate) fn portable_export_lower_bound(&self) -> StoreResult<u64> {
         let objects: i64 = self.connection.query_row("SELECT coalesce(sum(byte_size),0) FROM asset_objects", [], |row| row.get(0))?;
-        let pages: i64 = self.connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
-        let page_size: i64 = self.connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
-        u64::try_from(objects).ok().and_then(|objects| {
-            u64::try_from(pages).ok()?.checked_mul(u64::try_from(page_size).ok()?)?.checked_add(objects)
-        }).ok_or_else(|| invalid("portable export size overflow"))
+        let database = super::snapshot::logical_database_bytes(&self.connection)?;
+        u64::try_from(objects).ok().and_then(|objects| database.checked_add(objects))
+            .ok_or_else(|| invalid("portable export size overflow"))
     }
 
     pub(crate) fn capture_portable_units(&self, lease: &str, destination: &Connection, probe: &dyn CancellationProbe) -> StoreResult<super::external_capture::BackupDependencyInventory> {
@@ -465,6 +463,14 @@ impl PersistentStore {
             }
             if digest_tables(&transaction, Some(&stage.staging_id), probe)? != expected {
                 return Err(invalid("portable staging changed raw SQL values"));
+            }
+            let conversations = transaction
+                .prepare("SELECT character_id,conversation_id FROM conversations WHERE generation=?1")?
+                .query_map([&stage.staging_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for (character, conversation) in conversations {
+                cancelled(probe)?;
+                super::commit::page_staged_conversation(&transaction, &stage.staging_id, &character, &conversation)?;
             }
             cancelled(probe)?;
             transaction.commit()?;

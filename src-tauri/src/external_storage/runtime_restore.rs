@@ -123,10 +123,11 @@ fn confirm_restore_adoption_in_store(store:&PersistentStore,root:&Path,request:&
 fn require_activated_target(store:&PersistentStore,job:&DurableJob,revision:i64)->Result<()> {
     let intent:RestoreCommitIntent=serde_json::from_value(job.summary["restoreCommit"].clone()).map_err(|_|corrupt())?;
     let identity=store.external_identity().map_err(pds_error)?;
+    let activated=store.lww_activated_receipt(&intent.header.request_id).map_err(pds_error)?;
     if identity.store_id!=job.admission_identity.store_id
         || identity.library_epoch!=job.admission_identity.library_epoch
         || identity.selection_epoch!=job.admission_identity.selection_epoch
-        || identity.generation!=format!("revision-{revision}")
+        || activated.is_none_or(|(activated_revision,generation)|activated_revision!=revision || generation!=identity.generation)
         || store.lww_binding_authority().map_err(pds_error)?!=intent.header.binding_authority {
         return Err(ProviderError::new(ErrorKind::PreconditionFailed));
     }
@@ -152,6 +153,82 @@ pub(crate) fn external_storage_confirm_restore_adoption(app:AppHandle,request:Re
 
 pub(crate) fn application_started(job: &DurableJob) -> bool {
     job.request.kind == JobKind::Restore && job.summary["applicationStarted"] == true
+}
+
+/// Whether the restore that began a CAS journal can no longer use it. A restore
+/// of this process that has not finished keeps it. One left by an earlier run
+/// keeps it only while running the same restore again can still finish it.
+pub(crate) fn restore_journal_owner_ended(
+    root: &Path,
+    job_id: &str,
+    started_in_this_process: bool,
+    open_store: &dyn Fn() -> std::result::Result<PersistentStore, String>,
+) -> std::result::Result<bool, String> {
+    let job = match JobStore::open(root).and_then(|jobs| jobs.read(job_id)) {
+        Ok(job) => job,
+        Err(error) if error.kind == ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error.to_string()),
+    };
+    if job.request.kind != JobKind::Restore || job.terminal() {
+        return Ok(true);
+    }
+    if started_in_this_process {
+        return Ok(false);
+    }
+    // Before application a resumed restore pins what it needs again.
+    if !application_started(&job) {
+        return Ok(true);
+    }
+    match ConnectionStore::open(root).and_then(|connections| connections.read(&job.request.connection_id)) {
+        Ok(_) => {}
+        Err(error) if error.kind == ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error.to_string()),
+    }
+    let store = open_store()?;
+    let Some(receipt) = completed_restore_in_store(&store, &job).map_err(|error| error.to_string())? else {
+        return Ok(false);
+    };
+    let revision = receipt["receivedRevision"].as_str().and_then(|value| value.parse::<i64>().ok())
+        .ok_or_else(|| corrupt().to_string())?;
+    match require_activated_target(&store, &job, revision) {
+        Ok(()) => Ok(false),
+        Err(error) if error.kind == ErrorKind::PreconditionFailed => Ok(true),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Whether a person stopped this restore after its local application could
+/// not be confirmed, which ends it as it is.
+pub(crate) fn restore_stopped(job: &DurableJob) -> bool {
+    job.terminal() && job.summary["restoreStopped"] == true
+}
+
+/// Ends a restore whose local application could not be confirmed. The library
+/// stays as it is, and the files the restore still held are released.
+pub(crate) fn stop_restore(root: &Path, job_id: &str) -> Result<DurableJob> {
+    let jobs = JobStore::open(root)?;
+    let mut job = jobs.read(job_id)?;
+    if !application_started(&job) || job.summary["state"] != "uncertain" {
+        return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+    }
+    job.summary["state"] = json!("failed");
+    job.summary["phase"] = json!("paused");
+    job.summary["restoreStopped"] = json!(true);
+    job.summary.as_object_mut().ok_or_else(corrupt)?.remove("result");
+    job.summary["error"] = runtime::error_dto(&ProviderError::new(ErrorKind::Cancelled));
+    job.summary["updatedAtMs"] = json!(runtime::now_ms().to_string());
+    jobs.put(&job)?;
+    // A failed release leaves a journal whose restore has ended, which the
+    // next page start releases.
+    match crate::asset_repository::job_pins::DurableCasJob::open(root, job_id) {
+        Ok(mut pins) => pins
+            .release(crate::asset_repository::job_pins::CasReleaseOutcome::Aborted)
+            .map_err(runtime::local_error)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(runtime::local_error(error)),
+    }
+    discard_finished_staging(root, &job);
+    Ok(job)
 }
 
 #[cfg(test)]
@@ -420,7 +497,7 @@ pub(crate) async fn run_restore(
 
 fn restore_pins(root:&Path,id:&str)->Result<crate::asset_repository::job_pins::DurableCasJob> {
     use crate::asset_repository::job_pins::{DurableCasJob,CasJobKind};
-    let pins=match DurableCasJob::begin(root,id,CasJobKind::LocalBackupRestore,runtime::now_ms() as i64) {
+    let pins=match DurableCasJob::begin(root,id,CasJobKind::LocalBackupRestore,crate::asset_repository::job_pins::CasJobOwner::external_restore(id),runtime::now_ms() as i64) {
         Ok(pins)=>pins,
         Err(error) if error.kind()==std::io::ErrorKind::AlreadyExists=>DurableCasJob::open(root,id).map_err(runtime::local_error)?,
         Err(error)=>return Err(runtime::local_error(error)),
@@ -464,8 +541,9 @@ async fn receive_restore_bodies_in_store(mut store:PersistentStore,root:&Path,co
         None=>BTreeSet::new(),
     };
     let mut after=String::new();let mut sources=Vec::new();
+    let mut interner=super::lww_residency::ObjectInterner::default();
     loop {
-        let page=jobs.restore_body_page(&job.id,&after)?;
+        let page=jobs.restore_body_page(&job.id,&after,&mut interner)?;
         if page.is_empty() {break;}
         for source in page {after=source.hash.clone();sources.push(source);}
     }
@@ -509,7 +587,7 @@ async fn receive_restore_bodies_in_store(mut store:PersistentStore,root:&Path,co
 }
 
 async fn receive_restore_body(mut store:PersistentStore,root:&Path,connected:&ConnectedRepository,job:&DurableJob,revision:i64,
-    source:&super::lww_residency::PackedSource,path:Option<std::path::PathBuf>,cancel:&Cancellation)->Result<PersistentStore> {
+    source:&super::lww_residency::SharedPackedSource,path:Option<std::path::PathBuf>,cancel:&Cancellation)->Result<PersistentStore> {
     cancel.check()?;
     require_activated_target(&store,job,revision)?;
     super::lww_residency::validate_packed_source(source,&connected.handle)?;
@@ -604,7 +682,7 @@ fn prepare_local_restore(
     selection: RestoreSelection,
     sections: Vec<super::sections::CapturedSection>,
     cancel: Cancellation,
-    sources:Vec<super::lww_residency::PackedSource>,
+    sources:Vec<super::lww_residency::SharedPackedSource>,
     present:BTreeSet<String>,
     permit:crate::native_file_jobs::admission::Permit,
 ) -> Result<(Value,crate::native_file_jobs::admission::Permit)> {
@@ -623,7 +701,7 @@ fn prepare_local_restore_in_store(
     selection: RestoreSelection,
     sections: Vec<super::sections::CapturedSection>,
     cancel: Cancellation,
-    sources:Vec<super::lww_residency::PackedSource>,
+    sources:Vec<super::lww_residency::SharedPackedSource>,
     present:BTreeSet<String>,
     mut permit:crate::native_file_jobs::admission::Permit,
 ) -> Result<(Value,crate::native_file_jobs::admission::Permit)> {
@@ -1004,5 +1082,159 @@ mod tests {
         assert!(matches!(completed_restore_in_store(&store,&different),Err(ProviderError{kind:ErrorKind::Corrupt,..})));
         store.set_app_kv(&format!("external-restore-commit:{}",job.id),&json!({"receivedRevision":"999"})).unwrap();
         assert!(completed_restore_in_store(&store,&job).unwrap().is_none());
+    }
+
+    fn synthetic_connection(repository:&super::super::contract::RepositoryHandle) -> super::super::connection_store::StoredConnection {
+        use super::super::{contract::{ConnectionConfig,RemoteLocator},fake};
+        super::super::connection_store::StoredConnection {
+            id:"synthetic-connection".into(),
+            config:ConnectionConfig{provider:"synthetic".into(),profile:None,endpoint:"https://synthetic.invalid".into(),
+                account_id:"account".into(),location:Default::default(),oauth_profile:None},
+            descriptor:risunest_external_storage_format::format::Descriptor::new("format-repository".into(),
+                Some(risunest_external_storage_format::format::Strategy::Cas)).unwrap(),
+            descriptor_locator:RemoteLocator{connection_identity:repository.connection_identity.clone(),collection:None,object:"descriptor".into()},
+            provider_repository_id:repository.repository_id.clone(),credential_ref:"credential".into(),root_key_ref:"key".into(),
+            recovery_key_ref:"recovery".into(),retention_policy:None,capabilities:fake::capabilities(true),
+            created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
+        }
+    }
+
+    fn sweep_journals(store:&PersistentStore) {
+        let native_jobs=|| -> std::result::Result<Vec<crate::native_file_jobs::JobStatus>,String> {Ok(Vec::new())};
+        let open_store=|| store.open_native_job_store().map_err(|error| error.to_string());
+        crate::asset_repository::commands::DurableCasJobState::default().sweep_after_page_start(store.repository_root(),
+            &crate::asset_repository::commands::CasJobOwnerProbe{native_jobs:&native_jobs,device_session_active:false,open_store:&open_store}).unwrap();
+    }
+
+    #[test]
+    fn a_restore_journal_outlives_a_restart_only_while_the_restore_can_still_finish() {
+        let directory=tempfile::tempdir().unwrap();
+        let root=directory.path();
+        let mut store=PersistentStore::open(root).unwrap();
+        let open_store=|| PersistentStore::open(root).map_err(|error| error.to_string());
+        let ended=|id:&str,here:bool| restore_journal_owner_ended(root,id,here,&open_store).unwrap();
+        let input=serde_json::from_value(json!({"connectionId":"synthetic-connection","kind":"restore","snapshotId":"synthetic-snapshot","targetRevision":"0"})).unwrap();
+        let job=DurableJob::new(input,1,store.external_identity().unwrap());
+        assert!(ended(&job.id,true));
+        assert!(ended(&job.id,false));
+        JobStore::open(root).unwrap().put(&job).unwrap();
+        assert!(!ended(&job.id,true));
+        assert!(ended(&job.id,false));
+        mark_application_started(root,&job).unwrap();
+        assert!(ended(&job.id,false));
+        ConnectionStore::open(root).unwrap().insert(&synthetic_connection(&super::super::fake::repository())).unwrap();
+        assert!(!ended(&job.id,false));
+        commit_fixture(&mut store,root,&job);
+        assert!(!ended(&job.id,false));
+        let stage=store.replace_begin().unwrap();
+        store.replace_put_root(&stage.staging_id,&json!({"language":"synthetic later replacement"})).unwrap();
+        store.replace_commit(&stage.staging_id,Some(1)).unwrap();
+        assert!(ended(&job.id,false));
+        assert!(!ended(&job.id,true));
+        let jobs=JobStore::open(root).unwrap();
+        let mut failed=jobs.read(&job.id).unwrap();
+        failed.summary["state"]=json!("failed");
+        jobs.put(&failed).unwrap();
+        assert!(ended(&job.id,true));
+    }
+
+    #[test]
+    fn stopping_an_unfinished_restore_ends_it_and_keeps_the_library() {
+        use crate::asset_repository::job_pins::durable_cas_job_ids;
+        let directory=tempfile::tempdir().unwrap();
+        let root=directory.path();
+        let mut store=PersistentStore::open(root).unwrap();
+        let input=serde_json::from_value(json!({"connectionId":"synthetic-connection","kind":"restore","snapshotId":"synthetic-snapshot","targetRevision":"0"})).unwrap();
+        let job=DurableJob::new(input,1,store.external_identity().unwrap());
+        assert_eq!(stop_restore(root,&job.id).err().unwrap().kind,ErrorKind::NotFound);
+        commit_fixture(&mut store,root,&job);
+        assert_eq!(stop_restore(root,&job.id).err().unwrap().kind,ErrorKind::PreconditionFailed);
+        let jobs=JobStore::open(root).unwrap();
+        let mut unfinished=jobs.read(&job.id).unwrap();
+        unfinished.summary["state"]=json!("uncertain");
+        unfinished.summary["phase"]=json!("local-apply-unknown");
+        jobs.put(&unfinished).unwrap();
+        let cas=crate::asset_repository::PayloadCas::new(root).unwrap();
+        let received=cas.prepare_bytes(b"synthetic restored body").unwrap();
+        let mut pins=restore_pins(root,&job.id).unwrap();
+        pins.pin_existing(&cas,&received.content_hash,received.byte_size,crate::asset_repository::job_pins::CasObjectRole::DirectObject).unwrap();
+        drop(pins);
+        assert!(store.asset_residency_status().is_err());
+        let revision=store.revision().unwrap();
+        let library=store.read_root(None).unwrap().value;
+
+        let stopped=stop_restore(root,&job.id).unwrap();
+
+        assert_eq!(stopped.summary["state"],"failed");
+        assert!(restore_stopped(&stopped));
+        assert_eq!(jobs.read(&job.id).unwrap().summary,stopped.summary);
+        assert!(durable_cas_job_ids(root).unwrap().is_empty());
+        assert!(store.asset_residency_status().is_ok());
+        assert_eq!(store.revision().unwrap(),revision);
+        assert_eq!(store.read_root(None).unwrap().value,library);
+        assert_eq!(stop_restore(root,&job.id).err().unwrap().kind,ErrorKind::PreconditionFailed);
+    }
+
+    #[test]
+    fn a_page_reload_during_a_restore_keeps_its_journal_until_the_restore_settles() {
+        use super::super::{fake,journal::{JobIdentity,TransferJournal},packaging,phase_progress::PhaseProgress};
+        use crate::asset_repository::job_pins::durable_cas_job_ids;
+        use std::sync::Arc;
+        let source_root=tempfile::tempdir().unwrap();
+        let mut source=PersistentStore::open(source_root.path()).unwrap();
+        let asset=crate::server_sync::lww_tests::put_asset(&mut source,"assets/synthetic-restore.bin",&[57;4096]).object_hash.unwrap();
+        let probe=runtime::CancelProbe(Cancellation::default());
+        let hydration=source.hydrate_external_capture_dependencies("sender",&probe).unwrap();
+        let (lease,prepared)=source.lww_acquire_backup_capture(source.revision().unwrap()).unwrap();
+        let sections=super::super::sections::capture_prepared_backup_sections(&prepared,&source_root.path().join("backup-sections"),&probe.0).unwrap();
+        let capture=source.capture_external_library_from_lease_with_sections("sender",&hydration,&lease.lease,sections,&probe).unwrap();
+        let sections=capture.catalog.backup_sections().unwrap();
+        let original_units=capture.catalog.original_backup_units().unwrap();
+        let repository=fake::repository();
+        let connected=ConnectedRepository {
+            stored:synthetic_connection(&repository),provider:Arc::new(fake::FakeProvider::new(false)),handle:repository,
+            dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new([21;32]),
+        };
+        let backup_id=uuid::Uuid::new_v4().to_string();
+        let work=tempfile::tempdir().unwrap();
+        let mut transfer=TransferJournal::open(&work.path().join("backup-journal"),JobIdentity {
+            job_id:backup_id.clone(),connection_id:connected.stored.id.clone(),repository_id:connected.handle.repository_id.clone(),
+            capture_id:capture.id.clone(),capture:capture.identity.clone(),
+        }).unwrap();
+        let metadata=packaging::SnapshotMetadata {
+            snapshot_id:backup_id.clone(),repository_id:connected.stored.descriptor.repository_id.clone(),
+            library_id:capture.identity.library_epoch.clone(),author_device_id:capture.identity.store_id.clone(),
+            created_at_ms:runtime::now_ms(),logical_revision:capture.identity.revision as u64,parent_snapshot_id:None,
+            content_fingerprint:capture.catalog.content_fingerprint(&risunest_external_storage_format::format::library_fingerprint_domain()).unwrap(),
+            purpose:packaging::SnapshotPurpose::BackupBundle {
+                source:risunest_external_storage_format::control::BundleSource::Device{writer_id:source.lww_clock_state().unwrap().writer_id},
+                remote_generation:None,original_units,
+            },
+        };
+        let destination=tempfile::tempdir().unwrap();
+        let root=destination.path();
+        let mut store=PersistentStore::open(root).unwrap();
+        ConnectionStore::open(root).unwrap().insert(&connected.stored).unwrap();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let backup=packaging::package_and_upload(capture,sections,source_root.path(),&work.path().join("cache"),metadata,
+                &connected.root_key,packaging::PackageLimits::from_capabilities(&connected.stored.capabilities).unwrap(),None,&mut transfer,
+                connected.provider.as_ref(),&connected.handle,&PhaseProgress::silent(),&Cancellation::default()).await.unwrap();
+            let request=serde_json::from_value(json!({"connectionId":"synthetic-connection","kind":"restore","snapshotId":backup_id,"targetRevision":"0"})).unwrap();
+            let mut job=DurableJob::new(request,1,store.external_identity().unwrap());
+            job.summary["restoreSource"]=serde_json::to_value(backup.reference.stored(&connected.handle).unwrap()).unwrap();
+            JobStore::open(root).unwrap().put(&job).unwrap();
+            let (database,sections)=prepare_database_first_backup(root,&connected,&job,&Cancellation::default()).await.unwrap();
+            let admission=Arc::new(crate::native_file_jobs::admission::Admission::default());
+            let state=PersistentStoreState::default();
+            let (receipt,permit)=activate_database_first_backup(&mut store,&state,&job,database,sections,Cancellation::default(),admission.staging().unwrap()).unwrap();
+            assert_eq!(durable_cas_job_ids(root).unwrap(),[job.id.clone()]);
+            sweep_journals(&store);
+            assert_eq!(durable_cas_job_ids(root).unwrap(),[job.id.clone()]);
+            let adoption=RestoreAdoptionRequest{job_id:job.id.clone(),received_revision:receipt["receivedRevision"].as_str().unwrap().into(),selected_character_id:None};
+            settle_database_first_backup(store,&connected,&job,adoption,&mut Some(permit),&Cancellation::default()).await.unwrap();
+        });
+        assert!(durable_cas_job_ids(root).unwrap().is_empty());
+        assert!(crate::asset_repository::PayloadCas::new(root).unwrap().stat_object(&asset).unwrap().is_some());
+        assert!(PersistentStore::open(root).unwrap().asset_residency_status().is_ok());
     }
 }

@@ -5,7 +5,6 @@ use super::{
     contract::*,
     job_store::{DurableJob, JobCommandState, JobKind, JobStore, Session, StartJobRequest},
     leases,
-    publication::PublicationMode,
 };
 use crate::persistent_store::{
     self,
@@ -58,13 +57,13 @@ pub(crate) fn selection_dto(selection: Selection) -> Value {
         SyncTarget::Server(id) => ("server", Some(id)),
         SyncTarget::External(id) => ("external", Some(id)),
     };
-    let mut dto = json!({"kind":kind,"selectionEpoch":selection.epoch,"paused":selection.paused,"decisionRequired":selection.decision_required});
+    let mut dto = json!({"kind":kind,"selectionEpoch":selection.epoch,"paused":selection.paused});
     if let Some(id) = id {
         dto["connectionId"] = json!(id);
     }
     dto
 }
-fn require_session(request: &StartJobRequest, current: &Session) -> Result<PublicationMode> {
+fn require_session(request: &StartJobRequest, current: &Session) -> Result<()> {
     let manual = request.reason.as_deref().unwrap_or("manual") == "manual";
     if current.id.is_empty() || current.kind == "hidden" {
         return Err(ProviderError::new(ErrorKind::Cancelled));
@@ -76,13 +75,12 @@ fn require_session(request: &StartJobRequest, current: &Session) -> Result<Publi
             return Err(ProviderError::new(ErrorKind::Cancelled));
         }
     }
-    match current.kind.as_str() {
-        "foreground" => Ok(PublicationMode::Foreground),
-        "exitDrain" => Ok(PublicationMode::ExitDrain),
-        _ => Err(ProviderError::new(ErrorKind::Cancelled)),
+    if current.kind != "foreground" {
+        return Err(ProviderError::new(ErrorKind::Cancelled));
     }
+    Ok(())
 }
-pub(crate) fn read_job_session(app: &AppHandle, id: &str) -> Result<PublicationMode> {
+pub(crate) fn read_job_session(app: &AppHandle, id: &str) -> Result<()> {
     let job = JobStore::open(&root(app)?)?.read(id)?;
     let state = app.state::<JobCommandState>();
     let current = state.session.lock().map_err(local_error)?;
@@ -114,7 +112,7 @@ pub(crate) fn external_storage_set_execution_session(
     request: SetSessionRequest,
 ) -> Result<()> {
     logged("external_storage_set_execution_session", (|| {
-        if !["foreground", "hidden", "exitDrain"].contains(&request.kind.as_str())
+        if !["foreground", "hidden"].contains(&request.kind.as_str())
             || request.id.is_empty()
             || request.id.len() > 1024
         {
@@ -122,9 +120,6 @@ pub(crate) fn external_storage_set_execution_session(
         }
         let state = app.state::<JobCommandState>();
         let mut session = state.session.lock().map_err(local_error)?;
-        if session.kind == "exitDrain" && request.kind == "hidden" {
-            return Ok(());
-        }
         let hidden = request.kind == "hidden";
         *session = Session {
             kind: request.kind,
@@ -354,6 +349,24 @@ pub(crate) async fn external_storage_cancel_job(app: AppHandle, job_id: String) 
         }
         super::runtime_restore::discard_finished_staging(&root(&app)?, &job);
         Ok(job.summary)
+    }.await)
+}
+#[tauri::command]
+pub(crate) async fn external_storage_stop_restore(app: AppHandle, job_id: String) -> Result<Value> {
+    logged("external_storage_stop_restore", async move {
+        let root = root(&app)?;
+        let store = JobStore::open(&root)?;
+        // A restore that is running again continues instead of stopping, and
+        // the claim keeps a worker from starting it while it stops.
+        let (_, _claim) = app.state::<JobCommandState>().claim(&store.read(&job_id)?)?;
+        let _permit = app.state::<crate::native_file_jobs::NativeFileJobState>()
+            .admission.file(false).map_err(local_error)?;
+        // A restore found applied stays applied even when recording that failed.
+        if reconcile_stopped_job(&app, store.read(&job_id)?)?.summary["state"] != "uncertain" {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        let job = super::runtime_restore::stop_restore(&root, &job_id)?;
+        Ok(job_summary(&root, job))
     }.await)
 }
 #[tauri::command]
@@ -661,7 +674,7 @@ fn settle_invalidated(job: &mut DurableJob, phase: &str) {
 }
 
 fn settle_local_restore_recovery(job: &mut DurableJob) -> bool {
-    if !super::runtime_restore::application_started(job) { return false; }
+    if !super::runtime_restore::application_started(job) || super::runtime_restore::restore_stopped(job) { return false; }
     job.summary["state"] = json!("uncertain");
     job.summary["phase"] = json!("local-apply-unknown");
     job.summary.as_object_mut().unwrap().remove("result");
@@ -685,9 +698,7 @@ fn settle_interrupted(job: &mut DurableJob, complete: Option<Value>, uncertain: 
         } else {
             "paused"
         });
-        let decision = uncertain && job.summary["result"]["decisionRequired"] == true
-            && job.summary["result"]["reason"] == "publication-unknown";
-        if !decision { job.summary.as_object_mut().unwrap().remove("result"); }
+        job.summary.as_object_mut().unwrap().remove("result");
         job.summary["error"] = error_dto(&ProviderError::new(ErrorKind::Transient));
         if uncertain {
             job.summary["error"]["reason"] = json!("publication-unknown");
@@ -999,8 +1010,8 @@ pub(crate) fn spool_budget(root: &std::path::Path, job_id: &str) -> super::journ
 }
 
 /// Sealed ciphertext the other unfinished jobs are holding. A job that would
-/// add to a budget somebody else already owns waits for it instead; nothing
-/// here removes what another job may still need.
+/// not find room for the packs of its first wave waits for it instead of
+/// starting; nothing here removes what another job may still need.
 fn spool_budget_owner(
     root: &std::path::Path,
     store: &JobStore,
@@ -1022,7 +1033,8 @@ fn spool_budget_owner(
             owner = Some((other.id.clone(), held));
         }
     }
-    if total < super::journal::TRANSFER_SPOOL_BUDGET {
+    let headroom = super::packaging::producing_job_spool_headroom()?;
+    if total.saturating_add(headroom) <= super::journal::TRANSFER_SPOOL_BUDGET {
         return Ok(None);
     }
     Ok(owner)
@@ -1344,18 +1356,12 @@ fn record_check_progress(
     store.put(&job)
 }
 /// Whether a publication that is already required may also spend the optional
-/// maintenance portion. A drain has to finish instead, and a daily allowance
-/// with less headroom than the portion can spend is not spent on it.
+/// maintenance portion. A daily allowance with less headroom than the portion
+/// can spend is not spent on it.
 pub(crate) fn maintenance_allowed(
     app: &AppHandle,
     connected: &super::connection_commands::ConnectedRepository,
-    job: &DurableJob,
 ) -> bool {
-    if job.request.session.as_deref() == Some("exitDrain")
-        || job.request.reason.as_deref() == Some("exitDrain")
-    {
-        return false;
-    }
     let Ok(budget) = super::connection_commands::budget(app) else {
         return false;
     };
@@ -1517,7 +1523,7 @@ async fn run_backup(
         metadata,
         &connected.root_key,
         PackageLimits::from_capabilities(&connected.stored.capabilities)?
-            .with_maintenance(maintenance_allowed(app, connected, job)),
+            .with_maintenance(maintenance_allowed(app, connected)),
         None,
         &mut journal,
         connected.provider.as_ref(),
@@ -1675,13 +1681,15 @@ pub(crate) async fn external_storage_get_quota(
 mod tests {
     use super::*;
     #[test]
-    fn stopped_unknown_reconciliation_preserves_the_exhausted_head_decision() {
+    fn stopped_unknown_reconciliation_drops_the_stale_result_until_it_completes() {
         let mut job=automatic_job();
-        job.summary["result"]=json!({"stopReason":"uncertain","reason":"publication-unknown","decisionRequired":true});
+        job.summary["result"]=json!({"stopReason":"uncertain","reason":"publication-unknown"});
         settle_interrupted(&mut job,None,true);
-        assert_eq!(job.summary["result"]["decisionRequired"],true);
+        assert!(job.summary["result"].is_null());
+        assert_eq!(job.summary["state"],"uncertain");
+        assert_eq!(job.summary["error"]["reason"],"publication-unknown");
         settle_interrupted(&mut job,Some(json!({"publishedRevision":"1"})),false);
-        assert!(job.summary["result"]["decisionRequired"].is_null());
+        assert_eq!(job.summary["result"]["publishedRevision"],"1");
         assert_eq!(job.summary["state"],"succeeded");
     }
 
@@ -1795,6 +1803,8 @@ mod tests {
     /// releases it.
     #[test]
     fn a_producing_job_waits_for_the_spool_another_job_still_holds() {
+        use super::super::journal::TRANSFER_SPOOL_BUDGET;
+        let full = TRANSFER_SPOOL_BUDGET - super::super::packaging::producing_job_spool_headroom().unwrap() + 1;
         let root = tempfile::tempdir().unwrap();
         let store = JobStore::open(root.path()).unwrap();
         let mut holder = automatic_job();
@@ -1806,12 +1816,12 @@ mod tests {
         let directory = job_directory(root.path(), &holder.request.connection_id, &holder.id);
         std::fs::create_dir_all(&directory).unwrap();
         let held = std::fs::File::create(directory.join("held.spool")).unwrap();
-        held.set_len(super::super::journal::TRANSFER_SPOOL_BUDGET - 1).unwrap();
+        held.set_len(full - 1).unwrap();
         assert!(spool_budget_owner(root.path(), &store, &waiting).unwrap().is_none());
-        held.set_len(super::super::journal::TRANSFER_SPOOL_BUDGET).unwrap();
+        held.set_len(full).unwrap();
         assert_eq!(
             spool_budget_owner(root.path(), &store, &waiting).unwrap(),
-            Some((holder.id.clone(), super::super::journal::TRANSFER_SPOOL_BUDGET)),
+            Some((holder.id.clone(), full)),
         );
         assert!(spool_budget_owner(root.path(), &store, &holder).unwrap().is_none());
         holder.summary["state"] = json!("failed");
@@ -1821,6 +1831,63 @@ mod tests {
         store.put(&holder).unwrap();
         assert!(spool_budget_owner(root.path(), &store, &waiting).unwrap().is_none());
     }
+    /// A producing job starts only when the spool the other jobs hold leaves
+    /// room for every pack its first wave seals, so a full spool makes it wait
+    /// before it starts instead of refusing it partway through.
+    #[test]
+    fn a_producing_job_waits_to_start_until_its_first_wave_fits() {
+        use super::super::journal::{SpoolBudget, TRANSFER_SPOOL_BUDGET};
+        use super::super::packaging::{producing_job_spool_headroom, MAX_PACK_PLAINTEXT_BYTES};
+        use risunest_external_storage_format::snapshot as wire;
+        let headroom = producing_job_spool_headroom().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let store = JobStore::open(root.path()).unwrap();
+        let mut holder = automatic_job();
+        holder.request.connection_id = "holding-connection".into();
+        holder.summary["connectionId"] = json!("holding-connection");
+        store.put(&holder).unwrap();
+        let starting = automatic_job();
+        store.put(&starting).unwrap();
+        let directory = job_directory(root.path(), &holder.request.connection_id, &holder.id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let held = std::fs::File::create(directory.join("held.spool")).unwrap();
+
+        held.set_len(TRANSFER_SPOOL_BUDGET - headroom + 1).unwrap();
+        assert_eq!(
+            spool_budget_owner(root.path(), &store, &starting).unwrap(),
+            Some((holder.id.clone(), TRANSFER_SPOOL_BUDGET - headroom + 1)),
+        );
+        held.set_len(TRANSFER_SPOOL_BUDGET - headroom).unwrap();
+        assert!(spool_budget_owner(root.path(), &store, &starting).unwrap().is_none());
+
+        // The job that started seals its largest packs with the room sealing
+        // asks for, and every one of them is admitted.
+        let retaining = vec![
+            (holder.id.clone(), directory.clone()),
+            (starting.id.clone(), job_directory(root.path(), &starting.request.connection_id, &starting.id)),
+        ];
+        let budget = SpoolBudget::new(starting.id.clone(), move || Ok(retaining.clone()))
+            .with_limit(TRANSFER_SPOOL_BUDGET);
+        let largest_pack = wire::envelope_length(
+            &wire::PublicObjectHeader::new(
+                "r".repeat(128),
+                format!("pack-{}", "0".repeat(64)),
+                wire::ObjectRole::Pack,
+                MAX_PACK_PLAINTEXT_BYTES,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut admitted = Vec::new();
+        for waiting in 0..super::super::journal::ACTIVE_PACK_FAMILIES {
+            let room = budget
+                .try_reserve(largest_pack + super::super::control::inventory_page_headroom(waiting + 1))
+                .unwrap()
+                .unwrap_or_else(|| panic!("pack {waiting} of the first wave was refused"));
+            admitted.push(room);
+        }
+    }
+
     /// A13. The transfer spool is an app-wide budget, so what every unfinished
     /// job holds counts together, whatever connection it belongs to and
     /// whether it is working or waiting for its turn. A job's own spool is not
@@ -1891,6 +1958,18 @@ mod tests {
         assert_eq!(job.summary["state"], "succeeded");
         assert_eq!(job.summary["result"]["receivedRevision"], "2");
         assert!(job.summary.get("error").is_none());
+    }
+
+    #[test]
+    fn a_stopped_restore_stays_failed_when_it_is_reconciled() {
+        let mut job = automatic_job();
+        job.request.kind = JobKind::Restore;
+        job.summary["applicationStarted"] = json!(true);
+        job.summary["state"] = json!("failed");
+        job.summary["restoreStopped"] = json!(true);
+        assert!(!settle_local_restore_recovery(&mut job));
+        assert_eq!(job.summary["state"], "failed");
+        assert!(job.terminal());
     }
 
     #[test]
@@ -1982,17 +2061,14 @@ mod tests {
         request.reason = Some("manual".into());
         request.session = None;
         request.session_id = None;
-        assert_eq!(
-            require_session(
-                &request,
-                &Session {
-                    kind: "foreground".into(),
-                    id: "new".into()
-                }
-            )
-            .unwrap(),
-            PublicationMode::Foreground
-        );
+        assert!(require_session(
+            &request,
+            &Session {
+                kind: "foreground".into(),
+                id: "new".into()
+            }
+        )
+        .is_ok());
         assert!(require_session(
             &request,
             &Session {

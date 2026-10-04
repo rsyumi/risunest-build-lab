@@ -1508,5 +1508,12 @@ export const languageChinese = {
         restoreDescription: "将清除当前数据并恢复所选备份。如需备份，请手动备份。",
         restoreAcknowledge: "清除当前数据",
         restoreAction: "恢复",
+        previousFilesTitle: "是否连接？",
+        previousFilesDescription: "有些文件仅保存在之前使用的服务器或外部存储中。连接后也会将这些文件保存到新的目标。如需同时保留在此设备上，请选择“下载后连接”。",
+        downloadThenConnect: "下载后连接",
+        downloadFailedNotConnected: "无法下载文件，因此未进行连接。请重试，或不下载直接连接。",
+        previousStorageUnavailable: "无法获取仅保存在之前使用的服务器或外部存储中的文件，同步已停止。请在可以访问时重试。",
+        registrationRevoked: "此设备在服务器上的注册已被移除，无法同步。请在服务器上重新注册此设备，然后输入新的注册码。",
+        bindingIncomplete: "连接未完成。请按 Connect and sync 完成连接。",
     },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>;
