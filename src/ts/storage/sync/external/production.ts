@@ -345,6 +345,18 @@ async function readBackgroundJob(id: string, background: MobileBackgroundTask): 
     return background.signal?.aborted ? bridge.cancelJob(id) : bridge.getJob(id)
 }
 
+/** Ends a restore whose local application could not be confirmed and keeps the library as it is. */
+export async function stopExternalStorageRestore(jobId: string): Promise<ExternalJobSummary> {
+    const stopped = await getExternalStorageBridge().stopRestore(jobId)
+    const current = runtime
+    if (current) {
+        const state = await getExternalStorageBridge().getState()
+        current.state = state
+        current.controller.replaceState(state)
+    }
+    return stopped
+}
+
 function restoreFailure(job: ExternalJobSummary): Error {
     const error = new Error(job.error?.message ?? 'External storage restore failed')
     error.name = job.error?.code ?? 'ExternalStorageRestoreError'
@@ -434,7 +446,8 @@ export async function requestExternalStorageRestore(
                             continue
                         }
                         if (job.state === 'succeeded') throw new Error('External restore has no commit receipt')
-                        if (['failed', 'cancelled'].includes(job.state) && job.applicationStarted !== true) {
+                        if (['failed', 'cancelled'].includes(job.state)
+                            && (job.applicationStarted !== true || job.restoreStopped === true)) {
                             return { kind: 'not-applied', error: restoreFailure(job) }
                         }
                         if (['failed', 'cancelled', 'uncertain', 'conflict'].includes(job.state)) {
@@ -503,7 +516,6 @@ export interface ExternalExitSelectionCapture {
         connectionId?: string
         selectionEpoch: string
         paused: boolean
-        decisionRequired: boolean
     }
 }
 

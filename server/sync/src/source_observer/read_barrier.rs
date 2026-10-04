@@ -357,6 +357,7 @@ impl Drop for Wait {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "runs in the observer child process"]
     fn expired_release_cancels_actual_waiter_without_resuming_body_read() {
         let _reset = super::super::tests::Reset::new();
         let root = tempfile::tempdir().unwrap();

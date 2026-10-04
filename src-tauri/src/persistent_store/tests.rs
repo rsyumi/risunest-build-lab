@@ -122,6 +122,8 @@ fn stage_root(store: &mut PersistentStore, username: &str) -> String {
     staging.staging_id
 }
 
+#[path = "tests/activation_golden_tests.rs"]
+mod activation_golden_tests;
 #[path = "tests/archive_tests.rs"]
 mod archive_tests;
 #[path = "tests/asset_alias_tests.rs"]
@@ -138,6 +140,8 @@ mod display_name_tests;
 mod external_content_gc_tests;
 #[path = "tests/external_storage_tests.rs"]
 mod external_storage_tests;
+#[path = "tests/generation_state_tests.rs"]
+mod generation_state_tests;
 #[path = "tests/plugin_owner_tests.rs"]
 mod plugin_owner_tests;
 #[path = "tests/replacement_tests.rs"]

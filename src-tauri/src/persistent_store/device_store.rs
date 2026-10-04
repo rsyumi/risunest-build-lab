@@ -149,16 +149,6 @@ CREATE TABLE device_change_consumers(
   PRIMARY KEY (id, section)
 );
 
-CREATE TABLE device_remote_cursors(
-  connection_id TEXT NOT NULL,
-  library_lineage TEXT NOT NULL,
-  section TEXT NOT NULL,
-  applied_generation TEXT NOT NULL,
-  applied_gc_floor TEXT NOT NULL,
-  observed_max_write_clock TEXT NOT NULL,
-  PRIMARY KEY (connection_id, library_lineage, section)
-);
-
 CREATE TABLE plugin_claim_sessions(
   session_id TEXT PRIMARY KEY,
   import_batch_id TEXT NOT NULL,
@@ -270,6 +260,17 @@ fn check_setting_key(key: &str) -> StoreResult<()> {
     }
 }
 
+/// A backed-up setting travels as one section object, so it may not outgrow
+/// one.
+fn check_setting_size(key: &str, serialized: &str) -> StoreResult<()> {
+    if sections::LOCAL_SETTING_KEYS.contains(&key)
+        && serialized.len() > risunest_external_storage_format::section::MAX_SECTION_OBJECT_BYTES
+    {
+        return Err(invalid("device setting value is too large"));
+    }
+    Ok(())
+}
+
 fn sequence(value: &str) -> StoreResult<Sequence> {
     Sequence::try_from(value.to_owned()).map_err(|_| invalid("device write clock is invalid"))
 }
@@ -351,6 +352,7 @@ impl DeviceStore {
         check_setting_key(key)?;
         let serialized = serde_json::to_string(value)
             .map_err(|_| invalid("device setting value is not encodable"))?;
+        check_setting_size(key, &serialized)?;
         self.connection.execute(
             "INSERT INTO device_settings (key,value) VALUES (?1,?2)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -401,6 +403,7 @@ impl DeviceStore {
         }
         let serialized = serde_json::to_string(&Value::Object(object))
             .map_err(|_| invalid("device setting value is not encodable"))?;
+        check_setting_size(key, &serialized)?;
         transaction.execute(
             "INSERT INTO device_settings (key,value) VALUES (?1,?2)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",

@@ -53,32 +53,6 @@ describe('fetchTauriHttpStream', () => {
         },
     )
 
-    test('passes a text body as dataText without a byte body', async () => {
-        pluginFetch.mockResolvedValue(new Response(null, { status: 204 }))
-        await fetchTauriHttpStream({
-            url: 'https://api.example.invalid/',
-            method: 'POST',
-            headers: {},
-            text: '{"prompt":"synthetic"}',
-        })
-        const [, init] = pluginFetch.mock.calls[0]
-        expect(init.dataText).toBe('{"prompt":"synthetic"}')
-        expect('body' in init).toBe(false)
-    })
-
-    test.each(['GET', 'HEAD'])('sends no text body on %s', async (method) => {
-        pluginFetch.mockResolvedValue(new Response(null, { status: 204 }))
-        await fetchTauriHttpStream({
-            url: 'https://api.example.invalid/',
-            method,
-            headers: {},
-            text: 'ignored',
-        })
-        const [, init] = pluginFetch.mock.calls[0]
-        expect(init.dataText).toBeUndefined()
-        expect(init.body).toBeUndefined()
-    })
-
     test('preserves request bytes, response metadata, and chunk boundaries', async () => {
         const chunks = [new Uint8Array([4, 5]), new Uint8Array([6, 7, 8])]
         const upstream = new ReadableStream<Uint8Array>({

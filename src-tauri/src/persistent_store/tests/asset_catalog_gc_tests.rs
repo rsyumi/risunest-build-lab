@@ -471,6 +471,7 @@ fn asset_gc_delete_page_recollects_a_late_durable_pin_under_writer_exclusion() {
                     directory.path(),
                     "late-gc-pin",
                     CasJobKind::DirectAssetOrInlayWrite,
+                    crate::asset_repository::job_pins::CasJobOwner::for_test(),
                     1,
                 )
                 .unwrap();
@@ -513,6 +514,7 @@ fn asset_gc_delete_page_refuses_unsealed_jobs() {
         directory.path(),
         "gc-blocker-job",
         CasJobKind::DirectAssetOrInlayWrite,
+        crate::asset_repository::job_pins::CasJobOwner::for_test(),
         1,
     )
     .unwrap();
@@ -1144,6 +1146,7 @@ fn asset_gc_product_maintenance_keeps_blockers_fail_closed() {
         directory.path(),
         "product-maintenance-blocker",
         CasJobKind::DirectAssetOrInlayWrite,
+        crate::asset_repository::job_pins::CasJobOwner::for_test(),
         0,
     )
     .expect("begin unsealed blocker");
@@ -1179,6 +1182,7 @@ fn asset_gc_product_maintenance_advances_blocked_pages_and_revisits_after_wrap()
         directory.path(),
         "blocked-maintenance-cycle",
         CasJobKind::DirectAssetOrInlayWrite,
+        crate::asset_repository::job_pins::CasJobOwner::for_test(),
         0,
     )
     .expect("begin maintenance blocker");

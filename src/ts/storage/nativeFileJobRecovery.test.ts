@@ -520,7 +520,6 @@ describe('native file job bootstrap reconciliation', () => {
         ['export-character-card', 'risu-character-card-123e4567-e89b-42d3-a456-426614174004.json', 'native_character_card_handoff_cleanup'],
         ['export-character-card', 'risu-character-card-123e4567-e89b-42d3-a456-426614174004.png', 'native_character_card_handoff_cleanup'],
         ['export-risu-module', 'risu-module-123e4567-e89b-42d3-a456-426614174004.risum', 'native_risu_module_handoff_cleanup'],
-        ['export-dataset', 'risu-dataset-123e4567-e89b-42d3-a456-426614174004.json', 'native_dataset_export_handoff_cleanup'],
     ] as const)('cleans an abandoned Android %s handoff before forgetting its terminal job', async (kind, fileName, cleanupCommand) => {
         const calls: Array<[string, Record<string, unknown> | undefined]> = []
         const handoffPath = `C:\\app\\native-file-jobs\\handoffs\\${fileName}`
@@ -557,7 +556,6 @@ describe('native file job bootstrap reconciliation', () => {
         ['export-character-card', 'risu-character-card-123e4567-e89b-42d3-a456-426614174004.json'],
         ['export-character-card', 'risu-character-card-123e4567-e89b-42d3-a456-426614174004.png'],
         ['export-risu-module', 'risu-module-123e4567-e89b-42d3-a456-426614174004.risum'],
-        ['export-dataset', 'risu-dataset-123e4567-e89b-42d3-a456-426614174004.json'],
     ] as const)('preserves a %s handoff still owned by persisted Android SAF state', async (kind, fileName) => {
         const calls: string[] = []
         const exportId = '123e4567-e89b-42d3-a456-426614174004'

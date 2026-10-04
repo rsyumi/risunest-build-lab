@@ -523,6 +523,56 @@ describe('production persistent working-set publication', () => {
         expect(commit).toHaveBeenCalledTimes(2)
     })
 
+    it('writes nothing to the working set for receives that affected nothing', async () => {
+        const initial = normalizeDatabaseDefaults({} as Database)
+        initial.botPresets[0].id = 'resident-preset'
+        initial.personas[0].id = 'resident-persona'
+        const store = new IndexedDbPersistentDataStore('receive-without-affected-keys', new IDBFactory(), IDBKeyRange) as PersistentDataStore
+        await store.open()
+        const {revision} = await store.replaceFromDatabase(initial)
+        setDatabaseLite(projectCompleteScalableWorkingSet(initial, null, revision))
+        selectedCharID.set(-1)
+        const adapter = createProductionStateAdapter()
+        const runtime = createPersistentDataRuntime({store, state: adapter, prepareDatabase: async (value) => value})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        await runtime.flushPendingDataLocally('receive-without-affected-keys-settle')
+        const flush = vi.spyOn(adapter, 'beforeCapture')
+        const derive = vi.spyOn(adapter, 'afterRemoteApply')
+        const lease = vi.spyOn(store, 'acquireRevision')
+        store.lwwStageReceive = async () => undefined
+        store.lwwApplyReceive = async () => ({revision: runtime.revision, affectedKeys: [], heldKeys: [], deferredKeys: []})
+        store.lwwFinishReceive = async () => undefined
+        const committedRevision = runtime.revision
+        const markDirty = vi.fn()
+        const dispose = observePersistentSaveChanges({readDatabase: getDatabase, readSelectedCharacter: () => null, markDirty})
+        try {
+            flushSync()
+            markDirty.mockClear()
+            const database = getDatabase()
+            const keys = Object.keys(database)
+            const variables = database.globalChatVariables
+            const template = database.promptTemplate
+            const commit = vi.spyOn(store, 'commit')
+            for (const requestId of ['empty', 'echo']) {
+                await runtime.applyLwwReceive({bindingAuthority: '1', requestId, changes: [], progress: {kind: 'server', cursor: '1'}, admittedTimeUpperMs: '100'})
+            }
+            flushSync()
+            expect(flush).not.toHaveBeenCalled()
+            expect(derive).not.toHaveBeenCalled()
+            expect(lease).not.toHaveBeenCalled()
+            expect(markDirty).not.toHaveBeenCalled()
+            expect(getDatabase()).toBe(database)
+            expect(Object.keys(database)).toEqual(keys)
+            expect(database.globalChatVariables).toBe(variables)
+            expect(database.promptTemplate).toBe(template)
+            expect(runtime.revision).toBe(committedRevision)
+            await runtime.flushPendingDataLocally('receive-without-affected-keys')
+            expect(commit).not.toHaveBeenCalled()
+        } finally {
+            dispose()
+        }
+    })
+
     it('adopts received protected flags and explicit toggles without creating preset or toggle echoes', async () => {
         const initial = {
             botPresetsId: 0, doNotChangeSeperateModels: false, seperateModels: {memory: 'initial'},

@@ -1,6 +1,52 @@
 use super::*;
 use crate::persistent_store::query;
 
+/// Replacement changes as they were computed before the merge: both libraries
+/// captured into whole maps.
+pub(super) fn whole_library_changes(
+    db: &mut Connection,
+    generation: &str,
+    staging_id: &str,
+    source: Option<&BTreeMap<UnitKey, UnitValue>>,
+) -> StoreResult<(Vec<(UnitKey, UnitValue)>, BTreeSet<UnitKey>)> {
+    let before = projection::capture_all(db, generation, true)?;
+    let mut after = projection::capture_all(db, staging_id, true)?;
+    let mut overrides = BTreeSet::new();
+    for (key, value) in source.into_iter().flatten() {
+        if after.get(key) != Some(value) {
+            overrides.insert(key.clone());
+        }
+        after.insert(key.clone(), value.clone());
+    }
+    let mut keys = before.keys().chain(after.keys()).cloned().collect::<BTreeSet<_>>();
+    let stored: Vec<String> = db.prepare("SELECT key FROM lww_units")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+    for raw in stored {
+        let key: UnitKey = wire(raw.try_into())?;
+        if projection::known(&key) {
+            keys.insert(key);
+        }
+    }
+    let mut changes = Vec::new();
+    for key in keys {
+        if archived_character(&key).is_some_and(|id| {
+            after.get(&unit_key(&["archive", &id]).unwrap()).is_some_and(|value| matches!(value, UnitValue::Object { .. }))
+        }) && source.is_none_or(|units| !units.contains_key(&key))
+        {
+            continue;
+        }
+        let value = after.get(&key).cloned().unwrap_or(UnitValue::Deleted);
+        if !matches!(value, UnitValue::Deleted) && parent_status(db, &key)? == "retired" {
+            return Err(error("retired-record-id"));
+        }
+        let prior = read_unit(db, &key)?.map(|(_, v)| v).or_else(|| before.get(&key).cloned()).unwrap_or(UnitValue::Deleted);
+        if prior != value {
+            changes.push((key, value));
+        }
+    }
+    overrides.retain(|key| changes.binary_search_by(|(changed, _)| changed.cmp(key)).is_ok());
+    Ok((changes, overrides))
+}
+
 fn store() -> (tempfile::TempDir, PersistentStore) {
     let dir = tempfile::tempdir().unwrap();
     let store = PersistentStore::open(dir.path()).unwrap();
@@ -440,7 +486,7 @@ fn full_restore_library_hypa_and_enabled_plugin_changes_share_stamp_and_receipt(
     assert!(outbox.iter().all(|entry| !entry.key.as_str().contains("accountst")&&!entry.key.as_str().contains("synthetic")));
     let persisted: String=store.device_store().unwrap().connection().query_row("SELECT body FROM lww_intents WHERE request_id=?1",[&header.request_id],|row| row.get(0)).unwrap();
     let Intent::Replacement{source_units,device_sections,..}=serde_json::from_str(&persisted).unwrap() else {panic!()};
-    assert_eq!(source_units,Some(original.clone())); assert!(device_sections.is_some());
+    assert_eq!(source_units,Some(super::intent_rows::source_digest(&original).unwrap())); assert!(device_sections.is_some());
     let (_peer_dir,mut peer)=self::store();
     peer.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins,true).unwrap();
     receive(&mut peer,"full-restored-peer",outbox.iter().map(|entry|Change{key:entry.key.clone(),stamp:entry.stamp.clone(),value:entry.value.clone()}).collect(),vec![]);
@@ -526,7 +572,7 @@ fn full_restore_recovers_original_inputs_after_library_and_device_transaction_fa
         let sections=full_device_backup(Some("frozen")); let stage=restore_stage(&mut store,"frozen");
         let header=Header{binding_authority:0.into(),request_id:format!("crash-device-restore-{phase}")};
         let original=BTreeMap::from([(unit_key(&["future-unit","frozen"]).unwrap(),inline(&serde_json::json!(phase)).unwrap())]);
-        if phase==0 { store.connection.execute_batch("CREATE TEMP TRIGGER reject_library BEFORE DELETE ON root BEGIN SELECT RAISE(ABORT,'synthetic-library-failure'); END").unwrap(); }
+        if phase==0 { store.connection.execute_batch("CREATE TEMP TRIGGER reject_library BEFORE UPDATE ON generations BEGIN SELECT RAISE(ABORT,'synthetic-library-failure'); END").unwrap(); }
         else { store.device_store().unwrap().connection().execute_batch(if phase==1 {
             "CREATE TEMP TRIGGER reject_device BEFORE INSERT ON device_settings BEGIN SELECT RAISE(ABORT,'synthetic-device-failure'); END"
         } else {
@@ -576,7 +622,7 @@ fn full_restore_corrupted_frozen_intent_fails_before_replaying_device_rows() {
     let body:String=device.query_row("SELECT body FROM lww_intents WHERE request_id=?1",[&header.request_id],|row|row.get(0)).unwrap();
     let mut intent:Intent=serde_json::from_str(&body).unwrap();
     let Intent::Replacement{device_sections:Some(sections),..}=&mut intent else {panic!()};
-    let device_store::sections::SectionValueRow::Hypa{model,..}=&mut sections.hypa[0].value else {panic!()};
+    let device_store::sections::SectionValueRow::Hypa{model,..}=&mut sections.to_mut().hypa[0].value else {panic!()};
     *model="corrupted".into();
     device.execute("UPDATE lww_intents SET body=?1 WHERE request_id=?2",params![serde_json::to_string(&intent).unwrap(),header.request_id]).unwrap();
     assert!(store.lww_recover_intents().is_err()); assert_device_restore_label(&store,"old");
@@ -1114,6 +1160,68 @@ fn independent_fields_converge_in_both_delivery_orders() {
         a.read_root(None).unwrap().value,
         b.read_root(None).unwrap().value
     );
+}
+
+#[test]
+fn echo_and_empty_receives_keep_the_revision_and_still_acknowledge() {
+    let (_dir, mut store) = store();
+    save(
+        &mut store,
+        vec![mutation(&["root", "openAIKey"], serde_json::json!("a"))],
+    );
+    let own = store
+        .lww_read_outbox(0.into(), 10)
+        .unwrap()
+        .entries
+        .remove(0);
+    let before = store.revision().unwrap();
+
+    let empty = receive(&mut store, "empty", vec![], vec![]);
+    assert!(empty.affected_keys.is_empty());
+    assert_eq!(empty.revision, before);
+
+    let echo = receive(
+        &mut store,
+        "echo",
+        vec![Change {
+            key: own.key.clone(),
+            stamp: own.stamp.clone(),
+            value: own.value.clone(),
+        }],
+        vec![],
+    );
+    assert!(echo.affected_keys.is_empty());
+    assert_eq!(echo.revision, before);
+    assert_eq!(store.revision().unwrap(), before);
+    assert!(store.lww_read_outbox(0.into(), 10).unwrap().entries.is_empty());
+    let status: String = store
+        .connection
+        .query_row(
+            "SELECT status FROM lww_receive_rows WHERE request_id='echo'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "done");
+    assert_eq!(
+        store.lww_receive_progress(0.into()).unwrap()[0].cursor,
+        1.into()
+    );
+
+    // The change context closed, so the next local write opens a new one.
+    let next = save(
+        &mut store,
+        vec![mutation(&["root", "openAIKey"], serde_json::json!("b"))],
+    );
+    assert_eq!(next.revision, before + 1);
+    let remote = receive(
+        &mut store,
+        "remote",
+        vec![change(&["root", "language"], 10, serde_json::json!("ko"))],
+        vec![],
+    );
+    assert_eq!(remote.affected_keys.len(), 1);
+    assert_eq!(remote.revision, before + 2);
 }
 
 fn create_conversation(store: &mut PersistentStore, char_id: &str, conv_id: &str) {
@@ -2053,6 +2161,7 @@ fn detach_for_new_authority(store: &mut PersistentStore) -> DecimalU64 {
     let selection = super::super::sync_selection::read(&store.connection).unwrap();
     let binding = store.lww_binding_authority().unwrap();
     let change = super::super::sync_selection::BindingSelectionChange {
+        initial_publication: false,
         expected_epoch: selection.epoch,
         new_epoch: Uuid::new_v4().to_string(),
         target: super::super::sync_selection::SyncTarget::None,

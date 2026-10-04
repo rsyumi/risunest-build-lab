@@ -77,9 +77,11 @@ struct StagingFile {
 }
 
 impl StagingFile {
-    fn remove_and_sync(&mut self) -> io::Result<bool> {
+    /// Removes the file and reports whether that changed its directory, which
+    /// the caller then syncs.
+    fn remove(&mut self) -> io::Result<bool> {
         if !self.owned {
-            return Ok(true);
+            return Ok(false);
         }
         match fs::remove_file(&self.path) {
             Ok(()) => {}
@@ -87,6 +89,13 @@ impl StagingFile {
             Err(error) => return Err(error),
         }
         self.owned = false;
+        Ok(true)
+    }
+
+    fn remove_and_sync(&mut self) -> io::Result<bool> {
+        if !self.remove()? {
+            return Ok(true);
+        }
         sync_directory(&self.parent)
     }
 }
@@ -383,18 +392,81 @@ impl PayloadCas {
     pub(crate) fn publish_staged(&self, staged: StagedPayload) -> io::Result<PreparedPayload> {
         #[cfg(test)]
         staged.body_identity.check_scope();
+        self.check_staged_repository(&staged)?;
+        self.ensure_repository_root()?;
+        let (mut prepared, mut staging) = self.link_staged(staged, &mut sync_directory)?;
+        prepared.directory_entries_synced &= staging.remove_and_sync()?;
+        Ok(prepared)
+    }
+
+    /// Publishes staged payloads together. Every directory the batch changed is
+    /// synced once, after all of its entries are in place, so a batch pays per
+    /// directory rather than per payload.
+    pub(crate) fn publish_staged_batch(
+        &self,
+        staged: Vec<StagedPayload>,
+    ) -> io::Result<Vec<PreparedPayload>> {
+        for payload in &staged {
+            #[cfg(test)]
+            payload.body_identity.check_scope();
+            self.check_staged_repository(payload)?;
+        }
+        if staged.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ensure_repository_root()?;
+        let mut changed = BTreeSet::new();
+        let mut linked = Vec::with_capacity(staged.len());
+        for payload in staged {
+            linked.push(self.link_staged(payload, &mut |directory: &Path| {
+                changed.insert(directory.to_path_buf());
+                Ok(true)
+            })?);
+        }
+        let mut synced = true;
+        for directory in &changed {
+            synced &= sync_directory(directory)?;
+        }
+        let mut staging_directories = BTreeSet::new();
+        let mut published = Vec::with_capacity(linked.len());
+        for (prepared, mut staging) in linked {
+            if staging.remove()? {
+                staging_directories.insert(staging.parent.clone());
+            }
+            published.push(prepared);
+        }
+        for directory in &staging_directories {
+            synced &= sync_directory(directory)?;
+        }
+        for prepared in &mut published {
+            prepared.directory_entries_synced &= synced;
+        }
+        Ok(published)
+    }
+
+    fn check_staged_repository(&self, staged: &StagedPayload) -> io::Result<()> {
         if staged.repository_root != self.repository_root {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
                 "staged payload belongs to another repository",
             ));
         }
-        self.ensure_repository_root()?;
+        Ok(())
+    }
+
+    /// Links one staged payload under its content hash, handing `sync_parent`
+    /// every directory whose entries it changed. The staging file is left for
+    /// the caller to remove.
+    fn link_staged(
+        &self,
+        staged: StagedPayload,
+        sync_parent: &mut dyn FnMut(&Path) -> io::Result<bool>,
+    ) -> io::Result<(PreparedPayload, StagingFile)> {
         let StagedPayload {
             #[cfg(test)]
             body_identity: _body_identity,
             verified_file,
-            mut staging,
+            staging,
             identity,
             content_hash,
             byte_size,
@@ -415,18 +487,24 @@ impl PayloadCas {
         #[cfg(test)]
         super::body_io::verified_identity_metadata_open();
         let staging_path = staging.path.clone();
-        let assets_directory = self.ensure_directory(
+        let assets_directory = self.ensure_directory_with_sync(
             &self.repository_root,
             "assets",
             &mut directory_entries_synced,
+            &mut *sync_parent,
         )?;
         let physical_key = object_physical_key(&content_hash);
-        let objects_directory =
-            self.ensure_directory(&assets_directory, "objects", &mut directory_entries_synced)?;
-        let object_directory = self.ensure_directory(
+        let objects_directory = self.ensure_directory_with_sync(
+            &assets_directory,
+            "objects",
+            &mut directory_entries_synced,
+            &mut *sync_parent,
+        )?;
+        let object_directory = self.ensure_directory_with_sync(
             &objects_directory,
             &content_hash[..2],
             &mut directory_entries_synced,
+            &mut *sync_parent,
         )?;
         let object_path = object_directory.join(&content_hash[2..]);
 
@@ -441,12 +519,12 @@ impl PayloadCas {
         super::body_io::publication_result("hard-link", &publication, byte_size);
         let deduplicated = match publication {
             Ok(()) => {
-                directory_entries_synced &= sync_directory(&object_directory)?;
+                directory_entries_synced &= sync_parent(&object_directory)?;
                 false
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
                 self.verify_existing_object(&object_path, &content_hash, byte_size, &physical_key)?;
-                directory_entries_synced &= sync_directory(&object_directory)?;
+                directory_entries_synced &= sync_parent(&object_directory)?;
                 true
             }
             Err(error) => {
@@ -459,14 +537,16 @@ impl PayloadCas {
 
         drop(path_file);
         drop(verified_file);
-        directory_entries_synced &= staging.remove_and_sync()?;
-        Ok(PreparedPayload {
-            content_hash,
-            byte_size,
-            physical_key,
-            deduplicated,
-            directory_entries_synced,
-        })
+        Ok((
+            PreparedPayload {
+                content_hash,
+                byte_size,
+                physical_key,
+                deduplicated,
+                directory_entries_synced,
+            },
+            staging,
+        ))
     }
 
     pub fn stat_object(&self, content_hash: &str) -> io::Result<Option<u64>> {
@@ -1284,6 +1364,31 @@ mod tests {
         assert!(error.to_string().contains("payload collision or corruption"));
         assert_eq!(std::fs::read(object).unwrap(), corrupted);
         assert_eq!(std::fs::read_dir(directory.path().join("assets/staging")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_staged_batch_publishes_every_payload_and_leaves_no_staging() {
+        let directory = tempfile::tempdir().unwrap();
+        let other_directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let other = PayloadCas::new(other_directory.path()).unwrap();
+        let bodies: [&[u8]; 3] = [b"synthetic batch one", b"synthetic batch two", b"synthetic batch three"];
+        let stage = |bytes: &[u8]| {
+            let hash = hex::encode(sha2::Sha256::digest(bytes));
+            cas.stage_reader_expected(&mut Cursor::new(bytes), &hash, bytes.len() as u64).unwrap()
+        };
+        cas.publish_staged(stage(bodies[0])).unwrap();
+        let published = cas.publish_staged_batch(bodies.iter().map(|bytes| stage(bytes)).collect()).unwrap();
+        assert_eq!(published.iter().map(|payload| payload.deduplicated).collect::<Vec<_>>(), [true, false, false]);
+        for (bytes, payload) in bodies.iter().zip(&published) {
+            assert_eq!(cas.read_object(&payload.content_hash).unwrap().unwrap(), *bytes);
+        }
+        assert_eq!(std::fs::read_dir(directory.path().join("assets/staging")).unwrap().count(), 0);
+        assert!(cas.publish_staged_batch(Vec::new()).unwrap().is_empty());
+        let error = other.publish_staged_batch(vec![stage(b"synthetic foreign batch")]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read_dir(directory.path().join("assets/staging")).unwrap().count(), 0);
+        assert!(!other_directory.path().join("assets").exists());
     }
 
     #[test]

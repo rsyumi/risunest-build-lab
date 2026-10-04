@@ -96,6 +96,7 @@ pub(super) struct FakeState {
     upload_attempts: Vec<String>,
     upload_locators: BTreeMap<String, String>,
     reconcile_attempts: Vec<String>,
+    metadata_attempts: Vec<String>,
     scripted_pages: Vec<(Collection, Result<ObjectPage>)>,
     inventory_upload_failure: Option<ErrorKind>,
     upload_failure: Option<(usize, ErrorKind)>,
@@ -202,6 +203,10 @@ impl FakeProvider {
     pub(crate) fn holds(&self, object: &str) -> bool {
         self.state.lock().unwrap().objects.contains_key(object)
     }
+    pub(crate) fn objects_with_role(&self, role: ObjectRole) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        state.objects.keys().filter(|id| state.roles.get(*id) == Some(&role)).cloned().collect()
+    }
     pub(crate) fn delete_attempts(&self, object: &str) -> usize {
         self.state
             .lock()
@@ -271,6 +276,9 @@ impl FakeProvider {
     }
     pub(crate) fn reconcile_attempts(&self, object: &str) -> usize {
         self.state.lock().unwrap().reconcile_attempts.iter().filter(|id| id.as_str() == object).count()
+    }
+    pub(crate) fn metadata_attempts(&self, object: &str) -> usize {
+        self.state.lock().unwrap().metadata_attempts.iter().filter(|id| id.as_str() == object).count()
     }
     pub(crate) fn script_page(&self, collection: Collection, page: Result<ObjectPage>) {
         self.state.lock().unwrap().scripted_pages.push((collection, page));
@@ -691,6 +699,41 @@ impl Provider for FakeProvider {
                     object: remote_id.clone(),
                 },
                 byte_length: intent.byte_length,
+                version: Some(VersionToken(version.to_string())),
+                checksum: None,
+                complete: true,
+            }))
+        })
+    }
+    fn lookup_metadata<'a>(
+        &'a self,
+        repository: &'a RepositoryHandle,
+        intent: &'a ObjectIntent,
+        known: Option<&'a RemoteLocator>,
+        cancel: &'a Cancellation,
+    ) -> ProviderFuture<'a, Option<ObjectReceipt>> {
+        Box::pin(async move {
+            cancel.check()?;
+            intent.validate(repository)?;
+            if let Some(locator) = known {
+                locator.validate_for(repository)?;
+            }
+            let mut state = self.state.lock().unwrap();
+            let remote_id = match known {
+                Some(locator) => locator.object.clone(),
+                None => state.upload_locators.get(&intent.object_id).unwrap_or(&intent.object_id).clone(),
+            };
+            state.metadata_attempts.push(remote_id.clone());
+            let Some((bytes, version)) = state.objects.get(&remote_id) else {
+                return Ok(None);
+            };
+            Ok(Some(ObjectReceipt {
+                locator: known.cloned().unwrap_or_else(|| RemoteLocator {
+                    connection_identity: repository.connection_identity.clone(),
+                    collection: None,
+                    object: remote_id.clone(),
+                }),
+                byte_length: bytes.len() as u64,
                 version: Some(VersionToken(version.to_string())),
                 checksum: None,
                 complete: true,

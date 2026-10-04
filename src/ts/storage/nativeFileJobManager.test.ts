@@ -1,7 +1,6 @@
 import { doingChat, reserveGeneration } from "../process/generationState";
 import { isLibraryFileOperationReserved, registerLibraryFileOperationGate } from "./libraryFileOperation";
 import { get } from 'svelte/store'
-import { PayloadTooLargeError } from './nativePersistenceValue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const nativeInvoke = vi.hoisted(() => vi.fn())
 vi.mock('@tauri-apps/api/core', () => ({invoke: nativeInvoke}))
@@ -377,18 +376,6 @@ describe('renderer-lifetime native file job manager', () => {
                 expected: {
                     state: 'failed',
                     error: { code: 'invalid-source', message: 'Android spool manifest is invalid', recoveryRequired: false },
-                },
-            },
-            {
-                error: new PayloadTooLargeError('message', 70_000_000),
-                expected: {
-                    state: 'failed',
-                    error: {
-                        code: 'payload-too-large',
-                        message: 'Cannot save message: 70000000 bytes exceed the native request limit',
-                        recoveryRequired: false,
-                        itemKind: 'message',
-                    },
                 },
             },
             {

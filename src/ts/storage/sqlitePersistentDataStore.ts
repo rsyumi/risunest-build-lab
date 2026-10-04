@@ -1,7 +1,7 @@
 import { stableSelectionRoot, projectSelectionIndexes } from './persistentSelectionBoundary'
-import { jsonByteLength, prepareNativePersistenceValue, type PayloadTooLargeKind } from './nativePersistenceValue'
+import { prepareNativePersistenceValue } from './nativePersistenceValue'
 import { invoke } from '@tauri-apps/api/core'
-import { nativeCommitTransport, STAGED_REQUEST_BYTES } from './nativeCommitTransport'
+import { nativeCommitTransport } from './nativeCommitTransport'
 
 import type { Chat, Database, botPreset } from './database.svelte'
 import {
@@ -53,7 +53,9 @@ import {
 } from './persistentDataStore'
 
 const MAX_STAGED_CHARACTER_COUNT = 16
+const MAX_STAGED_CHARACTER_BYTES = 4 * 1024 * 1024
 const MAX_STAGED_ASSET_RECORDS = 512
+const textEncoder = new TextEncoder()
 
 /** Mirrors the Rust `PersistentStoreOpenResult` returned by the `pds_open` command. */
 export interface PersistentStoreOpenResult {
@@ -125,128 +127,31 @@ async function invokeArchiveOperation<T>(
     }
 }
 
-type StageRequest = (command: string, kind: PayloadTooLargeKind, args: Record<string, unknown>) => Promise<void>
-type Character = Database['characters'][number]
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-    typeof value === 'object' && value !== null && !Array.isArray(value)
-
-/** Batches of at most the staged request budget; a larger item goes alone. */
-function byteBatches<T>(
-    items: T[],
-    size: (item: T) => number = jsonByteLength,
-    maxCount = Infinity,
-): T[][] {
-    const output: T[][] = []
-    let batch: T[] = []
+function characterBatches(
+    characters: Database['characters'],
+): Array<Database['characters']> {
+    const batches: Array<Database['characters']> = []
+    let batch: Database['characters'] = []
     let batchBytes = 2
-    for (const item of items) {
-        const itemBytes = size(item)
-        if (batch.length > 0 && (batch.length >= maxCount || batchBytes + 1 + itemBytes > STAGED_REQUEST_BYTES)) {
-            output.push(batch)
+
+    for (const character of characters) {
+        const characterBytes = textEncoder.encode(JSON.stringify(character)).byteLength
+        const separatorBytes = batch.length === 0 ? 0 : 1
+        if (
+            batch.length > 0 &&
+            (batch.length >= MAX_STAGED_CHARACTER_COUNT ||
+                batchBytes + separatorBytes + characterBytes > MAX_STAGED_CHARACTER_BYTES)
+        ) {
+            batches.push(batch)
             batch = []
             batchBytes = 2
         }
-        batchBytes += (batch.length === 0 ? 0 : 1) + itemBytes
-        batch.push(item)
+        batchBytes += (batch.length === 0 ? 0 : 1) + characterBytes
+        batch.push(character)
     }
-    if (batch.length > 0) output.push(batch)
-    return output
-}
 
-// A character above the budget is staged as its detail, then each chat
-// without its messages, then those messages in pages.
-function characterPieces(characters: Character[]): Array<{ batch: Character[] } | { character: Character }> {
-    const pieces: Array<{ batch: Character[] } | { character: Character }> = []
-    let small: Array<{ character: Character; bytes: number }> = []
-    const flush = () => {
-        for (const batch of byteBatches(small, (entry) => entry.bytes, MAX_STAGED_CHARACTER_COUNT)) {
-            pieces.push({ batch: batch.map((entry) => entry.character) })
-        }
-        small = []
-    }
-    for (const character of characters) {
-        const bytes = jsonByteLength(character)
-        if (bytes <= STAGED_REQUEST_BYTES) {
-            small.push({ character, bytes })
-            continue
-        }
-        flush()
-        pieces.push({ character })
-    }
-    flush()
-    return pieces
-}
-
-async function stageCharacterInPieces(stage: StageRequest, character: Character): Promise<void> {
-    const { chats, ...detail } = character
-    const conversations: unknown[] = Array.isArray(chats) ? chats : []
-    await stage('pds_replace_put_character_detail', 'character', { detail, conversationCount: conversations.length })
-    for (const [configuredIndex, chat] of conversations.entries()) {
-        const messages: unknown[] = isRecord(chat) && Array.isArray(chat.message) ? chat.message : []
-        let conversation = chat
-        if (isRecord(chat)) {
-            const { message: _message, ...rest } = chat
-            conversation = rest
-        }
-        const last = messages.at(-1)
-        await stage('pds_replace_put_conversation', 'conversation', {
-            characterId: character.chaId,
-            configuredIndex,
-            conversation,
-            messageCount: messages.length,
-            ...(isRecord(last) && last.time !== undefined ? { lastMessageTime: last.time } : {}),
-        })
-        let start = 0
-        for (const page of byteBatches(messages)) {
-            await stage('pds_replace_add_conversation_messages', 'message', {
-                characterId: character.chaId,
-                conversationId: isRecord(conversation) ? conversation.id : undefined,
-                start,
-                messages: page,
-            })
-            start += page.length
-        }
-    }
-}
-
-// Plugin values leave the root request when the two exceed the budget.
-async function stageRoot(
-    stage: StageRequest,
-    root: Record<string, unknown>,
-    pluginStorageValues?: PluginStorageValue[],
-): Promise<void> {
-    if (pluginStorageValues) {
-        const split = jsonByteLength(root) + jsonByteLength(pluginStorageValues) > STAGED_REQUEST_BYTES
-        await stage('pds_replace_put_root', 'root', { root, pluginStorageValues: split ? [] : pluginStorageValues })
-        if (!split) return
-        for (const values of byteBatches(pluginStorageValues)) {
-            await stage('pds_replace_add_plugin_storage_values', 'plugin-value', { values })
-        }
-        return
-    }
-    const { pluginCustomStorage: storage, pluginStorageMeta: meta, ...rest } = root
-    if (!isRecord(storage) || jsonByteLength(root) <= STAGED_REQUEST_BYTES) {
-        await stage('pds_replace_put_root', 'root', { root })
-        return
-    }
-    await stage('pds_replace_put_root', 'root', { root: rest })
-    const owners = isRecord(meta) ? meta : undefined
-    const owned = (key: string) => owners !== undefined && Object.hasOwn(owners, key)
-    const size = (key: string) => jsonByteLength(key) + jsonByteLength(storage[key])
-        + (owned(key) ? jsonByteLength(key) + jsonByteLength(owners![key]) : 0)
-    for (const keys of byteBatches(Object.keys(storage), size)) {
-        await stage('pds_replace_add_plugin_storage', 'plugin-value', {
-            storage: Object.fromEntries(keys.map((key) => [key, storage[key]])),
-            ...(owners ? { meta: Object.fromEntries(keys.filter(owned).map((key) => [key, owners[key]])) } : {}),
-        })
-    }
-}
-
-async function stagePresets(stage: StageRequest, presets: botPreset[]): Promise<void> {
-    const [first = [], ...rest] = byteBatches(presets)
-    await stage('pds_replace_put_presets', 'preset', { presets: first })
-    for (const batch of rest) await stage('pds_replace_add_presets', 'preset', { presets: batch })
+    if (batch.length > 0) batches.push(batch)
+    return batches
 }
 
 function batches<T>(values: T[], limit: number): T[][] {
@@ -458,15 +363,21 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         const { stagingId } = await invokeStore<{ stagingId: string }>('pds_replace_begin')
         try {
             const { characters, botPresets } = database
-            const stage: StageRequest = async (command, kind, args) => {
-                try { await nativeCommitTransport.stage(command, kind, { stagingId, ...args }) }
-                catch (error) { throw restoreStoreError(error) }
-            }
-            await stageRoot(stage, stableSelectionRoot(database) as Record<string, unknown>, pluginStorageValues)
-            await stagePresets(stage, botPresets ?? [])
-            for (const piece of characterPieces(characters)) {
-                if ('character' in piece) await stageCharacterInPieces(stage, piece.character)
-                else await stage('pds_replace_add_characters', 'character', { characters: piece.batch })
+            const root = stableSelectionRoot(database)
+            await invokeStore<void>('pds_replace_put_root', {
+                stagingId,
+                root,
+                ...(pluginStorageValues ? { pluginStorageValues } : {}),
+            })
+            await invokeStore<void>('pds_replace_put_presets', {
+                stagingId,
+                presets: botPresets ?? [],
+            })
+            for (const batch of characterBatches(characters)) {
+                await invokeStore<void>('pds_replace_add_characters', {
+                    stagingId,
+                    characters: batch,
+                })
             }
             const preserved = await invokeStore<{ revision: DataRevision }>(
                 'pds_replace_preserve_repositories',

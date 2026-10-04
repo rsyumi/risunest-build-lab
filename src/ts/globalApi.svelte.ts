@@ -49,7 +49,6 @@ import {
 } from "./process/coldstorageData";
 import { collectExactPluginStorageAssetReferences } from "./drive/backupAssets";
 import { downloadIOSFile, exportIOSFile } from "./storage/iosFiles";
-import { downloadThroughAndroidSaf } from "./storage/androidSafDownload";
 import { isTauriIOS, isTauri, isTauriMobile } from "./platform";
 import { isLocalNetworkUrl } from "./network/localNetwork";
 import { ByteBudgetLru } from "./util/byteBudgetLru";
@@ -130,7 +129,15 @@ export async function downloadFile(name: string, dat: Uint8Array | ArrayBuffer |
     if (isTauriMobile) {
         // Android resolves the download directory to app private storage the user cannot browse,
         // so exports go through the system picker instead.
-        return downloadThroughAndroidSaf(name, data)
+        const extension = name.includes('.') ? name.split('.').pop()! : 'bin'
+        const target = await save({
+            defaultPath: name,
+            filters: [{ name: extension.toUpperCase(), extensions: [extension] }],
+        })
+        if (!target) {
+            return false
+        }
+        await writeFile(target, data)
     }
     else if (isTauri) {
         await writeFile(name, data, { baseDir: BaseDirectory.Download })
@@ -745,7 +752,7 @@ async function fetchWithUSFetch(url: string, arg: GlobalFetchArgs): Promise<Glob
 async function fetchWithTauri(url: string, arg: GlobalFetchArgs): Promise<GlobalFetchResult> {
     try {
         const headers = { 'Content-Type': 'application/json', ...arg.headers };
-        const response = await TauriHTTPFetch(new URL(url), { dataText: JSON.stringify(arg.body), headers, method: arg.method ?? "POST", signal: arg.abortSignal });
+        const response = await TauriHTTPFetch(new URL(url), { body: JSON.stringify(arg.body), headers, method: arg.method ?? "POST", signal: arg.abortSignal });
         const data = arg.rawResponse ? new Uint8Array(await response.arrayBuffer()) : await response.json();
         const ok = response.status >= 200 && response.status < 300;
         addFetchLogInGlobalFetch(data, ok, url, arg, response.status);
@@ -1228,7 +1235,6 @@ export async function fetchNative(url: string, arg: {
 
     let headers = arg.headers ?? {}
     let realBody: Uint8Array
-    let textBody: string | undefined
 
     if (arg.body === undefined || arg.method === 'GET' || arg.method === 'HEAD') {
         realBody = undefined
@@ -1245,7 +1251,6 @@ export async function fetchNative(url: string, arg: {
                 }
             }
         }
-        textBody = body
         realBody = new TextEncoder().encode(body)
     }
     else if (arg.body instanceof Uint8Array) {
@@ -1302,7 +1307,7 @@ export async function fetchNative(url: string, arg: {
                 url,
                 method: arg.method,
                 headers,
-                ...(textBody === undefined ? { body: realBody } : { text: textBody }),
+                body: realBody,
                 signal: arg.signal,
                 // The native route enforces the budget as an inactivity window, so a
                 // long running generation keeps going while a silent one is released.

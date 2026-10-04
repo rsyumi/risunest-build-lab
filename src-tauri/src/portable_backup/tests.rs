@@ -44,7 +44,7 @@ fn preservation_keeps_distinct_source_paths_even_when_bytes_are_live() {
         VerifiedArchive::open(File::open(path).unwrap(), directory.path(), &Never).unwrap();
     let inventory = RestoreInventory::build(&archive, directory.path(), &Never).unwrap();
     let store=crate::persistent_store::PersistentStore::open(directory.path()).unwrap();
-    let mut pins=crate::asset_repository::job_pins::DurableCasJob::begin(directory.path(),"preserve-distinct",crate::asset_repository::job_pins::CasJobKind::LocalBackupRestore,0).unwrap();
+    let mut pins=crate::asset_repository::job_pins::DurableCasJob::begin(directory.path(),"preserve-distinct",crate::asset_repository::job_pins::CasJobKind::LocalBackupRestore,crate::asset_repository::job_pins::CasJobOwner::for_test(),0).unwrap();
     let report = inventory
         .preserve(&archive, &store, &mut pins, &Never)
         .unwrap()
@@ -83,7 +83,7 @@ fn present_unreferenced_preservation_reuses_cas_without_archive_body_io_and_reba
     let cas=crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
     let object=cas.prepare_bytes(b"synthetic file bytes").unwrap();
     store.asset_object_catalog().register(&[crate::persistent_store::asset_object_catalog::AssetObjectRegistration {object_hash:object.content_hash.clone(),byte_size:object.byte_size}],0).unwrap();
-    let mut pins=crate::asset_repository::job_pins::DurableCasJob::begin(directory.path(),"preserve-present",crate::asset_repository::job_pins::CasJobKind::LocalBackupRestore,0).unwrap();
+    let mut pins=crate::asset_repository::job_pins::DurableCasJob::begin(directory.path(),"preserve-present",crate::asset_repository::job_pins::CasJobKind::LocalBackupRestore,crate::asset_repository::job_pins::CasJobOwner::for_test(),0).unwrap();
     source_io::reset_source_io();
     let archive=VerifiedArchive::open_for_restore(File::open(archive_path).unwrap(),directory.path(),&Never).unwrap();
     let inventory=RestoreInventory::build(&archive,directory.path(),&Never).unwrap();
@@ -139,7 +139,7 @@ fn independent_backup_reads_server_held_body_without_source_promotion_or_outbox_
     assert!(!before_outbox["entries"].as_array().unwrap().is_empty());
     let revision=store.revision().unwrap();
     let job=tempfile::tempdir_in(root.path()).unwrap();
-    let mut pins=crate::asset_repository::job_pins::DurableCasJob::begin(root.path(),"synthetic-held-backup",crate::asset_repository::job_pins::CasJobKind::OfficialPublicationOrExportPreparation,0).unwrap();
+    let mut pins=crate::asset_repository::job_pins::DurableCasJob::begin(root.path(),"synthetic-held-backup",crate::asset_repository::job_pins::CasJobKind::OfficialPublicationOrExportPreparation,crate::asset_repository::job_pins::CasJobOwner::for_test(),0).unwrap();
     source_io::reset_source_io();
     let capture=capture_library(&mut store,revision,job.path(),&mut pins,false,&Never,"synthetic").unwrap();
     assert!(!capture.repair_required,"synthetic validation: {:?}",capture.catalog.validate_library(&Never));

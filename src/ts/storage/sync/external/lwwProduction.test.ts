@@ -27,7 +27,7 @@ const state = (providers = ['webdav']): ExternalStorageState => ({ connections: 
 let dispose: (() => void) | undefined
 beforeEach(() => {
     vi.useFakeTimers(); fixture.native = true; fixture.registrations.clear()
-    fixture.invoke.mockReset(); fixture.invoke.mockImplementation(async command => command === 'external_lww_receive' ? null : undefined)
+    fixture.invoke.mockReset(); fixture.invoke.mockImplementation(async command => command === 'external_lww_receive' ? [] : undefined)
     fixture.state.mockResolvedValue(binding); fixture.listen.mockResolvedValue(() => {})
     fixture.resumeCurrent.mockReset(); fixture.resumeCurrent.mockImplementation(async target => { const current = await fixture.state(); await fixture.registrations.get(target.connectionId)!.resumeBinding({ state: current, signal: new AbortController().signal }) })
     fixture.apply.mockReset(); fixture.flush.mockReset(); fixture.mobile.mockImplementation(async (_name, work) => work())
@@ -56,11 +56,8 @@ describe('native external LWW adapter', () => {
         dispose = await installExternalLwwAdapters(state()); await settle()
         const transport = fixture.registrations.get('sync') as SyncBindingTransport & { receiveAvailableChanges(context: BindingContext): Promise<void> }
         const request = { header: { bindingAuthority: '4', requestId: 'synthetic-receive' }, changes: [] }
-        const next = { header: { bindingAuthority: '4', requestId: 'synthetic-receive-next' }, changes: [] }
-        fixture.invoke.mockClear(); fixture.apply.mockClear()
-        fixture.invoke.mockResolvedValueOnce(request).mockResolvedValueOnce(next); await transport.receiveAvailableChanges(context())
-        expect(fixture.invoke.mock.calls.map(call => call[0])).toEqual(['external_lww_receive', 'external_lww_receive', 'external_lww_receive'])
-        expect(fixture.apply.mock.calls).toEqual([[request], [next]])
+        fixture.invoke.mockResolvedValueOnce([request]); await transport.receiveAvailableChanges(context())
+        expect(fixture.apply).toHaveBeenCalledWith(request)
         fixture.invoke.mockRejectedValueOnce({ kind: 'corrupt' })
         await expect(transport.receiveAvailableChanges(context())).rejects.toEqual({ kind: 'corrupt' })
     })
@@ -72,7 +69,7 @@ describe('native external LWW adapter', () => {
         const skewed = receives()
         await vi.advanceTimersByTimeAsync(20_000); await settle()
         expect(receives()).toBe(skewed + 1)
-        fixture.invoke.mockImplementation(async command => command === 'external_lww_receive' ? null : undefined)
+        fixture.invoke.mockImplementation(async command => command === 'external_lww_receive' ? [] : undefined)
         await vi.advanceTimersByTimeAsync(20_000); await settle()
         expect(receives()).toBe(skewed + 2)
         fixture.invoke.mockImplementation(async command => { if (command === 'external_lww_receive') throw { kind: 'corrupt' } })
@@ -132,6 +129,21 @@ describe('native external LWW adapter', () => {
         expect(fixture.invoke.mock.calls.filter(call => call[0] === 'external_lww_fence').map(call => call[1])).toEqual([
             { connectionId: 'sync', newDevice: false }, { connectionId: 'sync', newDevice: true }, { connectionId: 'sync', newDevice: false },
         ])
+    })
+    it('finishes an owed initial queue natively when the binding resumes and publishes it through the ordinary publication', async () => {
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        const transport = fixture.registrations.get('sync')!
+        fixture.invoke.mockClear()
+        await transport.resumeBinding(context())
+        expect(fixture.invoke.mock.calls.slice(0, 2)).toEqual([
+            ['pds_lww_finish_initial_publication', { request: { bindingAuthority: '4', requestId: expect.any(String) } }],
+            ['external_lww_resume', { connectionId: 'sync' }],
+        ])
+        fixture.invoke.mockClear(); fixture.flush.mockClear()
+        await transport.publishInitialSharedState(context())
+        expect(fixture.invoke.mock.calls.map(call => call[0])).toEqual(['external_lww_publish'])
+        expect(fixture.invoke.mock.calls[0][1]).not.toHaveProperty('initial')
+        expect(fixture.flush).not.toHaveBeenCalled()
     })
     it('reconciles the authoritative revision when publication fails after native clock repair', async () => {
         dispose = await installExternalLwwAdapters(state()); await settle()

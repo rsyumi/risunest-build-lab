@@ -56,7 +56,6 @@ fn every_live_device_table_is_listed_here() {
         "device_change_context",
         "device_changes",
         "device_meta",
-        "device_remote_cursors",
         "device_sections",
         "device_settings",
         "external_lww_objects",
@@ -69,6 +68,7 @@ fn every_live_device_table_is_listed_here() {
         "lww_clock",
         "lww_device_context",
         "lww_initialization_scopes",
+        "lww_intent_rows",
         "lww_intents",
         "lww_new_device_authorizations",
         "lww_outbox",
@@ -837,6 +837,55 @@ fn device_settings_accept_only_the_assigned_keys() {
     assert_eq!(stored, DEVICE_SETTING_KEYS.len() as i64);
 }
 
+/// A backed-up setting travels as one section object, so a value that would
+/// not fit one is refused when it is written instead of failing a later backup.
+#[test]
+fn a_backed_up_setting_is_refused_above_the_section_object_limit() {
+    use crate::persistent_store::StoreError;
+    use risunest_external_storage_format::section::MAX_SECTION_OBJECT_BYTES;
+    use super::sections::LOCAL_SETTING_KEYS;
+    let refused = |result: StoreResult<()>, key: &str| match result {
+        Err(StoreError::Validation { message }) => {
+            assert_eq!(message, "device setting value is too large", "{key}")
+        }
+        other => panic!("{key}: {other:?}"),
+    };
+    // A string serializes with its two quotes, and `{"e":...}` adds six bytes.
+    let text = |length: usize| Value::String("s".repeat(length - 2));
+    let entry = |length: usize| {
+        serde_json::json!({ "e": text(length - 6) }).as_object().unwrap().clone()
+    };
+    let at_limit = text(MAX_SECTION_OBJECT_BYTES);
+    let above_limit = text(MAX_SECTION_OBJECT_BYTES + 1);
+    assert_eq!(serde_json::to_string(&at_limit).unwrap().len(), MAX_SECTION_OBJECT_BYTES);
+    assert_eq!(
+        serde_json::to_string(&entry(MAX_SECTION_OBJECT_BYTES)).unwrap().len(),
+        MAX_SECTION_OBJECT_BYTES
+    );
+
+    let (_directory, mut store) = open();
+    for key in LOCAL_SETTING_KEYS {
+        assert!(DEVICE_SETTING_KEYS.contains(&key), "{key}");
+        store.write_setting(key, &serde_json::json!("kept")).unwrap();
+        refused(store.write_setting(key, &above_limit), key);
+        assert_eq!(store.read_setting(key).unwrap(), Some(serde_json::json!("kept")));
+        store.write_setting(key, &at_limit).expect("a value at the limit is kept");
+
+        store.write_setting(key, &serde_json::json!({})).unwrap();
+        refused(store.patch_setting(key, &entry(MAX_SECTION_OBJECT_BYTES + 1)), key);
+        assert_eq!(store.read_setting(key).unwrap(), Some(serde_json::json!({})));
+        store
+            .patch_setting(key, &entry(MAX_SECTION_OBJECT_BYTES))
+            .expect("an entry that fills the limit is kept");
+        store.remove_setting(key).unwrap();
+    }
+
+    // A setting that stays on this device is never carried in a backup.
+    store
+        .write_setting("mcpStdioApprovals", &above_limit)
+        .expect("a device-only setting has no section object to fit");
+}
+
 #[test]
 fn a_settings_batch_answers_in_request_order() {
     let (_directory, store) = open();
@@ -1153,7 +1202,7 @@ mod section_exchange {
     use risunest_external_storage_format::section::SectionKind;
 
     use super::super::sections::{
-        SectionCursor, SectionRow, SectionSpoolBuilder,
+        SectionRow, SectionSpoolBuilder,
         SectionValueRow, TombstonePublication, LOCAL_SETTING_KEYS,
     };
     use super::super::{plugin_values::PluginDeviceMutation, DeviceStore, Section};
@@ -1226,10 +1275,9 @@ mod section_exchange {
     }
 
     /// Invariant 2. A received row is remote material: it keeps the version it
-    /// arrived with, counts as published, and a section this device does not
-    /// take part in offers nothing for publication.
+    /// arrived with and counts as published.
     #[test]
-    fn a_received_row_stays_remote_material_and_a_non_participating_section_is_not_offered() {
+    fn a_received_row_stays_remote_material() {
         let (_directory, mut store) = open();
         set(&mut store, "mine", "local");
         store
@@ -1261,19 +1309,6 @@ mod section_exchange {
             .expect("read own row");
         assert_ne!(own_writer, "writer-b");
         assert!(own_published.is_none());
-
-        store
-            .set_section_participating(Section::LocalPlugins, true)
-            .unwrap();
-        assert!(store
-            .sections_await_publication("connection", "library")
-            .unwrap());
-        store
-            .set_section_participating(Section::LocalPlugins, false)
-            .unwrap();
-        assert!(!store
-            .sections_await_publication("connection", "library")
-            .unwrap());
     }
 
     /// Invariant 15. A deletion travels as a tombstone and the value it removed
@@ -1612,71 +1647,6 @@ mod section_exchange {
         for kind in [SectionKind::LocalPlugins, SectionKind::LocalSettings] {
             assert_eq!(refusal(kind, &small), refusal(kind, &large));
         }
-    }
-
-    /// A cursor only moves forward, so a replayed apply cannot lose ground and
-    /// a published section does not offer the same values again.
-    #[test]
-    fn a_section_cursor_never_moves_backwards() {
-        let (_directory, mut store) = open();
-        let cursor = |generation: u64, observed: u64| SectionCursor {
-            applied_generation: Sequence::from(generation),
-            applied_gc_floor: Sequence::from(0u64),
-            observed_max_write_clock: Sequence::from(observed),
-        };
-        store
-            .write_section_cursor("connection", "library", Section::Hypa, &cursor(9, 40))
-            .unwrap();
-        store
-            .write_section_cursor("connection", "library", Section::Hypa, &cursor(3, 12))
-            .unwrap();
-        assert_eq!(
-            store
-                .read_section_cursor("connection", "library", Section::Hypa)
-                .unwrap(),
-            Some(cursor(9, 40))
-        );
-        assert!(store
-            .read_section_cursor("other", "library", Section::Hypa)
-            .unwrap()
-            .is_none());
-    }
-
-    /// A row this device wrote below the highest version the remote carries is
-    /// still unpublished, so counters cannot stand in for the question.
-    #[test]
-    fn a_local_write_below_the_remote_counter_still_owes_a_publication() {
-        let (_directory, mut store) = open();
-        store
-            .set_section_participating(Section::LocalPlugins, true)
-            .unwrap();
-        set(&mut store, "mine", "local");
-        store
-            .apply_section_rows(
-                Section::LocalPlugins,
-                &[plugin_row("theirs", "remote", 40, "writer-b")],
-            )
-            .expect("apply a remote row above every local write");
-        store
-            .write_section_cursor(
-                "connection",
-                "library",
-                Section::LocalPlugins,
-                &SectionCursor {
-                    applied_generation: Sequence::from(3u64),
-                    applied_gc_floor: Sequence::from(0u64),
-                    observed_max_write_clock: Sequence::from(40u64),
-                },
-            )
-            .unwrap();
-        assert!(store
-            .sections_await_publication("connection", "library")
-            .unwrap());
-
-        // A lineage this device never exchanged with holds none of these rows.
-        assert!(store
-            .sections_await_publication("connection", "other-library")
-            .unwrap());
     }
 
 }

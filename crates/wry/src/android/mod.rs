@@ -27,7 +27,6 @@ use std::{
 
 pub(crate) mod binding;
 mod main_pipe;
-mod response_bodies;
 use main_pipe::{
   activity_id_for_window_manager, first_activity_id, register_activity_proxy, ActivityId,
   CreateWebViewAttributes, MainPipe, WebViewMessage,

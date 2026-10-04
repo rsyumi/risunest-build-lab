@@ -1508,5 +1508,12 @@ export const languageVietnamese = {
         restoreDescription: "Dữ liệu hiện tại sẽ bị xóa và thay thế bằng bản sao lưu đã chọn. Hãy sao lưu thủ công nếu cần.",
         restoreAcknowledge: "Xóa dữ liệu hiện tại",
         restoreAction: "Khôi phục",
+        previousFilesTitle: "Kết nối?",
+        previousFilesDescription: "Một số tệp chỉ được lưu trên máy chủ hoặc bộ nhớ ngoài đã dùng trước đó. Khi kết nối, các tệp này cũng được lưu vào đích mới. Để giữ chúng trên thiết bị này, hãy chọn Tải xuống rồi kết nối.",
+        downloadThenConnect: "Tải xuống rồi kết nối",
+        downloadFailedNotConnected: "Không thể tải xuống các tệp nên chưa kết nối. Hãy thử lại hoặc kết nối mà không tải xuống.",
+        previousStorageUnavailable: "Không thể lấy các tệp chỉ được lưu trên máy chủ hoặc bộ nhớ ngoài đã dùng trước đó nên đồng bộ đã dừng. Hãy thử lại khi có thể truy cập.",
+        registrationRevoked: "Đăng ký của thiết bị này đã bị xóa trên máy chủ nên không thể đồng bộ. Hãy đăng ký lại thiết bị này trên máy chủ, sau đó nhập mã đăng ký mới.",
+        bindingIncomplete: "Kết nối chưa hoàn tất. Hãy nhấn Connect and sync để hoàn tất kết nối.",
     },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>;

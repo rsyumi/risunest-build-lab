@@ -12,9 +12,6 @@ overrides:
   yaml@>=2.0.0 <2.8.3: ^2.8.3
 
 patchedDependencies:
-  '@tauri-apps/plugin-http@2.6.1':
-    hash: e4c2ba214440e82a70f3fbd5df9201afcabf077edd80953c7330abcf414dadd7
-    path: patches/@tauri-apps__plugin-http@2.6.1.patch
   playwright-core@1.63.0:
     hash: d13341af3fe9b0ae7940de27c9665bbc64fd2038d9358ffae7279fbf83e7353f
     path: patches/playwright-core@1.63.0.patch
@@ -85,7 +82,7 @@ importers:
         version: 2.5.2
       '@tauri-apps/plugin-http':
         specifier: 2.6.1
-        version: 2.6.1(patch_hash=e4c2ba214440e82a70f3fbd5df9201afcabf077edd80953c7330abcf414dadd7)
+        version: 2.6.1
       '@tauri-apps/plugin-opener':
         specifier: ^2.5.5
         version: 2.5.5
@@ -3425,7 +3422,7 @@ snapshots:
     dependencies:
       '@tauri-apps/api': 2.11.1
 
-  '@tauri-apps/plugin-http@2.6.1(patch_hash=e4c2ba214440e82a70f3fbd5df9201afcabf077edd80953c7330abcf414dadd7)':
+  '@tauri-apps/plugin-http@2.6.1':
     dependencies:
       '@tauri-apps/api': 2.11.1
 

@@ -12,7 +12,6 @@ internal fun androidExportMimeType(filename: String): String = when (
   "zip" -> "application/zip"
   "json" -> "application/json"
   "txt" -> "text/plain"
-  "html", "htm" -> "text/html"
   "risum", "risup", "charx", "risunest", "risudat" -> "application/x-risunest"
   else -> "application/octet-stream"
 }

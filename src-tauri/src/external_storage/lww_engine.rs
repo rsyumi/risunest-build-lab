@@ -28,71 +28,6 @@ use tokio::task::spawn_blocking;
 
 /// Providers name a locator's collection after a role folder or a release tag.
 pub(crate) const MAX_LOCATOR_COLLECTION_BYTES: usize = 128;
-/// JSON bytes of changes in one receive page. One change is far smaller, and
-/// a larger one would still travel alone.
-pub(crate) const RECEIVE_PAGE_BYTES: usize = 4 * 1024 * 1024;
-#[cfg(test)]
-thread_local! {
-    static TEST_RECEIVE_PAGE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(RECEIVE_PAGE_BYTES) };
-}
-#[cfg(test)]
-pub(crate) fn set_receive_page_bytes_for_test(bytes: usize) {
-    TEST_RECEIVE_PAGE_BYTES.with(|value| value.set(bytes));
-}
-fn receive_page_bytes() -> usize {
-    #[cfg(test)]
-    return TEST_RECEIVE_PAGE_BYTES.with(std::cell::Cell::get);
-    #[cfg(not(test))]
-    RECEIVE_PAGE_BYTES
-}
-/// Splits changes in order into pages within the page budget. There is
-/// always at least one page, so a group without changes still carries its
-/// progress.
-pub(crate) fn receive_pages(changes: Vec<Change>, budget: usize) -> Result<Vec<Vec<Change>>> {
-    let mut pages = vec![Vec::new()];
-    let mut used = 0usize;
-    for change in changes {
-        let length = serde_json::to_vec(&change).map_err(|_| segment::corrupt())?.len() + 1;
-        if used.saturating_add(length) > budget && pages.last().is_some_and(|page| !page.is_empty()) {
-            pages.push(Vec::new());
-            used = 0;
-        }
-        used = used.saturating_add(length);
-        pages.last_mut().ok_or_else(segment::corrupt)?.push(change);
-    }
-    Ok(pages)
-}
-/// Stores one group's pages and keeps those not yet finished. Only the last
-/// page carries the group's progress; earlier pages repeat the writer's
-/// current cursor, so progress moves once the whole group is applied.
-#[allow(clippy::too_many_arguments)]
-fn push_receive_pages(
-    store: &PersistentStore,
-    requests: &mut Vec<StageReceive>,
-    id: &str,
-    authority: DecimalU64,
-    changes: Vec<Change>,
-    progress: Progress,
-    current: DecimalU64,
-    admitted_time_upper_ms: DecimalU64,
-) -> Result<()> {
-    let pages = receive_pages(changes, receive_page_bytes())?;
-    let last = pages.len() - 1;
-    for (index, changes) in pages.into_iter().enumerate() {
-        let request = store
-            .external_lww_stable_receive(StageReceive {
-                header: Header { binding_authority: authority, request_id: format!("{id}-{index}") },
-                changes,
-                progress: if index == last { progress.clone() } else { Progress { cursor: current, ..progress.clone() } },
-                admitted_time_upper_ms,
-            })
-            .map_err(store_error)?;
-        if !store.external_lww_receive_finished(&request.header.request_id).map_err(store_error)? {
-            requests.push(request);
-        }
-    }
-    Ok(())
-}
 
 /// The length of a segment under assembly, kept per entry.
 #[derive(Clone, Copy, Default)]
@@ -634,8 +569,8 @@ impl ExternalLwwEngine {
                     let sha256 = String::new();
                     let object_id = String::new();
                     let assets = assets.into_values().collect::<Vec<_>>();
-                    let asset_job = if assets.is_empty() && controls.is_empty() && reused_controls.is_empty() && reused_assets.is_empty() {
-                        None
+                    let (asset_job, mut asset_pins) = if assets.is_empty() && controls.is_empty() && reused_controls.is_empty() && reused_assets.is_empty() {
+                        (None, None)
                     } else {
                         let job = super::journal::JobIdentity {
                             job_id,
@@ -649,14 +584,18 @@ impl ExternalLwwEngine {
                         let mut pins = crate::asset_repository::job_pins::DurableCasJob::begin(
                             &root, &job.job_id,
                             crate::asset_repository::job_pins::CasJobKind::OfficialPublicationOrExportPreparation,
+                            crate::asset_repository::job_pins::CasJobOwner::external_publication(&job.job_id),
                             super::runtime::now_ms() as i64,
                         ).map_err(transient)?;
-                        pins.pin_existing_batch(&cas, &assets.iter().filter(|asset| asset.local_pin).map(|asset| (
+                        let sealed = pins.pin_existing_batch(&cas, &assets.iter().filter(|asset| asset.local_pin).map(|asset| (
                             asset.content_hash.clone(), asset.byte_length,
                             crate::asset_repository::job_pins::CasObjectRole::DirectObject,
-                        )).collect::<Vec<_>>()).map_err(transient)?;
-                        pins.seal(store, super::runtime::now_ms() as i64).map_err(transient)?;
-                        Some(job)
+                        )).collect::<Vec<_>>()).and_then(|()| pins.seal(store, super::runtime::now_ms() as i64));
+                        if let Err(error) = sealed {
+                            let _ = pins.release(crate::asset_repository::job_pins::CasReleaseOutcome::Aborted);
+                            return Err(transient(error));
+                        }
+                        (Some(job), Some(pins))
                     };
                     let frozen_controls = frozen_controls.into_values().collect::<Vec<_>>();
                     let publication = SealedPublication {
@@ -683,9 +622,13 @@ impl ExternalLwwEngine {
                         dispatched: false,
                         complete: false,
                     };
-                    store
-                        .external_lww_persist(&publication, &bytes)
-                        .map_err(store_error)?;
+                    if let Err(error) = store.external_lww_persist(&publication, &bytes) {
+                        if let Some(pins) = asset_pins.as_mut() {
+                            let _ = pins.release(crate::asset_repository::job_pins::CasReleaseOutcome::Aborted);
+                        }
+                        return Err(store_error(error));
+                    }
+                    drop(asset_pins);
                     staged.keep();
                     (publication, bytes)
                 }
@@ -891,7 +834,7 @@ impl ExternalLwwEngine {
                     let source = if let Some(proof) = &asset.remote_source {
                         let spool = super::lww_residency::spool_frozen_remote_body(
                             proof, &root.join("external-storage").join("lww-publications").join(&job.job_id), cancel,
-                        ).await?.into_temp_path();
+                        ).await.map_err(Self::held_body_error)?.into_temp_path();
                         Self::check_publication_authority(store, &publication)?;
                         let source = super::content_store::ObjectSource::File(spool.to_path_buf());
                         spools.push(spool);
@@ -1156,6 +1099,20 @@ impl ExternalLwwEngine {
             else if error.code == "binding-authority-changed" || error.code == "binding-authority-unavailable" { ErrorKind::PreconditionFailed }
             else { ErrorKind::Transient })
     }
+    /// A body the server or external storage that holds it could not provide.
+    fn held_body_error(error: ProviderError) -> ProviderError {
+        match error.kind {
+            ErrorKind::Cancelled | ErrorKind::PreconditionFailed | ErrorKind::Corrupt
+                | ErrorKind::LocalStorageFull | ErrorKind::LocalPermissionDenied => error,
+            _ => ProviderError { kind: ErrorKind::PreviousStorageUnavailable, http_status: None, retry_at_ms: None,
+                oauth_error: None, oauth_error_description: None, cause: error.cause },
+        }
+    }
+    fn held_server_body_error(error: crate::server_sync::SyncError, cancel: &Cancellation) -> ProviderError {
+        if error.code == "local-storage-full" { return ProviderError::new(ErrorKind::LocalStorageFull); }
+        let cause = ErrorCause(Some(error.code.clone()));
+        Self::held_body_error(ProviderError { cause, ..Self::body_source_error(error, cancel) })
+    }
     async fn open_frozen_server_body(
         store: &mut PersistentStore, asset: &FrozenAsset, job: &super::journal::JobIdentity,
         authority: DecimalU64, cancel: &Cancellation,
@@ -1174,7 +1131,7 @@ impl ExternalLwwEngine {
             std::fs::create_dir_all(&scratch).map_err(transient)?;
             let check = || Self::check_frozen_body_authority(&store, authority, &cancel);
             crate::server_sync::residency::open_transient_server_proof_with_check(&root, &scratch, &proof, &check)
-                .map_err(|error| Self::body_source_error(error, &cancel))?.ok_or_else(segment::corrupt)
+                .map_err(|error| Self::held_server_body_error(error, &cancel))?.ok_or_else(segment::corrupt)
         }).await.map_err(transient)?
     }
     async fn read_frozen_standalone(
@@ -1191,7 +1148,7 @@ impl ExternalLwwEngine {
         } else if let Some(proof) = &asset.remote_source {
             let spool = super::lww_residency::spool_frozen_remote_body(
                 proof, &store.repository_root().join("external-storage").join("lww-publications").join(&job.job_id), cancel,
-            ).await?;
+            ).await.map_err(Self::held_body_error)?;
             Self::check_frozen_body_authority(store, authority, cancel).map_err(|error| Self::body_source_error(error, cancel))?;
             super::lww_residency::read_frozen_body_spool(proof, &spool, cancel)?
         } else {
@@ -1290,15 +1247,16 @@ impl ExternalLwwEngine {
             Err(error) => Self::fence_outcome(error, new_device),
         }
     }
-    /// Only an unreachable repository lets a binding change go ahead without
-    /// an answer, and a refusal of this device does too when the change makes
-    /// it a new device.
+    /// Only an unreachable or missing repository lets a binding change go
+    /// ahead without an answer, and a refusal of this device does too when the
+    /// change makes it a new device.
     pub(crate) fn fence_outcome(error: ProviderError, new_device: bool) -> Result<()> {
         match error.kind {
             ErrorKind::Transient
             | ErrorKind::RateLimited
             | ErrorKind::DailyQuotaExhausted
-            | ErrorKind::EndpointRejected => Ok(()),
+            | ErrorKind::EndpointRejected
+            | ErrorKind::NotFound => Ok(()),
             ErrorKind::Unauthorized | ErrorKind::ReauthRequired if new_device => Ok(()),
             _ => Err(error),
         }
@@ -1376,7 +1334,8 @@ impl ExternalLwwEngine {
             match self.reconcile_sent(&publication, &sealed, cancel).await? {
                 Settlement::Landed => true,
                 Settlement::Conflict => return Err(segment::corrupt()),
-                Settlement::Nothing | Settlement::Missing => false,
+                Settlement::Nothing => false,
+                Settlement::Missing => self.landed_before_cleanup(store, &publication, cancel).await?,
             }
         } else {
             false
@@ -1390,11 +1349,39 @@ impl ExternalLwwEngine {
             } else {
                 crate::asset_repository::job_pins::CasReleaseOutcome::Aborted
             };
-            crate::asset_repository::job_pins::DurableCasJob::open(store.repository_root(), &job.job_id)
-                .and_then(|mut pins| pins.release(outcome))
-                .map_err(transient)?;
+            crate::persistent_store::external_lww::release_cas_job(store.repository_root(), &job.job_id, outcome)
+                .map_err(store_error)?;
         }
         Ok(())
+    }
+    /// A sent segment the repository no longer holds may have landed and been
+    /// removed after a checkpoint covered it. Its sequence is reused only when
+    /// no checkpoint covers it and this device has not received it either.
+    async fn landed_before_cleanup(
+        &self,
+        store: &mut PersistentStore,
+        publication: &SealedPublication,
+        cancel: &Cancellation,
+    ) -> Result<bool> {
+        let authority = store.lww_binding_authority().map_err(store_error)?;
+        let received = store
+            .lww_receive_progress(authority)
+            .map_err(store_error)?
+            .into_iter()
+            .any(|progress| {
+                progress.kind == "external"
+                    && progress.writer_id.as_deref() == Some(publication.writer.as_str())
+                    && progress.cursor >= publication.seq
+            });
+        if received {
+            return Ok(true);
+        }
+        Ok(self.checkpoints(cancel).await?.into_iter().any(|(_, checkpoint)| {
+            checkpoint
+                .covered_prefixes
+                .get(&publication.writer)
+                .is_some_and(|prefix| *prefix >= publication.seq)
+        }))
     }
     async fn include_objects(
         &self,
@@ -1790,16 +1777,27 @@ impl ExternalLwwEngine {
             .authorize_lww_new_device(&preparation.authorization_id)
             .map_err(store_error)
     }
+    #[cfg(test)]
     pub(crate) async fn receive_requests(
         &self,
         store: &mut PersistentStore,
         authority: DecimalU64,
         cancel: &Cancellation,
     ) -> Result<Vec<StageReceive>> {
+        self.receive_requests_cached(store, authority, &Default::default(), cancel).await
+    }
+    /// `receive_requests` reading only the snapshots `checkpoints` has not classified.
+    pub(crate) async fn receive_requests_cached(
+        &self,
+        store: &mut PersistentStore,
+        authority: DecimalU64,
+        checkpoints: &tokio::sync::Mutex<super::lww_compaction::CheckpointSummaries>,
+        cancel: &Cancellation,
+    ) -> Result<Vec<StageReceive>> {
         let progress=store.lww_receive_progress(authority).map_err(store_error)?;
         let current=progress.into_iter().filter(|p|p.kind=="external").filter_map(|p|p.writer_id.map(|w|(w,p.cursor))).collect::<BTreeMap<_,_>>();
         let mut covered=BTreeMap::new();
-        for (_,snapshot) in self.checkpoints(cancel).await? {
+        for snapshot in self.checkpoint_summaries(checkpoints, cancel).await? {
             for (writer,prefix) in snapshot.covered_prefixes {
                 let value=covered.entry(writer).or_insert(DecimalU64(0));
                 *value=(*value).max(prefix);
@@ -1809,39 +1807,52 @@ impl ExternalLwwEngine {
         let mut available=current.clone();
         for segment in &segments { available.insert(segment.writer_id.clone(),segment.seq); }
         let behind=covered.iter().any(|(writer,prefix)|available.get(writer).copied().unwrap_or(DecimalU64(0))<*prefix);
-        let upper=DecimalU64(self.admitted_upper()?.checked_add(300_000).ok_or_else(segment::corrupt)?);
-        let mut requests=Vec::new();
         if behind {
             let directory=tempfile::tempdir().map_err(transient)?;
             let mut state=self.published_state(directory.path(),cancel).await?;
             self.stage_published_objects(store,&mut state,directory.path(),cancel).await?;
             let mut changes=Some(state.catalog.changes()?);
             let identity=state.catalog.identity()?;
-            // The published catalog covers every writer, so the first writer's
-            // pages carry it and the rest only advance their writer's progress.
+            let mut requests=Vec::new();
+            // The published catalog covers every writer, so the first request
+            // carries it and the rest only advance their writer's progress.
             for (writer,prefix) in &state.catalog.coverage {
-                let before=current.get(writer).copied().unwrap_or(DecimalU64(0));
-                if before>=*prefix {continue;}
-                push_receive_pages(
-                    store,&mut requests,&format!("external-snapshot-{}-{}-{}-{}",authority.0,identity,writer,prefix.0),authority,
-                    changes.take().unwrap_or_default(),Progress{kind:"external".into(),cursor:*prefix,writer_id:Some(writer.clone())},before,upper,
-                )?;
+                if current.get(writer).copied().unwrap_or(DecimalU64(0))>=*prefix {continue;}
+                requests.push(store.external_lww_stable_receive(StageReceive {
+                    header:Header{binding_authority:authority,request_id:format!("external-snapshot-{}-{}-{}-{}",authority.0,identity,writer,prefix.0)},
+                    changes:changes.take().unwrap_or_default(), progress:Progress{kind:"external".into(),cursor:*prefix,writer_id:Some(writer.clone())},
+                    admitted_time_upper_ms:DecimalU64(self.admitted_upper()?.checked_add(300_000).ok_or_else(segment::corrupt)?),
+                }).map_err(store_error)?);
             }
             return Ok(requests);
         }
-        for segment in segments {
-            push_receive_pages(
-                store,
-                &mut requests,
-                &format!("external-receive-{}-{}-{}-{}", self.library, authority.0, segment.writer_id, segment.seq.0),
-                authority,
-                segment.changes,
-                Progress { kind: "external".into(), cursor: segment.seq, writer_id: Some(segment.writer_id) },
-                DecimalU64(segment.seq.0.checked_sub(1).ok_or_else(segment::corrupt)?),
-                upper,
-            )?;
-        }
-        Ok(requests)
+        segments
+            .into_iter()
+            .map(|segment| {
+                store
+                    .external_lww_stable_receive(StageReceive {
+                        header: Header {
+                            binding_authority: authority,
+                            request_id: format!(
+                                "external-receive-{}-{}-{}-{}",
+                                self.library, authority.0, segment.writer_id, segment.seq.0
+                            ),
+                        },
+                        changes: segment.changes,
+                        progress: Progress {
+                            kind: "external".into(),
+                            cursor: segment.seq,
+                            writer_id: Some(segment.writer_id),
+                        },
+                        admitted_time_upper_ms: DecimalU64(
+                            self.admitted_upper()?
+                                .checked_add(300_000)
+                                .ok_or_else(segment::corrupt)?,
+                        ),
+                    })
+                    .map_err(store_error)
+            })
+            .collect()
     }
     #[cfg(test)]
     pub(crate) async fn receive_and_apply(

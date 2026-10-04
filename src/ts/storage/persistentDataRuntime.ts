@@ -998,6 +998,12 @@ export function createPersistentDataRuntime(
     }
     const generating = () => [...(dependencies.state.getGeneratingConversations?.() ?? generatingConversations.snapshot())]
     const projectAppliedUnits = async (result: LwwApplyResult, baseline?: ReturnType<typeof captureLwwWorkingSetBaseline>, localIntent = false): Promise<void> => {
+        if (!localIntent && result.affectedKeys.length === 0) {
+            // Nothing reached the library, so the working set and its mirrors stay untouched.
+            coordinator.adoptAppliedUnitState(result.revision, null, null, [])
+            await commitContentCursor(result.revision)
+            return
+        }
         const database = dependencies.state.captureWorkingSetDatabase?.()
         if (!database) { coordinator.adoptAppliedUnitState(result.revision, null, null, []); return }
         baseline ??= captureLwwWorkingSetBaseline(database, coordinator.capturePersistentBaselineRoot(), dependencies.state.capturePresets?.() ?? null, coordinator.captureMaterializedBaseline(), coordinator.capturePresetRecordBaseline())

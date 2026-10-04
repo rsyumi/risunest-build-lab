@@ -77,7 +77,6 @@ const STAGE_ORDER: DialogStageId[] = [
     'preparing-attachments',
     'reading-database',
     'decoding-database',
-    'staging-characters',
     'finalizing-staging',
     'assign-plugin-values',
     'activating',
@@ -272,7 +271,6 @@ function stageLabel(stage: NativeFileJobDialogStage): string {
         case 'preparing-attachments': return copy.stagePreparingAttachments
         case 'reading-database': return copy.stageReadingDatabase
         case 'decoding-database': return copy.stageDecodingDatabase
-        case 'staging-characters': return copy.stageStagingCharacters
         case 'finalizing-staging': return copy.stageFinalizingStaging
         case 'assign-plugin-values': return copy.stageAssignPluginValues
         case 'activating': return copy.stageActivating
@@ -321,8 +319,6 @@ function doneStageDetail(stage: DialogStageId, counts: NativeImportCounts | unde
             return counts.attachmentsPrepared > 0
                 ? fillTemplate(copy.itemsCount, formatCount(counts.attachmentsPrepared))
                 : ''
-        case 'staging-characters':
-            return counts.characters > 0 ? fillTemplate(copy.itemsCount, formatCount(counts.characters)) : ''
         default:
             return ''
     }
@@ -503,14 +499,9 @@ function warningText(code: string): string {
     }
 }
 
-export function failureReason(code: string, direction: 'import' | 'export' = 'import', itemKind?: string): string {
+export function failureReason(code: string, direction: 'import' | 'export' = 'import'): string {
     const copy = language.risuNest.importDialog
     switch (code) {
-        case 'payload-too-large': {
-            const item = itemKind && Object.hasOwn(copy.tooLargeItems, itemKind)
-                ? copy.tooLargeItems[itemKind as keyof typeof copy.tooLargeItems] : undefined
-            return item ? copy.reasonTooLarge.replace('{0}', item) : copy.reasonUnknown
-        }
         case 'destination-required':
         case 'unsupported-without-destination':
             return copy.reasonPlainJpeg
@@ -754,7 +745,7 @@ export function buildNativeFileJobDialogModel(
             summary = copy.resultFailedAfterCommit
         } else {
             summary = copy.resultFailed
-            reason = failureReason(outcome.error?.code ?? '', 'import', outcome.error?.itemKind)
+            reason = failureReason(outcome.error?.code ?? '')
         }
         if (outcome.interruption === 'background-expired') {
             summary = outcome.partialWritesPossible ? copy.resultBackgroundExpiredPartial : copy.resultBackgroundExpired

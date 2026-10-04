@@ -1238,6 +1238,40 @@ fn cancellation_during_a_download_body_stops_the_transfer() {
 }
 
 #[test]
+fn object_metadata_reads_the_folder_listing_and_never_the_file() {
+    runtime().block_on(async {
+        let mut replies = open_replies(1_000, 10_000, 0);
+        replies.push(json(
+            200,
+            &listing(&[resource("pack-1.bin", "file-p", "file", 8)], None),
+        ));
+        let api = WireServer::start(replies);
+        let test = fixture();
+        let provider = super::create(test.dependencies.clone()).unwrap();
+        let cancel = Cancellation::default();
+        let (repository, _) = open(&provider, &api, OpenMode::Existing, &cancel)
+            .await
+            .unwrap();
+        let opened = api.requests.lock().unwrap().len();
+        let found = provider
+            .lookup_metadata(&repository, &object_intent("pack-1", ObjectRole::Pack, &[1; 8]), None, &cancel)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.locator, config::locator(&repository.connection_identity, config::PACKS, "pack-1.bin"));
+        assert_eq!(found.byte_length, 8);
+        assert!(found.checksum.is_none() && found.complete);
+        let missing = config::locator(&repository.connection_identity, config::PACKS, "pack-2.bin");
+        assert!(provider
+            .lookup_metadata(&repository, &object_intent("pack-2", ObjectRole::Pack, &[2; 8]), Some(&missing), &cancel)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(api.requests.lock().unwrap().len(), opened + 1, "one folder listing answers both and no file is read");
+    });
+}
+
+#[test]
 fn deleting_resolves_the_resource_id_and_refuses_the_head_and_descriptor_folders() {
     runtime().block_on(async {
         let mut replies = open_replies(1_000, 10_000, 0);

@@ -163,7 +163,6 @@ export interface LibrarySyncSelection {
     connectionId?: string
     selectionEpoch: string
     paused: boolean
-    decisionRequired: boolean
 }
 
 export interface ExternalExitCapture {
@@ -198,15 +197,16 @@ export interface StartExternalJobRequest {
     confirmLastRetained?: boolean
     restoreAreas?: ExternalRestoreArea[]
     targetRevision?: DecimalString
-    session?: 'foreground' | 'exitDrain'
+    session?: 'foreground'
     sessionId?: string
-    reason?: 'automatic' | 'manual' | 'exitDrain'
+    reason?: 'automatic' | 'manual'
 }
 
 export interface ExternalJobSummary {
     id: string
     applicationStarted?: boolean
-    reason?: 'automatic' | 'manual' | 'exitDrain'
+    restoreStopped?: boolean
+    reason?: 'automatic' | 'manual'
     targetRevision?: DecimalString
     restoreRequest?: {
         snapshotId: string
@@ -258,7 +258,6 @@ export interface ExternalJobSummary {
         damagedObjects?: DecimalString
         stopReason?: string
         reason?: string
-        decisionRequired?: boolean
     }
 }
 

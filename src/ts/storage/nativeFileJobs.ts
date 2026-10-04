@@ -227,7 +227,6 @@ export type NativeFileJobStage =
     | 'preparing-attachments'
     | 'reading-database'
     | 'decoding-database'
-    | 'staging-characters'
     | 'finalizing-staging'
     | 'assign-plugin-values'
     | 'awaiting-activation'
@@ -421,7 +420,6 @@ export interface NativeFileJobStatus {
         | 'export-character-charx'
         | 'export-character-card'
         | 'export-risu-module'
-        | 'export-dataset'
         | 'restore-legacy-local-backup'
         | 'export-compatible-local-backup'
         | 'export-portable-backup'
@@ -633,11 +631,6 @@ export interface NativeCharacterCardExportInput {
 
 export interface NativeRisuModuleExportInput {
     moduleIndex: number
-    destination: NativeCharacterCharxExportDestination
-    expectedRevision: number
-}
-
-export interface NativeDatasetExportInput {
     destination: NativeCharacterCharxExportDestination
     expectedRevision: number
 }
@@ -2248,30 +2241,6 @@ export function runNativeRisuModuleExport(
                     : {}),
                 expectedRevision: input.expectedRevision,
                 moduleIndex: input.moduleIndex,
-            }),
-        },
-        options,
-        dependencies,
-    )
-}
-
-export function runNativeDatasetExport(
-    input: NativeDatasetExportInput,
-    options: NativeFileJobOptions = {},
-    dependencies: NativeBackupExportDependencies = productionBackupExportDependencies,
-): Promise<NativeFileJobResult> {
-    return runNativeManagedExport(
-        {
-            operation: 'Native dataset export',
-            safLengthMismatchLabel: 'dataset',
-            handoffCleanupCommand: 'native_dataset_export_handoff_cleanup',
-            destination: input.destination,
-            prepareRequest: () => ({
-                kind: 'export-dataset',
-                ...(input.destination.type === 'desktopPath'
-                    ? { destination: input.destination.path }
-                    : {}),
-                expectedRevision: input.expectedRevision,
             }),
         },
         options,

@@ -1256,7 +1256,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
             source,
             cancellation,
           )
-          safDestinationPicker.launch(safDestinationPickerName(suggestedName, sourceKind))
+          safDestinationPicker.launch(safeSafDestinationName(suggestedName))
         } catch (error: SafDestinationException) {
           terminalRecord = destinationTerminalRecord(
             requestId = requestId,

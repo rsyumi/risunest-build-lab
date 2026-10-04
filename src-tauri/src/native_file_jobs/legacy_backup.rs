@@ -367,6 +367,7 @@ impl StrictLocalBackupDatabaseRestore for LegacyDatabaseRestore<'_> {
             self.repository_root,
             &self.job.id(),
             CasJobKind::LocalBackupRestore,
+            crate::asset_repository::job_pins::CasJobOwner::native_file_job(&self.job.id()),
             now_millis(),
         )
         .map_err(LocalBackupError::io)?;
@@ -1462,6 +1463,7 @@ mod tests {
                 directory.path(),
                 &Uuid::new_v4().to_string(),
                 CasJobKind::LocalBackupRestore,
+                crate::asset_repository::job_pins::CasJobOwner::for_test(),
                 now_millis(),
             )
             .unwrap(),
@@ -1528,6 +1530,7 @@ mod tests {
                 directory.path(),
                 &Uuid::new_v4().to_string(),
                 CasJobKind::LocalBackupRestore,
+                crate::asset_repository::job_pins::CasJobOwner::for_test(),
                 now_millis(),
             )
             .unwrap(),
@@ -1650,6 +1653,7 @@ mod tests {
                 directory.path(),
                 &Uuid::new_v4().to_string(),
                 CasJobKind::LocalBackupRestore,
+                crate::asset_repository::job_pins::CasJobOwner::for_test(),
                 now_millis(),
             )
             .unwrap(),
@@ -1707,6 +1711,7 @@ mod tests {
                 directory.path(),
                 &Uuid::new_v4().to_string(),
                 CasJobKind::LocalBackupRestore,
+                crate::asset_repository::job_pins::CasJobOwner::for_test(),
                 now_millis(),
             )
             .unwrap(),

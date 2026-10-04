@@ -130,10 +130,6 @@ destination_controlled_writer!(
     write_risu_module_destination_controlled,
     SourceKind::RisuModule
 );
-destination_controlled_writer!(
-    write_dataset_destination_controlled,
-    SourceKind::Dataset
-);
 
 trait DestinationFileSystem {
     type Source: Read;
@@ -247,7 +243,6 @@ enum SourceKind {
     CharacterCharX,
     CharacterCard,
     RisuModule,
-    Dataset,
 }
 
 impl SourceKind {
@@ -263,7 +258,6 @@ impl SourceKind {
             Self::CharacterCharX => Some(&["character.charx", "character.jpeg"]),
             Self::CharacterCard => Some(&["character.json", "character.png"]),
             Self::RisuModule => Some(&["module.risum"]),
-            Self::Dataset => Some(&["dataset.json"]),
         }
     }
 }

@@ -1742,7 +1742,6 @@ export const languageKorean = {
             failed: '변경 사항을 저장하지 못했습니다. 앱을 종료하기 전에 저장을 다시 시도해주세요.',
             invalid: '{0} 데이터를 저장하지 못했습니다. 해당 데이터를 확인한 후 저장을 다시 시도해주세요.',
             storage: '변경 사항을 저장하지 못했습니다. 저장 공간을 확보한 후 저장을 다시 시도해주세요.',
-            tooLarge: '변경 사항이 너무 커서 저장할 수 없습니다. 방금 추가한 큰 대화나 데이터를 삭제한 후 저장을 다시 시도해주세요.',
             settings: '설정', conversation: '대화', presets: '프리셋', plugins: '플러그인', assets: '에셋', data: '앱',
         },
         account: {
@@ -2572,7 +2571,6 @@ export const languageKorean = {
             stagePreparingAttachments: '첨부 파일 준비 중',
             stageReadingDatabase: '데이터베이스 읽는 중',
             stageDecodingDatabase: '데이터베이스 해석 중',
-            stageStagingCharacters: '캐릭터 저장 중',
             stageFinalizingStaging: '설정과 프리셋 저장 중',
             stageAssignPluginValues: '플러그인 값 할당',
             stageActivating: '데이터 적용 중',
@@ -2620,10 +2618,6 @@ export const languageKorean = {
                 '가져오는 동안 다른 변경이 있어 적용하지 못했습니다. 다시 시도하세요.',
             reasonStoreError: '저장소 오류로 가져오지 못했습니다.',
             reasonUnknown: '알 수 없는 오류가 발생했습니다.',
-            reasonTooLarge: '{0} 크기가 너무 커서 가져오지 못했습니다.',
-            tooLargeItems: {
-                root: '설정', preset: '프리셋', character: '캐릭터', conversation: '대화', message: '메시지', 'plugin-value': '플러그인 데이터',
-            },
             warningCleanupFailed:
                 '임시 파일을 정리하지 못했습니다. 다음 시작 때 다시 시도합니다.',
             warningUpstreamRestoreLosses: '콜드 스토리지 또는 인레이 데이터 일부를 복원하지 못했습니다. 복원된 데이터를 확인해주세요.',
@@ -2881,7 +2875,6 @@ export const languageKorean = {
 
     "syncConflictBackupUnreadable": '이 백업을 읽을 수 없습니다. 다른 백업을 선택하세요.',
     "chatMessageActionFailed": "작업 중 메시지가 변경되었습니다. 다시 시도하세요.",
-    "chatDraftConversationRemoved": "편집 중이던 메시지가 있는 채팅이 삭제되었습니다. 저장되지 않은 내용을 복사하세요.",
     "groupCharactersChangeFailed": "그룹의 캐릭터를 변경하지 못했습니다. 다시 시도하세요.",
     "regexScriptTimeout": "정규식 스크립트 실행 시간이 초과되었습니다.",
     "generationInterruptedInBackground": "백그라운드에서 응답 생성이 중단되었습니다.",
@@ -2904,5 +2897,12 @@ export const languageKorean = {
         restoreDescription: "현재 데이터를 초기화한 후 선택한 백업으로 복원합니다. 백업이 필요한 경우 수동으로 백업해주세요.",
         restoreAcknowledge: "현재 데이터 초기화",
         restoreAction: "복원",
+        previousFilesTitle: "연결하시겠습니까?",
+        previousFilesDescription: "이전에 연결한 서버나 외부 저장소에만 있는 파일이 있습니다. 연결하면 이 파일을 새 연결 대상에도 저장하며, 이 기기에도 보관하려면 다운로드 후 연결을 선택하세요.",
+        downloadThenConnect: "다운로드 후 연결",
+        downloadFailedNotConnected: "파일을 다운로드하지 못해 연결하지 않았습니다. 다시 시도하거나 다운로드하지 않고 연결하세요.",
+        previousStorageUnavailable: "이전에 연결한 서버나 외부 저장소에만 있는 파일을 가져오지 못해 동기화하지 못했습니다. 연결할 수 있을 때 다시 시도하세요.",
+        registrationRevoked: "서버에서 이 기기의 등록이 해제되어 동기화할 수 없습니다. 서버에서 이 기기를 새로 등록한 뒤 새 등록 코드를 입력하세요.",
+        bindingIncomplete: "연결이 완료되지 않았습니다. 연결하고 동기화를 눌러 연결을 마치세요.",
     },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>

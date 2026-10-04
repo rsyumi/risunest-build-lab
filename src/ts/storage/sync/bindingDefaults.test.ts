@@ -3,7 +3,7 @@ import { hasNonDefaultBindingData, validateBindingCount, type BindingLocalConten
 
 function defaults(): BindingLocalContent {
     const library = { characters: [{ chaId: 'fresh-id', name: 'Factory', chats: [{ id: 'chat-id', message: [] }], chatPage: 0 }], botPresets: [{ id: 'preset-id', name: 'Default' }], personas: [{ id: 'persona-id', name: 'User' }], jailbreakToggle: false }
-    return { library: structuredClone(library), characterCount: '0', factoryLibrary: library, opaqueSharedUnitCount: '0', managedAliasCount: '0', factoryManagedAliasCount: '0', ordinaryPluginValueCount: '0', hypaValueCount: '0', pluginLocalValueCount: '0' }
+    return { library: structuredClone(library), factoryLibrary: library, opaqueSharedUnitCount: '0', managedAliasCount: '0', factoryManagedAliasCount: '0', ordinaryPluginValueCount: '0', hypaValueCount: '0', pluginLocalValueCount: '0' }
 }
 
 it('preserves exact canonical decimal count strings beyond Number precision', () => {
@@ -42,14 +42,6 @@ describe('first binding non-default data', () => {
         expect(hasNonDefaultBindingData(data)).toBe(true)
         data.library.jailbreakToggle = false
         data.library.upstreamExtension = 'user value'
-        expect(hasNonDefaultBindingData(data)).toBe(true)
-    })
-    it('counts any character the native store reports', () => {
-        const data = defaults()
-        data.library.characters = []
-        data.factoryLibrary.characters = []
-        expect(hasNonDefaultBindingData(data)).toBe(false)
-        data.characterCount = '1'
         expect(hasNonDefaultBindingData(data)).toBe(true)
     })
     it.each(['ordinaryPluginValueCount', 'hypaValueCount', 'pluginLocalValueCount', 'managedAliasCount'] as const)('counts %s independently of participation', key => {
