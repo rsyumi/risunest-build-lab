@@ -406,19 +406,6 @@ pub(super) fn capture_with_work(
     Ok((value, work))
 }
 
-/// Drops a conversation's page index and manifest, so the next capture pages
-/// its messages again.
-pub(super) fn forget_pages(
-    tx: &Transaction<'_>,
-    generation: &str,
-    character: &str,
-    conversation: &str,
-) -> StoreResult<()> {
-    tx.execute("DELETE FROM message_page_indexes WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",params![generation,character,conversation])?;
-    tx.execute("DELETE FROM message_page_manifests WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",params![generation,character,conversation])?;
-    Ok(())
-}
-
 pub(super) fn current_manifest(
     tx: &Transaction<'_>,
     generation: &str,
@@ -1217,14 +1204,13 @@ fn library_object_roots(db: &Connection, objects: &Connection, roots: &mut Objec
 }
 
 /// Collects the objects that unfinished device rows in `schema` on `db`
-/// reference: device units, staged receives, unfinished intents with their
-/// rows, and unpublished proofs.
+/// reference: device units, staged receives, unfinished intents and
+/// unpublished proofs.
 fn device_object_roots(db: &Connection, schema: &str, objects: &Connection, roots: &mut ObjectRoots) -> StoreResult<()> {
     for sql in [
         format!("SELECT value FROM {schema}.lww_units WHERE json_extract(value,'$.kind')='object'"),
         format!("SELECT value FROM {schema}.lww_outbox WHERE json_extract(value,'$.kind')='object'"),
         format!("SELECT value FROM {schema}.lww_receive_rows WHERE status<>'done' AND json_extract(value,'$.kind')='object'"),
-        format!("SELECT r.value FROM {schema}.lww_intents i JOIN {schema}.lww_intent_rows r ON r.request_id=i.request_id WHERE i.complete=0 AND json_extract(r.value,'$.kind')='object'"),
     ] {
         unit_value_roots(db, objects, &sql, roots)?;
     }

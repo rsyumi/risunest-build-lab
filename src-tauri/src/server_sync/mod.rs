@@ -6,7 +6,6 @@ pub(crate) mod events;
 pub(crate) mod management;
 pub(crate) mod media;
 pub(crate) mod residency;
-pub(crate) mod previous_storage;
 #[cfg(test)]
 mod tests;
 pub(crate) mod transfer;
@@ -26,8 +25,6 @@ mod lww_large_unit_tests;
 mod media_admission_tests;
 #[cfg(test)]
 mod residency_lww_tests;
-#[cfg(test)]
-pub(crate) mod previous_storage_tests;
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

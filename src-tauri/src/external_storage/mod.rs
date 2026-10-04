@@ -71,5 +71,3 @@ pub(crate) mod lww_commands;
 pub(crate) mod lww_tests;
 #[cfg(test)]
 mod lww_large_unit_tests;
-#[cfg(test)]
-mod previous_storage_tests;

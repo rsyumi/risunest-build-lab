@@ -6,7 +6,7 @@ use super::{
     connection_commands::ConnectedRepository,
     contract::{
         Cancellation, Collection, ErrorKind, LeaseKind, ObjectIntent, ObjectReceipt, ObjectRole,
-        Provider, ProviderError, ProviderFuture, RepositoryHandle, Result,
+        ProviderError, ProviderFuture, RepositoryHandle, Result,
     },
     control,
     gc_store::{locator_key, GcStore},
@@ -744,10 +744,9 @@ impl ConnectedRepositoryView<'_> {
                     };
                     let Some(receipt) = leases::control_request(
                         cancel,
-                        self.connected.provider.lookup_metadata(
+                        self.connected.provider.lookup_object(
                             &self.connected.handle,
                             &intent,
-                            None,
                             cancel,
                         ),
                     )
@@ -1021,17 +1020,6 @@ impl DocumentSource for LwwRepositoryView<'_> {
             Box::pin(control::read_catalog_children_for_repository(self.base.connected,object,&self.engine.repository.repository_id,self.documents.cancel))
         } else {self.documents.catalog(object)}
     }
-    fn metadata<'a>(&'a self,object:&'a RemoteObject)->ProviderFuture<'a,Option<ObjectReceipt>> {
-        Box::pin(async move {
-            if let Some(current)=self.verified(object)? {return Ok(Some(current))}
-            if object.role!=ObjectRole::Segment && !self.native_body(object)? {
-                return if object.repository_id==self.engine.repository.repository_id {
-                    self.documents.metadata_for_repository(object,&self.engine.repository.repository_id).await
-                } else {self.documents.metadata(object).await};
-            }
-            stored_metadata(self.engine.provider.as_ref(),&self.engine.repository,object,self.documents.cancel).await
-        })
-    }
     fn probe<'a>(&'a self,object:&'a RemoteObject)->ProviderFuture<'a,Option<ObjectReceipt>> {
         Box::pin(async move {
             if let Some(current)=self.verified(object)? {return Ok(Some(current))}
@@ -1048,22 +1036,7 @@ impl DocumentSource for LwwRepositoryView<'_> {
         })
     }
 }
-/// Presence and length of a stored object from service metadata alone.
-async fn stored_metadata(provider:&dyn Provider,repository:&RepositoryHandle,object:&RemoteObject,cancel:&Cancellation)->Result<Option<ObjectReceipt>> {
-    let intent=ObjectIntent{repository_id:repository.repository_id.clone(),job_id:"cleanup-probe".into(),object_id:object.object_id.clone(),
-        role:object.role,byte_length:object.receipt.byte_length,sha256:object.ciphertext_sha256.clone()};
-    leases::control_request(cancel,provider.lookup_metadata(repository,&intent,Some(&object.receipt.locator),cancel)).await
-}
 impl ConnectedDocuments<'_> {
-    fn metadata_for_repository<'a>(&'a self, object: &'a RemoteObject,repository_id:&'a str) -> ProviderFuture<'a, Option<ObjectReceipt>> {
-        Box::pin(async move {
-            object.stored(&self.connected.handle)?;
-            if object.repository_id != repository_id {
-                return Err(ProviderError::new(ErrorKind::Corrupt));
-            }
-            stored_metadata(self.connected.provider.as_ref(),&self.connected.handle,object,self.cancel).await
-        })
-    }
     fn probe_for_repository<'a>(&'a self, object: &'a RemoteObject,repository_id:&'a str) -> ProviderFuture<'a, Option<ObjectReceipt>> {
         Box::pin(async move {
             object.stored(&self.connected.handle)?;
@@ -1119,9 +1092,6 @@ impl DocumentSource for ConnectedDocuments<'_> {
     fn probe<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, Option<ObjectReceipt>> {
         self.probe_for_repository(object,&self.connected.stored.descriptor.repository_id)
     }
-    fn metadata<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, Option<ObjectReceipt>> {
-        self.metadata_for_repository(object,&self.connected.stored.descriptor.repository_id)
-    }
 }
 
 #[cfg(test)]
@@ -1137,112 +1107,10 @@ mod tests {
     use risunest_external_storage_format::format::{Descriptor, Strategy};
     use std::{io::Write, sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex}};
 
-    /// An ordinary backup bundle published beside the checkpoints of `f`.
-    async fn ordinary_backup(f:&super::super::lww_tests::CycleFixture,directory:&Path,cancel:&Cancellation)
-        ->(ConnectedRepository,String,packaging::CompletedSnapshot) {
-        use super::super::contract::{ConnectionConfig,RemoteLocator};
-        let connected=ConnectedRepository {
-            stored:super::super::connection_store::StoredConnection {
-                id:"sender".into(),config:ConnectionConfig{provider:"synthetic".into(),profile:None,
-                    endpoint:"https://synthetic.invalid".into(),account_id:"fixture".into(),location:BTreeMap::new(),oauth_profile:None},
-                descriptor:f.sender.descriptor.clone(),descriptor_locator:RemoteLocator{connection_identity:f.sender.repository.connection_identity.clone(),collection:None,object:"descriptor".into()},
-                provider_repository_id:f.sender.repository.repository_id.clone(),credential_ref:"credential".into(),root_key_ref:"key".into(),recovery_key_ref:"recovery".into(),
-                retention_policy:None,capabilities:f.sender.capabilities.clone(),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
-            },provider:f.provider.clone(),handle:fake::repository(),
-            dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new([7;32]),
-        };
-        let cache=directory.join("cache");
-        let source_root=f.directory_a.path().to_path_buf();let backup_spool=directory.join("backup-sections");
-        let (capture,sections,original_units,writer)=super::super::worker_observation::spawn_blocking(move || {
-            let mut source=crate::persistent_store::PersistentStore::open(&source_root).unwrap();
-            let probe=super::super::runtime::CancelProbe(Cancellation::default());
-            let hydration=source.hydrate_external_capture_dependencies("sender",&probe).unwrap();
-            let (lease,prepared)=source.lww_acquire_backup_capture(source.revision().unwrap()).unwrap();
-            let sections=super::super::sections::capture_prepared_backup_sections(&prepared,&backup_spool,&probe.0).unwrap();
-            let capture=source.capture_external_library_from_lease_with_sections("sender",&hydration,&lease.lease,sections,&probe).unwrap();
-            let sections=capture.catalog.backup_sections().unwrap();let original=capture.catalog.original_backup_units().unwrap();
-            (capture,sections,original,source.lww_clock_state().unwrap().writer_id)
-        }).await.unwrap();
-        let backup_id=uuid::Uuid::new_v4().to_string();
-        let mut journal=TransferJournal::open(&directory.join("backup-journal"),super::super::journal::JobIdentity{
-            job_id:backup_id.clone(),connection_id:"sender".into(),repository_id:connected.handle.repository_id.clone(),
-            capture_id:capture.id.clone(),capture:capture.identity.clone(),
-        }).unwrap();
-        let metadata=packaging::SnapshotMetadata{snapshot_id:backup_id.clone(),repository_id:connected.stored.descriptor.repository_id.clone(),
-            library_id:capture.identity.library_epoch.clone(),author_device_id:capture.identity.store_id.clone(),created_at_ms:super::super::runtime::now_ms(),
-            logical_revision:capture.identity.revision as u64,parent_snapshot_id:None,
-            content_fingerprint:capture.catalog.content_fingerprint(&risunest_external_storage_format::format::library_fingerprint_domain()).unwrap(),
-            purpose:packaging::SnapshotPurpose::BackupBundle{source:BundleSource::Device{writer_id:writer},remote_generation:None,original_units},
-        };
-        let backup=packaging::package_and_upload(capture,sections,f.directory_a.path(),&cache,metadata,&connected.root_key,
-            packaging::PackageLimits::from_capabilities(&connected.stored.capabilities).unwrap(),None,&mut journal,
-            connected.provider.as_ref(),&connected.handle,&super::super::phase_progress::PhaseProgress::silent(),cancel).await.unwrap();
-        (connected,backup_id,backup)
-    }
-
-    #[test]
-    fn idle_receive_and_maintenance_read_each_snapshot_once_per_connection() {
-        runtime().block_on(async {
-            use super::super::lww_tests::CycleFixture;
-            use crate::persistent_store::lww::ApplyReceive;
-            use risunest_sync_wire::stamp::DecimalU64;
-            let mut f=CycleFixture::new();let cancel=Cancellation::default();
-            f.a.commit(&crate::persistent_store::WorkingSetCommit{expected_revision:f.a.revision().unwrap(),unit_mutations:Some(vec![
-                crate::persistent_store::lww::UnitMutation::Set{key:risunest_sync_wire::unit::UnitKey::new(&["root","language"]).unwrap(),value:serde_json::json!("en")},
-            ]),..Default::default()}).unwrap();
-            f.publish_a().await;
-            let directory=tempfile::tempdir().unwrap();
-            let writer=f.a.lww_clock_state().unwrap().writer_id;
-            let first=f.sender.compact_published(&directory.path().join("first"),"00000000-0000-4000-8000-000000000091",&writer,
-                &f.sender.capabilities,&cancel,None).await.unwrap();
-            let (_,_,backup)=ordinary_backup(&f,directory.path(),&cancel).await;
-            assert_eq!(f.receiver.snapshot_listing(&cancel).await.unwrap().len(),1);
-            let summaries=tokio::sync::Mutex::new(super::super::lww_compaction::CheckpointSummaries::default());
-            let reads=|f:&CycleFixture|(f.provider.read_count(),f.provider.listing_count());
-            let first_checkpoint=first.reference.receipt.locator.object.clone();
-            let ordinary=backup.reference.receipt.locator.object.clone();
-            let before=(f.provider.read_attempts(&first_checkpoint),f.provider.read_attempts(&ordinary));
-
-            let requests=f.receiver.receive_requests_cached(&mut f.b,DecimalU64(0),&summaries,&cancel).await.unwrap();
-            assert!(!requests.is_empty());
-            for request in requests {
-                f.b.lww_stage_receive(&request).unwrap();
-                f.b.lww_apply_receive(&ApplyReceive{header:request.header.clone(),generating:vec![]}).unwrap();
-                f.b.lww_finish_receive(&request.header).unwrap();
-            }
-            assert_eq!((f.provider.read_attempts(&first_checkpoint),f.provider.read_attempts(&ordinary)),(before.0+1,before.1+1));
-
-            let (read,listed)=reads(&f);
-            assert!(f.receiver.receive_requests_cached(&mut f.b,DecimalU64(0),&summaries,&cancel).await.unwrap().is_empty());
-            assert_eq!(reads(&f),(read,listed+2),"an idle receive reads objects or lists more than twice");
-            assert!(f.receiver.maintenance_needed_cached(&summaries,&cancel).await.unwrap().is_none());
-            assert_eq!(reads(&f),(read,listed+4),"an idle maintenance check reads objects or lists more than twice");
-
-            let own=tokio::sync::Mutex::new(super::super::lww_compaction::CheckpointSummaries::default());
-            for request in f.sender.receive_requests_cached(&mut f.a,DecimalU64(0),&own,&cancel).await.unwrap() {
-                f.a.lww_stage_receive(&request).unwrap();
-                f.a.lww_apply_receive(&ApplyReceive{header:request.header.clone(),generating:vec![]}).unwrap();
-                f.a.lww_finish_receive(&request.header).unwrap();
-            }
-            let (read,listed)=reads(&f);
-            assert!(f.sender.receive_requests_cached(&mut f.a,DecimalU64(0),&own,&cancel).await.unwrap().is_empty());
-            assert_eq!(reads(&f),(read,listed+2),"an idle receive on the publishing device reads objects or lists more than twice");
-
-            let second=f.sender.compact_published(&directory.path().join("second"),"00000000-0000-4000-8000-000000000092",&writer,
-                &f.sender.capabilities,&cancel,None).await.unwrap();
-            let (read,_)=reads(&f);
-            let known=(f.provider.read_attempts(&first_checkpoint),f.provider.read_attempts(&ordinary));
-            assert!(f.receiver.receive_requests_cached(&mut f.b,DecimalU64(0),&summaries,&cancel).await.unwrap().is_empty());
-            assert_eq!(reads(&f).0,read+1,"a new checkpoint is the only object the next receive reads");
-            assert_eq!(f.provider.read_attempts(&second.reference.receipt.locator.object),1);
-            assert_eq!((f.provider.read_attempts(&first_checkpoint),f.provider.read_attempts(&ordinary)),known);
-        });
-    }
-
     #[test]
     fn lww_gc_retires_native_body_before_its_signed_discovery_parent() {
         runtime().block_on(async {
-            use super::super::{lww_tests::{CycleFixture,small_asset},fake};
+            use super::super::{lww_tests::{CycleFixture,small_asset},fake,contract::{ConnectionConfig,RemoteLocator}};
             let mut f=CycleFixture::new();let cancel=Cancellation::default();
             small_asset(&mut f.a,"obsolete-large",&vec![31;5*1024*1024]);
             let mut small=Vec::new();
@@ -1266,8 +1134,42 @@ mod tests {
             assert_eq!(old.covered_prefixes,current.covered_prefixes);
             assert_eq!(checkpoint.reference.role,ObjectRole::Snapshot);
             assert_eq!(checkpoint.reference.object_id,id);
-            let (connected,backup_id,backup)=ordinary_backup(&f,directory.path(),&cancel).await;
+            let connected=ConnectedRepository {
+                stored:super::super::connection_store::StoredConnection {
+                    id:"sender".into(),config:ConnectionConfig{provider:"synthetic".into(),profile:None,
+                        endpoint:"https://synthetic.invalid".into(),account_id:"fixture".into(),location:BTreeMap::new(),oauth_profile:None},
+                    descriptor:f.sender.descriptor.clone(),descriptor_locator:RemoteLocator{connection_identity:f.sender.repository.connection_identity.clone(),collection:None,object:"descriptor".into()},
+                    provider_repository_id:f.sender.repository.repository_id.clone(),credential_ref:"credential".into(),root_key_ref:"key".into(),recovery_key_ref:"recovery".into(),
+                    retention_policy:None,capabilities:f.sender.capabilities.clone(),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
+                },provider:f.provider.clone(),handle:fake::repository(),
+                dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new([7;32]),
+            };
             let cache=directory.path().join("cache");let scratch=directory.path().join("probe");
+            let source_root=f.directory_a.path().to_path_buf();let backup_spool=directory.path().join("backup-sections");
+            let (capture,sections,original_units,writer)=super::super::worker_observation::spawn_blocking(move || {
+                let mut source=crate::persistent_store::PersistentStore::open(&source_root).unwrap();
+                let probe=super::super::runtime::CancelProbe(Cancellation::default());
+                let hydration=source.hydrate_external_capture_dependencies("sender",&probe).unwrap();
+                let (lease,prepared)=source.lww_acquire_backup_capture(source.revision().unwrap()).unwrap();
+                let sections=super::super::sections::capture_prepared_backup_sections(&prepared,&backup_spool,&probe.0).unwrap();
+                let capture=source.capture_external_library_from_lease_with_sections("sender",&hydration,&lease.lease,sections,&probe).unwrap();
+                let sections=capture.catalog.backup_sections().unwrap();let original=capture.catalog.original_backup_units().unwrap();
+                (capture,sections,original,source.lww_clock_state().unwrap().writer_id)
+            }).await.unwrap();
+            let backup_id=uuid::Uuid::new_v4().to_string();
+            let mut journal=TransferJournal::open(&directory.path().join("backup-journal"),super::super::journal::JobIdentity{
+                job_id:backup_id.clone(),connection_id:"sender".into(),repository_id:connected.handle.repository_id.clone(),
+                capture_id:capture.id.clone(),capture:capture.identity.clone(),
+            }).unwrap();
+            let metadata=packaging::SnapshotMetadata{snapshot_id:backup_id.clone(),repository_id:connected.stored.descriptor.repository_id.clone(),
+                library_id:capture.identity.library_epoch.clone(),author_device_id:capture.identity.store_id.clone(),created_at_ms:super::super::runtime::now_ms(),
+                logical_revision:capture.identity.revision as u64,parent_snapshot_id:None,
+                content_fingerprint:capture.catalog.content_fingerprint(&risunest_external_storage_format::format::library_fingerprint_domain()).unwrap(),
+                purpose:packaging::SnapshotPurpose::BackupBundle{source:BundleSource::Device{writer_id:writer},remote_generation:None,original_units},
+            };
+            let backup=packaging::package_and_upload(capture,sections,f.directory_a.path(),&cache,metadata,&connected.root_key,
+                packaging::PackageLimits::from_capabilities(&connected.stored.capabilities).unwrap(),None,&mut journal,
+                connected.provider.as_ref(),&connected.handle,&super::super::phase_progress::PhaseProgress::silent(),&cancel).await.unwrap();
             assert_ne!(backup.reference.repository_id,f.sender.repository.repository_id);
             assert_eq!(f.sender.snapshot_listing(&cancel).await.unwrap().len(),2,"ordinary logical-scope backup coexists with the physical checkpoints");
             let view=LwwRepositoryView::new(&f.sender,ConnectedRepositoryView{connected:&connected,writer_id:"sender",policy:RetentionPolicy::DEFAULT,
@@ -1397,47 +1299,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn lww_cleanup_checks_live_bodies_without_downloading_them() {
-        runtime().block_on(async {
-            use super::super::lww_tests::{CycleFixture,small_asset};
-            let mut f=CycleFixture::new();let cancel=Cancellation::default();
-            small_asset(&mut f.a,"live-large",&vec![37;5*1024*1024]);
-            for n in 0..3 {small_asset(&mut f.a,&format!("live-{n}"),format!("synthetic live pack entry {n}").as_bytes());}
-            f.publish_a().await;
-            let directory=tempfile::tempdir().unwrap();
-            let writer=f.a.lww_clock_state().unwrap().writer_id;
-            let completed=f.sender.compact_published(&directory.path().join("compaction"),"00000000-0000-4000-8000-0000000000a2",
-                &writer,&f.sender.capabilities,&cancel,None).await.unwrap();
-            let (_,checkpoint)=f.sender.checkpoint(&completed.reference.receipt,&cancel).await.unwrap();
-            let standalone=checkpoint.standalone_bodies.values().map(|body|body.locator.clone().unwrap().object).collect::<Vec<_>>();
-            assert_eq!(standalone.len(),1);
-            let packs=f.provider.objects_with_role(ObjectRole::Pack);
-            assert!(packs.len()>standalone.len() && standalone.iter().all(|id|packs.contains(id)),"packed and standalone bodies are live");
-            let catalogs=f.provider.objects_with_role(ObjectRole::Catalog);
-            assert!(!catalogs.is_empty());
-            let reads=|f:&CycleFixture,ids:&[String]|ids.iter().map(|id|f.provider.read_attempts(id)).collect::<Vec<_>>();
-            let reconciles=|f:&CycleFixture,ids:&[String]|ids.iter().map(|id|f.provider.reconcile_attempts(id)).collect::<Vec<_>>();
-            let (packs_before,catalogs_before,reconciled)=(reads(&f,&packs),reads(&f,&catalogs),reconciles(&f,&packs));
-            let connected=fixture_connection(&f);
-            let cache=directory.path().join("cache");let scratch=directory.path().join("probe");
-            let clock=fake::FakeLeaseClock::new(super::super::runtime::now_ms());
-            let context=LeaseContext{root:f.directory_a.path(),connection_id:"sender",writer_id:"collector",descriptor:&connected.stored.descriptor,
-                root_key:&connected.root_key,provider:connected.provider.as_ref(),repository:&connected.handle,clock:&clock,protection_supported:true,ledger:None};
-            let request=CleanupRequest{job_id:"idle-cleanup",cleanup_supported:true,limits:CleanupLimits::default(),connection_time:&available_time};
-            let outcome=run_lww(&context,&request,&f.sender,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
-                now_ms:super::super::runtime::now_ms(),unfinished:vec![],cache_root:&cache},&scratch,&cancel).await.unwrap();
-            assert_eq!(outcome.stop_reason,StopReason::Complete);
-            assert_eq!(outcome.deleted_objects,0);
-            assert_eq!(reads(&f,&packs),packs_before,"no live pack or standalone body is downloaded");
-            for ((id,before),after) in catalogs.iter().zip(&catalogs_before).zip(reads(&f,&catalogs)) {
-                assert!(after-before<=1,"catalog {id} is read once per cleanup run");
-            }
-            for id in &standalone {assert!(f.provider.metadata_attempts(id)>0,"a live standalone body is still checked");}
-            assert_eq!(reconciles(&f,&packs),reconciled,"the inventory survey reads metadata only");
-        });
-    }
-
     const NOW: u64 = 1000 * 24 * 60 * leases::MINUTE_MS;
     fn available_time(_: Instant) -> Result<bool> { Ok(true) }
     fn unavailable_time(_: Instant) -> Result<bool> { Ok(false) }
@@ -1516,31 +1377,14 @@ mod tests {
             self.source.listed(receipt)
         }
         fn catalog<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, Vec<RemoteObject>> {
-            Box::pin(async move {
-                self.tick();
-                if !self.provider.holds(&object.object_id) { return Err(ProviderError::new(ErrorKind::NotFound)); }
-                self.source.catalog(object).await
-            })
+            self.source.catalog(object)
         }
         fn probe<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, Option<ObjectReceipt>> {
             Box::pin(async move {
-                self.tick();
+                self.clock.advance(self.advance_once.swap(0, Ordering::SeqCst) as u64);
                 let receipt = self.source.probe(object).await?;
                 Ok(if self.provider.holds(&object.object_id) { receipt } else { None })
             })
-        }
-        fn metadata<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, Option<ObjectReceipt>> {
-            Box::pin(async move {
-                self.tick();
-                let receipt = self.source.metadata(object).await?;
-                Ok(if self.provider.holds(&object.object_id) { receipt } else { None })
-            })
-        }
-    }
-    impl Probes<'_> {
-        /// The first remote check of a run takes the time a test asks for.
-        fn tick(&self) {
-            self.clock.advance(self.advance_once.swap(0, Ordering::SeqCst) as u64);
         }
     }
     struct Harness {

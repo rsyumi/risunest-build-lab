@@ -41,21 +41,24 @@ function createAdapter(connectionId: string): Adapter {
         if (state.target.kind !== 'external' || state.target.connectionId !== connectionId) throw new Error('Sync binding changed')
         return { state, signal: active?.signal ?? new AbortController().signal }
     }
+    // Native code returns one bounded page per call until none remain.
     const receive = async (binding: BindingContext): Promise<number> => {
-        binding.signal.throwIfAborted()
-        const requests = await invoke<LwwStageReceive[]>('external_lww_receive', { request: header(connectionId, binding) })
-        for (const request of requests) {
+        let received = 0
+        for (;;) {
+            binding.signal.throwIfAborted()
+            const request = await invoke<LwwStageReceive | null>('external_lww_receive', { request: header(connectionId, binding) })
+            if (!request) return received
             binding.signal.throwIfAborted()
             await getPersistentDataRuntime().applyLwwReceive(request)
+            received++
         }
-        return requests.length
     }
-    const publish = async (binding?: BindingContext, flush = true): Promise<void> => {
+    const publish = async (initial = false, binding?: BindingContext, flush = true): Promise<void> => {
         const current = binding ?? await context()
         current.signal.throwIfAborted()
         try {
             if (flush) await flushPendingDataLocally('external-lww-publish')
-            await invoke('external_lww_publish', { request: header(connectionId, current) })
+            await invoke('external_lww_publish', { request: header(connectionId, current), initial })
         } finally {
             current.signal.throwIfAborted()
             const runtime = getPersistentDataRuntime()
@@ -83,10 +86,8 @@ function createAdapter(connectionId: string): Adapter {
             ...header(connectionId, binding), inspectionId: target.inspectionId, targetId: target.targetId, libraryId: target.libraryId,
         } }),
         replaceFromTarget: replaceNativeSyncBinding,
-        publishInitialSharedState: binding => publish(binding, false),
+        publishInitialSharedState: binding => publish(true, binding, false),
         async resumeBinding(binding) {
-            binding.signal.throwIfAborted()
-            await invoke('pds_lww_finish_initial_publication', { request: { bindingAuthority: binding.state.targetAuthority, requestId: crypto.randomUUID() } })
             await invoke('external_lww_resume', { connectionId })
             reportFailure(connectionId)
             active = binding
@@ -194,7 +195,7 @@ export function externalLwwExitDrain(connectionId: string, selectionEpoch: strin
             const binding = await native.state()
             if (binding.target.kind !== 'external' || binding.target.connectionId !== connectionId || binding.selectionEpoch !== selectionEpoch) return { kind: 'blocked', reason: 'sync-binding-changed' }
             try {
-                await invoke('external_lww_publish', { request: { ...header(connectionId, { state: binding, signal }), exitTarget: { revision: String(target.revision), libraryEpoch: target.libraryEpoch, selectionEpoch } } })
+                await invoke('external_lww_publish', { request: { ...header(connectionId, { state: binding, signal }), exitTarget: { revision: String(target.revision), libraryEpoch: target.libraryEpoch, selectionEpoch } }, initial: false })
                 signal.throwIfAborted()
                 if (!fenced) await adapter.scheduler.receiveNow(true)
                 return { kind: 'complete' }

@@ -44,9 +44,6 @@ pub(crate) trait DocumentSource: Sync {
     fn catalog<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, Vec<RemoteObject>>;
     /// Verify current identity and bytes. Only a confirmed missing object is None.
     fn probe<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, Option<ObjectReceipt>>;
-    /// Presence and byte length from service metadata, without reading the
-    /// body. Only a confirmed missing object is None.
-    fn metadata<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, Option<ObjectReceipt>>;
     fn native_body(&self, _object:&RemoteObject)->Result<bool> {Ok(false)}
     fn format_repository_id(&self,_object:&RemoteObject)->Option<&str> {None}
 }
@@ -163,50 +160,12 @@ impl Graph {
     }
 }
 
-/// What one mark run learned about each object, shared by its walks so an
-/// object reached from several roots is checked once.
-#[derive(Default)]
-struct Memo(BTreeMap<(String, String), Option<Vec<RemoteObject>>>);
-
-/// The objects one object names, or None when it is confirmed missing.
-async fn visit(source: &dyn DocumentSource, object: &RemoteObject) -> Result<Option<Vec<RemoteObject>>> {
-    let current = match object.role {
-        // The authenticated read of a catalog is its presence proof.
-        ObjectRole::Catalog => return match source.catalog(object).await {
-            Ok(children) => Ok(Some(children)),
-            Err(error) if error.kind == ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
-        },
-        ObjectRole::Pack => source.metadata(object).await?,
-        ObjectRole::SyncState | ObjectRole::BackupBundle | ObjectRole::Snapshot | ObjectRole::Segment
-            | ObjectRole::BackupPoint => source.probe(object).await?,
-        ObjectRole::Descriptor | ObjectRole::InventoryPage | ObjectRole::Lease => return Err(corrupt()),
-    };
-    let Some(current) = current else { return Ok(None) };
-    if !current.complete || current.locator != object.receipt.locator
-        || current.byte_length != object.receipt.byte_length
-        || current.checksum.as_ref().is_some_and(|checksum| checksum.algorithm.eq_ignore_ascii_case("sha256")
-            && checksum.value != object.ciphertext_sha256)
-    {
-        return Err(corrupt());
-    }
-    match object.role {
-        // A disappearing metadata object changes the survey even when an earlier
-        // direct probe found it. Do not hide a partially walked closure.
-        ObjectRole::SyncState | ObjectRole::BackupBundle | ObjectRole::Snapshot | ObjectRole::Segment => {
-            Ok(Some(source.document(object).await?.references))
-        }
-        _ => Ok(Some(Vec::new())),
-    }
-}
-
 async fn walk(
     source: &dyn DocumentSource,
     objects: Vec<RemoteObject>,
     repository: &RepositoryHandle,
     format_repository_id: &str,
     tolerate_missing: bool,
-    memo: &mut Memo,
     cancel: &Cancellation,
 ) -> Result<Graph> {
     let mut graph = Graph::default();
@@ -221,19 +180,29 @@ async fn walk(
             if previous != identity { return Err(corrupt()); }
             continue;
         }
-        let visited = match memo.0.get(&(key.clone(), identity.clone())) {
-            Some(known) => known.clone(),
-            None => {
-                let found = visit(source, &object).await?;
-                memo.0.insert((key.clone(), identity), found.clone());
-                found
-            }
-        };
-        let Some(children) = visited else {
+        let Some(current) = source.probe(&object).await? else {
             if !tolerate_missing { return Err(ProviderError::new(ErrorKind::NotFound)); }
             graph.missing.insert(key);
             continue;
         };
+        if !current.complete || current.locator != object.receipt.locator
+            || current.byte_length != object.receipt.byte_length
+        {
+            return Err(corrupt());
+        }
+        let children = match object.role {
+            ObjectRole::SyncState | ObjectRole::BackupBundle | ObjectRole::Snapshot | ObjectRole::Segment => {
+                source.document(&object).await.map(|node| node.references)
+            }
+            ObjectRole::Catalog => source.catalog(&object).await,
+            ObjectRole::Pack | ObjectRole::BackupPoint => Ok(Vec::new()),
+            ObjectRole::Descriptor | ObjectRole::InventoryPage | ObjectRole::Lease => {
+                return Err(corrupt())
+            }
+        };
+        // A disappearing metadata object changes the survey even when an earlier
+        // direct probe found it. Do not hide a partially walked closure.
+        let children = children?;
         let keys = children.iter().map(|child| locator_key(&child.receipt.locator))
             .collect::<Result<BTreeSet<_>>>()?;
         graph.nodes.insert(key, Node { object, children: keys });
@@ -322,9 +291,8 @@ pub(crate) async fn mark(
             protected.push(object.clone());
         }
     }
-    let mut memo = Memo::default();
     let live = walk(
-        source, protected, request.repository, request.format_repository_id, false, &mut memo, cancel,
+        source, protected, request.repository, request.format_repository_id, false, cancel,
     ).await?;
     let mut reachable = live.nodes.keys().cloned().collect::<BTreeSet<_>>();
     let mut reachable_bytes = live.nodes.values().try_fold(0u64, |sum, node| {
@@ -342,7 +310,7 @@ pub(crate) async fn mark(
         std::iter::once(point.point.clone()).chain(point.bundles.iter().cloned())
     }).collect();
     let mut expired = walk(
-        source, expired_roots, request.repository, request.format_repository_id, true, &mut memo, cancel,
+        source, expired_roots, request.repository, request.format_repository_id, true, cancel,
     ).await?;
     for point in &request.retired_points {
         if point.point.role != ObjectRole::BackupPoint
@@ -357,7 +325,7 @@ pub(crate) async fn mark(
     }
     authorized.extend(expired.nodes.keys().cloned());
     let mut candidates = walk(
-        source, request.known_objects, request.repository, request.format_repository_id, true, &mut memo, cancel,
+        source, request.known_objects, request.repository, request.format_repository_id, true, cancel,
     ).await?;
     for point in &request.retired_points {
         if let Some(node) = candidates.nodes.get_mut(&locator_key(&point.point.receipt.locator)?) {
@@ -471,18 +439,8 @@ pub(crate) mod tests {
         pub(crate) children: BTreeMap<String, Vec<RemoteObject>>,
         pub(crate) fail: Mutex<Option<ErrorKind>>,
         pub(crate) absent: Mutex<BTreeSet<String>>,
-        pub(crate) calls: Mutex<Vec<(String, &'static str)>>,
     }
     impl Source {
-        /// Records one remote check and answers whether the object is there.
-        fn reached(&self, object: &RemoteObject, call: &'static str) -> Result<bool> {
-            self.calls.lock().unwrap().push((object.object_id.clone(), call));
-            if let Some(kind) = self.fail.lock().unwrap().take() { return Err(ProviderError::new(kind)); }
-            Ok(!self.absent.lock().unwrap().contains(&object.object_id))
-        }
-        pub(crate) fn count_calls(&self, id: &str, call: &str) -> usize {
-            self.calls.lock().unwrap().iter().filter(|(object, kind)| object == id && *kind == call).count()
-        }
         fn node(&self, object: &RemoteObject) -> Result<DocumentNode> {
             if !self.objects.contains_key(&object.object_id) {
                 return Err(ProviderError::new(ErrorKind::NotFound));
@@ -495,10 +453,7 @@ pub(crate) mod tests {
     }
     impl DocumentSource for Source {
         fn document<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, DocumentNode> {
-            Box::pin(async move {
-                self.calls.lock().unwrap().push((object.object_id.clone(), "document"));
-                self.node(object)
-            })
+            Box::pin(async move { self.node(object) })
         }
         fn listed<'a>(&'a self, receipt: &'a ObjectReceipt) -> ProviderFuture<'a, (RemoteObject, DocumentNode)> {
             Box::pin(async move {
@@ -508,20 +463,12 @@ pub(crate) mod tests {
             })
         }
         fn catalog<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, Vec<RemoteObject>> {
-            Box::pin(async move {
-                if !self.reached(object, "catalog")? { return Err(ProviderError::new(ErrorKind::NotFound)); }
-                Ok(self.node(object)?.references)
-            })
+            Box::pin(async move { Ok(self.node(object)?.references) })
         }
         fn probe<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, Option<ObjectReceipt>> {
             Box::pin(async move {
-                if !self.reached(object, "probe")? { return Ok(None); }
-                Ok(self.objects.get(&object.object_id).map(|object| object.receipt.clone()))
-            })
-        }
-        fn metadata<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, Option<ObjectReceipt>> {
-            Box::pin(async move {
-                if !self.reached(object, "metadata")? { return Ok(None); }
+                if let Some(kind) = self.fail.lock().unwrap().take() { return Err(ProviderError::new(kind)); }
+                if self.absent.lock().unwrap().contains(&object.object_id) { return Ok(None); }
                 Ok(self.objects.get(&object.object_id).map(|object| object.receipt.clone()))
             })
         }
@@ -530,7 +477,7 @@ pub(crate) mod tests {
         Source {
             objects: objects.iter().map(|object| (object.object_id.clone(), object.clone())).collect(),
             children: edges.iter().map(|(object, children)| (object.object_id.clone(), children.clone())).collect(),
-            fail: Mutex::new(None), absent: Mutex::new(BTreeSet::new()), calls: Mutex::new(Vec::new()),
+            fail: Mutex::new(None), absent: Mutex::new(BTreeSet::new()),
         }
     }
     fn runtime() -> tokio::runtime::Runtime {
@@ -574,34 +521,6 @@ pub(crate) mod tests {
             assert!(!ids.contains(&section.object_id.as_str()));
             assert!(ids.iter().position(|id| *id == point.object_id).unwrap() < ids.iter().position(|id| *id == retired.object_id).unwrap());
             assert!(ids.iter().position(|id| *id == retired.object_id).unwrap() < ids.iter().position(|id| *id == dead_pack.object_id).unwrap());
-        });
-    }
-
-    #[test]
-    fn c_one_mark_checks_each_object_once_and_reads_catalogs_without_probing() {
-        runtime().block_on(async {
-            let root = tempfile::tempdir().unwrap();
-            let head = object("head-state", ObjectRole::SyncState);
-            let section = object("live-section", ObjectRole::Catalog);
-            let pack = object("live-pack", ObjectRole::Pack);
-            let retired = object("old-state", ObjectRole::BackupBundle);
-            let point = object("expired-point", ObjectRole::BackupPoint);
-            let all = vec![head.clone(), section.clone(), pack.clone(), retired.clone(), point.clone()];
-            let source = source(&all, &[
-                (&head, vec![section.clone()]), (&section, vec![pack.clone()]), (&retired, vec![section.clone()]),
-            ]);
-            let roots = Roots { head: Some(head.clone()), ..Roots::default() };
-            let expired = vec![RetiredPoint { point: point.clone(), bundles: vec![retired.clone()] }];
-            observe(root.path(), &source, 1000, roots, all, expired).await.unwrap();
-            assert_eq!(source.count_calls(&pack.object_id, "metadata"), 1, "a live pack is checked once without reading it");
-            assert_eq!(source.count_calls(&pack.object_id, "probe"), 0);
-            assert_eq!(source.count_calls(&section.object_id, "catalog"), 1, "the catalog read is its presence check");
-            assert_eq!(source.count_calls(&section.object_id, "probe"), 0);
-            for document in [&head, &retired] {
-                assert_eq!(source.count_calls(&document.object_id, "probe"), 1);
-                assert_eq!(source.count_calls(&document.object_id, "document"), 1);
-            }
-            assert_eq!(source.count_calls(&point.object_id, "probe"), 1);
         });
     }
 

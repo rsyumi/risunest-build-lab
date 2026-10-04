@@ -3,7 +3,7 @@ import { createSyncBindingFlow, type BindingActivationGuard, type BindingPluginL
 import type { PersistentDataRuntime } from '../persistentDataRuntime'
 import type { PersistentMutationToken } from '../saveCoordinator'
 import { registerCommittedWorkingSetContinuation } from '../committedWorkingSetContinuation'
-import { confirmPreviousStorageFiles, confirmSyncBindingReplacement, downloadPreviousStorageFiles } from './bindingDialog'
+import { confirmSyncBindingReplacement } from './bindingDialog'
 import { hasLocalBindingData, hasLocalSharedBindingData } from './bindingLocalData'
 import { createNativeSyncBindingBridge } from './bindingNative'
 import { getSyncBindingTransport, registerSyncBindingFlow } from './bindingRegistry'
@@ -39,8 +39,6 @@ export function installSyncBindingFlow(dependencies: {
         hasNonDefaultData: hasLocalBindingData,
         hasNonDefaultSharedData: hasLocalSharedBindingData,
         confirmReplacement: confirmSyncBindingReplacement,
-        confirmPreviousStorageFiles,
-        downloadPreviousStorageFiles: () => downloadPreviousStorageFiles(),
     })
     return { flow, dispose: registerSyncBindingFlow(flow) }
 }

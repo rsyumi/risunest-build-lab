@@ -273,7 +273,6 @@ fn import_jpeg_asset_with_before_commit(
         repository_root,
         &job.id(),
         CasJobKind::DirectAssetOrInlayWrite,
-        crate::asset_repository::job_pins::CasJobOwner::native_file_job(&job.id()),
         now_millis()?,
     )
     .map_err(|error| NativeJobError::new("store-error", error.to_string()))?;

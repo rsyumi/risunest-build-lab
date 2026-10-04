@@ -7,7 +7,7 @@ import { hasLocalBindingData, hasLocalSharedBindingData, inspectLocalBindingData
 import { normalizeDatabaseDefaults, type Database } from '../database.svelte'
 import { DBState } from 'src/ts/stores.svelte'
 function native() {
-    return { library: structuredClone(normalizeDatabaseDefaults({} as Database)), managedAliasCount: '0', ordinaryPluginValueCount: '0', hypaValueCount: '0', pluginLocalValueCount: '0', opaqueSharedUnitCount: '0', sharedVariables: {}, pluginLocalParticipating: false }
+    return { library: structuredClone(normalizeDatabaseDefaults({} as Database)), characterCount: '0', managedAliasCount: '0', ordinaryPluginValueCount: '0', hypaValueCount: '0', pluginLocalValueCount: '0', opaqueSharedUnitCount: '0', sharedVariables: {}, pluginLocalParticipating: false }
 }
 DBState.db = native().library
 beforeEach(() => { invoke.mockReset(); DBState.db = native().library })
@@ -15,7 +15,7 @@ it('a current fresh factory library needs no replacement acknowledgement', async
     invoke.mockResolvedValue(native())
     expect(await hasLocalBindingData()).toBe(false)
 })
-it.each(['managedAliasCount', 'ordinaryPluginValueCount', 'hypaValueCount', 'pluginLocalValueCount', 'opaqueSharedUnitCount'])('rejects a numeric native %s', async key => {
+it.each(['characterCount', 'managedAliasCount', 'ordinaryPluginValueCount', 'hypaValueCount', 'pluginLocalValueCount', 'opaqueSharedUnitCount'])('rejects a numeric native %s', async key => {
     invoke.mockResolvedValue({ ...native(), [key]: 0 })
     await expect(inspectLocalBindingData()).rejects.toThrow('Invalid binding content count')
 })
@@ -33,11 +33,11 @@ it.each([undefined, 1, 'true'])('rejects native plugin-local participation %s', 
     invoke.mockResolvedValue({ ...native(), pluginLocalParticipating: value })
     await expect(hasLocalSharedBindingData()).rejects.toThrow('Invalid binding content')
 })
-it('counts Hypa memo content stored in the materialized library', async () => {
-    const content = native()
-    content.library.characters = [{ chaId: 'synthetic', name: 'Test', chats: [{ id: 'chat', hypaV3Data: { memo: 'synthetic memo' }, message: [] }] }] as unknown as Database['characters']
-    invoke.mockResolvedValue(content)
+it('a factory library has no characters, so one reported character needs acknowledgement', async () => {
+    expect(native().library.characters).toEqual([])
+    invoke.mockResolvedValue({ ...native(), characterCount: '1' })
     expect(await hasLocalBindingData()).toBe(true)
+    expect(await hasLocalSharedBindingData()).toBe(true)
 })
 
 it('generated IDs assigned to factory presets and personas are not user edits', async () => {

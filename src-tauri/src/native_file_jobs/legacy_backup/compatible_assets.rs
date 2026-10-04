@@ -1069,7 +1069,6 @@ mod tests {
                 &root.join("repository"),
                 &Uuid::new_v4().to_string(),
                 CasJobKind::OfficialPublicationOrExportPreparation,
-                crate::asset_repository::job_pins::CasJobOwner::for_test(),
                 0,
             )
             .unwrap();
@@ -1163,7 +1162,6 @@ mod tests {
             &root.join("repository"),
             &Uuid::new_v4().to_string(),
             CasJobKind::OfficialPublicationOrExportPreparation,
-            crate::asset_repository::job_pins::CasJobOwner::for_test(),
             0,
         )
         .unwrap();
@@ -1253,7 +1251,6 @@ mod tests {
                 &root.join("repository"),
                 &Uuid::new_v4().to_string(),
                 CasJobKind::OfficialPublicationOrExportPreparation,
-                crate::asset_repository::job_pins::CasJobOwner::for_test(),
                 0,
             )
             .unwrap();
@@ -1536,7 +1533,6 @@ mod tests {
             &root.join("repository"),
             &Uuid::new_v4().to_string(),
             CasJobKind::OfficialPublicationOrExportPreparation,
-            crate::asset_repository::job_pins::CasJobOwner::for_test(),
             0,
         )
         .unwrap();

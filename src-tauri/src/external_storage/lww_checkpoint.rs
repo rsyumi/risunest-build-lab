@@ -96,52 +96,20 @@ pub(super) mod nested_metadata {
 pub(crate) fn covers(left: &Coverage, right: &Coverage) -> bool {
     right.iter().all(|(writer, prefix)| left.get(writer).copied().unwrap_or(DecimalU64(0)) >= *prefix)
 }
-/// What decides whether a checkpoint is retained.
-pub(crate) trait Covering {
-    fn snapshot_id(&self) -> &str;
-    fn covered_prefixes(&self) -> &Coverage;
-    fn state_identity(&self) -> &str;
-}
-impl Covering for Checkpoint {
-    fn snapshot_id(&self) -> &str { &self.snapshot_id }
-    fn covered_prefixes(&self) -> &Coverage { &self.covered_prefixes }
-    fn state_identity(&self) -> &str { &self.state_identity }
-}
-/// The part of a checkpoint that receive and maintenance checks read.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CheckpointSummary {
-    pub snapshot_id: String,
-    pub covered_prefixes: Coverage,
-    pub state_identity: String,
-}
-impl CheckpointSummary {
-    pub(crate) fn of(checkpoint: &Checkpoint) -> Self {
-        Self {
-            snapshot_id: checkpoint.snapshot_id.clone(),
-            covered_prefixes: checkpoint.covered_prefixes.clone(),
-            state_identity: checkpoint.state_identity.clone(),
-        }
-    }
-}
-impl Covering for CheckpointSummary {
-    fn snapshot_id(&self) -> &str { &self.snapshot_id }
-    fn covered_prefixes(&self) -> &Coverage { &self.covered_prefixes }
-    fn state_identity(&self) -> &str { &self.state_identity }
-}
-pub(crate) fn retained<C: Covering>(checkpoints: &[C]) -> Result<BTreeSet<String>> {
+pub(crate) fn retained(checkpoints: &[Checkpoint]) -> Result<BTreeSet<String>> {
     let mut result = BTreeSet::new();
     for candidate in checkpoints {
         let mut dominated = false;
         for other in checkpoints {
-            if candidate.snapshot_id() == other.snapshot_id() { continue; }
-            if !covers(other.covered_prefixes(), candidate.covered_prefixes()) { continue; }
-            if covers(candidate.covered_prefixes(), other.covered_prefixes()) {
-                if candidate.state_identity() != other.state_identity() { return Err(segment::corrupt()); }
-                if other.snapshot_id() > candidate.snapshot_id() { continue; }
+            if candidate.snapshot_id == other.snapshot_id { continue; }
+            if !covers(&other.covered_prefixes, &candidate.covered_prefixes) { continue; }
+            if covers(&candidate.covered_prefixes, &other.covered_prefixes) {
+                if candidate.state_identity != other.state_identity { return Err(segment::corrupt()); }
+                if other.snapshot_id > candidate.snapshot_id { continue; }
             }
             dominated = true;
         }
-        if !dominated { result.insert(candidate.snapshot_id().to_owned()); }
+        if !dominated { result.insert(candidate.snapshot_id.clone()); }
     }
     Ok(result)
 }

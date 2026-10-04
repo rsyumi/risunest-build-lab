@@ -1096,44 +1096,6 @@ impl Provider for WebdavProvider {
         })
     }
 
-    fn lookup_metadata<'a>(
-        &'a self,
-        repository: &'a RepositoryHandle,
-        intent: &'a ObjectIntent,
-        known: Option<&'a RemoteLocator>,
-        cancel: &'a Cancellation,
-    ) -> ProviderFuture<'a, Option<ObjectReceipt>> {
-        Box::pin(async move {
-            cancel.check()?;
-            let context = context_of(repository)?;
-            intent.validate(repository)?;
-            let (object, locator) = match known {
-                Some(locator) => {
-                    locator.validate_for(repository)?;
-                    (object_path(locator)?, locator.clone())
-                }
-                None => {
-                    let object = intent_path(intent)?;
-                    let locator = intent_locator(repository, &object);
-                    (object, locator)
-                }
-            };
-            let Some(stored) = self.stored(context, &object, cancel).await? else {
-                return Ok(None);
-            };
-            if stored.collection {
-                return Err(paths::corrupt());
-            }
-            Ok(Some(ObjectReceipt {
-                locator,
-                byte_length: stored.content_length.ok_or_else(paths::corrupt)?,
-                version: stored.version,
-                checksum: None,
-                complete: true,
-            }))
-        })
-    }
-
     fn head_locator(&self, repository: &RepositoryHandle) -> Result<RemoteLocator> {
         context_of(repository)?;
         Ok(RemoteLocator {

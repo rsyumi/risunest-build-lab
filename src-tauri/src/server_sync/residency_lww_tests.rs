@@ -30,40 +30,6 @@ fn present_bulk_hydration_completes_without_any_body_open_or_hash() {
     assert!(hashes_work.domains.is_empty()); assert!(hashes_work.incomplete.is_empty());
 }
 
-/// A body fetched from server custody, or already here when asked for, has its
-/// catalog row afterwards, whatever had taken the row away before.
-#[test]
-fn server_hydration_registers_every_body_it_fetches_or_finds_local() {
-    use super::residency::{HydrationOutcome, HydrationSession};
-    let server = LocalServerFixture::new();
-    let (_root, mut store) = local();
-    let core = server.client(&store);
-    let present = vec![61; 128 * 1024 + 1];
-    let fetched = vec![67; 128 * 1024 + 1];
-    let present_hash = put_asset(&mut store, "assets/catalog-present.png", &present).object_hash.unwrap();
-    let fetched_hash = put_asset(&mut store, "assets/catalog-fetched.png", &fetched).object_hash.unwrap();
-    super::lww_tests::drain_publications(&core, &mut store, &[]).unwrap();
-    store.asset_residency_set_policy(super::residency::AssetPolicy::Remote, || Ok(())).unwrap();
-    store.asset_residency_evict(|| Ok(())).unwrap();
-    let cas = PayloadCas::new(store.repository_root()).unwrap();
-    let mut session = HydrationSession::new(store.repository_root(), None).unwrap();
-    assert!(session.hydrate_many(std::slice::from_ref(&present_hash), &|| Ok(())).unwrap().is_empty());
-    assert!(cas.stat_object(&present_hash).unwrap().is_some());
-    assert!(cas.stat_object(&fetched_hash).unwrap().is_none());
-    // What a catalog rolled back to an older snapshot no longer has.
-    let catalog = rusqlite::Connection::open(store.repository_root().join("persistent").join(crate::persistent_store::DATABASE_FILE)).unwrap();
-    for hash in [&present_hash, &fetched_hash] {
-        catalog.execute("DELETE FROM asset_objects WHERE object_hash=?1", [hash]).unwrap();
-    }
-    let mut outcomes = Vec::new();
-    assert!(session.hydrate_many_outcomes(&[present_hash.clone(), fetched_hash.clone()], &|| Ok(()),
-        |hash, outcome| outcomes.push((hash.to_owned(), outcome))).unwrap().is_empty());
-    assert_eq!(outcomes, [(present_hash.clone(), HydrationOutcome::AlreadyLocal), (fetched_hash.clone(), HydrationOutcome::Downloaded)]);
-    assert_eq!(store.asset_object_byte_size(&present_hash).unwrap(), Some(present.len() as u64));
-    assert_eq!(store.asset_object_byte_size(&fetched_hash).unwrap(), Some(fetched.len() as u64));
-    store.asset_gc_dry_run(1024, None, crate::external_storage::runtime::now_ms() as i64, 0).unwrap();
-}
-
 #[test]
 fn selected_archive_priority_uses_native_metadata_without_reading_the_archive() {
     use crate::asset_repository::body_io::{reset_body_io,take_body_io};
@@ -175,7 +141,7 @@ fn selected_archived_owner_hydration_requires_only_the_existing_full_inventory()
         tuple:["extra".into(),"assets/owner-archive.png".into(),"png".into()],
         payload_hash:Some(hex::decode(&asset).unwrap().try_into().unwrap()),
     }]).unwrap();
-    let mut job=DurableCasJob::begin(store.repository_root(),"selected-archive-owner",CasJobKind::CardOrModuleContentImport,crate::asset_repository::job_pins::CasJobOwner::for_test(),1).unwrap();
+    let mut job=DurableCasJob::begin(store.repository_root(),"selected-archive-owner",CasJobKind::CardOrModuleContentImport,1).unwrap();
     let manifest=job.prepare_reader(&cas,&mut canonical.as_slice(),CasObjectRole::OwnerManifest).unwrap();
     job.seal(&mut store,2).unwrap();
     let head=AssetOwnerHead::present(AssetOwnerLocator::CharacterAdditionalAssets { character_id:"selected-owner-archive".into() },manifest.content_hash.clone(),1);
@@ -456,7 +422,6 @@ fn residency_classification_preserves_live_plugin_snapshot_and_durable_job_roots
         &root,
         "synthetic-classification-job",
         CasJobKind::OfficialPublicationOrExportPreparation,
-        crate::asset_repository::job_pins::CasJobOwner::for_test(),
         1,
     )
     .unwrap();
@@ -488,7 +453,6 @@ fn corrupt_durable_job_proof_blocks_residency_cleanup_before_any_release() {
         root,
         "synthetic-broken-job",
         CasJobKind::OfficialPublicationOrExportPreparation,
-        crate::asset_repository::job_pins::CasJobOwner::for_test(),
         1,
     )
     .unwrap();

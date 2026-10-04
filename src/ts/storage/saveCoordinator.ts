@@ -61,6 +61,8 @@ import {
     rebasePluginMutationPublication,
 } from './pluginMutationPublication'
 import { PENDING_SAVE_BYTE_LIMIT as PENDING_BYTE_LIMIT } from './pendingDataSize'
+import { PayloadTooLargeError } from './nativePersistenceValue'
+import { createsConversation, planConversationInsertPages, type ConversationInsertPlan } from './conversationInsertPages'
 
 export { canonicalJson }
 
@@ -2940,7 +2942,7 @@ export class SaveCoordinator {
                     }
                 }
                 try {
-                    const committed = await this.commitRoutine(commit)
+                    const committed = await this.commitFlush(commit)
                     for (const [id, value] of materialized) this.materializedBaselines.set(id, value)
                     if (this.dependencies.captureCharacters && !windowedCapture) this.setCharacterBaseline(captured)
                     this.currentRevision = committed.revision
@@ -4530,6 +4532,48 @@ export class SaveCoordinator {
         await this.finishExplicitCommit(revision)
     }
 
+    /** Commits a flush, writing created conversations in pages when the whole save is too large. */
+    private async commitFlush(commit: WorkingSetCommit): Promise<{ revision: DataRevision }> {
+        try {
+            return await this.commitRoutine(commit)
+        } catch (error) {
+            if (!(error instanceof PayloadTooLargeError)) throw error
+            const plan = planConversationInsertPages(commit)
+            if (!plan) throw error
+            return await this.commitInsertPages(commit.expectedRevision, plan)
+        }
+    }
+
+    private async commitInsertPages(expectedRevision: DataRevision, plan: ConversationInsertPlan): Promise<{ revision: DataRevision }> {
+        let revision: DataRevision | null = null
+        const created: { characterId: string; conversationId: string }[] = []
+        try {
+            for (const step of plan.steps) {
+                revision = (await this.commitRoutine({ ...step, expectedRevision: revision ?? expectedRevision })).revision
+                for (const mutation of step.conversations) {
+                    if (createsConversation(mutation)) created.push({ characterId: mutation.characterId, conversationId: mutation.conversationId })
+                }
+            }
+            return { revision: revision! }
+        } catch (error) {
+            if (revision === null) throw error
+            // Earlier pages are already stored; remove the conversations this save
+            // created so no partial chat stays, then reload what storage holds.
+            if (created.length > 0) {
+                try {
+                    revision = (await this.commitRoutine({
+                        expectedRevision: revision,
+                        conversations: created.map(({ characterId, conversationId }) => ({ type: 'delete', characterId, conversationId })),
+                    })).revision
+                } catch (cleanupError) {
+                    this.reportBackgroundError(cleanupError)
+                }
+            }
+            this.markCommittedWorkingSetRefreshRequired(revision, error)
+            throw error
+        }
+    }
+
     private async commitRoutine(input: WorkingSetCommit): Promise<{ revision: DataRevision }> {
         const captured = canonicalClone(input)
         while (true) {
@@ -4751,7 +4795,7 @@ export class SaveCoordinator {
         this.reportBackgroundError(error)
         if (this.dirtyGeneration !== this.persistedDirtyGeneration &&
             !(error instanceof TypeError) && !(error instanceof RevisionConflictError) &&
-            !(error instanceof Error && (error.name === 'QuotaExceededError' || error.name === 'UnsaveableValueError'))) {
+            !(error instanceof Error && (error.name === 'QuotaExceededError' || error.name === 'UnsaveableValueError' || error.name === 'PayloadTooLargeError'))) {
             this.armDebounce(this.backgroundRetryDelay)
             this.backgroundRetryDelay = Math.min(60_000, this.backgroundRetryDelay * 2)
         }
