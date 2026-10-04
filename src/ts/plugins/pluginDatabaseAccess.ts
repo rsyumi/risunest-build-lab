@@ -34,11 +34,19 @@ import { resolveLifecyclePluginStorageOwner } from './pluginStorageStore'
 import type { PluginStorageMeta } from './pluginOwner'
 import { attachPluginReadProvenance, PluginReadBaselineError, PluginReadBaselines, collectPluginReadProvenance, type PluginReadProvenance } from './pluginReadBaselines'
 import { pluginUnitIntents, type PluginUnitMutation, type PluginWholeMessageIntent } from './pluginUnitIntents'
-
-export const PLUGIN_SUMMARY_QUERY_DEFAULT_LIMIT = 50
-export const PLUGIN_SUMMARY_QUERY_MAX_LIMIT = 100
-export const PLUGIN_MESSAGE_QUERY_DEFAULT_LIMIT = 128
-export const PLUGIN_MESSAGE_QUERY_MAX_LIMIT = 128
+import {
+    readPinnedConversationContext,
+    type ConversationContext,
+    type ConversationContextRequest,
+} from './conversationContext'
+import {
+    PLUGIN_SUMMARY_QUERY_DEFAULT_LIMIT,
+    PLUGIN_SUMMARY_QUERY_MAX_LIMIT,
+    PLUGIN_MESSAGE_QUERY_MAX_LIMIT,
+    pluginMessageWindow,
+    positiveLimit,
+    requiredId,
+} from './pluginQueryInput'
 
 export interface PluginCharacterQuery {
     search?: string
@@ -212,6 +220,10 @@ export interface PluginDatabaseAccess {
     queryConversationMessages(
         input: PluginConversationMessageQuery,
     ): Promise<PluginConversationWindow | null>
+    readConversationContext(
+        request: ConversationContextRequest,
+        options: { allowPrivate: boolean; signal?: AbortSignal },
+    ): Promise<ConversationContext | null>
     getDatabaseSnapshot(
         includeOnly: string[] | 'all',
         allowedKeys: readonly string[],
@@ -321,28 +333,6 @@ const SYNCHRONOUS_CHARACTER_SET_ERROR =
 const STALE_DATABASE_SET_ERROR =
     'Plugin database update became stale because navigation state changed.'
 const DANGEROUS_DATABASE_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
-
-function positiveLimit(value: number | undefined, defaultValue: number, maximum: number): number {
-    const limit = value ?? defaultValue
-    if (!Number.isSafeInteger(limit) || limit <= 0) {
-        throw new RangeError('Query limit must be a positive safe integer')
-    }
-    return Math.min(limit, maximum)
-}
-
-function requiredId(value: string, name: string): void {
-    if (typeof value !== 'string' || value.trim().length === 0) {
-        throw new RangeError(`${name} must be a nonempty string`)
-    }
-}
-
-function nonnegativeWindow(value: number | undefined, name: string): number {
-    const size = value ?? 0
-    if (!Number.isSafeInteger(size) || size < 0) {
-        throw new RangeError(`${name} must be a nonnegative safe integer`)
-    }
-    return size
-}
 
 export function linkPluginQueryAbortSignals(
     ...signals: Array<AbortSignal | undefined>
@@ -1129,66 +1119,10 @@ export function createPluginDatabaseAccess(
         async queryConversationMessages(input) {
             requiredId(input.characterId, 'characterId')
             requiredId(input.conversationId, 'conversationId')
-
-            const ranged = input.startIndex !== undefined
-            const anchored = input.anchorMessageId !== undefined
-            let query
-            if (ranged) {
-                if (!Number.isSafeInteger(input.startIndex) || input.startIndex! < 0) {
-                    throw new RangeError(
-                        'Message range startIndex must be a nonnegative safe integer',
-                    )
-                }
-                if (input.limit === undefined) {
-                    throw new RangeError('Absolute message ranges require limit')
-                }
-                if (
-                    anchored ||
-                    input.before !== undefined ||
-                    input.after !== undefined
-                ) {
-                    throw new RangeError('Absolute message ranges cannot include anchor options')
-                }
-                query = {
-                    characterId: input.characterId,
-                    conversationId: input.conversationId,
-                    startIndex: input.startIndex,
-                    limit: positiveLimit(
-                        input.limit,
-                        PLUGIN_MESSAGE_QUERY_DEFAULT_LIMIT,
-                        PLUGIN_MESSAGE_QUERY_MAX_LIMIT,
-                    ),
-                }
-            } else if (anchored) {
-                requiredId(input.anchorMessageId!, 'anchorMessageId')
-                if (input.limit !== undefined) {
-                    throw new RangeError('Anchored message queries cannot include limit')
-                }
-                const before = nonnegativeWindow(input.before, 'before')
-                const after = nonnegativeWindow(input.after, 'after')
-                if (before + 1 + after > PLUGIN_MESSAGE_QUERY_MAX_LIMIT) {
-                    throw new RangeError('Anchored message window exceeds the maximum size')
-                }
-                query = {
-                    characterId: input.characterId,
-                    conversationId: input.conversationId,
-                    anchorMessageId: input.anchorMessageId,
-                    before,
-                    after,
-                }
-            } else {
-                if (input.before !== undefined || input.after !== undefined) {
-                    throw new RangeError('Message window offsets require anchorMessageId')
-                }
-                query = {
-                    characterId: input.characterId,
-                    conversationId: input.conversationId,
-                    limit: positiveLimit(
-                        input.limit,
-                        PLUGIN_MESSAGE_QUERY_DEFAULT_LIMIT,
-                        PLUGIN_MESSAGE_QUERY_MAX_LIMIT,
-                    ),
-                }
+            const query = {
+                characterId: input.characterId,
+                conversationId: input.conversationId,
+                ...pluginMessageWindow(input),
             }
 
             await prepareQuery(input.signal)
@@ -1196,6 +1130,27 @@ export function createPluginDatabaseAccess(
             const result = await dependencies.store.readConversationWindow(query)
             throwIfQueryAborted(input.signal)
             return result ? { ...result.value, revision: result.revision } : null
+        },
+
+        async readConversationContext(request, options) {
+            throwIfQueryAborted(options.signal)
+            await dependencies.flushPendingData('plugin-conversation-context-read')
+            throwIfQueryAborted(options.signal)
+            await openStore()
+            throwIfQueryAborted(options.signal)
+            const lease = await acquireCurrentRevisionReader()
+            return withPersistentRevisionLease(lease, async (reader) => {
+                // The selected conversation is resolved after the pin, so it and every part agree.
+                const selected = dependencies.captureSelectedConversationTarget()
+                return readPinnedConversationContext(reader, request, {
+                    selected: selected && {
+                        characterId: selected.characterId,
+                        conversationId: selected.conversationId,
+                    },
+                    allowPrivate: options.allowPrivate,
+                    signal: options.signal,
+                })
+            })
         },
 
         async getDatabaseSnapshotStream(includeOnly, allowedKeys) {

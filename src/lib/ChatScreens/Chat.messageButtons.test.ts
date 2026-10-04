@@ -1,0 +1,237 @@
+// @vitest-environment happy-dom
+
+import { writable } from 'svelte/store'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { mount, tick, unmount } from 'svelte'
+import type { Message } from 'src/ts/storage/database.svelte'
+import type { ConversationViewportKey, ConversationViewportRow } from 'src/ts/conversationViewportSource'
+
+const live = vi.hoisted(() => ({
+    db: {} as Record<string, any>,
+    popup: { openId: 0, children: null as unknown, mouseX: 0, mouseY: 0 },
+}))
+
+vi.mock('./ChatBody.svelte', async () => ({
+    default: (await import('./ChatBodyCaptureProbe.test.svelte')).default,
+}))
+vi.mock('src/ts/stores.svelte', () => ({
+    DBState: { get db() { return live.db } },
+    ReloadChatPointer: writable([]),
+    CurrentTriggerIdStore: writable(null),
+    popupStore: live.popup,
+    alertStore: writable({ type: 'none', msg: '' }),
+    selectedCharID: writable(0),
+    HideIconStore: writable(false),
+    ReloadGUIPointer: writable(0),
+    selIdState: { selId: 0 },
+    createSimpleCharacter: (char: unknown) => char,
+}))
+vi.mock('src/ts/characters', () => ({ getCharImage: async () => '' }))
+vi.mock('src/ts/gui/colorscheme', () => ({ ColorSchemeTypeStore: writable('light') }))
+vi.mock('src/ts/globalApi.svelte', () => ({
+    aiLawApplies: () => false,
+    changeChatTo: vi.fn(),
+    foldChatToMessage: vi.fn(),
+    getFileSrc: vi.fn(async (source: string) => source),
+    createChatCopyName: vi.fn(),
+}))
+vi.mock('src/ts/process/scripts', () => ({ risuChatParser: (value: string) => value }))
+vi.mock('src/ts/model/modellist', () => ({ getModelInfo: (model: string) => ({ shortName: model || 'model' }) }))
+vi.mock('src/ts/process/scriptings', () => ({ runLuaButtonTrigger: vi.fn() }))
+vi.mock('src/ts/process/triggers', () => ({ runTrigger: vi.fn() }))
+vi.mock('src/ts/process/tts', () => ({ sayTTS: vi.fn() }))
+vi.mock('src/ts/sync/multiuser', () => ({ ConnectionOpenStore: writable(false) }))
+vi.mock('src/ts/util', () => ({
+    capitalize: (value: string) => value,
+    getUserIcon: () => '',
+    getUserName: () => 'Live User',
+    sleep: () => Promise.resolve(),
+}))
+vi.mock('../../lang', () => ({ language: { copy: 'Copy', remove: 'Remove', edit: 'Edit' } }))
+vi.mock('../../ts/alert', () => ({
+    alertClear: vi.fn(), alertConfirm: vi.fn(), alertError: vi.fn(), alertInput: vi.fn(), alertNormal: vi.fn(),
+    alertRequestData: vi.fn(), alertWait: vi.fn(), alertToast: vi.fn(),
+}))
+vi.mock('../../ts/translator/translator', () => ({ getLLMCache: vi.fn(), setLLMCache: vi.fn() }))
+vi.mock('src/ts/process/files/inlayRenderSource', () => ({
+    DeferredInlayMarkerRegistry: class {}, withResolvedDeferredInlaySources: vi.fn(),
+}))
+vi.mock('src/ts/process/files/chatCopyInlays', () => ({ copyImageSourceToDataUrl: vi.fn() }))
+vi.mock('../../ts/storage/persistentDataRuntime.svelte', () => ({
+    acquireDestructiveReplacementFence: vi.fn(),
+    capturePersistentMutationToken: vi.fn(),
+    getActiveConversationSession: () => null,
+    getPersistentDataRuntime: () => ({}),
+}))
+
+import Chat from './Chat.svelte'
+import PopupList from '../UI/PopupList.svelte'
+import { additionalMessageButtons, type MessageButtonDef } from 'src/ts/plugins/messageButtons.svelte'
+
+const messages: Message[] = [
+    { role: 'user', data: 'question', chatId: 'm-0' },
+    { role: 'char', data: 'answer', chatId: 'm-1' },
+    { role: 'char', data: 'unnamed' },
+]
+
+function button(id: string, roles?: MessageButtonDef['roles']): MessageButtonDef {
+    return { id, name: `Button ${id}`, icon: '', iconType: 'none', callback: vi.fn(), roles }
+}
+
+function installCharacter(conversation: Record<string, unknown>) {
+    live.db = {
+        theme: '',
+        clickToEdit: false,
+        characters: [{
+            type: 'character',
+            name: 'Live Character',
+            chaId: 'character-a',
+            chatPage: 0,
+            chats: [conversation],
+            ttsMode: 'none',
+        }],
+    }
+}
+
+describe('plugin message buttons in the message action row', () => {
+    let target: HTMLDivElement
+    const mounted: ReturnType<typeof mount>[] = []
+    const innerWidth = window.innerWidth
+
+    const setWidth = (width: number) => Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
+    const mountChat = async (props: Record<string, unknown>, into = target) => {
+        mounted.push(mount(Chat, { target: into, props: { name: 'Live Character', isLastMemory: false, ...props } }))
+        await tick()
+    }
+    const pluginButtons = (root: ParentNode = target) =>
+        [...root.querySelectorAll<HTMLButtonElement>('.button-icon-plugin')].map((element) => element.title)
+
+    beforeEach(() => {
+        additionalMessageButtons.push(button('char-only', ['char']), button('user-only', ['user']), button('both'))
+        installCharacter({ id: 'conversation-a', message: messages, isStreaming: false })
+        live.popup.children = null
+        live.popup.openId = 0
+        setWidth(1024)
+        target = document.createElement('div')
+        document.body.append(target)
+    })
+
+    afterEach(async () => {
+        for (const instance of mounted.splice(0)) await unmount(instance)
+        additionalMessageButtons.splice(0)
+        setWidth(innerWidth)
+        document.body.replaceChildren()
+    })
+
+    test('shows matching buttons after the major buttons on desktop and hands over the message', async () => {
+        await mountChat({ message: 'answer', role: 'char', idx: 1, totalLength: 3 })
+
+        expect(pluginButtons()).toEqual(['Button char-only', 'Button both'])
+        const remove = target.querySelector('.button-icon-remove')!
+        const first = target.querySelector<HTMLButtonElement>('.button-icon-plugin')!
+        expect(remove.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+        expect(first.closest('.button-icon-menu')).toBeNull()
+
+        first.click()
+        expect(additionalMessageButtons[0].callback).toHaveBeenCalledWith({
+            characterIndex: 0, chatIndex: 0, messageIndex: 1, messageId: 'm-1', role: 'char',
+            characterId: 'character-a', conversationId: 'conversation-a',
+        })
+
+        const userRow = document.createElement('div')
+        document.body.append(userRow)
+        await mountChat({ message: 'question', role: 'user', idx: 0, totalLength: 3 }, userRow)
+        expect(pluginButtons(userRow)).toEqual(['Button user-only', 'Button both'])
+    })
+
+    test('reports a missing message ID as null and follows registration changes', async () => {
+        await mountChat({ message: 'unnamed', role: 'char', idx: 2, totalLength: 4 })
+        target.querySelectorAll<HTMLButtonElement>('.button-icon-plugin')[1].click()
+        expect(additionalMessageButtons[2].callback).toHaveBeenCalledWith(expect.objectContaining({ messageIndex: 2, messageId: null }))
+
+        additionalMessageButtons.push(button('late', ['char']))
+        await tick()
+        expect(pluginButtons()).toEqual(['Button char-only', 'Button both', 'Button late'])
+        additionalMessageButtons.splice(0, 1)
+        await tick()
+        expect(pluginButtons()).toEqual(['Button both', 'Button late'])
+    })
+
+    test('lists the buttons by name inside the action popup on narrow screens', async () => {
+        setWidth(400)
+        await mountChat({ message: 'answer', role: 'char', idx: 1, totalLength: 3 })
+        expect(pluginButtons()).toEqual([])
+
+        target.querySelector<HTMLButtonElement>('.button-icon-menu')!.click()
+        await vi.waitFor(() => expect(live.popup.children).not.toBeNull())
+        const popup = document.createElement('div')
+        document.body.append(popup)
+        mounted.push(mount(PopupList, { target: popup }))
+        await tick()
+
+        expect(pluginButtons(popup)).toEqual(['Button char-only', 'Button both'])
+        expect([...popup.querySelectorAll('.button-icon-plugin span')].map((element) => element.textContent)).toEqual(['Button char-only', 'Button both'])
+        popup.querySelector<HTMLButtonElement>('.button-icon-plugin')!.click()
+        expect(additionalMessageButtons[0].callback).toHaveBeenCalledWith(expect.objectContaining({ messageIndex: 1, messageId: 'm-1' }))
+    })
+
+    test('addresses a windowed row by its absolute index without reading the conversation body', async () => {
+        const conversation = { id: 'conversation-a', isStreaming: false }
+        Object.defineProperty(conversation, 'message', { get() { throw new Error('windowed conversation body was accessed') } })
+        installCharacter(conversation)
+        const row: ConversationViewportRow = {
+            key: 'row-4123' as ConversationViewportKey,
+            absoluteIndex: 4123,
+            message: { role: 'char', data: 'far answer', chatId: 'm-4123' },
+            sourceVersion: 1,
+        }
+        await mountChat({ message: 'far answer', role: 'char', idx: 4123, totalLength: 5000, viewportRow: row, viewportSourceToken: 'source' })
+
+        target.querySelector<HTMLButtonElement>('.button-icon-plugin')!.click()
+        expect(additionalMessageButtons[0].callback).toHaveBeenCalledWith({
+            characterIndex: 0, chatIndex: 0, messageIndex: 4123, messageId: 'm-4123', role: 'char',
+            characterId: 'character-a', conversationId: 'conversation-a',
+        })
+    })
+
+    test('leaves out comments, rows without a stored index and the streamed message', async () => {
+        await mountChat({ message: 'note', role: 'char', idx: 1, totalLength: 3, isComment: true })
+        expect(pluginButtons()).toEqual([])
+        expect(target.querySelector('.button-icon-remove')).not.toBeNull()
+
+        const unsaved = document.createElement('div')
+        document.body.append(unsaved)
+        await mountChat({ message: 'greeting', role: 'char', idx: -1, totalLength: 3 }, unsaved)
+        expect(pluginButtons(unsaved)).toEqual([])
+
+        installCharacter({ id: 'conversation-a', message: messages, isStreaming: true })
+        const streamed = document.createElement('div')
+        const earlier = document.createElement('div')
+        document.body.append(streamed, earlier)
+        await mountChat({ message: 'unnamed', role: 'char', idx: 2, totalLength: 3 }, streamed)
+        await mountChat({ message: 'answer', role: 'char', idx: 1, totalLength: 3 }, earlier)
+        expect(pluginButtons(streamed)).toEqual([])
+        expect(pluginButtons(earlier)).toEqual(['Button char-only', 'Button both'])
+    })
+
+    test('leaves out screenshot capture rows', async () => {
+        const character = live.db.characters[0]
+        await mountChat({
+            message: 'answer', role: 'char', idx: 1, totalLength: 3,
+            captureMessage: messages[1],
+            captureContext: {
+                character: null, characterName: 'Live Character', characterImageSource: '', characterLargePortrait: false,
+                userName: 'Live User', userImageSource: '', userLargePortrait: false,
+                moduleAssets: [], presetRegex: [], moduleRegexScripts: [], assetStyle: '',
+                parserContext: {
+                    database: { characters: [character] }, character, userName: 'Live User', personaPrompt: '',
+                    modules: [], moduleLorebooks: [], selectedCharID: 0, chatVariables: {}, globalChatVariables: {}, currentTime: 1,
+                },
+                totalTurns: 3, selectionStart: 0, firstParserMessageIndex: 0,
+                settings: { theme: '', iconSize: 100, zoomSize: 100, lineHeight: 1.25, hideIcons: false, translator: '' },
+            },
+        })
+        expect(target.querySelector('[data-chat-body-probe]')).not.toBeNull()
+        expect(pluginButtons()).toEqual([])
+    })
+})

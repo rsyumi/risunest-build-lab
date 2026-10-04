@@ -331,6 +331,7 @@ pub fn extract_package(
                 "risunest-sync-gui.exe",
                 "risunest-sync-server.exe",
                 "risunest-sync-manager.exe",
+                "risunest-sync-manager-background.exe",
                 "cloudflared.exe",
                 "CLOUDFLARED-LICENSE",
             ] {
@@ -473,10 +474,11 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::io::Write;
 
-    const WINDOWS_FILES: [&str; 5] = [
+    const WINDOWS_FILES: [&str; 6] = [
         "risunest-sync-gui.exe",
         "risunest-sync-server.exe",
         "risunest-sync-manager.exe",
+        "risunest-sync-manager-background.exe",
         "cloudflared.exe",
         "CLOUDFLARED-LICENSE",
     ];
@@ -492,10 +494,19 @@ mod tests {
     }
 
     fn write_windows_bundle(path: &Path, os: OperatingSystem, arch: Architecture) {
+        write_windows_bundle_files(path, os, arch, &WINDOWS_FILES);
+    }
+
+    fn write_windows_bundle_files(
+        path: &Path,
+        os: OperatingSystem,
+        arch: Architecture,
+        files: &[&str],
+    ) {
         let file = File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
-        for name in WINDOWS_FILES {
+        for name in files {
             zip.start_file(name, options).unwrap();
             zip.write_all(b"synthetic").unwrap();
         }
@@ -509,7 +520,7 @@ mod tests {
                 "version": "2.0.0",
                 "protocolId": risunest_sync_server::PROTOCOL_ID,
                 "storeFormatId": risunest_sync_server::STORE_FORMAT_ID,
-                "files": WINDOWS_FILES,
+                "files": files,
                 "vendor": [{
                     "name": vendor.name,
                     "version": vendor.version,
@@ -632,6 +643,7 @@ mod tests {
                 "risunest-sync-gui.exe",
                 "risunest-sync-server.exe",
                 "risunest-sync-manager.exe",
+                "risunest-sync-manager-background.exe",
                 "cloudflared.exe",
                 "CLOUDFLARED-LICENSE",
                 INVENTORY_FILE,
@@ -701,5 +713,35 @@ mod tests {
             Architecture::Aarch64,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn windows_zip_requires_the_windowless_manager() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("console-only.zip");
+        let files = WINDOWS_FILES
+            .into_iter()
+            .filter(|name| *name != "risunest-sync-manager-background.exe")
+            .collect::<Vec<_>>();
+        write_windows_bundle_files(
+            &archive,
+            OperatingSystem::Windows,
+            Architecture::X86_64,
+            &files,
+        );
+        let error = extract_package(
+            PackageFormat::Zip,
+            &archive,
+            &temp.path().join("stage"),
+            "2.0.0",
+            &[synthetic_vendor(
+                OperatingSystem::Windows,
+                Architecture::X86_64,
+            )],
+            OperatingSystem::Windows,
+            Architecture::X86_64,
+        )
+        .unwrap_err();
+        assert_eq!(error, "update-package-file-missing");
     }
 }

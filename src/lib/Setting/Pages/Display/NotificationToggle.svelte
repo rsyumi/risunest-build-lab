@@ -1,6 +1,7 @@
 <script lang="ts">
   import { language } from "src/lang";
-  import { isTauriIOS, isTauriAndroid } from "src/ts/platform";
+  import { isTauriIOS, isTauriAndroid, isTauriDesktop } from "src/ts/platform";
+  import { requestDesktopNotifications } from "src/ts/desktopNotifications";
   import { requestAndroidGenerationNotifications } from "src/ts/androidGenerationKeepAlive";
   import { requestIOSNotifications } from "src/ts/iosNative";
   import { alertError } from "src/ts/alert";
@@ -32,6 +33,8 @@
         if (isTauriAndroid) {
           await requestAndroidGenerationNotifications();
           granted = await window.RisuCompletionNotifications?.enabled() === true;
+        } else if (isTauriDesktop) {
+          granted = await requestDesktopNotifications();
         } else if (typeof Notification !== 'undefined') {
           granted = await Notification.requestPermission() === 'granted';
         }

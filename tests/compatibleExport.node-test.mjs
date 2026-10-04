@@ -70,6 +70,8 @@ function accepts(contract, id, value) {
         !Array.isArray(value) &&
         typeof value === "object" &&
         Object.entries(value).every(([key, item]) => {
+          if (!Object.hasOwn(node.fields, key) && key.startsWith("__") && id === contract.types.Message)
+            return true;
           const child = Object.hasOwn(node.fields, key)
             ? node.fields[key].node
             : node.additional;
@@ -196,6 +198,43 @@ for (const target of ["risuai", "pocket"]) {
           assert.equal(
             accepts(contract, contract.types.Chat, { rerollRecovery: {} }),
             false,
+          );
+          assert.equal(
+            accepts(contract, contract.types.Chat, { __plugin: true }),
+            false,
+          );
+        },
+      );
+
+      await t.test(
+        "plugin-owned message fields survive the actual reference loader",
+        async () => {
+          const record = { kind: "synthetic", nested: ["합성", 1, null] };
+          const fixture = {
+            characters: [
+              {
+                chaId: "synthetic-plugin-fields",
+                type: "character",
+                name: "Synthetic",
+                chats: [
+                  {
+                    id: "synthetic-plugin-chat",
+                    name: "",
+                    message: [
+                      { role: "char", data: "합성 답변", chatId: "m1", __plugin: record },
+                    ],
+                  },
+                ],
+              },
+            ],
+            characterOrder: ["synthetic-plugin-fields"],
+            formatversion: 5,
+          };
+          assert.equal(accepts(contract, contract.root, fixture), true);
+          const result = await harness.roundTrip(compressedWire(fixture));
+          assert.deepEqual(
+            plain(result.resaved.characters[0].chats[0].message[0].__plugin),
+            record,
           );
         },
       );

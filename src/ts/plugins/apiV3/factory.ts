@@ -1070,7 +1070,7 @@ export class SandboxHost {
                 this.pendingHostCalls += 1;
                 const storageMutation = data.type === 'CALL_INSTANCE'
                     ? ['setItem', 'removeItem', 'clear'].includes(String(data.method))
-                    : ['setChar', 'setCharacter', 'setCharacterToIndex', 'setChatToIndex', 'setDatabase', 'setDatabaseLite', '_setPluginStorage', '_removePluginStorage', '_clearPluginStorage', '_setSafeLocalStorage', '_removeSafeLocalStorage', '_clearSafeLocalStorage'].includes(String(data.method));
+                    : ['setChar', 'setCharacter', 'setCharacterToIndex', 'setChatToIndex', 'risunestPatchConversation', 'setDatabase', 'setDatabaseLite', '_setPluginStorage', '_removePluginStorage', '_clearPluginStorage', '_setSafeLocalStorage', '_removeSafeLocalStorage', '_clearSafeLocalStorage'].includes(String(data.method));
                 if (storageMutation) this.pendingStorageMutations += 1;
                 try {
 

@@ -52,6 +52,7 @@ const mocks = vi.hoisted(() => {
         runtime: { revision: 11 },
         isTauri: false,
         alertSet: vi.fn(),
+        alertClear: vi.fn(),
     }
 })
 
@@ -66,6 +67,7 @@ vi.mock('../alert', () => ({
     alertLogin: mocks.alertLogin,
     alertNormalWait: mocks.alertNormalWait,
     alertStore: { set: mocks.alertSet },
+    alertClear: mocks.alertClear,
 }))
 vi.mock('../globalApi.svelte', () => ({
     forageStorage: { keys: vi.fn() },
@@ -131,6 +133,7 @@ async function loadStorage() {
 
 beforeEach(() => {
     mocks.alertSet.mockClear()
+    mocks.alertClear.mockClear()
     vi.resetModules()
     mocks.fetchProtectedResource.mockReset()
     mocks.alertLogin.mockReset().mockResolvedValue('new-token')
@@ -355,7 +358,8 @@ describe('AccountStorage structured wire contract', () => {
         expect(localStorage.getItem('dosync')).toBe('sync')
         expect(localStorage.getItem('fallbackRisuToken')).not.toBeNull()
         expect(mocks.database.account.useSync).toBe(true)
-        expect(mocks.alertSet).toHaveBeenLastCalledWith({ type: 'none', msg: '' })
+        expect(mocks.alertClear).toHaveBeenCalledOnce()
+        expect(mocks.alertClear.mock.invocationCallOrder[0]).toBeGreaterThan(Math.max(...mocks.alertSet.mock.invocationCallOrder))
         expect(busy).toEqual([false, true, false])
         unsubscribe()
     })

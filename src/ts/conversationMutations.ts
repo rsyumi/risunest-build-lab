@@ -3,6 +3,7 @@ import type {
     ConversationPosition,
 } from './storage/activeConversationSession'
 import type { Chat, Database, Message } from './storage/database.svelte'
+import { v4 } from 'uuid'
 
 type ConversationCharacter = Database['characters'][number]
 
@@ -14,6 +15,12 @@ export interface ConversationMutationTarget {
     session: ActiveConversationSession | null
     sessionVersion: number | null
     startPosition: ConversationPosition | null
+}
+
+// A message the host creates gets a stable ID at once, so plugin-owned fields written to it
+// survive later whole-chat rewrites that match messages by ID.
+function withNewMessageId(message: Message): Message {
+    return message.chatId !== undefined && message.chatId !== null ? message : { ...message, chatId: v4() }
 }
 
 export class ConversationMutationTargetStaleError extends Error {
@@ -86,6 +93,7 @@ export function appendConversationMessage(
     baseMessages: Message[] = target.messages,
 ): void {
     assertConversationMutationTargetCurrent(target)
+    message = withNewMessageId(message)
     if (target.session) {
         if (baseMessages === target.messages) {
             target.session.append(message)
@@ -208,6 +216,7 @@ export function resetConversationWithMessage(
     message: Message,
 ): void {
     assertConversationMutationTargetCurrent(target)
+    message = withNewMessageId(message)
     if (target.session) {
         target.session.transaction((transaction) => {
             transaction.replaceTail(target.startPosition!, [])

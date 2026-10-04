@@ -101,7 +101,7 @@ unsafe extern "C" {
 }
 
 #[cfg(target_os = "macos")]
-extern "C" fn request_native_quit() -> std::ffi::c_int {
+extern "C" fn request_native_quit(session_ending: std::ffi::c_int) -> std::ffi::c_int {
     let Some(app) = APP.get() else { return -1; };
     let Some(state) = app.try_state::<ExitState>() else { return -1; };
     let previous = state.0.lock().unwrap_or_else(|error| error.into_inner()).pending.clone();
@@ -115,7 +115,7 @@ extern "C" fn request_native_quit() -> std::ffi::c_int {
             None => { crate::cancel_incomplete_boot(app); 0 }
             Some(token) => {
                 if let Some(token) = token {
-                    if let Err(error) = notify_quit(app, &token) {
+                    if let Err(error) = notify_quit(app, &token, session_ending != 0) {
                         state.0.lock().unwrap_or_else(|error| error.into_inner()).discard(&token);
                         crate::nlog!("warn", "macOS quit notification failed: {error}");
                         return -1;
@@ -133,7 +133,9 @@ extern "C" fn request_native_quit() -> std::ffi::c_int {
 #[cfg(target_os = "macos")]
 pub(crate) fn install_native_quit(app: &tauri::AppHandle) -> Result<(), String> {
     unsafe extern "C" {
-        fn risunest_install_termination_handler(callback: extern "C" fn() -> std::ffi::c_int) -> std::ffi::c_int;
+        fn risunest_install_termination_handler(
+            callback: extern "C" fn(std::ffi::c_int) -> std::ffi::c_int,
+        ) -> std::ffi::c_int;
     }
     APP.set(app.clone()).map_err(|_| "macOS quit bridge already installed")?;
     // Setup runs on the AppKit thread after Tao has installed its delegate.
@@ -235,9 +237,10 @@ extern "C" fn settle_response(context: *mut std::ffi::c_void) {
 }
 
 #[cfg(target_os = "macos")]
-fn notify_quit(app: &tauri::AppHandle, token: &str) -> Result<(), tauri::Error> {
+/// A session-end quit asks the document to save locally and answer without sync or questions.
+fn notify_quit(app: &tauri::AppHandle, token: &str, session_end: bool) -> Result<(), tauri::Error> {
     show_main(app);
-    app.emit_to("main", "risu-macos-exit-requested", token)
+    app.emit_to("main", "risu-macos-exit-requested", serde_json::json!({ "token": token, "sessionEnd": session_end }))
 }
 
 #[cfg(target_os = "macos")]
@@ -280,7 +283,7 @@ pub(crate) fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 decision.request(code.unwrap_or(0))
             };
             if let Some(token) = token {
-                if let Err(error) = notify_quit(app, &token) {
+                if let Err(error) = notify_quit(app, &token, false) {
                     state.0.lock().unwrap_or_else(|error| error.into_inner()).discard(&token);
                     crate::nlog!("warn", "macOS quit notification failed: {error}");
                 }

@@ -202,14 +202,19 @@ export function initHotkey(){
         }
         if(ev.key === 'Escape'){
             if(doingAlert()){
-                alertToast('Alert Closed')
+                if(alertStore.dialogVisible()){
+                    alertStore.set({ type: 'none', msg: '' })
+                    if(!alertStore.hasDialogs()){
+                        alertToast('Alert Closed')
+                    }
+                }
             }
             else if(get(settingsOpen)){
                 settingsOpen.set(false)
             }
             ev.preventDefault()
         }
-        if(ev.key === 'Enter'){
+        if(ev.key === 'Enter' && !ev.repeat){
             const alertType = get(alertStore).type 
             if(alertType === 'ask' || alertType === 'normal' || alertType === 'error'){
                 alertStore.set({
