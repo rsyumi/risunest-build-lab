@@ -1,3 +1,4 @@
+pub mod cli;
 pub mod client;
 pub mod lifecycle;
 pub mod platform;

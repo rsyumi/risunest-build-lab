@@ -2,7 +2,7 @@ import { offerHtmlClipboardExport } from './htmlClipboardExport'
 import { defaultChatToggleBinding } from './toggleBindings'
 import { get, writable } from "svelte/store";
 import { saveImage, type character, type Chat, defaultSdDataFunc, type loreBook, getDatabase, getCharacterByIndex, setCharacterByIndex } from "./storage/database.svelte";
-import { alertAddCharacter, alertCheckboxConfirm, alertError, alertNormal, alertSelect, alertStore, alertToast, alertWait } from "./alert";
+import { alertAddCharacter, alertCheckboxConfirm, alertClear, alertError, alertNormal, alertSelect, alertStore, alertToast, alertWait } from "./alert";
 import { language } from "../lang";
 import { isArchivedCharacter } from "./storage/workingSetCatalog";
 import { restoreArchivedCharacterWithConfirmation } from "./storage/characterArchive";
@@ -455,7 +455,8 @@ export async function importChat(){
                     if(!isFirst){
                         newChat.message.push({
                             role: presedLine.is_user ? "user" : 'char',
-                            data: formatTavernChat(presedLine.mes, DBState.db.characters[selectedID].name)
+                            data: formatTavernChat(presedLine.mes, DBState.db.characters[selectedID].name),
+                            chatId: v4(),
                         })
                     }
                 }
@@ -883,10 +884,7 @@ export async function makeGroupImage() {
         const uri = canvas.toDataURL()
         canvas.remove()
         db.characters[charID].image = await saveImage(dataURLtoBuffer(uri));
-        alertStore.set({
-            type: 'none',
-            msg: ''
-        })
+        alertClear()
     } catch (error) {
         alertError(error)
     }
@@ -1240,6 +1238,7 @@ export async function addNewChat(character: character | groupChat): Promise<bool
                     saying: memberId,
                     role: 'char',
                     data: findCharacterbyId(memberId).firstMessage,
+                    chatId: v4(),
                 })
             }
         }

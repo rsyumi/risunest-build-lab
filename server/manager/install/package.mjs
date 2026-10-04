@@ -171,6 +171,7 @@ function copyRuntime(stage, build, releaseInput, windows) {
         [build.gui, "risunest-sync-gui.exe"],
         [build.packagedDaemon, "risunest-sync-server.exe"],
         [build.manager, "risunest-sync-manager.exe"],
+        [build.managerBackground, "risunest-sync-manager-background.exe"],
         [build.cloudflared, "cloudflared.exe"],
         [build.license, "CLOUDFLARED-LICENSE"],
       ]
@@ -232,6 +233,7 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
   const requiredInputs = target.includes("linux")
     ? ["daemon", "manager", "cloudflared", "license"]
     : ["daemon", "packagedDaemon", "manager", "gui", "cloudflared", "license"];
+  if (target.includes("windows")) requiredInputs.push("managerBackground");
   for (const name of requiredInputs) {
     if (!existsSync(build[name])) throw new Error(`Native build input ${name} is missing.`);
   }
@@ -277,14 +279,19 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
       const cli = join(gui, "node_modules/@tauri-apps/cli/tauri.js");
       if (!existsSync(cli)) throw new Error("Install Sync GUI dependencies before packaging.");
       if (os === "windows") {
-        const owned = ["risunest-sync-gui.exe", "risunest-sync-server.exe", "risunest-sync-manager.exe", "cloudflared.exe", "CLOUDFLARED-LICENSE"];
+        const owned = ["risunest-sync-gui.exe", "risunest-sync-server.exe", "risunest-sync-manager.exe", "risunest-sync-manager-background.exe", "cloudflared.exe", "CLOUDFLARED-LICENSE"];
         writeOwnedInventory(join(gui, "src-tauri/binaries"), releaseInput, owned, "cloudflared.exe", build);
       }
+      const bundleConfig = JSON.parse(readFileSync(join(tauriRoot, "tauri.bundle.conf.json"), "utf8"));
       const config = JSON.stringify({
         version: releaseInput.version,
         bundle: {
           active: true,
           createUpdaterArtifacts: false,
+          // The macOS bundle shares the base list; only Windows ships the windowless manager.
+          ...(os === "windows"
+            ? { externalBin: [...bundleConfig.bundle.externalBin, "binaries/risunest-sync-manager-background"] }
+            : {}),
           resources: os === "windows"
             ? { "binaries/CLOUDFLARED-LICENSE": "CLOUDFLARED-LICENSE", "binaries/risunest-sync-bundle.json": "risunest-sync-bundle.json" }
             : ["binaries/CLOUDFLARED-LICENSE"],
@@ -308,11 +315,13 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
         const installedGui = join(installedRoot, "risunest-sync-gui.exe");
         const installedDaemon = join(installedRoot, "risunest-sync-server.exe");
         const installedManager = join(installedRoot, "risunest-sync-manager.exe");
+        const installedManagerBackground = join(installedRoot, "risunest-sync-manager-background.exe");
         assertBundleSelection(installedGui, "NSS");
         const installerProofs = [
           [installedGui, join(destination, "nsis-gui-proof.exe"), "gui"],
           [installedDaemon, join(destination, "nsis-daemon-proof.exe"), "daemon-background"],
           [installedManager, join(destination, "nsis-manager-proof.exe"), "manager"],
+          [installedManagerBackground, join(destination, "nsis-manager-background-proof.exe"), "manager-background"],
         ];
         for (const [source, proof] of installerProofs) copyFileSync(source, proof);
         rmSync(installerStage, { recursive: true, force: true });
@@ -331,6 +340,7 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
               { path: build.gui, arch: architecture, format: "pe", role: "gui" },
               { path: build.packagedDaemon, arch: architecture, format: "pe", role: "daemon-background" },
               { path: build.manager, arch: architecture, format: "pe", role: "manager" },
+              { path: build.managerBackground, arch: architecture, format: "pe", role: "manager-background" },
             ],
             checks: ["archive-layout", "bundle-inventory"],
           },

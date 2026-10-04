@@ -1,7 +1,7 @@
 import { writable } from "svelte/store"
 import { getDatabase } from "./database.svelte"
 import localforage from "localforage"
-import { alertError, alertLogin, alertNormalWait, alertStore } from "../alert"
+import { alertClear, alertError, alertLogin, alertNormalWait, alertStore } from "../alert"
 import { getUncleanablesSync } from "../globalApi.svelte"
 import { v4 } from "uuid"
 import { language } from "src/lang"
@@ -460,7 +460,7 @@ export function unMigrationAccount(): Promise<void> {
         .finally(() => {
             accountUnmigration = null
             accountUnmigrationBusy.set(false)
-            alertStore.set({ type: 'none', msg: '' })
+            alertClear()
         })
     accountUnmigrationBusy.set(true)
     alertStore.set({ type: 'wait', msg: language.accountUnmigration.preparing })
@@ -554,7 +554,7 @@ async function performAccountUnmigration(): Promise<void> {
             })
         },
         finalize: async () => {
-            alertStore.set({ type: "none", msg: "" })
+            alertClear()
             const markers = getDeviceMarkers()
             markers.setItem('dosync', 'avoid')
             markers.removeItem('accountst')

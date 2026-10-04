@@ -276,6 +276,9 @@ export function acceptsContract(contract, id, value) {
         !Array.isArray(value) &&
         typeof value === "object" &&
         Object.entries(value).every(([key, item]) => {
+          // Plugin-owned message fields pass through, as in the native projector.
+          if (!Object.hasOwn(node.fields, key) && key.startsWith("__") && id === contract.types.Message)
+            return true;
           const child = Object.hasOwn(node.fields, key)
             ? node.fields[key].node
             : node.additional;

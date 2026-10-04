@@ -150,6 +150,7 @@ import {
     editSelectedChatList,
     exportAllChats,
     exportChat,
+    importChat,
     removeChar,
     removeChat,
     selectCharImg,
@@ -947,6 +948,32 @@ describe('chat list operations', () => {
         expect(mocks.acquireCompleteConversation).not.toHaveBeenCalled()
     })
 
+    it('gives every message of an imported SillyTavern chat its own ID', async () => {
+        const character = buildSelectedCharacter()
+        character.name = 'Synthetic'
+        mocks.editWindowedChatList.mockReturnValue({ kind: 'unsupported' })
+        const lines = [
+            { user_name: 'User', character_name: 'Synthetic' },
+            { name: 'Synthetic', is_user: false, mes: 'greeting' },
+            { name: 'User', is_user: true, mes: 'reply' },
+        ].map((line) => JSON.stringify(line)).join('NEWLINE').split('NEWLINE').join(String.fromCharCode(10))
+        mocks.selectSingleFile.mockResolvedValueOnce({
+            name: 'synthetic.jsonl',
+            data: new TextEncoder().encode(lines),
+        })
+
+        await importChat()
+
+        const imported = character.chats[0]
+        expect(imported.name).toBe('Imported Chat')
+        expect(imported.message.map((message: any) => message.data)).toEqual(['greeting', 'reply'])
+        expect(imported.message.map((message: any) => message.chatId)).toEqual([
+            expect.stringMatching(/^generated-/),
+            expect.stringMatching(/^generated-/),
+        ])
+        expect(new Set(imported.message.map((message: any) => message.chatId)).size).toBe(2)
+    })
+
     it('keeps the selected chat when another chat is removed', async () => {
         const character = buildSelectedCharacter()
 
@@ -1303,7 +1330,7 @@ describe('chat list operations', () => {
         await addNewChat(character)
 
         expect(character.chats[0].message).toEqual([
-            { saying: 'member-1', role: 'char', data: 'hello there' },
+            { saying: 'member-1', role: 'char', data: 'hello there', chatId: expect.stringMatching(/^generated-/) },
         ])
     })
 })

@@ -97,12 +97,13 @@ import {
     listenRecoveredAndroidScreenshotPublications,
 } from "./nativeScreenshotArchiveWriter";
 import { initializeIOSNative, installIOSPersistenceLifecycle } from "./iosNative";
-import { restartNativeApp, schedulePeriodicNativeSnapshot } from "./storage/nativePersistentMaintenance";
+import { checkpointNativePersistentStore, restartNativeApp, schedulePeriodicNativeSnapshot } from "./storage/nativePersistentMaintenance";
 import { yieldToUi } from './ui/yieldToUi'
 import { markBootStage, markBootSuspect } from './storage/bootAttempt'
 import {
     finishBoot,
     isStartupExcluded,
+    takeRendererRecovery,
     type RecoveryExclusion,
 } from './storage/recoveryMode.svelte'
 import {
@@ -713,7 +714,9 @@ export async function loadData() {
         disposeLifecycleCommitListeners ??= registerLifecycleCommitListeners(
             (reason) => flushLifecycle(
                 reason,
-                isTauriDesktop && nativePlatform() === 'windows' && reason === 'stop',
+                isTauriDesktop
+                    && (nativePlatform() === 'windows' || nativePlatform() === 'linux')
+                    && reason === 'stop',
             ),
             syncExitCoordinator,
         )
@@ -728,6 +731,10 @@ export async function loadData() {
             )
             disposeMacosLifecycle = await registerMacosLifecycle({
                 coordinator: syncExitCoordinator,
+                saveLocally: async () => {
+                    await flushLifecycle('stop', true)
+                    await checkpointNativePersistentStore('truncate')
+                },
             })
         }
 
@@ -849,8 +856,15 @@ export async function loadData() {
           installIOSPersistenceLifecycle((reason) => flushLifecycle(reason, true));
         }
         if (!excluded('modules')) moduleUpdate()
-        void alertTOS().then((accepted) => {
-            if (accepted === false) location.reload()
+        void alertTOS().then(async (accepted) => {
+            if (accepted === false) {
+                location.reload()
+                return
+            }
+            if (isTauri && !isTauriAndroid && await takeRendererRecovery()) {
+                await waitAlert()
+                alertNormal(language.risuNest.startup.rendererRecovered)
+            }
         })
     } catch (error) {
         console.error('RisuNest startup failed', error)

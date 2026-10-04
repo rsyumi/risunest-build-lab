@@ -144,6 +144,14 @@ describe('plugin API version gate', () => {
         expect(getDatabase().plugins).toHaveLength(0)
     })
 
+    it('refuses a plugin named "*", which //@allowed-ipc reserves', async () => {
+        await importPlugin('//@name *\n//@api 3.0\n\nconsole.log("x")')
+
+        expect(alertError).toHaveBeenCalledTimes(1)
+        expect(getDatabase().plugins).toHaveLength(0)
+        expect(vi.mocked(loadV3Plugins)).not.toHaveBeenCalled()
+    })
+
     it('installs a bundle that declares API 3.0', async () => {
         await importPlugin('//@name modern-bundle\n//@api 3.0\n\nconsole.log("x")')
 

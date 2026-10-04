@@ -313,6 +313,7 @@ fn explicit_test_binaries() -> (PathBuf, PathBuf) {
     );
     assert!(server.is_absolute() && server.is_file());
     assert!(manager.is_absolute() && manager.is_file());
+    assert!(platform::background_manager_executable(&manager).is_file());
     (server, manager)
 }
 
@@ -962,6 +963,12 @@ async fn run_live_replacement_case(was_running: bool) {
         fs::copy(source, install.join(name)).unwrap();
         fs::copy(source, staged.join(name)).unwrap();
     }
+    // The installed manager starts its update helper from this sibling.
+    fs::copy(
+        platform::background_manager_executable(&source_manager),
+        platform::background_manager_executable(&installed_manager),
+    )
+    .unwrap();
     let replacement_proof = PathBuf::from("replacement-proof.txt");
     fs::write(install.join(&replacement_proof), b"old").unwrap();
     fs::write(staged.join(&replacement_proof), b"new").unwrap();
@@ -1167,7 +1174,9 @@ async fn installer_guard_records_restart_failure_after_accepted_corrupt_server_s
     let (source_server, source_manager) = explicit_test_binaries();
     let expected_server = fs::read(&source_server).unwrap();
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("synthetic-data");
+    // The manager CLI and its guard resolve the root, so the test must name
+    // the same scheduled task when it checks and removes registrations.
+    let root = platform::resolve_manager_root(&temp.path().join("synthetic-data")).unwrap();
     let install = temp.path().join("managed-install");
     fs::create_dir_all(&root).unwrap();
     fs::create_dir_all(&install).unwrap();
@@ -1240,11 +1249,10 @@ async fn live_corrupt_replacement_rollback(
         .await
         .map_err(|error| format!("lifecycle-stop:{error}"))?;
 
-    let error = run_helper(root, server, 4_000_000, install)
-        .await
-        .expect_err("the corrupt target must fail local health verification");
-    if error != "updated-server-health-failed" {
-        return Err(format!("corrupt-target-error:{error}"));
+    match run_helper(root, server, 4_000_000, install).await {
+        Err(error) if error == "updated-server-health-failed" => {}
+        Err(error) => return Err(format!("corrupt-target-error:{error}")),
+        Ok(outcome) => return Err(format!("corrupt-target-accepted:{outcome:?}")),
     }
     let restored = wait_for_authenticated_status(&client)
         .await
@@ -1265,12 +1273,14 @@ async fn live_corrupt_replacement_rollback(
     {
         return Err("corrupt-target-manager-not-restored".into());
     }
-    let transaction = InstallTransaction::load(root, install)
+    if InstallTransaction::load(root, install)
         .map_err(|error| format!("transaction-load:{error}"))?
-        .ok_or("rollback-transaction-missing")?;
+        .is_some()
+    {
+        return Err("rollback-transaction-remains".into());
+    }
     let status = load_status(root).map_err(|error| format!("status-load:{error}"))?;
-    if transaction.phase != TransactionPhase::RolledBack
-        || status.phase != UpdatePhase::Failed
+    if status.phase != UpdatePhase::Failed
         || status.reason.as_deref() != Some("updated-server-health-failed")
         || status.last_failed_version.as_deref() != Some(target)
     {
@@ -1285,7 +1295,7 @@ async fn live_corrupt_replacement_rollback(
 async fn helper_rolls_back_a_corrupt_live_replacement_and_restarts_the_old_server() {
     let (source_server, source_manager) = explicit_test_binaries();
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("synthetic-data");
+    let root = platform::resolve_manager_root(&temp.path().join("synthetic-data")).unwrap();
     let install = temp.path().join("managed-install");
     let staged = temp.path().join(".risunest-sync-update-stage-corrupt-live");
     let backup = temp
@@ -1358,7 +1368,7 @@ fn spawn_update_helper_subprocess() {
     let helper_dir = root.join("manager-update/helper");
     fs::create_dir_all(&helper_dir).unwrap();
     let helper = helper_dir.join("risunest-sync-update-helper.exe");
-    fs::copy(manager, &helper).unwrap();
+    fs::copy(platform::background_manager_executable(&manager), &helper).unwrap();
     let parent_lock = try_lock(&root).unwrap();
     let mut command = platform::process(helper);
     command
@@ -1611,6 +1621,12 @@ async fn interrupted_files_recovery_outlives_the_active_installed_manager() {
         fs::copy(source, install.join(name)).unwrap();
         fs::copy(source, staged.join(name)).unwrap();
     }
+    // The installed manager starts its recovery helper from this sibling.
+    fs::copy(
+        platform::background_manager_executable(&source_manager),
+        platform::background_manager_executable(&installed_manager),
+    )
+    .unwrap();
     fs::write(install.join("recovery-proof.txt"), b"old").unwrap();
     fs::write(staged.join("recovery-proof.txt"), b"new").unwrap();
 

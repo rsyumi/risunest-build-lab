@@ -1,5 +1,4 @@
 import { get, writable } from "svelte/store"
-import { sleep } from "./util"
 import { language } from "../lang"
 import { isTauri } from "src/ts/platform"
 import { getDatabase, type Message, type MessageGenerationInfo } from "./storage/database.svelte"
@@ -79,12 +78,7 @@ export function alertError(msg: string | Error) {
 }
 
 export async function waitAlert(){
-    while(true){
-        if (get(alertStoreImported).type === 'none'){
-            break
-        }
-        await sleep(10)
-    }
+    await alertStoreImported.idle()
 }
 
 export function alertNormal(msg:string){
@@ -95,31 +89,26 @@ export function alertNormal(msg:string){
 }
 
 export async function alertNormalWait(msg:string){
-    alertStoreImported.set({
+    await alertStoreImported.open({
         'type': 'normal',
         'msg': msg
     })
-    await waitAlert()
 }
 
 export async function alertAddCharacter() {
-    alertStoreImported.set({
+    return await alertStoreImported.open({
         'type': 'addchar',
         'msg': language.addCharacter
     })
-    await waitAlert()
-
-    return get(alertStoreImported).msg
 }
 
 export async function alertChatOptions() {
-    alertStoreImported.set({
+    const result = await alertStoreImported.open({
         'type': 'chatOptions',
         'msg': language.chatOptions
     })
-    await waitAlert()
 
-    return parseInt(get(alertStoreImported).msg)
+    return parseInt(result)
 }
 
 export async function openRisuAccountLogin(open: () => void): Promise<boolean> {
@@ -130,33 +119,25 @@ export async function openRisuAccountLogin(open: () => void): Promise<boolean> {
 
 export async function alertLogin(){
     if (!(await alertRisuServiceTOS())) return ""
-    alertStoreImported.set({
+    return await alertStoreImported.open({
         'type': 'login',
         'msg': 'login'
     })
-    await waitAlert()
-
-    return get(alertStoreImported).msg
 }
 
 export async function alertSelect(msg:string[], display?:string){
     const message = display !== undefined ? `__DISPLAY__${display}||${msg.join('||')}` : msg.join('||')
-    alertStoreImported.set({
+    return await alertStoreImported.open({
         'type': 'select',
         'msg': message
     })
-
-    await waitAlert()
-
-    return get(alertStoreImported).msg
 }
 
 export async function alertErrorWait(msg:string){
-    alertStoreImported.set({
+    await alertStoreImported.open({
         'type': 'wait2',
         'msg': msg
     })
-    await waitAlert()
 }
 
 export function alertMd(msg:string){
@@ -187,21 +168,14 @@ export function alertWait(msg:string){
 
 
 export function alertClear(){
-    alertStoreImported.set({
-        'type': 'none',
-        'msg': ''
-    })
+    alertStoreImported.clearStatus()
 }
 
 export async function alertSelectChar(){
-    alertStoreImported.set({
+    return await alertStoreImported.open({
         'type': 'selectChar',
         'msg': ''
     })
-
-    await waitAlert()
-
-    return get(alertStoreImported).msg
 }
 
 export interface AlertCheckboxConfirmOptions {
@@ -218,65 +192,47 @@ export interface AlertCheckboxConfirmResult {
     checked: boolean
 }
 
-export function alertCheckboxConfirm(options: AlertCheckboxConfirmOptions): Promise<AlertCheckboxConfirmResult> {
-    return new Promise((resolve) => {
-        let settled = false
-        let unsubscribe: (() => void) | undefined
-        const finish = (result: AlertCheckboxConfirmResult) => {
-            if (settled) return
-            settled = true
-            unsubscribe?.()
-            resolve(result.confirmed && options.requireChecked && !result.checked
-                ? { confirmed: false, checked: false }
-                : result)
-        }
-        const dialog: alertData = {
-            type: 'checkboxConfirm', msg: options.title,
-            checkboxConfirm: { ...options }, onCheckboxConfirm: finish,
-        }
-        alertStoreImported.set(dialog)
-        unsubscribe = alertStoreImported.subscribe((current) => {
-            if (current.onCheckboxConfirm !== finish) finish({ confirmed: false, checked: false })
-        })
-        if (settled) unsubscribe()
+export async function alertCheckboxConfirm(options: AlertCheckboxConfirmOptions): Promise<AlertCheckboxConfirmResult> {
+    // Escape and Back close the dialog without reporting a result, which counts as a cancel.
+    let result: AlertCheckboxConfirmResult = { confirmed: false, checked: false }
+    await alertStoreImported.open({
+        type: 'checkboxConfirm', msg: options.title,
+        checkboxConfirm: { ...options }, onCheckboxConfirm: (reported) => { result = reported },
     })
+    return result.confirmed && options.requireChecked && !result.checked
+        ? { confirmed: false, checked: false }
+        : result
 }
 
 export async function alertConfirm(msg:string){
 
-    alertStoreImported.set({
+    const result = await alertStoreImported.open({
         'type': 'ask',
         'msg': msg
     })
 
-    await waitAlert()
-
-    return get(alertStoreImported).msg === 'yes'
+    return result === 'yes'
 }
 
 export async function alertPluginConfirm(msg:string){
 
-    alertStoreImported.set({
+    const result = await alertStoreImported.open({
         'type': 'pluginconfirm',
         'msg': msg
     })
 
-    await waitAlert()
-
-    return get(alertStoreImported).msg === 'yes'
+    return result === 'yes'
 }
 
 export async function alertCardExport(type:string = ''){
 
-    alertStoreImported.set({
+    const result = await alertStoreImported.open({
         'type': 'cardexport',
         'msg': '',
         'submsg': type
     })
 
-    await waitAlert()
-
-    return JSON.parse(get(alertStoreImported).msg) as {
+    return JSON.parse(result) as {
         type: string,
         type2: string,
     }
@@ -301,14 +257,12 @@ async function askLegalAcceptance(type: 'tos'|'risu-tos', acceptanceKey: string)
         return true
     }
 
-    alertStoreImported.set({
+    const result = await alertStoreImported.open({
         'type': type,
         'msg': type
     })
 
-    await waitAlert()
-
-    if(get(alertStoreImported).msg === 'yes'){
+    if(result === 'yes'){
         markers.setItem(acceptanceKey, 'true')
         await markers.flush()
         return true
@@ -319,33 +273,20 @@ async function askLegalAcceptance(type: 'tos'|'risu-tos', acceptanceKey: string)
 
 export async function alertInput(msg:string, datalist?:[string, string][], defaultValue?:string) {
 
-    alertStoreImported.set({
+    return await alertStoreImported.open({
         'type': 'input',
         'msg': msg,
         'datalist': datalist ?? [],
         'defaultValue': defaultValue ?? ''
     })
-
-    await waitAlert()
-
-    return get(alertStoreImported).msg
 }
 
 export async function alertModuleSelect(){
 
-    alertStoreImported.set({
+    return await alertStoreImported.open({
         'type': 'selectModule',
         'msg': ''
     })
-
-    while(true){
-        if (get(alertStoreImported).type === 'none'){
-            break
-        }
-        await sleep(20)
-    }
-
-    return get(alertStoreImported).msg
 }
 
 export function alertRequestData(info:AlertGenerationInfoStoreData){

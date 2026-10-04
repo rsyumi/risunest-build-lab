@@ -1,4 +1,5 @@
 import { registerGeneratingConversation } from '../storage/generatingConversationRegistry'
+import { openGenerationRequestPhase } from './generationRequestPhase'
 import { boundedGenerationFallbackReason } from './boundedGenerationAdmission'
 import { get, writable } from "svelte/store";
 import { type character, type groupChat, type MessageGenerationInfo, type Chat, type MessagePresetInfo, activatePresetOverride, setCurrentChat, type Message } from "../storage/database.svelte";
@@ -89,7 +90,8 @@ import {
 } from '../storage/activeWorkingSet.svelte'
 import { beginAndroidGenerationKeepAlive, endAndroidGenerationKeepAlive } from '../androidGenerationKeepAlive'
 import { beginIOSGeneration, notifyIOSGenerationComplete, isBackgroundExpiryReason } from "../iosNative";
-import { isTauriIOS, isTauriAndroid } from "../platform";
+import { isTauriIOS, isTauriAndroid, isTauriDesktop } from "../platform";
+import { notifyDesktop } from "../desktopNotifications";
 import { classifyChatParserHistory } from '../chatParserHistory'
 
 export { doingChat } from './generationState'
@@ -191,6 +193,8 @@ export async function notifyGenerationCompletion(result: string): Promise<void> 
               await notifyIOSGenerationComplete();
             } else if (isTauriAndroid) {
               await window.RisuCompletionNotifications?.notify(result);
+            } else if (isTauriDesktop) {
+              await notifyDesktop(result);
             } else if (typeof Notification !== "undefined" && Notification.permission === "granted") {
               const notification = new Notification("RisuNest", {
                 body: result,
@@ -529,6 +533,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 role: 'char',
                 data: `\`\`\`risuerror\n${error}\n\`\`\``,
                 time: Date.now(),
+                chatId: v4(),
             }
             if(currentChar?.chaId){
                 m.saying = currentChar.chaId
@@ -2132,20 +2137,29 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
               requestSourceSession.canContinueGenerationFrom(requestSourceSessionVersion!) &&
               requestSourceSession.materializeCompatibilityArray() ===
                   requestSourceConversation.message)
-    const req = await requestChatData({
-        formated: formated,
-        biasString: biases,
-        currentChar: currentChar,
-        useStreaming: true,
-        isGroupChat: nowChatroom.type === 'group',
-        bias: {},
-        continue: arg.continue,
-        chatId: generationId,
-        imageResponse: DBState.db.outputImageModal,
-        previewBody: arg.previewPrompt,
-        escape: nowChatroom.type === 'character' && nowChatroom.escapeOutput,
-        rememberToolUsage: DBState.db.rememberToolUsage,
-    }, 'model', abortSignal)
+    const closeRequestPhase = openGenerationRequestPhase({
+        characterId: requestSourceCharacterId,
+        conversationId: requestSourceConversation.id ?? '',
+    })
+    let req: Awaited<ReturnType<typeof requestChatData>>
+    try {
+        req = await requestChatData({
+            formated: formated,
+            biasString: biases,
+            currentChar: currentChar,
+            useStreaming: true,
+            isGroupChat: nowChatroom.type === 'group',
+            bias: {},
+            continue: arg.continue,
+            chatId: generationId,
+            imageResponse: DBState.db.outputImageModal,
+            previewBody: arg.previewPrompt,
+            escape: nowChatroom.type === 'character' && nowChatroom.escapeOutput,
+            rememberToolUsage: DBState.db.rememberToolUsage,
+        }, 'model', abortSignal)
+    } finally {
+        await closeRequestPhase()
+    }
     if(!isRequestSourceCurrent()){
         return false
     }

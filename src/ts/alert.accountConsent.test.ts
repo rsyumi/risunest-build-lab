@@ -12,11 +12,10 @@ vi.mock('./storage/deviceMarkers', () => ({
     }),
 }))
 vi.mock('./stores.svelte', async () => {
-    const { writable } = await import('svelte/store')
-    return { alertStore: writable({ type: 'none', msg: '' }) }
+    const { createAlertQueue } = await import('./alertQueue')
+    return { alertStore: createAlertQueue({ type: 'none', msg: '' }, { gapMs: 0 }) }
 })
 vi.mock('./storage/database.svelte', () => ({ getDatabase: vi.fn(() => ({})) }))
-vi.mock('./util', () => ({ sleep: (milliseconds: number) => new Promise(resolve => setTimeout(resolve, milliseconds)) }))
 vi.mock('src/ts/platform', () => ({ isTauri: false }))
 vi.mock('../lang', () => ({ language: {} }))
 
@@ -70,7 +69,7 @@ describe('account service consent', () => {
         const open = vi.fn()
         await expect(openRisuAccountLogin(open)).resolves.toBe(true)
         expect(open).toHaveBeenCalledOnce()
-        expect(get(alertStore)).toEqual({ type: 'none', msg: '' })
+        expect(get(alertStore).type).toBe('none')
         expect(markers.flush).not.toHaveBeenCalled()
     })
 

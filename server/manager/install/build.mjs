@@ -56,8 +56,11 @@ export function buildNativeSuite({ target, output, registryUrl, version }) {
   build("server/manager/Cargo.toml");
   const managerBinary = join(destination, `risunest-sync-manager${extension}`);
   copyFileSync(join(targetRelease, `risunest-sync-manager${extension}`), managerBinary);
+  let managerBackground = null;
   let packagedDaemon = daemon;
   if (target.includes("windows")) {
+    managerBackground = join(destination, "risunest-sync-manager-background.exe");
+    copyFileSync(join(targetRelease, "risunest-sync-manager-background.exe"), managerBackground);
     build("server/sync/Cargo.toml", ["--features", "windows-background"]);
     packagedDaemon = join(destination, "risunest-sync-server-background.exe");
     copyFileSync(join(targetRelease, "risunest-sync-server.exe"), packagedDaemon);
@@ -75,6 +78,8 @@ export function buildNativeSuite({ target, output, registryUrl, version }) {
     mkdirSync(binaries, { recursive: true });
     copyFileSync(packagedDaemon, join(binaries, `risunest-sync-server-${target}${extension}`));
     copyFileSync(managerBinary, join(binaries, `risunest-sync-manager-${target}${extension}`));
+    if (managerBackground)
+      copyFileSync(managerBackground, join(binaries, `risunest-sync-manager-background-${target}.exe`));
     copyFileSync(cloudflared, join(binaries, `cloudflared-${target}${extension}`));
     copyFileSync(license, join(binaries, "CLOUDFLARED-LICENSE"));
     const cli = join(gui, "node_modules/@tauri-apps/cli/tauri.js");
@@ -89,6 +94,7 @@ export function buildNativeSuite({ target, output, registryUrl, version }) {
     daemon,
     packagedDaemon,
     manager: managerBinary,
+    managerBackground,
     gui: guiBinary,
     cloudflared,
     license,
