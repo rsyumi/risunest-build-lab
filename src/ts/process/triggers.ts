@@ -1,4 +1,5 @@
 import { parseChatML } from "../parser/chatML";
+import { v4 } from "uuid";
 import { risuChatParser as risuChatParserGlobal } from "../parser/parser.svelte";
 import type { ActiveConversationPin } from "../storage/activeConversationSession";
 import { getCurrentCharacter, getDatabase, setCharacterByIndex, setDatabase, type Chat, type character } from "../storage/database.svelte";
@@ -1487,10 +1488,10 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                 case 'impersonate':{
                     const effectValue = risuChatParser(effect.value,{chara:char})
                     if(effect.role === 'user'){
-                        chat.message.push({role: 'user', data: effectValue})
+                        chat.message.push({role: 'user', data: effectValue, chatId: v4()})
                     }
                     else if(effect.role === 'char'){
-                        chat.message.push({role: 'char', data: effectValue})
+                        chat.message.push({role: 'char', data: effectValue, chatId: v4()})
                     }
                     break
                 }
@@ -1961,10 +1962,10 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                 case 'v2Impersonate':{
                     let value = effect.valueType === 'value' ? risuChatParser(effect.value,{chara:char}) : getVar(risuChatParser(effect.value,{chara:char}))
                     if(effect.role === 'user'){
-                        chat.message.push({role: 'user', data: value})
+                        chat.message.push({role: 'user', data: value, chatId: v4()})
                     }
                     else if(effect.role === 'char'){
-                        chat.message.push({role: 'char', data: value})
+                        chat.message.push({role: 'char', data: value, chatId: v4()})
                     }
                     break
                 }

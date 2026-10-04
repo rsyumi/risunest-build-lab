@@ -148,16 +148,26 @@ describe('conversation mutations', () => {
         )
 
         appendConversationMessage(fallbackTarget, { role: 'char', data: 'fallback append' })
+        appendConversationMessage(
+            captureConversationMutationTarget(createCharacter(fallbackConversation), fallbackConversation, null),
+            { role: 'char', data: 'kept ID', chatId: 'existing' },
+        )
 
         expect(fallbackConversation.message.map((message) => message.data)).toEqual([
             'before',
             'fallback append',
+            'kept ID',
         ])
+        const sessionAppendId = sessionConversation.message[1].chatId
+        expect(sessionAppendId).toEqual(expect.any(String))
+        expect(fallbackConversation.message[1].chatId).toEqual(expect.any(String))
+        expect(fallbackConversation.message[1].chatId).not.toBe(sessionAppendId)
+        expect(fallbackConversation.message[2].chatId).toBe('existing')
         expect(encodeLegacyConversationProjection({ message: sessionConversation.message })).toEqual(
             encodeLegacyConversationProjection({
                 message: [
                     { role: 'user', data: 'before' },
-                    { role: 'char', data: 'session append' },
+                    { role: 'char', data: 'session append', chatId: sessionAppendId },
                 ],
             }),
         )
@@ -299,7 +309,7 @@ describe('conversation mutations', () => {
 
         resetConversationWithMessage(target, { role: 'user', data: 'new user' })
 
-        expect(conversation.message).toEqual([{ role: 'user', data: 'new user' }])
+        expect(conversation.message).toEqual([{ role: 'user', data: 'new user', chatId: expect.any(String) }])
         expect(onMutation).toHaveBeenCalledTimes(1)
         expect(onMutation).toHaveBeenCalledWith(expect.objectContaining({
             commands: ['replace-tail', 'append'],
@@ -328,7 +338,7 @@ describe('conversation mutations', () => {
 
         expect(conversation.message).toEqual([
             { role: 'char', data: 'trigger result' },
-            { role: 'user', data: 'new input' },
+            { role: 'user', data: 'new input', chatId: expect.any(String) },
         ])
         expect(onMutation).toHaveBeenCalledWith(expect.objectContaining({
             commands: ['replace-tail', 'append'],

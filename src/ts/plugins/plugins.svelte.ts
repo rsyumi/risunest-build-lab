@@ -346,6 +346,11 @@ export async function importPlugin(code:string|null = null, argu:{
             return
         }
 
+        if (name === '*') {
+            showError('plugin name cannot be "*".')
+            return
+        }
+
         if(updateURL && versionOfPlugin.length === 0){
             showError('plugin version not found, did you put it correctly? It is required when update URL is provided.')
             return

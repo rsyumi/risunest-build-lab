@@ -623,7 +623,8 @@ mod tests {
             let (_,seq,_)=parse_segment_object_id(&published.locator.object).unwrap();
             let payload=segment::open(&f.provider.contents(&published.locator.object).unwrap(),&f.sender.library,&writer,seq,&f.sender.root_key).unwrap();
             assert_eq!(payload.data_catalogs.len(),1,"the compacted segment carries a data catalog");
-            let base=tempfile::tempdir().unwrap();
+            // macOS puts the default temporary directory under a long /var/folders path.
+            let base=if cfg!(windows) {tempfile::tempdir()} else {tempfile::tempdir_in("/tmp")}.unwrap();
             let base_length=base.path().as_os_str().len();
             assert!(base_length<59,"temporary directory {base_length} characters long");
             let root=base.path().join("r".repeat(66-base_length-1));

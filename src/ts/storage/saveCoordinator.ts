@@ -429,6 +429,11 @@ interface ReplacementAdmission extends PersistentMutationToken {
     supersededAdditionToken: object | null
 }
 
+export interface PreparedUnitIntent {
+    unitMutations: readonly PersistentUnitMutation[]
+    conversations: readonly ConversationMutation[]
+}
+
 export interface PersistentReplacementOptions {
     upstreamImport?: boolean
     upstreamImportWarnings?: string[]
@@ -4630,8 +4635,7 @@ export class SaveCoordinator {
         return this.enqueue(async () => {
             await this.flushIterations(reason, false)
             if (!mutations.length && !ranges.length && !messages.length) return this.revision
-            while (true) {
-                const revision = this.revision
+            return (await this.commitUnitIntentAttempts(async () => {
                 const replacements: ConversationMutation[] = []
                 for (const target of messages) {
                     const metadata = await this.dependencies.store.readConversationMetadata(target.characterId, target.conversationId)
@@ -4639,21 +4643,46 @@ export class SaveCoordinator {
                     replacements.push({ type: 'replace-range', characterId: target.characterId, conversationId: target.conversationId,
                         start: 0, deleteCount: metadata?.value.totalMessages ?? 0, messages: target.messages })
                 }
-                let committedRevision: DataRevision | undefined
-                try {
-                    const result = await this.dependencies.store.commit({ expectedRevision: revision, unitMutations: mutations, conversations: [...ranges, ...replacements] })
-                    committedRevision = result.revision
-                    this.currentRevision = result.revision
-                    this.dependencies.onLocalRevision?.(result.revision)
-                    await onCommitted?.(result.revision)
-                    await this.finishExplicitCommit(result.revision, false)
-                    return result.revision
-                } catch (error) {
-                    if (committedRevision !== undefined || !(error instanceof RevisionConflictError) || error.actualRevision <= revision) throw error
-                    this.currentRevision = error.actualRevision
-                }
-            }
+                return { unitMutations: mutations, conversations: [...ranges, ...replacements] }
+            }, onCommitted))!
         })
+    }
+
+    /**
+     * Builds the commit at each attempt's revision after pending data is flushed, so
+     * checks made while preparing hold for the commit that lands. `null` commits nothing.
+     */
+    commitPreparedUnitIntent(reason: string, prepare: (revision: DataRevision) => Promise<PreparedUnitIntent | null>, onCommitted?: (revision: DataRevision) => Promise<void>): Promise<DataRevision | null> {
+        this.assertPersistentMutationAllowed()
+        return this.enqueue(async () => {
+            await this.flushIterations(reason, false)
+            return this.commitUnitIntentAttempts(async (revision) => {
+                const prepared = await prepare(revision)
+                return prepared && canonicalClone({ unitMutations: [...prepared.unitMutations], conversations: [...prepared.conversations] })
+            }, onCommitted)
+        })
+    }
+
+    private async commitUnitIntentAttempts(prepare: (revision: DataRevision) => Promise<PreparedUnitIntent | null>, onCommitted?: (revision: DataRevision) => Promise<void>): Promise<DataRevision | null> {
+        while (true) {
+            const revision = this.revision
+            const prepared = await prepare(revision)
+            if (!prepared) return null
+            if (!prepared.unitMutations.length && !prepared.conversations.length) return revision
+            let committedRevision: DataRevision | undefined
+            try {
+                const result = await this.dependencies.store.commit({ expectedRevision: revision, unitMutations: [...prepared.unitMutations], conversations: [...prepared.conversations] })
+                committedRevision = result.revision
+                this.currentRevision = result.revision
+                this.dependencies.onLocalRevision?.(result.revision)
+                await onCommitted?.(result.revision)
+                await this.finishExplicitCommit(result.revision, false)
+                return result.revision
+            } catch (error) {
+                if (committedRevision !== undefined || !(error instanceof RevisionConflictError) || error.actualRevision <= revision) throw error
+                this.currentRevision = error.actualRevision
+            }
+        }
     }
 
     private capturePendingAddition(): {

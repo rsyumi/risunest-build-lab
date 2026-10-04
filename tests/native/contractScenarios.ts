@@ -1,5 +1,7 @@
 import { RevisionConflictError, SnapshotReleasedError, type PersistentDataStore, type AssetAlias } from '../../src/ts/storage/persistentDataStore'
-import type { Database } from '../../src/ts/storage/database.svelte'
+import type { Database, Message } from '../../src/ts/storage/database.svelte'
+import { normalizeConversationContextInput, readPinnedConversationContext } from '../../src/ts/plugins/conversationContext'
+import { normalizeConversationPatchInput, planStoredConversationPatch, prepareConversationPatchCommit } from '../../src/ts/plugins/conversationPatch'
 
 const canonical = (value: unknown): string => JSON.stringify(value, (_key, item) =>
     item && typeof item === 'object' && !Array.isArray(item)
@@ -15,6 +17,129 @@ export async function verifyContractReadback(store: PersistentDataStore): Promis
     equal(root.value.username, 'contract-committed', 'delta survives reopen')
     equal((root.value as typeof root.value & { syntheticLarge?: string }).syntheticLarge, largeText, 'large transport survives reopen')
     equal((await store.readAssetAliasesByKeys('asset', aliases.map(alias => alias.key))).value, aliases, 'aliases survive reopen')
+}
+
+async function readContext(store: PersistentDataStore, characterId: string, conversationId: string, revision: number, beforeCharacter?: () => Promise<void>) {
+    const lease = await store.acquireRevision(revision)
+    const reader = new Proxy(lease, { get(target, key) {
+        const value = Reflect.get(target, key, target)
+        if (typeof value !== 'function') return value
+        if (key !== 'readCharacter' || !beforeCharacter) return value.bind(target)
+        return async (...args: unknown[]) => {
+            const hook = beforeCharacter
+            beforeCharacter = undefined
+            await hook!()
+            return value.apply(target, args)
+        }
+    } })
+    try {
+        return await readPinnedConversationContext(reader, normalizeConversationContextInput({
+            characterId, conversationId, include: { character: true, lore: true }, messages: { limit: 128 },
+        }), { selected: null, allowPrivate: true })
+    } finally { await lease.release() }
+}
+
+export async function verifyPinnedConversationContext(store: PersistentDataStore, fixture: Database): Promise<void> {
+    const character = fixture.characters[1]
+    const chat = character.chats[1]
+    const head = (await store.readRoot()).revision
+    let committed = false
+    const pinned = await readContext(store, character.chaId, chat.id!, head, async () => {
+        const metadata = await store.readConversationMetadata(character.chaId, chat.id!)
+        await store.commit({ expectedRevision: head,
+            rootMutations: [{ type: 'set', key: 'syntheticContext', value: 'late' }],
+            conversations: [{ type: 'replace-range', characterId: character.chaId, conversationId: chat.id!,
+                start: chat.message.length, deleteCount: 0, messages: [{ role: 'char', data: 'late', chatId: 'context-late' }],
+                conversation: { ...metadata!.value.conversation, name: 'late name' } }] })
+        committed = true
+    })
+    if (!committed) throw new Error('context commit did not run')
+    equal([pinned?.revision, pinned?.characterIndex, pinned?.chatIndex, pinned?.messageCount], [head, 1, 1, chat.message.length], 'context pinned position')
+    equal([pinned?.character?.chaId, pinned?.conversation.name], [character.chaId, chat.name], 'context pinned records')
+    equal(pinned?.messages?.messages.map(message => message.chatId), chat.message.map(message => message.chatId), 'context pinned window')
+    const after = await readContext(store, character.chaId, chat.id!, head + 1)
+    equal([after?.revision, after?.messageCount, after?.conversation.name], [head + 1, chat.message.length + 1, 'late name'], 'context after commit')
+}
+
+async function planPatch(store: PersistentDataStore, input: Record<string, unknown>) {
+    const request = normalizeConversationPatchInput(input)
+    const lease = await store.acquireRevision((await store.readRoot()).revision)
+    try { return { request, revision: lease.revision, planned: await planStoredConversationPatch(lease, request) } }
+    finally { await lease.release() }
+}
+
+async function commitPatch(store: PersistentDataStore, input: Record<string, unknown>, ranges: number) {
+    const { request, revision, planned } = await planPatch(store, input)
+    if (planned.kind !== 'apply') throw new Error(`patch conflict ${canonical(planned.conflict)}`)
+    const prepared = prepareConversationPatchCommit(request, planned)
+    equal(prepared.conversations.map(range => range.type === 'replace-range' ? [range.start, range.deleteCount] : null),
+        planned.runs.map(run => [run.start, run.messages.length]), 'patch ranges preserve counts')
+    equal(prepared.conversations.length, ranges, 'patch range count')
+    const committed = await store.commit({ expectedRevision: revision, unitMutations: [...prepared.unitMutations], conversations: [...prepared.conversations] })
+    equal(committed.revision, revision + 1, 'patch commits once')
+    return committed.revision
+}
+
+export async function verifyConversationPatch(store: PersistentDataStore, fixture: Database): Promise<void> {
+    const characterId = fixture.characters[0].chaId
+    const conversationId = fixture.characters[0].chats[0].id!
+    const target = { characterId, conversationId }
+    const messages: Message[] = [
+        { role: 'user', data: 'u0' },
+        { role: 'char', data: 'c1', chatId: 'patch-c1' },
+        ...Array.from({ length: 16 }, (_, offset): Message => ({ role: 'char', data: `f${offset + 2}`, chatId: `patch-f${offset + 2}` })),
+        { role: 'user', data: 'u18', chatId: 'patch-dup' },
+        { role: 'char', data: 'c19', chatId: 'patch-c19' },
+        { role: 'user', data: 'u20', chatId: 'patch-dup' },
+    ]
+    const metadata = await store.readConversationMetadata(characterId, conversationId)
+    await store.commit({ expectedRevision: metadata!.revision, conversations: [{ type: 'replace-range', ...target,
+        start: 0, deleteCount: metadata!.value.totalMessages, messages, conversation: { ...metadata!.value.conversation, scriptstate: { $a: 1 } } }] })
+    const readBack = async (label: string, scriptstate: Record<string, unknown>) => {
+        const stored = await store.readConversation(characterId, conversationId)
+        equal(stored?.value.message, messages, `${label} messages`)
+        equal(stored?.value.scriptstate, scriptstate, `${label} chat variables`)
+    }
+
+    let duplicate: unknown
+    try { await planPatch(store, { ...target, mutationId: 'dup', messages: [{ index: 18, messageId: 'patch-dup', set: { __x: 1 } }] }) }
+    catch (error) { duplicate = error }
+    if (!(duplicate instanceof TypeError)) throw new Error('duplicate message ID without a base revision')
+
+    await commitPatch(store, { ...target, mutationId: 'runs',
+        messages: [{ index: 19, messageId: 'patch-c19', set: { __x: 19 } },
+            { index: 1, messageId: 'patch-c1', expected: { data: 'c1', __tr: undefined }, set: { __tr: { text: 't', parts: [1, 2] } } }],
+        chatVariables: [{ key: '$a', expected: 1, value: 2 }, { key: '$b', value: 'x' }] }, 2)
+    messages[1] = { ...messages[1], __tr: { text: 't', parts: [1, 2] } } as Message
+    messages[19] = { ...messages[19], __x: 19 } as Message
+    await readBack('separate runs', { $a: 2, $b: 'x' })
+
+    const head = (await store.readRoot()).revision
+    await commitPatch(store, { ...target, mutationId: 'base', baseRevision: head,
+        messages: [{ index: 20, messageId: 'patch-dup', set: { __x: 20 } }, { index: 18, messageId: 'patch-dup', set: { __y: true } },
+            { index: 19, messageId: 'patch-c19', set: { data: 'c19 edited', __x: undefined } }, { index: 0, messageId: null, set: { __x: 0 } }] }, 2)
+    messages[0] = { ...messages[0], __x: 0 } as Message
+    messages[18] = { ...messages[18], __y: true } as Message
+    messages[19] = { role: 'char', data: 'c19 edited', chatId: 'patch-c19' }
+    messages[20] = { ...messages[20], __x: 20 } as Message
+    await readBack('base revision run', { $a: 2, $b: 'x' })
+
+    const stale = await planPatch(store, { ...target, mutationId: 'stale', baseRevision: head, messages: [{ index: 0, messageId: null, set: { __x: 1 } }] })
+    equal(stale.planned, { kind: 'conflict', conflict: { target: 'conversation', reason: 'revision' } }, 'stale base revision')
+    const mismatch = await planPatch(store, { ...target, mutationId: 'mismatch', messages: [{ index: 1, messageId: 'patch-c1', expected: { __tr: { parts: [1, 2], text: 't' } }, set: { __x: 1 } },
+        { index: 19, messageId: 'patch-c19', expected: { data: 'c19' }, set: { __x: 2 } }] })
+    equal(mismatch.planned, { kind: 'conflict', conflict: { target: 'message', reason: 'mismatch', index: 19, field: 'data' } }, 'field mismatch')
+    const conflicts = await Promise.all([
+        { ...target, mutationId: 'moved', messages: [{ index: 2, messageId: 'patch-c1', set: { __x: 1 } }] },
+        { ...target, mutationId: 'range', messages: [{ index: messages.length, messageId: 'patch-c1', set: { __x: 1 } }] },
+        { ...target, conversationId: 'patch-missing', mutationId: 'missing', messages: [] },
+    ].map(async input => (await planPatch(store, input)).planned))
+    equal(conflicts, [
+        { kind: 'conflict', conflict: { target: 'message', reason: 'mismatch', index: 2, field: 'chatId' } },
+        { kind: 'conflict', conflict: { target: 'message', reason: 'not-found', index: messages.length } },
+        { kind: 'conflict', conflict: { target: 'conversation', reason: 'not-found' } },
+    ], 'addressing conflicts')
+    await readBack('after conflicts', { $a: 2, $b: 'x' })
 }
 
 export async function runContractScenarios(store: PersistentDataStore, fixture: Database, reopen: () => Promise<PersistentDataStore>): Promise<void> {
@@ -55,5 +180,7 @@ export async function runContractScenarios(store: PersistentDataStore, fixture: 
     let released: unknown
     try { await lease.readRoot() } catch (error) { released = error }
     if (!(released instanceof SnapshotReleasedError)) throw new Error('released lease still readable')
+    await verifyPinnedConversationContext(store, fixture)
+    await verifyConversationPatch(store, fixture)
     await verifyContractReadback(await reopen())
 }

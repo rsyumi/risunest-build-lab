@@ -249,6 +249,22 @@ interface UIPartResponse {
 }
 
 /**
+ * The message whose button was clicked, for buttons registered with location 'message'
+ * (RisuNest addition).
+ */
+interface MessageButtonTarget {
+    characterIndex: number;
+    chatIndex: number;
+    /** Absolute stored index of the message, also in a windowed conversation */
+    messageIndex: number;
+    /** The message's chatId, or null when it has none */
+    messageId: string | null;
+    role: 'user' | 'char';
+    characterId: string;
+    conversationId: string;
+}
+
+/**
  * Container display mode
  */
 type ContainerMode = 'fullscreen';
@@ -1711,9 +1727,11 @@ interface RisuaiPluginAPI {
      * @param arg.name - Display name
      * @param arg.icon - Icon content (HTML or image URL)
      * @param arg.iconType - Icon type ('html', 'img', or 'none')
-     * @param arg.location - Button location ('action', 'chat', or 'hamburger'). Ignored when replacing an existing button.
+     * @param arg.location - Button location ('action', 'chat', 'hamburger', or 'message'). Ignored when replacing an existing button.
+     * 'message' (RisuNest addition) adds the button to each message's action row; hosts without it throw `Invalid location for button`.
      * @param arg.id - Optional stable ID. If omitted, a UUID is generated. If provided and already registered, the existing button is replaced in-place.
-     * @param callback - Callback function when clicked
+     * @param arg.roles - With location 'message', the message roles that show the button. Default: both (RisuNest addition).
+     * @param callback - Callback function when clicked. Buttons at location 'message' receive the clicked message.
      *
      * @example
      * ```typescript
@@ -1743,9 +1761,10 @@ interface RisuaiPluginAPI {
         name: string,
         icon: string,
         iconType: 'html'|'img'|'none',
-        location?: 'action'|'chat'|'hamburger',
-        id?: string
-    }, callback: () => void): Promise<UIPartResponse>;
+        location?: 'action'|'chat'|'hamburger'|'message',
+        id?: string,
+        roles?: ('user'|'char')[]
+    }, callback: (target?: MessageButtonTarget) => void): Promise<UIPartResponse>;
 
     /**
      * Unregisters a UI part
@@ -2207,6 +2226,8 @@ interface RisuaiPluginAPI {
 
     /**
      * Sends a message to another plugin's named channel (IPC between plugins).
+     * Delivery requires each plugin's `//@allowed-ipc` list to name the other plugin or contain `*`
+     * (RisuNest addition: `*` matches every plugin name).
      * @param pluginName - The internal name of the target plugin
      * @param channelName - The channel name to post to
      * @param message - The message payload to send

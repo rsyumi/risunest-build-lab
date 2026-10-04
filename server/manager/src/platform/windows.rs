@@ -194,7 +194,7 @@ fn task_xml(root: &Path, executable: &Path) -> Result<String> {
     ))
 }
 
-fn update_task_xml(root: &Path, manager: &Path, server: &Path) -> Result<String> {
+fn update_task_xml(root: &Path, program: &Path, server: &Path) -> Result<String> {
     let root = root.to_str().ok_or("invalid-data-path")?;
     let server = server.to_str().ok_or("invalid-executable-path")?;
     if [root, server]
@@ -203,7 +203,7 @@ fn update_task_xml(root: &Path, manager: &Path, server: &Path) -> Result<String>
     {
         return Err("invalid-update-task-path".into());
     }
-    let program = xml(manager.to_str().ok_or("invalid-executable-path")?);
+    let program = xml(program.to_str().ok_or("invalid-executable-path")?);
     let arguments = xml(&format!(
         "--data-dir \"{}\" --server \"{}\" update scheduled",
         root.trim_end_matches(['\\', '/']),
@@ -348,8 +348,12 @@ pub(super) fn update_schedule(
     } else {
         action
     };
+    let program = background_manager_executable(manager);
+    if effective == "install" && !program.is_file() {
+        return Err("manager-executable-missing".into());
+    }
     let mut file = tempfile::NamedTempFile::new().map_err(|_| "update-task-file-unavailable")?;
-    file.write_all(update_task_xml(root, manager, server)?.as_bytes())
+    file.write_all(update_task_xml(root, &program, server)?.as_bytes())
         .map_err(|_| "update-task-file-unavailable")?;
     let path = file.into_temp_path();
     let arguments = format!(
@@ -370,7 +374,7 @@ pub(super) fn update_schedule(
             format!("{}-update", instance_name(root)),
         )
         .env("RISUNEST_TASK_ACTION", effective)
-        .env("RISUNEST_TASK_PROGRAM", manager)
+        .env("RISUNEST_TASK_PROGRAM", &program)
         .env("RISUNEST_TASK_ARGUMENTS", arguments)
         .env("RISUNEST_TASK_DESCRIPTION", "RisuNest user sync updater")
         .env("RISUNEST_TASK_XML", &path)
@@ -433,11 +437,14 @@ mod tests {
     fn updater_task_is_current_user_periodic_and_bounded() {
         let xml = update_task_xml(
             Path::new("C:\\Users\\Test & User\\sync"),
-            Path::new("C:\\Apps\\RisuNest Sync\\risunest-sync-manager.exe"),
+            &background_manager_executable(Path::new(
+                "C:\\Apps\\RisuNest Sync\\risunest-sync-manager.exe",
+            )),
             Path::new("C:\\Apps\\RisuNest Sync\\risunest-sync-server.exe"),
         )
         .unwrap();
         for value in [
+            "<Command>C:\\Apps\\RisuNest Sync\\risunest-sync-manager-background.exe</Command>",
             "InteractiveToken",
             "LeastPrivilege",
             "<Interval>PT1H</Interval>",

@@ -12,9 +12,10 @@ const branchMocks = vi.hoisted(() => ({
 vi.mock('src/ts/gui/branches', () => branchMocks)
 vi.mock('src/ts/stores.svelte', async () => {
     const { writable } = await import('svelte/store')
+    const { createAlertQueue } = await import('src/ts/alertQueue')
     return {
         DBState: { db: { characters: [], botPresets: [], botPresetsId: 0 } },
-        alertStore: writable({ type: 'none', msg: '' }),
+        alertStore: createAlertQueue({ type: 'none', msg: '' }, { gapMs: 0 }),
         selectedCharID: writable(-1),
     }
 })
@@ -140,7 +141,7 @@ describe('checkbox confirmations', () => {
         else target.querySelector<HTMLButtonElement>('button[aria-label="Cancel"]')!.click()
         await expect(result).resolves.toEqual({ confirmed: false, checked: false })
     })
-    it('resolves cancellation if another alert replaces the dialog', async () => {
+    it('resolves cancellation when the dialog closes without a result', async () => {
         const { result } = await show()
         alertStore.set({ type: 'none', msg: '' })
         await expect(result).resolves.toEqual({ confirmed: false, checked: false })

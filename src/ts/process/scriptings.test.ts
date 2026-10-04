@@ -879,14 +879,60 @@ test('records explicit false stop and ordered chat mutations', async () => {
   expect(result).toEqual({
     chat: {
       message: [
-        { role: 'char', data: 'inserted' },
+        { role: 'char', data: 'inserted', chatId: expect.any(String) },
         { role: 'user', data: 'keep-me' },
-        { role: 'user', data: 'tail' },
+        { role: 'user', data: 'tail', chatId: expect.any(String) },
       ],
     },
     res: false,
     stopSending: true,
   })
+})
+
+test('gives Lua-created messages IDs that keep plugin fields through a later full-chat round trip', async () => {
+  const created = await runScripted(`
+    listenEdit('editInput', function(id, value, meta)
+      addChat(id, 'user', 'added')
+      insertChat(id, 0, 'char', 'inserted')
+      local messages = getFullChat(id)
+      table.insert(messages, {role = 'char', data = 'new entry'})
+      table.insert(messages, messages[2])
+      setFullChat(id, messages)
+      return value
+    end)
+  `, {
+    char: { chaId: 'lua-created-ids' } as never,
+    chat: { message: [{ role: 'user', data: 'original', chatId: 'original' }] } as never,
+    mode: 'editInput',
+  }) as { chat: Chat }
+
+  const messages = created.chat.message
+  expect(messages.map((message) => message.data)).toEqual([
+    'inserted', 'original', 'added', 'new entry', 'original',
+  ])
+  const ids = messages.map((message) => message.chatId)
+  expect(ids.every((id) => typeof id === 'string' && id.length > 0)).toBe(true)
+  expect(new Set(ids).size).toBe(ids.length)
+  expect(ids).not.toContain('original')
+
+  const written = {
+    message: messages.map((message, index) => ({ ...message, __plugin: `record-${index}` })),
+  }
+  const roundTrip = await runScripted(`
+    listenEdit('editInput', function(id, value, meta)
+      setFullChat(id, getFullChat(id))
+      return value
+    end)
+  `, {
+    char: { chaId: 'lua-created-ids' } as never,
+    chat: written as never,
+    mode: 'editInput',
+  }) as { chat: Chat }
+
+  expect(roundTrip.chat.message.map((message) => message.chatId)).toEqual(ids)
+  expect(roundTrip.chat.message.map((message) => (message as unknown as Record<string, unknown>).__plugin)).toEqual([
+    'record-0', 'record-1', 'record-2', 'record-3', 'record-4',
+  ])
 })
 
 test('runs ordered Lua chat mutations inside one versioned conversation operation', async () => {

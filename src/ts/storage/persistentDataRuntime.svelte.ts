@@ -816,6 +816,8 @@ export const getPersistentRevision = (): DataRevision => getPersistentDataRuntim
 export const applyPersistentLwwReceive = (request: LwwStageReceive): Promise<LwwApplyResult> => getPersistentDataRuntime().applyLwwReceive(request)
 export const commitPersistentUnitIntent = (reason: string, mutations: readonly PersistentUnitMutation[], conversations?: readonly ConversationMutation[], wholeMessages?: readonly WholeMessageIntent[]): Promise<void> =>
     getPersistentDataRuntime().commitPersistentUnitIntent(reason, mutations, conversations, wholeMessages)
+export const commitPreparedUnitIntent: PersistentDataRuntime['commitPreparedUnitIntent'] = (reason, prepare) =>
+    getPersistentDataRuntime().commitPreparedUnitIntent(reason, prepare)
 export const withPausedPersistentWrites = <T>(reason: string, operation: (token: PersistentMutationToken) => Promise<T>): Promise<T> => getPersistentDataRuntime().withPausedPersistentWrites(reason, operation)
 
 export const beginActivatedLibraryGuard = (token: PersistentMutationToken) => getPersistentDataRuntime().beginActivatedLibraryGuard(token)
