@@ -1468,6 +1468,45 @@ impl Provider for OneDrive {
         })
     }
 
+    fn lookup_metadata<'a>(
+        &'a self,
+        repository: &'a RepositoryHandle,
+        intent: &'a ObjectIntent,
+        known: Option<&'a RemoteLocator>,
+        cancel: &'a Cancellation,
+    ) -> ProviderFuture<'a, Option<ObjectReceipt>> {
+        Box::pin(async move {
+            cancel.check()?;
+            let context = self.context(repository)?;
+            intent.validate(repository)?;
+            let (path, locator) = match known {
+                Some(locator) => {
+                    locator.validate_for(repository)?;
+                    config::validate_relative_path(&locator.object)?;
+                    (locator.object.clone(), locator.clone())
+                }
+                None => {
+                    let path = config::object_path(intent.role, &intent.object_id)?;
+                    let locator = self.locator(context, config::role_folder(intent.role), path.clone());
+                    (path, locator)
+                }
+            };
+            let Some((item, headers)) = self.fetch_item(context, &path, cancel).await? else {
+                return Ok(None);
+            };
+            if item.file.is_none() {
+                return Err(corrupt());
+            }
+            Ok(Some(ObjectReceipt {
+                locator,
+                byte_length: item.size.ok_or_else(corrupt)?,
+                version: graph::version(&item, &headers),
+                checksum: None,
+                complete: true,
+            }))
+        })
+    }
+
     fn head_locator(&self, repository: &RepositoryHandle) -> Result<RemoteLocator> {
         self.context(repository)?;
         Ok(RemoteLocator {

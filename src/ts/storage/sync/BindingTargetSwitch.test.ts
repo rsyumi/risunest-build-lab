@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 const acknowledgement = vi.hoisted(() => vi.fn())
 vi.mock('src/ts/alert', () => ({ alertCheckboxConfirm: acknowledgement }))
+vi.mock('./serverAssetResidency', () => ({ getAssetResidencyStatus: vi.fn(), downloadRemoteAssets: vi.fn() }))
 import BindingTargetSwitch from './BindingTargetSwitch.svelte'
 import { createSyncBindingFlow, type SyncBindingState, type SyncBindingTransport } from './bindingFlow'
 import { confirmSyncBindingReplacement } from './bindingDialog'

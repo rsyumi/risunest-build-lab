@@ -1648,7 +1648,8 @@ fn payload_alias_abort_and_reopen_sweep_remove_all_staged_rows() {
         .replace_put_asset_aliases(&abandoned.staging_id, &[alias])
         .expect("stage abandoned alias");
     drop(store);
-    let store = PersistentStore::open(directory.path()).expect("reopen persistent store");
+    let mut store = PersistentStore::open(directory.path()).expect("reopen persistent store");
+    while store.purge_retired_batch(256).expect("purge abandoned stage") {}
     let abandoned_rows: i64 = store
         .connection
         .query_row(

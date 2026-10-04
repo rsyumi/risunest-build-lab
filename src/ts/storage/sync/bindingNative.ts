@@ -11,8 +11,8 @@ export function createNativeSyncBindingBridge(): SyncBindingNative {
                 throw new Error('Sync binding changed')
             }
         },
-        switchTarget: (expected, target, inspection, requestId) => invoke<SyncBindingState>('pds_lww_switch_target', {
-            request: { bindingAuthority: expected.targetAuthority, requestId, expectedSelectionEpoch: expected.selectionEpoch, target, inspectionId: inspection?.inspectionId ?? null },
+        switchTarget: (expected, target, inspection, requestId, initialPublication) => invoke<SyncBindingState>('pds_lww_switch_target', {
+            request: { bindingAuthority: expected.targetAuthority, requestId, expectedSelectionEpoch: expected.selectionEpoch, target, inspectionId: inspection?.inspectionId ?? null, initialPublication },
         }),
     }
 }

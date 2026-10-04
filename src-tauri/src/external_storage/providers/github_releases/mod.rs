@@ -956,16 +956,41 @@ impl Provider for GithubReleases {
         })
     }
 
-    fn lookup_object<'a>(
+    fn lookup_metadata<'a>(
         &'a self,
         repository: &'a RepositoryHandle,
         intent: &'a ObjectIntent,
+        known: Option<&'a RemoteLocator>,
         cancel: &'a Cancellation,
     ) -> ProviderFuture<'a, Option<ObjectReceipt>> {
         Box::pin(async move {
             cancel.check()?;
             let context = self.context(repository)?;
             intent.validate(repository)?;
+            if let Some(locator) = known {
+                locator.validate_for(repository)?;
+                let (_release, asset) = api::parse_locator(&locator.object)?;
+                let request = self.request(context, Method::GET, context.asset_url(asset)?, ProviderOperation::Metadata);
+                let response = self.send(request, cancel).await?;
+                if response.status == 404 {
+                    return Ok(None);
+                }
+                let found: AssetView = self.decode(response, cancel).await?;
+                if found.id != asset {
+                    return Err(corrupt());
+                }
+                return Ok(Some(ObjectReceipt {
+                    locator: locator.clone(),
+                    byte_length: found.size,
+                    version: None,
+                    checksum: found.sha256().map(|value| Checksum {
+                        algorithm: "sha256".into(),
+                        provider_verified: value == intent.sha256,
+                        value,
+                    }),
+                    complete: found.uploaded(),
+                }));
+            }
             if !api::is_safe_name(&intent.object_id, 180) {
                 return Err(corrupt());
             }

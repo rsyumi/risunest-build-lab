@@ -77,7 +77,6 @@ const STAGE_ORDER: DialogStageId[] = [
     'preparing-attachments',
     'reading-database',
     'decoding-database',
-    'staging-characters',
     'finalizing-staging',
     'assign-plugin-values',
     'activating',
@@ -272,7 +271,6 @@ function stageLabel(stage: NativeFileJobDialogStage): string {
         case 'preparing-attachments': return copy.stagePreparingAttachments
         case 'reading-database': return copy.stageReadingDatabase
         case 'decoding-database': return copy.stageDecodingDatabase
-        case 'staging-characters': return copy.stageStagingCharacters
         case 'finalizing-staging': return copy.stageFinalizingStaging
         case 'assign-plugin-values': return copy.stageAssignPluginValues
         case 'activating': return copy.stageActivating
@@ -321,8 +319,6 @@ function doneStageDetail(stage: DialogStageId, counts: NativeImportCounts | unde
             return counts.attachmentsPrepared > 0
                 ? fillTemplate(copy.itemsCount, formatCount(counts.attachmentsPrepared))
                 : ''
-        case 'staging-characters':
-            return counts.characters > 0 ? fillTemplate(copy.itemsCount, formatCount(counts.characters)) : ''
         default:
             return ''
     }

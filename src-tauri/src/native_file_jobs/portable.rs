@@ -206,10 +206,12 @@ pub(super) fn now() -> i64 {
 }
 
 fn new_pins(store: &PersistentStore, kind: CasJobKind) -> Result<DurableCasJob, NativeJobError> {
+    let id = uuid::Uuid::new_v4().to_string();
     DurableCasJob::begin(
         store.repository_root(),
-        &uuid::Uuid::new_v4().to_string(),
+        &id,
         kind,
+        crate::asset_repository::job_pins::CasJobOwner::native_file_job(&id),
         now(),
     )
     .map_err(error)
@@ -220,7 +222,7 @@ fn new_pins_for_job(
     kind: CasJobKind,
     job_id: &str,
 ) -> Result<DurableCasJob, NativeJobError> {
-    DurableCasJob::begin(store.repository_root(), job_id, kind, now()).map_err(error)
+    DurableCasJob::begin(store.repository_root(), job_id, kind, crate::asset_repository::job_pins::CasJobOwner::native_file_job(job_id), now()).map_err(error)
 }
 pub(super) fn finish_durable_job(
     outcome: Result<JobResultSummary, NativeJobError>,
@@ -1286,8 +1288,12 @@ mod tests {
         assert!(store.snapshot_list().unwrap().is_empty());
         let db = rusqlite::Connection::open(target.join("persistent/persistent.sqlite")).unwrap();
         assert_eq!(
-            db.query_row::<i64, _, _>("SELECT count(*) FROM asset_aliases", [], |r| r.get(0))
-                .unwrap(),
+            db.query_row::<i64, _, _>(
+                "SELECT count(*) FROM asset_aliases WHERE generation=(SELECT id FROM generations WHERE state='active')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
             0
         );
     }
@@ -1345,7 +1351,7 @@ mod tests {
             if !corrupt_existing {
                 let db = rusqlite::Connection::open(target.join("persistent/persistent.sqlite"))
                     .unwrap();
-                db.execute_batch("CREATE TRIGGER reject_replacement BEFORE DELETE ON root WHEN OLD.generation='revision-1' BEGIN SELECT RAISE(ABORT,'synthetic commit failure'); END;").unwrap();
+                db.execute_batch("CREATE TRIGGER reject_replacement BEFORE UPDATE ON generations BEGIN SELECT RAISE(ABORT,'synthetic commit failure'); END;").unwrap();
             }
             let jobs = directory.path().join("restore-job");
             fs::create_dir(&jobs).unwrap();
@@ -1380,7 +1386,7 @@ mod tests {
                 assert_eq!(observer.read_root(None).unwrap().value, expected);
                 let db = rusqlite::Connection::open(target.join("persistent/persistent.sqlite")).unwrap();
                 assert_eq!(db.query_row::<i64,_,_>("SELECT revision FROM lww_requests WHERE request_id=?1", [&job.id()], |row| row.get(0)).unwrap(), 2);
-                assert_eq!(db.query_row::<String,_,_>("SELECT object_hash FROM asset_aliases WHERE generation='revision-2' AND logical_key='assets/synthetic-0.bin'", [], |row| row.get(0)).unwrap(), hash);
+                assert_eq!(db.query_row::<String,_,_>("SELECT object_hash FROM asset_aliases WHERE generation=(SELECT id FROM generations WHERE state='active') AND logical_key='assets/synthetic-0.bin'", [], |row| row.get(0)).unwrap(), hash);
             } else {
                 assert_eq!(failure.code, "portable-backup-failed");
                 assert_eq!(failure.message, "device-storage-failed: Native backup section storage failed");
@@ -1458,7 +1464,7 @@ mod tests {
             before_roots
         );
         drop(db);
-        // Opening a store seeds its operational revision-0 row independently of restoration.
+        // The refused restore left the target library and its revision as they were.
         let target_store = PersistentStore::open(&target).unwrap();
         assert_eq!(target_store.revision().unwrap(), revision);
         assert_eq!(target_store.read_root(None).unwrap().value, before);
@@ -1890,6 +1896,48 @@ mod tests {
         let one = manifest_reads(1);
         assert!(one > 0);
         assert_eq!(manifest_reads(3), one);
+    }
+
+    #[test]
+    fn a_page_reload_during_an_export_keeps_its_journal_until_the_export_finishes() {
+        use crate::asset_repository::commands::{CasJobOwnerProbe, DurableCasJobState};
+        use crate::asset_repository::job_pins::durable_cas_job_ids;
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let jobs = directory.path().join("jobs");
+        fs::create_dir_all(&jobs).unwrap();
+        let mut store = library(&source);
+        crate::server_sync::lww_tests::put_asset(&mut store, "assets/synthetic-export.bin", b"synthetic export object");
+        let revision = store.revision().unwrap();
+        let swept = std::sync::Arc::new(std::sync::Mutex::new(None));
+        portable_backup::source_io::reset_source_io();
+        {
+            let root = source.clone();
+            let swept = swept.clone();
+            portable_backup::source_io::on_capture_ready(move |_, _| {
+                let before = durable_cas_job_ids(&root).unwrap();
+                let native_jobs = || -> Result<Vec<super::super::JobStatus>, String> { Ok(Vec::new()) };
+                let open_store = || PersistentStore::open(&root).map_err(|error| error.to_string());
+                DurableCasJobState::default()
+                    .sweep_after_page_start(&root, &CasJobOwnerProbe {
+                        native_jobs: &native_jobs,
+                        device_session_active: false,
+                        open_store: &open_store,
+                    })
+                    .unwrap();
+                *swept.lock().unwrap() = Some((before, durable_cas_job_ids(&root).unwrap()));
+            });
+        }
+        let export = super::super::JobRegistry::default()
+            .create_internal(super::super::JobKind::ExportPortableBackup, Some(revision), vec![], false)
+            .unwrap();
+        let exported = export_portable(None, revision, &jobs, &directory.path().join("handoffs"), store, &export, None, "9.8.7-synthetic");
+        portable_backup::source_io::reset_source_io();
+        exported.unwrap();
+        let (before, after) = swept.lock().unwrap().take().unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(after, before);
+        assert!(durable_cas_job_ids(&source).unwrap().is_empty());
     }
 }
 

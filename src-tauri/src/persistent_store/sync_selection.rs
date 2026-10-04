@@ -5,10 +5,11 @@ use serde::{Deserialize, Serialize};
 use crate::native_log::logged;
 
 pub(super) const SCHEMA: &str = r#"
-CREATE TABLE library_sync_selection(singleton INTEGER PRIMARY KEY CHECK(singleton=1),target TEXT NOT NULL CHECK(target IN ('none','server','external')),connection_id TEXT,selection_epoch TEXT NOT NULL,paused INTEGER NOT NULL CHECK(paused IN (0,1)),decision_required INTEGER NOT NULL CHECK(decision_required IN (0,1)),CHECK((target='none' AND connection_id IS NULL) OR (target!='none' AND length(connection_id)>0)));
+CREATE TABLE library_sync_selection(singleton INTEGER PRIMARY KEY CHECK(singleton=1),target TEXT NOT NULL CHECK(target IN ('none','server','external')),connection_id TEXT,selection_epoch TEXT NOT NULL,paused INTEGER NOT NULL CHECK(paused IN (0,1)),CHECK((target='none' AND connection_id IS NULL) OR (target!='none' AND length(connection_id)>0)));
 CREATE TABLE local_library_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),store_id TEXT NOT NULL,library_epoch TEXT NOT NULL);
 CREATE TABLE lww_binding_switch_requests(request_id TEXT PRIMARY KEY,body TEXT NOT NULL,change TEXT NOT NULL);
 CREATE TABLE lww_binding_switch_retained(request_id TEXT PRIMARY KEY);
+CREATE TABLE lww_initial_publication(singleton INTEGER PRIMARY KEY CHECK(singleton=1),authority TEXT NOT NULL);
 CREATE TABLE lww_binding_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),library_id TEXT,target_id TEXT);
 CREATE TABLE lww_binding_inspections(inspection_id TEXT PRIMARY KEY,target TEXT NOT NULL,target_id TEXT NOT NULL,library_id TEXT NOT NULL,source_authority TEXT NOT NULL,source_epoch TEXT NOT NULL);
 CREATE TABLE lww_binding_stages(staging_id TEXT PRIMARY KEY,inspection_id TEXT NOT NULL,receive_id TEXT NOT NULL UNIQUE,changes TEXT NOT NULL,activation_epoch TEXT,library_digest TEXT NOT NULL);
@@ -38,7 +39,6 @@ pub(crate) struct Selection {
     pub target: SyncTarget,
     pub epoch: String,
     pub paused: bool,
-    pub decision_required: bool,
 }
 
 fn invalid(message: &str) -> StoreError {
@@ -50,7 +50,7 @@ fn invalid(message: &str) -> StoreError {
 pub(super) fn create_schema(db: &Connection) -> StoreResult<()> {
     db.execute_batch(SCHEMA)?;
     db.execute(
-        "INSERT INTO library_sync_selection VALUES(1,'none',NULL,?1,0,0)",
+        "INSERT INTO library_sync_selection VALUES(1,'none',NULL,?1,0)",
         [uuid::Uuid::new_v4().to_string()],
     )?;
     db.execute(
@@ -65,7 +65,7 @@ pub(super) fn create_schema(db: &Connection) -> StoreResult<()> {
 }
 
 pub(crate) fn read(db: &Connection) -> StoreResult<Selection> {
-    let (kind,id,epoch,paused,decision):(String,Option<String>,String,bool,bool)=db.query_row("SELECT target,connection_id,selection_epoch,paused,decision_required FROM library_sync_selection WHERE singleton=1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+    let (kind,id,epoch,paused):(String,Option<String>,String,bool)=db.query_row("SELECT target,connection_id,selection_epoch,paused FROM library_sync_selection WHERE singleton=1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
     let target = match (kind.as_str(), id) {
         ("none", None) => SyncTarget::None,
         ("server", Some(id)) => SyncTarget::Server(id),
@@ -76,7 +76,6 @@ pub(crate) fn read(db: &Connection) -> StoreResult<Selection> {
         target,
         epoch,
         paused,
-        decision_required: decision,
     })
 }
 
@@ -114,7 +113,7 @@ pub(crate) fn select(
     if id.is_some_and(|id| id.is_empty()) {
         return Err(invalid("Missing sync connection identity"));
     }
-    tx.execute("UPDATE library_sync_selection SET target=?1,connection_id=?2,selection_epoch=?3,paused=0,decision_required=0 WHERE singleton=1",params![kind,id,uuid::Uuid::new_v4().to_string()])?;
+    tx.execute("UPDATE library_sync_selection SET target=?1,connection_id=?2,selection_epoch=?3,paused=0 WHERE singleton=1",params![kind,id,uuid::Uuid::new_v4().to_string()])?;
     tx.execute(
         "UPDATE external_storage_jobs SET phase='stale' WHERE role IN ('sync','restore') AND phase IN ('preparing','ready')",
         [],
@@ -221,6 +220,7 @@ pub(crate) struct BindingSelectionChange {
     pub library_id: Option<String>,
     pub target_id: Option<String>,
     pub inspection_id: Option<String>,
+    pub initial_publication: bool,
 }
 
 pub(crate) fn apply_binding_selection(tx: &Transaction<'_>, change: &BindingSelectionChange) -> StoreResult<Selection> {
@@ -243,7 +243,7 @@ pub(crate) fn apply_binding_selection(tx: &Transaction<'_>, change: &BindingSele
     if connection.is_some_and(|id| id.is_empty()) || (connection.is_some() && (change.library_id.as_deref().is_none_or(str::is_empty) || change.target_id.as_deref().is_none_or(str::is_empty))) {
         return Err(invalid("Missing binding identity"));
     }
-    tx.execute("UPDATE library_sync_selection SET target=?1,connection_id=?2,selection_epoch=?3,paused=0,decision_required=0 WHERE singleton=1", params![kind, connection, change.new_epoch])?;
+    tx.execute("UPDATE library_sync_selection SET target=?1,connection_id=?2,selection_epoch=?3,paused=0 WHERE singleton=1", params![kind, connection, change.new_epoch])?;
     if !matches!(change.target, SyncTarget::None) {
         tx.execute("UPDATE lww_binding_identity SET library_id=?1,target_id=?2 WHERE singleton=1", params![change.library_id, change.target_id])?;
     }
@@ -257,6 +257,20 @@ pub(crate) fn apply_binding_selection(tx: &Transaction<'_>, change: &BindingSele
 #[cfg(test)]
 mod binding_tests {
     use super::*;
+
+    #[test]
+    fn a_switch_request_reads_the_renderer_body_and_requires_the_initial_publication_flag() {
+        let body = serde_json::json!({
+            "bindingAuthority":"4","requestId":"synthetic-switch","expectedSelectionEpoch":"epoch",
+            "target":{"kind":"server","connectionId":"server"},"inspectionId":"inspection","initialPublication":true
+        });
+        let request: SwitchBindingRequest = serde_json::from_value(body.clone()).unwrap();
+        assert!(request.initial_publication);
+        assert_eq!(request.target, SyncTarget::Server("server".into()));
+        let mut missing = body;
+        missing.as_object_mut().unwrap().remove("initialPublication");
+        assert!(serde_json::from_value::<SwitchBindingRequest>(missing).is_err());
+    }
 
     #[test]
     fn binding_content_count_dto_uses_only_canonical_decimal_strings() {
@@ -283,7 +297,7 @@ mod binding_tests {
         db
     }
     fn change(db: &Connection) -> BindingSelectionChange {
-        BindingSelectionChange { expected_epoch: read(db).unwrap().epoch, new_epoch: "new".into(), target: SyncTarget::Server("connection".into()), library_id: Some("library".into()), target_id: Some("target".into()), inspection_id: None }
+        BindingSelectionChange { initial_publication: false, expected_epoch: read(db).unwrap().epoch, new_epoch: "new".into(), target: SyncTarget::Server("connection".into()), library_id: Some("library".into()), target_id: Some("target".into()), inspection_id: None }
     }
     #[test]
     fn binding_content_counts_orphan_values_in_both_namespaces_when_participation_is_off() {
@@ -354,7 +368,7 @@ mod binding_tests {
     }
     fn unbind(store: &mut super::super::PersistentStore) -> BindingState {
         let before = store.lww_binding_state().unwrap();
-        store.switch_lww_binding(&SwitchBindingRequest { header:super::super::lww::Header{binding_authority:before.target_authority,request_id:uuid::Uuid::new_v4().to_string()},expected_selection_epoch:before.selection_epoch,target:SyncTarget::None,inspection_id:None }).unwrap()
+        store.switch_lww_binding(&SwitchBindingRequest { initial_publication: false, header:super::super::lww::Header{binding_authority:before.target_authority,request_id:uuid::Uuid::new_v4().to_string()},expected_selection_epoch:before.selection_epoch,target:SyncTarget::None,inspection_id:None }).unwrap()
     }
     fn outbox_keys(store: &super::super::PersistentStore, authority: risunest_sync_wire::stamp::DecimalU64) -> Vec<String> {
         store.lww_read_outbox(authority,100).unwrap().entries.into_iter().map(|entry|entry.key.as_str().to_string()).collect()
@@ -368,7 +382,7 @@ mod binding_tests {
     }
     fn switch(store: &mut super::super::PersistentStore, inspection: &str, target: &SyncTarget) -> BindingState {
         let before = store.lww_binding_state().unwrap();
-        store.switch_lww_binding(&SwitchBindingRequest { header:super::super::lww::Header{binding_authority:before.target_authority,request_id:uuid::Uuid::new_v4().to_string()},expected_selection_epoch:before.selection_epoch,target:target.clone(),inspection_id:Some(inspection.into()) }).unwrap()
+        store.switch_lww_binding(&SwitchBindingRequest { initial_publication: false, header:super::super::lww::Header{binding_authority:before.target_authority,request_id:uuid::Uuid::new_v4().to_string()},expected_selection_epoch:before.selection_epoch,target:target.clone(),inspection_id:Some(inspection.into()) }).unwrap()
     }
     fn replacement(state: &BindingState, staging: &str, receive: &str) -> ReplaceBindingRequest {
         ReplaceBindingRequest { header:super::super::lww::Header{binding_authority:state.target_authority,request_id:receive.into()},expected_selection_epoch:state.selection_epoch.clone(),staging_id:staging.into(),receive_id:receive.into(),target_id:"remote-target".into(),library_id:"remote-library".into() }
@@ -378,7 +392,7 @@ mod binding_tests {
         let dir=tempfile::tempdir().unwrap();let mut store=super::super::PersistentStore::open(dir.path()).unwrap();
         let target=SyncTarget::Server("server".into());let inspection=inspect(&store,&target);
         let before=store.lww_binding_state().unwrap();
-        let request=SwitchBindingRequest { header:super::super::lww::Header{binding_authority:before.target_authority,request_id:uuid::Uuid::new_v4().to_string()},expected_selection_epoch:before.selection_epoch.clone(),target:SyncTarget::External("other".into()),inspection_id:Some(inspection) };
+        let request=SwitchBindingRequest { initial_publication: false, header:super::super::lww::Header{binding_authority:before.target_authority,request_id:uuid::Uuid::new_v4().to_string()},expected_selection_epoch:before.selection_epoch.clone(),target:SyncTarget::External("other".into()),inspection_id:Some(inspection) };
         assert!(store.switch_lww_binding(&request).is_err());
         assert_eq!(store.lww_binding_state().unwrap().target_authority,before.target_authority);
         assert_eq!(store.lww_binding_state().unwrap().selection_epoch,before.selection_epoch);
@@ -391,7 +405,7 @@ mod binding_tests {
         store.replace_put_root(&staging,&serde_json::json!({"language":"changed"})).unwrap();
         assert!(store.register_lww_binding_stage(&inspection,&staging,&receive,&[]).is_err());
         let before=store.lww_binding_state().unwrap();
-        let request=SwitchBindingRequest { header:super::super::lww::Header{binding_authority:before.target_authority,request_id:uuid::Uuid::new_v4().to_string()},expected_selection_epoch:before.selection_epoch.clone(),target,inspection_id:Some(inspection) };
+        let request=SwitchBindingRequest { initial_publication: false, header:super::super::lww::Header{binding_authority:before.target_authority,request_id:uuid::Uuid::new_v4().to_string()},expected_selection_epoch:before.selection_epoch.clone(),target,inspection_id:Some(inspection) };
         assert!(store.switch_lww_binding(&request).is_err());
         assert_eq!(store.lww_binding_state().unwrap().target_authority,before.target_authority);
     }
@@ -461,7 +475,7 @@ mod binding_tests {
     fn unbinding_retains_library_for_rebind() {
         let mut db=database();let initial=change(&db);let tx=db.transaction().unwrap();
         apply_binding_selection(&tx,&initial).unwrap();
-        let unbind=BindingSelectionChange {expected_epoch:initial.new_epoch,new_epoch:"unbound".into(),target:SyncTarget::None,library_id:None,target_id:None,inspection_id:None};
+        let unbind=BindingSelectionChange { initial_publication: false,expected_epoch:initial.new_epoch,new_epoch:"unbound".into(),target:SyncTarget::None,library_id:None,target_id:None,inspection_id:None};
         apply_binding_selection(&tx,&unbind).unwrap();
         apply_binding_selection(&tx,&unbind).unwrap();
         let library:Option<String>=tx.query_row("SELECT library_id FROM lww_binding_identity WHERE singleton=1",[],|r|r.get(0)).unwrap();
@@ -578,6 +592,8 @@ pub(crate) struct SwitchBindingRequest {
     pub expected_selection_epoch: String,
     pub target: SyncTarget,
     pub inspection_id: Option<String>,
+    /// Whether the switch leaves every unit of this library owed to an empty target.
+    pub initial_publication: bool,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -616,7 +632,12 @@ impl super::PersistentStore {
         Ok(id)
     }
 
+    #[cfg(test)]
     pub(crate) fn register_lww_binding_stage(&self, inspection_id: &str, staging_id: &str, receive_id: &str, changes: &[super::lww::Change]) -> StoreResult<()> {
+        self.register_lww_binding_stage_with(inspection_id, staging_id, receive_id, changes, true)
+    }
+
+    pub(super) fn register_lww_binding_stage_with(&self, inspection_id: &str, staging_id: &str, receive_id: &str, changes: &[super::lww::Change], prove_content: bool) -> StoreResult<()> {
         if receive_id.is_empty() { return Err(invalid("Missing binding receive identity")); }
         let (authority,epoch):(String,String) = self.connection.query_row("SELECT source_authority,source_epoch FROM lww_binding_inspections WHERE inspection_id=?1", [inspection_id], |r| Ok((r.get(0)?,r.get(1)?)))?;
         if authority != self.lww_binding_authority()?.0.to_string() || epoch != read(&self.connection)?.epoch { return Err(invalid("Stale binding inspection")); }
@@ -634,7 +655,7 @@ impl super::PersistentStore {
         let existing: Option<(String,String,String)> = self.connection.query_row("SELECT inspection_id,receive_id,changes FROM lww_binding_stages WHERE staging_id=?1", [staging_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         if let Some(existing) = existing {
             if existing != (inspection_id.into(),receive_id.into(),encoded) { return Err(invalid("Binding stage identity changed")); }
-            validate_binding_stage_content(&self.connection,staging_id)?;
+            if prove_content { validate_binding_stage_content(&self.connection,staging_id)?; }
             return Ok(());
         }
         let digest = binding_stage_digest(&self.connection, staging_id)?;
@@ -665,7 +686,7 @@ impl super::PersistentStore {
         // Unbinding, and returning to the target this library was last bound to without replacing it,
         // carry unpublished versions, receive progress and pending publications to the new authority.
         let (library_id,target_id,retain) = if matches!(request.target, SyncTarget::None) {
-            if request.inspection_id.is_some() { return Err(invalid("Unbinding has no target inspection")); }
+            if request.inspection_id.is_some() || request.initial_publication { return Err(invalid("Unbinding has no target inspection")); }
             (None,None,true)
         } else {
             let inspection = request.inspection_id.as_deref().ok_or_else(|| invalid("Missing binding inspection"))?;
@@ -673,10 +694,11 @@ impl super::PersistentStore {
             if serde_json::from_str::<SyncTarget>(&target)? != request.target || authority != request.header.binding_authority.0.to_string() || epoch != request.expected_selection_epoch { return Err(invalid("Wrong target binding inspection")); }
             validate_binding_inspection_stages(self,inspection,request.header.binding_authority)?;
             let staged:bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM lww_binding_stages WHERE inspection_id=?1)", [inspection], |r| r.get(0))?;
+            if staged && request.initial_publication { return Err(invalid("A staged binding has no initial publication")); }
             let retain = !staged && self.lww_previously_bound(&library,&target_id)?;
             (Some(library),Some(target_id),retain)
         };
-        let change = BindingSelectionChange { expected_epoch: request.expected_selection_epoch.clone(),new_epoch:uuid::Uuid::new_v4().to_string(),target:request.target.clone(),library_id,target_id,inspection_id:request.inspection_id.clone() };
+        let change = BindingSelectionChange { expected_epoch: request.expected_selection_epoch.clone(),new_epoch:uuid::Uuid::new_v4().to_string(),target:request.target.clone(),library_id,target_id,inspection_id:request.inspection_id.clone(),initial_publication:request.initial_publication };
         let tx = self.connection.transaction()?;
         tx.execute("INSERT INTO lww_binding_switch_requests VALUES(?1,?2,?3)", params![request.header.request_id,body,serde_json::to_string(&change)?])?;
         if retain { tx.execute("INSERT INTO lww_binding_switch_retained VALUES(?1)", [&request.header.request_id])?; }
@@ -695,8 +717,8 @@ impl super::PersistentStore {
         if request.header.request_id != request.receive_id { return Err(invalid("Binding receive request identity changed")); }
         let library_committed:bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM lww_requests WHERE request_id=?1)", [&request.header.request_id], |r| r.get(0))?;
         let changes:Vec<super::lww::Change> = serde_json::from_str(&encoded)?;
+        // The stage catalog is proved once, inside the activation transaction.
         if !library_committed {
-            validate_binding_stage_content(&self.connection,&request.staging_id)?;
             super::lww::validate_binding_source(&self.connection,&request.staging_id,&request.header,&changes)?;
         }
         self.lww_replace_target(&request.header,&request.staging_id,&changes)
@@ -736,10 +758,13 @@ pub(crate) fn binding_stage_digest(db: &Connection, staging_id: &str) -> StoreRe
     super::lww::catalog_digest(db, staging_id)
 }
 
+/// Proves the stage catalog once against both digests recorded for it.
 pub(crate) fn validate_binding_stage_content(db: &Connection, staging_id: &str) -> StoreResult<()> {
     let expected:Option<String> = db.query_row("SELECT library_digest FROM lww_binding_stages WHERE staging_id=?1", [staging_id], |r| r.get(0)).optional()?;
-    if let Some(expected) = expected {
-        if binding_stage_digest(db,staging_id)? != expected { return Err(invalid("Binding stage content changed")); }
-    }
+    let source:Option<String> = db.query_row("SELECT catalog_digest FROM lww_binding_sources WHERE staging_id=?1", [staging_id], |r| r.get(0)).optional()?;
+    if expected.is_none() && source.is_none() { return Ok(()); }
+    let actual = binding_stage_digest(db,staging_id)?;
+    if expected.is_some_and(|expected| expected != actual) { return Err(invalid("Binding stage content changed")); }
+    if source.is_some_and(|source| source != actual) { return Err(super::lww::error("binding-source-integrity")); }
     Ok(())
 }

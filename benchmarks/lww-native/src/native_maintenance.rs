@@ -117,7 +117,7 @@ pub(crate) async fn external_bootstrap_raw(
             &engine.repository.connection_identity,&engine.library).map_err(|e|e.to_string())?;
         let stage_header=lww::Header {binding_authority:before.target_authority.clone(),request_id:uuid::Uuid::new_v4().to_string()};
         let staged=engine.stage_binding(store,&stage_header,&inspection,&cancel).await.map_err(|e|format!("{e:?}"))?;
-        let switched=store.switch_lww_binding(&SwitchBindingRequest {header:lww::Header {
+        let switched=store.switch_lww_binding(&SwitchBindingRequest { initial_publication: false,header:lww::Header {
             binding_authority:before.target_authority.clone(),request_id:uuid::Uuid::new_v4().to_string()},
             expected_selection_epoch:before.selection_epoch.clone(),target,inspection_id:Some(inspection)}).map_err(|e|e.to_string())?;
         let request=crate::persistent_store::sync_selection::ReplaceBindingRequest {

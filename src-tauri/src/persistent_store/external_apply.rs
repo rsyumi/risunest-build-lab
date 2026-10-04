@@ -19,6 +19,7 @@ use crate::{
     },
 };
 use crate::external_storage::content_store::{Body, CancellableRead, ContentStore, ObjectSource};
+use crate::external_storage::lww_residency::RemoteBodies;
 use crate::local_backup::CancellationProbe;
 use risunest_external_storage_format::format::{fingerprint, library_fingerprint_domain};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
@@ -90,9 +91,11 @@ impl PersistentStore {
         // a caller that offers neither leaves this directory absent.
         let content = ContentStore::open_existing(&root.join("external-storage"))?;
         let stage = self.replace_begin()?;
+        let mut remote = RemoteBodies::deferred(&self.repository_root);
         let staged = (|| {
             let object_sizes = stage_objects(
                 &self.repository_root,
+                &mut remote,
                 &root,
                 content.as_ref(),
                 objects,
@@ -101,6 +104,7 @@ impl PersistentStore {
             let record_hashes = stage_records(
                 &mut self.connection,
                 &self.repository_root,
+                &mut remote,
                 &stage.staging_id,
                 application.expected_revision,
                 &root,
@@ -247,6 +251,7 @@ fn validate_hash(hash: &str, subject: &str) -> StoreResult<[u8; 32]> {
 
 fn stage_objects<O>(
     repository_root: &Path,
+    remote: &mut RemoteBodies,
     staging_root: &Path,
     content: Option<&ContentStore>,
     objects: O,
@@ -275,8 +280,10 @@ where
             if digest != &object.content_hash {
                 return invalid("External snapshot library body is not the object it names");
             }
-            let size = cas.stat_object(&object.content_hash)?.or(
-                crate::external_storage::lww_residency::stat(repository_root, &object.content_hash)?);
+            let size = match cas.stat_object(&object.content_hash)? {
+                Some(size) => Some(size),
+                None => remote.stat(&object.content_hash)?,
+            };
             if size != Some(object.byte_length) {
                 return invalid("External snapshot input size differs from its catalog");
             }
@@ -319,7 +326,7 @@ pub(crate) fn after_stage_batch(hook: Option<Box<dyn FnMut(usize, std::time::Dur
 }
 
 /// One write a stage batch holds: a record's own rows, declaring how many
-/// messages it has, or a run of those messages.
+/// messages it has, or a run of those messages, `last` when it ends them.
 enum StageWrite {
     Record {
         record: PreparedRecord,
@@ -330,6 +337,7 @@ enum StageWrite {
         conversation_id: String,
         first: usize,
         messages: Vec<rows::SerializedMessage>,
+        last: bool,
     },
 }
 
@@ -394,6 +402,7 @@ impl StageBatch {
                     conversation_id: conversation_id.clone(),
                     first,
                     messages: run,
+                    last: messages.peek().is_none(),
                 });
                 first += count;
             }
@@ -412,8 +421,10 @@ impl StageBatch {
 
     /// Writes the batch, provided the library is still at the revision the
     /// stage was prepared against: a local edit ends the stage at the next
-    /// batch rather than at activation. Cancellation is only asked before the
-    /// transaction begins, never while it commits.
+    /// batch rather than at activation. A conversation whose last messages the
+    /// batch writes is paged in it, so activation reads its manifest instead
+    /// of its messages. Cancellation is only asked before the transaction
+    /// begins, never while it commits.
     fn write(
         &mut self,
         connection: &mut rusqlite::Connection,
@@ -435,32 +446,58 @@ impl StageBatch {
                 actual: actual_revision,
             });
         }
+        let mut complete = Vec::new();
         for write in self.writes.drain(..) {
             match write {
                 StageWrite::Record {
                     record,
                     message_count,
-                } => rows::apply_serialized_record_rows(
-                    &transaction,
-                    generation,
-                    &record.locator,
-                    &record.envelope,
-                    message_count,
-                )?,
+                } => {
+                    rows::apply_serialized_record_rows(
+                        &transaction,
+                        generation,
+                        &record.locator,
+                        &record.envelope,
+                        message_count,
+                    )?;
+                    if let LogicalRecordLocator::Conversation {
+                        character_id,
+                        conversation_id,
+                    } = record.locator
+                    {
+                        if message_count == 0 {
+                            complete.push((character_id, conversation_id));
+                        }
+                    }
+                }
                 StageWrite::Messages {
                     character_id,
                     conversation_id,
                     first,
                     messages,
-                } => rows::insert_serialized_messages(
-                    &transaction,
-                    generation,
-                    &character_id,
-                    &conversation_id,
-                    first,
-                    &messages,
-                )?,
+                    last,
+                } => {
+                    rows::insert_serialized_messages(
+                        &transaction,
+                        generation,
+                        &character_id,
+                        &conversation_id,
+                        first,
+                        &messages,
+                    )?;
+                    if last {
+                        complete.push((character_id, conversation_id));
+                    }
+                }
             }
+        }
+        for (character_id, conversation_id) in complete {
+            super::commit::page_staged_conversation(
+                &transaction,
+                generation,
+                &character_id,
+                &conversation_id,
+            )?;
         }
         transaction.commit()?;
         self.records = 0;
@@ -481,6 +518,7 @@ impl StageBatch {
 fn stage_records<R>(
     connection: &mut rusqlite::Connection,
     repository_root: &Path,
+    remote: &mut RemoteBodies,
     generation: &str,
     expected_revision: i64,
     staging_root: &Path,
@@ -515,7 +553,7 @@ where
         bytes: 0,
         written: 0,
     };
-    let stage = |connection: &mut rusqlite::Connection,
+    let mut stage = |connection: &mut rusqlite::Connection,
                      batch: &mut StageBatch,
                      record: ExternalSnapshotRecord,
                      locator: LogicalRecordLocator|
@@ -531,6 +569,7 @@ where
         let prepared = prepare_record(
             connection,
             &cas,
+            remote,
             &active,
             objects,
             locator,
@@ -646,9 +685,11 @@ fn read_record(
 /// Turns a decoded record into the rows it becomes: the fields this library
 /// keeps for itself carried over from `active`, owner data rehydrated, and
 /// message pages read and encoded as rows.
+#[allow(clippy::too_many_arguments)]
 fn prepare_record(
     connection: &rusqlite::Connection,
     cas: &PayloadCas,
+    remote: &mut RemoteBodies,
     active: &str,
     objects: &BTreeMap<String, u64>,
     locator: LogicalRecordLocator,
@@ -677,7 +718,7 @@ fn prepare_record(
     preserve_local_view(&mut payload, local_character.as_ref(), local_root);
     let mut envelope = payload.record;
     let mut requires = std::collections::BTreeSet::new();
-    let messages = resolve_dependencies(cas, objects, &mut envelope, &mut requires, probe)?
+    let messages = resolve_dependencies(cas, remote, objects, &mut envelope, &mut requires, probe)?
         .map(|messages| {
             messages
                 .iter()
@@ -724,6 +765,7 @@ fn read_verified_record(
 /// `requires` the ones those rows go on referring to.
 fn resolve_dependencies(
     cas: &PayloadCas,
+    remote: &mut RemoteBodies,
     objects: &BTreeMap<String, u64>,
     envelope: &mut LogicalRecordEnvelope,
     requires: &mut std::collections::BTreeSet<(String, Option<u64>)>,
@@ -731,7 +773,7 @@ fn resolve_dependencies(
 ) -> StoreResult<Option<Vec<serde_json::Value>>> {
     match envelope {
         LogicalRecordEnvelope::Root { value, owner_heads } => {
-            let resolved = resolve_owner_heads(cas, objects, owner_heads, requires, probe)?;
+            let resolved = resolve_owner_heads(cas, remote, objects, owner_heads, requires, probe)?;
             rows::rehydrate_root_owners(value, &resolved)?;
             Ok(None)
         }
@@ -745,7 +787,7 @@ fn resolve_dependencies(
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| validation("External character ID is missing"))?
                 .to_owned();
-            let resolved = resolve_owner_heads(cas, objects, owner_heads, requires, probe)?;
+            let resolved = resolve_owner_heads(cas, remote, objects, owner_heads, requires, probe)?;
             rows::rehydrate_character_owner(detail, &character_id, &resolved)?;
             Ok(None)
         }
@@ -760,17 +802,18 @@ fn resolve_dependencies(
         } => {
             require(
                 cas,
+                remote,
                 objects,
                 requires,
                 archive_object_hash,
                 Some(*archive_object_size),
             )?;
-            require(cas,objects,requires,shared_archive_object_hash,None)?;
+            require(cas,remote,objects,requires,shared_archive_object_hash,None)?;
             for hash in asset_hashes.iter().chain(shared_asset_hashes.iter()) {
                 check(probe)?;
-                require(cas, objects, requires, hash, None)?;
+                require(cas, remote, objects, requires, hash, None)?;
             }
-            resolve_owner_heads(cas, objects, owner_heads, requires, probe)?;
+            resolve_owner_heads(cas, remote, objects, owner_heads, requires, probe)?;
             Ok(None)
         }
         LogicalRecordEnvelope::Conversation {
@@ -780,7 +823,7 @@ fn resolve_dependencies(
             let mut messages = Vec::new();
             for hash in message_page_hashes.iter() {
                 check(probe)?;
-                require_object(cas, objects, hash, None)?;
+                require_object(cas, remote, objects, hash, None)?;
                 let bytes = cas
                     .read_object(hash)?
                     .ok_or_else(|| validation("External message page is missing from local CAS"))?;
@@ -799,7 +842,7 @@ fn resolve_dependencies(
             let hash = object_hash
                 .as_deref()
                 .ok_or_else(|| validation("External alias is missing its complete payload"))?;
-            require(cas, objects, requires, hash, Some(*size))?;
+            require(cas, remote, objects, requires, hash, Some(*size))?;
             Ok(None)
         }
         // The store no longer holds cold payloads; the shared record format still carries the variant.
@@ -812,6 +855,7 @@ fn resolve_dependencies(
 
 fn resolve_owner_heads(
     cas: &PayloadCas,
+    remote: &mut RemoteBodies,
     objects: &BTreeMap<String, u64>,
     heads: &[crate::logical_records::LogicalOwnerHead],
     requires: &mut std::collections::BTreeSet<(String, Option<u64>)>,
@@ -821,7 +865,7 @@ fn resolve_owner_heads(
     for head in heads {
         check(probe)?;
         let tuples = if let Some(hash) = &head.manifest_hash {
-            require(cas, objects, requires, hash, None)?;
+            require(cas, remote, objects, requires, hash, None)?;
             let bytes = cas
                 .read_object(hash)?
                 .ok_or_else(|| validation("External owner manifest is missing from local CAS"))?;
@@ -838,7 +882,7 @@ fn resolve_owner_heads(
             for entry in entries {
                 check(probe)?;
                 if let Some(hash) = entry.payload_hash {
-                    require(cas, objects, requires, &hex::encode(hash), None)?;
+                    require(cas, remote, objects, requires, &hex::encode(hash), None)?;
                 }
                 tuples.push(serde_json::Value::Array(
                     entry
@@ -862,6 +906,7 @@ fn resolve_owner_heads(
 
 fn require(
     cas: &PayloadCas,
+    remote: &mut RemoteBodies,
     objects: &BTreeMap<String, u64>,
     requires: &mut std::collections::BTreeSet<(String, Option<u64>)>,
     hash: &str,
@@ -870,7 +915,7 @@ fn require(
     // Owner entries often share a payload; each body is confirmed once.
     let required = (hash.to_owned(), expected_size);
     if !requires.contains(&required) {
-        require_object(cas, objects, hash, expected_size)?;
+        require_object(cas, remote, objects, hash, expected_size)?;
         requires.insert(required);
     }
     Ok(())
@@ -878,6 +923,7 @@ fn require(
 
 fn require_object(
     cas: &PayloadCas,
+    remote: &mut RemoteBodies,
     objects: &BTreeMap<String, u64>,
     hash: &str,
     expected_size: Option<u64>,
@@ -887,7 +933,10 @@ fn require_object(
         .copied()
         .ok_or_else(|| validation("External snapshot has an incomplete payload reference"))?;
     if expected_size.is_some_and(|expected| expected != catalog_size)
-        || cas.stat_object(hash)?.or(crate::external_storage::lww_residency::stat(cas.repository_root(), hash)?) != Some(catalog_size)
+        || match cas.stat_object(hash)? {
+            Some(size) => Some(size),
+            None => remote.stat(hash)?,
+        } != Some(catalog_size)
     {
         return invalid("External snapshot payload size differs from its logical reference");
     }

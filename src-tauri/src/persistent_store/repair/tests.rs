@@ -40,7 +40,7 @@ fn root_of(store: &PersistentStore) -> Value {
 fn bind_server_capture(store: &PersistentStore) {
     store.connection.execute_batch(
         "INSERT INTO server_sync_state(singleton,config) VALUES(1,'{}');
-         UPDATE library_sync_selection SET target='server',connection_id='synthetic',decision_required=0;"
+         UPDATE library_sync_selection SET target='server',connection_id='synthetic';"
     ).unwrap();
 }
 
@@ -75,7 +75,6 @@ fn check_repair_and_undo_sync_identity(external: bool) {
         assert_eq!(after.selection_epoch, before.selection_epoch);
         assert_eq!(after.generation, before.generation);
         let after_selection = super::super::sync_selection::read(&store.connection).unwrap();
-        assert!(!after_selection.decision_required);
         assert_eq!(after_selection.target, selected.target);
         for table in ["content_changes"] {
             let entries: Vec<(String, String, String, i64)> = store.connection.prepare(&format!("SELECT kind,key1,key2,revision FROM {table}")).unwrap()
@@ -422,7 +421,6 @@ fn a_failure_during_repair_activation_preserves_live_data_identity_and_capture()
     assert_eq!(after.generation, before.generation);
     assert_eq!(store.revision().unwrap(), 1);
     assert_eq!(root_of(&store), root);
-    assert!(!super::super::sync_selection::read(&store.connection).unwrap().decision_required);
     for table in ["content_changes"] {
         let count: i64 = store.connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
         assert_eq!(count, 0, "failed activation must not publish {table}");
@@ -488,7 +486,6 @@ fn measures_single_reference_repair_and_undo_on_a_large_library() {
         assert_eq!(after.generation, identity.generation);
         let selection = super::super::sync_selection::read(&store.connection).unwrap();
         assert_eq!(selection.target, selected.target);
-        assert!(!selection.decision_required);
         let retained: (i64, i64) = store.connection.query_row(
             "SELECT COUNT(*),SUM(LENGTH(CAST(value AS BLOB))) FROM messages", [], |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap();
