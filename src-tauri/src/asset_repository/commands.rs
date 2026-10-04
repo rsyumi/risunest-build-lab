@@ -1149,6 +1149,7 @@ mod tests {
     #[test]
     fn remote_hydration_returns_only_size_and_publishes_verified_cas_bytes() {
         let directory = TempDir::new().unwrap();
+        let _store = PersistentStore::open(directory.path()).unwrap();
         let body = vec![73_u8; 200 * 1024];
         let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body));
         crate::server_sync::residency::test_remote::hold(directory.path(), &[(&hash, body.len() as u64)]);
