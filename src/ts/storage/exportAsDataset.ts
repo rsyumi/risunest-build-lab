@@ -1,9 +1,22 @@
 import { downloadFile } from "../globalApi.svelte";
-import { alertNormal } from "../alert";
+import { alertError, alertNormal } from "../alert";
 import { language } from "src/lang";
 import { materializePersistentDatabaseSnapshot } from "./persistentDataRuntime.svelte";
+import { DATASET_EXPORT_FILE_NAME, exportNativeDataset } from "./nativeDatasetExportRoute";
 
 export async function exportAsDataset(){
+    try {
+        if(await exportNativeDataset() !== undefined){
+            alertNormal(language.successExport)
+            return
+        }
+    } catch (error) {
+        if(!(error instanceof DOMException && error.name === 'AbortError')){
+            alertError(error as Error)
+        }
+        return
+    }
+
     const db = await materializePersistentDatabaseSnapshot('dataset-export')
 
     let dataset = []
@@ -22,7 +35,7 @@ export async function exportAsDataset(){
         }
     }
 
-    await downloadFile('dataset.json',Buffer.from(JSON.stringify(dataset, null,4), 'utf-8'))
+    await downloadFile(DATASET_EXPORT_FILE_NAME,Buffer.from(JSON.stringify(dataset, null,4), 'utf-8'))
 
     alertNormal(language.successExport)
     

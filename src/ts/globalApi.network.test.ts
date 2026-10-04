@@ -149,6 +149,7 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 }))
 vi.mock('@tauri-apps/plugin-http', () => ({ fetch: vi.fn() }))
 
+import { fetch as pluginFetch } from '@tauri-apps/plugin-http'
 import { fetchNative, globalFetch } from './globalApi.svelte'
 
 describe('network requests without application URL restrictions', () => {
@@ -244,5 +245,66 @@ describe('network requests without application URL restrictions', () => {
         await expect(
             fetchNative('http://localhost:8080/', { method: 'GET' }),
         ).rejects.toBe(error)
+    })
+})
+
+describe('Tauri route request bodies', () => {
+    beforeEach(() => {
+        state.isTauri = true
+        state.database.usePlainFetch = false
+        vi.mocked(pluginFetch).mockReset()
+        vi.mocked(pluginFetch).mockImplementation(
+            async () => new Response('{"fixture":true}', { status: 200 }),
+        )
+    })
+
+    afterEach(() => {
+        state.isTauri = false
+        state.database.usePlainFetch = true
+    })
+
+    test('globalFetch sends its JSON body as dataText with a JSON content type', async () => {
+        const body = { messages: [{ role: 'user', content: 'synthetic' }] }
+        const response = await globalFetch('https://api.example.invalid/v1', {
+            body,
+            headers: { Authorization: 'Bearer fixture' },
+        })
+        expect(response).toMatchObject({ ok: true, data: { fixture: true } })
+        const [input, init] = vi.mocked(pluginFetch).mock.calls[0] as [URL, any]
+        expect(String(input)).toBe('https://api.example.invalid/v1')
+        expect(init).toMatchObject({
+            method: 'POST',
+            dataText: JSON.stringify(body),
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer fixture',
+            },
+        })
+        expect('body' in init).toBe(false)
+    })
+
+    test('nativeFetch hands a string body to the stream as text without adding a content type', async () => {
+        await fetchNative('https://api.example.invalid/v1', {
+            method: 'POST',
+            body: '{"stream":true}',
+            headers: { 'X-Request': 'value' },
+            logFetch: false,
+        })
+        const [, init] = vi.mocked(pluginFetch).mock.calls[0] as [string, any]
+        expect(init.dataText).toBe('{"stream":true}')
+        expect('body' in init).toBe(false)
+        expect(init.headers).toEqual({ 'X-Request': 'value' })
+    })
+
+    test('nativeFetch keeps a byte body as bytes', async () => {
+        const body = Uint8Array.of(0, 255, 1)
+        await fetchNative('https://api.example.invalid/v1', {
+            method: 'PUT',
+            body,
+            logFetch: false,
+        })
+        const [, init] = vi.mocked(pluginFetch).mock.calls[0] as [string, any]
+        expect(init.body).toBe(body)
+        expect(init.dataText).toBeUndefined()
     })
 })

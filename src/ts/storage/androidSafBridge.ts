@@ -132,7 +132,7 @@ export interface AndroidSafDestinationResult {
 export interface AndroidSafDestinationEvent {
     requestId: string
     exportId?: string
-    sourceKind?: 'risuSave' | 'legacyBackup' | 'screenshot'
+    sourceKind?: 'risuSave' | 'legacyBackup' | 'screenshot' | 'download'
     state: 'succeeded' | 'failed' | 'cancelled'
     bytes?: number | null
     code?: string | null

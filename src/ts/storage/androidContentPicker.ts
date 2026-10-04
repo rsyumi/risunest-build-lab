@@ -81,14 +81,19 @@ async function consumeAndroidContentSpool(
     try {
         if (/\.(json|lorebook)$/i.test(displayName)) {
             // JSON-only formats retain the upstream converters; binary content never
-            // makes this IPC round trip. The native reader enforces a 128 MiB limit.
-            const text = await invoke<string>(
+            // makes this IPC round trip. The native reader enforces a 128 MiB limit
+            // and returns the UTF-8 bytes, which Android streams instead of evaluating.
+            const response = await invoke<ArrayBuffer | number[]>(
                 'native_content_source_metadata',
                 { token: source.token },
             )
             context.signal.throwIfAborted()
-            const data = new TextEncoder().encode(text)
-            const parsed = destination === 'auto' ? JSON.parse(text) : null
+            const data = response instanceof ArrayBuffer
+                ? new Uint8Array(response)
+                : Uint8Array.from(response)
+            const parsed = destination === 'auto'
+                ? JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data))
+                : null
             const moduleJson = parsed && typeof parsed === 'object' && (
                 parsed.type === 'risuModule'
                 || (parsed.type === 'risu' && Array.isArray(parsed.data))

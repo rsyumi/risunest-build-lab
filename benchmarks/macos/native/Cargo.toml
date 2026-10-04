@@ -23,7 +23,6 @@ tauri-plugin-shell = "2.3.6"
 tauri-plugin-http = "2.6.1"
 tauri-plugin-updater = "2.12.0"
 tauri-plugin-single-instance = { version = "2.4.5", features = ["deep-link"] }
-tauri-plugin-notification = "~2.4.0"
 
 [features]
 default = ["custom-protocol"]
@@ -32,4 +31,5 @@ custom-protocol = ["tauri/custom-protocol", "risunest/custom-protocol"]
 [patch.crates-io]
 wry = { path = "../../../crates/wry" }
 tauri-plugin-updater = { path = "../../../crates/tauri-plugin-updater" }
+tauri-plugin-http = { path = "../../../crates/tauri-plugin-http" }
 tauri-plugin-window-state = { path = "../../../crates/tauri-plugin-window-state" }

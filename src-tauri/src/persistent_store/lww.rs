@@ -1902,10 +1902,13 @@ impl PersistentStore {
                 |r| r.get(0),
             )
             .optional()?;
+        // A missing cursor counts as 0, so a page that keeps the cursor where it
+        // is writes no progress.
         if old
             .map(|c| wire(c.try_into()))
             .transpose()?
-            .is_none_or(|old: DecimalU64| old < request.progress.cursor)
+            .unwrap_or(DecimalU64(0))
+            < request.progress.cursor
         {
             tx.execute("INSERT INTO lww_progress VALUES(?1,?2,?3,?4) ON CONFLICT(kind,writer_id) DO UPDATE SET cursor=excluded.cursor,authority=excluded.authority",params![request.progress.kind,writer,request.progress.cursor.0.to_string(),header.binding_authority.0.to_string()])?;
         }

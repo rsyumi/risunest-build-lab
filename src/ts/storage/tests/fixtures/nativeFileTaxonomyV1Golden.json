@@ -37,6 +37,16 @@
         "kind": "risu-module",
         "prefix": "risu-module-",
         "suffixes": [".risum"]
+      },
+      {
+        "kind": "dataset-export",
+        "prefix": "risu-dataset-",
+        "suffixes": [".json"]
+      },
+      {
+        "kind": "download",
+        "prefix": "risu-download-",
+        "suffixes": [".bin"]
       }
     ],
     "risuSaveExport": {

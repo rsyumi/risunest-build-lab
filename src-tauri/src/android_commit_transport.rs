@@ -1,6 +1,6 @@
 //! Bounded strings or ArrayBuffer packets. No partial payload changes the store.
 use crate::persistent_store::{
-    commands::with_store_mut, RevisionResult, StoreError, StoreResult,
+    commands::{with_store_mut, StagedReplaceRequest}, RevisionResult, StoreError, StoreResult,
 };
 use serde::Serialize;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -254,6 +254,34 @@ pub(crate) async fn pds_commit_android_finish(
     }.await)
 }
 
+pub(crate) fn decode_replace_request(bytes: &[u8]) -> StoreResult<StagedReplaceRequest> {
+    serde_json::from_slice(bytes).map_err(|error| StoreError::CommitDecode {
+        message: format!("replace request {}", crate::native_log::json_failure(&error)),
+    })
+}
+
+/// Stages one replace request that was too large for an ordinary invoke.
+#[tauri::command]
+pub(crate) async fn pds_replace_android_finish(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AndroidCommitState>,
+    id: String,
+) -> StoreResult<()> {
+    logged("pds_replace_android_finish", async move {
+        guard(&window)?;
+        let bytes = state.lock()?.take(&id)?;
+        let lease = FinishGuard { app, id };
+        tauri::async_runtime::spawn_blocking(move || {
+            let request = decode_replace_request(&bytes)?;
+            drop(bytes);
+            with_store_mut(lease.app.state(), |store| request.apply(store))
+        })
+        .await
+        .map_err(|_| invalid("Android replace task failed"))?
+    }.await)
+}
+
 #[tauri::command(async)]
 pub(crate) fn pds_commit_android_cancel(
     window: WebviewWindow,
@@ -371,6 +399,66 @@ mod tests {
         pool.reset();
         assert!(pool.append(&token, 1, "bc").is_err());
         pool.open(id(), 1, false).unwrap();
+    }
+
+    fn assemble(pool: &mut Pool, request: &serde_json::Value) -> Vec<u8> {
+        let data = serde_json::to_vec(request).unwrap();
+        let token = id();
+        pool.open(token.clone(), data.len(), true).unwrap();
+        for (index, chunk) in data.chunks(BINARY_CAPACITY).enumerate() {
+            let offset = (index * BINARY_CAPACITY) as u32;
+            pool.append_packet(&packet(&token, offset, chunk)).unwrap();
+        }
+        let bytes = pool.take(&token).unwrap();
+        pool.complete(&token);
+        bytes
+    }
+
+    #[test]
+    fn assembled_replace_requests_stage_through_their_named_command_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let staging_id = store.replace_begin().unwrap().staging_id;
+        let text = "한글 🐿️\\\"\n".repeat(40_000);
+        let messages = json!([
+            { "role": "user", "data": text, "time": 1_700_000_000_001_i64 },
+            { "role": "char", "data": "reply", "time": 1_700_000_000_002_i64 },
+        ]);
+        let mut pool = Pool::default();
+        for (command, args) in [
+            ("pds_replace_put_root", json!({ "stagingId": staging_id, "root": { "username": "synthetic" } })),
+            ("pds_replace_put_presets", json!({ "stagingId": staging_id, "presets": [] })),
+            ("pds_replace_put_character_detail", json!({
+                "stagingId": staging_id,
+                "detail": { "chaId": "char-a", "name": "Synthetic" },
+                "conversationCount": 1,
+            })),
+            ("pds_replace_put_conversation", json!({
+                "stagingId": staging_id,
+                "characterId": "char-a",
+                "configuredIndex": 0,
+                "conversation": { "id": "conv-a", "name": "Chat" },
+                "messageCount": 2,
+                "lastMessageTime": 1_700_000_000_002_i64,
+            })),
+            ("pds_replace_add_conversation_messages", json!({
+                "stagingId": staging_id,
+                "characterId": "char-a",
+                "conversationId": "conv-a",
+                "start": 0,
+                "messages": messages,
+            })),
+        ] {
+            let bytes = assemble(&mut pool, &json!({ "command": command, "args": args }));
+            decode_replace_request(&bytes).unwrap().apply(&mut store).unwrap();
+        }
+        for command in ["pds_commit", "pds_replace_commit", "pds_replace_abort"] {
+            let bytes = assemble(&mut pool, &json!({ "command": command, "args": { "stagingId": staging_id } }));
+            assert!(matches!(decode_replace_request(&bytes), Err(StoreError::CommitDecode { .. })));
+        }
+        store.replace_commit(&staging_id, Some(0)).unwrap();
+        let database = store.materialize(None).unwrap();
+        assert_eq!(database["characters"][0]["chats"][0]["message"], messages);
     }
 
     #[test]

@@ -1773,15 +1773,20 @@ impl PersistentStore {
         Ok(database)
     }
 
-    pub(crate) fn materialize_without_chats(&self) -> StoreResult<Value> {
-        let (mut database, target) = query::materialize_without_chats(&self.connection)?;
+    /// Root fields and presets with the number of characters (see
+    /// [`query::binding_library`]).
+    pub(crate) fn binding_library(&self) -> StoreResult<(Value, u64)> {
+        let (mut database, characters, target) = query::binding_library(&self.connection)?;
+        let root = database.as_object_mut().ok_or_else(|| StoreError::Store {
+            message: "Persistent root must be an object".to_owned(),
+        })?;
         owner_projection::OwnerManifestProjector::from_snapshots_dir(
             &self.connection,
             &target,
             &self.snapshots_dir,
         )?
-        .project_database(&mut database)?;
-        Ok(database)
+        .project_root(root)?;
+        Ok((database, characters))
     }
 
     pub(crate) fn materialize_lease(&self, lease: &str) -> StoreResult<Value> {
@@ -2016,6 +2021,51 @@ impl PersistentStore {
             start,
             messages,
         )
+    }
+
+    pub(crate) fn replace_put_conversation(
+        &mut self,
+        staging_id: &str,
+        character_id: &str,
+        configured_index: i64,
+        conversation: &Value,
+        message_count: i64,
+        last_message_time: Option<&Value>,
+    ) -> StoreResult<()> {
+        commit::replace_put_conversation(
+            &mut self.connection,
+            staging_id,
+            character_id,
+            configured_index,
+            conversation,
+            message_count,
+            last_message_time,
+        )
+    }
+
+    pub(crate) fn replace_add_presets(
+        &mut self,
+        staging_id: &str,
+        presets: &[Value],
+    ) -> StoreResult<()> {
+        commit::replace_add_presets(&mut self.connection, staging_id, presets)
+    }
+
+    pub(crate) fn replace_add_plugin_storage_values(
+        &mut self,
+        staging_id: &str,
+        values: &[PluginStorageValue],
+    ) -> StoreResult<()> {
+        commit::replace_add_plugin_storage_values(&mut self.connection, staging_id, values)
+    }
+
+    pub(crate) fn replace_add_plugin_storage(
+        &mut self,
+        staging_id: &str,
+        storage: &serde_json::Map<String, Value>,
+        meta: Option<&serde_json::Map<String, Value>>,
+    ) -> StoreResult<()> {
+        commit::replace_add_plugin_storage(&mut self.connection, staging_id, storage, meta)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

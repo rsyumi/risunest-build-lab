@@ -135,6 +135,17 @@ describe('nativeFileJobDialogModel', () => {
         expect(model.terminal?.details).toBe(`[${code}] synthetic detail`)
     })
 
+    it('names the kind of an item too large to import', () => {
+        for (const [kind, item] of Object.entries(copy.tooLargeItems)) {
+            const model = buildNativeFileJobDialogModel(null, outcome({ state: 'failed', error: {
+                code: 'payload-too-large', message: 'synthetic detail', recoveryRequired: false, itemKind: kind,
+            } }), 0)
+            expect(model.terminal?.reason).toBe(copy.reasonTooLarge.replace('{0}', item))
+        }
+        expect(failureReason('payload-too-large', 'import', 'commit')).toBe(copy.reasonUnknown)
+        expect(failureReason('payload-too-large')).toBe(copy.reasonUnknown)
+    })
+
     it('asks to connect sync when a bound restore cannot reach its sync target', () => {
         const model = buildNativeFileJobDialogModel(null, outcome({ state: 'failed', error: { code: 'sync-unavailable', message: 'synthetic detail', recoveryRequired: false } }), 0)
         expect(model.terminal?.reason).toBe(languageEnglish.risuNest.backup.syncUnavailable)

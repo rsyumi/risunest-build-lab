@@ -91,8 +91,6 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-plugin-single-instance = { version = "2.4.5", features = ["deep-link"] }
 tauri-plugin-updater = "2.12.0"
 tauri-plugin-window-state = "2"
-# 2.5 requires Tauri 2.12.
-tauri-plugin-notification = "~2.4.0"
 getrandom = "0.2.15"
 reqwest = { version = "0.12.28", features = ["blocking", "json"] }
 
@@ -122,7 +120,7 @@ libc = "0.2"
 security-framework = "3.7.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-webkit2gtk = { version = "2.0", features = ["v2_34"] }
+webkit2gtk = { version = "2.0", features = ["v2_16"] }
 keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
@@ -160,9 +158,13 @@ tauri = { version = "2.11.6", features = ["test"] }
 regex = "1.13.1"
 
 [patch.crates-io]
+# On Android, run main-frame-only scripts in the top frame and stream large
+# custom-protocol responses instead of copying them into one Java array.
 wry = { path = "../crates/wry" }
 # Keep failed desktop updates from closing or discarding the installed app.
 tauri-plugin-updater = { path = "../crates/tauri-plugin-updater" }
 # Let the window state file follow the manifest root instead of the
 # identifier-derived configuration directory.
 tauri-plugin-window-state = { path = "../crates/tauri-plugin-window-state" }
+# Accept a string request body as text instead of a JSON number array.
+tauri-plugin-http = { path = "../crates/tauri-plugin-http" }

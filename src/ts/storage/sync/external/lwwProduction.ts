@@ -41,14 +41,17 @@ function createAdapter(connectionId: string): Adapter {
         if (state.target.kind !== 'external' || state.target.connectionId !== connectionId) throw new Error('Sync binding changed')
         return { state, signal: active?.signal ?? new AbortController().signal }
     }
+    // Native code returns one bounded page per call until none remain.
     const receive = async (binding: BindingContext): Promise<number> => {
-        binding.signal.throwIfAborted()
-        const requests = await invoke<LwwStageReceive[]>('external_lww_receive', { request: header(connectionId, binding) })
-        for (const request of requests) {
+        let received = 0
+        for (;;) {
+            binding.signal.throwIfAborted()
+            const request = await invoke<LwwStageReceive | null>('external_lww_receive', { request: header(connectionId, binding) })
+            if (!request) return received
             binding.signal.throwIfAborted()
             await getPersistentDataRuntime().applyLwwReceive(request)
+            received++
         }
-        return requests.length
     }
     const publish = async (initial = false, binding?: BindingContext, flush = true): Promise<void> => {
         const current = binding ?? await context()

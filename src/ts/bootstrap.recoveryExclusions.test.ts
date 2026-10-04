@@ -2,8 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const startupMocks = vi.hoisted(() => ({ checkNativeStartupStatus: vi.fn() }))
 const startup = vi.hoisted(() => ({
-    native: true, exclusions: [] as string[], database: {} as any, reachUi: false,
-    takeRendererRecovery: vi.fn(async () => false),
+    native: true, exclusions: [] as string[], database: {} as any,
     credential: { id: 'synthetic-account', token: 'synthetic-token' },
     readVault: vi.fn(), reconcile: vi.fn(), external: vi.fn(), stages: vi.fn(),
     stop: new Error('synthetic bootstrap test reached UI'),
@@ -25,9 +24,7 @@ vi.mock('@tauri-apps/api/path', () => ({ join: vi.fn() }))
 vi.mock('./util', () => ({ changeFullscreen: vi.fn(), sleep: vi.fn() }))
 vi.mock('./update', () => ({ checkRisuUpdate: vi.fn() }))
 vi.mock('./gui/animation', () => ({ updateAnimationSpeed: vi.fn() }))
-vi.mock('./gui/colorscheme', () => ({
-    updateColorScheme: () => { if (!startup.reachUi) throw startup.stop }, updateTextThemeAndCSS: vi.fn(),
-}))
+vi.mock('./gui/colorscheme', () => ({ updateColorScheme: () => { throw startup.stop }, updateTextThemeAndCSS: vi.fn() }))
 vi.mock('./observer.svelte', () => ({ startObserveDom: vi.fn() }))
 vi.mock('./gui/guisize', () => ({ updateGuisize: vi.fn() }))
 vi.mock('./hotkey', () => ({ initMobileGesture: vi.fn() }))
@@ -52,13 +49,13 @@ vi.mock('src/lang', () => ({ changeLanguage: vi.fn(), language: { risuNest: {
 } } }))
 vi.mock('./platform', () => ({ get isTauri() { return startup.native }, isTauriAndroid: false, isTauriDesktop: false }))
 vi.mock('./storage/deviceSettings', () => ({ getStartupExclusions: () => startup.exclusions, loadDeviceSettings: () => ({ nativeFileLogEnabled: false }) }))
-vi.mock('./nativeLog', () => ({ recordNativeLogError: vi.fn(), setNativeLogFileEnabled: vi.fn() }))
+vi.mock('./nativeLog', () => ({ setNativeLogFileEnabled: vi.fn() }))
 vi.mock('./storage/persistentStorageRuntime', () => ({
     initializePersistentStorage: vi.fn(), activateNativeAssetRepository: vi.fn(),
 }))
 vi.mock('./storage/nativeFileJobRecovery', () => ({
     shouldReconcileNativeFileJobs: vi.fn(() => false),
-    reconcileNativeFileJobsBeforeBootstrap: async () => ({ pendingRestoreAcknowledgements: [], pendingOfficialPublications: [], interruptedRestores: [] }),
+    reconcileNativeFileJobsBeforeBootstrap: async () => ({ pendingRestoreAcknowledgements: [], pendingOfficialPublications: [] }),
     acknowledgeRecoveredNativeRestores: vi.fn(),
 }))
 vi.mock('./storage/persistentBootstrap', () => ({ bootstrapPersistentDatabase: async () => ({ database: startup.database, revision: 1, source: 'persistent' }) }))
@@ -77,7 +74,7 @@ vi.mock('./storage/workingSetResidency', () => ({
     workingSetResidency: { clear: vi.fn(), markCharacterReleased: vi.fn(), reconcileConversationResidency: vi.fn() },
 }))
 vi.mock('./storage/persistentDataRuntime.svelte', () => ({
-    getPersistentDataRuntime: () => ({ store: {}, revision: 1, flushPendingData: vi.fn(), expirePersistentTrash: vi.fn(async () => {}) }),
+    getPersistentDataRuntime: () => ({ store: {}, revision: 1, flushPendingData: vi.fn() }),
     initializeActiveWorkingSet: vi.fn(), configurePersistentDataRuntime: vi.fn(),
     hasPendingOfficialPublication: vi.fn(() => false), publishCurrentOfficialRevision: vi.fn(),
 }))
@@ -131,7 +128,7 @@ vi.mock('./globalApi.svelte', () => ({
 }))
 vi.mock('./stores.svelte', () => ({
     MobileGUI: { set: vi.fn() }, botMakerMode: { set: vi.fn() }, selectedCharID: { set: vi.fn() },
-    loadedStore: { set: vi.fn() }, DBState: {}, LoadingStatusState: { text: '' }, bootFailure: { set: vi.fn() },
+    loadedStore: {}, DBState: {}, LoadingStatusState: { text: '' }, bootFailure: { set: vi.fn() },
 }))
 vi.mock('./alert', () => ({
     alertConfirm: vi.fn(), alertError: vi.fn(), alertInput: vi.fn(), alertLogin: vi.fn(), alertMd: vi.fn(),
@@ -144,11 +141,6 @@ vi.mock('./nativeStartup', () => startupMocks)
 
 
 vi.mock('./storage/deviceMarkers', () => ({ initializeDeviceMarkers: vi.fn(), getDeviceMarkers: () => startup.markers }))
-vi.mock('./storage/recoveryMode.svelte', async (importOriginal) => ({
-    ...await importOriginal<typeof import('./storage/recoveryMode.svelte')>(),
-    finishBoot: vi.fn(async () => {}),
-    takeRendererRecovery: startup.takeRendererRecovery,
-}))
 vi.mock('./storage/bootAttempt', () => ({ markBootStage: startup.stages, markBootSuspect: vi.fn() }))
 vi.mock('./ui/yieldToUi', () => ({ yieldToUi: async () => {} }))
 vi.mock('./nativeLocalUrls', () => ({ initializeNativeLocalUrls: vi.fn() }))
@@ -165,7 +157,6 @@ vi.mock('./process/transformers', () => ({ releaseIdleTransformerModels: vi.fn()
 vi.mock('./process/files/inlayProviderImage', () => ({ forgetInlayProviderImages: vi.fn() }))
 
 import { loadData } from './bootstrap'
-import { alertNormal, alertTOS, waitAlert } from './alert'
 import { bootFailure } from './stores.svelte'
 import { loadRisuAccountData } from './drive/accounter'
 import { initializeOfficialAccountBootstrap } from './storage/sync/officialAccountBootstrap'
@@ -173,7 +164,6 @@ import { initializeNativeSyncBindings, installServerSyncProduction } from './sto
 
 beforeEach(() => {
     vi.clearAllMocks()
-    startup.reachUi = false
     vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn(), removeItem: vi.fn() })
     vi.stubGlobal('navigator', {})
     startup.database = { characters: [], botPresets: [], account: { id: 'web-account', token: 'synthetic-web-token' } }
@@ -244,37 +234,5 @@ describe('bootstrap recovery exclusions', () => {
             stage: 'drive-sync', message: failure.message,
         }))
         expect(startup.external).not.toHaveBeenCalled()
-    })
-})
-
-describe('renderer recovery notice', () => {
-    beforeEach(() => {
-        startup.native = true
-        startup.exclusions = []
-        startup.reachUi = true
-        startup.reconcile.mockResolvedValue(undefined)
-    })
-
-    it('waits for the terms answer so the terms prompt cannot replace it', async () => {
-        let answerTerms!: (accepted: boolean) => void
-        vi.mocked(alertTOS).mockReturnValueOnce(new Promise((resolve) => { answerTerms = resolve }))
-        startup.takeRendererRecovery.mockResolvedValueOnce(true)
-        await loadData()
-        expect(bootFailure.set).toHaveBeenLastCalledWith(null)
-        expect(startup.takeRendererRecovery).not.toHaveBeenCalled()
-        answerTerms(true)
-        await vi.waitFor(() => expect(alertNormal).toHaveBeenCalledOnce())
-        expect(vi.mocked(waitAlert).mock.invocationCallOrder.at(-1))
-            .toBeLessThan(vi.mocked(alertNormal).mock.invocationCallOrder[0])
-    })
-
-    it('leaves the answer untaken when the terms are declined', async () => {
-        const reload = vi.fn()
-        vi.stubGlobal('location', { reload })
-        vi.mocked(alertTOS).mockResolvedValueOnce(false)
-        await loadData()
-        await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce())
-        expect(startup.takeRendererRecovery).not.toHaveBeenCalled()
-        expect(alertNormal).not.toHaveBeenCalled()
     })
 })

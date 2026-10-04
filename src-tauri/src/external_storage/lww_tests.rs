@@ -2145,6 +2145,104 @@ fn behind_recovery_carries_the_published_catalog_once_across_writer_requests() {
     })
 }
 #[test]
+fn receive_pages_keep_change_order_within_the_budget_and_send_a_larger_change_alone() {
+    use crate::persistent_store::lww::Change;
+    let change = |name: &str, length: usize| Change {
+        key: UnitKey::new(&["root", name]).unwrap(),
+        stamp: risunest_sync_wire::stamp::Stamp { physical_ms: DecimalU64(1), logical: 0, writer_id: "synthetic-writer".into() },
+        value: risunest_sync_wire::unit::UnitValue::Inline { bytes: "A".repeat(length) },
+    };
+    let (first, second) = (change("language", 10), change("askRemoval", 10));
+    let budget = [&first, &second].iter().map(|change| serde_json::to_vec(change).unwrap().len() + 1).sum::<usize>();
+    let changes = vec![first, second, change("loreBookDepth", budget * 2), change("additionalPrompt", 10)];
+    let pages = super::lww_engine::receive_pages(changes.clone(), budget).unwrap();
+    assert_eq!(pages.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1, 1]);
+    assert_eq!(pages.concat(), changes);
+    assert_eq!(super::lww_engine::receive_pages(Vec::new(), budget).unwrap(), [Vec::<Change>::new()]);
+}
+#[test]
+fn a_segment_over_the_page_budget_arrives_in_pages_and_resumes_after_the_finished_ones() {
+    run(async {
+        let mut f = CycleFixture::new();
+        let cancel = Cancellation::default();
+        set(&mut f.a, &["root", "language"], serde_json::json!("paged"));
+        set(&mut f.a, &["root", "askRemoval"], serde_json::json!(true));
+        set(&mut f.a, &["root", "loreBookDepth"], serde_json::json!(7));
+        set(&mut f.a, &["root", "additionalPrompt"], serde_json::json!("synthetic prompt"));
+        assert_eq!(f.publish_a().await.segments.0, 1);
+        super::lww_engine::set_receive_page_bytes_for_test(1);
+        let requests = f.receiver.receive_requests(&mut f.b, DecimalU64(0), &cancel).await.unwrap();
+        assert!(requests.len() >= 4);
+        assert!(requests.iter().all(|request| request.changes.len() == 1));
+        let last = requests.last().unwrap().progress.clone();
+        let writer = f.a.lww_clock_state().unwrap().writer_id;
+        assert_eq!(last.writer_id.as_deref(), Some(writer.as_str()));
+        assert!(requests[..requests.len() - 1].iter().all(|request| request.progress.cursor.0 == last.cursor.0 - 1));
+        apply_all(&mut f.b, &requests[..2]);
+        assert!(f.b.lww_receive_progress(DecimalU64(0)).unwrap().is_empty(), "progress waits for the last page");
+        let resumed = f.receiver.receive_requests(&mut f.b, DecimalU64(0), &cancel).await.unwrap();
+        assert_eq!(serde_json::to_value(&resumed).unwrap(), serde_json::to_value(&requests[2..]).unwrap());
+        apply_all(&mut f.b, &resumed);
+        let root = f.b.read_root(None).unwrap().value;
+        assert_eq!(root["language"], "paged");
+        assert_eq!(root["askRemoval"], true);
+        assert_eq!(root["loreBookDepth"], 7);
+        assert_eq!(root["additionalPrompt"], "synthetic prompt");
+        let progress = f.b.lww_receive_progress(DecimalU64(0)).unwrap();
+        assert_eq!(progress.len(), 1);
+        assert_eq!(progress[0].cursor, last.cursor);
+        assert!(f.receiver.receive_requests(&mut f.b, DecimalU64(0), &cancel).await.unwrap().is_empty());
+    })
+}
+#[test]
+fn behind_recovery_pages_the_catalog_and_resumes_after_the_finished_pages() {
+    run(async {
+        let mut f = CycleFixture::new();
+        let cancel = Cancellation::default();
+        set(&mut f.a, &["root", "language"], serde_json::json!("from-a"));
+        set(&mut f.a, &["root", "askRemoval"], serde_json::json!(true));
+        f.publish_a().await;
+        set(&mut f.b, &["root", "loreBookDepth"], serde_json::json!(3));
+        f.receiver.publish(&mut f.b, DecimalU64(0), &[], &cancel).await.unwrap();
+        let job = tempfile::tempdir().unwrap();
+        f.sender
+            .compact_published(job.path(), "00000000-0000-4000-8000-0000000000b2",
+                &f.a.lww_clock_state().unwrap().writer_id, &f.sender.capabilities, &cancel, None)
+            .await
+            .unwrap();
+        for object in f.sender.listing(&cancel).await.unwrap() {
+            f.provider.delete_object(&f.sender.repository, &object.locator, &cancel).await.unwrap();
+        }
+        let (_directory, mut store, engine) = third_device(&f);
+        super::lww_engine::set_receive_page_bytes_for_test(1);
+        let requests = engine.receive_requests(&mut store, DecimalU64(0), &cancel).await.unwrap();
+        let catalog = requests.iter().take_while(|request| !request.changes.is_empty()).count();
+        assert!(catalog >= 3);
+        assert_eq!(requests.len(), catalog + 1, "the other writer's progress follows the catalog pages");
+        assert!(requests[..catalog].iter().all(|request| request.changes.len() == 1));
+        assert!(requests[catalog].changes.is_empty());
+        let carrier = requests[0].progress.writer_id.clone();
+        assert!(requests[..catalog].iter().all(|request| request.progress.writer_id == carrier));
+        assert!(requests[..catalog - 1].iter().all(|request| request.progress.cursor == DecimalU64(0)));
+        assert_ne!(requests[catalog - 1].progress.cursor, DecimalU64(0));
+        apply_all(&mut store, &requests[..catalog - 1]);
+        assert!(progress_writers(&store).is_empty(), "progress waits for the last catalog page");
+        let resumed = engine.receive_requests(&mut store, DecimalU64(0), &cancel).await.unwrap();
+        assert_eq!(serde_json::to_value(&resumed).unwrap(), serde_json::to_value(&requests[catalog - 1..]).unwrap());
+        apply_all(&mut store, &resumed);
+        let root = store.read_root(None).unwrap().value;
+        assert_eq!(root["language"], "from-a");
+        assert_eq!(root["askRemoval"], true);
+        assert_eq!(root["loreBookDepth"], 3);
+        let mut writers = progress_writers(&store);
+        writers.sort();
+        let mut expected = vec![f.a.lww_clock_state().unwrap().writer_id, f.b.lww_clock_state().unwrap().writer_id];
+        expected.sort();
+        assert_eq!(writers, expected);
+        assert!(engine.receive_requests(&mut store, DecimalU64(0), &cancel).await.unwrap().is_empty());
+    })
+}
+#[test]
 fn a_future_stamped_writer_is_held_while_other_writers_are_received() {
     run(async {
         let mut f = CycleFixture::new();
