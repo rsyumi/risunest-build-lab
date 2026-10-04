@@ -28,6 +28,71 @@ use tokio::task::spawn_blocking;
 
 /// Providers name a locator's collection after a role folder or a release tag.
 pub(crate) const MAX_LOCATOR_COLLECTION_BYTES: usize = 128;
+/// JSON bytes of changes in one receive page. One change is far smaller, and
+/// a larger one would still travel alone.
+pub(crate) const RECEIVE_PAGE_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(test)]
+thread_local! {
+    static TEST_RECEIVE_PAGE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(RECEIVE_PAGE_BYTES) };
+}
+#[cfg(test)]
+pub(crate) fn set_receive_page_bytes_for_test(bytes: usize) {
+    TEST_RECEIVE_PAGE_BYTES.with(|value| value.set(bytes));
+}
+fn receive_page_bytes() -> usize {
+    #[cfg(test)]
+    return TEST_RECEIVE_PAGE_BYTES.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    RECEIVE_PAGE_BYTES
+}
+/// Splits changes in order into pages within the page budget. There is
+/// always at least one page, so a group without changes still carries its
+/// progress.
+pub(crate) fn receive_pages(changes: Vec<Change>, budget: usize) -> Result<Vec<Vec<Change>>> {
+    let mut pages = vec![Vec::new()];
+    let mut used = 0usize;
+    for change in changes {
+        let length = serde_json::to_vec(&change).map_err(|_| segment::corrupt())?.len() + 1;
+        if used.saturating_add(length) > budget && pages.last().is_some_and(|page| !page.is_empty()) {
+            pages.push(Vec::new());
+            used = 0;
+        }
+        used = used.saturating_add(length);
+        pages.last_mut().ok_or_else(segment::corrupt)?.push(change);
+    }
+    Ok(pages)
+}
+/// Stores one group's pages and keeps those not yet finished. Only the last
+/// page carries the group's progress; earlier pages repeat the writer's
+/// current cursor, so progress moves once the whole group is applied.
+#[allow(clippy::too_many_arguments)]
+fn push_receive_pages(
+    store: &PersistentStore,
+    requests: &mut Vec<StageReceive>,
+    id: &str,
+    authority: DecimalU64,
+    changes: Vec<Change>,
+    progress: Progress,
+    current: DecimalU64,
+    admitted_time_upper_ms: DecimalU64,
+) -> Result<()> {
+    let pages = receive_pages(changes, receive_page_bytes())?;
+    let last = pages.len() - 1;
+    for (index, changes) in pages.into_iter().enumerate() {
+        let request = store
+            .external_lww_stable_receive(StageReceive {
+                header: Header { binding_authority: authority, request_id: format!("{id}-{index}") },
+                changes,
+                progress: if index == last { progress.clone() } else { Progress { cursor: current, ..progress.clone() } },
+                admitted_time_upper_ms,
+            })
+            .map_err(store_error)?;
+        if !store.external_lww_receive_finished(&request.header.request_id).map_err(store_error)? {
+            requests.push(request);
+        }
+    }
+    Ok(())
+}
 
 /// The length of a segment under assembly, kept per entry.
 #[derive(Clone, Copy, Default)]
@@ -1744,52 +1809,39 @@ impl ExternalLwwEngine {
         let mut available=current.clone();
         for segment in &segments { available.insert(segment.writer_id.clone(),segment.seq); }
         let behind=covered.iter().any(|(writer,prefix)|available.get(writer).copied().unwrap_or(DecimalU64(0))<*prefix);
+        let upper=DecimalU64(self.admitted_upper()?.checked_add(300_000).ok_or_else(segment::corrupt)?);
+        let mut requests=Vec::new();
         if behind {
             let directory=tempfile::tempdir().map_err(transient)?;
             let mut state=self.published_state(directory.path(),cancel).await?;
             self.stage_published_objects(store,&mut state,directory.path(),cancel).await?;
             let mut changes=Some(state.catalog.changes()?);
             let identity=state.catalog.identity()?;
-            let mut requests=Vec::new();
-            // The published catalog covers every writer, so the first request
-            // carries it and the rest only advance their writer's progress.
+            // The published catalog covers every writer, so the first writer's
+            // pages carry it and the rest only advance their writer's progress.
             for (writer,prefix) in &state.catalog.coverage {
-                if current.get(writer).copied().unwrap_or(DecimalU64(0))>=*prefix {continue;}
-                requests.push(store.external_lww_stable_receive(StageReceive {
-                    header:Header{binding_authority:authority,request_id:format!("external-snapshot-{}-{}-{}-{}",authority.0,identity,writer,prefix.0)},
-                    changes:changes.take().unwrap_or_default(), progress:Progress{kind:"external".into(),cursor:*prefix,writer_id:Some(writer.clone())},
-                    admitted_time_upper_ms:DecimalU64(self.admitted_upper()?.checked_add(300_000).ok_or_else(segment::corrupt)?),
-                }).map_err(store_error)?);
+                let before=current.get(writer).copied().unwrap_or(DecimalU64(0));
+                if before>=*prefix {continue;}
+                push_receive_pages(
+                    store,&mut requests,&format!("external-snapshot-{}-{}-{}-{}",authority.0,identity,writer,prefix.0),authority,
+                    changes.take().unwrap_or_default(),Progress{kind:"external".into(),cursor:*prefix,writer_id:Some(writer.clone())},before,upper,
+                )?;
             }
             return Ok(requests);
         }
-        segments
-            .into_iter()
-            .map(|segment| {
-                store
-                    .external_lww_stable_receive(StageReceive {
-                        header: Header {
-                            binding_authority: authority,
-                            request_id: format!(
-                                "external-receive-{}-{}-{}-{}",
-                                self.library, authority.0, segment.writer_id, segment.seq.0
-                            ),
-                        },
-                        changes: segment.changes,
-                        progress: Progress {
-                            kind: "external".into(),
-                            cursor: segment.seq,
-                            writer_id: Some(segment.writer_id),
-                        },
-                        admitted_time_upper_ms: DecimalU64(
-                            self.admitted_upper()?
-                                .checked_add(300_000)
-                                .ok_or_else(segment::corrupt)?,
-                        ),
-                    })
-                    .map_err(store_error)
-            })
-            .collect()
+        for segment in segments {
+            push_receive_pages(
+                store,
+                &mut requests,
+                &format!("external-receive-{}-{}-{}-{}", self.library, authority.0, segment.writer_id, segment.seq.0),
+                authority,
+                segment.changes,
+                Progress { kind: "external".into(), cursor: segment.seq, writer_id: Some(segment.writer_id) },
+                DecimalU64(segment.seq.0.checked_sub(1).ok_or_else(segment::corrupt)?),
+                upper,
+            )?;
+        }
+        Ok(requests)
     }
     #[cfg(test)]
     pub(crate) async fn receive_and_apply(

@@ -3,7 +3,9 @@ import type { Chat, character, groupChat } from './database.svelte'
 import type {
     CharacterDetail,
     PersistentDataStore,
+    WorkingSetCommit,
 } from './persistentDataStore'
+import { MAX_NATIVE_REQUEST_BYTES, PayloadTooLargeError } from './nativePersistenceValue'
 import type { WindowedConversationPersistenceAuthority } from './saveCoordinator'
 import {
     captureRoot,
@@ -1038,14 +1040,17 @@ describe('SaveCoordinator', () => {
             expect(harness.commit).not.toHaveBeenCalled()
         })
 
-        function recordAddedChat(harness: ReturnType<typeof makeWindowedHarness>) {
+        function recordAddedChat(
+            harness: ReturnType<typeof makeWindowedHarness>,
+            messages: unknown[] = [{ role: 'user', data: 'added message' }],
+        ) {
             const before = harness.selected()
             const added = {
                 id: 'added',
                 name: 'Added',
                 note: 'added note',
                 localLore: [],
-                message: [{ role: 'user', data: 'added message' }],
+                message: messages,
             } as unknown as Chat
             const draft = {
                 type: 'character',
@@ -1099,6 +1104,74 @@ describe('SaveCoordinator', () => {
                 { type: 'reorder', characterId: 'char-a', conversationIds: ['added', 'two'] },
             ])
             expect(harness.coordinator.hasPendingPersistenceWork).toBe(false)
+        })
+
+        function pagedSave(fail?: number) {
+            const commit = vi.fn(async ({ expectedRevision }: WorkingSetCommit) => {
+                const call = commit.mock.calls.length
+                if (call === 1) throw new PayloadTooLargeError('commit', MAX_NATIVE_REQUEST_BYTES + 1)
+                if (call === fail) throw new Error('synthetic storage failure')
+                return { revision: expectedRevision + 1 }
+            })
+            const harness = makeWindowedHarness({ commit })
+            // Three 7 MiB messages exceed one 16 MiB page.
+            const messages = [0, 1, 2].map((index) => ({ role: 'user', data: `${index}`.padEnd(7 * 1024 * 1024, 'x') }))
+            expect(recordAddedChat(harness, messages).recorded).toBe(true)
+            const sent = () => commit.mock.calls.map(([input]) => input)
+            const firsts = (input: WorkingSetCommit) => input.conversations?.map((mutation) =>
+                mutation.type === 'replace-range' ? { ...mutation, messages: mutation.messages.map((message) => message.data[0]) } : mutation)
+            return { harness, sent, firsts }
+        }
+
+        it('writes a created chat in message pages when the whole save is too large', async () => {
+            const { harness, sent, firsts } = pagedSave()
+
+            await harness.coordinator.flushPendingData('chat-list')
+
+            const [, created, appended] = sent()
+            expect(sent()).toHaveLength(3)
+            expect(created.expectedRevision).toBe(2)
+            expect(created.character).toBeUndefined()
+            expect(firsts(created)).toEqual([{
+                type: 'replace-range', characterId: 'char-a', conversationId: 'added', start: 0, deleteCount: 0,
+                messages: ['0', '1'],
+                conversation: { id: 'added', name: 'Added', note: 'added note', localLore: [] },
+                configuredIndex: 1,
+            }])
+            expect(appended.expectedRevision).toBe(3)
+            expect(appended.character).toEqual({ type: 'character', chaId: 'char-a', name: 'Alpha', chatPage: 1 })
+            expect(firsts(appended)).toEqual([
+                { type: 'replace-range', characterId: 'char-a', conversationId: 'added', start: 2, deleteCount: 0, messages: ['2'] },
+                { type: 'reorder', characterId: 'char-a', conversationIds: ['added', 'two'] },
+            ])
+            expect(harness.coordinator.revision).toBe(4)
+            expect(harness.coordinator.hasPendingPersistenceWork).toBe(false)
+        })
+
+        it('removes a paged chat and reloads storage when a later page fails', async () => {
+            const { harness, sent } = pagedSave(3)
+
+            await expect(harness.coordinator.flushPendingData('chat-list')).rejects.toThrow('synthetic storage failure')
+
+            expect(sent()).toHaveLength(4)
+            expect(sent()[3]).toEqual({
+                expectedRevision: 3,
+                conversations: [{ type: 'delete', characterId: 'char-a', conversationId: 'added' }],
+            })
+            expect(harness.coordinator.pendingWorkingSetRefreshRevision).toBe(4)
+        })
+
+        it('reports a save that is too large without creating anything', async () => {
+            const commit = vi.fn(async (): Promise<{ revision: number }> => {
+                throw new PayloadTooLargeError('commit', MAX_NATIVE_REQUEST_BYTES + 1)
+            })
+            const harness = makeWindowedHarness({ commit })
+            harness.database.username = 'Changed with an oversized save'
+            harness.coordinator.markPersistentDataDirty(0)
+
+            await expect(harness.coordinator.flushPendingData('too-large')).rejects.toBeInstanceOf(PayloadTooLargeError)
+            expect(commit).toHaveBeenCalledOnce()
+            expect(harness.coordinator.pendingWorkingSetRefreshRevision).toBeNull()
         })
 
         it('still refuses a selected change the recorded chat-list edit does not explain', async () => {

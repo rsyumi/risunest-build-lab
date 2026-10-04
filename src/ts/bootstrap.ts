@@ -97,13 +97,12 @@ import {
     listenRecoveredAndroidScreenshotPublications,
 } from "./nativeScreenshotArchiveWriter";
 import { initializeIOSNative, installIOSPersistenceLifecycle } from "./iosNative";
-import { checkpointNativePersistentStore, restartNativeApp, schedulePeriodicNativeSnapshot } from "./storage/nativePersistentMaintenance";
+import { restartNativeApp, schedulePeriodicNativeSnapshot } from "./storage/nativePersistentMaintenance";
 import { yieldToUi } from './ui/yieldToUi'
 import { markBootStage, markBootSuspect } from './storage/bootAttempt'
 import {
     finishBoot,
     isStartupExcluded,
-    takeRendererRecovery,
     type RecoveryExclusion,
 } from './storage/recoveryMode.svelte'
 import {
@@ -719,9 +718,7 @@ export async function loadData() {
         disposeLifecycleCommitListeners ??= registerLifecycleCommitListeners(
             (reason) => flushLifecycle(
                 reason,
-                isTauriDesktop
-                    && (nativePlatform() === 'windows' || nativePlatform() === 'linux')
-                    && reason === 'stop',
+                isTauriDesktop && nativePlatform() === 'windows' && reason === 'stop',
             ),
             syncExitCoordinator,
         )
@@ -736,10 +733,6 @@ export async function loadData() {
             )
             disposeMacosLifecycle = await registerMacosLifecycle({
                 coordinator: syncExitCoordinator,
-                saveLocally: async () => {
-                    await flushLifecycle('stop', true)
-                    await checkpointNativePersistentStore('truncate')
-                },
             })
         }
 
@@ -831,13 +824,6 @@ export async function loadData() {
         registerAndroidScreenshotPublicationRecovery()
         LoadingStatusState.startedAt = null
         loadedStore.set(true)
-        if (isTauri && !isTauriAndroid) {
-            void takeRendererRecovery().then(async (recovered) => {
-                if (!recovered) return
-                await waitAlert()
-                alertNormal(language.risuNest.startup.rendererRecovered)
-            })
-        }
         setTimeout(() => {
             void runtime.expirePersistentTrash().catch((error) => console.error('Trash expiry failed', error))
         }, 0)

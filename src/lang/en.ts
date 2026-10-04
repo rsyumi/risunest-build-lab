@@ -1927,6 +1927,7 @@ export const languageEnglish = {
             failed: 'Changes could not be saved. Retry saving before closing the app.',
             invalid: '{0} could not be saved. Check this data, then retry saving.',
             storage: 'Changes could not be saved. Free storage space, then retry saving.',
+            tooLarge: 'Changes are too large to save. Delete the large chat or data you just added, then retry saving.',
             settings: 'Settings', conversation: 'Chat', presets: 'Presets', plugins: 'Plugin data', assets: 'Assets', data: 'Data',
         },
         account: {
@@ -2201,7 +2202,6 @@ export const languageEnglish = {
             serviceWorker: 'Preparing offline support',
             ui: 'Preparing the interface',
             elapsed: (seconds: number) => `${seconds}s elapsed`,
-            rendererRecovered: 'The WebView renderer stopped, so the screen was reloaded.',
         },
         serverSync: {
             registrationCode: 'Registration code',
@@ -2807,6 +2807,10 @@ export const languageEnglish = {
                 'Other changes happened during the import, so it could not be applied. Try again.',
             reasonStoreError: 'A storage error stopped the import.',
             reasonUnknown: 'An unknown error occurred.',
+            reasonTooLarge: '{0} is too large to import.',
+            tooLargeItems: {
+                root: 'Settings data', preset: 'A preset', character: 'A character', conversation: 'A chat', message: 'A message', 'plugin-value': 'Plugin data',
+            },
             warningCleanupFailed:
                 'A temporary file could not be cleaned up. It will be retried at startup.',
             warningUpstreamRestoreLosses: 'Some cold storage or inlay data could not be restored. Review the restored data.',

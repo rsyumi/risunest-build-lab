@@ -23,7 +23,13 @@ const HANDOFF_KIND_TO_JOB_KIND: Record<
     'character-charx': 'export-character-charx',
     'character-card': 'export-character-card',
     'risu-module': 'export-risu-module',
+    'dataset-export': 'export-dataset',
 }
+// Handoffs the renderer writes itself; no native job recovers them.
+const RENDERER_HANDOFF_KINDS = ['download']
+const jobHandoffs = taxonomy.managedHandoffs.filter(
+    (grammar) => !RENDERER_HANDOFF_KINDS.includes(grammar.kind),
+)
 
 function spoolSource(displayName: string): AndroidSpoolReady {
     return { token: 'token-1', displayName, bytes: 4, totalBytes: 4 }
@@ -36,11 +42,11 @@ describe('native file taxonomy golden fixture', () => {
         ).toEqual(Object.keys(ANDROID_SAF_HANDOFF_ID_PATTERNS).sort())
         expect(
             taxonomy.managedHandoffs.map((grammar) => grammar.kind).sort(),
-        ).toEqual(Object.keys(HANDOFF_KIND_TO_JOB_KIND).sort())
+        ).toEqual([...Object.keys(HANDOFF_KIND_TO_JOB_KIND), ...RENDERER_HANDOFF_KINDS].sort())
     })
 
     it('accepts every managed handoff grammar and captures the export id', () => {
-        for (const grammar of taxonomy.managedHandoffs) {
+        for (const grammar of jobHandoffs) {
             const pattern =
                 ANDROID_SAF_HANDOFF_ID_PATTERNS[
                     HANDOFF_KIND_TO_JOB_KIND[grammar.kind]
@@ -73,7 +79,7 @@ describe('native file taxonomy golden fixture', () => {
     it('rejects a grammar name against every other grammar', () => {
         for (const grammar of taxonomy.managedHandoffs) {
             const name = `${grammar.prefix}${taxonomy.uuid}${grammar.suffixes[0]}`
-            for (const other of taxonomy.managedHandoffs) {
+            for (const other of jobHandoffs) {
                 if (other.kind === grammar.kind) continue
                 const pattern =
                     ANDROID_SAF_HANDOFF_ID_PATTERNS[

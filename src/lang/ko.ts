@@ -1742,6 +1742,7 @@ export const languageKorean = {
             failed: '변경 사항을 저장하지 못했습니다. 앱을 종료하기 전에 저장을 다시 시도해주세요.',
             invalid: '{0} 데이터를 저장하지 못했습니다. 해당 데이터를 확인한 후 저장을 다시 시도해주세요.',
             storage: '변경 사항을 저장하지 못했습니다. 저장 공간을 확보한 후 저장을 다시 시도해주세요.',
+            tooLarge: '변경 사항이 너무 커서 저장할 수 없습니다. 방금 추가한 큰 대화나 데이터를 삭제한 후 저장을 다시 시도해주세요.',
             settings: '설정', conversation: '대화', presets: '프리셋', plugins: '플러그인', assets: '에셋', data: '앱',
         },
         account: {
@@ -2016,7 +2017,6 @@ export const languageKorean = {
             serviceWorker: '오프라인 기능 준비 중',
             ui: '화면 준비 중',
             elapsed: (seconds: number) => `${seconds}초 경과`,
-            rendererRecovered: 'WebView 렌더러가 중단되어 화면을 다시 불러왔습니다.',
         },
         serverSync: {
             registrationCode: '등록 코드',
@@ -2620,6 +2620,10 @@ export const languageKorean = {
                 '가져오는 동안 다른 변경이 있어 적용하지 못했습니다. 다시 시도하세요.',
             reasonStoreError: '저장소 오류로 가져오지 못했습니다.',
             reasonUnknown: '알 수 없는 오류가 발생했습니다.',
+            reasonTooLarge: '{0} 크기가 너무 커서 가져오지 못했습니다.',
+            tooLargeItems: {
+                root: '설정', preset: '프리셋', character: '캐릭터', conversation: '대화', message: '메시지', 'plugin-value': '플러그인 데이터',
+            },
             warningCleanupFailed:
                 '임시 파일을 정리하지 못했습니다. 다음 시작 때 다시 시도합니다.',
             warningUpstreamRestoreLosses: '콜드 스토리지 또는 인레이 데이터 일부를 복원하지 못했습니다. 복원된 데이터를 확인해주세요.',

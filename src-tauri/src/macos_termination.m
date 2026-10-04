@@ -1,32 +1,14 @@
 #import <AppKit/AppKit.h>
 #import <CoreFoundation/CoreFoundation.h>
-#import <CoreServices/CoreServices.h>
 #import <objc/runtime.h>
 
-static int (*requestQuit)(int sessionEnding);
+static int (*requestQuit)(void);
 static BOOL pending;
-
-// Logout, restart and shutdown send the quit event with a reason; Cmd+Q and the Dock send none.
-static int sessionEnding(void) {
-    NSAppleEventDescriptor *event = [[NSAppleEventManager sharedAppleEventManager] currentAppleEvent];
-    OSType reason = [[event attributeDescriptorForKeyword:kAEQuitReason] typeCodeValue];
-    switch (reason) {
-        case kAELogOut:
-        case kAEReallyLogOut:
-        case kAEShowRestartDialog:
-        case kAEShowShutdownDialog:
-        case kAERestart:
-        case kAEShutDown:
-            return 1;
-        default:
-            return 0;
-    }
-}
 
 static NSApplicationTerminateReply shouldTerminate(id delegate, SEL command, NSApplication *sender) {
     if (pending) return NSTerminateLater;
     pending = YES;
-    int disposition = requestQuit ? requestQuit(sessionEnding()) : 0;
+    int disposition = requestQuit ? requestQuit() : 0;
     if (disposition > 0) return NSTerminateLater;
     pending = NO;
     return disposition < 0 ? NSTerminateCancel : NSTerminateNow;
@@ -55,7 +37,7 @@ int risunest_queue_termination_response(void (*callback)(void *), void *context)
     return 1;
 }
 
-int risunest_install_termination_handler(int (*callback)(int sessionEnding)) {
+int risunest_install_termination_handler(int (*callback)(void)) {
     if (![NSThread isMainThread] || !NSApp.delegate || !callback) return 0;
     Class delegateClass = object_getClass(NSApp.delegate);
     SEL selector = @selector(applicationShouldTerminate:);

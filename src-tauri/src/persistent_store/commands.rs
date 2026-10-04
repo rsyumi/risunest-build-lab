@@ -884,6 +884,208 @@ pub(crate) fn pds_replace_put_presets(
 }
 
 #[tauri::command(async)]
+pub(crate) fn pds_replace_add_presets(
+    state: State<'_, PersistentStoreState>,
+    staging_id: String,
+    presets: Vec<Value>,
+) -> Result<(), StoreError> {
+    logged("pds_replace_add_presets", with_store_mut(state, |store| {
+        store.replace_add_presets(&staging_id, &presets)
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_replace_add_plugin_storage_values(
+    state: State<'_, PersistentStoreState>,
+    staging_id: String,
+    values: Vec<super::PluginStorageValue>,
+) -> Result<(), StoreError> {
+    logged("pds_replace_add_plugin_storage_values", with_store_mut(state, |store| {
+        store.replace_add_plugin_storage_values(&staging_id, &values)
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_replace_add_plugin_storage(
+    state: State<'_, PersistentStoreState>,
+    staging_id: String,
+    storage: serde_json::Map<String, Value>,
+    meta: Option<serde_json::Map<String, Value>>,
+) -> Result<(), StoreError> {
+    logged("pds_replace_add_plugin_storage", with_store_mut(state, |store| {
+        store.replace_add_plugin_storage(&staging_id, &storage, meta.as_ref())
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_replace_put_character_detail(
+    state: State<'_, PersistentStoreState>,
+    staging_id: String,
+    detail: Value,
+    conversation_count: i64,
+) -> Result<(), StoreError> {
+    logged("pds_replace_put_character_detail", with_store_mut(state, |store| {
+        store.replace_put_character_detail(&staging_id, &detail, conversation_count)
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_replace_put_conversation(
+    state: State<'_, PersistentStoreState>,
+    staging_id: String,
+    character_id: String,
+    configured_index: i64,
+    conversation: Value,
+    message_count: i64,
+    last_message_time: Option<Value>,
+) -> Result<(), StoreError> {
+    logged("pds_replace_put_conversation", with_store_mut(state, |store| {
+        store.replace_put_conversation(
+            &staging_id,
+            &character_id,
+            configured_index,
+            &conversation,
+            message_count,
+            last_message_time.as_ref(),
+        )
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_replace_add_conversation_messages(
+    state: State<'_, PersistentStoreState>,
+    staging_id: String,
+    character_id: String,
+    conversation_id: String,
+    start: i64,
+    messages: Vec<Value>,
+) -> Result<(), StoreError> {
+    logged("pds_replace_add_conversation_messages", with_store_mut(state, |store| {
+        store.replace_add_conversation_messages(
+            &staging_id,
+            &character_id,
+            &conversation_id,
+            start,
+            &messages,
+        )
+    }))
+}
+
+/// A staged replace request assembled by the Android chunked transport. The
+/// tag names the command whose arguments it carries.
+#[cfg(any(test, target_os = "android"))]
+#[derive(serde::Deserialize)]
+#[serde(tag = "command", content = "args")]
+pub(crate) enum StagedReplaceRequest {
+    #[serde(rename = "pds_replace_put_root", rename_all = "camelCase")]
+    PutRoot {
+        staging_id: String,
+        root: Value,
+        plugin_storage_values: Option<Vec<super::PluginStorageValue>>,
+    },
+    #[serde(rename = "pds_replace_put_presets", rename_all = "camelCase")]
+    PutPresets { staging_id: String, presets: Vec<Value> },
+    #[serde(rename = "pds_replace_add_presets", rename_all = "camelCase")]
+    AddPresets { staging_id: String, presets: Vec<Value> },
+    #[serde(rename = "pds_replace_add_characters", rename_all = "camelCase")]
+    AddCharacters { staging_id: String, characters: Vec<Value> },
+    #[serde(rename = "pds_replace_put_character_detail", rename_all = "camelCase")]
+    PutCharacterDetail {
+        staging_id: String,
+        detail: Value,
+        conversation_count: i64,
+    },
+    #[serde(rename = "pds_replace_put_conversation", rename_all = "camelCase")]
+    PutConversation {
+        staging_id: String,
+        character_id: String,
+        configured_index: i64,
+        conversation: Value,
+        message_count: i64,
+        last_message_time: Option<Value>,
+    },
+    #[serde(rename = "pds_replace_add_conversation_messages", rename_all = "camelCase")]
+    AddConversationMessages {
+        staging_id: String,
+        character_id: String,
+        conversation_id: String,
+        start: i64,
+        messages: Vec<Value>,
+    },
+    #[serde(rename = "pds_replace_add_plugin_storage_values", rename_all = "camelCase")]
+    AddPluginStorageValues {
+        staging_id: String,
+        values: Vec<super::PluginStorageValue>,
+    },
+    #[serde(rename = "pds_replace_add_plugin_storage", rename_all = "camelCase")]
+    AddPluginStorage {
+        staging_id: String,
+        storage: serde_json::Map<String, Value>,
+        meta: Option<serde_json::Map<String, Value>>,
+    },
+}
+
+#[cfg(any(test, target_os = "android"))]
+impl StagedReplaceRequest {
+    pub(crate) fn apply(self, store: &mut PersistentStore) -> StoreResult<()> {
+        match self {
+            Self::PutRoot { staging_id, root, plugin_storage_values } => store
+                .replace_put_root_with_plugin_storage(
+                    &staging_id,
+                    &root,
+                    plugin_storage_values.as_deref(),
+                ),
+            Self::PutPresets { staging_id, presets } => {
+                store.replace_put_presets(&staging_id, &presets)
+            }
+            Self::AddPresets { staging_id, presets } => {
+                store.replace_add_presets(&staging_id, &presets)
+            }
+            Self::AddCharacters { staging_id, characters } => {
+                store.replace_add_characters(&staging_id, &characters)
+            }
+            Self::PutCharacterDetail { staging_id, detail, conversation_count } => {
+                store.replace_put_character_detail(&staging_id, &detail, conversation_count)
+            }
+            Self::PutConversation {
+                staging_id,
+                character_id,
+                configured_index,
+                conversation,
+                message_count,
+                last_message_time,
+            } => store.replace_put_conversation(
+                &staging_id,
+                &character_id,
+                configured_index,
+                &conversation,
+                message_count,
+                last_message_time.as_ref(),
+            ),
+            Self::AddConversationMessages {
+                staging_id,
+                character_id,
+                conversation_id,
+                start,
+                messages,
+            } => store.replace_add_conversation_messages(
+                &staging_id,
+                &character_id,
+                &conversation_id,
+                start,
+                &messages,
+            ),
+            Self::AddPluginStorageValues { staging_id, values } => {
+                store.replace_add_plugin_storage_values(&staging_id, &values)
+            }
+            Self::AddPluginStorage { staging_id, storage, meta } => {
+                store.replace_add_plugin_storage(&staging_id, &storage, meta.as_ref())
+            }
+        }
+    }
+}
+
+#[tauri::command(async)]
 pub(crate) fn pds_replace_put_asset_aliases(
     state: State<'_, PersistentStoreState>,
     staging_id: String,

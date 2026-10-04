@@ -406,6 +406,32 @@ impl PersistentStore {
         )?;
         Ok(request)
     }
+    /// The stored receive page with this id, unless it is missing or finished.
+    pub(crate) fn external_lww_unfinished_receive(
+        &self,
+        request_id: &str,
+    ) -> StoreResult<Option<super::lww::StageReceive>> {
+        let body: Option<String> = self
+            .device_store()?
+            .connection()
+            .query_row(
+                "SELECT body FROM external_lww_receives page WHERE request_id=?1 AND NOT EXISTS(SELECT 1 FROM lww_receive receive WHERE receive.request_id=page.request_id AND receive.finished=1)",
+                [request_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(match body {
+            Some(body) => Some(serde_json::from_str(&body)?),
+            None => None,
+        })
+    }
+    pub(crate) fn external_lww_receive_finished(&self, request_id: &str) -> StoreResult<bool> {
+        Ok(self.device_store()?.connection().query_row(
+            "SELECT EXISTS(SELECT 1 FROM lww_receive WHERE request_id=?1 AND finished=1)",
+            [request_id],
+            |r| r.get(0),
+        )?)
+    }
     pub(crate) fn external_lww_verify_versions(
         &mut self,
         target: &str,

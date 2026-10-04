@@ -503,9 +503,14 @@ function warningText(code: string): string {
     }
 }
 
-export function failureReason(code: string, direction: 'import' | 'export' = 'import'): string {
+export function failureReason(code: string, direction: 'import' | 'export' = 'import', itemKind?: string): string {
     const copy = language.risuNest.importDialog
     switch (code) {
+        case 'payload-too-large': {
+            const item = itemKind && Object.hasOwn(copy.tooLargeItems, itemKind)
+                ? copy.tooLargeItems[itemKind as keyof typeof copy.tooLargeItems] : undefined
+            return item ? copy.reasonTooLarge.replace('{0}', item) : copy.reasonUnknown
+        }
         case 'destination-required':
         case 'unsupported-without-destination':
             return copy.reasonPlainJpeg
@@ -749,7 +754,7 @@ export function buildNativeFileJobDialogModel(
             summary = copy.resultFailedAfterCommit
         } else {
             summary = copy.resultFailed
-            reason = failureReason(outcome.error?.code ?? '')
+            reason = failureReason(outcome.error?.code ?? '', 'import', outcome.error?.itemKind)
         }
         if (outcome.interruption === 'background-expired') {
             summary = outcome.partialWritesPossible ? copy.resultBackgroundExpiredPartial : copy.resultBackgroundExpired
