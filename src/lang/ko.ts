@@ -2016,6 +2016,7 @@ export const languageKorean = {
             serviceWorker: '오프라인 기능 준비 중',
             ui: '화면 준비 중',
             elapsed: (seconds: number) => `${seconds}초 경과`,
+            rendererRecovered: 'WebView 렌더러가 중단되어 화면을 다시 불러왔습니다.',
         },
         serverSync: {
             registrationCode: '등록 코드',
@@ -2223,6 +2224,16 @@ export const languageKorean = {
             overflowScopeAll: '전체',
             overflowScopeHelp:
                 '채팅 메시지 영역을 벗어나는 UI 요소(설정 버튼, 오버레이 등)의 렌더링을 최신 메시지 1개에만 허용할지, 전체 메시지에서 허용할지 선택할 수 있습니다. 사용하는 캐릭터와 호환되지 않는 경우 전체를 선택해주세요. 전체는 긴 대화에서 스크롤이 조금 느려질 수 있습니다.',
+        },
+        ui: {
+            title: 'UI',
+            chatEditPopup: '채팅 수정 팝업창 사용',
+            chatEditPopupHelp: '채팅 수정 버튼을 누르면 팝업창에서 내용을 수정할 수 있도록 합니다.',
+        },
+        textEditor: {
+            open: '팝업창에서 수정',
+            close: '닫기',
+            save: '저장',
         },
         inlay: {
             optimizeFailed: '선택한 에셋을 최적화하지 못했습니다.',

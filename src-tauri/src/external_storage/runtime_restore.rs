@@ -649,7 +649,7 @@ fn prepare_local_restore_in_store(
     let current=JobStore::open(&root)?.read(&job.id)?;
     let previous_intent=current.summary.get("restoreCommit").map(|value|serde_json::from_value::<RestoreCommitIntent>(value.clone()).map_err(|_|corrupt())).transpose()?;
     if previous_intent.is_some() {completed_restore_in_store(store,&current)?;}
-    for source in &sources {super::lww_residency::register_verified_packed(store.repository_root(),source)?;}
+    super::lww_residency::register_verified_packed_many(store.repository_root(),&sources)?;
     let cas=crate::asset_repository::PayloadCas::new(store.repository_root()).map_err(runtime::local_error)?;
     let mut pins=restore_pins(store.repository_root(),&job.id)?;
     for batch in sources.iter().filter(|source|present.contains(&source.hash)).map(|source|(source.hash.clone(),source.byte_length,crate::asset_repository::job_pins::CasObjectRole::DirectObject)).collect::<Vec<_>>().chunks(128) {

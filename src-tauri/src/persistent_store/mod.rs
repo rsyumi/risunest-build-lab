@@ -1027,14 +1027,20 @@ fn scan_failure(error: crate::portable_backup::Error) -> StoreError {
 std::thread_local! {
     static ASSET_GC_ROOT_COLLECTIONS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
     static ASSET_GC_LIBRARY_ROOT_COLLECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ASSET_GC_FINAL_MARKINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The library's own asset roots from one cleanup run, reused by its later pages while the
-/// database reports no change since they were collected.
+/// database reports no change since they were collected, and the marks of the last page's
+/// complete roots.
 pub(crate) struct AssetGcLibraryRoots {
     data_version: i64,
     total_changes: i64,
     roots: crate::asset_repository::migration_gc::AssetRootSet,
+    marks: Option<(
+        Vec<crate::asset_repository::migration_gc::AssetRootSet>,
+        std::sync::Arc<crate::asset_repository::migration_gc::AssetGcMarks>,
+    )>,
 }
 
 pub(crate) struct AssetGcPreview {
@@ -1758,6 +1764,17 @@ impl PersistentStore {
 
     pub(crate) fn materialize(&self, revision: Option<i64>) -> StoreResult<Value> {
         let (mut database, target) = query::materialize_with_target(&self.connection, revision)?;
+        owner_projection::OwnerManifestProjector::from_snapshots_dir(
+            &self.connection,
+            &target,
+            &self.snapshots_dir,
+        )?
+        .project_database(&mut database)?;
+        Ok(database)
+    }
+
+    pub(crate) fn materialize_without_chats(&self) -> StoreResult<Value> {
+        let (mut database, target) = query::materialize_without_chats(&self.connection)?;
         owner_projection::OwnerManifestProjector::from_snapshots_dir(
             &self.connection,
             &target,
@@ -2886,8 +2903,23 @@ impl PersistentStore {
         let current_roots = self.collect_asset_gc_roots_reusing_library(
             true, false, Some(&plugins.roots), Some((library, library_version, expected_changes)),
         )?
-            .into_iter().map(|(_, roots)| roots);
-        let final_marks = mark_asset_roots_with_remote(&cas, current_roots, |hash| residency.gc_size(hash))?;
+            .into_iter().map(|(_, roots)| roots).collect::<Vec<_>>();
+        // Marks follow from the roots and content-addressed manifests alone, so a page with the
+        // same roots as the last one skips reading every manifest and statting every object.
+        let reused = library.as_ref().and_then(|cached| cached.marks.as_ref())
+            .filter(|(roots, _)| *roots == current_roots).map(|(_, marks)| marks.clone());
+        let final_marks = match reused {
+            Some(marks) => marks,
+            None => {
+                #[cfg(test)]
+                ASSET_GC_FINAL_MARKINGS.with(|count| count.set(count.get() + 1));
+                let marks = std::sync::Arc::new(mark_asset_roots_with_remote(
+                    &cas, current_roots.iter().cloned(), |hash| residency.gc_size(hash),
+                )?);
+                if let Some(cached) = library.as_mut() { cached.marks = Some((current_roots, marks.clone())); }
+                marks
+            }
+        };
         final_transaction.rollback()?;
         let mut report = sweep_asset_candidates_with_remote(&cas, final_candidates.items.clone(), &final_marks,
             now_ms, minimum_grace_ms, |hash| residency.gc_size(hash))?;
@@ -3090,7 +3122,7 @@ impl PersistentStore {
             }
             Some((cache, data_version, total_changes)) => {
                 let roots = collect_library()?;
-                *cache = Some(AssetGcLibraryRoots { data_version, total_changes, roots: roots.clone() });
+                *cache = Some(AssetGcLibraryRoots { data_version, total_changes, roots: roots.clone(), marks: None });
                 roots
             }
             None => collect_library()?,

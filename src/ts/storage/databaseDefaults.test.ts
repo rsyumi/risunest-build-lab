@@ -85,6 +85,19 @@ describe('streaming display defaults', () => {
         ).toBe('all')
     })
 
+    it('edits chat messages in the popup by default and preserves the inline choice', () => {
+        expect(
+            normalizeDatabaseDefaults({ characters: [] } as Database)
+                .risunestChatEditPopup,
+        ).toBe(true)
+        expect(
+            normalizeDatabaseDefaults({
+                characters: [],
+                risunestChatEditPopup: false,
+            } as Database).risunestChatEditPopup,
+        ).toBe(false)
+    })
+
     it('does not import the removed RisuNest-only performance setting', () => {
         const database = normalizeDatabaseDefaults({
             characters: [],
