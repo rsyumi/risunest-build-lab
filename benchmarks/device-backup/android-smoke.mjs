@@ -421,6 +421,12 @@ async function main() {
       (await run(["shell", "pm", "clear", packageName])).stdout,
       /Success/,
     );
+    // The startup notification prompt would cover and pause the WebView. Android 12 and older reject the grant.
+    await run(
+      ["shell", "pm", "grant", packageName, "android.permission.POST_NOTIFICATIONS"],
+      10_000,
+      true,
+    );
     progress("launch-synthetic-harness");
     await run(["shell", "am", "start", "-n", `${packageName}/.MainActivity`]);
     started = true;

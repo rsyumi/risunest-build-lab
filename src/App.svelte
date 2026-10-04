@@ -29,6 +29,8 @@
     import EasyPanel from './lib/Others/ProTools/EasyPanel.svelte';
     import sendSound from './etc/send.mp3'
     import PopupEditor from './lib/Others/PopupEditor.svelte';
+    import TextEditorPopup from './lib/Others/TextEditorPopup.svelte';
+    import { textEditorPopup } from './ts/gui/textEditorPopup.svelte';
     import LoadoutModal from './lib/Others/LoadoutModal.svelte';
     import IrisModal from './lib/Others/IrisModal.svelte';
     import Legal from './lib/Others/Legal.svelte';
@@ -503,6 +505,12 @@
             {/if}
             <ChatScreen />
         {/if}
+    {/if}
+    <!-- Before the alerts so a refused save or a removed-chat notice shows above the editor. -->
+    {#if textEditorPopup.request}
+        {#key textEditorPopup.request}
+            <TextEditorPopup request={textEditorPopup.request} />
+        {/key}
     {/if}
     {#if $alertStore.type !== 'none'}
         <AlertComp />

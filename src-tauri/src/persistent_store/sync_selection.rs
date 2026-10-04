@@ -188,7 +188,10 @@ impl super::PersistentStore {
             }
         }
         Ok(BindingContent {
-            library: self.materialize(None)?,
+            // Binding only compares this with a factory library, which has no characters, so a
+            // character decides the comparison before any chat could. A large library's chats
+            // would not fit in one response on Android.
+            library: self.materialize_without_chats()?,
             opaque_shared_unit_count: opaque_shared_unit_count.into(),
             shared_variables,
             protected_values:serde_json::Value::Object(protected),
@@ -296,6 +299,35 @@ mod binding_tests {
         assert!(!content.plugin_local_participating);
         assert_eq!(content.hypa_value_count.0, 0);
         assert_eq!(content.ordinary_plugin_value_count.0, 0);
+    }
+    #[test]
+    fn binding_content_library_matches_the_materialized_library_without_chats() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = super::super::PersistentStore::open(dir.path()).unwrap();
+        let staging = store.replace_begin().unwrap().staging_id;
+        store.replace_put_root(&staging, &json!({"plugins": [{"name": "Plugin"}], "pluginCustomStorage": {"plugin": {"enabled": true}}})).unwrap();
+        store.replace_put_presets(&staging, &[json!({"id": "preset-a", "name": "Preset A"})]).unwrap();
+        let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
+        assert_eq!(store.lww_binding_content().unwrap().library, store.materialize(None).unwrap());
+
+        let staging = store.replace_begin().unwrap().staging_id;
+        store.replace_put_root(&staging, &json!({"plugins": [{"name": "Plugin"}]})).unwrap();
+        store.replace_put_presets(&staging, &[json!({"id": "preset-a", "name": "Preset A"})]).unwrap();
+        store.replace_add_characters(&staging, &[json!({
+            "type": "character", "chaId": "character-a", "name": "Character A",
+            "chats": [{"id": "chat-a", "name": "Chat A", "note": "kept out", "message": [
+                {"role": "user", "data": "first", "chatId": "message-1"},
+                {"role": "char", "data": "second", "chatId": "message-2"}
+            ]}]
+        })]).unwrap();
+        store.replace_commit(&staging, Some(revision)).unwrap();
+        let mut expected = store.materialize(None).unwrap();
+        assert_eq!(expected["characters"][0]["chats"][0]["message"].as_array().unwrap().len(), 2);
+        expected["characters"][0].as_object_mut().unwrap().remove("chats");
+        let library = store.lww_binding_content().unwrap().library;
+        assert!(library["characters"][0].get("chats").is_none());
+        assert_eq!(library, expected);
     }
     fn staged(store: &mut super::super::PersistentStore, inspection: &str, changes: &[super::super::lww::Change]) -> (String,String) {
         let receive = uuid::Uuid::new_v4().to_string();

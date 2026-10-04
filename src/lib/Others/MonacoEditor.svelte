@@ -42,6 +42,8 @@
         theme?: string;
         readonly?: boolean;
         onchange?: (value: string) => void;
+        options?: monaco.editor.IStandaloneEditorConstructionOptions;
+        onready?: (editor: monaco.editor.IStandaloneCodeEditor) => void;
     }
 
     let {
@@ -50,6 +52,8 @@
         theme = 'vs-dark',
         readonly = false,
         onchange,
+        options = {},
+        onready,
     }: Props = $props();
 
     let container: HTMLDivElement;
@@ -75,6 +79,7 @@
                 verticalScrollbarSize: 6,
                 horizontalScrollbarSize: 6,
             },
+            ...options,
         });
 
         editor.onDidChangeModelContent(() => {
@@ -82,6 +87,7 @@
             value = newValue;
             onchange?.(newValue);
         });
+        onready?.(editor);
 
         return () => {
             editor?.dispose();

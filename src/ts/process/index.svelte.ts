@@ -89,7 +89,8 @@ import {
 } from '../storage/activeWorkingSet.svelte'
 import { beginAndroidGenerationKeepAlive, endAndroidGenerationKeepAlive } from '../androidGenerationKeepAlive'
 import { beginIOSGeneration, notifyIOSGenerationComplete, isBackgroundExpiryReason } from "../iosNative";
-import { isTauriIOS, isTauriAndroid } from "../platform";
+import { isTauriIOS, isTauriAndroid, isTauriDesktop } from "../platform";
+import { notifyDesktop } from "../desktopNotifications";
 import { classifyChatParserHistory } from '../chatParserHistory'
 
 export { doingChat } from './generationState'
@@ -191,6 +192,8 @@ export async function notifyGenerationCompletion(result: string): Promise<void> 
               await notifyIOSGenerationComplete();
             } else if (isTauriAndroid) {
               await window.RisuCompletionNotifications?.notify(result);
+            } else if (isTauriDesktop) {
+              await notifyDesktop(result);
             } else if (typeof Notification !== "undefined" && Notification.permission === "granted") {
               const notification = new Notification("RisuNest", {
                 body: result,

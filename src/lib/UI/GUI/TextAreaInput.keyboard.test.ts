@@ -4,7 +4,6 @@ import { mount, tick, unmount } from 'svelte'
 const state = vi.hoisted(() => ({
     os: 'macos',
     matches: vi.fn(() => true),
-    popup: { open: false, value: '', mode: '', language: '' },
 }))
 vi.mock('@tauri-apps/plugin-os', () => ({ platform: () => state.os }))
 vi.mock('src/ts/hotkey', () => ({ hotkeyMatches: state.matches }))
@@ -19,25 +18,25 @@ vi.mock('src/ts/stores.svelte', async () => {
     const { writable } = await import('svelte/store')
     return {
         DBState: { db: { hotkeys: [{ action: 'popupEditor', key: '.', ctrl: true }] } },
-        disableHighlight: writable(false), popUpEditorStore: state.popup,
+        disableHighlight: writable(false),
     }
 })
 vi.mock('src/ts/platform', () => ({ isMobile: false }))
-vi.mock('src/ts/util', () => ({ sleep: async () => { state.popup.open = false } }))
+vi.mock('src/ts/util', () => ({ sleep: async () => {} }))
 
 import TextAreaInput from './TextAreaInput.svelte'
+import { textEditorPopup } from 'src/ts/gui/textEditorPopup.svelte'
 let component: ReturnType<typeof mount> | undefined
 
 beforeEach(() => {
     state.os = 'macos'
     state.matches.mockClear()
-    state.popup.open = false
-    state.popup.value = ''
     Object.defineProperty(globalThis, '__TAURI_INTERNALS__', { configurable: true, value: {} })
 })
 afterEach(async () => {
     if (component) await unmount(component)
     component = undefined
+    textEditorPopup.request = null
     document.body.replaceChildren()
     Reflect.deleteProperty(globalThis, '__TAURI_INTERNALS__')
 })
@@ -57,7 +56,7 @@ describe('popup editor keyboard entry', () => {
         target.dispatchEvent(event)
         expect(state.matches).toHaveBeenCalledOnce()
         expect(event.defaultPrevented).toBe(true)
-        expect(state.popup.value).toBe('preserve text')
+        expect(textEditorPopup.request?.value).toBe('preserve text')
     })
 
     it('does not reinterpret the Windows meta key as the configured Ctrl shortcut', async () => {
@@ -67,6 +66,7 @@ describe('popup editor keyboard entry', () => {
         target.dispatchEvent(event)
         expect(state.matches).not.toHaveBeenCalled()
         expect(event.defaultPrevented).toBe(false)
+        expect(textEditorPopup.request).toBeNull()
     })
 
     it.each([false, true])('leaves IME Enter to the input method (highlight %s)', async (highlight) => {

@@ -6,6 +6,7 @@
     import { aiLawApplies, changeChatTo, foldChatToMessage, getFileSrc, createChatCopyName } from "src/ts/globalApi.svelte"
     import { ColorSchemeTypeStore } from "src/ts/gui/colorscheme"
     import { longpress } from "src/ts/gui/longtouch"
+    import { openTextEditorPopup } from "src/ts/gui/textEditorPopup.svelte"
     import { getModelInfo } from "src/ts/model/modellist"
     import { runLuaButtonTrigger } from 'src/ts/process/scriptings'
     import { risuChatParser } from "src/ts/process/scripts"
@@ -60,6 +61,9 @@
 
     let translating = $state(false)
     let editMode = $state(false)
+    // The draft is edited in the popup editor, so the row keeps showing the message.
+    let editInPopup = $state(false)
+    let inlineEditMode = $derived(editMode && !editInPopup)
     let statusMessage:string = $state('')
     let retranslate = $state(false)
     let editTranslationMode = $state(false)
@@ -490,10 +494,36 @@
     function startOriginalEdit() {
         if (originalEditControlDisabled) return
         beginEdit()
+        if (editMode && (DBState.db.risunestChatEditPopup ?? true)) openEditPopup()
+    }
+
+    function openEditPopup() {
+        editInPopup = true
+        openTextEditorPopup({
+            value: editDraft,
+            save: async (value) => {
+                editDraft = value
+                if (!(await edit())) return false
+                editMode = false
+                editInPopup = false
+                return true
+            },
+            // Keeps takeEditorDraft current if the conversation is removed while the popup is open.
+            input: (value) => {
+                editDraft = value
+            },
+            cancel: () => {
+                editMode = false
+                editInPopup = false
+                editIntent = null
+                editTarget = null
+            },
+        })
     }
 
     async function toggleOriginalEdit() {
-        if (originalEditControlDisabled) return
+        // The edit hotkey clicks this button behind the popup editor, which owns the draft.
+        if (originalEditControlDisabled || editInPopup) return
 
         if (editMode) {
             if (await edit()) editMode = false
@@ -927,7 +957,7 @@
             saveTranslationEdit()
         }} />
     {/if}
-    {#if editMode}
+    {#if inlineEditMode}
         <AutoresizeArea bind:value={editDraft} handleLongPress={toggleOriginalEdit} />
     {:else if isComment}
         <div class="w-full flex justify-center text-textcolor2 italic mb-12">
@@ -1678,7 +1708,7 @@
                             <h2 class="text-base font-bold text-gray-500 text-center mt-2 max-w-full text-ellipsis">{name}</h2>
 
                         </div>
-                        {#if editMode}
+                        {#if inlineEditMode}
                             <textarea class="grow h-138 sm:h-96 overflow-y-auto bg-transparent text-black p-2 mb-2 resize-none message-edit-area" bind:value={editDraft}></textarea>
                         {:else}
                             <div class="grow h-138 sm:h-96 overflow-y-auto p-2 mb-2 sm:mb-0">

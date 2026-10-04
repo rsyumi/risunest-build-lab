@@ -6,6 +6,22 @@ export const risuNestSettingUnits: Record<string, string> = {
     'risunest.inlay.maxDimension': 'px',
 }
 
+export const risuNestUiSettingsItems: SettingItem[] = [
+    {
+        id: 'risunest.ui.header',
+        type: 'header',
+        labelKey: 'risuNest.ui.title',
+        options: { level: 'h2' },
+    },
+    {
+        id: 'risunest.ui.chatEditPopup',
+        type: 'check',
+        labelKey: 'risuNest.ui.chatEditPopup',
+        helpKey: 'risuNest.ui.chatEditPopupHelp',
+        bindKey: 'risunestChatEditPopup',
+    },
+]
+
 export const risuNestStreamingSettingsItems: SettingItem[] = [
     {
         id: 'risunest.streaming.header',
@@ -115,4 +131,4 @@ export const risuNestInlaySettingsItems: SettingItem[] = [
     },
 ]
 
-export const risuNestSettingsItems: SettingItem[] = [...risuNestStreamingSettingsItems, ...risuNestInlaySettingsItems]
+export const risuNestSettingsItems: SettingItem[] = [...risuNestUiSettingsItems, ...risuNestStreamingSettingsItems, ...risuNestInlaySettingsItems]

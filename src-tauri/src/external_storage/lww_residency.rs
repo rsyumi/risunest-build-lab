@@ -143,13 +143,27 @@ pub(crate) fn validate_packed_source(source:&PackedSource,repository:&Repository
     if length!=source.byte_length { return Err(segment::corrupt()); }
     Ok(())
 }
+pub(crate) const PACKED_REGISTRATION_BATCH:usize=1024;
 pub(crate) fn register_packed(root:&Path,source:&PackedSource,repository:&RepositoryHandle) -> Result<()> {
-    validate_packed_source(source,repository)?;
-    register_verified_packed(root,source)
+    register_packed_many(root,std::slice::from_ref(source),repository)
 }
-pub(super) fn register_verified_packed(root:&Path,source:&PackedSource) -> Result<()> {
-    let db=database(root,true)?.ok_or_else(segment::corrupt)?;
-    db.execute("INSERT INTO packed_sources VALUES(?1,?2,?3) ON CONFLICT(hash,library) DO UPDATE SET source=excluded.source",params![source.hash,source.library_id,serde_json::to_string(source).map_err(local)?]).map_err(local)?;
+pub(crate) fn register_packed_many(root:&Path,sources:&[PackedSource],repository:&RepositoryHandle) -> Result<()> {
+    for source in sources {validate_packed_source(source,repository)?;}
+    register_verified_packed_many(root,sources)
+}
+/// Registers the sources through one connection, committing every batch, so a large catalog
+/// does not pay a connection and a synchronous commit per body.
+pub(super) fn register_verified_packed_many<'a>(root:&Path,sources:impl IntoIterator<Item=&'a PackedSource>) -> Result<()> {
+    let mut sources=sources.into_iter().peekable();
+    if sources.peek().is_none() {return Ok(());}
+    let mut db=database(root,true)?.ok_or_else(segment::corrupt)?;
+    while sources.peek().is_some() {
+        let transaction=db.transaction().map_err(local)?;
+        for source in sources.by_ref().take(PACKED_REGISTRATION_BATCH) {
+            transaction.execute("INSERT INTO packed_sources VALUES(?1,?2,?3) ON CONFLICT(hash,library) DO UPDATE SET source=excluded.source",params![source.hash,source.library_id,serde_json::to_string(source).map_err(local)?]).map_err(local)?;
+        }
+        transaction.commit().map_err(local)?;
+    }
     Ok(())
 }
 pub(crate) fn packed_source(root:&Path,hash:&str) -> Result<Option<PackedSource>> {
@@ -340,14 +354,15 @@ pub(crate) fn hydrate_registered_many(root:&Path,digests:&[String],priority:&std
                         let refreshed=engine.refresh_packed_sources(&missing,&scratch.path().join("current-catalogs"),&cancel).await?;
                         if let Some(reason)=owner.recheck(&protection,&cancel).await? {return Err(super::leases::yield_error(reason));}
                         check().map_err(|error| {installer_error.replace(Some(error));segment::corrupt()})?;
-                        for source in &refreshed {register_packed(root,source,&repository)?;}
+                        register_packed_many(root,&refreshed,&repository)?;
                         missing=refreshed;
                         super::snapshot_restore::download_packed_body_files(&missing,&stage.path().join("current-source"),&key,provider.as_ref(),&repository,&cancel).await?
                     }
                     other=>other?,
                 };
+                // Every read above finished before this check, so one check covers the whole group.
+                if let Some(reason)=owner.recheck(&protection,&cancel).await? {return Err(super::leases::yield_error(reason));}
                 for source in missing {
-                    if let Some(reason)=owner.recheck(&protection,&cancel).await? {return Err(super::leases::yield_error(reason));}
                     install(&source.hash,source.byte_length,files.get(&source.hash).ok_or_else(segment::corrupt)?).map_err(|error| {installer_error.replace(Some(error));segment::corrupt()})?;
                 }
                 Ok(())
@@ -517,6 +532,34 @@ mod frozen_spool_tests {
         assert!(observed.complete());
         assert_eq!(observed.asset_work().opens,1);
         assert_eq!(observed.asset_work().read_bytes,bytes.len() as u64);
+    }
+}
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    use risunest_external_storage_format::snapshot::{ObjectRole,PublicObjectHeader,StoredObject,WireLocator};
+    #[test]
+    fn batched_registration_records_every_source_across_batches() {
+        let root=tempfile::tempdir().unwrap();
+        register_verified_packed_many(root.path(),&[] as &[PackedSource]).unwrap();
+        assert!(database(root.path(),false).unwrap().is_none(),"nothing to register creates no database");
+        let catalog=StoredObject {
+            header:PublicObjectHeader::new("synthetic-repository".into(),"synthetic-catalog".into(),ObjectRole::Catalog,1).unwrap(),
+            locator:WireLocator {connection_identity:"synthetic-account".into(),collection:Some("catalogs".into()),object:"synthetic-object".into()},
+            ciphertext_length:1,ciphertext_sha256:[1;32],plaintext_length:1,plaintext_sha256:[2;32],
+        };
+        let sources=(0..PACKED_REGISTRATION_BATCH*2+1).map(|index| PackedSource {
+            hash:format!("{index:064x}"),byte_length:index as u64,library_id:"synthetic-library".into(),
+            connection_id:"synthetic-connection".into(),connection_root:PathBuf::new(),protected_snapshot:"synthetic-snapshot".into(),
+            catalog:catalog.clone(),chunks:Vec::new(),packs:Vec::new(),
+        }).collect::<Vec<_>>();
+        register_verified_packed_many(root.path(),&sources).unwrap();
+        let db=database(root.path(),false).unwrap().unwrap();
+        let count:i64=db.query_row("SELECT COUNT(*) FROM packed_sources",[],|row|row.get(0)).unwrap();
+        assert_eq!(count,sources.len() as i64);
+        for source in [&sources[0],&sources[PACKED_REGISTRATION_BATCH],&sources[sources.len()-1]] {
+            assert_eq!(packed_source(root.path(),&source.hash).unwrap().unwrap().byte_length,source.byte_length);
+        }
     }
 }
 async fn remote_source(

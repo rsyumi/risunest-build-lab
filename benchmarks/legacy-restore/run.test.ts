@@ -7,7 +7,7 @@ import { fixtureCharacter, planFixture } from './fixture'
 import { runLegacyRestoreMeasurement, type ReadbackProgress } from './run'
 
 const native = vi.hoisted(() => ({ invoke: vi.fn(), remove: vi.fn(), bytes: new Uint8Array(3_000_000), offset: 0, length: 0,
-    retireActive: () => {}, activeIds: [] as string[] }))
+    retireActive: () => {}, activeIds: [] as string[], bufferPackets: false, nonPlainWrites: 0 }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }))
 vi.mock('@tauri-apps/api/path', () => ({ join: async (...parts: string[]) => parts.join('/') }))
 vi.mock('../../src/ts/storage/nativePaths', () => ({ nativeDataPath: async () => '/synthetic' }))
@@ -15,6 +15,7 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
     SeekMode: { Start: 0 }, mkdir: vi.fn(), remove: native.remove,
     open: async () => ({
         write: async (bytes: Uint8Array) => {
+            if (Object.getPrototypeOf(bytes) !== Uint8Array.prototype) native.nonPlainWrites++
             // Short writes exercise the source writer's complete-write loop.
             const count = Math.min(bytes.length, 65_536)
             native.bytes.set(bytes.subarray(0, count), native.offset)
@@ -27,7 +28,12 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
 }))
 vi.mock('./fixture', async importOriginal => {
     const actual = await importOriginal<typeof import('./fixture')>()
-    return { ...actual, planFixture: (_bytes: number, prefix?: string) => actual.planFixture(2_500_000, prefix) }
+    // Mirrors the WebView's Buffer polyfill, whose toJSON turns bytes into an object.
+    class BufferLike extends Uint8Array { toJSON() { return { type: 'Buffer', data: [...this] } } }
+    return { ...actual, planFixture: (_bytes: number, prefix?: string) => actual.planFixture(2_500_000, prefix),
+        *fixturePackets(...args: Parameters<typeof actual.fixturePackets>) {
+            for (const bytes of actual.fixturePackets(...args)) yield native.bufferPackets ? new BufferLike(bytes) : bytes
+        } }
 })
 
 beforeEach(() => {
@@ -35,6 +41,8 @@ beforeEach(() => {
     native.remove.mockReset()
     native.bytes.fill(0)
     native.offset = native.length = 0
+    native.bufferPackets = false
+    native.nonPlainWrites = 0
 })
 function installNative(corrupt = false) {
     const plan = planFixture(2_500_000)
@@ -124,6 +132,13 @@ describe('isolated legacy restore measurement', () => {
         expect(native.remove).toHaveBeenCalledTimes(2)
         expect(progress.at(-1)).toEqual({ stage: 14, index: plan.characterCount,
             readReturned: plan.characterCount, hashVerified: plan.characterCount, messageCount: plan.messageCount })
+    })
+    it('writes plain byte arrays when the encoder returns Buffer instances', async () => {
+        installNative()
+        native.bufferPackets = true
+        expect(await runLegacyRestoreMeasurement({ megabytes: 100, encoding: 'raw',
+            assertIsolatedHarness: async () => {}, report: async () => {} })).toMatchObject({ phase: 'verified' })
+        expect(native.nonPlainWrites).toBe(0)
     })
     it('gates native restore after preparation and readback after the terminal interval', async () => {
         installNative()

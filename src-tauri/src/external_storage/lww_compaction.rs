@@ -307,13 +307,18 @@ impl ExternalLwwEngine {
                 if !seen.insert(catalog.header.object_id.clone()) {continue;}
                 let object=RemoteObject::from_stored(&catalog,&self.repository)?;
                 let (entries,packs,_)=super::snapshot_restore::read_catalog(&object,wire::CatalogKind::Assets,&self.root_key,directory,self.provider.as_ref(),&self.repository,cancel).await?;
+                let mut sources=Vec::new();
                 for entry in entries {
                     let hash=hex::encode(entry.content_sha256);
                     if cas.stat_object(&hash).map_err(error)?.is_some() {continue;}
                     let selected=entry.chunks.iter().map(|c|c.pack_id.as_str()).collect::<BTreeSet<_>>();
                     let packs=packs.iter().filter(|(id,_)|selected.contains(id.as_str())).map(|(_,pack)|pack.stored(&self.repository)).collect::<Result<Vec<_>>>()?;
-                    super::lww_residency::register_packed(&root,&super::lww_residency::PackedSource {hash,byte_length:entry.byte_length,library_id:self.library.clone(),connection_id:self.connection_id.clone(),connection_root:self.connection_root.clone(),protected_snapshot:snapshot.object_id.clone(),catalog:catalog.clone(),chunks:entry.chunks,packs},&self.repository)?;
+                    sources.push(super::lww_residency::PackedSource {hash,byte_length:entry.byte_length,library_id:self.library.clone(),connection_id:self.connection_id.clone(),connection_root:self.connection_root.clone(),protected_snapshot:snapshot.object_id.clone(),catalog:catalog.clone(),chunks:entry.chunks,packs});
+                    if sources.len()==super::lww_residency::PACKED_REGISTRATION_BATCH {
+                        super::lww_residency::register_packed_many(&root,&std::mem::take(&mut sources),&self.repository)?;
+                    }
                 }
+                super::lww_residency::register_packed_many(&root,&sources,&self.repository)?;
             }
         }
         for (receipt,document) in &state.segments {

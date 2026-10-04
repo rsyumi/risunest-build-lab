@@ -128,6 +128,36 @@ pub(crate) fn cancel_if_incomplete(app_data_root: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Records a start that did not finish when a renderer fails again soon after it was reloaded, so
+/// the next document opens through the startup choice. A marker already on disk is left alone,
+/// because the next start counts it anyway.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn record_interrupted(
+    app_data_root: &Path,
+    app_version: &str,
+    started_at: i64,
+) -> io::Result<()> {
+    let _active = active_attempts().lock().unwrap_or_else(|error| error.into_inner());
+    if read(app_data_root)?.is_some() {
+        return Ok(());
+    }
+    let path = marker_path(app_data_root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let staging = path.with_extension("json.writing");
+    std::fs::write(
+        &staging,
+        serde_json::to_vec(&Attempt {
+            started_at,
+            app_version: app_version.to_owned(),
+            consecutive_failures: 0,
+        })
+        .map_err(io::Error::other)?,
+    )?;
+    std::fs::rename(staging, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +236,30 @@ mod tests {
         let decision = begin(directory.path(), "1.0.0", now(0)).unwrap();
         assert_eq!(decision.consecutive_failures, 1);
         assert_eq!(decision.previous, Some(Attempt::default()));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn an_interrupted_document_after_a_finished_start_makes_the_next_start_offer_the_choice() {
+        let directory = tempfile::tempdir().unwrap();
+        begin(directory.path(), "1.0.0", now(0)).unwrap();
+        complete(directory.path()).unwrap();
+        record_interrupted(directory.path(), "1.0.0", now(5)).unwrap();
+        let decision = begin(directory.path(), "1.0.0", now(10)).unwrap();
+        assert_eq!(decision.consecutive_failures, 1);
+        assert_eq!(decision.previous.unwrap().started_at, now(5));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn an_interruption_during_an_unfinished_start_keeps_the_existing_count() {
+        let directory = tempfile::tempdir().unwrap();
+        begin(directory.path(), "1.0.0", now(0)).unwrap();
+        begin(directory.path(), "1.0.0", now(1)).unwrap();
+        let before = read(directory.path()).unwrap();
+        record_interrupted(directory.path(), "1.0.0", now(2)).unwrap();
+        assert_eq!(read(directory.path()).unwrap(), before);
+        assert_eq!(begin(directory.path(), "1.0.0", now(3)).unwrap().consecutive_failures, 2);
     }
 
     #[test]
