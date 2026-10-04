@@ -5337,8 +5337,8 @@
     {
       "path": "src-tauri/src/asset_repository/commands.rs",
       "mode": "100644",
-      "bytes": 71804,
-      "sha256": "8db3298db3c2c3941a67b27786a977052fc739ee30fa3646177b1882cf3ff234"
+      "bytes": 71875,
+      "sha256": "ac748bee99bd80195fa9b183bca0e90aefb9160555b6e119b671f9a46b054cad"
     },
     {
       "path": "src-tauri/src/asset_repository/coordinator.rs",
