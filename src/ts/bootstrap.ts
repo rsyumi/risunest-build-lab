@@ -643,6 +643,9 @@ export async function loadData() {
                         selection.kind === 'server' && getServerSyncController().snapshot().paused
                     ))
                 )
+                if (!syncDisabled && selection.kind !== 'none' && selection.decisionRequired) {
+                    throw { code: 'sync-selection-decision-required' }
+                }
                 if (!syncDisabled && selection.kind !== 'none' && !selection.connectionId) {
                     throw { code: 'sync-selection-invalid' }
                 }
@@ -650,6 +653,7 @@ export async function loadData() {
                 let selectionId = `none:${selection.selectionEpoch}`
                 if (
                     !syncDisabled
+                    && !selection.decisionRequired
                     && selection.kind === 'server'
                     && selection.connectionId
                 ) {
@@ -660,6 +664,7 @@ export async function loadData() {
                     )
                 } else if (
                     !syncDisabled
+                    && !selection.decisionRequired
                     && selection.kind === 'external'
                     && selection.connectionId
                 ) {

@@ -257,6 +257,14 @@ fn window_state_plugin(directory: &std::path::Path) -> tauri::plugin::TauriPlugi
         .build()
 }
 
+/// Keeps IPC responses on the custom protocol after a failed body read.
+fn ipc_read_guard_script() -> String {
+    include_str!("ipc_read_guard.js").replace(
+        "__RISUNEST_ANDROID__",
+        if cfg!(target_os = "android") { "true" } else { "false" },
+    )
+}
+
 /// Product initialization shared by native entry points. An alternative entry
 /// manages its own [`AppPaths`] before building.
 pub fn builder() -> tauri::Builder<tauri::Wry> {
@@ -273,7 +281,8 @@ fn builder_with_main_window(
     let setup_native_startup_state = native_startup_state.clone();
     let mut builder = tauri::Builder::default()
         .manage(native_startup_state)
-        .plugin(tauri_plugin_opener::init());
+        .plugin(tauri_plugin_opener::init())
+        .append_invoke_initialization_script(ipc_read_guard_script());
     #[cfg(not(target_os = "android"))]
     {
         builder = builder.manage(renderer_recovery::RendererRecovery::default());
@@ -708,7 +717,6 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         external_storage::runtime::external_storage_get_job,
         external_storage::runtime_restore::external_storage_confirm_restore_adoption,
         external_storage::runtime::external_storage_cancel_job,
-        external_storage::runtime::external_storage_stop_restore,
         external_storage::runtime::external_storage_get_quota,
         external_storage::history::external_storage_list_history,
         external_storage::history_deletion::external_storage_prepare_history_delete,
@@ -745,7 +753,6 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         server_sync::commands::server_sync_lww_activate,
         server_sync::commands::server_sync_lww_hydrate,
         server_sync::commands::server_sync_lww_inspect,
-        server_sync::commands::server_sync_lww_pending_binding,
         server_sync::commands::server_sync_lww_stage_target,
         server_sync::commands::server_sync_lww_prepare_new_device,
         server_sync::commands::server_sync_lww_prepare_fresh_writer,
@@ -756,7 +763,6 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         server_sync::commands::server_sync_notify_start,
         server_sync::commands::server_sync_notify_stop,
         server_sync::commands::server_sync_asset_policy,
-        server_sync::commands::asset_residency_download_remote,
         server_sync::commands::server_sync_asset_evict,
         server_sync::commands::server_sync_cache_usage,
         server_sync::commands::server_sync_cache_cleanup,
@@ -835,6 +841,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_file_jobs::native_character_charx_handoff_cleanup,
         native_file_jobs::native_character_card_handoff_cleanup,
         native_file_jobs::native_risu_module_handoff_cleanup,
+        native_file_jobs::native_dataset_export_handoff_cleanup,
+        native_file_jobs::download_handoff::native_download_handoff_create,
+        native_file_jobs::download_handoff::native_download_handoff_append,
+        native_file_jobs::download_handoff::native_download_handoff_cleanup,
         native_file_jobs::screenshot_output::native_file_job_screenshot_output_start,
         native_file_jobs::screenshot_output::native_file_job_screenshot_output_append,
         native_file_jobs::screenshot_output::native_file_job_screenshot_output_publish,
@@ -880,10 +890,12 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         android_commit_transport::pds_commit_android_finish,
         #[cfg(target_os = "android")]
         android_commit_transport::pds_commit_android_cancel,
+        #[cfg(target_os = "android")]
+        android_commit_transport::pds_replace_android_finish,
         #[cfg(any(windows, target_os = "linux", target_os = "ios", target_os = "macos"))]
         persistent_commit_raw::pds_commit_raw,
         persistent_store::lww_commands::pds_lww_read_outbox,
-        persistent_store::lww_commands::pds_lww_finish_initial_publication,
+        persistent_store::lww_commands::pds_lww_queue_unit_state_page,
         persistent_store::lww_commands::pds_lww_stage_receive,
         persistent_store::lww_commands::pds_lww_apply_receive,
         persistent_store::lww_commands::pds_lww_finish_receive,
@@ -905,6 +917,12 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_replace_begin,
         persistent_store::commands::pds_replace_put_root,
         persistent_store::commands::pds_replace_put_presets,
+        persistent_store::commands::pds_replace_add_presets,
+        persistent_store::commands::pds_replace_add_plugin_storage_values,
+        persistent_store::commands::pds_replace_add_plugin_storage,
+        persistent_store::commands::pds_replace_put_character_detail,
+        persistent_store::commands::pds_replace_put_conversation,
+        persistent_store::commands::pds_replace_add_conversation_messages,
         persistent_store::commands::pds_replace_add_characters,
         persistent_store::commands::pds_replace_put_asset_aliases,
         persistent_store::commands::pds_replace_put_asset_owner_heads,
@@ -1087,6 +1105,14 @@ mod header_map_tests {
         assert_eq!(startup_failure_exit_code(&setup("cleanup-app-still-running")), 0);
         assert_eq!(startup_failure_exit_code(&setup("cleanup-lock-unavailable")), 1);
         assert_eq!(startup_failure_exit_code(&setup("invalid native path")), 1);
+    }
+
+    #[test]
+    fn ipc_read_guard_script_carries_its_target_flag() {
+        let script = ipc_read_guard_script();
+        assert!(!script.contains("__RISUNEST_ANDROID__"));
+        let flag = format!("const android = {};", cfg!(target_os = "android"));
+        assert!(script.contains(&flag));
     }
     use reqwest::header::{HeaderName, HeaderValue};
 

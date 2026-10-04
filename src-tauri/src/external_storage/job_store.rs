@@ -88,11 +88,11 @@ impl StartJobRequest {
             || self
                 .reason
                 .as_deref()
-                .is_some_and(|s| !["automatic", "manual"].contains(&s))
+                .is_some_and(|s| !["automatic", "manual", "exitDrain"].contains(&s))
             || self
                 .session
                 .as_deref()
-                .is_some_and(|s| s != "foreground")
+                .is_some_and(|s| !["foreground", "exitDrain"].contains(&s))
             || self.restore_areas.as_ref().is_some_and(|areas| {
                 areas.len() > 5
                     || areas.iter().any(|s| {
@@ -233,7 +233,7 @@ impl JobStore {
         .map_err(failure)?;
         Ok(Self(db))
     }
-    pub(crate) fn freeze_restore_bodies<O:serde::Serialize>(&self,job:&DurableJob,sources:&[super::lww_residency::PackedSource<O>],present:&std::collections::BTreeSet<String>) -> Result<()> {
+    pub(crate) fn freeze_restore_bodies(&self,job:&DurableJob,sources:&[super::lww_residency::PackedSource],present:&std::collections::BTreeSet<String>) -> Result<()> {
         let tx=self.0.unchecked_transaction().map_err(failure)?;
         let mut current=self.read(&job.id)?;
         let ready=current.summary["restoreBodiesReady"]==true;
@@ -258,16 +258,11 @@ impl JobStore {
         tx.execute("UPDATE external_requests SET value=?2 WHERE id=?1",rusqlite::params![job.id,serde_json::to_string(&current).map_err(failure)?]).map_err(failure)?;
         tx.commit().map_err(failure)
     }
-    /// Reads the next page of unsettled bodies. Sources read through one
-    /// interner share their catalog and pack objects across pages.
-    pub(crate) fn restore_body_page(&self,job:&str,after:&str,interner:&mut super::lww_residency::ObjectInterner)->Result<Vec<super::lww_residency::SharedPackedSource>> {
+    pub(crate) fn restore_body_page(&self,job:&str,after:&str)->Result<Vec<super::lww_residency::PackedSource>> {
         if self.read(job)?.summary["restoreBodiesReady"]!=true {return Err(ProviderError::new(ErrorKind::Corrupt));}
         let mut statement=self.0.prepare("SELECT source FROM external_restore_bodies WHERE job_id=?1 AND hash>?2 AND settled=0 ORDER BY hash LIMIT 128").map_err(failure)?;
         let rows=statement.query_map(rusqlite::params![job,after],|row|row.get::<_,String>(0)).map_err(failure)?;
-        rows.map(|row|{
-            let source:super::lww_residency::PackedSource=serde_json::from_str(&row.map_err(failure)?).map_err(failure)?;
-            Ok(source.interned(interner))
-        }).collect()
+        rows.map(|row|serde_json::from_str(&row.map_err(failure)?).map_err(failure)).collect()
     }
     pub(crate) fn restore_body(&self,job:&str,hash:&str)->Result<Option<super::lww_residency::PackedSource>> {
         let source:Option<String>=self.0.query_row("SELECT source FROM external_restore_bodies WHERE job_id=?1 AND hash=?2 AND settled=0",rusqlite::params![job,hash],|row|row.get(0)).optional().map_err(failure)?;
@@ -687,35 +682,6 @@ mod tests {
             revision: 1,
         }
     }
-    #[test]
-    fn restore_body_pages_share_one_copy_of_each_catalog_and_pack() {
-        use crate::external_storage::lww_residency::{synthetic_packed, ObjectInterner};
-        let root = tempfile::tempdir().unwrap();
-        let jobs = JobStore::open(root.path()).unwrap();
-        let job = DurableJob::new(request(), 1, identity());
-        jobs.put(&job).unwrap();
-        let sources = (0..130)
-            .map(|index| synthetic_packed(&format!("{index:064x}"), "library", 1, &["pack"]))
-            .collect::<Vec<_>>();
-        jobs.freeze_restore_bodies(&job, &sources, &std::collections::BTreeSet::new()).unwrap();
-        let mut interner = ObjectInterner::default();
-        let mut pages = Vec::new();
-        let mut after = String::new();
-        loop {
-            let page = jobs.restore_body_page(&job.id, &after, &mut interner).unwrap();
-            let Some(last) = page.last() else { break };
-            after = last.hash.clone();
-            pages.push(page);
-        }
-        assert_eq!(pages.len(), 2);
-        assert_eq!(pages.iter().map(Vec::len).sum::<usize>(), sources.len());
-        let first = &pages[0][0];
-        for source in pages.iter().flatten() {
-            assert!(std::ptr::eq(&*first.catalog, &*source.catalog));
-            assert!(std::ptr::eq(&*first.packs[0], &*source.packs[0]));
-        }
-    }
-
     #[test]
     fn cleanup_waits_for_worker_tail_after_the_job_claim_is_released() {
         let state = JobCommandState::default();

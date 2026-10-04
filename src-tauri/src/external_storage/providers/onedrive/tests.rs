@@ -1281,38 +1281,6 @@ fn an_expired_session_restarts_completes_or_conflicts_on_the_remote_truth() {
 }
 
 #[test]
-fn object_metadata_reads_the_item_and_never_its_content() {
-    runtime().block_on(async {
-        let mut replies = existing_open();
-        replies.push(json(200, &file_item("pack-m", 2_048, "etag-m")));
-        replies.push(json(404, "{\"error\":{\"code\":\"itemNotFound\"}}"));
-        let server = WireServer::start(replies);
-        let harness = harness(NOW_MS);
-        let provider = create(harness.dependencies.clone()).unwrap();
-        let cancel = Cancellation::default();
-        let (repository, _) = open(&provider, &config_for(&server, "personal"), OpenMode::Existing, &cancel)
-            .await
-            .unwrap();
-        let opened = server.requests.lock().unwrap().len();
-        let intent = ObjectIntent {
-            byte_length: 2_048,
-            ..intent_for(&repository, "pack-m", ObjectRole::Pack, &vec![b'm'; 2048])
-        };
-        let found = provider.lookup_metadata(&repository, &intent, None, &cancel).await.unwrap().unwrap();
-        assert_eq!(found.locator.object, "packs/pack-m");
-        assert_eq!(found.byte_length, 2_048);
-        assert!(found.version.is_some() && found.checksum.is_none() && found.complete);
-        assert!(provider.lookup_metadata(&repository, &intent, Some(&found.locator), &cancel).await.unwrap().is_none());
-        let records = server.requests.lock().unwrap();
-        assert_eq!(records.len(), opened + 2);
-        for record in &records[opened..] {
-            assert!(line(record).starts_with("GET ") && line(record).contains("packs/pack-m"));
-            assert!(!line(record).contains("/content"));
-        }
-    });
-}
-
-#[test]
 fn head_writes_send_exactly_one_request_and_never_retry_a_lost_response() {
     runtime().block_on(async {
         let mut replies = existing_open();

@@ -2223,12 +2223,6 @@ pub(crate) async fn external_storage_remove_connection(
         drop(pds);
         let mut store = ConnectionStore::open(&root)?;
         let stored = store.read(&connection_id)?;
-        runtime::native_store(&app)?
-            .external_lww_forget_target(&format!(
-                "{}:{}",
-                stored.descriptor.repository_id, stored.descriptor_locator.connection_identity
-            ))
-            .map_err(runtime::local_error)?;
         secrets::provider_vault(&root)
             .remove(&SecretRef(stored.credential_ref.clone()))
             .await?;
@@ -2239,13 +2233,6 @@ pub(crate) async fn external_storage_remove_connection(
             .remove(&SecretRef(stored.recovery_key_ref.clone()))
             .await?;
         store.remove(&connection_id)?;
-        // Sources left behind count as unavailable, because their connection is gone.
-        let forgotten = runtime::native_store(&app).and_then(|pds| {
-            pds.forget_external_connection_bodies(&connection_id).map_err(|error| runtime::local_error(error.code))
-        });
-        if let Err(error) = forgotten {
-            crate::nlog!("warn", "Removed external connection sources were kept: {error}");
-        }
         // A directory that stays behind is removed at the next startup.
         if let Err(error) = super::leftovers::remove_connection_directory(&root, &connection_id) {
             crate::nlog!("warn", "Removed external connection files were kept: {error}");

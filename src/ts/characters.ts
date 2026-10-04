@@ -482,7 +482,9 @@ export async function importChat(){
             }
         }
         else if(dat.name.endsWith('json')){
-            const json = JSON.parse(Buffer.from(dat.data).toString('utf-8'))
+            // The Buffer polyfill collects every code unit in an array before decoding,
+            // which needs several times the file size; a large chat file runs the renderer out of memory.
+            const json = JSON.parse(new TextDecoder('utf-8', { ignoreBOM: true }).decode(dat.data))
             if((json.type === 'risuAllChats' || json.type === 'risuChat') && json.ver === 2){
                 const folders = json.folders || []
                 const chats = Array.isArray(json.data) ? json.data : [json.data]

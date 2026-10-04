@@ -132,7 +132,7 @@ export interface AndroidSafDestinationResult {
 export interface AndroidSafDestinationEvent {
     requestId: string
     exportId?: string
-    sourceKind?: 'risuSave' | 'legacyBackup' | 'screenshot'
+    sourceKind?: 'risuSave' | 'legacyBackup' | 'screenshot' | 'download'
     state: 'succeeded' | 'failed' | 'cancelled'
     bytes?: number | null
     code?: string | null
@@ -464,17 +464,21 @@ function androidSafAbortError(
     code?: string | null
     warningCodes: string[]
 } {
-    return Object.assign(
-        new DOMException(
-            detail?.message ?? 'Android SAF export was cancelled',
-            'AbortError',
-        ),
-        {
-            requestId,
-            code: detail?.code,
-            warningCodes: detail?.warningCodes ?? [],
-        },
+    const error = new DOMException(
+        detail?.message ?? 'Android SAF export was cancelled',
+        'AbortError',
     )
+    // DOMException.prototype.code is a getter without a setter, so assigning it throws.
+    const own = (value: unknown) => ({ value, enumerable: true, writable: true, configurable: true })
+    return Object.defineProperties(error, {
+        requestId: own(requestId),
+        code: own(detail?.code),
+        warningCodes: own(detail?.warningCodes ?? []),
+    }) as DOMException & {
+        requestId: string
+        code?: string | null
+        warningCodes: string[]
+    }
 }
 
 export function isAndroidSafDestinationRequestActive(requestId: string): boolean {

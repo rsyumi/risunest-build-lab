@@ -5,6 +5,7 @@ import { get, writable } from 'svelte/store'
 import { invoke } from '@tauri-apps/api/core'
 import { doingChat } from '../process/generationState'
 import { reserveLibraryFileOperation, waitForLibraryFileOperation } from './libraryFileOperation'
+import { PayloadTooLargeError } from './nativePersistenceValue'
 
 import {
     NativeFileJobActivationCommittedError,
@@ -57,6 +58,8 @@ export interface NativeFileOperationError {
     code: string
     message: string
     recoveryRequired: boolean
+    /** The kind of a refused item that is too large to save. */
+    itemKind?: string
 }
 
 export interface NativeFileOperationOutcome {
@@ -142,6 +145,9 @@ function outcomeError(kind: NativeFileOperationKind, error: unknown): NativeFile
             message: cause instanceof Error ? cause.message : String(cause),
             recoveryRequired: true,
         }
+    }
+    if (error instanceof PayloadTooLargeError) {
+        return { code: error.code, message: error.message, recoveryRequired: false, itemKind: error.kind }
     }
     if (
         error !== null && typeof error === 'object' &&

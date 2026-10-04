@@ -4,6 +4,8 @@ mod character_json_export;
 mod character_png_export;
 pub mod charx;
 mod content;
+mod dataset_export;
+pub(crate) mod download_handoff;
 mod error;
 mod jpeg_asset;
 pub mod screenshot_output;
@@ -319,6 +321,10 @@ pub(crate) enum NativeFileJobStartRequest {
         destination: Option<String>,
         expected_revision: i64,
         module_index: u64,
+    },
+    ExportDataset {
+        destination: Option<String>,
+        expected_revision: i64,
     },
     PrepareContentImport {
         source: JobSource,
@@ -869,16 +875,18 @@ fn handoff_name(path: &Path, prefix: &str, suffix: &str) -> bool {
     })
 }
 
-fn cleanup_handoff_path(
+/// Checks that `path` is an app-owned handoff file; `false` when it is gone.
+fn owned_handoff_file(
     root: &Path,
     path: &Path,
     prefix: &str,
     suffix: &str,
     label: &str,
+    failure_code: &str,
 ) -> Result<bool, NativeJobError> {
     let handoffs_root = root.join("handoffs").canonicalize().map_err(|error| {
         NativeJobError::new(
-            "cleanup-failed",
+            failure_code,
             format!("{label} handoff root cannot be resolved: {error}"),
         )
     })?;
@@ -889,7 +897,7 @@ fn cleanup_handoff_path(
     {
         return Err(NativeJobError::new(
             "invalid-input",
-            format!("{label} handoff cleanup target is not app-owned"),
+            format!("{label} handoff target is not app-owned"),
         ));
     }
     let metadata = match fs::symlink_metadata(path) {
@@ -897,7 +905,7 @@ fn cleanup_handoff_path(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => {
             return Err(NativeJobError::new(
-                "cleanup-failed",
+                failure_code,
                 format!("{label} handoff metadata is unavailable: {error}"),
             ))
         }
@@ -905,7 +913,7 @@ fn cleanup_handoff_path(
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(NativeJobError::new(
             "invalid-input",
-            format!("{label} handoff cleanup target is not an owned regular file"),
+            format!("{label} handoff target is not an owned regular file"),
         ));
     }
     #[cfg(windows)]
@@ -915,9 +923,22 @@ fn cleanup_handoff_path(
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return Err(NativeJobError::new(
                 "invalid-input",
-                format!("{label} handoff cleanup target is a reparse point"),
+                format!("{label} handoff target is a reparse point"),
             ));
         }
+    }
+    Ok(true)
+}
+
+fn cleanup_handoff_path(
+    root: &Path,
+    path: &Path,
+    prefix: &str,
+    suffix: &str,
+    label: &str,
+) -> Result<bool, NativeJobError> {
+    if !owned_handoff_file(root, path, prefix, suffix, label, "cleanup-failed")? {
+        return Ok(false);
     }
     match fs::remove_file(path) {
         Ok(()) => Ok(true),
@@ -942,6 +963,8 @@ fn is_owned_handoff_name(path: &Path) -> bool {
         || handoff_name(path, "risu-character-card-", ".json")
         || handoff_name(path, "risu-character-card-", ".png")
         || handoff_name(path, "risu-module-", ".risum")
+        || handoff_name(path, dataset_export::PREFIX, dataset_export::SUFFIX)
+        || handoff_name(path, download_handoff::PREFIX, download_handoff::SUFFIX)
 }
 
 fn cleanup_stale_handoffs(root: &Path) -> Result<(), String> {
@@ -1040,6 +1063,10 @@ fn cleanup_character_card_handoff_path(root: &Path, path: &Path) -> Result<bool,
 
 fn cleanup_risu_module_handoff_path(root: &Path, path: &Path) -> Result<bool, NativeJobError> {
     cleanup_handoff_path(root, path, "risu-module-", ".risum", "RISUM")
+}
+
+fn cleanup_dataset_handoff_path(root: &Path, path: &Path) -> Result<bool, NativeJobError> {
+    cleanup_handoff_path(root, path, dataset_export::PREFIX, dataset_export::SUFFIX, "dataset")
 }
 
 fn cleanup_spool_directories_at(
@@ -1707,6 +1734,24 @@ impl NativeFileJobState {
                     prepared,
                 }
             }
+            NativeFileJobStartRequest::ExportDataset {
+                destination,
+                expected_revision,
+            } => {
+                let destination = destination.map(PathBuf::from);
+                if let Some(destination) = destination.as_deref() {
+                    validate_desktop_destination(destination)?;
+                }
+                let prepared =
+                    crate::persistent_store::commands::with_store_mut(app.state(), |store| {
+                        store.prepare_risu_save_export(expected_revision)
+                    })
+                    .map_err(native_store_error)?;
+                NativeFileJobTask::ExportDataset {
+                    destination,
+                    prepared,
+                }
+            }
             request @ NativeFileJobStartRequest::PrepareContentImport { .. } => {
                 return self.start_content(request);
             }
@@ -2348,6 +2393,16 @@ impl NativeFileJobState {
                         destination.as_deref(),
                         &job,
                     ),
+                    NativeFileJobTask::ExportDataset {
+                        destination,
+                        prepared,
+                    } => dataset_export::export_dataset(
+                        prepared,
+                        &owned_directory,
+                        &root.join("handoffs"),
+                        destination.as_deref(),
+                        &job,
+                    ),
                     NativeFileJobTask::ImportJpegAsset {
                         opened_source,
                         display_name,
@@ -2722,6 +2777,10 @@ enum NativeFileJobTask {
         module_index: u64,
         prepared: crate::persistent_store::PreparedRisuSaveExport,
     },
+    ExportDataset {
+        destination: Option<PathBuf>,
+        prepared: crate::persistent_store::PreparedRisuSaveExport,
+    },
     ImportJpegAsset {
         opened_source: Option<OpenedJobSource>,
         source: JobSource,
@@ -2755,6 +2814,7 @@ impl NativeFileJobTask {
             Self::ExportCharacterCharx { .. } => JobKind::ExportCharacterCharx,
             Self::ExportCharacterCard { .. } => JobKind::ExportCharacterCard,
             Self::ExportRisuModule { .. } => JobKind::ExportRisuModule,
+            Self::ExportDataset { .. } => JobKind::ExportDataset,
             Self::ImportJpegAsset { .. } => JobKind::ImportJpegAsset,
             #[cfg(feature = "native-kei-upload-pilot")]
             Self::KeiBackup { .. } => JobKind::KeiBackupUpload,
@@ -2792,7 +2852,8 @@ impl NativeFileJobTask {
             } => Some(*expected_revision),
             Self::ExportCharacterCharx { prepared, .. }
             | Self::ExportCharacterCard { prepared, .. }
-            | Self::ExportRisuModule { prepared, .. } => Some(prepared.revision),
+            | Self::ExportRisuModule { prepared, .. }
+            | Self::ExportDataset { prepared, .. } => Some(prepared.revision),
             #[cfg(feature = "native-kei-upload-pilot")]
             Self::KeiBackup { prepared } => Some(prepared.revision()),
             #[cfg(feature = "native-official-publication")]
@@ -3398,6 +3459,14 @@ pub(crate) fn native_risu_module_handoff_cleanup(
     logged("native_risu_module_handoff_cleanup", cleanup_risu_module_handoff_path(&state.root, Path::new(&path)))
 }
 
+#[tauri::command(async)]
+pub(crate) fn native_dataset_export_handoff_cleanup(
+    state: State<'_, NativeFileJobState>,
+    path: String,
+) -> Result<bool, NativeJobError> {
+    logged("native_dataset_export_handoff_cleanup", cleanup_dataset_handoff_path(&state.root, Path::new(&path)))
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum JobKind {
@@ -3413,6 +3482,7 @@ pub(crate) enum JobKind {
     ExportCharacterCharx,
     ExportCharacterCard,
     ExportRisuModule,
+    ExportDataset,
     PrepareContentImport,
     ImportJpegAsset,
     KeiBackupUpload,
@@ -3471,6 +3541,7 @@ pub(crate) enum JobStage {
     PreparingAttachments,
     ReadingDatabase,
     DecodingDatabase,
+    StagingCharacters,
     FinalizingStaging,
     AwaitingActivation,
     Activating,
@@ -3663,9 +3734,7 @@ fn verify_portable_body_receipt(repository:&Path,request:&PortableBodyRetryReque
         if authority!=request.binding_authority {return Ok(false);}
         let header=crate::persistent_store::lww::Header {request_id:request.job_id.clone(),binding_authority:serde_json::from_value(serde_json::json!(request.binding_authority))?};
         let receipt=crate::persistent_store::lww::completed_device_replacement_receipt(&library,&device,&header,&request.staging_id)?;
-        let activated=crate::persistent_store::lww::activated_receipt(&library,&request.job_id)?;
-        Ok(receipt.is_some_and(|receipt|receipt.revision.to_string()==request.activation_revision
-            && activated.as_ref().is_some_and(|(activated_revision,activated)|*activated_revision==receipt.revision && *activated==generation)))
+        Ok(receipt.is_some_and(|receipt|receipt.revision.to_string()==request.activation_revision && generation==format!("revision-{}",receipt.revision)))
     })().map_err(native_store_error)?;
     if !valid {return Err(NativeJobError::new("invalid-activation-receipt","Portable activated library identity differs"));}
     Ok(())
@@ -4391,6 +4460,7 @@ impl JobControl {
             || (status.kind == JobKind::ExportCharacterCharx && status.state.is_terminal())
             || (status.kind == JobKind::ExportCharacterCard && status.state.is_terminal())
             || (status.kind == JobKind::ExportRisuModule && status.state.is_terminal())
+            || (status.kind == JobKind::ExportDataset && status.state.is_terminal())
             || (status.kind == JobKind::ExportPortableBackup && status.state.is_terminal())
             || (status.kind == JobKind::ExportCompatibleLocalBackup && status.state.is_terminal())
             || (status.device_session_id.is_some() && status.state.is_terminal())
@@ -4713,6 +4783,7 @@ impl JobControl {
             JobKind::ExportCharacterCharx => JobPhase::WritingExport,
             JobKind::ExportCharacterCard => JobPhase::WritingExport,
             JobKind::ExportRisuModule => JobPhase::WritingExport,
+            JobKind::ExportDataset => JobPhase::WritingExport,
             JobKind::PrepareContentImport => JobPhase::ReadingSource,
             JobKind::ImportJpegAsset => JobPhase::ReadingSource,
             JobKind::KeiBackupUpload => JobPhase::WritingExport,
@@ -5424,7 +5495,6 @@ mod tests {
             repository_root,
             job_id,
             CasJobKind::OfficialPublicationOrExportPreparation,
-            crate::asset_repository::job_pins::CasJobOwner::for_test(),
             1,
         )
         .unwrap();
@@ -7304,7 +7374,6 @@ mod tests {
             repository_root,
             &job.id(),
             CasJobKind::CardOrModuleContentImport,
-            crate::asset_repository::job_pins::CasJobOwner::for_test(),
             1,
         )
         .unwrap();
@@ -7563,6 +7632,11 @@ mod tests {
                 "expectedRevision": 11,
                 "moduleIndex": 3
             }),
+            json!({
+                "kind": "export-dataset",
+                "destination": "C:\\chosen\\dataset.json",
+                "expectedRevision": 12
+            }),
         ];
         for case in &cases {
             assert!(case.get("assets").is_none());
@@ -7617,6 +7691,14 @@ mod tests {
                 module_index: 3,
             }
         ));
+        let dataset: NativeFileJobStartRequest = serde_json::from_value(cases[4].clone()).unwrap();
+        assert!(matches!(
+            dataset,
+            NativeFileJobStartRequest::ExportDataset {
+                destination: Some(destination),
+                expected_revision: 12,
+            } if destination == "C:\\chosen\\dataset.json"
+        ));
 
         assert_eq!(
             serde_json::to_value(JobKind::ExportCharacterCharx).unwrap(),
@@ -7629,6 +7711,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(JobKind::ExportRisuModule).unwrap(),
             json!("export-risu-module")
+        );
+        assert_eq!(
+            serde_json::to_value(JobKind::ExportDataset).unwrap(),
+            json!("export-dataset")
         );
     }
 
@@ -8118,7 +8204,11 @@ mod tests {
     #[test]
     fn terminal_native_content_export_receipts_keep_exact_recovery_kinds_until_forget() {
         let registry = JobRegistry::with_retention(0, Duration::ZERO);
-        for kind in [JobKind::ExportCharacterCard, JobKind::ExportRisuModule] {
+        for kind in [
+            JobKind::ExportCharacterCard,
+            JobKind::ExportRisuModule,
+            JobKind::ExportDataset,
+        ] {
             let job = registry.create(kind).unwrap();
             let id = job.id();
             job.start(JobPhase::WritingExport).unwrap();
@@ -8531,11 +8621,21 @@ mod tests {
                 "character-charx" => cleanup_character_charx_handoff_path,
                 "character-card" => cleanup_character_card_handoff_path,
                 "risu-module" => cleanup_risu_module_handoff_path,
+                "dataset-export" => cleanup_dataset_handoff_path,
+                "download" => |root, path| {
+                    cleanup_handoff_path(
+                        root,
+                        path,
+                        download_handoff::PREFIX,
+                        download_handoff::SUFFIX,
+                        "download",
+                    )
+                },
                 other => panic!("fixture grammar {other} has no cleanup entry point"),
             }
         };
         let grammars = fixture["managedHandoffs"].as_array().unwrap();
-        assert_eq!(grammars.len(), 6, "grammar count drifted from the fixture");
+        assert_eq!(grammars.len(), 8, "grammar count drifted from the fixture");
 
         for grammar in grammars {
             let kind = grammar["kind"].as_str().unwrap();
@@ -8620,6 +8720,8 @@ mod tests {
             format!("risu-character-card-{uuid}.json"),
             format!("risu-character-card-{uuid}.png"),
             format!("risu-module-{uuid}.risum"),
+            format!("risu-download-{uuid}.bin"),
+            format!("risu-dataset-{uuid}.json"),
         ];
         for name in &owned {
             fs::write(handoffs.join(name), b"synthetic handoff").unwrap();
@@ -8794,6 +8896,28 @@ mod tests {
     }
 
     #[test]
+    fn dataset_handoff_cleanup_removes_only_exact_owned_files_and_is_idempotent() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path().join("native-file-jobs");
+        let handoffs = root.join("handoffs");
+        fs::create_dir_all(&handoffs).unwrap();
+        let owned = handoffs.join(format!("risu-dataset-{}.json", Uuid::new_v4()));
+        let unrelated = handoffs.join("dataset.json");
+        fs::write(&owned, b"owned").unwrap();
+        fs::write(&unrelated, b"unrelated").unwrap();
+
+        assert!(cleanup_dataset_handoff_path(&root, &owned).unwrap());
+        assert!(!cleanup_dataset_handoff_path(&root, &owned).unwrap());
+        assert!(unrelated.is_file());
+        assert_eq!(
+            cleanup_dataset_handoff_path(&root, &unrelated)
+                .unwrap_err()
+                .code,
+            "invalid-input"
+        );
+    }
+
+    #[test]
     fn risu_module_handoff_cleanup_removes_only_exact_owned_files_and_is_idempotent() {
         let directory = TempDir::new().unwrap();
         let root = directory.path().join("native-file-jobs");
@@ -8872,7 +8996,8 @@ mod tests {
         let missing = native_portable_select_sections(app.state(), "missing-job".into(), selection);
         assert_eq!(missing.unwrap_err().code, "job-not-found");
         let metadata = tauri::async_runtime::block_on(native_content_source_metadata(app.state(), "not-a-token".into()));
-        let metadata = metadata.unwrap_err().code;
+        let Err(metadata) = metadata else { panic!("an unknown token is refused") };
+        let metadata = metadata.code;
         for (command, code) in [
             ("native_legacy_backup_handoff_cleanup", refused.as_str()),
             ("native_portable_select_sections", "job-not-found"),
@@ -8907,7 +9032,7 @@ mod tests {
 pub(crate) async fn native_content_source_metadata(
     state: tauri::State<'_, NativeFileJobState>,
     token: String,
-) -> Result<String, NativeJobError> {
+) -> Result<tauri::ipc::Response, NativeJobError> {
     logged("native_content_source_metadata", async move {
         let root = state.root.clone();
         tauri::async_runtime::spawn_blocking(move || {
@@ -8920,19 +9045,23 @@ pub(crate) async fn native_content_source_metadata(
                     "Content metadata exceeds 128 MiB",
                 ));
             }
-            let mut text = String::new();
+            let mut bytes = Vec::new();
             source
                 .file
                 .take(LIMIT + 1)
-                .read_to_string(&mut text)
+                .read_to_end(&mut bytes)
                 .map_err(|e| NativeJobError::new("invalid-input", e.to_string()))?;
-            if text.len() as u64 > LIMIT {
+            if bytes.len() as u64 > LIMIT {
                 return Err(NativeJobError::new(
                     "native-limit",
                     "Content metadata exceeds 128 MiB",
                 ));
             }
-            Ok(text)
+            std::str::from_utf8(&bytes)
+                .map_err(|e| NativeJobError::new("invalid-input", e.to_string()))?;
+            // Raw bytes take the streamed channel path on Android; a string
+            // response would be evaluated as one script.
+            Ok(tauri::ipc::Response::new(bytes))
         })
         .await
         .map_err(|e| NativeJobError::new("store-error", e.to_string()))?

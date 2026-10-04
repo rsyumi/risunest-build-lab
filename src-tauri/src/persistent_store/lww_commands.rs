@@ -98,12 +98,24 @@ pub(crate) fn pds_lww_commit_replacement(
     }))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UnitStateRequest {
+    #[serde(flatten)]
+    header: Header,
+    after_key: Option<risunest_sync_wire::unit::UnitKey>,
+    limit: DecimalU64,
+}
 #[tauri::command]
-pub(crate) fn pds_lww_finish_initial_publication(
+pub(crate) fn pds_lww_queue_unit_state_page(
     state: State<'_, PersistentStoreState>,
-    request: Header,
-) -> Result<bool, StoreError> {
-    logged("pds_lww_finish_initial_publication", with_store_mut(state, |store| {
-        store.lww_finish_initial_publication(&request)
+    request: UnitStateRequest,
+) -> Result<lww::UnitStatePage, StoreError> {
+    logged("pds_lww_queue_unit_state_page", with_store_mut(state, |store| {
+        store.lww_queue_unit_state_page(
+            &request.header,
+            request.after_key.as_ref(),
+            usize::try_from(request.limit.0).map_err(lww::error)?,
+        )
     }))
 }

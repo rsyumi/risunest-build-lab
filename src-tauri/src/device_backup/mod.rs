@@ -442,10 +442,7 @@ impl DeviceBackupState {
         require(current_authority==authority,"Portable activated library authority has changed")?;
         let receipt=crate::persistent_store::lww::completed_device_replacement_receipt(&library,&device,&header,stage)
             .map_err(|failure|error("device-receipt-invalid",&failure.to_string()))?;
-        let activated=crate::persistent_store::lww::activated_receipt(&library,&header.request_id)
-            .map_err(|failure|error("device-receipt-invalid",&failure.to_string()))?;
-        require(receipt.is_some_and(|receipt|receipt.revision.to_string()==revision
-            && activated.as_ref().is_some_and(|(activated_revision,activated)|*activated_revision==receipt.revision && *activated==generation)),"Portable adoption activation identity differs")
+        require(receipt.is_some_and(|receipt|receipt.revision.to_string()==revision && generation==format!("revision-{}",receipt.revision)),"Portable adoption activation identity differs")
     }
 
     /// Native-only: source section and binary import has fully completed.

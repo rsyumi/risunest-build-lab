@@ -413,8 +413,6 @@ fn restore_risu_save_reader_controlled<R: Read>(
         Ok(result) => Ok(result),
         Err(error) => match sink.abort(&staging_id) {
             Ok(()) => Err(error),
-            Err(StoreError::Validation { message })
-                if message == crate::persistent_store::commit::STAGE_ACTIVATED => Err(error),
             Err(abort_error) => Err(cleanup_failed(format!(
                 "{}; staging abort failed: {}",
                 error.message, abort_error
@@ -501,10 +499,9 @@ fn parse_and_stage_legacy<R: Read>(
         job,
         "legacy RisuSave",
     );
-    let mut input = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
-    let database = stream_legacy_database(&mut input, staging_id, job, sink)?;
+    let value = decode_messagepack(decoded, job)?.0;
     reader.complete_item()?;
-    finish_legacy_database(database, staging_id, job, reader, sink)
+    stage_legacy_database(value, staging_id, job, reader, sink)
 }
 
 fn parse_and_stage_compressed_legacy<R: Read>(
@@ -528,200 +525,58 @@ fn parse_and_stage_compressed_legacy<R: Read>(
         job,
         "legacy RisuSave",
     );
-    let mut input = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
-    let database = stream_legacy_database(&mut input, staging_id, job, sink)?;
-    let compressed = input.get_ref().inner.get_ref();
-    if !compressed.buffer().is_empty() || compressed.get_ref().remaining != 0 {
+    let (value, decoded) = decode_messagepack(decoded, job)?;
+    let decoder = decoded.into_inner();
+    let buffered = decoder.into_inner();
+    if !buffered.buffer().is_empty() || buffered.get_ref().remaining != 0 {
         return Err(corrupt("trailing data in legacy RisuSave gzip stream"));
     }
     reader.complete_item()?;
-    finish_legacy_database(database, staging_id, job, reader, sink)
+    stage_legacy_database(value, staging_id, job, reader, sink)
 }
 
-// The nesting a root entry and a `characters` element had left when the
-// whole database was decoded as one value.
-const LEGACY_ROOT_ENTRY_DEPTH: usize = rmpv::decode::MAX_DEPTH - 2;
-const LEGACY_CHARACTER_DEPTH: usize = rmpv::decode::MAX_DEPTH - 4;
-
-enum LegacyDatabase {
-    Root {
-        root: Map<String, Value>,
-        character_count: Option<u64>,
-    },
-    NotAnObject,
-}
-
-/// Reads the legacy root map one entry at a time. Each `characters` element is
-/// converted and staged as soon as it is read; the other entries are converted
-/// together afterwards so JavaScript map semantics stay the same.
-fn stream_legacy_database<S: TrackedSource>(
-    input: &mut BufReader<DecodedLimitReader<'_, S>>,
-    staging_id: &str,
+fn decode_messagepack<'a, R: Read>(
+    decoded: DecodedLimitReader<'a, R>,
     job: &JobControl,
-    sink: &dyn ReplacementSink,
-) -> Result<LegacyDatabase, NativeJobError> {
-    let marker =
-        rmp::decode::read_marker(input).map_err(|error| messagepack_error(error.into(), job))?;
-    let length = match marker {
-        rmp::Marker::FixMap(length) => u32::from(length),
-        rmp::Marker::Map16 => u32::from(u16::from_be_bytes(read_messagepack_length(input, job)?)),
-        rmp::Marker::Map32 => u32::from_be_bytes(read_messagepack_length(input, job)?),
-        marker => return decode_legacy_non_map(marker, input, job),
-    };
-    let mut entries = Vec::new();
-    let mut character_count = None;
-    for _ in 0..length {
-        let key = rmpv::decode::read_value_with_max_depth(input, LEGACY_ROOT_ENTRY_DEPTH)
-            .map_err(|error| messagepack_error(error, job))?;
-        match key.as_str().map(|key| key == "characters") {
-            None => return Err(invalid("legacy MessagePack object keys must be strings")),
-            Some(true) if character_count.is_some() => {
-                return Err(corrupt(
-                    "legacy MessagePack database has a duplicate characters key",
-                ))
-            }
-            Some(true) => {
-                character_count = Some(stream_legacy_characters(input, staging_id, job, sink)?);
-            }
-            Some(false) => {
-                let value = rmpv::decode::read_value_with_max_depth(input, LEGACY_ROOT_ENTRY_DEPTH)
-                    .map_err(|error| messagepack_error(error, job))?;
-                entries.push((key, value));
-            }
-        }
-    }
-    require_legacy_end(input, job)?;
-    let JsonSlot::Value(Value::Object(root)) = messagepack_map_to_json(entries)? else {
-        return Err(invalid("legacy MessagePack database must be an object"));
-    };
-    Ok(LegacyDatabase::Root {
-        root,
-        character_count,
-    })
-}
-
-fn stream_legacy_characters<S: TrackedSource>(
-    input: &mut BufReader<DecodedLimitReader<'_, S>>,
-    staging_id: &str,
-    job: &JobControl,
-    sink: &dyn ReplacementSink,
-) -> Result<u64, NativeJobError> {
-    let marker =
-        rmp::decode::read_marker(input).map_err(|error| messagepack_error(error.into(), job))?;
-    let total = match marker {
-        rmp::Marker::FixArray(length) => u64::from(length),
-        rmp::Marker::Array16 => u64::from(u16::from_be_bytes(read_messagepack_length(input, job)?)),
-        rmp::Marker::Array32 => u64::from(u32::from_be_bytes(read_messagepack_length(input, job)?)),
-        _ => return Err(invalid("legacy MessagePack characters must be an array")),
-    };
-    input
-        .get_mut()
-        .inner
-        .report_counts(|counts| counts.characters_total = Some(total))?;
-    let mut batch = Vec::new();
-    let mut batch_bytes = 0u64;
-    for index in 0..total {
-        if job.is_cancel_requested() {
-            return Err(cancelled("restore cancelled while staging legacy database"));
-        }
-        let start = decoded_position(input);
-        let packed = rmpv::decode::read_value_with_max_depth(input, LEGACY_CHARACTER_DEPTH)
-            .map_err(|error| messagepack_error(error, job))?;
-        let bytes = decoded_position(input) - start;
-        let mut character = match messagepack_to_json(packed)? {
-            JsonSlot::Value(value) => value,
-            JsonSlot::Undefined => Value::Null,
-        };
-        pocket_features::character(&mut character, &format!("character:{index}"))
-            .map_err(invalid)?;
-        assign_legacy_chat_ids(std::slice::from_mut(&mut character))?;
-        if !batch.is_empty() && batch_bytes.saturating_add(bytes) > CHARACTER_BATCH_BYTES as u64 {
-            sink.add_characters(staging_id, &batch)
-                .map_err(store_error)?;
-            batch.clear();
-            batch_bytes = 0;
-        }
-        batch.push(character);
-        batch_bytes = batch_bytes.saturating_add(bytes);
-        input
-            .get_mut()
-            .inner
-            .report_counts(|counts| counts.characters = index + 1)?;
-        if batch.len() >= CHARACTER_BATCH_COUNT {
-            sink.add_characters(staging_id, &batch)
-                .map_err(store_error)?;
-            batch.clear();
-            batch_bytes = 0;
-        }
-    }
-    if !batch.is_empty() {
-        sink.add_characters(staging_id, &batch)
-            .map_err(store_error)?;
-    }
-    Ok(total)
-}
-
-// A root that is not a map is still decoded whole, so it fails the same way.
-fn decode_legacy_non_map<B: Read>(
-    marker: rmp::Marker,
-    input: &mut B,
-    job: &JobControl,
-) -> Result<LegacyDatabase, NativeJobError> {
-    let marker = [marker.to_u8()];
-    let packed = rmpv::decode::read_value(&mut marker.as_slice().chain(&mut *input))
-        .map_err(|error| messagepack_error(error, job))?;
-    require_legacy_end(input, job)?;
-    match messagepack_to_json(packed)? {
-        JsonSlot::Value(_) => Ok(LegacyDatabase::NotAnObject),
-        JsonSlot::Undefined => Err(invalid("legacy MessagePack database cannot be undefined")),
-    }
-}
-
-fn read_messagepack_length<const N: usize>(
-    input: &mut impl Read,
-    job: &JobControl,
-) -> Result<[u8; N], NativeJobError> {
-    let mut bytes = [0u8; N];
-    input
-        .read_exact(&mut bytes)
-        .map_err(|error| messagepack_error(rmpv::decode::Error::InvalidDataRead(error), job))?;
-    Ok(bytes)
-}
-
-fn require_legacy_end(input: &mut impl Read, job: &JobControl) -> Result<(), NativeJobError> {
+) -> Result<(Value, DecodedLimitReader<'a, R>), NativeJobError> {
+    let mut buffered = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
+    let packed =
+        rmpv::decode::read_value(&mut buffered).map_err(|error| messagepack_error(error, job))?;
     let mut trailing = [0u8; 1];
-    let read = input
+    let read = buffered
         .read(&mut trailing)
         .map_err(|error| messagepack_io_error(error, job))?;
     if read != 0 {
         return Err(corrupt("trailing data after legacy MessagePack value"));
     }
-    Ok(())
+    let value = match messagepack_to_json(packed)? {
+        JsonSlot::Value(value) => value,
+        JsonSlot::Undefined => {
+            return Err(invalid("legacy MessagePack database cannot be undefined"))
+        }
+    };
+    Ok((value, buffered.into_inner()))
 }
 
-fn decoded_position<S: Read>(input: &BufReader<DecodedLimitReader<'_, S>>) -> u64 {
-    input.get_ref().completed - input.buffer().len() as u64
-}
-
-fn finish_legacy_database<R: Read>(
-    database: LegacyDatabase,
+fn stage_legacy_database<R: Read>(
+    value: Value,
     staging_id: &str,
     job: &JobControl,
     reader: &mut TrackedReader<'_, R>,
     sink: &dyn ReplacementSink,
 ) -> Result<ParsedCounts, NativeJobError> {
-    let (mut root, character_count) = match database {
-        LegacyDatabase::Root {
-            root,
-            character_count: Some(count),
-        } => (root, count),
-        LegacyDatabase::Root { .. } => {
-            return Err(invalid("legacy MessagePack characters must be an array"))
-        }
-        LegacyDatabase::NotAnObject => {
-            return Err(invalid("legacy MessagePack database must be an object"))
-        }
+    let mut root = match value {
+        Value::Object(root) => root,
+        _ => return Err(invalid("legacy MessagePack database must be an object")),
     };
+    let mut characters = match root.shift_remove("characters") {
+        Some(Value::Array(characters)) => characters,
+        _ => return Err(invalid("legacy MessagePack characters must be an array")),
+    };
+    for (index, character) in characters.iter_mut().enumerate() {
+        pocket_features::character(character, &format!("character:{index}")).map_err(invalid)?;
+    }
+    assign_legacy_chat_ids(&mut characters)?;
     let presets = match root.shift_remove("botPresets") {
         Some(Value::Array(presets)) => presets,
         Some(_) => return Err(invalid("legacy MessagePack botPresets must be an array")),
@@ -745,7 +600,38 @@ fn finish_legacy_database<R: Read>(
     }
     root.entry("pluginCustomStorage".to_owned())
         .or_insert_with(|| Value::Object(Map::new()));
+
+    let character_total = characters.len() as u64;
+    reader.counts.characters_total = Some(character_total);
     reader.counts.presets = presets.len() as u64;
+    reader.report_stage_items(JobStage::StagingCharacters, 0, Some(character_total))?;
+    let mut start = 0;
+    while start < characters.len() {
+        if job.is_cancel_requested() {
+            return Err(cancelled("restore cancelled while staging legacy database"));
+        }
+        let mut end = start;
+        let mut bytes = 0usize;
+        while end < characters.len() && end - start < CHARACTER_BATCH_COUNT {
+            let character_bytes = serde_json::to_vec(&characters[end])
+                .map_err(|error| corrupt(format!("legacy character is not JSON: {error}")))?
+                .len();
+            if end > start && bytes.saturating_add(character_bytes) > CHARACTER_BATCH_BYTES {
+                break;
+            }
+            bytes = bytes.saturating_add(character_bytes);
+            end += 1;
+        }
+        sink.add_characters(staging_id, &characters[start..end])
+            .map_err(store_error)?;
+        start = end;
+        reader.counts.characters = start as u64;
+        reader.report_stage_items(
+            JobStage::StagingCharacters,
+            start as u64,
+            Some(character_total),
+        )?;
+    }
 
     job.set_phase(JobPhase::StagingDatabase)
         .map_err(|error| job_error(job, error))?;
@@ -757,7 +643,7 @@ fn finish_legacy_database<R: Read>(
     sink.put_presets(staging_id, &presets)
         .map_err(store_error)?;
     Ok(ParsedCounts {
-        character_count,
+        character_count: characters.len() as u64,
         preset_count: presets.len() as u64,
     })
 }
@@ -998,34 +884,6 @@ impl<R: Read> Read for RemainingSourceReader<'_, '_, R> {
             .map_err(native_error_to_io)?;
         self.remaining -= read as u64;
         Ok(read)
-    }
-}
-
-/// Reaches the tracked source beneath the legacy decoders, whose counters
-/// every source read reports.
-trait TrackedSource: Read {
-    fn report_counts(
-        &mut self,
-        update: impl FnOnce(&mut ImportCounts),
-    ) -> Result<(), NativeJobError>;
-}
-
-impl<R: Read> TrackedSource for RemainingSourceReader<'_, '_, R> {
-    fn report_counts(
-        &mut self,
-        update: impl FnOnce(&mut ImportCounts),
-    ) -> Result<(), NativeJobError> {
-        update(&mut self.reader.counts);
-        self.reader.report()
-    }
-}
-
-impl<S: TrackedSource> TrackedSource for GzDecoder<BufReader<S>> {
-    fn report_counts(
-        &mut self,
-        update: impl FnOnce(&mut ImportCounts),
-    ) -> Result<(), NativeJobError> {
-        self.get_mut().get_mut().report_counts(update)
     }
 }
 
@@ -2625,9 +2483,6 @@ fn store_error(error: StoreError) -> NativeJobError {
 }
 
 #[cfg(test)]
-mod legacy_stream_tests;
-
-#[cfg(test)]
 mod tests {
     use super::super::*;
     use super::*;
@@ -3150,7 +3005,7 @@ mod tests {
                 use crate::asset_repository::job_pins::{CasJobKind, CasReleaseOutcome, DurableCasJob};
                 use crate::asset_repository::PayloadCas;
                 let cas = PayloadCas::new(self.directory).unwrap();
-                let mut durable = DurableCasJob::begin(self.directory, &self.job.id(), CasJobKind::LocalBackupRestore, crate::asset_repository::job_pins::CasJobOwner::for_test(), 0).unwrap();
+                let mut durable = DurableCasJob::begin(self.directory, &self.job.id(), CasJobKind::LocalBackupRestore, 0).unwrap();
                 let payloads = super::super::legacy_backup::prepare_legacy_restore_payloads(entries, &cas, &mut durable, &NeverCancelled)?;
                 self.sink.cold_payloads = Some(payloads.cold_payloads);
                 durable.seal(&mut self.sink.store.lock().unwrap(), 0).unwrap();
@@ -3429,27 +3284,6 @@ mod tests {
         assert_eq!(store.materialize(Some(1)).unwrap()["username"], "Old");
     }
 
-    #[test]
-    fn a_failure_after_the_library_commit_keeps_the_restored_library() {
-        let (directory, sink) = fixture();
-        let path = directory.path().join("committed.risudat");
-        fs::write(&path, save_bytes(valid_blocks())).unwrap();
-        sink.store.lock().unwrap().device_store().unwrap().connection().execute_batch(
-            "CREATE TRIGGER fail_completion BEFORE UPDATE OF complete ON lww_intents
-             BEGIN SELECT RAISE(ABORT,'synthetic completion failure'); END;",
-        ).unwrap();
-        let registry = JobRegistry::default();
-        let job = registry.create(JobKind::RestoreBlockRisuSave).unwrap();
-
-        let error = restore_block_risu_save_path(&path, 1, &job, &sink).unwrap_err();
-
-        assert_ne!(error.code, "cleanup-failed", "{}", error.message);
-        assert_eq!(sink.abort_calls.load(Ordering::Acquire), 1);
-        let store = sink.store.lock().unwrap();
-        assert_eq!(store.revision().unwrap(), 2);
-        assert_eq!(store.materialize(None).unwrap()["username"], "Imported");
-    }
-
     fn msgpackr_parity_fixture() -> Value {
         serde_json::from_str(MSGPACKR_PARITY_FIXTURE).unwrap()
     }
@@ -3458,24 +3292,6 @@ mod tests {
         let mut bytes = vec![0, b'R', b'I', b'S', b'U', b'S', b'A', b'V', b'E', 0, kind];
         bytes.extend_from_slice(payload);
         bytes
-    }
-
-    fn stage_legacy_json(
-        database: &Value,
-        staging_id: &str,
-        job: &JobControl,
-        sink: &dyn ReplacementSink,
-    ) -> Result<ParsedCounts, NativeJobError> {
-        let payload = super::legacy_stream_tests::messagepack_bytes(
-            &super::legacy_stream_tests::messagepack_from_json(database),
-        );
-        let wire = legacy_wire(7, &payload);
-        let mut reader = TrackedReader::new(wire.as_slice(), wire.len() as u64, job);
-        read_risu_save_format(&mut reader)?;
-        let parsed =
-            parse_and_stage_legacy(&mut reader, staging_id, job, sink, RestoreLimits::default())?;
-        reader.require_eof()?;
-        Ok(parsed)
     }
 
     fn assert_failed_restore_preserves_active(bytes: &[u8], expected: &str) {
@@ -3744,7 +3560,8 @@ mod tests {
             .unwrap();
         job.start(JobPhase::ReadingSource).unwrap();
         let staging_id = sink.begin().unwrap().staging_id;
-        stage_legacy_json(&database, &staging_id, &job, &sink).unwrap();
+        let mut reader = TrackedReader::new(io::empty(), 0, &*job);
+        stage_legacy_database(database.clone(), &staging_id, &job, &mut reader, &sink).unwrap();
         sink.commit(&staging_id, 1).unwrap();
         let restored = sink.store.lock().unwrap().materialize(None).unwrap();
         let chats = restored["characters"][0]["chats"].as_array().unwrap();
@@ -3779,7 +3596,8 @@ mod tests {
             .unwrap();
         job.start(JobPhase::ReadingSource).unwrap();
         let staging_id = sink.begin().unwrap().staging_id;
-        stage_legacy_json(&database, &staging_id, &job, &sink).unwrap();
+        let mut reader = TrackedReader::new(io::empty(), 0, &*job);
+        stage_legacy_database(database, &staging_id, &job, &mut reader, &sink).unwrap();
         sink.commit(&staging_id, 1).unwrap();
 
         let exported_path = {
@@ -3826,7 +3644,9 @@ mod tests {
                 .unwrap();
             job.start(JobPhase::ReadingSource).unwrap();
             let staging_id = sink.begin().unwrap().staging_id;
-            let error = match stage_legacy_json(&database, &staging_id, &job, &sink) {
+            let mut reader = TrackedReader::new(io::empty(), 0, &*job);
+            let error = match stage_legacy_database(database, &staging_id, &job, &mut reader, &sink)
+            {
                 Ok(_) => panic!("{key} must reject a present non-array value"),
                 Err(error) => error,
             };

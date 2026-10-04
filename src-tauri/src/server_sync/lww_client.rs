@@ -298,55 +298,17 @@ impl LwwClient {
         .admit()?;
         Ok(admitted.incoming_upper_ms(&target, elapsed)?.into())
     }
-    /// The client for the registration that sent a publication. The current
-    /// address asks for it when that registration is the one in use.
-    fn registration_client(&self, publication: &Publication) -> Result<Option<ServerClient>> {
-        let current = self.client.config();
-        if publication.config.library_id == current.library_id
-            && publication.config.device_id == current.device_id
-        {
-            return Ok(None);
-        }
-        #[allow(unused_mut)]
-        let mut client = ServerClient::with_cancellation(
+    pub(crate) fn settle(&self, publication: &Publication) -> Result<OperationReceipt> {
+        let original = ServerClient::with_cancellation(
             publication.config.resolve(&self.root)?,
             self.cancelled.clone(),
         )?;
         #[cfg(test)]
-        {
-            client.test_io = self.client.test_io.clone();
-        }
-        Ok(Some(client))
-    }
-    /// Whether the server that holds a publication answers for it. An address
-    /// that cannot be reached or no longer serves this library does not, and
-    /// neither does a registration whose credential this device cannot read.
-    pub(crate) fn answers(&self, publication: &Publication) -> Result<bool> {
-        let resolved = match self.registration_client(publication) {
-            Err(error) if error.code == "device-credential-unavailable" => return Ok(false),
-            resolved => resolved?,
+        let original = {
+            let mut original = original;
+            original.test_io = self.client.test_io.clone();
+            original
         };
-        let attempt = resolved.as_ref().unwrap_or(&self.client).request_ambiguous_mutation(
-            reqwest::Method::GET,
-            &format!("operations/{}", publication.request.operation_id),
-            None,
-            &[],
-            MAX_METADATA_BYTES,
-        )?;
-        Ok(match attempt {
-            super::client::RequestAttempt::Response(reply) => match reply.status {
-                404 => super::client::response_code(&reply).as_deref() == Some("operation-not-found"),
-                502..=504 => false,
-                _ => true,
-            },
-            super::client::RequestAttempt::Failure { error, .. } => {
-                !super::client::is_ambiguous_transient(&error) && error.code != "directory-unreachable"
-            }
-        })
-    }
-    pub(crate) fn settle(&self, publication: &Publication) -> Result<OperationReceipt> {
-        let resolved = self.registration_client(publication)?;
-        let original = resolved.as_ref().unwrap_or(&self.client);
         let path = format!("operations/{}", publication.request.operation_id);
         let reply = original.request(
             reqwest::Method::GET,
@@ -356,9 +318,6 @@ impl LwwClient {
             &[],
             MAX_METADATA_BYTES,
         )?;
-        if reply.status == 404 && super::client::response_code(&reply).as_deref() != Some("operation-not-found") {
-            return Err(SyncError::new("server-unreachable", 503));
-        }
         let receipt = if reply.status == 404 {
             let (_, receipt) = original.json(
                 reqwest::Method::POST,
@@ -431,9 +390,6 @@ impl LwwClient {
     pub(crate) fn fence_new_device(&self, store: &mut PersistentStore) -> Result<()> {
         self.log.prune()?;
         for publication in self.log.pending()? {
-            if !self.answers(&publication)? {
-                continue;
-            }
             match self.settle(&publication) {
                 Ok(receipt) => self.acknowledge(store, &publication, &receipt)?,
                 Err(error) if error.status == 401 => {}
@@ -454,6 +410,7 @@ impl LwwClient {
         for publication in self.log.pending()? {
             if publication.config.library_id != former.library_id
                 || publication.config.device_id != former.device_id
+                || publication.config.endpoint != former.endpoint
             {
                 return Err(SyncError::new("publication-unsettled", 409));
             }
@@ -501,6 +458,7 @@ impl LwwClient {
         fit_push_page(&mut request, &mut entries)?;
         let cache = Cache::open(&store.repository_root().join("server-sync/lww-cache"))?
             .with_library(store.repository_root())?;
+        let transfer = Transfer::new(&self.client, &cache)?;
         let mut objects = BTreeSet::new();
         for entry in &entries {
             self.check()?;
@@ -575,40 +533,28 @@ impl LwwClient {
                 }
             }
         }
-        let check = || self.check();
-        let mut previous = super::previous_storage::PreviousStorage::new(
-            store.repository_root(),
-            &check,
-            self.cancelled.clone(),
-        );
         for hash in &objects {
             if cache.stat_object(hash)?.is_none() {
                 if let Some(body) = store.lww_object_body(hash)? {
                     cache.put(&body)?;
-                } else {
-                    previous.observe(store, hash)?;
                 }
             }
         }
-        Transfer::new(&self.client, &cache)?
-            .with_held(&previous)
-            .upload_with_hints(
-                &objects.into_iter().collect::<Vec<_>>(),
-                &[],
-                false,
-                &std::collections::BTreeMap::new(),
-            )?;
-        let config = self
-            .access
-            .clone()
-            .or(store.server_stored_config()?)
-            .ok_or_else(|| SyncError::new("server-unconfigured", 409))?;
-        previous.retain(&self.client, &config)?;
+        transfer.upload_with_hints(
+            &objects.into_iter().collect::<Vec<_>>(),
+            &[],
+            false,
+            &std::collections::BTreeMap::new(),
+        )?;
         let publication = Publication {
             authority: header.binding_authority,
             request,
             entries,
-            config,
+            config: self
+                .access
+                .clone()
+                .or(store.server_stored_config()?)
+                .ok_or_else(|| SyncError::new("server-unconfigured", 409))?,
         };
         let body = self.log.prepare(&publication)?;
         self.check()?;

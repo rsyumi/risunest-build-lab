@@ -63,7 +63,6 @@ webp = "0.3.1"
 flate2 = "1.1.2"
 crc32fast = "1.5.0"
 rmpv = "1.3.0"
-rmp = "0.8.15"
 time = { version = "0.3.55", features = ["formatting", "large-dates", "parsing"] }
 [features]
 default = ["native-kei-upload-pilot", "native-official-publication"]
@@ -161,9 +160,13 @@ tauri = { version = "2.11.6", features = ["test"] }
 regex = "1.13.1"
 
 [patch.crates-io]
+# On Android, run main-frame-only scripts in the top frame and stream large
+# custom-protocol responses instead of copying them into one Java array.
 wry = { path = "../crates/wry" }
 # Keep failed desktop updates from closing or discarding the installed app.
 tauri-plugin-updater = { path = "../crates/tauri-plugin-updater" }
 # Let the window state file follow the manifest root instead of the
 # identifier-derived configuration directory.
 tauri-plugin-window-state = { path = "../crates/tauri-plugin-window-state" }
+# Accept a string request body as text instead of a JSON number array.
+tauri-plugin-http = { path = "../crates/tauri-plugin-http" }

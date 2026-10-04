@@ -9,9 +9,11 @@ import type {
     StartExternalJobRequest,
 } from './types'
 
-export type ExternalExecutionSession = { kind: 'foreground'; id: string }
+export type ExternalExecutionSession =
+    | { kind: 'foreground'; id: string }
+    | { kind: 'exitDrain'; id: string }
 
-export type ExternalJobReason = 'automatic' | 'manual'
+export type ExternalJobReason = 'automatic' | 'manual' | 'exitDrain'
 
 export interface ExternalStorageJobBridge {
     startJob(request: StartExternalJobRequest, jobId?: string): Promise<ExternalJobSummary>
@@ -21,6 +23,7 @@ export interface ExternalStorageJobBridge {
 
 export interface ExternalStorageControllerDependencies {
     wait?(delay: number, signal?: AbortSignal): Promise<void>
+    applyReceived?(job: ExternalJobSummary): Promise<void>
 }
 
 export interface ExternalControllerRequest {
@@ -174,6 +177,16 @@ export function createExternalStorageController(
         while (!terminalStates.has(job.state)) {
             background?.progress(measuredTaskPercent(Number(job.completedBytes), Number(job.totalBytes)))
             throwIfAborted(signal)
+            if (job.state === 'waiting' && job.phase === 'remote-apply') {
+                throwIfAborted(signal)
+                if (!dependencies.applyReceived) {
+                    throw new Error('External received state has no activation handler')
+                }
+                await dependencies.applyReceived(job)
+                job = await bridge.getJob(job.id)
+                throwIfAborted(signal)
+                continue
+            }
             if (job.state === 'waiting' && job.phase !== 'device-capture') return job
             await pause(job.state === 'waiting' ? 5_000 : 500, signal)
             throwIfAborted(signal)
@@ -190,7 +203,8 @@ export function createExternalStorageController(
                 run.cancelling = undefined
             }
             if (run.cancelled || run.goals.length === 0) break
-            const selectedGoal = run.goals.reduce((current, candidate) =>
+            const sessionGoal = run.goals.find(candidate => candidate.request.reason === 'exitDrain')
+            const selectedGoal = sessionGoal ?? run.goals.reduce((current, candidate) =>
                 candidate.revision > current.revision ? candidate : current)
             const latest = run.goals
                 .filter(candidate => candidate.request.kind === selectedGoal.request.kind)

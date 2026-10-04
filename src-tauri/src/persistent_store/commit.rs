@@ -205,7 +205,7 @@ fn commit_inner(
                 let after = super::lww::capture_targets(transaction, generation, input, asset_aliases, false, &conversation_orders)?;
                 let changed = super::lww::record_changes(transaction, before, after, stamp, header.binding_authority, &header.request_id)?;
                 super::lww::refresh_orders(transaction, generation,&changed)?;
-                transaction.execute("INSERT INTO lww_requests(request_id,digest,revision) VALUES(?1,?2,?3)", params![header.request_id, digest, current_revision(transaction)?+1])?;
+                transaction.execute("INSERT INTO lww_requests VALUES(?1,?2,?3)", params![header.request_id, digest, current_revision(transaction)?+1])?;
             }
             Ok(())
         },
@@ -495,7 +495,6 @@ fn put_asset_owner_head(
 pub(super) fn replace_begin(connection: &mut Connection) -> StoreResult<StagingResult> {
     let staging_id = format!("staging-{}", uuid::Uuid::new_v4());
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    begin_generation(&transaction, &staging_id)?;
     put_root(&transaction, &staging_id, &Value::Object(Map::new()))?;
     transaction.commit()?;
     Ok(StagingResult { staging_id })
@@ -551,7 +550,17 @@ fn replace_plugin_storage_values(
         "DELETE FROM plugin_storage WHERE generation = ?1",
         [generation],
     )?;
-    for (ordinal, entry) in values.iter().enumerate() {
+    put_plugin_storage_values(transaction, generation, values, carried, 0)
+}
+
+fn put_plugin_storage_values(
+    transaction: &Transaction<'_>,
+    generation: &str,
+    values: &[super::PluginStorageValue],
+    carried: &HashMap<String, String>,
+    first_ordinal: i64,
+) -> StoreResult<()> {
+    for (offset, entry) in values.iter().enumerate() {
         let import_batch = plugin_owner::is_unowned(&entry.owner).then(|| {
             carried
                 .get(entry.key.as_str())
@@ -564,10 +573,50 @@ fn replace_plugin_storage_values(
             &entry.owner,
             &entry.key,
             &entry.value,
-            Some(ordinal as i64),
+            Some(first_ordinal + offset as i64),
             import_batch,
         )?;
     }
+    Ok(())
+}
+
+fn next_plugin_storage_ordinal(transaction: &Transaction<'_>, generation: &str) -> StoreResult<i64> {
+    Ok(transaction.query_row(
+        "SELECT COALESCE(MAX(ordinal) + 1, 0) FROM plugin_storage WHERE generation = ?1",
+        [generation],
+        |row| row.get(0),
+    )?)
+}
+
+/// Appends plugin values after those already staged, in the order given.
+pub(super) fn replace_add_plugin_storage_values(
+    connection: &mut Connection,
+    staging_id: &str,
+    values: &[super::PluginStorageValue],
+) -> StoreResult<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    require_staging(&transaction, staging_id)?;
+    let carried = carried_plugin_import_batches(&transaction)?;
+    let first = next_plugin_storage_ordinal(&transaction, staging_id)?;
+    put_plugin_storage_values(&transaction, staging_id, values, &carried, first)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Appends entries of a root's `pluginCustomStorage`, owned through the
+/// matching `pluginStorageMeta` entries, as staging the whole root would.
+pub(super) fn replace_add_plugin_storage(
+    connection: &mut Connection,
+    staging_id: &str,
+    storage: &Map<String, Value>,
+    meta: Option<&Map<String, Value>>,
+) -> StoreResult<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    require_staging(&transaction, staging_id)?;
+    let carried = carried_plugin_import_batches(&transaction)?;
+    let first = next_plugin_storage_ordinal(&transaction, staging_id)?;
+    put_plugin_storage_map(&transaction, staging_id, storage, meta, &carried, first)?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -592,7 +641,6 @@ pub(super) fn replace_add_characters(
             ));
         }
         put_full_character(&transaction, staging_id, character, configured_index)?;
-        page_staged_conversations(&transaction, staging_id, character_id)?;
         configured_index += 1;
     }
     transaction.commit()?;
@@ -666,9 +714,30 @@ pub(super) fn replace_put_conversation_row(
         message_count,
         detail,
     )?;
-    page_staged_conversation(&transaction, staging_id, character_id, conversation_id)?;
     transaction.commit()?;
     Ok(())
+}
+
+/// Stages a conversation whose messages follow in pages, with the recency it
+/// would get if it were staged with its messages.
+pub(super) fn replace_put_conversation(
+    connection: &mut Connection,
+    staging_id: &str,
+    character_id: &str,
+    configured_index: i64,
+    conversation: &Value,
+    message_count: i64,
+    last_message_time: Option<&Value>,
+) -> StoreResult<()> {
+    replace_put_conversation_row(
+        connection,
+        staging_id,
+        character_id,
+        configured_index,
+        conversation,
+        conversation_recent_at(conversation, last_message_time),
+        message_count,
+    )
 }
 
 pub(super) fn replace_add_conversation_messages(
@@ -691,7 +760,6 @@ pub(super) fn replace_add_conversation_messages(
             "Persistent data import message pages must be contiguous",
         ));
     }
-    super::message_pages::forget_pages(&transaction, staging_id, character_id, conversation_id)?;
     insert_messages(
         &transaction,
         staging_id,
@@ -700,46 +768,7 @@ pub(super) fn replace_add_conversation_messages(
         start,
         messages,
     )?;
-    page_staged_conversation(&transaction, staging_id, character_id, conversation_id)?;
     transaction.commit()?;
-    Ok(())
-}
-
-/// Pages a staged conversation once all of its messages are written, so that
-/// activation reads its manifest instead of its messages.
-pub(super) fn page_staged_conversation(
-    transaction: &Transaction<'_>,
-    staging_id: &str,
-    character_id: &str,
-    conversation_id: &str,
-) -> StoreResult<()> {
-    let complete: Option<bool> = transaction
-        .query_row(
-            "SELECT c.message_count = (SELECT count(*) FROM messages m WHERE m.generation = c.generation
-                AND m.character_id = c.character_id AND m.conversation_id = c.conversation_id)
-             FROM conversations c WHERE c.generation = ?1 AND c.character_id = ?2 AND c.conversation_id = ?3",
-            params![staging_id, character_id, conversation_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if complete == Some(true) {
-        super::message_pages::capture_manifest(transaction, staging_id, character_id, conversation_id, None)?;
-    }
-    Ok(())
-}
-
-fn page_staged_conversations(
-    transaction: &Transaction<'_>,
-    staging_id: &str,
-    character_id: &str,
-) -> StoreResult<()> {
-    let conversations = transaction
-        .prepare("SELECT conversation_id FROM conversations WHERE generation = ?1 AND character_id = ?2")?
-        .query_map(params![staging_id, character_id], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    for conversation_id in conversations {
-        page_staged_conversation(transaction, staging_id, character_id, &conversation_id)?;
-    }
     Ok(())
 }
 
@@ -751,6 +780,39 @@ pub(super) fn replace_put_presets(
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     require_staging(&transaction, staging_id)?;
     replace_presets(&transaction, staging_id, presets)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Appends presets after those already staged.
+pub(super) fn replace_add_presets(
+    connection: &mut Connection,
+    staging_id: &str,
+    presets: &[Value],
+) -> StoreResult<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    require_staging(&transaction, staging_id)?;
+    let mut ids = HashSet::new();
+    for preset in presets {
+        let id = required_string(preset, "id", "Preset")?;
+        let staged = transaction
+            .query_row(
+                "SELECT 1 FROM bot_presets WHERE generation = ?1 AND preset_id = ?2",
+                params![staging_id, id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if staged || !ids.insert(id) {
+            return Err(validation("Duplicate preset ID"));
+        }
+    }
+    let first_index: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM bot_presets WHERE generation = ?1",
+        [staging_id],
+        |row| row.get(0),
+    )?;
+    put_preset_rows(&transaction, staging_id, presets, first_index)?;
     transaction.commit()?;
     Ok(())
 }
@@ -1345,13 +1407,6 @@ pub(super) fn put_asset_alias(
     Ok(())
 }
 
-/// What a non-target replacement froze in its intent.
-pub(super) struct ReplacementProof<'a> {
-    pub(super) base_revision: i64,
-    pub(super) staging_digest: &'a str,
-    pub(super) overrides: &'a std::collections::BTreeSet<risunest_sync_wire::unit::UnitKey>,
-}
-
 pub(super) fn replace_commit_lww(
     connection: &mut Connection,
     staging_id: &str,
@@ -1363,7 +1418,7 @@ pub(super) fn replace_commit_lww(
     received: &[super::lww::Change],
     received_authority: Option<risunest_sync_wire::stamp::DecimalU64>,
     selection_change: Option<&super::sync_selection::BindingSelectionChange>,
-    replacement_proof: Option<ReplacementProof<'_>>,
+    replacement_proof: Option<(i64, &str)>,
 ) -> StoreResult<RevisionResult> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let completed: Option<(String,i64)> = transaction.query_row(
@@ -1376,12 +1431,12 @@ pub(super) fn replace_commit_lww(
     }
     if let Some(change)=selection_change {super::sync_selection::apply_binding_selection(&transaction,change)?;}
     require_staging(&transaction, staging_id)?;
-    if let Some(proof) = &replacement_proof {
+    if let Some((base_revision, expected_digest)) = replacement_proof {
         let actual = current_revision(&transaction)?;
-        if actual != proof.base_revision {
-            return Err(StoreError::RevisionConflict { expected: proof.base_revision, actual });
+        if actual != base_revision {
+            return Err(StoreError::RevisionConflict { expected: base_revision, actual });
         }
-        if super::lww::catalog_digest(&transaction, staging_id)? != proof.staging_digest {
+        if super::lww::catalog_digest(&transaction, staging_id)? != expected_digest {
             return Err(validation("replacement-stage-changed"));
         }
     }
@@ -1392,10 +1447,11 @@ pub(super) fn replace_commit_lww(
     let active=active_generation(&transaction)?;
     if target {super::lww::preserve_local_root(&transaction,&active,staging_id)?;}
     let revision=current_revision(&transaction)?+1;
-    let generation=staging_id;
+    let generation=format!("revision-{revision}");
     super::plugin_claim_eligibility::capture(&transaction, staging_id)?;
-    activate_generation(&transaction,&active,generation)?;
-    super::content_change_index::full_replacement(&transaction,generation,revision)?;
+    delete_generation(&transaction,&active)?;
+    move_generation(&transaction,staging_id,&generation)?;
+    super::content_change_index::full_replacement(&transaction,&generation,revision)?;
     if target {
         transaction.execute("DELETE FROM lww_units",[])?;
         transaction.execute("DELETE FROM lww_retired",[])?;
@@ -1411,13 +1467,13 @@ pub(super) fn replace_commit_lww(
             if super::lww::parent_status(&transaction,key)?=="retired"&&!(key.components()[0]=="exists"&&matches!(value,risunest_sync_wire::unit::UnitValue::Deleted)){continue;}
             super::lww::put_unit(&transaction,key,stamp,value,&header.request_id,Some(header.binding_authority))?;
         }
-        super::lww::project_replacement_units(&transaction,generation,header,stamp,changes,replacement_proof.as_ref().map(|proof| proof.overrides))?;
+        super::lww::project_replacement_units(&transaction,&generation,header,stamp,changes)?;
     }
     if !target {for (key,_) in changes{super::lww::ensure_publishable_parents(&transaction,key,header.binding_authority)?;}}
     let changed=if target {received.iter().map(|c|c.key.clone()).collect::<Vec<_>>()}else{changes.iter().map(|(k,_)|k.clone()).collect::<Vec<_>>()};
-    super::lww::refresh_orders(&transaction,generation,&changed)?;
-    set_active(&transaction,revision,generation)?;
-    transaction.execute("INSERT INTO lww_requests(request_id,digest,revision,activated_generation) VALUES(?1,?2,?3,?4)",params![header.request_id,digest,revision,generation])?;
+    super::lww::refresh_orders(&transaction,&generation,&changed)?;
+    set_active(&transaction,revision,&generation)?;
+    transaction.execute("INSERT INTO lww_requests VALUES(?1,?2,?3)",params![header.request_id,digest,revision])?;
     transaction.commit()?;Ok(RevisionResult{revision})
 }
 
@@ -1439,18 +1495,11 @@ pub(super) fn validate_replace_commit(
     Ok(actual_revision)
 }
 
-/// Refused once the stage was activated: from then on it is the library or a
-/// retired library that only the purge removes.
-pub(crate) const STAGE_ACTIVATED: &str = "replacement-stage-activated";
-
 pub(super) fn replace_abort(connection: &mut Connection, staging_id: &str) -> StoreResult<()> {
     if !staging_id.starts_with("staging-") {
         return Err(validation("Invalid staging generation"));
     }
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if generation_state(&transaction, staging_id)?.is_some_and(|state| state != "staging") {
-        return Err(validation(STAGE_ACTIVATED));
-    }
     delete_generation(&transaction, staging_id)?;
     transaction.commit()?;
     Ok(())
@@ -1500,7 +1549,18 @@ pub(super) fn replace_plugin_storage(
         "DELETE FROM plugin_storage WHERE generation = ?1",
         [generation],
     )?;
-    for (ordinal, (key, value)) in values.iter().enumerate() {
+    put_plugin_storage_map(transaction, generation, values, meta, carried, 0)
+}
+
+fn put_plugin_storage_map(
+    transaction: &Transaction<'_>,
+    generation: &str,
+    values: &Map<String, Value>,
+    meta: Option<&Map<String, Value>>,
+    carried: &HashMap<String, String>,
+    first_ordinal: i64,
+) -> StoreResult<()> {
+    for (offset, (key, value)) in values.iter().enumerate() {
         let owner = sidecar_owner(meta, key);
         // The staging identity names this import, so a plugin that starts once
         // afterwards can take a value the save left without an owner.
@@ -1512,7 +1572,7 @@ pub(super) fn replace_plugin_storage(
             owner,
             key,
             value,
-            Some(ordinal as i64),
+            Some(first_ordinal + offset as i64),
             import_batch,
         )?;
     }
@@ -1619,17 +1679,26 @@ pub(super) fn replace_presets(
     for id in existing { if !ids.contains(id.as_str()) {
         transaction.execute("DELETE FROM bot_presets WHERE generation=?1 AND preset_id=?2", params![generation,id])?;
     }}
+    put_preset_rows(transaction, generation, presets, 0)
+}
+
+fn put_preset_rows(
+    transaction: &Transaction<'_>,
+    generation: &str,
+    presets: &[Value],
+    first_index: i64,
+) -> StoreResult<()> {
     let mut statement = transaction.prepare_cached(
         "INSERT INTO bot_presets (generation, preset_id, configured_index, name, image, value)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(generation,preset_id) DO UPDATE SET configured_index=excluded.configured_index,
              name=excluded.name,image=excluded.image,value=excluded.value",
     )?;
-    for (configured_index, preset) in presets.iter().enumerate() {
+    for (offset, preset) in presets.iter().enumerate() {
         statement.execute(params![
             generation,
             required_string(preset, "id", "Preset")?,
-            configured_index as i64,
+            first_index + offset as i64,
             preset
                 .get("name")
                 .and_then(Value::as_str)
@@ -1644,9 +1713,6 @@ pub(super) fn replace_presets(
 pub(super) fn require_staging(connection: &Connection, staging_id: &str) -> StoreResult<()> {
     if !staging_id.starts_with("staging-") {
         return Err(validation("Invalid staging generation"));
-    }
-    if generation_state(connection, staging_id)?.as_deref() != Some("staging") {
-        return Err(validation("Staging generation does not exist"));
     }
     let exists = connection
         .query_row(
@@ -1881,16 +1947,10 @@ fn put_conversation(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let recent_at = object
-        .get("lastDate")
-        .and_then(Value::as_i64)
-        .or_else(|| {
-            messages
-                .last()
-                .and_then(|message| message.get("time"))
-                .and_then(Value::as_i64)
-        })
-        .unwrap_or_default();
+    let recent_at = conversation_recent_at(
+        conversation,
+        messages.last().and_then(|message| message.get("time")),
+    );
     let detail = without_field(conversation, "message")?;
     put_conversation_record(
         transaction,
@@ -1911,6 +1971,14 @@ fn put_conversation(
         0,
         &messages,
     )
+}
+
+fn conversation_recent_at(conversation: &Value, last_message_time: Option<&Value>) -> i64 {
+    conversation
+        .get("lastDate")
+        .and_then(Value::as_i64)
+        .or_else(|| last_message_time.and_then(Value::as_i64))
+        .unwrap_or_default()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2266,128 +2334,56 @@ pub(super) fn delete_generation(
     transaction: &Transaction<'_>,
     generation: &str,
 ) -> StoreResult<()> {
-    if active_generation(transaction)? == generation
-        || generation_state(transaction, generation)?.as_deref() == Some("active")
-    {
-        return Err(validation("The active generation cannot be deleted"));
-    }
     for (table, _) in GENERATION_TABLES.iter().rev() {
-        while delete_generation_rows(transaction, table, generation, 256)? != 0 {}
+        mutate_generation_rows(transaction, table, generation, None)?;
     }
     transaction.execute(
         "DELETE FROM snapshot_leases WHERE generation = ?1",
         [generation],
     )?;
-    transaction.execute("DELETE FROM generations WHERE id = ?1", [generation])?;
     Ok(())
 }
 
-// A bulk DELETE keeps a statement rollback journal containing the old pages.
+fn move_generation(transaction: &Transaction<'_>, source: &str, target: &str) -> StoreResult<()> {
+    for (table, _) in GENERATION_TABLES {
+        mutate_generation_rows(transaction, table, source, Some(target))?;
+    }
+    Ok(())
+}
+
+// A bulk UPDATE/DELETE keeps a statement rollback journal containing the old pages.
 // Android's bundled SQLite forces that journal into memory, even with temp_store=FILE.
-// Bound each statement to one record while retaining the enclosing atomic transaction
-// and its triggers. Only row IDs are buffered across statements.
-fn delete_generation_rows(
+// Bound each statement to one record while retaining the enclosing atomic transaction,
+// triggers, and final revision/marker commit. Only row IDs are buffered across statements.
+fn mutate_generation_rows(
     transaction: &Transaction<'_>,
     table: &str,
-    generation: &str,
-    limit: usize,
-) -> StoreResult<usize> {
-    let rows = transaction
-        .prepare_cached(&format!("SELECT rowid FROM {table} WHERE generation=?1 LIMIT ?2"))?
-        .query_map(params![generation, limit as i64], |row| row.get::<_, i64>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut delete = transaction
-        .prepare_cached(&format!("DELETE FROM {table} WHERE rowid=?1 AND generation=?2"))?;
-    for row in &rows {
-        delete.execute(params![row, generation])?;
-    }
-    Ok(rows.len())
-}
-
-pub(super) fn generation_state(
-    connection: &Connection,
-    generation: &str,
-) -> StoreResult<Option<String>> {
-    Ok(connection
-        .query_row("SELECT state FROM generations WHERE id = ?1", [generation], |row| row.get(0))
-        .optional()?)
-}
-
-pub(super) fn begin_generation(transaction: &Transaction<'_>, generation: &str) -> StoreResult<()> {
-    transaction.execute("INSERT INTO generations (id, state) VALUES (?1, 'staging')", [generation])?;
-    Ok(())
-}
-
-fn activate_generation(
-    transaction: &Transaction<'_>,
-    previous: &str,
-    staging_id: &str,
+    source: &str,
+    target: Option<&str>,
 ) -> StoreResult<()> {
-    let retired = transaction.execute(
-        "UPDATE generations SET state = 'retired' WHERE id = ?1 AND state = 'active'",
-        [previous],
-    )?;
-    let activated = transaction.execute(
-        "UPDATE generations SET state = 'active' WHERE id = ?1 AND state = 'staging'",
-        [staging_id],
-    )?;
-    if retired != 1 || activated != 1 {
-        return Err(validation("Generation states differ from the active library"));
-    }
-    Ok(())
-}
-
-/// Hands a stage that can no longer be activated to the purge.
-pub(super) fn retire_generation(transaction: &Transaction<'_>, generation: &str) -> StoreResult<()> {
-    transaction.execute(
-        "INSERT INTO generations (id, state) VALUES (?1, 'retired')
-         ON CONFLICT(id) DO UPDATE SET state = 'retired' WHERE state = 'staging'",
-        [generation],
-    )?;
-    Ok(())
-}
-
-/// Deletes up to `limit` rows of retired generations in one transaction and
-/// forgets a generation once none of its rows remain. Returns whether retired
-/// generations remain.
-pub(super) fn purge_retired_batch(connection: &mut Connection, limit: usize) -> StoreResult<bool> {
-    let pending: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM generations WHERE state = 'retired')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !pending {
-        return Ok(false);
-    }
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let retired = transaction
-        .prepare("SELECT id FROM generations WHERE state = 'retired' ORDER BY id")?
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut budget = limit.max(1);
-    for generation in &retired {
-        for (table, _) in GENERATION_TABLES.iter().rev() {
-            if budget == 0 {
-                break;
-            }
-            budget -= delete_generation_rows(&transaction, table, generation, budget)?;
-        }
-        if budget == 0 {
+    let mut select = transaction.prepare(&format!(
+        "SELECT rowid FROM {table} WHERE generation=?1 LIMIT 256"
+    ))?;
+    let sql = match target {
+        Some(_) => format!("UPDATE {table} SET generation=?3 WHERE rowid=?1 AND generation=?2"),
+        None => format!("DELETE FROM {table} WHERE rowid=?1 AND generation=?2"),
+    };
+    let mut mutate = transaction.prepare(&sql)?;
+    loop {
+        let rows = select
+            .query_map([source], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if rows.is_empty() {
             break;
         }
-        transaction.execute("DELETE FROM snapshot_leases WHERE generation = ?1", [generation])?;
-        transaction.execute(
-            "DELETE FROM generations WHERE id = ?1 AND state = 'retired'",
-            [generation],
-        )?;
+        for row in rows {
+            match target {
+                Some(target) => mutate.execute(params![row, source, target])?,
+                None => mutate.execute(params![row, source])?,
+            };
+        }
     }
-    let remaining: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM generations WHERE state = 'retired')",
-        [],
-        |row| row.get(0),
-    )?;
-    transaction.commit()?;
-    Ok(remaining)
+    Ok(())
 }
 
 pub(super) fn set_active(
@@ -2573,7 +2569,7 @@ pub(super) fn claim_unowned_plugin_value(
     let after = super::lww::capture_targets(&transaction, &generation, &input, &[], false, &BTreeSet::new())?;
     let changed = super::lww::record_changes(&transaction, before, after, stamp, header.binding_authority, &header.request_id)?;
     super::lww::refresh_orders(&transaction, &generation, &changed)?;
-    transaction.execute("INSERT INTO lww_requests(request_id,digest,revision) VALUES(?1,?2,?3)", params![header.request_id, digest, revision])?;
+    transaction.execute("INSERT INTO lww_requests VALUES(?1,?2,?3)", params![header.request_id, digest, revision])?;
     super::content_change_index::finish_mutation(&transaction)?;
     set_active(&transaction, revision, &generation)?;
     transaction.commit()?;
@@ -2759,7 +2755,7 @@ pub(super) fn assign_plugin_storage(
     let after = super::lww::capture_targets(&transaction, &generation, &input, &[], false, &BTreeSet::new())?;
     let changed = super::lww::record_changes(&transaction, before, after, stamp, header.binding_authority, &header.request_id)?;
     super::lww::refresh_orders(&transaction, &generation, &changed)?;
-    transaction.execute("INSERT INTO lww_requests(request_id,digest,revision) VALUES(?1,?2,?3)", params![header.request_id, digest, revision])?;
+    transaction.execute("INSERT INTO lww_requests VALUES(?1,?2,?3)", params![header.request_id, digest, revision])?;
     super::content_change_index::finish_mutation(&transaction)?;
     set_active(&transaction, revision, &generation)?;
     transaction.commit()?;

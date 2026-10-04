@@ -799,8 +799,16 @@ impl GoogleDrive {
         {
             return Err(corrupt());
         }
+        let object = if intent.role == ObjectRole::Segment {
+            if segment_file_name(file)? != intent.object_id { return Err(corrupt()); }
+            segment_locator_object(file_id, &intent.object_id)?
+        } else { file_id.to_owned() };
         Ok(ObjectReceipt {
-            locator: object_locator(settings, intent, file)?,
+            locator: RemoteLocator {
+                connection_identity: settings.connection_identity.clone(),
+                collection: collection_token(intent.role).map(str::to_owned),
+                object,
+            },
             byte_length: intent.byte_length,
             version: file.version_token(),
             checksum: checksum.or_else(|| Some(Checksum { algorithm: "sha256".into(), value: intent.sha256.clone(), provider_verified: false })),
@@ -812,7 +820,15 @@ impl GoogleDrive {
     /// lost. Identical bytes converge; different bytes never overwrite.
     async fn verify_file(&self, session: Session<'_>, intent: &ObjectIntent, file: &DriveFile,
         cancel: &Cancellation) -> Result<()> {
-        matches_intent(intent, file)?;
+        if file.byte_length()? != intent.byte_length || file.property(ROLE_KEY) != Some(role_token(intent.role)) {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        if intent.role == ObjectRole::Segment {
+            segment_locator_object(file.file_id()?, &intent.object_id)?;
+            if file.name.as_deref() != Some(format!("segments/{}", intent.object_id).as_str()) {
+                return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+            }
+        }
         let token = self.token(session, false, cancel).await?;
         let mut response = self.dispatch(HttpRequest {
             method: reqwest::Method::GET,
@@ -829,13 +845,6 @@ impl GoogleDrive {
 
     async fn existing_object(&self, session: Session<'_>, intent: &ObjectIntent,
         cancel: &Cancellation) -> Result<Option<DriveFile>> {
-        let files = self.existing_files(session, intent, cancel).await?;
-        for file in &files { self.verify_file(session, intent, file, cancel).await?; }
-        Ok(files.into_iter().next())
-    }
-
-    async fn existing_files(&self, session: Session<'_>, intent: &ObjectIntent,
-        cancel: &Cancellation) -> Result<Vec<DriveFile>> {
         let selector = if intent.role == ObjectRole::Segment {
             let (writer, seq, _) = crate::external_storage::contract::parse_segment_object_id(&intent.object_id)?;
             format!("name contains 'segments/{writer}-{seq}-'")
@@ -845,7 +854,8 @@ impl GoogleDrive {
         let query = format!("'{}' in parents and trashed = false and {selector}", session.settings.folder_id);
         let mut files = self.list_control_files(session, &query, usize::MAX, ErrorKind::Corrupt, cancel).await?;
         files.sort_by(|left, right| left.id.cmp(&right.id));
-        Ok(files)
+        for file in &files { self.verify_file(session, intent, file, cancel).await?; }
+        Ok(files.into_iter().next())
     }
 
     async fn file_by_id(&self, session: Session<'_>, file_id: &str, cancel: &Cancellation) -> Result<Option<DriveFile>> {
@@ -930,33 +940,6 @@ fn context(repository: &RepositoryHandle) -> Result<&Context> {
         return Err(corrupt());
     }
     Ok(context)
-}
-
-/// The checks an existing file passes before its bytes are compared.
-fn matches_intent(intent: &ObjectIntent, file: &DriveFile) -> Result<()> {
-    if file.byte_length()? != intent.byte_length || file.property(ROLE_KEY) != Some(role_token(intent.role)) {
-        return Err(ProviderError::new(ErrorKind::PreconditionFailed));
-    }
-    if intent.role == ObjectRole::Segment {
-        segment_locator_object(file.file_id()?, &intent.object_id)?;
-        if file.name.as_deref() != Some(format!("segments/{}", intent.object_id).as_str()) {
-            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
-        }
-    }
-    Ok(())
-}
-
-fn object_locator(settings: &Settings, intent: &ObjectIntent, file: &DriveFile) -> Result<RemoteLocator> {
-    let file_id = file.file_id()?;
-    let object = if intent.role == ObjectRole::Segment {
-        if segment_file_name(file)? != intent.object_id { return Err(corrupt()); }
-        segment_locator_object(file_id, &intent.object_id)?
-    } else { file_id.to_owned() };
-    Ok(RemoteLocator {
-        connection_identity: settings.connection_identity.clone(),
-        collection: collection_token(intent.role).map(str::to_owned),
-        object,
-    })
 }
 
 fn resolve_file_id(context: &Context, locator: &RemoteLocator) -> Result<String> {
@@ -1578,39 +1561,6 @@ impl Provider for GoogleDrive {
                 Err(error) => return Err(error),
             }
             Ok(UploadResolution::Complete(self.completed_receipt(&context.settings, intent, &file, Some(&upload.file_id))?))
-        })
-    }
-
-    fn lookup_metadata<'a>(&'a self, repository: &'a RepositoryHandle, intent: &'a ObjectIntent,
-        known: Option<&'a RemoteLocator>, cancel: &'a Cancellation) -> ProviderFuture<'a, Option<ObjectReceipt>> {
-        Box::pin(async move {
-            cancel.check()?;
-            let context = context(repository)?;
-            intent.validate(repository)?;
-            let session = context.session();
-            let (file, locator) = match known {
-                Some(locator) => {
-                    locator.validate_for(repository)?;
-                    let file_id = resolve_file_id(context, locator)?;
-                    let Some(file) = self.file_by_id(session, &file_id, cancel).await? else { return Ok(None) };
-                    if let Some((_, name)) = segment_locator_parts(locator)? { validate_segment_file(&file, &file_id, name)?; }
-                    (file, locator.clone())
-                }
-                None => {
-                    let files = self.existing_files(session, intent, cancel).await?;
-                    for file in &files { matches_intent(intent, file)?; }
-                    let Some(file) = files.into_iter().next() else { return Ok(None) };
-                    let locator = object_locator(&context.settings, intent, &file)?;
-                    (file, locator)
-                }
-            };
-            Ok(Some(ObjectReceipt {
-                locator,
-                byte_length: file.byte_length()?,
-                version: file.version_token(),
-                checksum: file.checksum(Some(&intent.sha256)),
-                complete: true,
-            }))
         })
     }
 

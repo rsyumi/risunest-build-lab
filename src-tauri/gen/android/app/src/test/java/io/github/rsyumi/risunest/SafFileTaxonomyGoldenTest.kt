@@ -63,7 +63,7 @@ class SafFileTaxonomyGoldenTest {
     ).findAll(json).map { match ->
       HandoffGrammar(match.groupValues[1], match.groupValues[2], quotedStrings(match.groupValues[3]))
     }.toList()
-    check(grammars.size == 6) { "expected 6 managed handoff grammars, found ${grammars.size}" }
+    check(grammars.size == 8) { "expected 8 managed handoff grammars, found ${grammars.size}" }
     val exportBlock = Regex("\"risuSaveExport\"\\s*:\\s*\\{([^}]*)\\}").find(json)?.groupValues?.get(1)
       ?: error("fixture risuSaveExport block is missing")
     fun exportString(name: String): String =
@@ -212,7 +212,9 @@ class SafFileTaxonomyGoldenTest {
     for (grammar in taxonomy.grammars) {
       val expectedSourceKind = when (grammar.kind) {
         "legacy-backup" -> SafDestinationSourceKind.LEGACY_BACKUP
-        "raw-recovery", "portable-backup", "character-charx", "character-card", "risu-module" ->
+        "download" -> SafDestinationSourceKind.DOWNLOAD
+        "raw-recovery", "portable-backup", "character-charx", "character-card", "risu-module",
+        "dataset-export" ->
           SafDestinationSourceKind.RISU_SAVE
         else -> error("unexpected managed handoff kind ${grammar.kind}")
       }

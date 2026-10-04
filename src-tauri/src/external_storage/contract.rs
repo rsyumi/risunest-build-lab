@@ -42,9 +42,6 @@ pub(crate) enum ErrorKind {
     FolderInaccessible,
     FolderNotRepository,
     FolderUnsupportedLocation,
-    /// A body this device does not hold could not be fetched from the server
-    /// or external storage that holds it.
-    PreviousStorageUnavailable,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -418,10 +415,6 @@ impl Cancellation {
         self.0.cancelled.store(true, Ordering::Release);
         self.0.notify.notify_waiters();
     }
-    /// Whether both handles share one token.
-    pub(crate) fn same(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
     pub fn check(&self) -> Result<()> {
         if self.0.cancelled.load(Ordering::Acquire)
             || self.0.external_flag.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire))
@@ -631,19 +624,28 @@ pub(crate) trait Provider: Send + Sync {
         resume: Option<&'a ResumeState>,
         cancel: &'a Cancellation,
     ) -> ProviderFuture<'a, UploadResolution>;
-    /// Presence, byte length and version of an immutable object, read from
-    /// service metadata without reading its body. `known` is the locator a
-    /// receipt already names; without it the object is resolved from the
-    /// intent. A checksum is present only when the service computed one, and
-    /// is provider verified only when it equals the intent's digest. A missing
-    /// object is `None`.
-    fn lookup_metadata<'a>(
+    /// Resolve an immutable object with repository credentials without opening,
+    /// resuming or deleting an upload session.
+    fn lookup_object<'a>(
         &'a self,
         repository: &'a RepositoryHandle,
         intent: &'a ObjectIntent,
-        known: Option<&'a RemoteLocator>,
         cancel: &'a Cancellation,
-    ) -> ProviderFuture<'a, Option<ObjectReceipt>>;
+    ) -> ProviderFuture<'a, Option<ObjectReceipt>> {
+        Box::pin(async move {
+            match self
+                .reconcile_upload(repository, intent, None, cancel)
+                .await?
+            {
+                UploadResolution::Complete(receipt) => Ok(Some(receipt)),
+                UploadResolution::RestartRequired => Ok(None),
+                UploadResolution::Conflict => {
+                    Err(ProviderError::new(ErrorKind::PreconditionFailed))
+                }
+                UploadResolution::Resumable(_) => Err(ProviderError::new(ErrorKind::Corrupt)),
+            }
+        })
+    }
     /// The one mutable head of a repository. Head writes accept only this
     /// locator, so an ordinary object can never be replaced by a head write;
     /// a backup-only service answers `Unsupported`.

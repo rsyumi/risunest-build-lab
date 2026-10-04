@@ -51,7 +51,6 @@ fn observe_missing<'a>(store:&PersistentStore,plan:&'a BodyPlan)->Result<(BodyRe
     let mut result=BodyResult {stage_id:plan.stage_id.clone(),activated_revision:plan.revision,binding_authority:plan.authority.clone(),policy:plan.policy,total:plan.objects.len() as u64,locally_present:0,remote_held:0,unavailable:0,all_bodies_local:false,settled:false};
     let hashes=plan.objects.iter().map(|object|object.hash.as_str()).collect::<Vec<_>>();
     let sizes=store.portable_object_sizes(&hashes).map_err(error)?;
-    let mut remote=crate::external_storage::lww_residency::RemoteBodies::deferred(store.repository_root());
     let mut missing=Vec::new();
     for (object,size) in plan.objects.iter().zip(sizes) {
         match size {
@@ -59,7 +58,7 @@ fn observe_missing<'a>(store:&PersistentStore,plan:&'a BodyPlan)->Result<(BodyRe
             Some(_)=>return Err(NativeJobError::new("snapshot-body-size-differs","Snapshot body size differs from the frozen inventory")),
             None=>{
                 let held=residency.object(&object.hash,None).map_err(sync_error)?.is_some_and(|proof|proof.size==object.size)
-                    || remote.stat(&object.hash).map_err(error)?==Some(object.size);
+                    || crate::external_storage::lww_residency::stat(store.repository_root(),&object.hash).map_err(error)?==Some(object.size);
                 if held {result.remote_held+=1;} else {result.unavailable+=1;}
                 missing.push(object);
             }
@@ -103,7 +102,7 @@ pub(crate) fn run(store:&mut PersistentStore,plan:&BodyPlan,job:&JobControl,scra
     job.set_progress(JobProgress {total_bytes:Some(missing_bytes),total_items:Some(missing.len() as u64),..Default::default()}).map_err(error)?;
     let mut pins=match DurableCasJob::open(store.repository_root(),&plan.protection_id) {
         Ok(pins)=>pins,
-        Err(failure) if failure.kind()==io::ErrorKind::NotFound=>DurableCasJob::begin(store.repository_root(),&plan.protection_id,CasJobKind::LocalBackupRestore,crate::asset_repository::job_pins::CasJobOwner::native_file_job(&job.id()),super::portable::now()).map_err(error)?,
+        Err(failure) if failure.kind()==io::ErrorKind::NotFound=>DurableCasJob::begin(store.repository_root(),&plan.protection_id,CasJobKind::LocalBackupRestore,super::portable::now()).map_err(error)?,
         Err(failure)=>return Err(error(failure)),
     };
     let outcome=(|| {
@@ -184,21 +183,6 @@ pub(crate) fn finish(job:&JobControl,outcome:Result<BodyResult,NativeJobError>)-
 mod tests {
     use super::*;
     use crate::server_sync::lww_tests::{local,put_asset};
-
-    #[test]
-    fn observing_missing_bodies_opens_the_body_registry_once() {
-        use crate::external_storage::lww_residency::{forget_registry_opens,register_synthetic_source,registry_opens};
-        let (root,store)=local();
-        let hashes=(1..=3).map(|index|format!("{index:064x}")).collect::<Vec<_>>();
-        for hash in &hashes {register_synthetic_source(root.path(),hash,7);}
-        let plan=BodyPlan {stage_id:"synthetic-stage".into(),revision:1,authority:"1".into(),protection_id:"synthetic-protection".into(),
-            objects:hashes.iter().map(|hash|BodyObject {hash:hash.clone(),size:7,owner:false,cached:false}).collect(),
-            source:PathBuf::new(),policy:AssetPolicy::Remote};
-        forget_registry_opens(root.path());
-        let (result,missing)=observe_missing(&store,&plan).unwrap();
-        assert_eq!((result.remote_held,result.unavailable,missing.len()),(3,0,3));
-        assert_eq!(registry_opens(root.path()),1);
-    }
 
     fn activated(store:&mut PersistentStore)->BodyPlan {
         let snapshot=store.snapshot_create("synthetic-body-phase").unwrap();
