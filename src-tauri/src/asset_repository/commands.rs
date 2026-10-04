@@ -58,7 +58,12 @@ impl AbandonedCasJobs {
         }
         for id in self.journal_ids {
             let released = match DurableCasJob::open(&self.root, &id) {
-                Ok(mut job) if job.kind() == CasJobKind::DirectAssetOrInlayWrite => {
+                Ok(mut job)
+                    if matches!(
+                        job.kind(),
+                        CasJobKind::DirectAssetOrInlayWrite | CasJobKind::CardOrModuleContentImport
+                    ) =>
+                {
                     job.release(CasReleaseOutcome::Aborted)
                 }
                 Ok(_) => Ok(()),
@@ -124,8 +129,9 @@ impl DurableCasJobState {
             .collect::<Vec<_>>();
         let sessions = ids.iter().filter_map(|id| jobs.remove(id)).collect();
         drop(jobs);
-        // Sessions an earlier run left behind have no page either. Native jobs
-        // of the same kind start only from a page, so none exists before the
+        // Sessions an earlier run left behind have no page either, and neither
+        // does content a native import prepared for a page to activate. Native
+        // jobs of these kinds start only from a page, so none exists before the
         // first one.
         let (journal_ids, listing_failure) = if self.renderer_started.swap(true, Ordering::AcqRel) {
             (Vec::new(), None)
@@ -1085,35 +1091,43 @@ mod tests {
         let mut earlier = begin("earlier-write", CasJobKind::DirectAssetOrInlayWrite);
         earlier.prepare_bytes(&cas, b"synthetic earlier", CasObjectRole::DirectObject).unwrap();
         drop(earlier);
+        drop(begin("earlier-import", CasJobKind::CardOrModuleContentImport));
         drop(begin("earlier-restore", CasJobKind::LocalBackupRestore));
+        let state = DurableCasJobState::default();
+        let blockers = || {
+            collect_durable_cas_job_roots(root).blockers.into_iter().collect::<Vec<_>>()
+        };
+
+        state.take_abandoned(root).unwrap().release().unwrap();
+        assert_eq!(blockers(), ["job-pin-unsealed:earlier-restore"]);
+
         let mut unsealed = begin("page-unsealed", CasJobKind::DirectAssetOrInlayWrite);
         unsealed.prepare_bytes(&cas, b"synthetic unsealed", CasObjectRole::DirectObject).unwrap();
         let mut sealed = begin("page-sealed", CasJobKind::DirectAssetOrInlayWrite);
         let sealed_object =
             sealed.prepare_bytes(&cas, b"synthetic sealed", CasObjectRole::DirectObject).unwrap();
         sealed.seal(&mut store, 1).unwrap();
-        let state = DurableCasJobState::default();
         state.jobs.lock().unwrap().extend([
             ("page-unsealed".to_owned(), unsealed),
             ("page-sealed".to_owned(), sealed),
             ("page-import".to_owned(), begin("page-import", CasJobKind::CardOrModuleContentImport)),
         ]);
-
-        state.take_abandoned(root).unwrap().release().unwrap();
-        let roots = collect_durable_cas_job_roots(root);
-        assert_eq!(
-            roots.blockers.iter().map(String::as_str).collect::<Vec<_>>(),
-            ["job-pin-unsealed:earlier-restore", "job-pin-unsealed:page-import"],
-        );
-        assert!(!roots.object_hashes.contains(&sealed_object.content_hash));
-        assert_eq!(state.jobs.lock().unwrap().keys().collect::<Vec<_>>(), ["page-import"]);
-
-        // After the first page, a write journal outside the map belongs to a native job.
+        // After the first page, a journal outside the map belongs to a native job.
         drop(begin("native-write", CasJobKind::DirectAssetOrInlayWrite));
+
         state.take_abandoned(root).unwrap().release().unwrap();
-        assert!(collect_durable_cas_job_roots(root)
-            .blockers
-            .contains("job-pin-unsealed:native-write"));
+        assert_eq!(
+            blockers(),
+            [
+                "job-pin-unsealed:earlier-restore",
+                "job-pin-unsealed:native-write",
+                "job-pin-unsealed:page-import",
+            ],
+        );
+        assert!(!collect_durable_cas_job_roots(root)
+            .object_hashes
+            .contains(&sealed_object.content_hash));
+        assert_eq!(state.jobs.lock().unwrap().keys().collect::<Vec<_>>(), ["page-import"]);
     }
 
     fn owner_manifest() -> Vec<u8> {

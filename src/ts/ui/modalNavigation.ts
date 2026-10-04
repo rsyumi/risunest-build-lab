@@ -17,14 +17,19 @@ function scheduleCleanup() {
         if (count) history.go(-count)
     })
 }
+const alertVisible = () => !['none', 'toast', 'wait', 'progress'].includes(get(alertStore).type)
 function cancelVisibleAlert(): boolean {
-    const { type } = get(alertStore)
-    if (['none', 'toast', 'wait', 'progress'].includes(type)) return false
+    if (!alertVisible()) return false
     alertStore.set({ type: 'none', msg: '' })
     return true
 }
 
-type NavigationOptions = { close(): void; enabled?: boolean }
+type NavigationOptions = {
+    close(): void
+    enabled?: boolean
+    /** Leaves Escape to focused content, such as a code editor that closes its own widgets first. */
+    leaveEscape?(event: KeyboardEvent): boolean
+}
 function navigationLayer(node: HTMLElement, initial: NavigationOptions, trapFocus: boolean) {
     let options = initial
     let token: string | null = null
@@ -55,6 +60,7 @@ function navigationLayer(node: HTMLElement, initial: NavigationOptions, trapFocu
     const keydown = (event: KeyboardEvent) => {
         if (!isTopmost() || isCompositionKey(event)) return
         if (event.key === 'Escape') {
+            if (!alertVisible() && options.leaveEscape?.(event)) return
             event.preventDefault()
             event.stopImmediatePropagation()
             if (!cancelVisibleAlert()) options.close()

@@ -11,7 +11,9 @@ const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 const terminal = new Set(['succeeded', 'failed', 'cancelled'])
 const hash = async (text: string) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))),
     byte => byte.toString(16).padStart(2, '0')).join('')
-async function write(file: FileHandle, bytes: Uint8Array) {
+async function write(file: FileHandle, source: Uint8Array) {
+    // The WebView's Buffer polyfill serializes through toJSON as an object, which the IPC rejects.
+    const bytes = Object.getPrototypeOf(source) === Uint8Array.prototype ? source : new Uint8Array(source)
     let offset = 0
     while (offset < bytes.length) {
         const count = await file.write(bytes.subarray(offset))

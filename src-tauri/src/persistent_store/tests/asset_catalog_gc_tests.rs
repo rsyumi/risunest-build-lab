@@ -1488,11 +1488,13 @@ fn reused_library_roots_are_collected_again_after_a_change_between_gc_pages() {
         let marks = store.prepare_asset_gc_delete_marks().unwrap();
         let mut library = None;
         super::super::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| count.set(0));
+        super::super::ASSET_GC_FINAL_MARKINGS.with(|count| count.set(0));
         let first = store.asset_gc_delete_marked_page_reusing_library(&marks, &mut library, 1, None, 100, 10, |_| Ok(())).unwrap();
         let second = store.asset_gc_delete_marked_page_reusing_library(&marks, &mut library, 1, first.next_cursor.as_deref(), 100, 10, |_| Ok(())).unwrap();
         assert_eq!(first.report.deleted_hashes, [objects[0].content_hash.clone()]);
         assert_eq!(second.report.deleted_hashes, [objects[1].content_hash.clone()]);
         assert_eq!(super::super::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| count.get()), 1);
+        assert_eq!(super::super::ASSET_GC_FINAL_MARKINGS.with(|count| count.get()), 1);
         let generation = super::active_generation(&store.connection).unwrap();
         let insert = "INSERT INTO asset_aliases (generation, logical_key, object_hash, kind, size, mime, name, ext,
                 inlay_type, width, height, metadata)
@@ -1507,6 +1509,7 @@ fn reused_library_roots_are_collected_again_after_a_change_between_gc_pages() {
         let last = store.asset_gc_delete_marked_page_reusing_library(&marks, &mut library, 1, second.next_cursor.as_deref(), 100, 10, |_| Ok(())).unwrap();
         assert!(last.report.deleted_hashes.is_empty(), "other connection: {other_connection}");
         assert_eq!(super::super::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| count.get()), 2);
+        assert_eq!(super::super::ASSET_GC_FINAL_MARKINGS.with(|count| count.get()), 2);
         assert!(cas.stat_object(&objects[2].content_hash).unwrap().is_some());
     }
 }
@@ -1614,4 +1617,57 @@ fn plugin_gc_preserves_both_disabled_namespaces_and_received_inline_roots_withou
     let changed=UnitValue::inline(br#"null"#).unwrap();
     store.device_store().unwrap().connection().execute("UPDATE lww_units SET value=?1 WHERE key=?2",rusqlite::params![serde_json::to_string(&changed).unwrap(),key.as_str()]).unwrap();
     assert!(matches!(store.asset_gc_delete_marked_page_with_hook(&marks,16,None,100,10,|_|Ok(())),Err(StoreError::CommitBusy)));
+}
+
+#[test]
+fn catalog_pages_seek_past_objects_registered_at_the_same_time() {
+    use super::asset_object_catalog::AssetObjectRegistration;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let directory = tempfile::tempdir().expect("create catalog directory");
+    let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
+    let objects = (0..2048u32)
+        .map(|index| AssetObjectRegistration {
+            object_hash: format!("{index:064x}"),
+            byte_size: 1,
+        })
+        .collect::<Vec<_>>();
+    for batch in objects.chunks(512) {
+        store
+            .asset_object_catalog()
+            .register(batch, 5)
+            .expect("register objects together");
+    }
+    let mut cursor = None;
+    let mut steps = Vec::new();
+    loop {
+        let counted = Arc::new(AtomicUsize::new(0));
+        let counter = counted.clone();
+        store
+            .connection
+            .progress_handler(
+                64,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .expect("count page steps");
+        let page = store
+            .query_asset_object_catalog(256, cursor.as_deref())
+            .expect("query catalog page");
+        store
+            .connection
+            .progress_handler(64, None::<fn() -> bool>)
+            .expect("stop counting");
+        steps.push(counted.load(Ordering::Relaxed));
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(steps.len(), 8);
+    // A page that walked from the first object to its cursor would cost several first pages.
+    assert!(steps.iter().all(|&step| step <= steps[0] * 2), "{steps:?}");
 }

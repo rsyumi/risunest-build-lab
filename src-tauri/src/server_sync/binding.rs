@@ -539,9 +539,12 @@ pub(crate) fn activate(
             .filter(|target| {
                 state.library_id.as_deref() == Some(&target.config.library_id)
                     && (target.authority.0.checked_add(1) == Some(header.binding_authority.0)
-                        || active
-                            .as_ref()
-                            .is_some_and(|active| active.target_id == target.target_id))
+                        || match active.as_ref() {
+                            Some(active) => active.target_id == target.target_id,
+                            // A first binding stopped after its target switch is retried
+                            // without another switch.
+                            None => target.authority == header.binding_authority,
+                        })
             })
             .or(active)
             .ok_or_else(|| SyncError::new("binding-integrity", 409))?;
@@ -1186,6 +1189,28 @@ mod tests {
         let client = bound_client(&a);
         receive_available(&client, &mut a, &[]).unwrap();
         assert_eq!(a.read_root(None).unwrap().value["language"], "ja");
+    }
+    #[test]
+    fn a_first_binding_stopped_after_its_target_switch_activates_when_retried() {
+        use crate::server_sync::lww_tests::{drain_publications, receive_available};
+        let server = LocalServerFixture::new();
+        let (_a_root, mut a) = local();
+        let (_b_root, mut b) = local();
+        let peer = server.client(&b);
+        configure(&server, &a);
+        let inspected = inspect(&a, &header(&a)).unwrap();
+        assert!(inspected.empty);
+        switch_to(&mut a, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
+        // The app stops here. The retry finds the target already switched and switches no further.
+        let retried = inspect(&a, &header(&a)).unwrap();
+        assert!(retried.empty && !retried.previously_bound_library);
+        resume(&mut a);
+        assert!(a.server_stored_config().unwrap().is_some());
+        let client = bound_client(&a);
+        save(&mut a, &["root", "language"], serde_json::json!("ja"));
+        drain_publications(&client, &mut a, &[]).unwrap();
+        receive_available(&peer, &mut b, &[]).unwrap();
+        assert_eq!(b.read_root(None).unwrap().value["language"], "ja");
     }
     fn fresh_writer(store: &mut PersistentStore, inspection_id: &str) -> Result<NewDevicePreparation> {
         let request = header(store);

@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => {}) }))
+
 import { registerWindowCloseDrain } from './syncExitProduction'
 
 function harness(result: 'exit' | 'cancelled' = 'exit') {
@@ -75,5 +78,37 @@ describe('window close exit drain', () => {
 
         expect(h.coordinator.requestExit).toHaveBeenCalledTimes(2)
         expect(h.window.destroy).toHaveBeenCalledTimes(2)
+    })
+
+    it('acknowledges every close request before the drain settles', async () => {
+        let finish!: (result: 'exit') => void
+        const h = harness()
+        h.coordinator.requestExit.mockImplementationOnce(
+            () => new Promise<'exit'>((resolve) => { finish = resolve }),
+        )
+        const acknowledge = vi.fn(async () => {})
+        await registerWindowCloseDrain(h.window, h.coordinator as never, undefined, acknowledge)
+
+        const first = h.getHandler()({ preventDefault: vi.fn() })
+        expect(acknowledge).toHaveBeenCalledOnce()
+        const second = h.getHandler()({ preventDefault: vi.fn() })
+        expect(acknowledge).toHaveBeenCalledTimes(2)
+        finish('exit')
+        await Promise.all([first, second])
+        await h.getHandler()({ preventDefault: vi.fn() })
+
+        expect(acknowledge).toHaveBeenCalledTimes(3)
+    })
+
+    it('drains the close request when the acknowledgement fails', async () => {
+        const h = harness()
+        const reportError = vi.fn()
+        const acknowledge = vi.fn(async () => { throw new Error('not available') })
+        await registerWindowCloseDrain(h.window, h.coordinator as never, reportError, acknowledge)
+
+        await h.getHandler()({ preventDefault: vi.fn() })
+
+        expect(h.window.destroy).toHaveBeenCalledOnce()
+        expect(reportError).not.toHaveBeenCalled()
     })
 })

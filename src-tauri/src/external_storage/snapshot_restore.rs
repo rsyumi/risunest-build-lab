@@ -1814,9 +1814,10 @@ pub(crate) async fn admit_asset_catalogs(
     for batch in registrations.chunks(crate::persistent_store::asset_object_catalog::ASSET_OBJECT_CATALOG_MAX_PAGE as usize) {
         store.asset_object_catalog().register(batch,super::runtime::now_ms() as i64).map_err(transient)?;
     }
-    for source in planned.values() {
+    let sources=planned.values().collect::<Vec<_>>();
+    for batch in sources.chunks(super::lww_residency::PACKED_REGISTRATION_BATCH) {
         cancel.check()?;
-        super::lww_residency::register_packed(store.repository_root(),source,repository)?;
+        super::lww_residency::register_verified_packed_many(store.repository_root(),batch.iter().copied())?;
     }
     Ok(planned.into_keys().collect())
 }

@@ -128,3 +128,32 @@ it('lets menu layers keep focus and opt out without a history entry', async () =
     history.replaceState(null, '')
     action.destroy()
 })
+it('leaves Escape to content that asks for it without closing the modal below', () => {
+    vi.spyOn(history, 'go').mockImplementation(() => {})
+    const lower = document.createElement('div'), upper = document.createElement('div')
+    upper.innerHTML = '<div data-editor><textarea></textarea></div><button>Close</button>'
+    document.body.append(lower, upper)
+    const editor = upper.querySelector('[data-editor]')!, field = upper.querySelector('textarea')!
+    const closeLower = vi.fn(), closeUpper = vi.fn()
+    const lowerAction = modalNavigation(lower, { close: closeLower })
+    const upperAction = modalNavigation(upper, { close: closeUpper, leaveEscape: (event) => editor.contains(event.target as Node) })
+    const escape = () => new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+
+    const left = escape()
+    field.dispatchEvent(left)
+    expect(left.defaultPrevented).toBe(false)
+    expect(closeUpper).not.toHaveBeenCalled()
+    expect(closeLower).not.toHaveBeenCalled()
+
+    alertStore.set({ type: 'ask', msg: 'confirm' })
+    const overAlert = escape()
+    field.dispatchEvent(overAlert)
+    expect(overAlert.defaultPrevented).toBe(true)
+    expect(get(alertStore)).toEqual({ type: 'none', msg: '' })
+
+    upper.querySelector('button')!.dispatchEvent(escape())
+    expect(closeUpper).toHaveBeenCalledOnce()
+    expect(closeLower).not.toHaveBeenCalled()
+    upperAction.destroy()
+    lowerAction.destroy()
+})

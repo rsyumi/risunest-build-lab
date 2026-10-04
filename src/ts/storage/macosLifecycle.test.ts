@@ -13,26 +13,64 @@ function harness() {
         },
         respond: vi.fn(async (_token: string, _exit: boolean) => {}),
         reportError: vi.fn(),
+        saveLocally: vi.fn(async () => {}),
     }
-    return { ...dependencies, handle: createMacosExitHandler(dependencies) }
+    const handler = createMacosExitHandler(dependencies)
+    return {
+        ...dependencies,
+        handle: (token: string) => handler({ token, sessionEnd: false }),
+    }
+}
+
+function coordinated(limitMillis?: number) {
+    const coordinator = {
+        requestExit: vi.fn(async () => 'exit' as const),
+    }
+    const dependencies = {
+        coordinator,
+        respond: vi.fn(async (_token: string, _exit: boolean) => {}),
+        reportError: vi.fn(),
+        saveLocally: vi.fn(async () => {}),
+    }
+    return {
+        ...dependencies,
+        handle: createMacosExitHandler(dependencies, limitMillis),
+    }
 }
 
 describe('macOS acknowledged quit', () => {
     it('delegates the held request to the shared coordinator', async () => {
-        const coordinator = {
-            requestExit: vi.fn(async () => 'exit' as const),
-        }
-        const dependencies = {
-            coordinator,
-            respond: vi.fn(async (_token: string, _exit: boolean) => {}),
-            reportError: vi.fn(),
-        }
-        const handle = createMacosExitHandler(dependencies)
+        const c = coordinated()
 
-        await handle('coordinated')
+        await c.handle({ token: 'coordinated', sessionEnd: false })
 
-        expect(coordinator.requestExit).toHaveBeenCalledOnce()
-        expect(dependencies.respond).toHaveBeenCalledWith('coordinated', true)
+        expect(c.coordinator.requestExit).toHaveBeenCalledOnce()
+        expect(c.saveLocally).not.toHaveBeenCalled()
+        expect(c.respond).toHaveBeenCalledWith('coordinated', true)
+    })
+
+    it('saves locally and approves a session-end quit without sync or questions', async () => {
+        const c = coordinated()
+
+        await c.handle({ token: 'logout', sessionEnd: true })
+
+        expect(c.saveLocally).toHaveBeenCalledOnce()
+        expect(c.coordinator.requestExit).not.toHaveBeenCalled()
+        expect(c.respond).toHaveBeenCalledExactlyOnceWith('logout', true)
+    })
+
+    it('approves a session-end quit when the local save fails or stalls', async () => {
+        const failed = coordinated()
+        failed.saveLocally.mockRejectedValueOnce(new Error('synthetic failure'))
+        await failed.handle({ token: 'failed', sessionEnd: true })
+        expect(failed.reportError).toHaveBeenCalledOnce()
+        expect(failed.respond).toHaveBeenCalledExactlyOnceWith('failed', true)
+
+        const stalled = coordinated(10)
+        stalled.saveLocally.mockImplementationOnce(() => new Promise<void>(() => {}))
+        await stalled.handle({ token: 'stalled', sessionEnd: true })
+        expect(stalled.reportError).toHaveBeenCalledOnce()
+        expect(stalled.respond).toHaveBeenCalledExactlyOnceWith('stalled', true)
     })
 
     it('awaits the save and checkpoint, then sync confirmation before responding', async () => {

@@ -58,7 +58,7 @@ describe("native server sync signals", () => {
     const launch = start.indexOf("super::notification::run(");
     expect(launch).toBeGreaterThan(0);
     const admission = start.slice(0, launch);
-    expect(admission).toContain("server_sync_notify_stop(app.clone()).await?");
+    expect(admission).toContain("stop_notification_job(&app).await?");
     expect(admission).toContain("store.lww_binding_authority()?!=request.binding_authority");
     expect(admission.match(/cleanup_closed\.load\(Ordering::Acquire\)/g)).toHaveLength(1);
     expect(admission).toContain("install_notification(start,");

@@ -11,6 +11,7 @@ import type { SelectedConversationOperations } from 'src/ts/selectedConversation
 import { createSelectedConversationOperations } from 'src/ts/selectedConversationOperations'
 import { SynchronousSessionConversationViewportSource } from 'src/ts/conversationViewportSource'
 import type { SelectedConversationTarget } from 'src/ts/storage/activeWorkingSet.svelte'
+import { cancelTextEditorPopup, textEditorPopup } from 'src/ts/gui/textEditorPopup.svelte'
 
 const live = vi.hoisted(() => ({
     db: {} as Record<string, any>,
@@ -370,6 +371,7 @@ describe('Chat frozen capture presentation', () => {
             if (mounted) await unmount(mounted)
         } finally {
             mounted = undefined
+            textEditorPopup.request = null
             vi.useRealTimers()
             document.body.replaceChildren()
             TestIntersectionObserver.instance = undefined
@@ -905,7 +907,8 @@ describe('Chat frozen capture presentation', () => {
             vi.mocked(alertToast).mockClear()
             runtime.activeSession = session
             live.db = { ...live.db, theme: 'cardboard', characters: [owner], translator: '', clickToEdit: false,
-                useChatCopy: false, enableBookmark: false, askRemoval: false, instantRemove: false }
+                useChatCopy: false, enableBookmark: false, askRemoval: false, instantRemove: false,
+                risunestChatEditPopup: false }
             vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
             try {
                 mounted = mount(Chats, { target, props: {
@@ -958,6 +961,83 @@ describe('Chat frozen capture presentation', () => {
                     expect(conversation.message[1].data).toBe('Earlier row')
                     expect(conversation.message[3].data).toBe('Later row')
                 }
+            } finally {
+                if (mounted) await unmount(mounted)
+                mounted = undefined
+                source.dispose()
+            }
+        },
+    )
+
+    test.each(['save-unchanged', 'save-conflict'] as const)(
+        'saves the popup draft to the retained row after an earlier insertion (%s)',
+        async (action) => {
+            const messages: Message[] = [
+                { role: 'user', data: 'Earlier row', chatId: 'earlier-row' },
+                { role: 'char', data: 'Original edited row', chatId: 'edited-row' },
+                { role: 'user', data: 'Later row', chatId: 'later-row' },
+            ]
+            const conversation = { id: 'popup-chat', message: messages, note: '', localLore: [], bookmarks: [] } as ChatRecord
+            const owner = {
+                type: 'character', chaId: 'popup-owner', name: 'Synthetic popup owner', chatPage: 0,
+                firstMessage: '', firstMsgIndex: -1, image: '', customscript: [], virtualscript: '',
+                additionalAssets: [], emotionImages: [], triggerscript: [], chats: [conversation], ttsMode: 'none',
+            } as unknown as character
+            const session = new ActiveConversationSession({
+                characterId: owner.chaId, conversationId: conversation.id!, conversation, storeRevision: 7,
+            })
+            const current = () => ({ character: owner, conversation })
+            const source = new SynchronousSessionConversationViewportSource({ session, captureCurrent: current })
+            const selection = {
+                characterId: owner.chaId, conversationId: conversation.id!, navigationGeneration: 1, storeRevision: 7,
+            } as SelectedConversationTarget
+            const operations = createSelectedConversationOperations({
+                captureCurrent: current,
+                captureSelectedConversationTarget: () => selection,
+                getCurrentSession: () => session,
+                getCurrentViewportSource: () => source,
+                acquireCompleteConversation: async (reason) => ({ reason, target: selection, session, release: vi.fn() }),
+            })
+            const acquireEdit = vi.spyOn(operations, 'acquireCompleteMessageTargetForIntent')
+            vi.mocked(alertToast).mockClear()
+            runtime.activeSession = session
+            live.db = { ...live.db, theme: '', characters: [owner], translator: '', clickToEdit: false,
+                useChatCopy: false, enableBookmark: false, askRemoval: false, instantRemove: false }
+            vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+            try {
+                mounted = mount(Chats, { target, props: {
+                    currentCharacter: owner, viewportSource: source, selectedConversationOperations: operations,
+                    onReroll: () => {}, unReroll: () => {}, currentUsername: 'User', userIcon: '',
+                } })
+                const row = await vi.waitFor(() => {
+                    const element = [...target.querySelectorAll<HTMLElement>('[data-chat-render-key]')]
+                        .find((node) => node.textContent?.includes('Original edited row'))
+                    expect(element).toBeDefined()
+                    expect(element!.querySelector('.button-icon-edit')).not.toBeNull()
+                    return element!
+                })
+                row.querySelector<HTMLButtonElement>('.button-icon-edit')!.click()
+                const request = textEditorPopup.request!
+                expect(request.value).toBe('Original edited row')
+                request.input?.('Popup draft')
+                session.replaceRange(session.positionAt(0), 0, [{ role: 'user', data: 'Inserted above', chatId: 'inserted-row' }])
+                if (action === 'save-conflict') {
+                    session.edit(session.locate(2), { ...session.readMessage(session.locate(2)), data: 'Concurrent edited row' })
+                }
+                await vi.waitFor(() => expect(row.dataset.chatViewportIndex).toBe('3'))
+                expect(row.querySelector('.message-edit-area')).toBeNull()
+
+                if (action === 'save-unchanged') {
+                    await expect(request.save('Popup draft')).resolves.toBe(true)
+                    expect(conversation.message[2].data).toBe('Popup draft')
+                    expect(acquireEdit).toHaveBeenCalledWith(expect.objectContaining({ absoluteIndex: 2 }), 'edit-message')
+                } else {
+                    await expect(request.save('Popup draft')).resolves.toBe(false)
+                    expect(alertToast).toHaveBeenCalledWith('Message action failed')
+                    expect(conversation.message[2].data).toBe('Concurrent edited row')
+                }
+                expect(conversation.message[1].data).toBe('Earlier row')
+                expect(conversation.message[3].data).toBe('Later row')
             } finally {
                 if (mounted) await unmount(mounted)
                 mounted = undefined
@@ -1089,6 +1169,7 @@ describe('Chat frozen capture presentation', () => {
             useChatCopy: false,
             enableBookmark: false,
             clickToEdit: false,
+            risunestChatEditPopup: false,
         }
         mounted = mount(Chat, {
             target,
@@ -1159,6 +1240,7 @@ describe('Chat frozen capture presentation', () => {
                 useChatCopy: false,
                 enableBookmark: false,
                 clickToEdit: false,
+                risunestChatEditPopup: false,
             }
             mounted = mount(Chat, {
                 target,
@@ -1220,6 +1302,119 @@ describe('Chat frozen capture presentation', () => {
             }
         },
     )
+
+    function mountPopupEditHarness(theme: string) {
+        const harness = makeWindowedEditHarness()
+        live.db = {
+            ...live.db,
+            theme,
+            characters: [harness.metadataCharacter],
+            translator: '',
+            useChatCopy: false,
+            enableBookmark: false,
+            clickToEdit: false,
+        }
+        mounted = mount(Chat, {
+            target,
+            props: {
+                message: harness.message.data,
+                name: 'Live Character',
+                role: 'char',
+                idx: 1,
+                totalLength: 2,
+                isLastMemory: false,
+                viewportRow: {
+                    key: 'row-1' as ConversationViewportKey,
+                    absoluteIndex: 1,
+                    message: harness.message,
+                    sourceVersion: 3,
+                },
+                viewportSourceToken: 'source-a',
+                selectedConversationOperations: harness.operations,
+                captureViewportTarget: () => null,
+            },
+        })
+        return harness
+    }
+
+    const hasPopupRowEditor = () => (mounted as { hasActiveEditor(): boolean }).hasActiveEditor()
+
+    async function openPopupEditor() {
+        const editButton = await vi.waitFor(() => {
+            const button = target.querySelector<HTMLButtonElement>('.button-icon-edit')
+            expect(button).not.toBeNull()
+            return button!
+        })
+        editButton.click()
+        const request = textEditorPopup.request
+        expect(request).not.toBeNull()
+        return { editButton, request: request! }
+    }
+
+    test.each(['', 'cardboard'])(
+        'edits the message in the popup editor by default and saves against the original row target (theme "%s")',
+        async (theme) => {
+            const harness = mountPopupEditHarness(theme)
+            const { editButton, request } = await openPopupEditor()
+
+            expect(request.value).toBe('Original viewport message')
+            expect(hasPopupRowEditor()).toBe(true)
+            await tick()
+            expect(target.querySelector('.message-edit-area')).toBeNull()
+            // A removed conversation reports the popup's draft, not the text it opened with.
+            request.input?.('Typed in popup')
+            expect((mounted as { takeEditorDraft(): string | null }).takeEditorDraft()).toBe('Typed in popup')
+
+            // The edit hotkey clicks the row button behind the popup; it must not save the stale draft.
+            editButton.click()
+            await tick()
+            expect(harness.acquireCompleteMessageTargetForIntent).not.toHaveBeenCalled()
+            expect(textEditorPopup.request).toBe(request)
+
+            await expect(request.save('Saved in popup')).resolves.toBe(true)
+            expect(harness.completeConversation.message[1].data).toBe('Saved in popup')
+            expect(harness.acquireCompleteMessageTargetForIntent).toHaveBeenCalledWith(
+                expect.objectContaining({ rowKey: 'row-1' }),
+                'edit-message',
+            )
+            expect(harness.release).toHaveBeenCalledOnce()
+            expect(hasPopupRowEditor()).toBe(false)
+        },
+    )
+
+    test('keeps the popup editor open when its save is refused', async () => {
+        const harness = mountPopupEditHarness('')
+        harness.acquireCompleteMessageTargetForIntent.mockResolvedValueOnce(null as never)
+        vi.mocked(alertToast).mockClear()
+        const { request } = await openPopupEditor()
+
+        await expect(request.save('Refused edit')).resolves.toBe(false)
+        expect(alertToast).toHaveBeenCalledWith('Message action failed')
+        expect(harness.completeConversation.message[1].data).toBe('Original viewport message')
+        expect(hasPopupRowEditor()).toBe(true)
+        await tick()
+        expect(target.querySelector('.message-edit-area')).toBeNull()
+
+        await expect(request.save('Accepted edit')).resolves.toBe(true)
+        expect(harness.completeConversation.message[1].data).toBe('Accepted edit')
+        expect(hasPopupRowEditor()).toBe(false)
+    })
+
+    test('leaves the message unchanged when the popup editor is cancelled', async () => {
+        const harness = mountPopupEditHarness('')
+        const { editButton, request } = await openPopupEditor()
+
+        cancelTextEditorPopup(request)
+        expect(textEditorPopup.request).toBeNull()
+        expect(hasPopupRowEditor()).toBe(false)
+        expect(harness.acquireCompleteMessageTargetForIntent).not.toHaveBeenCalled()
+        expect(harness.completeConversation.message[1].data).toBe('Original viewport message')
+
+        editButton.click()
+        expect(textEditorPopup.request).not.toBeNull()
+        expect(textEditorPopup.request).not.toBe(request)
+        expect(hasPopupRowEditor()).toBe(true)
+    })
 
     test.each(['cancel', 'unmount'] as const)('cleans up a pending partial edit scroll on %s', async (action) => {
         const harness = makeWindowedEditHarness()

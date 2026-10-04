@@ -135,8 +135,7 @@ pub(super) fn query(
             let mut statement = connection.prepare(
                 "SELECT object_hash, byte_size, created_at_ms
                  FROM asset_objects
-                 WHERE created_at_ms > ?1
-                    OR (created_at_ms = ?1 AND object_hash > ?2)
+                 WHERE (created_at_ms, object_hash) > (?1, ?2)
                  ORDER BY created_at_ms ASC, object_hash ASC
                  LIMIT ?3",
             )?;
@@ -209,8 +208,7 @@ pub(super) fn cursor_has_successor(connection: &Connection, value: &str) -> Stor
     Ok(connection.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM asset_objects
-            WHERE created_at_ms > ?1
-               OR (created_at_ms = ?1 AND object_hash > ?2)
+            WHERE (created_at_ms, object_hash) > (?1, ?2)
         )",
         params![cursor.created_at_ms, cursor.object_hash],
         |row| row.get(0),

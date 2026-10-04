@@ -413,6 +413,7 @@ function makeWindowedHarness(input: {
         workingSet,
         database,
         coordinator,
+        readCharacter: (store as unknown as { readCharacter: ReturnType<typeof vi.fn> }).readCharacter,
         readConversation,
         readConversationMetadata,
         captureActivationRollback,
@@ -644,6 +645,62 @@ describe('ActiveWorkingSet', () => {
             characterId: 'a', conversationId: 'chat-a',
         })
         await expect(harness.workingSet.activateCharacter('b')).resolves.toBe(true)
+    })
+
+    it('waits for background persistence queued during hydration before publishing', async () => {
+        const harness = makeWindowedHarness({
+            characters: [makeCharacter('a', [makeChat('chat-a')])],
+        })
+        const { coordinator } = harness
+        const { readCharacter } = harness
+        const read = readCharacter.getMockImplementation() as (id: string) => Promise<unknown>
+        readCharacter.mockImplementationOnce(async (id: string) => {
+            coordinator.hasPendingPersistenceWork = true
+            return read(id)
+        })
+        coordinator.flushPendingData.mockImplementation(async () => {
+            coordinator.hasPendingPersistenceWork = false
+        })
+        coordinator.runSelectedConversationTransition.mockImplementation(<T>(transition: () => T) => {
+            if (coordinator.hasPendingPersistenceWork) throw new Error('Selected conversation authority transition has pending persistence')
+            return transition()
+        })
+
+        await expect(harness.workingSet.activateCharacter('a')).resolves.toBe(true)
+        expect(coordinator.flushPendingData).toHaveBeenCalledTimes(2)
+        expect(readCharacter).toHaveBeenCalledOnce()
+        expect(harness.workingSet.captureSelectedConversationTarget()).toMatchObject({
+            characterId: 'a', conversationId: 'chat-a',
+        })
+    })
+
+    it('reads the character again when background persistence moves the revision', async () => {
+        const harness = makeWindowedHarness({
+            characters: [makeCharacter('a', [makeChat('chat-a')])],
+        })
+        const { coordinator } = harness
+        const { readCharacter } = harness
+        const read = readCharacter.getMockImplementation() as (id: string) => Promise<unknown>
+        readCharacter.mockImplementationOnce(async (id: string) => {
+            coordinator.hasPendingPersistenceWork = true
+            return read(id)
+        })
+        coordinator.flushPendingData.mockImplementation(async () => {
+            if (!coordinator.hasPendingPersistenceWork) return
+            coordinator.hasPendingPersistenceWork = false
+            coordinator.revision = 2
+            harness.setStoreRevision(2)
+        })
+        coordinator.runSelectedConversationTransition.mockImplementation(<T>(transition: () => T) => {
+            if (coordinator.hasPendingPersistenceWork) throw new Error('Selected conversation authority transition has pending persistence')
+            return transition()
+        })
+
+        await expect(harness.workingSet.activateCharacter('a')).resolves.toBe(true)
+        expect(readCharacter).toHaveBeenCalledTimes(2)
+        expect(harness.workingSet.captureSelectedConversationAuthority()).toMatchObject({
+            characterId: 'a', conversationId: 'chat-a', storeRevision: 2,
+        })
     })
 
     it('directly activates a large selected conversation from metadata', async () => {

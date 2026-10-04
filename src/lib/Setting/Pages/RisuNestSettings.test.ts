@@ -73,10 +73,11 @@ describe('RisuNest settings navigation', () => {
         }
     })
 
-    it('groups the settings tab as performance, streaming, attachments, update, platform, diagnostics', () => {
+    it('groups the settings tab as performance, UI, streaming, attachments, update, platform, diagnostics', () => {
         const panel = between(pageSource, "{#if activeTab === 'settings'}", "{:else if activeTab === 'storage'}")
         inOrder(panel, [
             '<RisuNestPerformanceSettings />',
+            'items={risuNestUiSettingsItems}',
             'items={risuNestStreamingSettingsItems}',
             'items={risuNestInlaySettingsItems}',
             '<RisuNestUpdateSettings />',

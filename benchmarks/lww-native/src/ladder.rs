@@ -974,19 +974,26 @@ fn serverless_group(recorder:&Recorder,library:&Path,work:&Path,settings:&Settin
         crate::external_storage::worker_observation::begin();
         let window=Window::start(settings.sample);
         let objects=engine.listing(&cancel).await.at("listing")?;
+        let listed_ms=window.elapsed();
         let snapshots=engine.snapshot_listing(&cancel).await.at("snapshot listing")?;
+        let snapshots_ms=window.elapsed();
         let inspection=store.register_lww_binding_inspection(before.target_authority.clone(),&target,
             &engine.repository.connection_identity,&engine.library).at("inspection")?;
+        let inspected_ms=window.elapsed();
         let stage_header=lww::Header {binding_authority:before.target_authority.clone(),request_id:uuid::Uuid::new_v4().to_string()};
         let staged=engine.stage_binding(&mut store,&stage_header,&inspection,&cancel).await.at("stage binding")?;
+        let staged_ms=window.elapsed();
         let switched=store.switch_lww_binding(&SwitchBindingRequest {header:lww::Header {
             binding_authority:before.target_authority.clone(),request_id:uuid::Uuid::new_v4().to_string()},
             expected_selection_epoch:before.selection_epoch.clone(),target,inspection_id:Some(inspection)}).at("switch binding")?;
+        let switched_ms=window.elapsed();
         let request=ReplaceBindingRequest {header:lww::Header {binding_authority:switched.target_authority,request_id:stage_header.request_id.clone()},
             expected_selection_epoch:switched.selection_epoch,staging_id:staged.staging_id,receive_id:stage_header.request_id,
             target_id:engine.repository.connection_identity.clone(),library_id:engine.library.clone()};
         let receipt=store.replace_lww_binding(&request).at("replace binding")?;
         let activation_ms=window.elapsed();
+        let activation_steps=json!({"listing":listed_ms,"snapshotListing":snapshots_ms-listed_ms,"inspection":inspected_ms-snapshots_ms,
+            "stageBinding":staged_ms-inspected_ms,"switchBinding":switched_ms-staged_ms,"replaceBinding":activation_ms-switched_ms});
         let provider_activated=provider_io(&cycle.provider);
         let authority=store.lww_binding_authority().text()?;
         let finishes=engine.receive_and_apply(&mut store,authority,&[],&cancel).await.at("receive")?;
@@ -1013,8 +1020,8 @@ fn serverless_group(recorder:&Recorder,library:&Path,work:&Path,settings:&Settin
         let workers=hashes.workers(crate::external_storage::worker_observation::take());
         let observers=take_observers(hashes);
         let status=store.asset_residency_status().text()?;
-        let line=json!({"elapsedMs":elapsed,"subTimingsMs":{"databaseActivation":activation_ms,"receive":received_ms-activation_ms,
-            "bodies":elapsed-received_ms},"memory":memory,
+        let line=json!({"elapsedMs":elapsed,"subTimingsMs":{"databaseActivation":activation_ms,"databaseActivationSteps":activation_steps,
+            "receive":received_ms-activation_ms,"bodies":elapsed-received_ms},"memory":memory,
             "counts":{"remoteObjects":objects.len(),"remoteSnapshots":snapshots.len(),"activationRevision":receipt.revision,
                 "receiveFinishes":finishes,"hydratedObjects":objects_done.load(Ordering::Relaxed),
                 "provider":provider_delta(provider_before,provider_io(&cycle.provider)),

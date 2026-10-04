@@ -12,6 +12,7 @@ const nativeFileJobDialog = readFileSync('src/lib/Others/NativeFileJobDialog.sve
 const persistentWorkingSetRecovery = readFileSync('src/lib/Others/PersistentWorkingSetRecovery.svelte', 'utf8')
 const updatePopup = readFileSync('src/lib/Others/UpdatePopup.svelte', 'utf8')
 const popupEditor = readFileSync('src/lib/Others/PopupEditor.svelte', 'utf8')
+const textEditorPopup = readFileSync('src/lib/Others/TextEditorPopup.svelte', 'utf8')
 const promptDiffModal = readFileSync('src/lib/Others/PromptDiffModal.svelte', 'utf8')
 const easyPanel = readFileSync('src/lib/Others/ProTools/EasyPanel.svelte', 'utf8')
 const defaultChatScreen = readFileSync('src/lib/ChatScreens/DefaultChatScreen.svelte', 'utf8')
@@ -41,6 +42,7 @@ const observer = readFileSync('src/ts/observer.svelte.ts', 'utf8')
 const modalSources: Record<string, string> = {
     'AlertComp.svelte': alertComp,
     'PopupEditor.svelte': popupEditor,
+    'TextEditorPopup.svelte': textEditorPopup,
     'IrisModal.svelte': irisModal,
     'CustomSidebarConfig.svelte': customSidebarConfig,
     'HypaV3Modal/category-manager-modal.svelte': categoryManagerModal,
@@ -102,6 +104,12 @@ describe('modal layering', () => {
         expect(checkboxDialog).toContain('aria-modal="true"')
         expect(checkboxDialog).toContain('aria-labelledby="checkbox-confirm-title"')
         expect(checkboxDialog).toContain('aria-describedby="checkbox-confirm-description"')
+    })
+
+    it('mounts the text editor popup before the alerts so alerts cover it', () => {
+        const app = readFileSync('src/App.svelte', 'utf8')
+        expect(app.indexOf('<TextEditorPopup ')).toBeGreaterThan(-1)
+        expect(app.indexOf('<TextEditorPopup ')).toBeLessThan(app.indexOf('<AlertComp />'))
     })
 
     it('leaves in-screen layers on their local z-index', () => {

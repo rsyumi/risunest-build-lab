@@ -125,7 +125,8 @@ impl PublishedCatalog {
         let file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(sql)?;
         file.sync_all().map_err(sql)?;
         let db = Connection::open(path).map_err(sql)?;
-        db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
+        // A catalog is scratch rebuilt from the remote state and never reopened, so its writes skip durability.
+        db.execute_batch("PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;
             CREATE TABLE units(key TEXT PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE versions(key TEXT NOT NULL,stamp TEXT NOT NULL,identity TEXT NOT NULL,PRIMARY KEY(key,stamp));
             CREATE TABLE retirements(key TEXT PRIMARY KEY,body TEXT NOT NULL);").map_err(sql)?;

@@ -5162,7 +5162,9 @@ mod tests {
                         assert!(PayloadCas::new(bootstrap_store.repository_root()).unwrap().stat_object(&refusal_hash).unwrap().is_none());
                     }
                     let before=refusal_provider.read_attempts(&refusal_pack);
+                    let listings=refusal_provider.listing_count();
                     bootstrap_store.hydrate_registered_remote_assets_prioritized(None,None,||Ok(()),||{}).unwrap();
+                    assert!(refusal_provider.listing_count()-listings<8,"one protection check covers a pack group's bodies");
                     before
                 }).await.unwrap();
                 let bootstrap_bodies=crate::asset_repository::body_io::take_body_io();
