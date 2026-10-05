@@ -122,11 +122,11 @@ test('the guest ignores sibling responses, callbacks, aborts and code execution'
     ]))
 })
 
-test('production CSP and opaque origin block network, string compilation and parent storage access', async ({ page }) => {
+test('production CSP and opaque origin block network, string compilation and parent storage access', async ({ page, baseURL }) => {
     await page.goto('/')
-    await page.evaluate(() => window.boundary.load([
+    await page.evaluate(origin => window.boundary.load([
         "const attempts = {",
-        " network: () => fetch('http://127.0.0.1:4187/'),",
+        ` network: () => fetch('${origin}/'),`,
         " eval: () => eval('1'),",
         " function: () => new Function('return 1')(),",
         " parent: () => parent.document,",
@@ -136,7 +136,7 @@ test('production CSP and opaque origin block network, string compilation and par
         " let blocked = false; try { await attempt(); } catch { blocked = true; }",
         " await risuai.pluginStorage.setItem(key, blocked);",
         "}",
-    ].join('\n')))
+    ].join('\n')), new URL(baseURL!).origin)
     await expect.poll(() => page.evaluate(() => window.boundary.state.writes)).toEqual([
         { key: 'network', value: true }, { key: 'eval', value: true },
         { key: 'function', value: true }, { key: 'parent', value: true }, { key: 'storage', value: true },

@@ -271,6 +271,16 @@ impl Archive {
     }
 
     pub fn restore(&self, id: &str, destination: &Path) -> StoreResult<Metadata> {
+        self.restore_observed(id, destination, &crate::local_backup::NeverCancelled)
+    }
+
+    /// Restores like `restore`, reporting each chunk's bytes to `probe` and stopping when it cancels.
+    pub fn restore_observed(
+        &self,
+        id: &str,
+        destination: &Path,
+        probe: &dyn crate::local_backup::CancellationProbe,
+    ) -> StoreResult<Metadata> {
         let metadata = self.metadata(id)?;
         let mut output = OpenOptions::new()
             .write(true)
@@ -295,10 +305,16 @@ impl Archive {
             {
                 return Err(invalid("snapshot chunk length, order or hash mismatch"));
             }
+            if probe.is_cancelled() {
+                return Err(StoreError::Validation {
+                    message: "snapshot restore cancelled".to_owned(),
+                });
+            }
             output.write_all(&data)?;
             hasher.update(&data);
             bytes += data.len() as u64;
             seq += 1;
+            probe.backup_bytes_processed(data.len() as u64);
         }
         if bytes != metadata.bytes || hasher.finalize().as_slice() != metadata.file_hash {
             return Err(invalid("snapshot whole-file length or hash mismatch"));

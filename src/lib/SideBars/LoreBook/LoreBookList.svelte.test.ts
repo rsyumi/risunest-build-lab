@@ -189,8 +189,8 @@ describe('lorebook editing', () => {
         await tick()
         await remove('Folder')
         expect(alerts.alertCheckboxConfirm).toHaveBeenCalledExactlyOnceWith({
-            title: languageEnglish.folderRemoveConfirm,
-            description: languageEnglish.removeConfirm + 'Folder',
+            title: languageEnglish.removeConfirm + 'Folder',
+            description: languageEnglish.checkboxConfirmation.lorebookDeletionDescription,
             checkboxLabel: languageEnglish.checkboxConfirmation.lorebookDeletion,
             actionLabel: languageEnglish.confirm,
             cancelLabel: languageEnglish.cancel,

@@ -21,8 +21,13 @@ if (process.env.CARGO_TARGET_DIR && resolve(process.env.CARGO_TARGET_DIR) !== ta
 const env = { ...process.env, CARGO_TARGET_DIR: target, TAURI_CONFIG: JSON.stringify({ build: { frontendDist: [join(root, '.tmp/test-results/native/dist')] } }) }
 await command(process.execPath, [join(dirname(require.resolve('vite/package.json')), 'bin/vite.js'), 'build', '--mode', 'agent', '--config', 'tests/native/vite.config.ts'])
 await command('cargo', ['build', '--release', '--locked', '--manifest-path', 'tests/native/native/Cargo.toml'], env)
-for (const phases of [['write', 'read'], ['abort', 'read-abort'], ['contract', 'read-contract']]) {
-    const runId = randomUUID().replaceAll('-', '')
+const phaseGroups = [['write', 'read'], ['abort', 'read-abort'], ['contract', 'read-contract']]
+// The repeated-close escape exists where closing the window quits; SIGTERM asks only Linux to save.
+if (process.platform === 'win32' || process.platform === 'linux') phaseGroups.push(['close-escape'])
+if (process.platform === 'linux') phaseGroups.push(['session-end', 'read-session-end'], ['session-end-unanswered'])
+for (const phases of phaseGroups) {
+    // Linux registers the identifier as a D-Bus name, whose elements cannot start with a digit.
+    const runId = `a${randomUUID().replaceAll('-', '').slice(1)}`
     const identifier = `io.github.rsyumi.risunest.boundary.${runId}`
     const dataHome = process.platform === 'win32' ? process.env.APPDATA
         : process.platform === 'darwin' ? join(process.env.HOME, 'Library/Application Support')
@@ -50,14 +55,20 @@ for (const phases of [['write', 'read'], ['abort', 'read-abort'], ['contract', '
                     RISUNEST_BOUNDARY_PHASE: phase, RISUNEST_BOUNDARY_REPORT: reportPath,
                 } })
                 let timedOut = false
+                const terminate = phase.startsWith('session-end') ? setInterval(() => {
+                    if (!existsSync(`${reportPath}.ready`)) return
+                    clearInterval(terminate)
+                    child.kill('SIGTERM')
+                }, 50) : undefined
                 const timeout = setTimeout(() => {
                     timedOut = true
                     if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true })
                     else process.kill(-child.pid, 'SIGKILL')
                 }, 90_000)
-                child.on('error', error => { clearTimeout(timeout); reject(error) })
+                child.on('error', error => { clearTimeout(timeout); clearInterval(terminate); reject(error) })
                 child.on('close', code => {
                     clearTimeout(timeout)
+                    clearInterval(terminate)
                     timedOut ? reject(new Error(`Native ${phase} timed out`)) : accept(code)
                 })
             })

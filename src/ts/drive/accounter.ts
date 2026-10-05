@@ -101,7 +101,7 @@ export async function loadRisuAccountBackup() {
     }
     if (!isTauri && !(await alertCheckboxConfirm({
         title: language.backupLoadConfirm,
-        description: language.backupLoadConfirm2,
+        description: language.checkboxConfirmation.dataReplacementDescription,
         checkboxLabel: language.checkboxConfirmation.dataReplacement,
         actionLabel: language.confirm,
         cancelLabel: language.cancel,

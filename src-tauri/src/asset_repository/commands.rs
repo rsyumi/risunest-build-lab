@@ -1222,12 +1222,58 @@ mod tests {
     }
 
     fn save_publication_segment(root: &std::path::Path, job_id: &str) {
+        use crate::external_storage::journal::JobIdentity;
+        use crate::persistent_store::external_lww::SealedPublication;
+        use crate::persistent_store::sync_selection::CaptureIdentity;
+        use risunest_sync_wire::stamp::DecimalU64;
+        let publication = SealedPublication {
+            target: "synthetic-target".into(),
+            writer: "synthetic-writer".into(),
+            seq: DecimalU64(1),
+            authority: DecimalU64(1),
+            captured_at_ms: Some(1),
+            object_id: "synthetic-object".into(),
+            sha256: String::new(),
+            payload_sha256: String::new(),
+            payload: String::new(),
+            sealed: true,
+            entries: Vec::new(),
+            bodies: Vec::new(),
+            assets: Vec::new(),
+            controls: Vec::new(),
+            reused_control_catalogs: Vec::new(),
+            reused_assets: Vec::new(),
+            asset_job: Some(JobIdentity {
+                job_id: job_id.to_owned(),
+                connection_id: "synthetic-connection".into(),
+                repository_id: "synthetic-repository".into(),
+                capture_id: "synthetic-capture".into(),
+                capture: CaptureIdentity {
+                    store_id: "store".into(),
+                    library_epoch: "library".into(),
+                    generation: "generation".into(),
+                    selection_epoch: "selection".into(),
+                    revision: 0,
+                },
+            }),
+            data_catalogs: Vec::new(),
+            asset_catalogs: Vec::new(),
+            resume: None,
+            dispatched: false,
+            complete: false,
+        };
         rusqlite::Connection::open(root.join("persistent/device.sqlite"))
             .unwrap()
             .execute(
                 "INSERT INTO external_lww_segments(target,writer,seq,authority,metadata,sealed,complete)
-                 VALUES('synthetic-target','synthetic-writer',?1,'1',?2,x'00',0)",
-                [job_id.to_owned(), json!({"assets": [], "reusedAssets": [], "assetJob": {"jobId": job_id}}).to_string()],
+                 VALUES(?1,?2,?3,?4,?5,x'00',0)",
+                [
+                    publication.target.clone(),
+                    publication.writer.clone(),
+                    publication.seq.0.to_string(),
+                    publication.authority.0.to_string(),
+                    serde_json::to_string(&publication).unwrap(),
+                ],
             )
             .unwrap();
     }

@@ -22,6 +22,10 @@ fn full_frames(objects: &[&[u8]]) -> Vec<u8> {
     transfer::encode(&frames).expect("synthetic full frames must fit")
 }
 
+/// Turns a lost response into a failure. Loaded hosts answer a loopback request
+/// in far less, so it never decides an outcome.
+const BOUND: Duration = Duration::from_secs(60);
+
 struct Server {
     base: String,
     store: Arc<Store>,
@@ -29,6 +33,7 @@ struct Server {
     a: DeviceCredential,
     b: DeviceCredential,
     task: tokio::task::JoinHandle<()>,
+    runtime: Option<tokio::runtime::Runtime>,
     _dir: tempfile::TempDir,
 }
 
@@ -348,7 +353,7 @@ async fn bounded_bulk_buffers_leave_head_available_and_release_after_completion(
         let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
         socket.write_all(format!("POST /uploads/frames HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nX-Risu-Library: {}\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",credential.token,credential.library_id,frame.len()).as_bytes()).await.unwrap();
         let mut interim = Vec::new();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(BOUND, async {
             while !interim.ends_with(b"\r\n\r\n") {
                 interim.push(socket.read_u8().await.unwrap());
             }
@@ -386,7 +391,7 @@ async fn bounded_bulk_buffers_leave_head_available_and_release_after_completion(
     let mut first = sockets.remove(0);
     first.write_all(&frame).await.unwrap();
     let mut completed = Vec::new();
-    tokio::time::timeout(Duration::from_secs(5), first.read_to_end(&mut completed))
+    tokio::time::timeout(BOUND, first.read_to_end(&mut completed))
         .await
         .unwrap()
         .unwrap();
@@ -411,6 +416,9 @@ async fn bounded_bulk_buffers_leave_head_available_and_release_after_completion(
 impl Drop for Server {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
     }
 }
 
@@ -470,21 +478,33 @@ impl Server {
         let store = Arc::new(Store::init(dir.path()).unwrap());
         let a = store.add_device().unwrap();
         let b = store.add_device().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let router = http::router(store.clone());
-        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        // The server runs on its own threads. A socket write can block the
+        // test's thread until the peer reads, which a server sharing that
+        // thread never would.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let router = {
+            let _runtime = runtime.enter();
+            http::router(store.clone())
+        };
+        let task = runtime.spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            axum::serve(listener, router).await.unwrap()
+        });
         Self {
             base,
             store,
-            client: Client::builder()
-                .no_proxy()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap(),
+            client: Client::builder().no_proxy().timeout(BOUND).build().unwrap(),
             a,
             b,
             task,
+            runtime: Some(runtime),
             _dir: dir,
         }
     }
@@ -580,7 +600,7 @@ async fn unauthorized_large_unfinished_body_is_rejected_before_reading_it() {
     .await
     .unwrap();
     let mut bytes = [0; 1024];
-    let count = tokio::time::timeout(Duration::from_secs(2), tcp.read(&mut bytes))
+    let count = tokio::time::timeout(BOUND, tcp.read(&mut bytes))
         .await
         .unwrap()
         .unwrap();
@@ -612,7 +632,7 @@ async fn stalled_upload_does_not_hold_library_writer_or_another_device_slot() {
     let headers=format!("POST /uploads/frames HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nX-Risu-Library: {}\r\nContent-Length: {}\r\n\r\n",s.a.token,s.a.library_id,frame.len());
     tcp.write_all(headers.as_bytes()).await.unwrap();
     tcp.write_all(&frame[..10]).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(BOUND, async {
         s.upload(&s.b, b"concurrent").await;
         let request = request(
             &s.store,
@@ -624,6 +644,12 @@ async fn stalled_upload_does_not_hold_library_writer_or_another_device_slot() {
     })
     .await
     .unwrap();
+    // B finished while the server still waited for A's body, not after it gave up on A.
+    let mut answer = [0; 1];
+    assert!(matches!(
+        tcp.try_read(&mut answer),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
     // Disconnect A mid-frame; no verified object can be published for that frame.
     drop(tcp);
     assert!(s
@@ -720,7 +746,7 @@ async fn malformed_metadata_and_frame_fail_without_mutation() {
     let headers=format!("POST /uploads/frames HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nX-Risu-Library: {}\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",s.a.token,s.a.library_id,transfer::MAX_BATCH_BYTES+1);
     oversized.write_all(headers.as_bytes()).await.unwrap();
     let mut response = [0; 1024];
-    let length = tokio::time::timeout(Duration::from_secs(2), oversized.read(&mut response))
+    let length = tokio::time::timeout(BOUND, oversized.read(&mut response))
         .await
         .unwrap()
         .unwrap();
@@ -853,7 +879,10 @@ async fn streamed_frame_body_limit_rejects_before_publishing() {
         .build()
         .unwrap();
     assert!(!request.headers().contains_key("content-length"));
-    let response = s.client.execute(request).await.unwrap();
+    let response = tokio::time::timeout(BOUND, s.client.execute(request))
+        .await
+        .expect("the oversized streamed body was not answered")
+        .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert!(s.store.object_size(&hash(object)).unwrap().is_none());
     assert_eq!(s.head(&s.a).await, head);

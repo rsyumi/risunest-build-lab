@@ -1,3 +1,4 @@
+use super::lww::{SourceLayer, REMAPPED_SOURCE, STAGED_SOURCE};
 use super::{PersistentStore, StoreResult};
 use risunest_sync_wire::unit::{UnitKey, UnitValue};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -206,11 +207,13 @@ impl IdentityRemap {
 }
 
 impl PersistentStore {
-    pub(crate) fn remap_retired_staging<'a>(
+    /// Remaps the stage's identities that retired records still hold. Returns
+    /// the layer of the source units a commit reads, when units are staged.
+    pub(crate) fn remap_retired_staging(
         &mut self,
         staging: &str,
-        source: Option<&'a BTreeMap<UnitKey, UnitValue>>,
-    ) -> StoreResult<Option<std::borrow::Cow<'a, BTreeMap<UnitKey, UnitValue>>>> {
+        staged_source: bool,
+    ) -> StoreResult<Option<i64>> {
         let tx = self.connection.transaction()?;
         super::commit::validate_replace_commit(&tx, staging, None)?;
         let prior: Option<String> = tx
@@ -222,9 +225,9 @@ impl PersistentStore {
             .optional()?;
         if let Some(prior) = prior {
             let map: IdentityRemap = serde_json::from_str(&prior)?;
-            let remapped = remap_source(&tx, &map, source)?;
+            let layer = remap_source(&tx, &map, staging, staged_source)?;
             tx.commit()?;
-            return Ok(remapped.map(std::borrow::Cow::Owned));
+            return Ok(layer);
         }
         let mut candidates = std::collections::BTreeSet::new();
         let chars = identity_rows(
@@ -269,8 +272,9 @@ impl PersistentStore {
                 }
             }
         }
-        if let Some(source) = source {
-            for (key, value) in source {
+        if staged_source {
+            for unit in super::lww::replacement_source_units(&tx, SourceLayer::staged(staging)) {
+                let (key, value) = unit?;
                 let p = key.components();
                 if p[0] == "exists"
                     && p[1] != "conversation"
@@ -312,7 +316,7 @@ impl PersistentStore {
         }
         if map.records.is_empty() && map.conversations.is_empty() {
             tx.commit()?;
-            return Ok(source.map(std::borrow::Cow::Borrowed));
+            return Ok(staged_source.then_some(STAGED_SOURCE));
         }
         let rows = json_rows(&tx, "SELECT value FROM root WHERE generation=?1", staging)?;
         for (_, mut value) in rows {
@@ -439,9 +443,9 @@ impl PersistentStore {
                 serde_json::to_string(&map)?
             ],
         )?;
-        let remapped = remap_source(&tx, &map, source)?;
+        let layer = remap_source(&tx, &map, staging, staged_source)?;
         tx.commit()?;
-        Ok(remapped.map(std::borrow::Cow::Owned))
+        Ok(layer)
     }
 }
 
@@ -469,41 +473,42 @@ fn json_rows(db: &Connection, sql: &str, generation: &str) -> StoreResult<Vec<(S
         .collect()
 }
 
-fn remap_source(
-    db: &Connection,
-    map: &IdentityRemap,
-    source: Option<&BTreeMap<UnitKey, UnitValue>>,
-) -> StoreResult<Option<BTreeMap<UnitKey, UnitValue>>> {
-    source
-        .map(|source| -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
-            let mut result = BTreeMap::new();
-            for (key, value) in source {
-                let mut value = value.clone();
-                if key.components()[0] == "archive" && !matches!(value, UnitValue::Deleted) {
-                    let mut archive = super::lww::archive_metadata(db, &value)?;
-                    archive.identity_remap.push(map.clone());
-                    value = super::lww::archive_value(db, &archive)?;
-                } else if matches!(value, UnitValue::Inline { .. })
-                    || (matches!(value, UnitValue::Object { .. })
-                        && super::external_capture::is_large_unit(key))
-                {
-                    let original = super::lww::json_value_resolved(db, &value)?
-                        .ok_or_else(|| super::StoreError::Validation {
-                            message: "remapped unit value is missing".into(),
-                        })?;
-                    let mut payload = original.clone();
-                    map.unit(key, &mut payload);
-                    // Remapped identities change the value's length, so its
-                    // inline or large form follows the new bytes.
-                    if payload != original {
-                        value = super::lww::unit_value(db, &payload)?;
-                    }
-                }
-                result.insert(map.key(key)?, value);
-            }
-            Ok(result)
-        })
-        .transpose()
+/// Rebuilds the remapped layer of the staged source units from the staged layer.
+fn remap_source(db: &Connection, map: &IdentityRemap, staging: &str, staged_source: bool) -> StoreResult<Option<i64>> {
+    if !staged_source {
+        return Ok(None);
+    }
+    super::lww::clear_replacement_source(db, staging, Some(REMAPPED_SOURCE))?;
+    for unit in super::lww::replacement_source_units(db, SourceLayer::staged(staging)) {
+        let (key, value) = unit?;
+        let (key, value) = remap_unit(db, map, &key, value)?;
+        super::lww::insert_replacement_source(db, staging, REMAPPED_SOURCE, &key, &value)?;
+    }
+    Ok(Some(REMAPPED_SOURCE))
+}
+
+fn remap_unit(db: &Connection, map: &IdentityRemap, key: &UnitKey, mut value: UnitValue) -> StoreResult<(UnitKey, UnitValue)> {
+    if key.components()[0] == "archive" && !matches!(value, UnitValue::Deleted) {
+        let mut archive = super::lww::archive_metadata(db, &value)?;
+        archive.identity_remap.push(map.clone());
+        value = super::lww::archive_value(db, &archive)?;
+    } else if matches!(value, UnitValue::Inline { .. })
+        || (matches!(value, UnitValue::Object { .. })
+            && super::external_capture::is_large_unit(key))
+    {
+        let original = super::lww::json_value_resolved(db, &value)?
+            .ok_or_else(|| super::StoreError::Validation {
+                message: "remapped unit value is missing".into(),
+            })?;
+        let mut payload = original.clone();
+        map.unit(key, &mut payload);
+        // Remapped identities change the value's length, so its
+        // inline or large form follows the new bytes.
+        if payload != original {
+            value = super::lww::unit_value(db, &payload)?;
+        }
+    }
+    Ok((map.key(key)?, value))
 }
 
 #[cfg(test)]
@@ -639,14 +644,19 @@ mod tests {
                 .unwrap(),
             ),
         ]);
-        let first = store
-            .remap_retired_staging(&incoming, Some(&source))
-            .unwrap();
+        let remapped = |store: &PersistentStore| {
+            super::super::lww::replacement_source_units(&store.connection, SourceLayer { generation: &incoming, layer: REMAPPED_SOURCE })
+                .collect::<StoreResult<Vec<_>>>()
+                .unwrap()
+        };
+        store.stage_replacement_source(&incoming, &source).unwrap();
+        assert_eq!(store.remap_retired_staging(&incoming, true).unwrap(), Some(REMAPPED_SOURCE));
+        let first = remapped(&store);
         let projection = store.materialize_staging(&incoming).unwrap();
-        let second = store
-            .remap_retired_staging(&incoming, Some(&source))
-            .unwrap();
-        assert_eq!(first, second);
+        assert_eq!(store.remap_retired_staging(&incoming, true).unwrap(), Some(REMAPPED_SOURCE));
+        assert_eq!(first.len(), source.len());
+        assert_ne!(first.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(), source.keys().cloned().collect::<Vec<_>>());
+        assert_eq!(first, remapped(&store));
         assert_eq!(projection, store.materialize_staging(&incoming).unwrap());
         let header = Header {
             binding_authority: store.lww_binding_authority().unwrap(),
@@ -821,9 +831,9 @@ mod tests {
         expected[0]["data"][0] = json!(map.id("character", before[0]["data"][0].as_str().unwrap()));
         let order_key = key(&["order", "characters"]);
         let original = unit_value(db, &before).unwrap();
-        let source = BTreeMap::from([(order_key.clone(), original.clone())]);
-        let remapped = remap_source(db, &map, Some(&source)).unwrap().unwrap();
-        let value = &remapped[&order_key];
+        let (remapped_key, value) = remap_unit(db, &map, &order_key, original.clone()).unwrap();
+        assert_eq!(remapped_key, order_key);
+        let value = &value;
         let large = risunest_sync_wire::payload_value::encode(&expected).unwrap().len() > MAX_INLINE_UNIT_BYTES;
         assert_eq!(matches!(value, UnitValue::Object { .. }), large);
         assert!(validate_large_unit(db, value).unwrap() == Some(expected.clone()));
@@ -847,12 +857,12 @@ mod tests {
         assert_order_remap(&store.connection, sized_order(&"l".repeat(64), bound + 16));
         assert_order_remap(&store.connection, sized_order("kept", bound + 4096));
         // An opaque unit is passed through without reading a body.
-        let opaque = BTreeMap::from([(
+        let opaque = (
             key(&["future-unit", "order"]),
             UnitValue::object(risunest_sync_wire::descriptor::RecordDescriptor::content("a".repeat(64))).unwrap(),
-        )]);
+        );
         assert_eq!(
-            remap_source(&store.connection, &IdentityRemap::default(), Some(&opaque)).unwrap().unwrap(),
+            remap_unit(&store.connection, &IdentityRemap::default(), &opaque.0, opaque.1.clone()).unwrap(),
             opaque
         );
     }

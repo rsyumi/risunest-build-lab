@@ -46,17 +46,23 @@ export async function runPluginUnloadCallbacks(
 
 export function createPluginLoadOrchestrator<T>(dependencies: PluginLoadDependencies<T>) {
     let loadGeneration = 0
+    let latestLoad: Promise<void> = Promise.resolve()
     const operationMutex = new Mutex()
 
     return (plugins: readonly T[]): Promise<void> => {
         const generation = ++loadGeneration
         const isCurrent = () => generation === loadGeneration
 
-        return operationMutex.runExclusive(async () => {
+        const operation = operationMutex.runExclusive(async () => {
             await dependencies.resetRegistry(isCurrent)
             if (!isCurrent()) return
 
             await dependencies.loadV3(plugins)
         })
+        // A caller whose load was replaced waits for the replacement, so the runtime it
+        // asked to change has changed when its promise settles.
+        const settled = operation.then(() => isCurrent() ? undefined : latestLoad)
+        latestLoad = settled
+        return settled
     }
 }

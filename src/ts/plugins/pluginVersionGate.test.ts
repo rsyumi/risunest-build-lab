@@ -239,4 +239,12 @@ describe('plugin list database mutation policy', () => {
         await loadPlugins()
         expect(vi.mocked(loadV3Plugins).mock.calls.at(-1)![0].map((plugin) => plugin.name)).toEqual(['original', 'new'])
     })
+    it('never installs a plugin named * through a database write', async () => {
+        const original = makePlugin('original', '3.0')
+        getDatabase().plugins = [original]
+        const confirm = vi.spyOn(alertModule, 'alertConfirm').mockResolvedValue(true)
+        await access().setDatabase({ plugins: [original, makePlugin('*', '3.0'), makePlugin('named', '3.0')] }, allowedDbKeys)
+        expect(getDatabase().plugins.map((plugin) => plugin.name)).toEqual(['original', 'named'])
+        expect(confirm).toHaveBeenCalledTimes(1)
+    })
 })

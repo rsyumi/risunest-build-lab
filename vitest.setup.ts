@@ -13,6 +13,16 @@ const guardedFetch: typeof fetch = (input, init) => {
 }
 globalThis.fetch = guardedFetch
 
+const RealWebSocket = globalThis.WebSocket
+if (RealWebSocket) {
+    globalThis.WebSocket = class extends RealWebSocket {
+        constructor(url: string | URL, protocols?: string | string[]) {
+            testNetwork.check(url)
+            super(url, protocols)
+        }
+    }
+}
+
 type GuardRequest = { request: { url: string } }
 const happyDOM = (globalThis as { happyDOM?: { settings?: { fetch?: { interceptor?: unknown } } } }).happyDOM
 if (happyDOM?.settings?.fetch) {

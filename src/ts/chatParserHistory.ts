@@ -209,13 +209,19 @@ function decodeHexUtf8(value: string): string | null {
     }
 }
 
-function collectParserInputText(value: unknown, seen = new WeakSet<object>()): string[] {
-    if (typeof value === 'string') return [value]
-    if (!value || typeof value !== 'object' || seen.has(value)) return []
+function collectParserInputText(
+    value: unknown,
+    seen = new WeakSet<object>(),
+    output: string[] = [],
+): string[] {
+    if (typeof value === 'string') {
+        output.push(value)
+        return output
+    }
+    if (!value || typeof value !== 'object' || seen.has(value)) return output
     seen.add(value)
-    const output: string[] = []
     for (const child of Object.values(value)) {
-        output.push(...collectParserInputText(child, seen))
+        collectParserInputText(child, seen, output)
     }
     return output
 }

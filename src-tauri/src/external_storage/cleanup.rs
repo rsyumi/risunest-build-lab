@@ -287,14 +287,18 @@ pub(crate) fn lww_cleanup_due(compacted: bool, last_run_ms: Option<u64>, now_ms:
     })
 }
 
+/// Cleanup of a serverless repository. `store` holds the segment references
+/// this device recorded and the versions it releases with a removed segment.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_lww(
     context:&LeaseContext<'_>,request:&CleanupRequest<'_>,engine:&super::lww_engine::ExternalLwwEngine,
+    store:&std::sync::Mutex<crate::persistent_store::PersistentStore>,
     base:ConnectedRepositoryView<'_>,scratch:&Path,cancel:&Cancellation,
 )->Result<CleanupOutcome> {
     if engine.connection_id!=context.connection_id || engine.repository.repository_id!=context.repository.repository_id || engine.repository.connection_identity!=context.repository.connection_identity
         || engine.library!=context.descriptor.repository_id {return Err(ProviderError::new(ErrorKind::Corrupt))}
     let documents=ConnectedDocuments{connected:base.connected,cancel,scratch};
-    let view=LwwRepositoryView::new(engine,base,documents);
+    let view=LwwRepositoryView::new(engine,store,base,documents);
     run(context,request,&view,&view,cancel).await
 }
 
@@ -843,23 +847,31 @@ pub(crate) struct ConnectedDocuments<'a> {
 }
 
 type ListedCheckpoint=Option<(RemoteObject,super::lww_checkpoint::Checkpoint)>;
-/// One cleanup run reads each published checkpoint and segment once; rechecks
-/// only list again. A changed receipt is read again.
+/// One cleanup run reads each published checkpoint once and each segment at
+/// most once; a segment whose references this device recorded is not read.
+/// Rechecks only list again. A changed receipt is read again.
 pub(crate) struct LwwRepositoryView<'a> {
     pub engine:&'a super::lww_engine::ExternalLwwEngine,
     pub base:ConnectedRepositoryView<'a>,
     pub documents:ConnectedDocuments<'a>,
+    store:&'a std::sync::Mutex<crate::persistent_store::PersistentStore>,
     native_bodies:std::sync::Mutex<BTreeMap<String,RemoteObject>>,
     known:std::sync::Mutex<Vec<RemoteObject>>,
     checkpoints:std::sync::Mutex<BTreeMap<String,ListedCheckpoint>>,
     segments:std::sync::Mutex<BTreeMap<String,(RemoteObject,DocumentNode)>>,
+    coverage:std::sync::Mutex<super::lww_checkpoint::Coverage>,
 }
 fn receipt_key(receipt:&ObjectReceipt)->Result<String> {
     serde_json::to_string(receipt).map_err(|_|ProviderError::new(ErrorKind::Corrupt))
 }
 impl<'a> LwwRepositoryView<'a> {
-    pub(crate) fn new(engine:&'a super::lww_engine::ExternalLwwEngine,base:ConnectedRepositoryView<'a>,documents:ConnectedDocuments<'a>)->Self {
-        Self{engine,base,documents,native_bodies:Default::default(),known:Default::default(),checkpoints:Default::default(),segments:Default::default()}
+    pub(crate) fn new(engine:&'a super::lww_engine::ExternalLwwEngine,store:&'a std::sync::Mutex<crate::persistent_store::PersistentStore>,
+        base:ConnectedRepositoryView<'a>,documents:ConnectedDocuments<'a>)->Self {
+        Self{engine,base,documents,store,native_bodies:Default::default(),known:Default::default(),checkpoints:Default::default(),
+            segments:Default::default(),coverage:Default::default()}
+    }
+    fn store(&self)->Result<std::sync::MutexGuard<'_,crate::persistent_store::PersistentStore>> {
+        self.store.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))
     }
     async fn checkpoint_document(&self,receipt:&ObjectReceipt)->Result<ListedCheckpoint> {
         let key=receipt_key(receipt)?;
@@ -913,15 +925,25 @@ impl<'a> LwwRepositoryView<'a> {
     async fn segment_node(&self,receipt:&ObjectReceipt)->Result<(RemoteObject,DocumentNode)> {
         let name=receipt.locator.object.rsplit('/').next().ok_or_else(||ProviderError::new(ErrorKind::Corrupt))?;
         let (writer,seq,hash)=super::contract::parse_segment_object_id(name)?;
+        let target=self.engine.target_scope();
+        let cached=self.store()?.external_lww_segment_references(&target,writer,seq,hash).map_err(super::lww_engine::store_error)?;
+        if let Some(references)=cached.filter(|references|receipt.complete && references.byte_length==receipt.byte_length) {
+            return self.referenced_node(receipt,name,hash,&references);
+        }
         let bytes=super::lww_engine::read_bytes(self.engine.provider.as_ref(),&self.engine.repository,&receipt.locator,self.documents.cancel).await?;
         if !receipt.complete || bytes.len() as u64!=receipt.byte_length || super::lww_segment::digest(&bytes)!=hash {return Err(ProviderError::new(ErrorKind::Corrupt))}
         let document=super::lww_segment::open(&bytes,&self.engine.library,writer,seq,&self.engine.root_key)?;
+        let references=super::lww_engine::segment_references(receipt.byte_length,&document)?;
+        let node=self.referenced_node(receipt,name,hash,&references)?;
+        self.store()?.external_lww_record_seen(&target,writer,seq,hash,Some(&references)).map_err(super::lww_engine::store_error)?;
+        Ok(node)
+    }
+    fn referenced_node(&self,receipt:&ObjectReceipt,name:&str,hash:&str,document:&crate::persistent_store::external_lww::SegmentReferences)->Result<(RemoteObject,DocumentNode)> {
         let upper=self.engine.admitted_upper()?.checked_add(300_000).ok_or_else(||ProviderError::new(ErrorKind::Corrupt))?;
-        if document.changes.iter().any(|change|change.stamp.physical_ms.0>upper) {return Err(ProviderError::new(ErrorKind::ClockSkew))}
-        let plaintext=document.encode()?;
+        if document.newest_physical_ms>upper {return Err(ProviderError::new(ErrorKind::ClockSkew))}
         let object=RemoteObject{repository_id:self.engine.repository.repository_id.clone(),object_id:name.into(),role:ObjectRole::Segment,
-            receipt:receipt.clone(),ciphertext_sha256:hash.into(),plaintext_length:plaintext.len() as u64,
-            plaintext_sha256:super::lww_segment::digest(&plaintext)};
+            receipt:receipt.clone(),ciphertext_sha256:hash.into(),plaintext_length:document.plaintext_length,
+            plaintext_sha256:document.plaintext_sha256.clone()};
         let mut references=document.asset_catalogs.iter().chain(&document.data_catalogs).map(|object|RemoteObject::from_stored(object,&self.engine.repository)).collect::<Result<Vec<_>>>()?;
         for (hash,body) in &document.large_bodies {references.push(self.standalone(hash,body)?);}
         Ok((object,DocumentNode{snapshot_id:name.into(),parent_snapshot_id:None,references}))
@@ -963,6 +985,7 @@ impl RepositoryView for LwwRepositoryView<'_> {
             }
             known.extend(self.native_bodies.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?.values().cloned());
             *self.known.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?=known;
+            *self.coverage.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?=coverage;
             Ok(roots)
         })
     }
@@ -980,7 +1003,16 @@ impl RepositoryView for LwwRepositoryView<'_> {
         } else {self.base.delete_inventory_page(expected,cancel)}
     }
     fn prepare_removals(&self,objects:&[RemoteObject])->Result<()> {self.base.prepare_removals(objects)}
-    fn confirmed_removed(&self,object:&RemoteObject)->Result<()> {self.base.confirmed_removed(object)}
+    fn confirmed_removed(&self,object:&RemoteObject)->Result<()> {
+        self.base.confirmed_removed(object)?;
+        if object.role!=ObjectRole::Segment {return Ok(())}
+        let (writer,seq,hash)=super::contract::parse_segment_object_id(&object.object_id)?;
+        let covered=self.coverage.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?.get(writer).is_some_and(|prefix|seq<=prefix.0);
+        if covered {
+            self.store()?.external_lww_forget_removed_segment(&self.engine.target_scope(),writer,seq,hash).map_err(super::lww_engine::store_error)?;
+        }
+        Ok(())
+    }
     fn protected_jobs(&self)->Vec<String> {self.base.protected_jobs()}
 }
 impl DocumentSource for LwwRepositoryView<'_> {
@@ -1125,7 +1157,7 @@ impl DocumentSource for ConnectedDocuments<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::external_storage::{
         fake::{self, DeleteFault, FakeLeaseClock, FakeProvider},
@@ -1193,7 +1225,7 @@ mod tests {
             f.publish_a().await;
             let directory=tempfile::tempdir().unwrap();
             let writer=f.a.lww_clock_state().unwrap().writer_id;
-            let first=f.sender.compact_published(&directory.path().join("first"),"00000000-0000-4000-8000-000000000091",&writer,
+            let first=f.sender.compact_published(&mut f.a,&directory.path().join("first"),"00000000-0000-4000-8000-000000000091",&writer,
                 &f.sender.capabilities,&cancel,None).await.unwrap();
             let (_,_,backup)=ordinary_backup(&f,directory.path(),&cancel).await;
             assert_eq!(f.receiver.snapshot_listing(&cancel).await.unwrap().len(),1);
@@ -1203,7 +1235,8 @@ mod tests {
             let ordinary=backup.reference.receipt.locator.object.clone();
             let before=(f.provider.read_attempts(&first_checkpoint),f.provider.read_attempts(&ordinary));
 
-            let requests=f.receiver.receive_requests_cached(&mut f.b,DecimalU64(0),&summaries,&cancel).await.unwrap();
+            let requests=f.receiver.receive_requests_cached(&mut f.b,DecimalU64(0),&summaries,&cancel).await.unwrap()
+                .iter().map(|id|f.b.external_lww_unfinished_receive(id).unwrap().unwrap()).collect::<Vec<_>>();
             assert!(!requests.is_empty());
             for request in requests {
                 f.b.lww_stage_receive(&request).unwrap();
@@ -1219,7 +1252,8 @@ mod tests {
             assert_eq!(reads(&f),(read,listed+4),"an idle maintenance check reads objects or lists more than twice");
 
             let own=tokio::sync::Mutex::new(super::super::lww_compaction::CheckpointSummaries::default());
-            for request in f.sender.receive_requests_cached(&mut f.a,DecimalU64(0),&own,&cancel).await.unwrap() {
+            for id in f.sender.receive_requests_cached(&mut f.a,DecimalU64(0),&own,&cancel).await.unwrap() {
+                let request=f.a.external_lww_unfinished_receive(&id).unwrap().unwrap();
                 f.a.lww_stage_receive(&request).unwrap();
                 f.a.lww_apply_receive(&ApplyReceive{header:request.header.clone(),generating:vec![]}).unwrap();
                 f.a.lww_finish_receive(&request.header).unwrap();
@@ -1228,7 +1262,7 @@ mod tests {
             assert!(f.sender.receive_requests_cached(&mut f.a,DecimalU64(0),&own,&cancel).await.unwrap().is_empty());
             assert_eq!(reads(&f),(read,listed+2),"an idle receive on the publishing device reads objects or lists more than twice");
 
-            let second=f.sender.compact_published(&directory.path().join("second"),"00000000-0000-4000-8000-000000000092",&writer,
+            let second=f.sender.compact_published(&mut f.a,&directory.path().join("second"),"00000000-0000-4000-8000-000000000092",&writer,
                 &f.sender.capabilities,&cancel,None).await.unwrap();
             let (read,_)=reads(&f);
             let known=(f.provider.read_attempts(&first_checkpoint),f.provider.read_attempts(&ordinary));
@@ -1252,14 +1286,15 @@ mod tests {
             for n in 1..4 {f.a.delete_asset_alias("asset",&format!("small-{n}"),f.a.revision().unwrap()).unwrap();}
             f.publish_a().await;
             let directory=tempfile::tempdir().unwrap();
-            let baseline=f.receiver.compact_published(&directory.path().join("remote-baseline"),"ffffffff-ffff-4fff-8fff-ffffffffffff",&f.a.lww_clock_state().unwrap().writer_id,
+            let a_writer=f.a.lww_clock_state().unwrap().writer_id;
+            let baseline=f.receiver.compact_published(&mut f.b,&directory.path().join("remote-baseline"),"ffffffff-ffff-4fff-8fff-ffffffffffff",&a_writer,
                 &f.receiver.capabilities,&cancel,None).await.unwrap();
             assert!(f.receive_b().await>0);
             let saved=super::super::lww_residency::packed_source(f.directory_b.path(),&small[0]).unwrap().unwrap();
             let old_pack=saved.packs[0].header.object_id.clone();
             assert!(crate::asset_repository::PayloadCas::new(f.directory_b.path()).unwrap().stat_object(&small[0]).unwrap().is_none());
             let id="00000000-0000-4000-8000-000000000090".to_owned();
-            let checkpoint=f.sender.compact_published(directory.path(),&id,&f.a.lww_clock_state().unwrap().writer_id,
+            let checkpoint=f.sender.compact_published(&mut f.a,directory.path(),&id,&a_writer,
                 &f.sender.capabilities,&cancel,None).await.unwrap();
             let old=f.sender.checkpoint(&baseline.reference.receipt,&cancel).await.unwrap().1;
             let current=f.sender.checkpoint(&checkpoint.reference.receipt,&cancel).await.unwrap().1;
@@ -1270,7 +1305,8 @@ mod tests {
             let cache=directory.path().join("cache");let scratch=directory.path().join("probe");
             assert_ne!(backup.reference.repository_id,f.sender.repository.repository_id);
             assert_eq!(f.sender.snapshot_listing(&cancel).await.unwrap().len(),2,"ordinary logical-scope backup coexists with the physical checkpoints");
-            let view=LwwRepositoryView::new(&f.sender,ConnectedRepositoryView{connected:&connected,writer_id:"sender",policy:RetentionPolicy::DEFAULT,
+            let sender_store=std::sync::Mutex::new(f.a.open_native_job_store().unwrap());
+            let view=LwwRepositoryView::new(&f.sender,&sender_store,ConnectedRepositoryView{connected:&connected,writer_id:"sender",policy:RetentionPolicy::DEFAULT,
                 now_ms:1000,unfinished:vec![],cache_root:&cache},ConnectedDocuments{connected:&connected,cancel:&cancel,scratch:&scratch});
             let observed=view.roots(&cancel).await.unwrap();let listed=view.snapshots(&cancel).await.unwrap();let known=view.known_objects().unwrap();
             let inventory=view.inventory(&cancel).await.unwrap();
@@ -1300,17 +1336,17 @@ mod tests {
             let context=LeaseContext{root:f.directory_a.path(),connection_id:"sender",writer_id:"collector",descriptor:&connected.stored.descriptor,
                 root_key:&connected.root_key,provider:connected.provider.as_ref(),repository:&connected.handle,clock:&clock,protection_supported:true,ledger:None};
             let request=CleanupRequest{job_id:"first-finite-gc",cleanup_supported:true,limits:CleanupLimits{batch:1,per_run:1},connection_time:&available_time};
-            let first=run_lww(&context,&request,&f.sender,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
+            let first=run_lww(&context,&request,&f.sender,&sender_store,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
                 now_ms:1000+leases::UNREACHABLE_GRACE_MS,unfinished:vec![],cache_root:&cache},&scratch,&cancel).await.unwrap();
             assert!(first.deleted_objects<=1);assert!(f.provider.holds(&body.object_id),"a newly unmarked protected body retains its grace period");
             clock.advance(leases::UNREACHABLE_GRACE_MS);
             let request=CleanupRequest{job_id:"second-finite-gc",..request};
-            let settled=run_lww(&context,&request,&f.sender,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
+            let settled=run_lww(&context,&request,&f.sender,&sender_store,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
                 now_ms:1000+2*leases::UNREACHABLE_GRACE_MS,unfinished:vec![],cache_root:&cache},&scratch,&cancel).await.unwrap();
             assert_eq!(settled.deleted_objects,1);assert!(!f.provider.holds(&body.object_id));
             assert!(view.snapshots(&cancel).await.unwrap().len()>=3,"partial deletion keeps signed discovery parents");
             let request=CleanupRequest{job_id:"retire-covered-pack",limits:CleanupLimits{batch:100,per_run:100},..request};
-            run_lww(&context,&request,&f.sender,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
+            run_lww(&context,&request,&f.sender,&sender_store,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
                 now_ms:1000+2*leases::UNREACHABLE_GRACE_MS,unfinished:vec![],cache_root:&cache},&scratch,&cancel).await.unwrap();
             assert!(!f.provider.holds(&old_pack),"finite aged GC retires the saved equal-coverage pack");
             let mut receiver_connection=ConnectedRepository{stored:connected.stored.clone(),provider:connected.provider.clone(),handle:fake::repository(),
@@ -1345,6 +1381,72 @@ mod tests {
     }
     fn validate_generic_body(object:&RemoteObject,repository:&RepositoryHandle)->Result<()> {object.stored(repository).map(|_|())}
 
+    /// Runs cleanup on the sender's repository twice, the grace period apart,
+    /// so the second run removes what the first found unreachable.
+    pub(crate) async fn collect_after_grace(f:&super::super::lww_tests::CycleFixture,directory:&Path)->(CleanupOutcome,CleanupOutcome) {
+        let cancel=Cancellation::default();
+        let connected=fixture_connection(f);
+        let sender_store=std::sync::Mutex::new(f.a.open_native_job_store().unwrap());
+        let cache=directory.join("cache");let scratch=directory.join("probe");
+        let start=super::super::runtime::now_ms();
+        let clock=fake::FakeLeaseClock::new(start);
+        let context=LeaseContext{root:f.directory_a.path(),connection_id:"sender",writer_id:"collector",descriptor:&connected.stored.descriptor,
+            root_key:&connected.root_key,provider:connected.provider.as_ref(),repository:&connected.handle,clock:&clock,protection_supported:true,ledger:None};
+        let request=CleanupRequest{job_id:"mark-unreachable",cleanup_supported:true,limits:CleanupLimits::default(),connection_time:&available_time};
+        let first=run_lww(&context,&request,&f.sender,&sender_store,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
+            now_ms:start,unfinished:vec![],cache_root:&cache},&scratch,&cancel).await.unwrap();
+        clock.advance(leases::UNREACHABLE_GRACE_MS);
+        let request=CleanupRequest{job_id:"remove-unreachable",..request};
+        let second=run_lww(&context,&request,&f.sender,&sender_store,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
+            now_ms:start+leases::UNREACHABLE_GRACE_MS,unfinished:vec![],cache_root:&cache},&scratch,&cancel).await.unwrap();
+        (first,second)
+    }
+
+    #[test]
+    fn versions_of_segments_cleanup_removed_under_a_checkpoint_are_released() {
+        runtime().block_on(async {
+            use super::super::lww_tests::{CycleFixture,device_rows};
+            use crate::persistent_store::{lww::UnitMutation,WorkingSetCommit};
+            let mut f=CycleFixture::new();let cancel=Cancellation::default();
+            for value in ["one","two","three"] {
+                f.a.commit(&WorkingSetCommit{expected_revision:f.a.revision().unwrap(),unit_mutations:Some(vec![UnitMutation::Set{
+                    key:risunest_sync_wire::unit::UnitKey::new(&["root","language"]).unwrap(),value:serde_json::json!(value)}]),..Default::default()}).unwrap();
+                f.publish_a().await;
+            }
+            assert!(device_rows(&f.a,"external_lww_versions")>=3);
+            let directory=tempfile::tempdir().unwrap();
+            let writer=f.a.lww_clock_state().unwrap().writer_id;
+            f.sender.compact_published(&mut f.a,&directory.path().join("compaction"),"00000000-0000-4000-8000-0000000000e1",
+                &writer,&f.sender.capabilities,&cancel,None).await.unwrap();
+            assert!(device_rows(&f.a,"external_lww_versions")>=3,"compaction releases no versions");
+            let (_,removed)=collect_after_grace(&f,directory.path()).await;
+            assert_eq!(removed.stop_reason,StopReason::Complete);
+            assert!(f.sender.listing(&cancel).await.unwrap().is_empty(),"the covered segments are removed");
+            assert_eq!(device_rows(&f.a,"external_lww_versions"),0,"versions of removed covered segments stay");
+        });
+    }
+
+    #[test]
+    fn lww_cleanup_answers_segments_this_device_published_from_its_reference_cache() {
+        runtime().block_on(async {
+            use super::super::lww_tests::CycleFixture;
+            use crate::persistent_store::{lww::UnitMutation,WorkingSetCommit};
+            let mut f=CycleFixture::new();
+            for value in ["one","two","three"] {
+                f.a.commit(&WorkingSetCommit{expected_revision:f.a.revision().unwrap(),unit_mutations:Some(vec![UnitMutation::Set{
+                    key:risunest_sync_wire::unit::UnitKey::new(&["root","language"]).unwrap(),value:serde_json::json!(value)}]),..Default::default()}).unwrap();
+                f.publish_a().await;
+            }
+            let segments=f.sender.listing(&Cancellation::default()).await.unwrap().into_iter().map(|receipt|receipt.locator.object).collect::<Vec<_>>();
+            let reads=|f:&CycleFixture|segments.iter().map(|id|f.provider.read_attempts(id)).collect::<Vec<_>>();
+            let before=reads(&f);
+            let directory=tempfile::tempdir().unwrap();
+            let (first,second)=collect_after_grace(&f,directory.path()).await;
+            assert_eq!((first.deleted_objects,second.deleted_objects),(0,0));
+            assert_eq!(reads(&f),before,"cleanup downloads segments this device published");
+        });
+    }
+
     fn fixture_connection(f:&super::super::lww_tests::CycleFixture)->ConnectedRepository {
         use super::super::contract::{ConnectionConfig,RemoteLocator};
         ConnectedRepository {
@@ -1360,40 +1462,48 @@ mod tests {
     }
 
     #[test]
-    fn lww_cleanup_reads_each_published_input_once() {
+    fn lww_cleanup_reads_a_segment_only_when_this_device_has_no_references_for_it() {
         runtime().block_on(async {
             use super::super::lww_tests::CycleFixture;
             use crate::persistent_store::{lww::UnitMutation,WorkingSetCommit};
             let mut f=CycleFixture::new();let cancel=Cancellation::default();
-            let language=|f:&mut CycleFixture,value:&str| {
-                f.a.commit(&WorkingSetCommit{expected_revision:f.a.revision().unwrap(),unit_mutations:Some(vec![UnitMutation::Set{
-                    key:risunest_sync_wire::unit::UnitKey::new(&["root","language"]).unwrap(),value:serde_json::json!(value)}]),..Default::default()}).unwrap();
+            let set=|store:&mut crate::persistent_store::PersistentStore,key:&str,value:serde_json::Value| {
+                store.commit(&WorkingSetCommit{expected_revision:store.revision().unwrap(),unit_mutations:Some(vec![UnitMutation::Set{
+                    key:risunest_sync_wire::unit::UnitKey::new(&["root",key]).unwrap(),value}]),..Default::default()}).unwrap();
             };
-            for value in ["one","two","three"] {language(&mut f,value);f.publish_a().await;}
+            for value in ["one","two","three"] {set(&mut f.a,"language",serde_json::json!(value));f.publish_a().await;}
             let directory=tempfile::tempdir().unwrap();
-            let completed=f.sender.compact_published(&directory.path().join("compaction"),"00000000-0000-4000-8000-0000000000a1",
-                &f.a.lww_clock_state().unwrap().writer_id,&f.sender.capabilities,&cancel,None).await.unwrap();
-            language(&mut f,"four");f.publish_a().await;
+            let writer=f.a.lww_clock_state().unwrap().writer_id;
+            let completed=f.sender.compact_published(&mut f.a,&directory.path().join("compaction"),"00000000-0000-4000-8000-0000000000a1",
+                &writer,&f.sender.capabilities,&cancel,None).await.unwrap();
+            set(&mut f.a,"language",serde_json::json!("four"));f.publish_a().await;
+            set(&mut f.b,"loreBookDepth",serde_json::json!(3));
+            f.receiver.publish(&mut f.b,risunest_sync_wire::stamp::DecimalU64(0),&[],&cancel).await.unwrap();
             let segments=f.sender.listing(&cancel).await.unwrap().into_iter().map(|receipt|receipt.locator.object).collect::<Vec<_>>();
-            assert_eq!(segments.len(),4);
+            assert_eq!(segments.len(),5);
+            let foreign=segments.iter().filter(|id|super::super::contract::parse_segment_object_id(id).unwrap().0!=writer).cloned().collect::<Vec<_>>();
+            assert_eq!(foreign.len(),1);
             let checkpoint=completed.reference.receipt.locator.object.clone();
             let reads=|f:&CycleFixture,ids:&[String]|ids.iter().map(|id|f.provider.read_attempts(id)).collect::<Vec<_>>();
-            let (segments_before,checkpoint_before)=(reads(&f,&segments),f.provider.read_attempts(&checkpoint));
             let connected=fixture_connection(&f);
             let cache=directory.path().join("cache");let scratch=directory.path().join("probe");
             let clock=fake::FakeLeaseClock::new(super::super::runtime::now_ms());
             let context=LeaseContext{root:f.directory_a.path(),connection_id:"sender",writer_id:"collector",descriptor:&connected.stored.descriptor,
                 root_key:&connected.root_key,provider:connected.provider.as_ref(),repository:&connected.handle,clock:&clock,protection_supported:true,ledger:None};
-            let request=CleanupRequest{job_id:"idle-cleanup",cleanup_supported:true,limits:CleanupLimits::default(),connection_time:&available_time};
-            let outcome=run_lww(&context,&request,&f.sender,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
-                now_ms:super::super::runtime::now_ms(),unfinished:vec![],cache_root:&cache},&scratch,&cancel).await.unwrap();
-            assert_eq!(outcome.stop_reason,StopReason::Complete);
-            assert_eq!(outcome.deleted_objects,0);
-            let segments_after=reads(&f,&segments);
-            for ((id,before),after) in segments.iter().zip(&segments_before).zip(&segments_after) {
-                assert_eq!(after-before,1,"segment {id} is read once per cleanup run");
+            let sender_store=std::sync::Mutex::new(f.a.open_native_job_store().unwrap());
+            for run in 0..2 {
+                let (segments_before,checkpoint_before)=(reads(&f,&segments),f.provider.read_attempts(&checkpoint));
+                let request=CleanupRequest{job_id:if run==0 {"idle-cleanup"} else {"idle-cleanup-again"},cleanup_supported:true,limits:CleanupLimits::default(),connection_time:&available_time};
+                let outcome=run_lww(&context,&request,&f.sender,&sender_store,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
+                    now_ms:super::super::runtime::now_ms(),unfinished:vec![],cache_root:&cache},&scratch,&cancel).await.unwrap();
+                assert_eq!(outcome.stop_reason,StopReason::Complete);
+                assert_eq!(outcome.deleted_objects,0);
+                for ((id,before),after) in segments.iter().zip(&segments_before).zip(reads(&f,&segments)) {
+                    let expected=usize::from(run==0 && foreign.contains(id));
+                    assert_eq!(after-before,expected,"segment {id} in run {run}");
+                }
+                assert!(f.provider.read_attempts(&checkpoint)-checkpoint_before<=1);
             }
-            assert!(f.provider.read_attempts(&checkpoint)-checkpoint_before<=1);
         });
     }
 
@@ -1407,7 +1517,7 @@ mod tests {
             f.publish_a().await;
             let directory=tempfile::tempdir().unwrap();
             let writer=f.a.lww_clock_state().unwrap().writer_id;
-            let completed=f.sender.compact_published(&directory.path().join("compaction"),"00000000-0000-4000-8000-0000000000a2",
+            let completed=f.sender.compact_published(&mut f.a,&directory.path().join("compaction"),"00000000-0000-4000-8000-0000000000a2",
                 &writer,&f.sender.capabilities,&cancel,None).await.unwrap();
             let (_,checkpoint)=f.sender.checkpoint(&completed.reference.receipt,&cancel).await.unwrap();
             let standalone=checkpoint.standalone_bodies.values().map(|body|body.locator.clone().unwrap().object).collect::<Vec<_>>();
@@ -1425,7 +1535,8 @@ mod tests {
             let context=LeaseContext{root:f.directory_a.path(),connection_id:"sender",writer_id:"collector",descriptor:&connected.stored.descriptor,
                 root_key:&connected.root_key,provider:connected.provider.as_ref(),repository:&connected.handle,clock:&clock,protection_supported:true,ledger:None};
             let request=CleanupRequest{job_id:"idle-cleanup",cleanup_supported:true,limits:CleanupLimits::default(),connection_time:&available_time};
-            let outcome=run_lww(&context,&request,&f.sender,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
+            let sender_store=std::sync::Mutex::new(f.a.open_native_job_store().unwrap());
+            let outcome=run_lww(&context,&request,&f.sender,&sender_store,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
                 now_ms:super::super::runtime::now_ms(),unfinished:vec![],cache_root:&cache},&scratch,&cancel).await.unwrap();
             assert_eq!(outcome.stop_reason,StopReason::Complete);
             assert_eq!(outcome.deleted_objects,0);

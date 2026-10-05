@@ -67,6 +67,9 @@ export function nativeFileJobTitle(
             return language.risuNest.backup.officialPublish
         case 'restore-official-account-snapshot':
             return language.risuNest.backup.officialRestore
+        case 'restore-native-snapshot':
+        case 'snapshot-bodies':
+            return language.risuNest.importDialog.titleSnapshot
         case 'restore-portable-backup':
             return language.portableBackup.restore
         case 'export-portable-backup':

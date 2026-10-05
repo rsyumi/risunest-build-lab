@@ -1,6 +1,11 @@
 use super::*;
+use super::super::{lww, message_pages};
 use crate::data_health::repair::RepairCandidate;
 use crate::persistent_store::active_generation;
+use risunest_sync_wire::{
+    stamp::Stamp,
+    unit::{UnitKey, UnitValue},
+};
 use serde_json::json;
 
 fn candidate(action: RepairAction) -> RepairCandidate {
@@ -531,4 +536,547 @@ fn measures_single_reference_repair_and_undo_on_a_large_library() {
     store.checkpoint(crate::persistent_store::CheckpointMode::Truncate).unwrap();
     let checkpoint = footprint();
     eprintln!("cr004 phase=checkpoint temporary_root_file_bytes={} database_bytes={} wal_bytes={}", checkpoint.0, checkpoint.1, checkpoint.2);
+}
+
+fn unit(parts: &[&str]) -> UnitKey {
+    lww::unit_key(parts).unwrap()
+}
+
+fn chat_message(index: usize) -> Value {
+    json!({ "role": "user", "data": format!("message-{index}"), "chatId": format!("m-{index}") })
+}
+
+/// A library holding a record of every kind a repair rewrites, written by an activation and an
+/// ordinary save, so its shared units already describe it. Each reference in it names a file the
+/// library does not hold.
+fn library() -> (tempfile::TempDir, PersistentStore) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let staging = store.replace_begin().unwrap().staging_id;
+    store
+        .replace_put_root(&staging, &json!({ "customBackground": "assets/missing.png" }))
+        .unwrap();
+    store
+        .replace_put_presets(
+            &staging,
+            &[
+                json!({ "id": "preset-a", "name": "Preset A", "bias": [["assets/missing.png", 1]] }),
+                json!({ "id": "preset-b", "name": "Preset B" }),
+            ],
+        )
+        .unwrap();
+    let mut long: Vec<Value> = (0..6).map(chat_message).collect();
+    long[3]["extra"] = json!("assets/missing.png");
+    store
+        .replace_add_characters(
+            &staging,
+            &[
+                json!({
+                    "chaId": "char-a", "name": "A", "type": "character", "chatPage": 0,
+                    "emotionImages": [["happy", "assets/missing.png"]],
+                    "chats": [
+                        { "id": "conv-a", "name": "Chat A", "note": "assets/missing.png", "message": long },
+                        { "id": "conv-b", "name": "Chat B", "message": [chat_message(0), chat_message(1)] },
+                    ],
+                }),
+                json!({
+                    "chaId": "char-b", "name": "B", "type": "character", "chatPage": 0,
+                    "chats": [{ "id": "conv-c", "name": "Chat C", "message": [chat_message(0)] }],
+                }),
+            ],
+        )
+        .unwrap();
+    store.replace_commit(&staging, Some(0)).unwrap();
+    store
+        .commit(&crate::persistent_store::WorkingSetCommit {
+            expected_revision: 1,
+            plugin_storage: Some(vec![crate::persistent_store::PluginStorageMutation::Set {
+                owner: "plugin-a".into(),
+                key: "saved".into(),
+                value: json!({ "icon": "assets/missing.png", "kept": true }),
+            }]),
+            ..Default::default()
+        })
+        .unwrap();
+    (directory, store)
+}
+
+fn owner(kind: &str, id: &str) -> crate::data_health::Owner {
+    crate::data_health::Owner {
+        kind: kind.to_owned(),
+        id: id.to_owned(),
+    }
+}
+
+fn drop_reference(kind: &str, id: &str, path: &str) -> RepairCandidate {
+    candidate(RepairAction::DropReference {
+        owner: owner(kind, id),
+        source_path: path.to_owned(),
+        occurrence: 0,
+    })
+}
+
+fn normalize(table: &str) -> RepairCandidate {
+    candidate(RepairAction::NormalizeRecords {
+        table: table.to_owned(),
+    })
+}
+
+/// Every candidate in one repair needs its own id, as the planner gives it.
+fn numbered(candidates: Vec<RepairCandidate>) -> Vec<RepairCandidate> {
+    candidates
+        .into_iter()
+        .enumerate()
+        .map(|(index, candidate)| RepairCandidate {
+            id: format!("{index}:test"),
+            ..candidate
+        })
+        .collect()
+}
+
+/// What the outbox holds, by unit.
+fn queued(store: &PersistentStore) -> BTreeMap<UnitKey, (Stamp, UnitValue)> {
+    let authority = store.lww_binding_authority().unwrap();
+    store
+        .lww_read_outbox(authority, 100_000)
+        .unwrap()
+        .entries
+        .into_iter()
+        .map(|entry| (entry.key, (entry.stamp, entry.value)))
+        .collect()
+}
+
+/// Conversations whose stored pages differ from paging their messages again.
+fn stale_pages(store: &mut PersistentStore) -> Vec<String> {
+    let generation = active_generation(&store.connection).unwrap();
+    let conversations = store
+        .connection
+        .prepare("SELECT character_id,conversation_id FROM conversations WHERE generation=?1 ORDER BY 1,2")
+        .unwrap()
+        .query_map([&generation], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let transaction = store.connection.transaction().unwrap();
+    let mut stale = Vec::new();
+    for (character, conversation) in conversations {
+        let current = message_pages::current_manifest(&transaction, &generation, &character, &conversation).unwrap();
+        let paged = message_pages::capture_manifest(&transaction, &generation, &character, &conversation, None).unwrap();
+        if current != paged {
+            stale.push(format!("{character}/{conversation}"));
+        }
+    }
+    transaction.rollback().unwrap();
+    stale
+}
+
+/// Units the shared state holds differently from the library's rows, with every conversation
+/// paged again from its messages: what a replacement with an exact copy would still have to
+/// publish. A unit under a retired record is gone for good and is left out.
+fn unpublished(store: &mut PersistentStore) -> Vec<UnitKey> {
+    let active = active_generation(&store.connection).unwrap();
+    let copy = store.replace_begin().unwrap().staging_id;
+    copy_generation(&store.connection, &active, &copy).unwrap();
+    let [(changes, _), _] = store.replacement_change_sets(&copy, None).unwrap();
+    store.replace_abort(&copy).unwrap();
+    changes
+        .into_iter()
+        .filter(|(key, value)| {
+            !(matches!(value, UnitValue::Deleted)
+                && lww::parent_status(&store.connection, key).unwrap() == "retired")
+        })
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// Checks what an ordinary save guarantees after one repair step: the stored pages are what
+/// paging the messages again gives, the shared units are what the rows hold, and exactly the
+/// expected units were queued under a stamp newer than anything queued before the step.
+fn check_step(
+    store: &mut PersistentStore,
+    step: &str,
+    before: &BTreeMap<UnitKey, (Stamp, UnitValue)>,
+    changed: &[UnitKey],
+) {
+    assert_eq!(stale_pages(store), Vec::<String>::new(), "{step} left stale message pages");
+    assert_eq!(unpublished(store), Vec::<UnitKey>::new(), "{step} left units the rows no longer hold");
+    let after = queued(store);
+    let newest = before.values().map(|(stamp, _)| stamp).max();
+    let mut fresh = after
+        .iter()
+        .filter(|(key, (stamp, _))| before.get(*key).map(|(old, _)| old) != Some(stamp))
+        .map(|(key, (stamp, _))| {
+            assert!(
+                newest.is_none_or(|newest| stamp > newest),
+                "{step} queued {key:?} under an older stamp"
+            );
+            key.clone()
+        })
+        .collect::<Vec<_>>();
+    fresh.sort();
+    let mut expected = changed.to_vec();
+    expected.sort();
+    assert_eq!(fresh, expected, "{step} queued other units than the ones it changed");
+}
+
+/// Applies a repair and undoes it, checking the shared state after each step. Returns the
+/// messages read and pages written by the two steps themselves.
+fn check_repair_and_undo(
+    store: &mut PersistentStore,
+    candidates: &[RepairCandidate],
+    changed: &[UnitKey],
+) -> (usize, usize) {
+    assert_eq!(unpublished(store), Vec::<UnitKey>::new(), "the fixture starts published");
+    let before = queued(store);
+    let revision = store.revision().unwrap();
+    message_pages::reset_capture_work();
+    let (repaired, journal) = store.apply_repair(revision, candidates, 10).unwrap();
+    let repair_work = message_pages::take_capture_work().work;
+    check_step(store, "repair", &before, changed);
+    let before = queued(store);
+    message_pages::reset_capture_work();
+    let (undone, skipped) = store.undo_repair(&journal, repaired.revision).unwrap();
+    let undo_work = message_pages::take_capture_work().work;
+    assert!(skipped.is_empty(), "{skipped:?}");
+    assert_eq!(undone.revision, repaired.revision + 1);
+    check_step(store, "undo", &before, changed);
+    (
+        repair_work.messages_read + undo_work.messages_read,
+        repair_work.pages_written + undo_work.pages_written,
+    )
+}
+
+#[test]
+fn a_fresh_library_has_nothing_left_to_publish() {
+    let (_directory, mut store) = library();
+    assert_eq!(stale_pages(&mut store), Vec::<String>::new());
+    assert_eq!(unpublished(&mut store), Vec::<UnitKey>::new());
+}
+
+#[test]
+fn a_dropped_root_reference_reaches_the_outbox_and_its_undo_too() {
+    let (_directory, mut store) = library();
+    let (_, old_value) = queued(&store).remove(&unit(&["root", "customBackground"])).unwrap();
+    check_repair_and_undo(
+        &mut store,
+        &[drop_reference("root", "database", "$.customBackground")],
+        &[unit(&["root", "customBackground"])],
+    );
+    assert_eq!(
+        queued(&store)[&unit(&["root", "customBackground"])].1,
+        old_value,
+        "the undo queues the value the repair removed"
+    );
+}
+
+#[test]
+fn a_reference_dropped_from_a_message_repages_its_conversation() {
+    let (_directory, mut store) = library();
+    check_repair_and_undo(
+        &mut store,
+        &[drop_reference("message", "char-a/conv-a/3", "$.extra")],
+        &[unit(&["messages", "char-a", "conv-a"])],
+    );
+}
+
+#[test]
+fn references_dropped_from_records_reach_the_outbox() {
+    for (kind, id, path, changed) in [
+        ("preset", "preset-a", "$.bias[0]", unit(&["preset", "preset-a", "bias"])),
+        ("character", "char-a", "$.emotionImages[0]", unit(&["character", "char-a", "emotionImages"])),
+        ("conversation", "char-a/conv-a", "$.note", unit(&["conversation", "char-a", "conv-a", "note"])),
+    ] {
+        let (_directory, mut store) = library();
+        check_repair_and_undo(&mut store, &[drop_reference(kind, id, path)], &[changed]);
+    }
+}
+
+#[test]
+fn a_plugin_value_rewritten_with_its_size_reaches_the_outbox() {
+    let (_directory, mut store) = library();
+    check_repair_and_undo(
+        &mut store,
+        &numbered(vec![
+            drop_reference("plugin", "plugin-a/saved", "$.icon"),
+            normalize("plugin_storage"),
+        ]),
+        &[unit(&["plugin", "plugin-a", "saved"])],
+    );
+}
+
+fn stored_alias(store: &mut PersistentStore, size: i64) -> String {
+    let cas = crate::asset_repository::PayloadCas::new(store.repository_root()).unwrap();
+    let stored = cas.prepare_bytes(b"synthetic").unwrap();
+    let revision = store.revision().unwrap();
+    store
+        .commit_asset_alias(
+            &crate::persistent_store::AssetAlias {
+                key: "assets/kept.png".into(),
+                object_hash: Some(stored.content_hash.clone()),
+                kind: "asset".into(),
+                size,
+                mime: "image/png".into(),
+                name: "kept.png".into(),
+                ext: "png".into(),
+                inlay_type: None,
+                width: None,
+                height: None,
+                metadata: json!({}),
+            },
+            revision,
+        )
+        .unwrap();
+    stored.content_hash
+}
+
+#[test]
+fn a_removed_alias_and_an_adopted_payload_reach_the_outbox() {
+    let (_directory, mut store) = library();
+    stored_alias(&mut store, 9);
+    check_repair_and_undo(
+        &mut store,
+        &[candidate(RepairAction::DropAlias {
+            kind: "asset".into(),
+            key: "assets/kept.png".into(),
+        })],
+        &[unit(&["asset", "assets/kept.png"])],
+    );
+
+    let (_directory, mut store) = library();
+    stored_alias(&mut store, 4);
+    check_repair_and_undo(
+        &mut store,
+        &[candidate(RepairAction::AdoptStoredPayload {
+            kind: "asset".into(),
+            key: "assets/kept.png".into(),
+        })],
+        &[unit(&["asset", "assets/kept.png"])],
+    );
+}
+
+#[test]
+fn normalizing_derived_columns_queues_nothing_and_keeps_pages() {
+    for (table, damage) in [
+        ("root", "UPDATE root SET value=json_set(value,'$.pluginStorageMeta',json('{\"owned\":true}')) WHERE generation=?1"),
+        ("characters", "UPDATE characters SET conversation_count=9 WHERE generation=?1 AND character_id='char-a'"),
+        ("conversations", "UPDATE conversations SET configured_index=0 WHERE generation=?1"),
+        ("bot_presets", "UPDATE bot_presets SET configured_index=7 WHERE generation=?1 AND preset_id='preset-b'"),
+        ("plugin_storage", "UPDATE plugin_storage SET byte_size=1 WHERE generation=?1"),
+    ] {
+        let (_directory, mut store) = library();
+        let generation = active_generation(&store.connection).unwrap();
+        store.connection.execute(damage, [&generation]).unwrap();
+        assert_eq!(
+            check_repair_and_undo(&mut store, &[normalize(table)], &[]),
+            (0, 0),
+            "{table}: a record whose messages are untouched keeps its stored pages"
+        );
+    }
+}
+
+/// Moves messages of one conversation to higher indexes without the database noticing, so
+/// the conversation's indexes have a gap at `from`.
+fn open_gap(store: &PersistentStore, from: i64) {
+    let generation = active_generation(&store.connection).unwrap();
+    store
+        .connection
+        .execute_batch(&format!(
+            "UPDATE messages SET message_index=message_index+100 WHERE generation='{generation}' AND character_id='char-a' AND conversation_id='conv-a' AND message_index>={from};
+             UPDATE messages SET message_index=message_index-99 WHERE generation='{generation}' AND character_id='char-a' AND conversation_id='conv-a' AND message_index>=100;"
+        ))
+        .unwrap();
+}
+
+#[test]
+fn renumbering_messages_repages_them_and_an_undo_that_restores_the_gap_is_refused() {
+    let (_directory, mut store) = library();
+    open_gap(&store, 2);
+    let before = queued(&store);
+    let revision = store.revision().unwrap();
+    let (repaired, journal) = store.apply_repair(revision, &[normalize("messages")], 10).unwrap();
+    assert!(journal.records.iter().any(|record| record.table == "messages"));
+    check_step(&mut store, "repair", &before, &[]);
+
+    let rows = |store: &PersistentStore| -> Vec<(i64, String)> {
+        store
+            .connection
+            .prepare("SELECT message_index,value FROM messages WHERE character_id='char-a' AND conversation_id='conv-a' AND generation=?1 ORDER BY 1")
+            .unwrap()
+            .query_map([active_generation(&store.connection).unwrap()], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let repaired_rows = rows(&store);
+    let error = store.undo_repair(&journal, repaired.revision).unwrap_err();
+    assert!(matches!(error, StoreError::Validation { .. }), "{error:?}");
+    assert_eq!(store.revision().unwrap(), repaired.revision);
+    assert_eq!(rows(&store), repaired_rows, "a refused undo changes nothing");
+    let before = queued(&store);
+    check_step(&mut store, "refused undo", &before, &[]);
+}
+
+#[test]
+fn renumbering_messages_after_a_lost_row_publishes_what_remains() {
+    let (_directory, mut store) = library();
+    let generation = active_generation(&store.connection).unwrap();
+    store
+        .connection
+        .execute(
+            "DELETE FROM messages WHERE generation=?1 AND character_id='char-a' AND conversation_id='conv-a' AND message_index=2",
+            [&generation],
+        )
+        .unwrap();
+    let before = queued(&store);
+    let revision = store.revision().unwrap();
+    store
+        .apply_repair(revision, &numbered(vec![normalize("conversations"), normalize("messages")]), 10)
+        .unwrap();
+    check_step(&mut store, "repair", &before, &[unit(&["messages", "char-a", "conv-a"])]);
+    let manifest = queued(&store)[&unit(&["messages", "char-a", "conv-a"])].1.clone();
+    let transaction = store.connection.transaction().unwrap();
+    let paged = message_pages::capture_manifest(&transaction, &generation, "char-a", "conv-a", None).unwrap();
+    transaction.rollback().unwrap();
+    assert_eq!(manifest, paged, "the queued manifest pages the five messages that remain");
+}
+
+#[test]
+fn keeping_the_single_root_changes_and_queues_nothing() {
+    let (_directory, mut store) = library();
+    let before = queued(&store);
+    let revision = store.revision().unwrap();
+    let (repaired, journal) = store
+        .apply_repair(revision, &[candidate(RepairAction::KeepSingleRecord { table: "root".into() })], 10)
+        .unwrap();
+    assert!(journal.records.is_empty(), "the live root table cannot hold a second root");
+    check_step(&mut store, "repair", &before, &[]);
+    store.undo_repair(&journal, repaired.revision).unwrap();
+    check_step(&mut store, "undo", &before, &[]);
+}
+
+#[test]
+fn orphan_recovery_is_refused_by_the_gate_and_changes_nothing() {
+    for (table, damage) in [
+        ("conversations", "DELETE FROM characters WHERE generation=?1 AND character_id='char-b'"),
+        ("messages", "DELETE FROM conversations WHERE generation=?1 AND character_id='char-b' AND conversation_id='conv-c'"),
+    ] {
+        let (_directory, mut store) = library();
+        let generation = active_generation(&store.connection).unwrap();
+        store.connection.execute(damage, [&generation]).unwrap();
+        let before = queued(&store);
+        let revision = store.revision().unwrap();
+        let error = store
+            .apply_repair(revision, &[candidate(RepairAction::RecoverOrphans { table: table.into() })], 10)
+            .unwrap_err();
+        assert!(matches!(error, StoreError::Validation { .. }), "{table}: {error:?}");
+        assert_eq!(store.revision().unwrap(), revision);
+        assert_eq!(queued(&store), before, "{table}: a refused repair queues nothing");
+    }
+}
+
+/// An undo journal that removes records and restores another, the shape an undo of an orphan
+/// recovery has. The removed character's id is retired, the removed conversation's pages are
+/// dropped and the restored conversation's changed field is queued.
+#[test]
+fn an_undo_that_removes_and_restores_records_publishes_both() {
+    let (_directory, mut store) = library();
+    let generation = active_generation(&store.connection).unwrap();
+    let row = |store: &PersistentStore, table: &str, identity: &[&str]| -> Vec<Option<String>> {
+        let table = TABLES.iter().find(|candidate| candidate.name == table).unwrap();
+        let identity: Vec<String> = identity.iter().map(|part| (*part).to_owned()).collect();
+        stored_row(&store.connection, table, &generation, &identity).unwrap().unwrap()
+    };
+    let character = row(&store, "characters", &["char-b"]);
+    let removed_conversation = row(&store, "conversations", &["char-b", "conv-c"]);
+    let removed_message = row(&store, "messages", &["char-b", "conv-c", "0"]);
+    let mut conversation = row(&store, "conversations", &["char-a", "conv-b"]);
+    let mut detail: Value = serde_json::from_str(conversation[6].as_deref().unwrap()).unwrap();
+    detail["name"] = json!("Chat B restored");
+    conversation[4] = Some("Chat B restored".into());
+    conversation[6] = Some(detail.to_string());
+    let messages = (0..2)
+        .map(|index| row(&store, "messages", &["char-a", "conv-b", &index.to_string()]))
+        .collect::<Vec<_>>();
+    // The conversation's rows are lost without the shared state hearing of it, so restoring
+    // them is the only change the shared state has not seen.
+    store
+        .connection
+        .execute_batch(&format!(
+            "DELETE FROM messages WHERE generation='{generation}' AND character_id='char-a' AND conversation_id='conv-b';
+             DELETE FROM conversations WHERE generation='{generation}' AND character_id='char-a' AND conversation_id='conv-b';"
+        ))
+        .unwrap();
+    let revision = store.revision().unwrap();
+    let mut records = vec![
+        RecordChange {
+            table: "characters".into(),
+            identity: vec!["char-b".into()],
+            before: None,
+            after: Some(character),
+        },
+        RecordChange {
+            table: "conversations".into(),
+            identity: vec!["char-b".into(), "conv-c".into()],
+            before: None,
+            after: Some(removed_conversation),
+        },
+        RecordChange {
+            table: "messages".into(),
+            identity: vec!["char-b".into(), "conv-c".into(), "0".into()],
+            before: None,
+            after: Some(removed_message),
+        },
+        RecordChange {
+            table: "conversations".into(),
+            identity: vec!["char-a".into(), "conv-b".into()],
+            before: Some(conversation),
+            after: None,
+        },
+    ];
+    for (index, message) in messages.into_iter().enumerate() {
+        records.push(RecordChange {
+            table: "messages".into(),
+            identity: vec!["char-a".into(), "conv-b".into(), index.to_string()],
+            before: Some(message),
+            after: None,
+        });
+    }
+    let journal = Journal {
+        id: "repair-synthetic".into(),
+        created_at: 10,
+        from_revision: revision - 1,
+        to_revision: revision,
+        applied: Vec::new(),
+        records,
+        released_objects: BTreeSet::new(),
+    };
+    let before = queued(&store);
+    let (_, skipped) = store.undo_repair(&journal, revision).unwrap();
+    assert!(skipped.is_empty(), "{skipped:?}");
+    let pages: i64 = store
+        .connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM message_page_indexes WHERE generation=?1 AND character_id='char-b')
+                  + (SELECT COUNT(*) FROM message_page_manifests WHERE generation=?1 AND character_id='char-b')",
+            [&generation],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pages, 0, "a removed conversation keeps no stored pages");
+    assert_eq!(stale_pages(&mut store), Vec::<String>::new());
+    assert_eq!(unpublished(&mut store), Vec::<UnitKey>::new());
+    let after = queued(&store);
+    let fresh = after
+        .iter()
+        .filter(|(key, (stamp, _))| before.get(*key).map(|(old, _)| old) != Some(stamp))
+        .map(|(key, _)| key.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        fresh,
+        BTreeSet::from([
+            unit(&["conversation", "char-a", "conv-b", "name"]),
+            unit(&["exists", "character", "char-b"]),
+        ])
+    );
+    assert!(matches!(after[&unit(&["exists", "character", "char-b"])].1, UnitValue::Deleted));
 }

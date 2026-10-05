@@ -11,19 +11,21 @@
     import { isCompositionKey } from 'src/ts/hotkeyModifier';
     import { type Chat as ChatRecord, type Database, type character, type groupChat, type Message } from "../../ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
-    import { chatProcessStage, doingChat, sendChat, notifyGenerationCompletion, getSelectedBoundedGenerationFallbackReason } from "../../ts/process/index.svelte";
+    import { chatProcessStage, doingChat, sendChat, notifyGenerationCompletion, getSelectedBoundedGenerationFallbackReason, getHistoryWindowMemoryMode, openSelectedHistoryWindow } from "../../ts/process/index.svelte";
     import { getPersonaPrompt, parseKeyValue, sleep } from "../../ts/util";
     import { language } from "../../lang";
     import { isExpTranslator, translate } from "../../ts/translator/translator";
     import { alertError, alertNormal, showHypaV2Alert } from "../../ts/alert";
     import sendSound from '../../etc/send.mp3'
-    import { processScript, type ProcessScriptCaptureContext } from "src/ts/process/scripts";
+    import { createPromptScriptOperationScope, processScript, type ProcessScriptCaptureContext } from "src/ts/process/scripts";
+    import { writeHistoryWindowChat } from 'src/ts/process/historyWindowWrite';
+    import { PersistentMutationFencedError } from 'src/ts/storage/saveCoordinator';
     import { stopTTS } from "src/ts/process/tts";
     import MainMenu from '../UI/MainMenu.svelte';
     import AssetInput from './AssetInput.svelte';
     import { aiLawApplies, chatFoldedState, chatFoldedStateMessageIndex, downloadFile, LocalWriter } from 'src/ts/globalApi.svelte';
     import { runTrigger } from 'src/ts/process/triggers';
-    import { generateResponseCandidate, moveResponseCandidate } from 'src/ts/durableReroll'
+    import { generateResponseCandidate, generateWindowedResponseCandidate, moveResponseCandidate, moveWindowedResponseCandidate, type OpenResponseTail } from 'src/ts/durableReroll'
     import { responseRange } from 'src/ts/responseVariants'
     import { processMultiCommand } from 'src/ts/process/command'
     import { postChatFile } from 'src/ts/process/files/multisend';
@@ -330,7 +332,12 @@
         sending = true
         const submittedInput = messageInput
         const submittedFiles = [...fileInput]
+        let windowed = false
         try {
+            if (!submittedInput.startsWith('/') && historyLimitApplies()) {
+                windowed = true
+                return await sendMainWindowed(continueResponse, submittedInput, submittedFiles)
+            }
             if (getSelectedBoundedGenerationFallbackReason() === null &&
                 !submittedInput.startsWith('/') && submittedFiles.length === 0 &&
                 (submittedInput !== '' || (continueResponse && !DBState.db.useSayNothing)) &&
@@ -360,11 +367,97 @@
                 (context) => sendMainComplete(context, continueResponse, submittedInput, submittedFiles),
             )
         } catch (error) {
-            alertError(error)
+            // A lost history window has already been reported.
+            if (!windowed || !(error instanceof PersistentMutationFencedError)) alertError(error)
         } finally {
             sending = false
         }
     }
+
+    function historyLimitApplies(): boolean {
+        return getHistoryWindowMemoryMode(true) !== null
+    }
+
+    function isSelectedConversationTarget(
+        target: { characterId: string, conversationId: string, navigationGeneration: number },
+    ): boolean {
+        const current = persistentRuntime.captureSelectedConversationTarget()
+        return current?.characterId === target.characterId &&
+            current.conversationId === target.conversationId &&
+            current.navigationGeneration === target.navigationGeneration
+    }
+
+    // A history window that does not open stops the step; tell the user unless they moved away.
+    function reportUnopenedHistoryWindow(
+        target: { characterId: string, conversationId: string, navigationGeneration: number },
+        message = language.chatConversationActionFailed,
+    ): void {
+        if (isSelectedConversationTarget(target)) alertError(message)
+    }
+
+    // The input step of a send with the loading limit on runs over a history
+    // window, so the conversation is not loaded complete before generation.
+    async function sendMainWindowed(
+        continueResponse: boolean,
+        submittedInput: string,
+        submittedFiles: string[],
+    ) {
+        const character = DBState.db.characters[$selectedCharID]
+        const target = persistentRuntime.captureSelectedConversationTarget()
+        if (character?.type !== 'character' || !target) return
+        let input = submittedInput
+        for (const file of submittedFiles) {
+            input += `{{inlayed::${file}}}`
+        }
+        const window = await openSelectedHistoryWindow({ register: true })
+        if (!window) {
+            reportUnopenedHistoryWindow(target)
+            return
+        }
+        try {
+            const name = $ConnectionOpenStore ? DBState.db.username : null
+            if (input === '') {
+                if (DBState.db.useSayNothing && window.chat.message.at(-1)?.role !== 'user') {
+                    const message: Message = { role: 'user', data: '*says nothing*', name, chatId: v4() }
+                    if (!window.controller.applyRange(window.chat.message.length, 0, [message], 'append')) return
+                }
+            } else {
+                const triggerResult = await runTrigger(character, 'input', { chat: window.chat })
+                if (triggerResult && !writeHistoryWindowChat(window.controller, triggerResult.chat)) return
+                const scope = createPromptScriptOperationScope(character, {
+                    historyWindow: { chat: window.chat, conversationId: target.conversationId },
+                })
+                let processedInput: string
+                try {
+                    processedInput = await processScript(character, input, 'editinput', {}, {
+                        promptOperationScope: scope,
+                    })
+                    scope.finish()
+                } finally {
+                    scope.release()
+                }
+                const message: Message = { role: 'user', data: processedInput, time: Date.now(), name, chatId: v4() }
+                if (!window.controller.applyRange(window.chat.message.length, 0, [message], 'append')) return
+            }
+        } finally {
+            window.release()
+        }
+        if (messageInput === submittedInput) {
+            messageInput = ''
+            messageInputTranslate = ''
+        }
+        for (const file of submittedFiles) {
+            const index = fileInput.indexOf(file)
+            if (index >= 0) fileInput.splice(index, 1)
+        }
+        await persistentRuntime.flushPendingData('generation-input')
+        await sleep(10)
+        if (!isSelectedConversationTarget(target)) return
+        updateInputSizeAll()
+        await sendChatMainRaw(continueResponse)
+    }
+
+    const openResponseTailWindow: OpenResponseTail = (tailStart) => openSelectedHistoryWindow({ tailStart })
 
     async function sendMainComplete(
         context: ConversationOperationContext,
@@ -461,16 +554,27 @@
         context.requireCurrent()
         mutationTarget = requireConversationMutationTarget(context)
         updateInputSizeAll()
-        await sendChatMainComplete(context, continueResponse)
+        // Slash-command input keeps loading the whole conversation for its generation.
+        await sendChatMainComplete(context, continueResponse, !submittedInput.startsWith('/'))
         context.requireCurrent()
 
     }
 
-    async function reroll() {
+    function reroll() {
+        return rerollCandidate()
+    }
+
+    async function rerollCandidate(expectedLastMessage?: string) {
         if ($doingChat || rerollBusy || sending) return
         rerollBusy = true
         abortController = new AbortController()
+        let windowed = false
         try {
+            if (historyLimitApplies()) {
+                windowed = true
+                await rerollWindowed(abortController.signal, expectedLastMessage)
+                return
+            }
             await runSelectedConversationOperation('reroll-response', async (context) => {
                 const { character, conversation } = context.requireCurrent()
                 const navigation = persistentRuntime.getNavigationGeneration()
@@ -491,7 +595,7 @@
                     isCurrent,
                     createId: v4,
                     flush: () => persistentRuntime.flushPendingData('reroll-candidate'),
-                    generate: () => sendChat(-1, { signal: abortController!.signal }),
+                    generate: () => sendChat(-1, { signal: abortController!.signal, historyLimit: true }),
                     aborted: () => abortController!.signal.aborted,
                 })
                 if (completed) {
@@ -501,15 +605,66 @@
                 }
             })
         } catch (error) {
-            alertError(error)
+            if (!windowed || !(error instanceof PersistentMutationFencedError)) alertError(error)
         } finally {
             rerollBusy = false
             $doingChat = false
         }
     }
 
+    async function rerollWindowed(signal: AbortSignal, expectedLastMessage?: string) {
+        const target = persistentRuntime.captureSelectedConversationTarget()
+        if (!target) return
+        const result = await generateWindowedResponseCandidate({
+            open: openResponseTailWindow,
+            isCurrent: () => isSelectedConversationTarget(target),
+            createId: v4,
+            flush: () => persistentRuntime.flushPendingData('reroll-candidate'),
+            generate: () => sendChat(-1, { signal, historyLimit: true }),
+            aborted: () => signal.aborted,
+            expectedLastMessage,
+        })
+        if (!result) {
+            reportUnopenedHistoryWindow(target)
+            return
+        }
+        if (result.reopenFailed) {
+            if (!signal.aborted) reportUnopenedHistoryWindow(target, language.generationConversationChanged)
+            return
+        }
+        if (result.completed) {
+            await persistentRuntime.acknowledgeGenerationCompletion()
+            await notifyGenerationCompletion(result.lastMessage ?? '')
+            if (DBState.db.playMessage) new Audio(sendSound).play().catch(() => {})
+        }
+    }
+
+    async function moveCandidateWindowed(direction: -1 | 1) {
+        const target = persistentRuntime.captureSelectedConversationTarget()
+        if (!target) return null
+        try {
+            const move = await moveWindowedResponseCandidate(
+                openResponseTailWindow,
+                direction,
+                v4,
+                () => persistentRuntime.flushPendingData('select-response-candidate'),
+            )
+            if (!move) reportUnopenedHistoryWindow(target)
+            return move
+        } catch (error) {
+            if (!(error instanceof PersistentMutationFencedError)) alertError(error)
+            return null
+        }
+    }
+
     async function nextReroll() {
         if ($doingChat || rerollBusy || sending) return
+        if (historyLimitApplies()) {
+            const move = await moveCandidateWindowed(1)
+            if (!move || move.moved || move.lastMessage === null) return
+            if (await alertConfirm(language.confirmNewResponseCandidate)) await rerollCandidate(move.lastMessage)
+            return
+        }
         let generate = false
         await runSelectedConversationOperation('next-response-candidate', async (context) => {
             const { conversation, session } = context.requireCurrent()
@@ -532,6 +687,10 @@
 
     async function unReroll() {
         if ($doingChat || rerollBusy || sending) return
+        if (historyLimitApplies()) {
+            await moveCandidateWindowed(-1)
+            return
+        }
         await runSelectedConversationOperation('previous-response-candidate', async (context) => {
             const { conversation, session } = context.requireCurrent()
             if (moveResponseCandidate(conversation, session, -1, v4)) {
@@ -588,7 +747,9 @@
     let abortController:null|AbortController = null
 
     async function sendChatMain(continued:boolean = false) {
-        if (getSelectedBoundedGenerationFallbackReason() === null) return sendChatMainRaw(continued)
+        if (historyLimitApplies() || getSelectedBoundedGenerationFallbackReason() === null) {
+            return sendChatMainRaw(continued)
+        }
         return runSelectedConversationOperation(
             continued ? 'continue-generation' : 'generate-response',
             (context) => sendChatMainComplete(context, continued),
@@ -598,18 +759,20 @@
     async function sendChatMainComplete(
         context: ConversationOperationContext,
         continued: boolean = false,
+        historyLimit = true,
     ) {
         requireConversationMutationTarget(context)
-        return sendChatMainRaw(continued)
+        return sendChatMainRaw(continued, historyLimit)
     }
 
-    async function sendChatMainRaw(continued: boolean) {
+    async function sendChatMainRaw(continued: boolean, historyLimit = true) {
         abortController = new AbortController()
         let completed = false
         try {
             completed = await sendChat(-1, {
                 signal: abortController.signal,
                 continue: continued,
+                historyLimit,
             })
         } catch (error) {
             if (error instanceof SelectedConversationPromotionStaleError) return

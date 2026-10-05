@@ -26,6 +26,7 @@ export function describeDataHealthFinding(
     names: DataHealthResolvedNames | null,
     strings: DataHealthPresentationStrings,
 ): string | null {
+    if (item.code === 'intent-quarantined') return item.detail
     if (item.code === 'record-invalid' && item.owner.kind === 'root') {
         const prefix = 'portable root contains separated field: '
         if (item.detail.startsWith(prefix)) {

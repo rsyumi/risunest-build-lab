@@ -27,11 +27,20 @@ export interface MeasurementOptions {
     charactersFirst?: boolean
     assertIsolatedHarness(): Promise<void>
     report(event: Record<string, unknown>): Promise<void>
-    sampleMemory?(): Promise<{ peakRssBytes: number; source: string }>
+    sampleMemory?(): Promise<MemorySample>
     beforeRestore?(prepared: Record<string, unknown>): Promise<void>
     afterRestore?(terminal: Record<string, unknown>): Promise<void>
     onReadbackProgress?(progress: ReadbackProgress): void
 }
+export interface MemorySample {
+    source: string
+    // Resident bytes at the moment of sampling. Only this measures what the restore adds.
+    residentBytes?: number
+    // The process's lifetime high-water, which already includes the fixture write.
+    peakRssBytes?: number
+}
+const RESIDENT_INCREMENT_SCOPE = 'native-process-resident-increment-from-restore-start-excludes-separate-webcontent'
+const LIFETIME_PEAK_SCOPE = 'native-process-lifetime-high-water-includes-fixture-write'
 export interface ReadbackProgress {
     stage: 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14
     index: number
@@ -88,19 +97,31 @@ export async function runLegacyRestoreMeasurement(options: MeasurementOptions) {
     const prepared = { ...identity, phase: 'prepared', sourceBytes, memoryBefore }
     await options.report(prepared)
     await options.beforeRestore?.(prepared)
+    // The baseline is taken with the fixture already on disk, so the gate sees only what the restore adds.
+    const memoryAtStart = await options.sampleMemory?.()
+    const restoreBaselineBytes = memoryAtStart?.residentBytes ?? null
+    let restoreResidentMaxBytes = restoreBaselineBytes
+    let peakRssBytes = memoryAtStart?.peakRssBytes ?? null
     const startedAt = Date.now()
-    await options.report({ ...identity, phase: 'restore-started', startedAt, sourceBytes, memoryBefore })
+    await options.report({ ...identity, phase: 'restore-started', startedAt, sourceBytes, memoryBefore, memoryAtStart })
     const job = await invoke<{ jobId: string }>('native_file_job_start', { request: {
         kind: 'restore-legacy-local-backup', source: { type: 'desktopPath', path }, expectedRevision: opened.revision,
     } })
     let status: NativeFileJobStatus
     let finalized = false
-    let peakRssBytes = memoryBefore?.peakRssBytes ?? null
     let samples = 0
+    let residentSamples = 0
     do {
         status = await invoke<NativeFileJobStatus>('native_file_job_status', { jobId: job.jobId })
         const memory = await options.sampleMemory?.()
-        if (memory) { peakRssBytes = Math.max(peakRssBytes ?? 0, memory.peakRssBytes); samples++ }
+        if (memory) {
+            samples++
+            if (memory.residentBytes !== undefined) {
+                restoreResidentMaxBytes = Math.max(restoreResidentMaxBytes ?? 0, memory.residentBytes)
+                residentSamples++
+            }
+            if (memory.peakRssBytes !== undefined) peakRssBytes = Math.max(peakRssBytes ?? 0, memory.peakRssBytes)
+        }
         if (status.phase === 'awaiting-activation' && !finalized) {
             await invoke('native_file_job_finalize', { jobId: job.jobId, expectedRevision: opened.revision })
             finalized = true
@@ -108,14 +129,20 @@ export async function runLegacyRestoreMeasurement(options: MeasurementOptions) {
         if (!terminal.has(status.state)) await pause(200)
     } while (!terminal.has(status.state))
     const finishedAt = Date.now()
+    const restoreIncrementBytes = restoreBaselineBytes === null || residentSamples === 0 ? null
+        : Math.max(0, (restoreResidentMaxBytes ?? 0) - restoreBaselineBytes)
     const measurement = { ...identity, phase: 'restore-terminal', startedAt, finishedAt,
         elapsedMs: finishedAt - startedAt, sourceBytes, outcome: status.state,
-        code: status.error?.code ?? null, peakRssBytes, memorySamples: samples,
+        code: status.error?.code ?? null, memorySamples: samples,
         memorySource: memoryBefore?.source ?? 'external-sampler-required',
-        memoryScope: 'native-process-lifetime-high-water-excludes-separate-webcontent',
+        memoryScope: restoreIncrementBytes !== null ? RESIDENT_INCREMENT_SCOPE
+            : peakRssBytes !== null ? 'lifetime-high-water-only-cannot-separate-restore-from-fixture-write' : 'not-sampled',
+        restoreBaselineBytes, restoreResidentMaxBytes, restoreIncrementBytes,
+        incrementToDecodedRatio: restoreIncrementBytes === null ? null : restoreIncrementBytes / plan.decodedBytes,
+        aboveTwiceDecoded: restoreIncrementBytes === null ? null : restoreIncrementBytes > 2 * plan.decodedBytes,
+        peakRssBytes, peakScope: LIFETIME_PEAK_SCOPE,
         peakToDecodedRatio: peakRssBytes === null ? null : peakRssBytes / plan.decodedBytes,
-        peakToSourceRatio: peakRssBytes === null ? null : peakRssBytes / sourceBytes,
-        aboveTwiceDecoded: peakRssBytes === null ? null : peakRssBytes > 2 * plan.decodedBytes }
+        peakToSourceRatio: peakRssBytes === null ? null : peakRssBytes / sourceBytes }
     await options.report(measurement)
     await options.afterRestore?.(measurement)
     if (status.state !== 'succeeded') return measurement

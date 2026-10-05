@@ -136,7 +136,7 @@ fn authenticated_headers(
 }
 
 fn build_client() -> Result<reqwest::Client, OfficialPublicationUploadError> {
-    reqwest::Client::builder()
+    crate::platform_tls::client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| OfficialPublicationUploadError::Transport {

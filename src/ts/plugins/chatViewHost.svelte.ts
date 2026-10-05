@@ -1,7 +1,7 @@
 import { untrack } from 'svelte'
 import { v4 } from 'uuid'
 import { DBState, selIdState } from '../stores.svelte'
-import { createChatViewEvents, type ChatViewConversation } from './chatViewEvents'
+import { createChatViewEvents, createPinnedChatViewConversation, type ChatViewConversation } from './chatViewEvents'
 
 function readSelectedConversation(): ChatViewConversation {
     const characterIndex = selIdState.selId
@@ -18,14 +18,20 @@ function readSelectedConversation(): ChatViewConversation {
 }
 
 export const chatViewEvents = createChatViewEvents({
-    readConversation: readSelectedConversation,
-    watchConversation: (onChange) =>
-        $effect.root(() => {
-            $effect(() => {
-                readSelectedConversation()
-                untrack(onChange)
-            })
-        }),
+    ...createPinnedChatViewConversation({
+        readSelection: readSelectedConversation,
+        watchSelection: (onChange) =>
+            $effect.root(() => {
+                $effect(() => {
+                    readSelectedConversation()
+                    untrack(onChange)
+                })
+            }),
+        resolvePosition: async (characterId, conversationId) => {
+            const { resolvePinnedConversationPosition } = await import('./pinnedConversationPosition')
+            return resolvePinnedConversationPosition(characterId, conversationId)
+        },
+    }),
     requestFrame: (callback) => {
         requestAnimationFrame(() => callback())
     },

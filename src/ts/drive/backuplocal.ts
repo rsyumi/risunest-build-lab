@@ -244,8 +244,8 @@ export async function SavePartialLocalBackup(){
     if (!isTauri) await forageStorage.Init()
     const blobStore = await resolveBlobStore()
     if (!(await alertCheckboxConfirm({
-        title: language.partialBackupFirstConfirm,
-        description: language.partialBackupSecondConfirm,
+        title: language.checkboxConfirmation.partialBackupTitle,
+        description: language.checkboxConfirmation.partialBackupDescription,
         checkboxLabel: language.checkboxConfirmation.partialBackup,
         actionLabel: language.confirm,
         cancelLabel: language.cancel,
@@ -601,8 +601,8 @@ export async function importLegacyBackupWithWebView(
             .filter((key) => !restoredColdStoragePayloads.has(key))
         const affectedCold = getColdStorageAffectedCharacters(dbData, missingColdStorageKeys)
         upstreamLosses.coldMissing = missingColdStorageKeys.length
-        const description = missingColdStorageKeys.length === 0 ? language.backupLoadConfirm2
-            : `${language.backupLoadConfirm2}\n\n${language.errors.coldStorageIncompleteRestoreConfirm(affectedCold.characterNames.join(', '), missingColdStorageKeys.length, affectedCold.unresolvedKeys.length, false)}`
+        const description = missingColdStorageKeys.length === 0 ? language.checkboxConfirmation.dataReplacementDescription
+            : `${language.checkboxConfirmation.dataReplacementDescription}\n\n${language.errors.coldStorageIncompleteRestoreConfirm(affectedCold.characterNames.join(', '), missingColdStorageKeys.length, affectedCold.unresolvedKeys.length, false)}`
         if (!isTauri && !(await alertCheckboxConfirm({
             title: confirmationTitle,
             description,

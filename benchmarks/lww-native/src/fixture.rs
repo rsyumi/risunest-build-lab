@@ -151,6 +151,7 @@ pub fn generate(directory: &Path, scale: FixtureScale, materialize_bodies: bool)
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn generation_is_deterministic_valid_and_never_overwrites() {
         let root = tempfile::tempdir().unwrap();
         let scale = FixtureScale { minimum_database_bytes: 10_000, assets: 3, seed: 12, long_conversation_messages: 2 };
@@ -169,6 +170,7 @@ mod tests {
         assert_eq!(generate(&root.path().join("a"), scale, false).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn scales_are_targets_not_limits() {
         assert!(FixtureScale::above_target().assets > TARGET_ASSETS);
         assert!(FixtureScale::above_target().minimum_database_bytes > TARGET_DATABASE_BYTES);

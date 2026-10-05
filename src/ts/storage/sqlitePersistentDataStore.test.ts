@@ -300,20 +300,18 @@ describe('SqlitePersistentDataStore', () => {
         await expect(store.readRoot()).rejects.toBeInstanceOf(SnapshotReleasedError)
     })
 
-    it('restores native validation errors as ordinary errors', async () => {
-        mocks.invoke.mockRejectedValue({ code: 'validation', message: 'invalid character' })
+    it.each([
+        { code: 'validation', message: 'request-id-integrity' },
+        { code: 'store-error', message: 'disk I/O error' },
+        { code: 'commit-decode', message: 'invalid commit body' },
+        { code: 'schema-mismatch', message: 'invalid-lww-schema' },
+    ])('restores a native $code error as an Error that keeps its code', async (native) => {
+        mocks.invoke.mockRejectedValue(native)
         const store = new SqlitePersistentDataStore()
 
-        await expect(store.readCharacter('char-a')).rejects.toEqual(
-            new Error('invalid character'),
-        )
-    })
-
-    it('restores native store errors as ordinary errors', async () => {
-        mocks.invoke.mockRejectedValue({ code: 'store-error', message: 'disk I/O error' })
-        const store = new SqlitePersistentDataStore()
-
-        await expect(store.readRoot()).rejects.toEqual(new Error('disk I/O error'))
+        const error = await store.readRoot().catch((value: unknown) => value)
+        expect(error).toBeInstanceOf(Error)
+        expect(error).toMatchObject(native)
     })
 
     it('cancels an in-flight native character archive operation with the same operation id', async () => {

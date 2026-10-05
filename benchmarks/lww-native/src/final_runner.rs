@@ -421,6 +421,7 @@ mod tests {
             timings:NativeTimings {durable_save_ms:durable,publication_complete_ms:durable+1.0,receiver_durable_ack_ms:durable+2.0}}
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn transport_key_witness_requires_the_exact_actual_fixed_change_set() {
         let original=sample(Scenario::SettingEdit,Direction::AtoB,0,false);
         original.validate().unwrap();
@@ -438,6 +439,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn fixed_policy_retains_warmups_but_excludes_them_from_percentiles() {
         let collection=collect(|s,d,i,w|Ok(sample(s,d,i,w)));
         let report=report(&"a".repeat(40),&"b".repeat(64),"test adapter",certificate(),&collection).unwrap();
@@ -455,6 +457,7 @@ mod tests {
         assert!(super::report(&"a".repeat(40),&"b".repeat(64),"test adapter",certificate(),&missing).is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn invalid_scope_and_driver_failure_retain_actual_observations() {
         let failed=collect(|s,d,i,w| {let mut sample=sample(s,d,i,w);sample.observation.body_scope_complete=Some(false);Ok(sample)});
         assert_eq!(failed.samples.len(),1);assert_eq!(failed.failures.len(),1);
@@ -471,6 +474,7 @@ mod tests {
         unobserved.observation.units_visited=0;assert!(unobserved.validate().is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn native_resume_summary_has_complete_fixed_matrix_and_no_renderer_phase() {
         let mut samples=Vec::new();
         for direction in [Direction::AtoB,Direction::BtoA] {
@@ -487,6 +491,7 @@ mod tests {
         samples[0].affected_keys.clear();assert!(summarize_resume(&samples).is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn asynchronous_runner_uses_the_same_fixed_slots_and_failure_retention() {
         struct Driver;
         impl AsyncCycleDriver for Driver {
@@ -503,6 +508,7 @@ mod tests {
         assert_eq!(report.summaries.len(),AVAILABLE.len()*2);
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn collector_rejects_incomplete_scopes_and_unavailable_scenarios() {
         let failed=collect(|_,_,_,_|Err("actual adapter failed".into()));
         assert_eq!(failed.failures.len(),1);
@@ -517,6 +523,7 @@ mod tests {
         assert_eq!((WARMUPS,REPETITIONS),(5,30));
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn above_validator_is_required_before_native_comparison() {
         // A correctness certificate cannot stand in for either final tier.
         let value=serde_json::json!({"schema":"risunest.native-persisted-scale/v1","requirement":{"tier":"correctness","minimum_database_bytes":0,"minimum_assets":0},

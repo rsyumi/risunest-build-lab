@@ -7,7 +7,10 @@ import { ActiveConversationSession } from 'src/ts/storage/activeConversationSess
 import { SynchronousSessionConversationViewportSource } from 'src/ts/conversationViewportSource'
 import type { ChatViewEvent, ChatViewRow } from 'src/ts/plugins/chatViewEvents'
 
+const pinned = vi.hoisted(() => ({ resolve: vi.fn() }))
+
 vi.mock('src/ts/alert', () => ({ alertNormal: vi.fn() }))
+vi.mock('src/ts/plugins/pinnedConversationPosition', () => ({ resolvePinnedConversationPosition: pinned.resolve }))
 vi.mock('src/ts/characters', () => ({ getCharImage: async (source: string | undefined) => `image:${source ?? ''}` }))
 vi.mock('src/ts/globalApi.svelte', () => ({ chatFoldedStateMessageIndex: { index: -1 } }))
 vi.mock('src/ts/ui/yieldToUi', () => ({ yieldToMainThread: () => Promise.resolve() }))
@@ -103,15 +106,21 @@ describe('chat view events from the chat row lifecycle', () => {
         frames.clear()
         for (const frame of batch) frame(performance.now())
     }
-    const listen = () => chatViewEvents.forOwner('plugin').register((event) => {
-        events.push(event)
-        if (event.type === 'conversation') {
-            model.clear()
-            return
-        }
-        for (const row of event.unmounted) model.delete(row.index)
-        for (const row of event.mounted) model.set(row.index, row)
-    })
+    const listen = async () => {
+        const registration = chatViewEvents.forOwner('plugin').register((event) => {
+            events.push(event)
+            if (event.type === 'conversation') {
+                model.clear()
+                return
+            }
+            for (const row of event.unmounted) model.delete(row.index)
+            for (const row of event.mounted) model.set(row.index, row)
+        })
+        // The selection is reported once its position has been resolved.
+        await vi.waitFor(() => expect(pinned.resolve).toHaveBeenCalled())
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        return registration
+    }
     const rowEvents = () => events.filter((event): event is Extract<ChatViewEvent, { type: 'rows' }> => event.type === 'rows')
     const domIndices = () => [...target.querySelectorAll<HTMLElement>('[data-chat-index]')]
         .filter((element) => element.querySelector('[data-chat-probe]'))
@@ -145,6 +154,12 @@ describe('chat view events from the chat row lifecycle', () => {
         vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id))
         vi.stubGlobal('ResizeObserver', TestResizeObserver)
         DBState.db.streamingThoughtMode = undefined
+        pinned.resolve.mockReset()
+        // Without archived characters the position the index APIs read is the working-set position.
+        pinned.resolve.mockImplementation(async (characterId: string) => ({
+            characterIndex: (DBState.db.characters as character[]).findIndex((char) => char.chaId === characterId),
+            chatIndex: 0,
+        }))
         events = []
         model = new Map()
         target = document.createElement('div')
@@ -163,7 +178,8 @@ describe('chat view events from the chat row lifecycle', () => {
         const messages = range(0, 8).map((index) => makeMessage(index))
         await mountChats(messages)
 
-        expect(listen().id).toEqual(expect.any(String))
+        expect((await listen()).id).toEqual(expect.any(String))
+        expect(pinned.resolve).toHaveBeenCalledExactlyOnceWith('character-id', 'chat-room-id')
         expect(events).toEqual([])
         runFrames()
         expect(events).toHaveLength(2)
@@ -180,7 +196,7 @@ describe('chat view events from the chat row lifecycle', () => {
     test('reports appended and removed rows and the rows refreshed around them', async () => {
         const messages = range(0, 8).map((index) => makeMessage(index))
         await mountChats(messages)
-        listen()
+        await listen()
         runFrames()
         events = []
 
@@ -207,7 +223,7 @@ describe('chat view events from the chat row lifecycle', () => {
     test('follows the bounded viewport through scrolling and direct jumps', async () => {
         const messages = range(0, 200).map((index) => makeMessage(index))
         await mountChats(messages)
-        listen()
+        await listen()
         runFrames()
         expect(modelIndices()).toEqual(range(136, 200))
         expect(modelIndices()).toEqual(domIndices())
@@ -247,7 +263,7 @@ describe('chat view events from the chat row lifecycle', () => {
         const messages = range(0, 4).map((index) => makeMessage(index))
         const first = makeCharacter(messages)
         await mountChats(messages, first)
-        listen()
+        await listen()
         runFrames()
         events = []
 
@@ -289,7 +305,7 @@ describe('chat view events from the chat row lifecycle', () => {
             captureCurrent: () => ({ character: char, conversation }),
         })
         await mountChats(messages, char, { initialViewportSource: source })
-        listen()
+        await listen()
         runFrames()
         events = []
 
@@ -313,7 +329,7 @@ describe('chat view events from the chat row lifecycle', () => {
         const char = makeCharacter(messages, true)
         char.chats[0].activeStreamingDisplayOptimizationMode = mode
         await mountChats(messages, char)
-        listen()
+        await listen()
         runFrames()
         expect(model.get(7)).toEqual({ index: 7, messageId: 'message-id-7', role: 'char' })
         events = []

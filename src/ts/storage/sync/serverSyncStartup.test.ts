@@ -5,8 +5,9 @@ import type { SyncBindingState } from './bindingFlow'
 const f = vi.hoisted(() => ({
     invoke: vi.fn(), offline: true, repairError: undefined as unknown, activationError: undefined as unknown, fenceError: undefined as unknown,
     configured: true, pending: null as unknown, inspectError: undefined as unknown,
+    sharedData: false, marker: false, queued: 0, outbox: 0, pushed: 0,
     binding: undefined as unknown as SyncBindingState,
-    runtime: { revision: 0, getStorageAuthorityEpoch: () => 'storage', subscribeActiveConversationViewportSource: () => () => {}, setActivatedLibraryRecoveryLifecycle() {}, markCommittedWorkingSetRefreshRequired() {} },
+    runtime: { revision: 0, getStorageAuthorityEpoch: () => 'storage', subscribeActiveConversationViewportSource: () => () => {}, captureSelectedConversationTarget: () => null, setActivatedLibraryRecoveryLifecycle() {}, markCommittedWorkingSetRefreshRequired() {} },
 }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: f.invoke }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: async () => () => {} }))
@@ -14,13 +15,14 @@ vi.mock('src/ts/platform', () => ({ isTauri: true }))
 vi.mock('src/ts/stores.svelte', () => ({ selectedCharID: { subscribe: (run: (value: number) => void) => { run(-1); return () => {} } } }))
 vi.mock('../database.svelte', () => ({ getDatabase: () => ({ characters: [] }) }))
 vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: async () => true, confirmPreviousStorageFiles: async () => 'connect', downloadPreviousStorageFiles: async () => {} }))
-vi.mock('./bindingLocalData', () => ({ hasLocalBindingData: async () => false, hasLocalSharedBindingData: async () => false }))
+vi.mock('./bindingLocalData', () => ({ hasLocalBindingData: async () => false, hasLocalSharedBindingData: async () => f.sharedData }))
 vi.mock('../persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: () => f.runtime,
     withPausedPersistentWrites: async (_reason: string, operation: (token: unknown) => Promise<unknown>) => operation({ id: 'paused' }),
     beginActivatedLibraryGuard: () => ({ complete() {}, async abortUnchanged() {} }),
-    refreshActivatedLibraryUnderPause: async () => ({ projection: 'applied' }), applyPersistentLwwReceive: async () => {},
+    refreshActivatedLibraryUnderPause: async () => ({ projection: 'applied' }), applyPersistentLwwReceive: async () => {}, flushPendingDataLocally: async () => {},
 }))
+vi.mock('../../mobileBackgroundTask', () => ({ runWithMobileBackgroundTask: (_kind: string, operation: (task: object) => Promise<unknown>) => operation({ progress() {}, async dispose() {} }) }))
 vi.mock('../committedWorkingSetContinuation', () => ({ registerCommittedWorkingSetContinuation: vi.fn() }))
 vi.mock('src/ts/plugins/apiV3/v3.svelte', () => ({ fencePluginExecutionForAuthorityReplacement: async () => {}, invalidatePluginCachesAfterAuthorityReplacement: async () => {}, restartPluginsAfterAuthorityReplacement: async () => {} }))
 vi.mock('../persistentRevisionEvents', () => ({ subscribeLocalPersistentRevision: () => () => {} }))
@@ -30,7 +32,7 @@ vi.mock('@lucide/svelte', () => ({ LoaderCircleIcon: () => {} }))
 vi.mock('./serverSyncRegistrationInbox', () => ({ serverRegistrationInbox: { changed: { subscribe: () => () => {} }, releaseConsumed() {}, take: () => undefined } }))
 vi.mock('./serverSyncQr', () => ({ canScanServerRegistration: false, createServerQrScanner: () => ({ cancel() {} }) }))
 vi.mock('./serverAssetResidency', () => ({ getAssetResidencyStatus: async () => undefined, setAssetResidencyPolicy: vi.fn(), evictLocalAssets: vi.fn(), cancelAssetResidencyOperation: vi.fn() }))
-vi.mock('src/lang', () => ({ language: { loading: 'Loading', lwwSync: { concurrentEditNotice: 'Concurrent edits', clockBlocked: 'Clock blocked', writerCollision: 'Writer blocked', bindingIncomplete: 'Binding incomplete' }, risuNest: { serverSync: { title: 'Sync', description: 'Sync library', connect: 'Connect and sync', syncNow: 'Sync now', disconnect: 'Disconnect', disconnected: 'Stopped', ready: 'Ready', errorHelp: 'Connection failed', management: {}, residency: {} } } } }))
+vi.mock('src/lang', () => ({ language: { loading: 'Loading', lwwSync: { concurrentEditNotice: 'Concurrent edits', clockBlocked: 'Clock blocked', writerCollision: 'Writer blocked', bindingIncomplete: 'Binding incomplete', registrationRevoked: 'Registration revoked' }, risuNest: { serverSync: { title: 'Sync', description: 'Sync library', connect: 'Connect and sync', syncNow: 'Sync now', disconnect: 'Disconnect', disconnected: 'Stopped', ready: 'Ready', errorHelp: 'Connection failed', credentialUnavailable: 'Credential unavailable', registrationCode: 'Registration code', readRegistration: 'Read', management: {}, residency: {} } } } }))
 
 let production: typeof import('./serverSyncProduction')
 let ui: typeof import('svelte')
@@ -41,6 +43,7 @@ const button = (text: string) => [...document.querySelectorAll('button')].find(v
 beforeEach(async () => {
     vi.resetModules(); f.invoke.mockReset(); f.offline = true; f.repairError = undefined; f.activationError = undefined; f.fenceError = undefined
     f.configured = true; f.pending = null; f.inspectError = undefined
+    f.sharedData = false; f.marker = false; f.queued = 0; f.outbox = 0; f.pushed = 0
     f.binding = { target: { kind: 'server', connectionId: 'server' }, targetAuthority: '4', selectionEpoch: 'persisted', libraryId: 'library', progress: null }
     Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
     f.invoke.mockImplementation(async (command, args) => {
@@ -48,7 +51,14 @@ beforeEach(async () => {
         if (command === 'server_sync_status') return { configured: f.configured, writerId: 'writer', bindingAuthority: f.binding.targetAuthority, libraryId: 'library', deviceId: 'device' }
         if (command === 'server_sync_lww_activate' && f.activationError) throw f.activationError
         if (command === 'server_sync_lww_activate' && f.offline) throw { code: 'server-unreachable', status: 503, retryable: true }
-        if (command === 'server_sync_lww_activate') f.configured = true
+        if (command === 'server_sync_lww_activate') {
+            // Native activation commits the pending registration and queues an initial publication the switch marked.
+            f.configured = true; f.pending = null
+            if (f.marker) { f.marker = false; f.queued += 1; f.outbox += 2 }
+        }
+        if (command === 'server_sync_configure') f.pending = { endpoint: args.config.endpoint, libraryId: args.config.libraryId, epoch: 'epoch', serverEmpty: true }
+        if (command === 'server_sync_lww_push') { if (!f.outbox) return null; f.outbox -= 1; f.pushed += 1; return { accepted: 1 } }
+        if (command === 'server_sync_lww_pull') return { bindingAuthority: f.binding.targetAuthority, requestId: 'pull', changes: [] }
         if (command === 'server_sync_lww_pending_binding') return structuredClone(f.pending)
         if (command === 'server_sync_lww_inspect') {
             if (f.inspectError) throw f.inspectError
@@ -58,7 +68,8 @@ beforeEach(async () => {
         if (command === 'server_sync_lww_fence' && f.fenceError) throw f.fenceError
         if (command === 'pds_lww_switch_target') {
             expect(args.request).toMatchObject({ bindingAuthority: f.binding.targetAuthority, expectedSelectionEpoch: f.binding.selectionEpoch })
-            f.binding = { ...f.binding, target: args.request.target, targetAuthority: String(Number(f.binding.targetAuthority) + 1), selectionEpoch: 'disconnected' }
+            f.binding = { ...f.binding, target: args.request.target, targetAuthority: String(Number(f.binding.targetAuthority) + 1), selectionEpoch: 'disconnected', libraryId: args.request.target.kind === 'none' ? null : 'library' }
+            f.marker = args.request.initialPublication === true
             return structuredClone(f.binding)
         }
         return null
@@ -156,10 +167,25 @@ describe('persisted server offline startup', () => {
         expect(f.binding).toEqual(before)
     })
     it.each([
+        [{ code: 'unauthorized', status: 401, retryable: false }, 'Registration revoked'],
+        [{ code: 'invalid-device-token', status: 401, retryable: false }, 'Registration revoked'],
+        [{ code: 'server-epoch-changed', status: 409, retryable: false }, 'Registration revoked'],
+        [{ code: 'device-credential-unavailable', status: 409, retryable: false }, 'Credential unavailable'],
+    ])('opens the library and asks for a registration in settings when startup activation fails with %j', async (failure, text) => {
+        f.activationError = failure
+        await expect(production.installServerSyncProduction()).resolves.toBeUndefined()
+        expect(commands()).toContain('server_sync_lww_fence')
+        expect(commands()).not.toContain('server_sync_notify_start'); expect(commands()).not.toContain('pds_lww_switch_target')
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, running: false, paused: true, error: failure.code })
+        await settings()
+        expect(document.body.textContent).toContain(text)
+        expect(document.querySelector('#server-registration')).not.toBeNull()
+        expect(button('Disconnect')).toBeDefined()
+    })
+    it.each([
         { code: 'binding-authority-stale', retryable: false },
         { code: 'server-unreachable', retryable: false },
         { code: 'equal-stamp-integrity', retryable: false },
-        { code: 'unauthorized', status: 401, retryable: false },
         { code: 'local-metadata', status: 503, retryable: true },
         new Error('Local activation state is invalid'),
     ])('rejects non-recoverable or unknown activation failures after fencing startup jobs (%j)', async failure => {
@@ -217,5 +243,39 @@ describe('first binding stopped after its target switch', () => {
         f.configured = true
         await production.installServerSyncProduction()
         expect(commands()).not.toContain('server_sync_lww_pending_binding')
+    })
+})
+
+describe('initial publication owed by a first binding that stopped after its switch', () => {
+    const config = { endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'device', token: 'synthetic' }
+    beforeEach(() => {
+        f.binding = { target: { kind: 'none' }, targetAuthority: '0', selectionEpoch: 'none', libraryId: null, progress: null }
+        f.configured = false; f.offline = false
+    })
+    async function restartVisible() {
+        production.disposeNativeSyncBindings(); vi.resetModules(); f.invoke.mockClear()
+        Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+        production = await import('./serverSyncProduction'); production.initializeNativeSyncBindings()
+        await production.installServerSyncProduction(); await settle()
+    }
+    it.each([true, false])('carries the decision made at the switch through a restart to one publication (shared data %s)', async shared => {
+        f.sharedData = shared
+        await production.installServerSyncProduction()
+        f.activationError = { code: 'server-unreachable', status: 503, retryable: true }
+        await expect(production.connectServerSync(config)).rejects.toMatchObject({ code: 'server-unreachable' })
+        const switches = f.invoke.mock.calls.filter(([command]) => command === 'pds_lww_switch_target')
+        expect(switches).toHaveLength(1)
+        expect(switches[0][1].request).toMatchObject({ target: { kind: 'server', connectionId: 'server' }, initialPublication: shared })
+        expect(f.marker).toBe(shared); expect(f.queued).toBe(0); expect(f.pushed).toBe(0)
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: true, error: 'server-unreachable' })
+
+        f.activationError = undefined
+        await restartVisible()
+        expect(commands()).toContain('server_sync_lww_pending_binding')
+        expect(commands()).toContain('server_sync_lww_inspect')
+        expect(commands()).not.toContain('pds_lww_switch_target')
+        await vi.waitFor(() => expect(f.pushed).toBe(shared ? 2 : 0))
+        expect(f.marker).toBe(false); expect(f.queued).toBe(shared ? 1 : 0); expect(f.outbox).toBe(0)
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { configured: true, bound: true }, paused: false, error: '', bindingIncomplete: false })
     })
 })

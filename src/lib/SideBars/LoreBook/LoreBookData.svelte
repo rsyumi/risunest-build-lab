@@ -156,8 +156,8 @@
             const title = language.removeConfirm + (value.comment || 'Unnamed Folder');
             const confirmed = value.mode === 'folder' && externalLoreBooks.some(e => e.folder === value.key)
                 ? (await alertCheckboxConfirm({
-                    title: language.folderRemoveConfirm,
-                    description: title,
+                    title,
+                    description: language.checkboxConfirmation.lorebookDeletionDescription,
                     checkboxLabel: language.checkboxConfirmation.lorebookDeletion,
                     actionLabel: language.confirm,
                     cancelLabel: language.cancel,

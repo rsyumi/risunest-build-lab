@@ -133,6 +133,7 @@ describe('native file job bootstrap reconciliation', () => {
 
     it.each([
         ['restore-official-account-snapshot', 'official-restore'],
+        ['restore-native-snapshot', 'snapshot-restore'],
         ['restore-legacy-local-backup', 'legacy-restore'],
     ] as const)('retains a successful %s for post-bootstrap acknowledgement', async (kind, jobId) => {
         const calls: string[] = []

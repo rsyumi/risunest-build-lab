@@ -11,6 +11,8 @@ pub(crate) mod codes {
     pub(crate) const RECORD_INVALID: &str = "record-invalid";
     pub(crate) const RECORD_ORPHAN: &str = "record-orphan";
     pub(crate) const OBJECT_UNREFERENCED: &str = "object-unreferenced";
+    /// A local change whose replay kept failing, so it was set aside unapplied.
+    pub(crate) const INTENT_QUARANTINED: &str = "intent-quarantined";
     pub(crate) const UNCLASSIFIED: &str = "unclassified";
 }
 
@@ -27,7 +29,7 @@ pub(crate) enum Severity {
 
 fn severity_of(code: &str) -> Severity {
     match code {
-        codes::REFERENCE_MISSING | codes::REFERENCE_INVALID => Severity::Degraded,
+        codes::REFERENCE_MISSING | codes::REFERENCE_INVALID | codes::INTENT_QUARANTINED => Severity::Degraded,
         codes::OBJECT_UNREFERENCED => Severity::Informational,
         _ => Severity::Blocking,
     }

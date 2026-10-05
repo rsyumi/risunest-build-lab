@@ -2,8 +2,8 @@ import '../androidNativeControl'
 import { invoke } from '@tauri-apps/api/core'
 import { relaunch } from '../desktopRelaunch'
 import { isTauriIOS, isTauriMobile } from '../platform'
-import { NativeFileJobError, type NativeFileJobStatus, type NativeSnapshotBodiesStarted, type NativeSnapshotBodyResult } from './nativeFileJobs'
-import { runSharedNativeFileOperation } from './nativeFileJobManager'
+import { NativeFileJobError, runNativeSnapshotRestore, type NativeFileJobStatus, type NativeSnapshotBodiesStarted, type NativeSnapshotBodyResult, type NativeSnapshotRestoreActivation } from './nativeFileJobs'
+import { nativeFileOperationOutcomeShown, runSharedNativeFileOperation } from './nativeFileJobManager'
 import type {
     DataHealthResult,
     RepairApplied,
@@ -205,69 +205,25 @@ export async function completeNativeSnapshotRestoreBodies(stagingId: string, act
 }
 
 export async function requestNativePersistentSnapshotRestore(id: string): Promise<boolean> {
-    const [{getPersistentDataRuntime}, {prepareBoundLibraryReplacement}, {acquireUpstreamImportPause,confirmUpstreamLibraryReplacement}, plugins, {registerCommittedWorkingSetContinuation}, {createStorageMutationGate}] = await Promise.all([
-        import('./persistentDataRuntime.svelte'),import('./sync/bindingRegistry'),import('./upstreamReplacement'),import('../plugins/apiV3/v3.svelte'),import('./committedWorkingSetContinuation'),import('./storageMutationGate'),
-    ])
+    const {getPersistentDataRuntime} = await import('./persistentDataRuntime.svelte')
     const runtime = getPersistentDataRuntime()
-    const staged = await invoke<{stagingId:string}>('pds_snapshot_restore_stage',{id,requestId:crypto.randomUUID()})
-    let submitted = false
-    let pause: Awaited<ReturnType<typeof acquireUpstreamImportPause>> | undefined
-    let binding: Awaited<ReturnType<typeof prepareBoundLibraryReplacement>> | undefined
-    let acceptedRevision: number | undefined
-    const gate = createStorageMutationGate()
-    try {
-        binding = await prepareBoundLibraryReplacement()
-        if (!(await confirmUpstreamLibraryReplacement(binding.bound))) {
-            await invoke('pds_snapshot_restore_abort',{stagingId:staged.stagingId})
-            return false
-        }
-        await binding.fence()
-        await plugins.fencePluginExecutionForAuthorityReplacement()
-        pause = await acquireUpstreamImportPause(runtime,'native-snapshot-restore')
-        await binding.assertAuthority()
-        const args = {stagingId:staged.stagingId,expectedRevision:pause.fence.revision,bindingAuthority:binding.state.targetAuthority}
-        runtime.setActivatedLibraryRecoveryLifecycle(pause.token,{
-            async beforeRefresh() {
-                await binding!.assertAuthority()
-                const result = await gate.runTransition(() => invoke<{revision:number}>('pds_snapshot_restore_activate',args))
-                acceptedRevision = result.revision
-                return result.revision
-            },
-            async afterRefresh() {
-                await plugins.invalidatePluginCachesAfterAuthorityReplacement()
-                await plugins.restartPluginsAfterAuthorityReplacement()
-            },
-        })
-        submitted = true
-        const result = await gate.runTransition(() => invoke<{revision:number}>('pds_snapshot_restore_activate',args))
-        acceptedRevision = result.revision
-        await pause.fence.refreshCommittedWorkingSet(result.revision)
-        await plugins.invalidatePluginCachesAfterAuthorityReplacement()
-        await plugins.restartPluginsAfterAuthorityReplacement()
-        pause.complete()
-        await pause.finish()
-        await binding.resume()
-    } catch (error) {
-        if (submitted && pause) {
-            const revision = acceptedRevision ?? pause.fence.revision
-            runtime.markCommittedWorkingSetRefreshRequired(revision,error)
-            registerCommittedWorkingSetContinuation(revision,runtime,runtime.getStorageAuthorityEpoch(),async () => {
-                await binding!.assertAuthority()
-                await binding!.resume()
-                if (acceptedRevision === undefined) throw new Error('Snapshot activation revision is unavailable')
-                await completeNativeSnapshotRestoreBodies(staged.stagingId, acceptedRevision, String(binding!.state.targetAuthority))
-            },undefined,true)
-        } else {
-            await invoke('pds_snapshot_restore_abort',{stagingId:staged.stagingId})
-            if (pause) await pause.abortUnchanged(async () => {await binding?.assertAuthority()})
-            await plugins.restartPluginsAfterAuthorityReplacement()
-            await binding?.resume()
-        }
-        throw error
-    } finally {
-        if (pause) await pause.finish()
+    const copyBodies = async (activation: NativeSnapshotRestoreActivation): Promise<void> => {
+        await completeNativeSnapshotRestoreBodies(activation.stagingId, activation.activationRevision, activation.bindingAuthority)
     }
-    await completeNativeSnapshotRestoreBodies(staged.stagingId, acceptedRevision!, String(binding!.state.targetAuthority))
+    let activation: NativeSnapshotRestoreActivation
+    try {
+        activation = await runSharedNativeFileOperation('import', `snapshot-restore:${id}`, context => runNativeSnapshotRestore(runtime, {snapshotId: id}, {
+            signal: context.signal,
+            onStatus: context.onStatus,
+            onBlockingChange: context.setBlocking,
+            afterActivationRecovery: copyBodies,
+        }), {presentation: 'dialog', format: 'library-backup'})
+    } catch (error) {
+        // The operation dialog already shows how an admitted restore ended.
+        if ((error instanceof DOMException && error.name === 'AbortError') || nativeFileOperationOutcomeShown('import')) return false
+        throw error
+    }
+    await copyBodies(activation)
     return true
 }
 

@@ -61,14 +61,24 @@ mod scope;
 #[cfg(feature = "cookies")]
 const COOKIES_FILENAME: &str = ".cookies";
 
+/// Prepares the builder of every client the plugin creates, before the
+/// request options apply.
+pub type ClientBuilderHook = fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder;
+
 pub(crate) struct Http {
+    client_builder: ClientBuilderHook,
     #[cfg(feature = "cookies")]
     cookies_jar: std::sync::Arc<crate::reqwest_cookie_store::CookieStoreMutex>,
 }
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
+    init_with_client_builder(|builder| builder)
+}
+
+/// RisuNest: lets the application choose how clients verify servers.
+pub fn init_with_client_builder<R: Runtime>(client_builder: ClientBuilderHook) -> TauriPlugin<R> {
     Builder::<R>::new("http")
-        .setup(|app, _| {
+        .setup(move |app, _| {
             #[cfg(feature = "cookies")]
             let cookies_jar = {
                 use crate::reqwest_cookie_store::*;
@@ -96,6 +106,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             };
 
             let state = Http {
+                client_builder,
                 #[cfg(feature = "cookies")]
                 cookies_jar: std::sync::Arc::new(cookies_jar),
             };

@@ -355,7 +355,7 @@
     if (
       (await alertCheckboxConfirm({
           title: language.hypaV3Modal.resetConfirmMessage,
-          description: language.hypaV3Modal.resetConfirmSecondMessage,
+          description: language.checkboxConfirmation.hypaResetDescription,
           checkboxLabel: language.checkboxConfirmation.hypaReset,
           actionLabel: language.confirm,
           cancelLabel: language.cancel,

@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import type { Chat, Message } from './storage/database.svelte'
-import { generateResponseCandidate, moveResponseCandidate, recoverInterruptedReroll } from './durableReroll'
-import { trackRerollOutput } from './responseVariants'
+import {
+    generateResponseCandidate,
+    generateWindowedResponseCandidate,
+    moveResponseCandidate,
+    moveWindowedResponseCandidate,
+    recoverInterruptedReroll,
+    type OpenResponseTail,
+} from './durableReroll'
+import { attachHistoryWindow } from './process/historyWindowIndex'
+import { recoverRerollMessages, trackRerollOutput } from './responseVariants'
 
 const message = (data: string, role: Message['role'] = 'char', saying = 'bot'): Message => ({
     data,
@@ -180,5 +188,233 @@ describe('durable response candidates', () => {
         expect(f.chat.message.map((message) => message.data)).toEqual(['new', 'note'])
         moveResponseCandidate(f.chat, null, -1, f.options.createId)
         expect(f.chat.message.map((message) => message.data)).toEqual(['a', 'b', 'note'])
+    })
+})
+
+// A stored conversation that tail windows read from and write back to by absolute index.
+function storedConversation(messages: Message[]) {
+    const stored = { messages, metadata: { id: 'chat', name: 'Synthetic', note: '', localLore: [] } as Omit<Chat, 'message'> }
+    const starts: number[] = []
+    let flushed = structuredClone(stored)
+    const open: OpenResponseTail = async (tailStart) => {
+        const start = Math.min(Math.max(tailStart(stored.messages.length), 0), stored.messages.length)
+        starts.push(start)
+        const chat = { ...structuredClone(stored.metadata), message: structuredClone(stored.messages.slice(start)) } as Chat
+        attachHistoryWindow(chat, start)
+        let released = false
+        return {
+            chat,
+            controller: {
+                chat,
+                absoluteStartIndex: start,
+                isCurrent: () => !released,
+                applyRange(localStart, deleteCount, replacement) {
+                    if (released) return false
+                    stored.messages.splice(start + localStart, deleteCount, ...structuredClone([...replacement]))
+                    chat.message.splice(localStart, deleteCount, ...structuredClone([...replacement]))
+                    const { message: _message, ...metadata } = chat
+                    stored.metadata = structuredClone(metadata)
+                    return true
+                },
+                release: () => {
+                    released = true
+                },
+            },
+            release: () => {
+                released = true
+            },
+        }
+    }
+    let serial = 0
+    const options = {
+        open,
+        isCurrent: () => true,
+        createId: () => `id-${++serial}`,
+        flush: async () => {
+            flushed = structuredClone(stored)
+        },
+        aborted: () => false,
+        generate: async () => {
+            stored.messages.push(message('new'))
+            return true
+        },
+    }
+    return { stored, starts, options, flushed: () => flushed }
+}
+
+const longConversation = (count: number) =>
+    Array.from({ length: count }, (_, index) => message(`m${index}`, index % 2 ? 'char' : 'user'))
+
+describe('response candidates over a history window', () => {
+    it('generates a candidate from tail windows and leaves earlier messages untouched', async () => {
+        const conversation = storedConversation(longConversation(100))
+        const before = structuredClone(conversation.stored.messages.slice(0, 99))
+        conversation.options.generate = async () => {
+            expect(conversation.flushed().messages.at(-1)?.data).toBe('m99')
+            expect(conversation.stored.messages.at(-1)?.data).toBe('m98')
+            expect(conversation.stored.metadata.rerollRecovery).toMatchObject({
+                phase: 'generating',
+                startIndex: 99,
+                anchorId: 'message:m98',
+            })
+            conversation.stored.messages.push(message('new'))
+            return true
+        }
+
+        const result = await generateWindowedResponseCandidate(conversation.options)
+
+        expect(result).toEqual({ completed: true, lastMessage: 'new' })
+        expect(conversation.stored.messages.slice(0, 99)).toEqual(before)
+        expect(conversation.stored.messages.at(-1)?.responseVariants?.candidates.map((candidate) => candidate.messages[0].data))
+            .toEqual(['m99', 'new'])
+        expect(conversation.stored.metadata.rerollRecovery).toBeUndefined()
+        expect(conversation.flushed().messages.at(-1)?.data).toBe('new')
+        expect(Math.min(...conversation.starts)).toBe(92)
+    })
+
+    it('restores the original response when the generation fails', async () => {
+        const conversation = storedConversation(longConversation(100))
+        const before = structuredClone(conversation.stored.messages.slice(0, 99))
+        conversation.options.generate = async () => {
+            // The generation records its output in the stored recovery as it writes.
+            const output = message('partial')
+            conversation.stored.metadata.rerollRecovery!.outputs[output.chatId!] = structuredClone(output)
+            conversation.stored.messages.push(output)
+            return false
+        }
+        expect(await generateWindowedResponseCandidate(conversation.options)).toEqual({ completed: false, lastMessage: 'm99' })
+        expect(conversation.stored.messages.slice(0, 99)).toEqual(before)
+        expect(conversation.stored.messages.map((entry) => entry.data).slice(98)).toEqual(['m98', 'm99'])
+        expect(conversation.stored.metadata.rerollRecovery).toBeUndefined()
+    })
+
+    it('returns null when no tail window opens', async () => {
+        const conversation = storedConversation(longConversation(10))
+        expect(await generateWindowedResponseCandidate({
+            ...conversation.options,
+            open: async () => null,
+            generate: async () => {
+                throw new Error('must not generate')
+            },
+        })).toBeNull()
+    })
+
+    it('keeps the stored recovery when the tail cannot be reopened after the generation', async () => {
+        const conversation = storedConversation(longConversation(100))
+        const open = conversation.options.open
+        let generated = false
+        const result = await generateWindowedResponseCandidate({
+            ...conversation.options,
+            open: async (tailStart) => generated ? null : open(tailStart),
+            generate: async () => {
+                const output = message('new')
+                conversation.stored.metadata.rerollRecovery!.outputs[output.chatId!] = structuredClone(output)
+                conversation.stored.messages.push(output)
+                generated = true
+                return true
+            },
+        })
+
+        expect(result).toEqual({ completed: false, reopenFailed: true })
+        expect(conversation.stored.metadata.rerollRecovery).toMatchObject({ phase: 'generating', startIndex: 99 })
+        const reopened = { ...structuredClone(conversation.stored.metadata), message: structuredClone(conversation.stored.messages) } as Chat
+        expect(recoverRerollMessages(reopened).slice(98).map((entry) => entry.data)).toEqual(['m98', 'm99'])
+    })
+
+    it('does nothing when the last message changed after confirmation', async () => {
+        const conversation = storedConversation(longConversation(10))
+        const before = structuredClone(conversation.stored)
+        const result = await generateWindowedResponseCandidate({
+            ...conversation.options,
+            expectedLastMessage: JSON.stringify(message('other')),
+            generate: async () => {
+                throw new Error('must not generate')
+            },
+        })
+        expect(result).toEqual({ completed: false })
+        expect(conversation.stored).toEqual(before)
+    })
+
+    it('widens the tail until it holds the message before a long response', async () => {
+        const conversation = storedConversation([
+            ...longConversation(20),
+            ...Array.from({ length: 10 }, (_, index) => message(`r${index}`, 'char', `speaker-${index}`)),
+        ])
+        const { open, createId, flush } = conversation.options
+        const move = await moveWindowedResponseCandidate(open, 1, createId, flush)
+        expect(move).toEqual({ moved: false, lastMessage: JSON.stringify(conversation.stored.messages.at(-1)) })
+        expect(conversation.starts).toEqual([22, 14])
+    })
+
+    it('reads one tail window when the newest message is not a response', async () => {
+        const conversation = storedConversation([...longConversation(1000), message('question', 'user')])
+        const before = structuredClone(conversation.stored)
+        const { open, createId, flush } = conversation.options
+
+        expect(await moveWindowedResponseCandidate(open, 1, createId, flush)).toEqual({ moved: false, lastMessage: null })
+        expect(await moveWindowedResponseCandidate(open, -1, createId, flush)).toEqual({ moved: false, lastMessage: null })
+        expect(await generateWindowedResponseCandidate({
+            ...conversation.options,
+            generate: async () => {
+                throw new Error('must not generate')
+            },
+        })).toMatchObject({ completed: false })
+
+        expect(conversation.starts).toEqual([993, 993, 993])
+        expect(conversation.stored).toEqual(before)
+    })
+
+    it('widens past a tail of comments and disabled messages to the response', async () => {
+        const conversation = storedConversation([
+            ...longConversation(100),
+            ...Array.from({ length: 6 }, (_, index) => ({ ...message(`note${index}`), isComment: true })),
+            ...Array.from({ length: 4 }, (_, index) => ({ ...message(`off${index}`, 'user'), disabled: true })),
+        ])
+        const { open, createId, flush } = conversation.options
+
+        const move = await moveWindowedResponseCandidate(open, 1, createId, flush)
+
+        expect(move).toEqual({ moved: false, lastMessage: JSON.stringify(conversation.stored.messages.at(-1)) })
+        expect(conversation.starts).toEqual([102, 94])
+    })
+
+    it('opens a conversation shorter than the tail once', async () => {
+        const conversation = storedConversation(longConversation(3))
+        const { open, createId, flush } = conversation.options
+
+        expect(await moveWindowedResponseCandidate(open, 1, createId, flush)).toEqual({ moved: false, lastMessage: null })
+        expect(conversation.starts).toEqual([0])
+    })
+
+    it('moves between candidates over a tail window', async () => {
+        const conversation = storedConversation(longConversation(100))
+        await generateWindowedResponseCandidate(conversation.options)
+        const { open, createId, flush } = conversation.options
+        expect(await moveWindowedResponseCandidate(open, -1, createId, flush)).toEqual({ moved: true, lastMessage: null })
+        expect(conversation.flushed().messages.at(-1)?.data).toBe('m99')
+        expect(await moveWindowedResponseCandidate(open, -1, createId, flush)).toEqual({
+            moved: false,
+            lastMessage: JSON.stringify(conversation.stored.messages.at(-1)),
+        })
+        expect(await moveWindowedResponseCandidate(open, 1, createId, flush)).toEqual({ moved: true, lastMessage: null })
+        expect(conversation.stored.messages.at(-1)?.data).toBe('new')
+        expect(conversation.stored.messages).toHaveLength(100)
+    })
+
+    it('recovers a window by its absolute start when the anchor is missing', () => {
+        const chat = {
+            id: 'chat',
+            message: [message('a', 'user'), message('partial')],
+            rerollRecovery: {
+                attemptId: 'attempt',
+                phase: 'generating',
+                startIndex: 51,
+                original: [message('original')],
+                responseCount: 1,
+                outputs: { 'message:partial': message('partial') },
+            },
+        } as unknown as Chat
+        attachHistoryWindow(chat, 50)
+        expect(recoverRerollMessages(chat).map((entry) => entry.data)).toEqual(['a', 'original'])
     })
 })

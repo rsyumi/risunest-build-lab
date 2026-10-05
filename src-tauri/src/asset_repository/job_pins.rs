@@ -140,6 +140,31 @@ fn open_handles() -> std::sync::MutexGuard<'static, HashMap<PathBuf, usize>> {
 
 fn track_open_handle(journal_path: &Path) {
     *open_handles().entry(journal_path.to_owned()).or_default() += 1;
+    #[cfg(test)]
+    {
+        *JOURNAL_OPENS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(journal_path.to_owned())
+            .or_default() += 1;
+    }
+}
+
+#[cfg(test)]
+static JOURNAL_OPENS: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
+
+/// How many times this process began or opened the journal of `job_id`.
+#[cfg(test)]
+pub(crate) fn journal_opens(repository_root: &Path, job_id: &str) -> usize {
+    let Some((_, directory)) = job_pin_directory(repository_root, false).unwrap() else {
+        return 0;
+    };
+    JOURNAL_OPENS
+        .lock()
+        .unwrap()
+        .get(&directory.join(format!("job-{job_id}.journal")))
+        .copied()
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

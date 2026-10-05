@@ -46,8 +46,12 @@ vi.mock('./storage/nativeFileJobs', () => ({
     NativeFileJobError: class extends Error {}, runNativeOfficialAccountSnapshotRestore: vi.fn(),
 }))
 vi.mock('./storage/androidRisuSaveRouteProduction.svelte', () => ({ registerAndroidRisuSaveRoute: vi.fn() }))
+vi.mock('./storage/iosFiles', () => ({ reportInterruptedIOSBackupSourcesAtStart: vi.fn() }))
 vi.mock('src/lang', () => ({ changeLanguage: vi.fn(), language: { risuNest: {
-    startup: { storage: 'Storage', account: 'Account', plugins: 'Plugins', ui: 'UI', data: 'Data', serviceWorker: 'Service worker' },
+    startup: {
+        storage: 'Storage', account: 'Account', plugins: 'Plugins', ui: 'UI', data: 'Data', serviceWorker: 'Service worker',
+        rendererRecovered: 'Synthetic recovery notice',
+    },
     backup: { officialAssetsRestoreFailed: 'Synthetic asset restore failed', officialAssetsMissing: 'Synthetic missing assets: {count}' },
 } } }))
 vi.mock('./platform', () => ({ get isTauri() { return startup.native }, isTauriAndroid: false, isTauriDesktop: false }))
@@ -136,6 +140,7 @@ vi.mock('./stores.svelte', () => ({
 vi.mock('./alert', () => ({
     alertConfirm: vi.fn(), alertError: vi.fn(), alertInput: vi.fn(), alertLogin: vi.fn(), alertMd: vi.fn(),
     alertNormal: vi.fn(), alertSelect: vi.fn(), alertTOS: vi.fn(), alertRisuServiceTOS: vi.fn(), waitAlert: vi.fn(),
+    alertToast: vi.fn(),
 }))
 vi.mock('./characterCards', () => ({ applyHubSelection: vi.fn(), characterURLImport: vi.fn(), hubURL: 'https://hub.invalid' }))
 vi.mock('./storage/androidSafBridge', () => ({ isAndroidSafFileJobsEnabled: vi.fn(() => false) }))
@@ -165,7 +170,7 @@ vi.mock('./process/transformers', () => ({ releaseIdleTransformerModels: vi.fn()
 vi.mock('./process/files/inlayProviderImage', () => ({ forgetInlayProviderImages: vi.fn() }))
 
 import { loadData } from './bootstrap'
-import { alertNormal, alertTOS, waitAlert } from './alert'
+import { alertNormal, alertToast, alertTOS, waitAlert } from './alert'
 import { bootFailure } from './stores.svelte'
 import { loadRisuAccountData } from './drive/accounter'
 import { initializeOfficialAccountBootstrap } from './storage/sync/officialAccountBootstrap'
@@ -255,7 +260,7 @@ describe('renderer recovery notice', () => {
         startup.reconcile.mockResolvedValue(undefined)
     })
 
-    it('waits for the terms answer so the terms prompt cannot replace it', async () => {
+    it('shows a toast after the terms answer and queued dialogs so neither can replace it', async () => {
         let answerTerms!: (accepted: boolean) => void
         vi.mocked(alertTOS).mockReturnValueOnce(new Promise((resolve) => { answerTerms = resolve }))
         startup.takeRendererRecovery.mockResolvedValueOnce(true)
@@ -263,9 +268,16 @@ describe('renderer recovery notice', () => {
         expect(bootFailure.set).toHaveBeenLastCalledWith(null)
         expect(startup.takeRendererRecovery).not.toHaveBeenCalled()
         answerTerms(true)
-        await vi.waitFor(() => expect(alertNormal).toHaveBeenCalledOnce())
+        await vi.waitFor(() => expect(alertToast).toHaveBeenCalledExactlyOnceWith('Synthetic recovery notice'))
+        expect(alertNormal).not.toHaveBeenCalled()
         expect(vi.mocked(waitAlert).mock.invocationCallOrder.at(-1))
-            .toBeLessThan(vi.mocked(alertNormal).mock.invocationCallOrder[0])
+            .toBeLessThan(vi.mocked(alertToast).mock.invocationCallOrder[0])
+    })
+
+    it('words the notice as a reload with saved data', async () => {
+        const [{ languageKorean }, { languageEnglish }] = await Promise.all([import('src/lang/ko'), import('src/lang/en')])
+        expect(languageKorean.risuNest.startup.rendererRecovered).toBe('저장된 데이터로 화면을 다시 불러왔습니다.')
+        expect(languageEnglish.risuNest.startup.rendererRecovered).toBe('The screen was reloaded with your saved data.')
     })
 
     it('leaves the answer untaken when the terms are declined', async () => {
@@ -275,6 +287,6 @@ describe('renderer recovery notice', () => {
         await loadData()
         await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce())
         expect(startup.takeRendererRecovery).not.toHaveBeenCalled()
-        expect(alertNormal).not.toHaveBeenCalled()
+        expect(alertToast).not.toHaveBeenCalled()
     })
 })

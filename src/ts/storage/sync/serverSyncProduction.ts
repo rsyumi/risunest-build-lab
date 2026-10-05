@@ -3,14 +3,15 @@ import type { SyncExitDrainAdapter } from '../syncExitCoordinator'
 import type { RetainableReplacementFence } from '../retainableReplacementFence'
 import { isTauri } from 'src/ts/platform'
 import { createSyncBindingRecoveryRegistration, installSyncBindingFlow } from './bindingProduction'
-import { withPausedPersistentWrites, beginActivatedLibraryGuard, refreshActivatedLibraryUnderPause, applyPersistentLwwReceive, getPersistentDataRuntime } from '../persistentDataRuntime.svelte'
+import { withPausedPersistentWrites, beginActivatedLibraryGuard, refreshActivatedLibraryUnderPause, applyPersistentLwwReceive, flushPendingDataLocally, getPersistentDataRuntime } from '../persistentDataRuntime.svelte'
 import type { PersistentMutationToken } from '../saveCoordinator'
-import type { LwwStageReceive, LwwRemoteChange } from '../persistentDataStore'
+import { RevisionConflictError, type LwwStageReceive, type LwwRemoteChange } from '../persistentDataStore'
+import { runWithMobileBackgroundTask } from '../../mobileBackgroundTask'
 import { fencePluginExecutionForAuthorityReplacement, invalidatePluginCachesAfterAuthorityReplacement, restartPluginsAfterAuthorityReplacement } from 'src/ts/plugins/apiV3/v3.svelte'
 import { registerSyncBindingTransport, resumeCurrentSyncBinding } from './bindingRegistry'
-import type { SyncBindingTransport, BindingContext } from './bindingFlow'
+import type { SyncBindingTransport, BindingContext, BindingOutcome, SyncBindingOptions } from './bindingFlow'
 import { replaceNativeSyncBinding, replaceNativeSyncBindingAsNewDevice } from './bindingNative'
-import { createServerSyncScheduler, serverSyncErrorCode } from './serverSyncScheduler'
+import { createServerSyncScheduler, integrityCodes, serverSyncErrorCode } from './serverSyncScheduler'
 import { subscribeLocalPersistentRevision } from '../persistentRevisionEvents'
 import { listen } from '@tauri-apps/api/event'
 import { generatingConversations } from '../generatingConversationRegistry'
@@ -102,7 +103,7 @@ function continueHydration(): void {
 async function updateForeground(visible: boolean): Promise<void> {
     foreground = visible && !replacing && !!context && !context.signal.aborted
     if (!foreground && hydrating) hydrationPending = true
-    await scheduler.foreground(foreground)
+    await scheduler.foreground(foreground, !visible)
     continueHydration()
 }
 async function retryNativeClock(automatic = false): Promise<void> {
@@ -116,29 +117,37 @@ async function retryNativeClock(automatic = false): Promise<void> {
     if (!automatic || error === 'clock-skew' || error === 'server-unreachable') { error = ''; hydrationError = ''; changed() }
 }
 const failures = (value: unknown): unknown[] => value instanceof AggregateError ? value.errors : [value]
+// Classifies a failed local apply as native code does for its own store failures: an invariant
+// failure stops sync until retry, a busy or unavailable store is tried again.
+const localApplyFailure = (value: unknown): unknown => {
+    const code = serverSyncErrorCode(value)
+    if (code === 'cancelled' || integrityCodes.includes(code) || (value instanceof Error && value.name === 'AbortError')) return value
+    const local = value instanceof RevisionConflictError ? 'local-revision-changed'
+        : code === 'commit-busy' || (value instanceof Error && ['PersistentMutationFencedError', 'SelectedConversationTransitionInProgressError'].includes(value.name)) ? 'library-operation-busy'
+            : code === 'store-error' ? 'local-storage' : 'local-validation'
+    return Object.assign(new Error(local, { cause: value }), { code: local, retryable: local !== 'local-validation' })
+}
 const transientTransportFailure = (value: unknown) => {
     const code = serverSyncErrorCode(value)
     return !!code && !code.startsWith('local-') && typeof value === 'object' && value !== null && 'retryable' in value && value.retryable === true
 }
+// A revoked or replaced registration, a restored server and credentials the OS cannot open are
+// resolved in settings, which a failed startup could not reach.
+const settingsResolvedFailure = (value: unknown) => ['unauthorized', 'invalid-device-token', 'server-epoch-changed', 'device-credential-unavailable'].includes(serverSyncErrorCode(value))
 async function resumeCurrentServerBinding(state: BindingContext['state']): Promise<void> {
     try { await resumeCurrentSyncBinding(state.target) }
     catch (value) { error = serverSyncErrorCode(failures(value)[0]) || 'server-unreachable'; await controller.ensureStatus(); throw value }
 }
-async function pushAvailable(captured: BindingContext, requireForeground = false): Promise<void> {
+/** Sends queued pages until none remain; without `drain` it stops when the app leaves the foreground. */
+async function pushAvailable(captured: BindingContext, drain = false): Promise<void> {
     for (;;) {
         captured.signal.throwIfAborted()
         if (captured !== context) throw new Error('Sync binding changed')
-        if (!foreground) {
-            if (requireForeground) throw new Error('Sync binding foreground is unavailable')
-            return
-        }
+        if (!foreground && !drain) return
         const receipt = await invoke('server_sync_lww_push', { request: header(), generating: generatingConversations.snapshot() })
         captured.signal.throwIfAborted()
         if (captured !== context) throw new Error('Sync binding changed')
-        if (!foreground) {
-            if (requireForeground) throw new Error('Sync binding foreground is unavailable')
-            return
-        }
+        if (!foreground && !drain) return
         if (!receipt) break
     }
     changed()
@@ -154,7 +163,8 @@ const scheduler = createServerSyncScheduler({
             if (captured !== context) throw new Error('Sync binding changed')
             const request = await invoke<LwwStageReceive>('server_sync_lww_pull', { request: header() })
             captured.signal.throwIfAborted()
-            await applyPersistentLwwReceive(request)
+            try { await applyPersistentLwwReceive(request) }
+            catch (value) { throw localApplyFailure(value) }
             checkContext(captured)
             if (receivedBodyReferences(request.changes)) { receivedBodies = true; hydrationPending = true }
             if (!foreground && !completeAvailable) break
@@ -165,6 +175,15 @@ const scheduler = createServerSyncScheduler({
         if (receivedBodies) continueHydration()
     },
     retryClock: () => retryNativeClock(true),
+    async publishHidden() {
+        const captured = context
+        if (!captured || captured.signal.aborted) return
+        await runWithMobileBackgroundTask('sync', async () => {
+            // A failed local save is reported where it happened; what is already queued still goes out.
+            await flushPendingDataLocally('server-sync-hidden').catch(() => {})
+            await pushAvailable(captured, true)
+        })
+    },
     connect: () => context ? invoke('server_sync_notify_start', { request: header() }) : Promise.resolve(),
     disconnect: async () => { await invoke('server_sync_notify_stop'); await invoke('server_sync_cancel') },
     failed(value) { error = serverSyncErrorCode(value) || 'server-unreachable'; changed() },
@@ -179,13 +198,16 @@ const transport: SyncBindingTransport = {
     inspectTarget: c => invoke('server_sync_lww_inspect', { request: { bindingAuthority: c.state.targetAuthority, requestId: crypto.randomUUID() } }),
     pullAvailableState: (inspected,c) => invoke('server_sync_lww_stage_target', { inspectionId: inspected.inspectionId, request: { bindingAuthority: c.state.targetAuthority, requestId: crypto.randomUUID() } }),
     replaceFromTarget: replaceNativeSyncBinding,
+    reportStopped(value) {
+        const code = serverSyncErrorCode(failures(value)[0])
+        if (code !== 'cancelled') { error = code || 'server-unreachable'; changed() }
+    },
     async fenceOldJobs(c) { foreground = false; context = undefined; persistedBinding = undefined; await scheduler.fence(); await hydrating; await invoke('server_sync_lww_fence', { newDevice: c.mode === 'new-device' || c.mode === 'fresh-writer' }); hydrationPending = false; hydrationAgain = false },
     async receiveAvailableChanges(c) { c.signal.throwIfAborted(); if (!context || context.state.targetAuthority !== c.state.targetAuthority || context.state.selectionEpoch !== c.state.selectionEpoch) throw new Error('Sync binding changed'); await receiveAvailableServerChanges(); c.signal.throwIfAborted() },
     async publishInitialSharedState(c) {
         context = c
         await invoke('server_sync_lww_activate', { request: header() })
         checkContext(c)
-        foreground = document.visibilityState !== 'hidden'
         await pushAvailable(c, true)
     },
     async resumeBinding(c) { context = c; adoptSchedulerAuthority(c); await invoke('server_sync_lww_activate', { request: header() }); checkContext(c); persistedBinding = c.state; hydrationPending = true; await updateForeground(document.visibilityState !== 'hidden'); scheduler.remoteHint() },
@@ -196,9 +218,25 @@ const transport: SyncBindingTransport = {
 }
 export async function receiveAvailableServerChanges(): Promise<void> { await scheduler.receiveAvailableChanges() }
 export async function configureServerSyncConnection(config: ServerConfig): Promise<void> { await invoke('server_sync_configure', { config }); error = '' }
-export async function connectServerSync(config: ServerConfig, newDevice = false): Promise<void> { await configureServerSyncConnection(config); await bindSyncTarget({ kind: 'server', connectionId: 'server' }, newDevice ? { mode: 'new-device' } : {}); await controller.ensureStatus() }
+// Binding and its initial publication continue while the app is in the background. A failure keeps
+// what native code committed visible, so a binding that stopped after its switch can be resumed.
+async function bindServer(options: SyncBindingOptions = {}): Promise<BindingOutcome> {
+    try { return await runWithMobileBackgroundTask('sync', () => bindSyncTarget({ kind: 'server', connectionId: 'server' }, options), undefined, true) }
+    catch (value) {
+        const code = serverSyncErrorCode(failures(value)[0])
+        if (code !== 'cancelled') { error = code || 'server-unreachable'; changed() }
+        await controller.ensureStatus().catch(() => {})
+        throw value
+    }
+}
+export async function connectServerSync(config: ServerConfig, newDevice = false): Promise<BindingOutcome> {
+    await configureServerSyncConnection(config)
+    const outcome = await bindServer(newDevice ? { mode: 'new-device' } : {})
+    await controller.ensureStatus()
+    return outcome
+}
 /** Finishes a first binding that stopped after its target switch, with the saved registration. */
-export async function completeServerSyncBinding(): Promise<void> { await bindSyncTarget({ kind: 'server', connectionId: 'server' }); await controller.ensureStatus() }
+export async function completeServerSyncBinding(): Promise<void> { await bindServer(); await controller.ensureStatus() }
 export async function disconnectServerSync(): Promise<void> { await unbindSyncTarget(); context = undefined; await controller.ensureStatus() }
 /** Stops automatic sync until the returned release runs, so an asset download is not refused as busy. */
 export const holdServerSync = () => controller.beginReplacement()
@@ -215,7 +253,19 @@ export async function installServerSyncProduction(): Promise<void> {
     if (!isTauri || disposeServer) return
     const disposers = [registerSyncBindingTransport({ kind: 'server', connectionId: 'server' }, transport)]
     disposers.push(subscribeLocalPersistentRevision((_revision,cause) => scheduler.localChange(cause === 'generation-complete')))
-    disposers.push(getPersistentDataRuntime().subscribeActiveConversationViewportSource(() => { void scheduler.conversationOpened().then(continueHydration) }))
+    // The source is renewed on every store revision; only a different conversation counts as opened.
+    // The one open at startup is covered by the startup pull.
+    const conversationIdentity = () => {
+        const target = getPersistentDataRuntime().captureSelectedConversationTarget()
+        return target ? JSON.stringify([target.characterId, target.conversationId]) : ''
+    }
+    let openedConversation = conversationIdentity()
+    disposers.push(getPersistentDataRuntime().subscribeActiveConversationViewportSource(source => {
+        const identity = source ? conversationIdentity() : ''
+        if (!identity || identity === openedConversation) return
+        openedConversation = identity
+        void scheduler.conversationOpened().then(continueHydration)
+    }))
     disposers.push(await listen('risu-server-sync-remote-hint', () => scheduler.remoteHint()))
     disposers.push(await listen<{ connected: boolean }>('risu-server-sync-notification', event => scheduler.socket(event.payload.connected)))
     const visibility = () => { void updateForeground(document.visibilityState !== 'hidden').catch(value => { if (serverSyncErrorCode(value) === 'cancelled') return; error = serverSyncErrorCode(value) || 'server-unreachable'; changed() }) }
@@ -228,7 +278,7 @@ export async function installServerSyncProduction(): Promise<void> {
         try { await resumeCurrentServerBinding(current) }
         catch (value) {
             // A fenced binding that cannot reach its server keeps the local library usable until retry.
-            if (!failures(value).every(transientTransportFailure)) throw value
+            if (!failures(value).every(failure => transientTransportFailure(failure) || settingsResolvedFailure(failure))) throw value
         }
     } else if (current.target.kind === 'server') await completeInterruptedBinding()
 }

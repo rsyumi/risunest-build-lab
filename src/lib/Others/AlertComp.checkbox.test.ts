@@ -91,7 +91,15 @@ vi.mock('./Help.svelte', async () => ({
     default: (await import('./AlertCompDependencyStub.test.svelte')).default,
 }))
 
+vi.mock('src/ts/process/index.svelte', async () => ({
+    doingChat: (await import('svelte/store')).writable(false),
+    previewBody: '',
+    sendChat: vi.fn(),
+}))
+vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({ deactivateActiveWorkingSet: vi.fn() }))
+
 import { alertCheckboxConfirm } from 'src/ts/alert'
+import { initHotkey } from 'src/ts/hotkey'
 import AlertComp from './AlertComp.svelte'
 
 let mounted: ReturnType<typeof mount> | undefined
@@ -146,6 +154,18 @@ describe('checkbox confirmations', () => {
         alertStore.set({ type: 'none', msg: '' })
         await expect(result).resolves.toEqual({ confirmed: false, checked: false })
     })
+    it('keeps a line break in the title', async () => {
+        const result = alertCheckboxConfirm({ ...options, title: 'Remove the plugin?\nSynthetic plugin' })
+        target = document.createElement('div')
+        document.body.append(target)
+        mounted = mount(AlertComp, { target })
+        await tick()
+        const title = target.querySelector('#checkbox-confirm-title')!
+        expect(title.textContent).toBe('Remove the plugin?\nSynthetic plugin')
+        expect(title.classList.contains('whitespace-pre-wrap')).toBe(true)
+        action('Cancel').click()
+        await result
+    })
     it('starts a consecutive dialog unchecked', async () => {
         const { result } = await show(false)
         target.querySelector<HTMLInputElement>('input')!.click()
@@ -158,5 +178,22 @@ describe('checkbox confirmations', () => {
         expect(action('Replace').disabled).toBe(true)
         action('Cancel').click()
         await next
+    })
+    it('cancels only the checkbox dialog when the hotkey and dialog Escape handlers both run', async () => {
+        const listening = vi.spyOn(document, 'addEventListener')
+        initHotkey()
+        try {
+            const { result } = await show()
+            const next = alertCheckboxConfirm({ ...options, title: 'Next?' })
+            expect(listening.mock.calls.some(([type]) => type === 'keydown')).toBe(true)
+            document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+            await expect(result).resolves.toEqual({ confirmed: false, checked: false })
+            await vi.waitFor(() => expect(get(alertStore)).toMatchObject({ type: 'checkboxConfirm', msg: 'Next?' }))
+            action('Cancel').click()
+            await expect(next).resolves.toEqual({ confirmed: false, checked: false })
+        } finally {
+            for (const [type, handler] of listening.mock.calls) document.removeEventListener(type, handler as EventListener)
+            listening.mockRestore()
+        }
     })
 })

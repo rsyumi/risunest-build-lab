@@ -6,13 +6,17 @@ use super::{
 #[cfg(test)]
 use crate::persistent_store::lww::ApplyReceive;
 use crate::persistent_store::{
-    external_lww::{AssetReference, FrozenAsset, FrozenAssetReference, FrozenControl, FrozenControlCatalog, SealedBody, SealedPublication, UploadState},
+    external_lww::{
+        publication_directory, sealed_body_path, AssetReference, FrozenAsset, FrozenAssetReference, FrozenControl,
+        FrozenControlCatalog, SealedBody, SealedPublication, SegmentReferences, UploadState,
+    },
     lww::{Change, Header, MessageLocator, Progress, StageReceive},
     PersistentStore,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use risunest_sync_wire::{stamp::DecimalU64, unit::UnitValue};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
@@ -26,6 +30,8 @@ use super::worker_observation::spawn_blocking;
 #[cfg(not(test))]
 use tokio::task::spawn_blocking;
 
+/// The largest listing page every provider accepts.
+pub(crate) const LISTING_PAGE: u16 = 1000;
 /// Providers name a locator's collection after a role folder or a release tag.
 pub(crate) const MAX_LOCATOR_COLLECTION_BYTES: usize = 128;
 /// JSON bytes of changes in one receive page. One change is far smaller, and
@@ -45,15 +51,23 @@ fn receive_page_bytes() -> usize {
     #[cfg(not(test))]
     RECEIVE_PAGE_BYTES
 }
+/// Whether a change of `length` bytes starts a new page after `used` bytes.
+fn page_break(used: usize, length: usize, budget: usize, empty: bool) -> bool {
+    used.saturating_add(length) > budget && !empty
+}
+fn change_length(change: &Change) -> Result<usize> {
+    Ok(serde_json::to_vec(change).map_err(|_| segment::corrupt())?.len() + 1)
+}
 /// Splits changes in order into pages within the page budget. There is
 /// always at least one page, so a group without changes still carries its
 /// progress.
+#[cfg(test)]
 pub(crate) fn receive_pages(changes: Vec<Change>, budget: usize) -> Result<Vec<Vec<Change>>> {
     let mut pages = vec![Vec::new()];
     let mut used = 0usize;
     for change in changes {
-        let length = serde_json::to_vec(&change).map_err(|_| segment::corrupt())?.len() + 1;
-        if used.saturating_add(length) > budget && pages.last().is_some_and(|page| !page.is_empty()) {
+        let length = change_length(&change)?;
+        if page_break(used, length, budget, pages.last().is_none_or(Vec::is_empty)) {
             pages.push(Vec::new());
             used = 0;
         }
@@ -62,36 +76,132 @@ pub(crate) fn receive_pages(changes: Vec<Change>, budget: usize) -> Result<Vec<V
     }
     Ok(pages)
 }
-/// Stores one group's pages and keeps those not yet finished. Only the last
-/// page carries the group's progress; earlier pages repeat the writer's
-/// current cursor, so progress moves once the whole group is applied.
-#[allow(clippy::too_many_arguments)]
-fn push_receive_pages(
-    store: &PersistentStore,
-    requests: &mut Vec<StageReceive>,
-    id: &str,
+/// Stores one group's pages as its changes arrive and collects the ids of
+/// those not yet finished. Only the last page carries the group's progress;
+/// earlier pages repeat the writer's current cursor, so progress moves once
+/// the whole group is applied.
+struct PageWriter<'a> {
+    target: &'a str,
+    id: String,
     authority: DecimalU64,
-    changes: Vec<Change>,
     progress: Progress,
     current: DecimalU64,
     admitted_time_upper_ms: DecimalU64,
-) -> Result<()> {
-    let pages = receive_pages(changes, receive_page_bytes())?;
-    let last = pages.len() - 1;
-    for (index, changes) in pages.into_iter().enumerate() {
-        let request = store
-            .external_lww_stable_receive(StageReceive {
-                header: Header { binding_authority: authority, request_id: format!("{id}-{index}") },
-                changes,
-                progress: if index == last { progress.clone() } else { Progress { cursor: current, ..progress.clone() } },
-                admitted_time_upper_ms,
-            })
-            .map_err(store_error)?;
-        if !store.external_lww_receive_finished(&request.header.request_id).map_err(store_error)? {
-            requests.push(request);
+    page: Vec<Change>,
+    used: usize,
+    index: usize,
+}
+impl<'a> PageWriter<'a> {
+    fn new(target: &'a str, id: String, authority: DecimalU64, progress: Progress, current: DecimalU64, admitted_time_upper_ms: DecimalU64) -> Self {
+        Self { target, id, authority, progress, current, admitted_time_upper_ms, page: Vec::new(), used: 0, index: 0 }
+    }
+    fn push(&mut self, store: &PersistentStore, offered: &mut Vec<String>, change: Change) -> Result<()> {
+        let length = change_length(&change)?;
+        if page_break(self.used, length, receive_page_bytes(), self.page.is_empty()) {
+            self.store_page(store, offered, self.current)?;
+        }
+        self.used = self.used.saturating_add(length);
+        self.page.push(change);
+        Ok(())
+    }
+    fn store_page(&mut self, store: &PersistentStore, offered: &mut Vec<String>, cursor: DecimalU64) -> Result<()> {
+        let request = StageReceive {
+            header: Header { binding_authority: self.authority, request_id: format!("{}-{}", self.id, self.index) },
+            changes: std::mem::take(&mut self.page),
+            progress: Progress { cursor, ..self.progress.clone() },
+            admitted_time_upper_ms: self.admitted_time_upper_ms,
+        };
+        self.used = 0;
+        self.index += 1;
+        offered.extend(store.external_lww_stable_receive(self.target, &request).map_err(store_error)?);
+        Ok(())
+    }
+    fn finish(mut self, store: &PersistentStore, offered: &mut Vec<String>) -> Result<()> {
+        let cursor = self.progress.cursor;
+        self.store_page(store, offered, cursor)
+    }
+}
+/// Segment names by writer and sequence. A sequence listed under two names is
+/// refused from the names alone.
+pub(crate) fn segment_groups(objects: Vec<ObjectReceipt>) -> Result<BTreeMap<(String, u64), (String, ObjectReceipt)>> {
+    let mut groups = BTreeMap::new();
+    for object in objects {
+        let name = object.locator.object.rsplit('/').next().ok_or_else(segment::corrupt)?;
+        let (writer, seq, hash) = parse_segment_object_id(name)?;
+        let hash = hash.to_owned();
+        match groups.entry((writer.to_owned(), seq)) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((hash, object));
+            }
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                if entry.get().0 != hash {
+                    return Err(segment::corrupt());
+                }
+            }
         }
     }
-    Ok(())
+    Ok(groups)
+}
+/// The sequence each writer reaches from `current` through consecutive names.
+fn reachable(current: &BTreeMap<String, DecimalU64>, groups: &BTreeMap<(String, u64), (String, ObjectReceipt)>) -> BTreeMap<String, u64> {
+    let mut reached = current.iter().map(|(writer, cursor)| (writer.clone(), cursor.0)).collect::<BTreeMap<_, _>>();
+    for (writer, seq) in groups.keys() {
+        let prefix = reached.entry(writer.clone()).or_insert(0);
+        if prefix.checked_add(1) == Some(*seq) {
+            *prefix = *seq;
+        }
+    }
+    reached
+}
+fn behind(covered: &BTreeMap<String, DecimalU64>, reached: &BTreeMap<String, u64>) -> bool {
+    covered.iter().any(|(writer, prefix)| reached.get(writer).copied().unwrap_or(0) < prefix.0)
+}
+/// What cleanup reads from a segment, kept so it need not download the
+/// segment again.
+pub(crate) fn segment_references(byte_length: u64, document: &Segment) -> Result<SegmentReferences> {
+    let plaintext = document.encode()?;
+    Ok(SegmentReferences {
+        byte_length,
+        plaintext_length: plaintext.len() as u64,
+        plaintext_sha256: segment::digest(&plaintext),
+        newest_physical_ms: document.changes.iter().map(|change| change.stamp.physical_ms.0).max().unwrap_or(0),
+        data_catalogs: document.data_catalogs.clone(),
+        asset_catalogs: document.asset_catalogs.clone(),
+        large_bodies: document.large_bodies.clone(),
+    })
+}
+/// A captured body read once while it is hashed and counted.
+struct CheckedBody<'a, R> {
+    input: R,
+    digest: Sha256,
+    length: u64,
+    check: &'a mut dyn FnMut() -> std::io::Result<()>,
+}
+impl<R: std::io::Read> std::io::Read for CheckedBody<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        (self.check)()?;
+        let read = std::io::Read::read(&mut self.input, buffer)?;
+        self.digest.update(&buffer[..read]);
+        self.length = self.length.saturating_add(read as u64);
+        Ok(read)
+    }
+}
+/// A sealed body file hashed as it is written.
+struct HashingFile {
+    file: std::fs::File,
+    digest: Sha256,
+    length: u64,
+}
+impl std::io::Write for HashingFile {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let written = std::io::Write::write(&mut self.file, buffer)?;
+        self.digest.update(&buffer[..written]);
+        self.length = self.length.saturating_add(written as u64);
+        Ok(written)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(&mut self.file)
+    }
 }
 
 /// The length of a segment under assembly, kept per entry.
@@ -179,7 +289,7 @@ enum Settlement {
     Missing,
     Conflict,
 }
-fn store_error(error: crate::persistent_store::StoreError) -> ProviderError {
+pub(crate) fn store_error(error: crate::persistent_store::StoreError) -> ProviderError {
     segment::corrupt().caused(&error)
 }
 fn transient(error: impl std::fmt::Display) -> ProviderError {
@@ -943,24 +1053,27 @@ impl ExternalLwwEngine {
             if publication.bodies[index].complete {
                 continue;
             }
-            if publication.bodies[index].bytes.is_empty() {
+            let job = publication.asset_job.clone().ok_or_else(segment::corrupt)?;
+            let path = sealed_body_path(store.repository_root(), &job.job_id, &publication.bodies[index].object_id);
+            if publication.bodies[index].sha256.is_empty() {
                 let body = &publication.bodies[index];
                 let asset = publication.assets.iter().find(|asset| asset.content_hash == body.content_hash)
                     .ok_or_else(segment::corrupt)?;
-                let bytes = self.read_frozen_standalone(store, asset, publication.asset_job.as_ref().ok_or_else(segment::corrupt)?, publication.authority, cancel).await?;
-                if bytes.len() as u64 != asset.byte_length { return Err(segment::corrupt()); }
-                let sealed_body = segment::seal_body(&bytes, &self.library, &body.object_id, &self.root_key)?;
-                publication.bodies[index].sha256 = segment::digest(&sealed_body);
-                publication.bodies[index].byte_length = sealed_body.len() as u64;
-                publication.bodies[index].bytes = URL_SAFE_NO_PAD.encode(sealed_body);
+                let (byte_length, sha256) = self.seal_frozen_standalone(store, asset, &job, &body.object_id, publication.authority, &path, cancel).await?;
+                publication.bodies[index].sha256 = sha256;
+                publication.bodies[index].byte_length = byte_length;
                 store.external_lww_persist(&publication, &sealed).map_err(store_error)?;
             }
             let body = publication.bodies[index].clone();
-            let bytes = URL_SAFE_NO_PAD
-                .decode(&body.bytes)
-                .map_err(|_| segment::corrupt())?;
-            let intent = self.intent(&body.object_id, ObjectRole::Pack, &bytes);
-            if intent.sha256 != body.sha256 || intent.byte_length != body.byte_length { return Err(segment::corrupt()); }
+            let source = super::transfer::SpoolSource::verified(&path, body.byte_length, &body.sha256)?;
+            let intent = ObjectIntent {
+                job_id: self.library.clone(),
+                repository_id: self.repository.repository_id.clone(),
+                object_id: body.object_id.clone(),
+                role: ObjectRole::Pack,
+                byte_length: body.byte_length,
+                sha256: body.sha256.clone(),
+            };
             if publication.bodies[index].resume.is_none() {
                 publication.bodies[index].resume = self
                     .provider
@@ -977,7 +1090,7 @@ impl ExternalLwwEngine {
                 .create_object(
                     &self.repository,
                     &intent,
-                    &BytesSource(bytes),
+                    &source,
                     resume.as_ref(),
                     cancel,
                 )
@@ -1007,7 +1120,7 @@ impl ExternalLwwEngine {
                     .bodies
                     .iter()
                     .find(|item| item.object_id == body.object_id)
-                    .filter(|item| item.complete && !item.bytes.is_empty() && item.byte_length > 0)
+                    .filter(|item| item.complete && !item.sha256.is_empty() && item.byte_length > 0)
                     .ok_or_else(segment::corrupt)?;
                 body.sha256 = prepared.sha256.clone();
                 body.byte_length = DecimalU64(prepared.byte_length);
@@ -1086,9 +1199,10 @@ impl ExternalLwwEngine {
             publication.seq.0,
             &self.root_key,
         )?;
+        let references = segment_references(sealed.len() as u64, &payload)?;
         Self::check_publication_authority(store, &publication)?;
         store
-            .external_lww_verify_versions(&self.target_scope(), &payload.changes)
+            .external_lww_verify_versions(&self.target_scope(), &publication.writer, publication.seq.0, &payload.changes)
             .map_err(store_error)?;
         self.admit_objects(store, &payload, &publication.object_id, cancel).await?;
         if let Some(rooted_at_ms)=Self::trusted_control_time() {
@@ -1103,15 +1217,7 @@ impl ExternalLwwEngine {
                 .map_err(store_error)?;
         }
         store
-            .external_lww_record_seen(
-                &self.target_scope(),
-                &publication.writer,
-                publication.seq.0,
-                &publication.sha256,
-            )
-            .map_err(store_error)?;
-        store
-            .external_lww_finish_publication(&publication, &sealed)
+            .external_lww_finish_publication(&publication, &sealed, &references)
             .map_err(store_error)?;
         if let Some(job) = &publication.asset_job {
             crate::asset_repository::job_pins::DurableCasJob::open(store.repository_root(), &job.job_id)
@@ -1199,39 +1305,84 @@ impl ExternalLwwEngine {
                 .map_err(|error| Self::held_server_body_error(error, &cancel))?.ok_or_else(segment::corrupt)
         }).await.map_err(transient)?
     }
-    async fn read_frozen_standalone(
+    /// Seals one captured standalone body into `path`, reading it once without
+    /// holding it in memory, and returns the sealed length and digest.
+    #[allow(clippy::too_many_arguments)]
+    async fn seal_frozen_standalone(
         &self,
         store: &mut PersistentStore,
         asset: &FrozenAsset,
         job: &super::journal::JobIdentity,
+        object_id: &str,
         authority: DecimalU64,
+        path: &std::path::Path,
         cancel: &Cancellation,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<(u64, String)> {
         Self::check_frozen_body_authority(store, authority, cancel).map_err(|error| Self::body_source_error(error, cancel))?;
-        let bytes = if asset.local_pin {
-            store.lww_object_body(&asset.content_hash).map_err(store_error)?.ok_or_else(segment::corrupt)?
+        std::fs::create_dir_all(path.parent().ok_or_else(segment::corrupt)?).map_err(transient)?;
+        let mut failure = None;
+        let sealed = if asset.local_pin {
+            let mut check = || cancel.check().map_err(|error| {
+                failure = Some(error);
+                std::io::Error::other("cancelled")
+            });
+            let cas = crate::asset_repository::PayloadCas::new(store.repository_root()).map_err(transient)?;
+            match cas.open_object(&asset.content_hash).map_err(transient)? {
+                Some(file) => self.seal_checked(file, asset, object_id, path, &mut check),
+                None => {
+                    let bytes = store.lww_object_body(&asset.content_hash).map_err(store_error)?.ok_or_else(segment::corrupt)?;
+                    self.seal_checked(Cursor::new(bytes), asset, object_id, path, &mut check)
+                }
+            }
         } else if let Some(proof) = &asset.remote_source {
             let spool = super::lww_residency::spool_frozen_remote_body(
-                proof, &store.repository_root().join("external-storage").join("lww-publications").join(&job.job_id), cancel,
+                proof, &publication_directory(store.repository_root(), &job.job_id), cancel,
             ).await.map_err(Self::held_body_error)?;
             Self::check_frozen_body_authority(store, authority, cancel).map_err(|error| Self::body_source_error(error, cancel))?;
-            super::lww_residency::read_frozen_body_spool(proof, &spool, cancel)?
+            #[cfg(test)]
+            let _scope = crate::asset_repository::body_io::object_scope(&asset.content_hash);
+            let input = crate::trust_boundary::open_regular_source(spool.path());
+            #[cfg(test)]
+            crate::asset_repository::body_io::open_result("managed", &input);
+            let input = input.map_err(transient)?;
+            #[cfg(test)]
+            let input = crate::asset_repository::body_io::TrackedBodyFile::new(input, &asset.content_hash);
+            let mut check = || cancel.check().map_err(|error| {
+                failure = Some(error);
+                std::io::Error::other("cancelled")
+            });
+            self.seal_checked(input, asset, object_id, path, &mut check)
         } else {
-            let mut body = Self::open_frozen_server_body(store, asset, job, authority, cancel).await?;
-            let mut bytes = Vec::new();
-            let mut chunk = [0; 64 * 1024];
-            loop {
-                Self::check_frozen_body_authority(store, authority, cancel).map_err(|error| Self::body_source_error(error, cancel))?;
-                let read = std::io::Read::read(&mut body, &mut chunk).map_err(transient)?;
-                if read == 0 { break; }
-                bytes.extend_from_slice(&chunk[..read]);
-            }
-            bytes
+            let body = Self::open_frozen_server_body(store, asset, job, authority, cancel).await?;
+            let store = &*store;
+            let mut check = || Self::check_frozen_body_authority(store, authority, cancel).map_err(|error| {
+                failure = Some(Self::body_source_error(error, cancel));
+                std::io::Error::other("held")
+            });
+            self.seal_checked(body, asset, object_id, path, &mut check)
         };
-        if bytes.len() as u64 != asset.byte_length || segment::digest(&bytes) != asset.content_hash {
+        match (sealed, failure) {
+            (Err(_), Some(error)) => Err(error),
+            (sealed, _) => sealed,
+        }
+    }
+    fn seal_checked(
+        &self,
+        input: impl std::io::Read,
+        asset: &FrozenAsset,
+        object_id: &str,
+        path: &std::path::Path,
+        check: &mut dyn FnMut() -> std::io::Result<()>,
+    ) -> Result<(u64, String)> {
+        let mut input = CheckedBody { input, digest: Sha256::new(), length: 0, check };
+        let file = std::fs::File::create(path).map_err(transient)?;
+        let mut output = HashingFile { file, digest: Sha256::new(), length: 0 };
+        segment::seal_body_stream(&mut input, &mut output, &self.library, object_id, &self.root_key, asset.byte_length)?;
+        if input.length != asset.byte_length || hex::encode(input.digest.finalize()) != asset.content_hash {
             return Err(segment::corrupt());
         }
-        Ok(bytes)
+        output.file.sync_all().map_err(transient)?;
+        Ok((output.length, hex::encode(output.digest.finalize())))
     }
     fn validate_receipt(intent: &ObjectIntent, receipt: &ObjectReceipt) -> Result<()> {
         if !receipt.complete
@@ -1405,8 +1556,17 @@ impl ExternalLwwEngine {
         } else {
             false
         };
+        let references = if landed {
+            let payload = segment::open(&sealed, &self.library, &publication.writer, publication.seq.0, &self.root_key)?;
+            store
+                .external_lww_verify_versions(&self.target_scope(), &publication.writer, publication.seq.0, &payload.changes)
+                .map_err(store_error)?;
+            Some(segment_references(sealed.len() as u64, &payload)?)
+        } else {
+            None
+        };
         store
-            .external_lww_settle_detached(&publication, landed)
+            .external_lww_settle_detached(&publication, references.as_ref())
             .map_err(store_error)?;
         if let Some(job) = &publication.asset_job {
             let outcome = if landed {
@@ -1565,7 +1725,7 @@ impl ExternalLwwEngine {
                 });
                 bodies.push(SealedBody {
                     object_id: id, content_hash: hash, byte_length: 0,
-                    sha256: String::new(), bytes: String::new(), resume: None,
+                    sha256: String::new(), resume: None,
                     complete: false, locator: None,
                 });
             }
@@ -1583,7 +1743,7 @@ impl ExternalLwwEngine {
                     &self.repository,
                     Collection::Segments,
                     cursor.as_deref(),
-                    100,
+                    LISTING_PAGE,
                     cancel,
                 )
                 .await?;
@@ -1599,135 +1759,6 @@ impl ExternalLwwEngine {
             }
         }
         Ok(objects)
-    }
-    pub(crate) async fn verified_segments(
-        &self,
-        store: &mut PersistentStore,
-        all: bool,
-        cancel: &Cancellation,
-    ) -> Result<Vec<Segment>> {
-        let upper = self
-            .admitted_upper()?
-            .checked_add(300_000)
-            .ok_or_else(segment::corrupt)?;
-        let objects = self.listing(cancel).await?;
-        let mut groups: BTreeMap<(String, u64), Vec<ObjectReceipt>> = BTreeMap::new();
-        for object in objects {
-            let name = object
-                .locator
-                .object
-                .rsplit('/')
-                .next()
-                .ok_or_else(segment::corrupt)?;
-            let (writer, seq, _) = parse_segment_object_id(name)?;
-            groups.entry((writer.into(), seq)).or_default().push(object);
-        }
-        let progress = store
-            .lww_receive_progress(store.lww_binding_authority().map_err(store_error)?)
-            .map_err(store_error)?;
-        let mut prefixes: BTreeMap<String, u64> = if all {
-            BTreeMap::new()
-        } else {
-            progress
-                .into_iter()
-                .filter(|p| p.kind == "external")
-                .filter_map(|p| p.writer_id.map(|w| (w, p.cursor.0)))
-                .collect()
-        };
-        let mut segments = Vec::new();
-        // A writer whose clock runs ahead of the admitted bound waits without
-        // holding back the other writers; its later segments wait behind it.
-        let mut held = BTreeSet::new();
-        'groups: for ((writer, seq), mut variants) in groups {
-            if held.contains(&writer) {
-                continue;
-            }
-            variants.sort_by(|a, b| a.locator.object.cmp(&b.locator.object));
-            let prefix = *prefixes.get(&writer).unwrap_or(&0);
-            let mut winner = None;
-            let mut identity = None;
-            for receipt in variants {
-                let name = receipt
-                    .locator
-                    .object
-                    .rsplit('/')
-                    .next()
-                    .ok_or_else(segment::corrupt)?;
-                let (_, _, hash) = parse_segment_object_id(name)?;
-                let seen = store
-                    .external_lww_matches_seen(&self.target_scope(), &writer, seq, hash)
-                    .map_err(store_error)?;
-                if !all && seen && seq <= prefix {
-                    continue;
-                }
-                let bytes = read_bytes(
-                    self.provider.as_ref(),
-                    &self.repository,
-                    &receipt.locator,
-                    cancel,
-                )
-                .await?;
-                if segment::digest(&bytes) != hash {
-                    return Err(segment::corrupt());
-                }
-                let payload = segment::open(&bytes, &self.library, &writer, seq, &self.root_key)?;
-                store
-                    .external_lww_verify_seen(&self.target_scope(), &writer, seq, hash)
-                    .map_err(store_error)?;
-                if payload
-                    .changes
-                    .iter()
-                    .any(|change| change.stamp.physical_ms.0 > upper)
-                {
-                    if all {
-                        return Err(ProviderError::new(ErrorKind::ClockSkew));
-                    }
-                    held.insert(writer);
-                    continue 'groups;
-                }
-                store
-                    .external_lww_verify_versions(&self.target_scope(), &payload.changes)
-                    .map_err(store_error)?;
-                if identity.as_deref().is_some_and(|value| value != hash) {
-                    return Err(segment::corrupt());
-                }
-                identity = Some(hash.to_owned());
-                winner = Some(payload);
-            }
-            if seq != prefix.checked_add(1).ok_or_else(segment::corrupt)? {
-                if all {
-                    return Err(ProviderError::new(ErrorKind::PreconditionFailed));
-                }
-                continue;
-            }
-            if let Some(payload) = winner {
-                self.admit_objects(
-                    store,
-                    &payload,
-                    &segment_object_id(
-                        &writer,
-                        seq,
-                        identity.as_deref().ok_or_else(segment::corrupt)?,
-                    )?,
-                    cancel,
-                )
-                .await?;
-                store
-                    .external_lww_record_seen(
-                        &self.target_scope(),
-                        &writer,
-                        seq,
-                        identity.as_deref().ok_or_else(segment::corrupt)?,
-                    )
-                    .map_err(store_error)?;
-                prefixes.insert(writer, seq);
-                segments.push(payload);
-            }
-        }
-        if segments.is_empty() && !held.is_empty() {
-            return Err(ProviderError::new(ErrorKind::ClockSkew));
-        }
-        Ok(segments)
     }
     async fn admit_objects(
         &self,
@@ -1809,10 +1840,10 @@ impl ExternalLwwEngine {
         cancel: &Cancellation,
     ) -> Result<crate::persistent_store::lww::BindingUnitStage> {
         let directory=tempfile::tempdir().map_err(transient)?;
-        let mut published=self.published_state(directory.path(),cancel).await?;
+        let mut published=self.published_state(store,directory.path(),cancel).await?;
         published.require_complete()?;
         self.stage_published_objects(store,&mut published,directory.path(),cancel).await?;
-        store
+        let stage = store
             .lww_stage_binding_units(
                 header,
                 inspection,
@@ -1823,7 +1854,11 @@ impl ExternalLwwEngine {
                         .ok_or_else(segment::corrupt)?,
                 ),
             )
-            .map_err(store_error)
+            .map_err(store_error)?;
+        store
+            .external_lww_record_stage(&self.target_scope(), header, &published.catalog.coverage, &published.covered())
+            .map_err(store_error)?;
+        Ok(stage)
     }
     pub(crate) async fn prepare_new_device(
         &self,
@@ -1834,7 +1869,7 @@ impl ExternalLwwEngine {
     ) -> Result<crate::persistent_store::lww::NewDevicePreparation> {
         self.settle_publication(store, cancel).await?;
         let directory=tempfile::tempdir().map_err(transient)?;
-        self.published_state(directory.path(),cancel).await?.require_complete()?;
+        self.published_state(store,directory.path(),cancel).await?.require_complete()?;
         let preparation = store
             .prepare_lww_new_device(header, staging)
             .map_err(store_error)?;
@@ -1849,16 +1884,24 @@ impl ExternalLwwEngine {
         authority: DecimalU64,
         cancel: &Cancellation,
     ) -> Result<Vec<StageReceive>> {
-        self.receive_requests_cached(store, authority, &Default::default(), cancel).await
+        let ids = self.receive_requests_cached(store, authority, &Default::default(), cancel).await?;
+        ids.iter()
+            .map(|id| store.external_lww_unfinished_receive(id).map_err(store_error)?.ok_or_else(segment::corrupt))
+            .collect()
     }
-    /// `receive_requests` reading only the snapshots `checkpoints` has not classified.
+    /// Stores the receive pages of what this device has not applied and
+    /// returns the ids of the unfinished ones in order. Covered segments are
+    /// never read, and each segment's pages are stored before the next one is
+    /// read. Snapshots `checkpoints` has classified are not read again.
     pub(crate) async fn receive_requests_cached(
         &self,
         store: &mut PersistentStore,
         authority: DecimalU64,
         checkpoints: &tokio::sync::Mutex<super::lww_compaction::CheckpointSummaries>,
         cancel: &Cancellation,
-    ) -> Result<Vec<StageReceive>> {
+    ) -> Result<Vec<String>> {
+        let target = self.target_scope();
+        store.external_lww_seed_activation(&target, authority).map_err(store_error)?;
         let progress=store.lww_receive_progress(authority).map_err(store_error)?;
         let current=progress.into_iter().filter(|p|p.kind=="external").filter_map(|p|p.writer_id.map(|w|(w,p.cursor))).collect::<BTreeMap<_,_>>();
         let mut covered=BTreeMap::new();
@@ -1868,43 +1911,134 @@ impl ExternalLwwEngine {
                 *value=(*value).max(prefix);
             }
         }
-        let segments = self.verified_segments(store, false, cancel).await?;
-        let mut available=current.clone();
-        for segment in &segments { available.insert(segment.writer_id.clone(),segment.seq); }
-        let behind=covered.iter().any(|(writer,prefix)|available.get(writer).copied().unwrap_or(DecimalU64(0))<*prefix);
+        let groups = segment_groups(self.listing(cancel).await?)?;
+        store
+            .external_lww_observe_listing(&target, &groups.keys().cloned().collect(), &covered)
+            .map_err(store_error)?;
         let upper=DecimalU64(self.admitted_upper()?.checked_add(300_000).ok_or_else(segment::corrupt)?);
-        let mut requests=Vec::new();
-        if behind {
-            let directory=tempfile::tempdir().map_err(transient)?;
-            let mut state=self.published_state(directory.path(),cancel).await?;
-            self.stage_published_objects(store,&mut state,directory.path(),cancel).await?;
-            let mut changes=Some(state.catalog.changes()?);
-            let identity=state.catalog.identity()?;
-            // The published catalog covers every writer, so the first writer's
-            // pages carry it and the rest only advance their writer's progress.
-            for (writer,prefix) in &state.catalog.coverage {
-                let before=current.get(writer).copied().unwrap_or(DecimalU64(0));
-                if before>=*prefix {continue;}
-                push_receive_pages(
-                    store,&mut requests,&format!("external-snapshot-{}-{}-{}-{}",authority.0,identity,writer,prefix.0),authority,
-                    changes.take().unwrap_or_default(),Progress{kind:"external".into(),cursor:*prefix,writer_id:Some(writer.clone())},before,upper,
-                )?;
+        let mut offered = Vec::new();
+        if !behind(&covered, &reachable(&current, &groups)) {
+            let reached = self.receive_segments(store, authority, &current, groups, upper, &mut offered, cancel).await?;
+            if !behind(&covered, &reached) {
+                store.external_lww_retain_receives(&target, &offered.iter().cloned().collect()).map_err(store_error)?;
+                return Ok(offered);
             }
-            return Ok(requests);
+            offered.clear();
         }
-        for segment in segments {
-            push_receive_pages(
-                store,
-                &mut requests,
-                &format!("external-receive-{}-{}-{}-{}", self.library, authority.0, segment.writer_id, segment.seq.0),
+        self.receive_published(store, authority, &current, upper, &mut offered, cancel).await?;
+        store.external_lww_retain_receives(&target, &offered.iter().cloned().collect()).map_err(store_error)?;
+        Ok(offered)
+    }
+    /// Receives each writer's next consecutive segments and returns the
+    /// sequence each writer reached. A writer whose clock runs ahead of the
+    /// admitted bound waits without holding back the other writers; its later
+    /// segments wait behind it.
+    #[allow(clippy::too_many_arguments)]
+    async fn receive_segments(
+        &self,
+        store: &mut PersistentStore,
+        authority: DecimalU64,
+        current: &BTreeMap<String, DecimalU64>,
+        groups: BTreeMap<(String, u64), (String, ObjectReceipt)>,
+        upper: DecimalU64,
+        offered: &mut Vec<String>,
+        cancel: &Cancellation,
+    ) -> Result<BTreeMap<String, u64>> {
+        let target = self.target_scope();
+        let mut prefixes = current.iter().map(|(writer, cursor)| (writer.clone(), cursor.0)).collect::<BTreeMap<_, _>>();
+        let mut held = BTreeSet::new();
+        let mut received = false;
+        for ((writer, seq), (hash, receipt)) in groups {
+            if held.contains(&writer) {
+                continue;
+            }
+            let prefix = prefixes.get(&writer).copied().unwrap_or(0);
+            if seq <= prefix {
+                store.external_lww_verify_seen(&target, &writer, seq, &hash).map_err(store_error)?;
+                continue;
+            }
+            if seq != prefix.checked_add(1).ok_or_else(segment::corrupt)? {
+                continue;
+            }
+            let bytes = read_bytes(self.provider.as_ref(), &self.repository, &receipt.locator, cancel).await?;
+            if segment::digest(&bytes) != hash {
+                return Err(segment::corrupt());
+            }
+            let payload = segment::open(&bytes, &self.library, &writer, seq, &self.root_key)?;
+            store.external_lww_verify_seen(&target, &writer, seq, &hash).map_err(store_error)?;
+            if payload.changes.iter().any(|change| change.stamp.physical_ms.0 > upper.0) {
+                held.insert(writer);
+                continue;
+            }
+            store
+                .external_lww_verify_versions(&target, &writer, seq, &payload.changes)
+                .map_err(store_error)?;
+            self.admit_objects(store, &payload, &segment_object_id(&writer, seq, &hash)?, cancel).await?;
+            let references = segment_references(bytes.len() as u64, &payload)?;
+            drop(bytes);
+            store
+                .external_lww_record_seen(&target, &writer, seq, &hash, Some(&references))
+                .map_err(store_error)?;
+            let mut pages = PageWriter::new(
+                &target,
+                format!("external-receive-{}-{}-{}-{}", self.library, authority.0, writer, seq),
                 authority,
-                segment.changes,
-                Progress { kind: "external".into(), cursor: segment.seq, writer_id: Some(segment.writer_id) },
-                DecimalU64(segment.seq.0.checked_sub(1).ok_or_else(segment::corrupt)?),
+                Progress { kind: "external".into(), cursor: DecimalU64(seq), writer_id: Some(writer.clone()) },
+                DecimalU64(prefix),
                 upper,
-            )?;
+            );
+            for change in payload.changes {
+                pages.push(store, offered, change)?;
+            }
+            pages.finish(store, offered)?;
+            prefixes.insert(writer, seq);
+            received = true;
         }
-        Ok(requests)
+        if !received && !held.is_empty() {
+            return Err(ProviderError::new(ErrorKind::ClockSkew));
+        }
+        Ok(prefixes)
+    }
+    /// Receives the published state as one catalog when the segments cannot
+    /// reach what the checkpoints cover. The first writer's pages carry the
+    /// catalog and the rest only advance their writer's progress.
+    async fn receive_published(
+        &self,
+        store: &mut PersistentStore,
+        authority: DecimalU64,
+        current: &BTreeMap<String, DecimalU64>,
+        upper: DecimalU64,
+        offered: &mut Vec<String>,
+        cancel: &Cancellation,
+    ) -> Result<()> {
+        let directory=tempfile::tempdir().map_err(transient)?;
+        let mut state=self.published_state(store,directory.path(),cancel).await?;
+        self.stage_published_objects(store,&mut state,directory.path(),cancel).await?;
+        let target = self.target_scope();
+        for (writer, seq, hash) in state.covered() {
+            store.external_lww_record_seen(&target, &writer, seq, &hash, None).map_err(store_error)?;
+        }
+        let identity=state.catalog.identity()?;
+        let mut carried = false;
+        for (writer,prefix) in &state.catalog.coverage {
+            let before=current.get(writer).copied().unwrap_or(DecimalU64(0));
+            if before>=*prefix {continue;}
+            let mut pages = PageWriter::new(
+                &target,
+                format!("external-snapshot-{}-{}-{}-{}",authority.0,identity,writer,prefix.0),
+                authority,
+                Progress{kind:"external".into(),cursor:*prefix,writer_id:Some(writer.clone())},
+                before,
+                upper,
+            );
+            if !carried {
+                let store = &*store;
+                state.catalog.visit_changes(&mut |change| pages.push(store, offered, change))?;
+                carried = true;
+            }
+            pages.finish(store, offered)?;
+        }
+        Ok(())
     }
     #[cfg(test)]
     pub(crate) async fn receive_and_apply(

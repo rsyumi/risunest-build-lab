@@ -124,6 +124,17 @@ describe('chat parser history classification', () => {
         })
     })
 
+    it('collects the strings of a conversation with hundreds of thousands of fields', () => {
+        const message = Array.from({ length: 300_000 }, (_, index) => ({ role: 'user', data: `#${index}` }))
+        message.push({ role: 'char', data: '{{previouschatlog::7}}' })
+
+        expect(classifyChatParserHistory({ source: [{ message }] })).toEqual({
+            requiresFullHistory: false,
+            absoluteMessageIndices: [7],
+            reasons: [],
+        })
+    })
+
     it('ignores requested literal indices outside the available conversation', () => {
         const classification = classifyChatParserHistory({
             source: '{{previouschatlog::500}}',

@@ -14,6 +14,12 @@ import {
     makeStore,
     SaveCoordinator,
 } from './saveCoordinator.testSupport'
+import { safeStructuredClone } from '../polyfill'
+
+vi.mock('../polyfill', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('../polyfill')>()
+    return { ...actual, safeStructuredClone: vi.fn(actual.safeStructuredClone) }
+})
 
 describe('SaveCoordinator', () => {
     describe('windowed selected-conversation persistence authority', () => {
@@ -1104,6 +1110,19 @@ describe('SaveCoordinator', () => {
                 { type: 'reorder', characterId: 'char-a', conversationIds: ['added', 'two'] },
             ])
             expect(harness.coordinator.hasPendingPersistenceWork).toBe(false)
+        })
+
+        it('copies a recorded added chat body once before the commit takes its own copy', async () => {
+            const harness = makeWindowedHarness()
+            const messages = [{ role: 'user', data: 'counted body' }]
+            const clone = vi.mocked(safeStructuredClone)
+            clone.mockClear()
+            expect(recordAddedChat(harness, messages).recorded).toBe(true)
+            await harness.coordinator.flushPendingData('chat-list-copies')
+            expect(harness.commit).toHaveBeenCalledTimes(1)
+            expect(harness.commit.mock.calls[0][0].conversations[0].messages).toEqual(messages)
+            const bodyCopies = clone.mock.calls.filter(([value]) => JSON.stringify(value) === JSON.stringify(messages))
+            expect(bodyCopies).toHaveLength(1)
         })
 
         function pagedSave(fail?: number) {

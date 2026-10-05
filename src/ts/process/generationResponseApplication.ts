@@ -16,6 +16,7 @@ import {
 } from './generationConversationOperation'
 import type { requestDataResponse } from './request/request'
 import { consumeStreamingDisplayStream } from './streamingDisplayStream'
+import { historyLength } from './historyWindowIndex'
 import type { ConversationCommitObserver } from './conversationOperationContext'
 
 export interface GenerationResponseProcessingOptions {
@@ -302,7 +303,7 @@ export async function applyGenerationResponse(
                 const messageText = message[1]
                 const operationChat = options.operation.getTargetChat()
                 if (!operationChat || !isOwnerCurrent()) return null
-                let messageIndex = operationChat.message.length
+                let messageIndex = historyLength(operationChat)
                 const continuingFirstMessage = index === 0 && options.continueGeneration
                 let continueBaseData = ''
                 if (continuingFirstMessage) {

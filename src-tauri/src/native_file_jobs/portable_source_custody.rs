@@ -452,7 +452,8 @@ fn ios_probe(
     }
     Ok(guard)
 }
-pub(crate) fn cleanup_orphans(app: &tauri::AppHandle) -> Result<(), NativeJobError> {
+/// Releases the sources an earlier page picked but never imported, and returns how many there were.
+pub(crate) fn cleanup_orphans(app: &tauri::AppHandle) -> Result<usize, NativeJobError> {
     #[cfg(target_os = "ios")]
     {
         use tauri_plugin_ios_native::IosNativeExt;
@@ -460,16 +461,27 @@ pub(crate) fn cleanup_orphans(app: &tauri::AppHandle) -> Result<(), NativeJobErr
             .ios_native()
             .portable_source_orphans()
             .map_err(|_| error("Source owner reset could not be confirmed"))?;
-        for token in retired {
-            cleanup_orphan(&token, |token| {
-                app.ios_native()
-                    .acknowledge_portable_source_orphan(token)
-                    .map_err(|_| error("Source orphan cleanup acknowledgement is unavailable"))
-            })?;
-        }
+        cleanup_orphan_tokens(&retired, |token| {
+            app.ios_native()
+                .acknowledge_portable_source_orphan(token)
+                .map_err(|_| error("Source orphan cleanup acknowledgement is unavailable"))
+        })
     }
-    let _ = app;
-    Ok(())
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = app;
+        Ok(0)
+    }
+}
+#[cfg(any(target_os = "ios", test))]
+fn cleanup_orphan_tokens(
+    tokens: &[String],
+    mut acknowledge: impl FnMut(&str) -> Result<bool, NativeJobError>,
+) -> Result<usize, NativeJobError> {
+    for token in tokens {
+        cleanup_orphan(token, &mut acknowledge)?;
+    }
+    Ok(tokens.len())
 }
 #[cfg(any(target_os = "ios", test))]
 fn cleanup_orphan(
@@ -801,6 +813,23 @@ mod tests {
             Ok(true)
         })
         .unwrap();
+    }
+    #[test]
+    fn orphan_cleanup_counts_every_interrupted_source_it_releases() {
+        let (_first_directory, first) = selected_on(Platform::Ios);
+        let (_second_directory, second) = selected_on(Platform::Ios);
+        let tokens = [parts(&first).unwrap().0.to_owned(), parts(&second).unwrap().0.to_owned()];
+        let mut acknowledged = Vec::new();
+        assert_eq!(
+            cleanup_orphan_tokens(&tokens, |token| {
+                acknowledged.push(token.to_owned());
+                Ok(true)
+            })
+            .unwrap(),
+            2
+        );
+        assert_eq!(acknowledged, tokens);
+        assert_eq!(cleanup_orphan_tokens(&[], |_| panic!("ACK without an orphan")).unwrap(), 0);
     }
     #[test]
     fn orphan_cleanup_does_not_acknowledge_foreign_or_claimed_native_owners() {

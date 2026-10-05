@@ -18,7 +18,7 @@ import { registerRuntimeErrorHandlers } from "./runtimeErrors";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, LoadingStatusState, bootFailure } from "./stores.svelte";
 import { loadPlugins, loadPluginsAfterAuthoritativeRestore } from "./plugins/plugins.svelte";
-import { alertConfirm, alertError, alertInput, alertLogin, alertMd, alertNormal, alertSelect, alertTOS, waitAlert } from "./alert";
+import { alertConfirm, alertError, alertInput, alertLogin, alertMd, alertNormal, alertSelect, alertToast, alertTOS, waitAlert } from "./alert";
 import { applyHubSelection, characterURLImport, downloadRisuHub, hubURL } from "./characterCards";
 import { initializeNativeLocalUrls } from "./nativeLocalUrls";
 import { loadRisuAccountData } from "./drive/accounter";
@@ -91,6 +91,7 @@ import {
 } from "./storage/nativeFileJobRecovery";
 import { refreshDeviceStateAfterRestore } from "./storage/deviceStateRestore";
 import { registerAndroidRisuSaveRoute } from "./storage/androidRisuSaveRouteProduction.svelte";
+import { reportInterruptedIOSBackupSourcesAtStart } from "./storage/iosFiles";
 import { isAndroidSafFileJobsEnabled } from "./storage/androidSafBridge";
 import {
     describeScreenshotPublicationError,
@@ -714,9 +715,11 @@ export async function loadData() {
         disposeLifecycleCommitListeners ??= registerLifecycleCommitListeners(
             (reason) => flushLifecycle(
                 reason,
-                isTauriDesktop
-                    && (nativePlatform() === 'windows' || nativePlatform() === 'linux')
-                    && reason === 'stop',
+                isTauriAndroid
+                    ? reason === 'stop' || reason === 'trim-memory'
+                    : isTauriDesktop
+                        && (nativePlatform() === 'windows' || nativePlatform() === 'linux')
+                        && reason === 'stop',
             ),
             syncExitCoordinator,
         )
@@ -847,6 +850,7 @@ export async function loadData() {
         registerModelDynamic()
         await saveDb()
         registerAndroidRisuSaveRoute()
+        await reportInterruptedIOSBackupSourcesAtStart()
         if (recoveredNativeFileJobs.interruptedRestores.length > 0) {
             alertNormal(language.risuNest.backup.restoreInterrupted)
             await waitAlert()
@@ -862,8 +866,9 @@ export async function loadData() {
                 return
             }
             if (isTauri && !isTauriAndroid && await takeRendererRecovery()) {
+                // A dialog replaces the toast, so it waits for queued dialogs.
                 await waitAlert()
-                alertNormal(language.risuNest.startup.rendererRecovered)
+                alertToast(language.risuNest.startup.rendererRecovered)
             }
         })
     } catch (error) {

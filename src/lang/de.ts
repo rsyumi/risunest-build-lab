@@ -18,8 +18,7 @@ export const languageGerman = {
         "hypaDeletion": "Nachfolgende Zusammenfassungen löschen",
         "pluginDataDeletion": "Plugin-Daten löschen",
         "lorebookDeletion": "Lorebook-Ordner und Einträge löschen",
-        "partialBackup": "Backup ohne weitere Assets",
-        "onlySelectedMessage": "Nur diese Nachricht löschen"
+        "partialBackup": "Backup ohne weitere Assets"
     },
 
     "formating": {

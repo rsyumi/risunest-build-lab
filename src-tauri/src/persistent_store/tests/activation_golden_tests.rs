@@ -582,6 +582,44 @@ fn active_manifests_equal_a_full_capture_after_every_mutation_kind() {
     store.restore_character("char-a", revision).unwrap();
     results.push(("restore", manifest_mismatches(&mut store)));
 
+    // A repair and its undo rewrite message rows outside a range edit, so both have to leave
+    // the stored pages what paging the messages again gives.
+    let generation = active_generation(&store.connection).unwrap();
+    let stored: i64 = store
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM message_page_manifests WHERE generation=?1 AND character_id='char-a' AND conversation_id='conv-short'",
+            [&generation],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, 1, "the repaired conversation has stored pages to keep current");
+    let revision = store.revision().unwrap();
+    let (repaired, journal) = store
+        .apply_repair(
+            revision,
+            &[crate::data_health::repair::RepairCandidate {
+                id: "0:drop-reference".into(),
+                action: crate::data_health::repair::RepairAction::DropReference {
+                    owner: crate::data_health::Owner {
+                        kind: "message".into(),
+                        id: "char-a/conv-short/1".into(),
+                    },
+                    source_path: "$.time".into(),
+                    occurrence: 0,
+                },
+                finding: 0,
+                preferred: true,
+                discards: true,
+            }],
+            10,
+        )
+        .unwrap();
+    assert!(journal.records.iter().any(|record| record.table == "messages"), "the repair rewrote a message");
+    results.push(("repair", manifest_mismatches(&mut store)));
+    store.undo_repair(&journal, repaired.revision).unwrap();
+    results.push(("undo repair", manifest_mismatches(&mut store)));
+
     eprintln!("current manifest equivalence: {results:?}");
     assert!(results.iter().all(|(_, mismatches)| mismatches.is_empty()), "{results:?}");
 }

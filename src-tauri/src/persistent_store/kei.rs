@@ -528,7 +528,7 @@ async fn upload_payload_for_job(
         completed: 0,
         total: payload.bytes,
     }));
-    let client = reqwest::Client::builder()
+    let client = crate::platform_tls::client_builder()
         .connect_timeout(connect_timeout)
         .build()
         .map_err(|_| StoreError::Store {
@@ -740,7 +740,7 @@ fn store_error(error: StoreError) -> NativeJobError {
             NativeJobError::new("revision-conflict", error.to_string())
         }
         StoreError::Committed { .. } | StoreError::RawBodyUnavailable | StoreError::CommitBusy
-        | StoreError::SnapshotReleased => NativeJobError::new("store-error", error.to_string()),
+        | StoreError::SnapshotReleased | StoreError::SchemaMismatch { .. } => NativeJobError::new("store-error", error.to_string()),
         StoreError::CommitDecode { .. } | StoreError::Validation { .. } => NativeJobError::new("invalid-input", error.to_string()),
         StoreError::Store { .. } => NativeJobError::new("transport-failed", error.to_string()),
     }
@@ -758,7 +758,12 @@ fn checkpoint_after_detached_release_after_close(
 async fn upload_payload(url: &Url, payload: &KeiPayloadFile) -> StoreResult<u16> {
     let file = tokio::fs::File::open(&payload.path).await?;
     let body = Body::wrap_stream(ReaderStream::new(file));
-    let response = reqwest::Client::new()
+    let client = crate::platform_tls::client_builder()
+        .build()
+        .map_err(|_| StoreError::Store {
+            message: "KEI backup HTTP client could not be created".to_owned(),
+        })?;
+    let response = client
         .post(url.clone())
         .header(CONTENT_TYPE, "application/json")
         .header(CONTENT_LENGTH, payload.bytes)

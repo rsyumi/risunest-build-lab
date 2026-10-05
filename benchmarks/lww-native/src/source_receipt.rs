@@ -170,6 +170,7 @@ mod tests {
         total:Work::default(),unknown_work:Work::default(),violations:BTreeMap::new(),pending_workers:0,pending_requests:0,
         pending_body_work:PendingBodyWork::default(),read_barrier:None}}
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn complete_source_requires_final_shutdown_and_no_late_work() {
         let snapshot=empty();let mut receipt=SettledSource {end:EndReceipt {scope_id:snapshot.scope_id.clone(),observation:snapshot.clone()},
             shutdown:ShutdownReceipt {complete:true,root_removed:true,observation:snapshot,child_exit:0}};
@@ -179,6 +180,7 @@ mod tests {
         receipt.shutdown.root_removed=true;receipt.end.observation.pending_body_work.upload_sessions=1;assert!(receipt.validate().is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn actual_source_reads_and_hashes_conserve_exact_rows_ranges_and_roles() {
         let mut snapshot=empty();let work=Work {open_attempts:1,opens:1,read_calls:1,read_bytes:20,
             hash_calls:1,hash_bytes:20,hash_finalizations:1,..Default::default()};
@@ -197,6 +199,7 @@ mod tests {
         snapshot=valid;snapshot.objects[0].work.hash_finalizations=0;assert!(snapshot.validate().is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn inline_extraction_and_file_eof_do_not_invent_range_calls() {
         let mut snapshot=empty();let work=Work {open_attempts:1,opens:1,read_calls:2,read_bytes:20,..Default::default()};
         snapshot.objects.push(ObjectWork {hash:"b".repeat(64),purposes:vec!["Asset".into()],placement:"inline".into(),flow:"source".into(),
@@ -208,6 +211,7 @@ mod tests {
         snapshot.objects[0].read_ranges[0].calls=3;assert!(snapshot.validate().is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn physical_read_barrier_requires_exact_reached_release_and_positive_asset_read() {
         let mut snapshot=empty();let work=Work {open_attempts:1,opens:1,read_calls:1,read_bytes:1,..Default::default()};
         snapshot.objects.push(ObjectWork {hash:"c".repeat(64),purposes:vec!["Asset".into()],placement:"file".into(),flow:"source".into(),

@@ -34,7 +34,7 @@ interface IdentityState {
     binding: ToggleBinding | undefined
 }
 const states = new WeakMap<Database, IdentityState>()
-const personaMirrorMap = { username: 'name', userIcon: 'icon', personaPrompt: 'personaPrompt', userNote: 'note' }
+export const personaMirrorMap = { username: 'name', userIcon: 'icon', personaPrompt: 'personaPrompt', userNote: 'note' }
 const clone = <T>(value: T): T => value === undefined ? value : safeStructuredClone(value)
 const root = (db: Database): Snapshot => db as unknown as Snapshot
 const snapshot = (db: Database, map: Record<string, string>): Snapshot =>

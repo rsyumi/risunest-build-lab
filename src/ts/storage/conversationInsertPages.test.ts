@@ -54,6 +54,21 @@ describe('planConversationInsertPages', () => {
         ])
     })
 
+    it('applies the conversation order of a character that gains a conversation in the last commit', () => {
+        const [a, b] = [message('a'.repeat(40)), message('b'.repeat(40))]
+        const gainingOrder = { type: 'set' as const, key: '["order","conversations","char"]', value: { ids: ['one', 'kept', 'two'], folders: [] } }
+        const otherOrder = { type: 'set' as const, key: '["order","conversations","other"]', value: { ids: ['x'], folders: [] } }
+        const plan = planConversationInsertPages({
+            expectedRevision: 1,
+            unitMutations: [gainingOrder, otherOrder],
+            conversations: [create('one', [a], 0), create('two', [b], 2)],
+        }, bytes(a))!
+        expect(plan.steps).toEqual([
+            { unitMutations: [otherOrder], conversations: [create('one', [a], 0)] },
+            { unitMutations: [gainingOrder], conversations: [create('two', [b], 2)] },
+        ])
+    })
+
     it('starts a new commit when the next created conversation does not fit', () => {
         const [a, b] = [message('a'.repeat(40)), message('b'.repeat(40))]
         const plan = planConversationInsertPages({

@@ -678,11 +678,52 @@ class MainActivityBehaviorTest {
     val directory = temporaryFolder.newFolder("pending-legacy")
     val source = java.io.File(directory, "source.risup").apply { writeText("synthetic"); setLastModified(1_000) }
     val marker = java.io.File(directory, "source.risup.pending").apply { writeText(""); setLastModified(1_000) }
+    val delivered = java.io.File(directory, "source.risup.delivered").apply { writeText(""); setLastModified(1_000) }
     assertEquals(emptyList<String>(), cleanupLegacyOpenedFiles(directory, nowMillis = 2_000, staleAfterMillis = 100))
     assertEquals(true, source.exists())
     assertEquals(true, marker.exists())
+    assertEquals(true, delivered.exists())
     marker.delete()
-    assertEquals(listOf("source.risup"), cleanupLegacyOpenedFiles(directory, nowMillis = 2_000, staleAfterMillis = 100))
+    assertEquals(
+      listOf("source.risup", "source.risup.delivered"),
+      cleanupLegacyOpenedFiles(directory, nowMillis = 2_000, staleAfterMillis = 100),
+    )
+  }
+
+  @Test
+  fun `legacy replay removes and reports a file an earlier WebView received`() {
+    val directory = temporaryFolder.newFolder("replay-legacy")
+    val prefix = "a".repeat(64)
+    fun pending(name: String, delivered: Boolean): java.io.File {
+      val source = java.io.File(directory, name).apply { writeText("synthetic") }
+      java.io.File(directory, "$name.pending").writeText("")
+      if (delivered) java.io.File(directory, "$name.delivered").writeText("")
+      return source
+    }
+    val waiting = pending("$prefix-0-waiting.risup", delivered = false)
+    val interrupted = pending("$prefix-1-large preset.risup", delivered = true)
+    val current = pending("$prefix-2-current.risup", delivered = true)
+    java.io.File(directory, "orphan.risup.pending").writeText("")
+
+    val replay = replayLegacyOpenedFiles(directory, setOf(current.absolutePath))
+
+    assertEquals(listOf(waiting.absolutePath), replay.deliver)
+    assertEquals(listOf("large preset.risup"), replay.interrupted)
+    assertEquals(
+      listOf(
+        "$prefix-0-waiting.risup",
+        "$prefix-0-waiting.risup.pending",
+        "$prefix-2-current.risup",
+        "$prefix-2-current.risup.delivered",
+        "$prefix-2-current.risup.pending",
+        "orphan.risup.pending",
+      ),
+      directory.list().orEmpty().sorted(),
+    )
+    assertEquals(false, interrupted.exists())
+    val again = replayLegacyOpenedFiles(directory, emptySet())
+    assertEquals(listOf(waiting.absolutePath), again.deliver)
+    assertEquals(listOf("current.risup"), again.interrupted)
   }
 
   @Test

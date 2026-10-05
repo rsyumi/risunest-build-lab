@@ -5,6 +5,7 @@ use super::{
 };
 use crate::asset_repository::migration_gc::AssetRootSet;
 use crate::asset_repository::PayloadCas;
+use crate::local_backup::CancellationProbe;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -145,7 +146,11 @@ impl Drop for RevisionReadLease {
     }
 }
 
-fn prepare_restore_candidate(persistent_dir: &Path, target: &Path) -> StoreResult<PathBuf> {
+fn prepare_restore_candidate(
+    persistent_dir: &Path,
+    target: &Path,
+    probe: &dyn CancellationProbe,
+) -> StoreResult<PathBuf> {
     let candidate = persistent_dir.join(format!(
         "{DATABASE_FILE}.restore-candidate-{}",
         Uuid::new_v4()
@@ -157,16 +162,19 @@ fn prepare_restore_candidate(persistent_dir: &Path, target: &Path) -> StoreResul
         let mut connection = Connection::open(&candidate)?;
         super::schema::initialize(&mut connection)?;
         // A snapshot can hold a partly purged retired library, which restore never reads.
-        while super::commit::purge_retired_batch(&mut connection, 4096)? {}
+        while super::commit::purge_retired_batch(&mut connection, 4096)? {
+            cancelled(probe)?;
+        }
         let transaction = connection.transaction()?;
         super::message_pages::accept_copied_database(&transaction)?;
         transaction.commit()?;
         let generation = active_generation(&connection)?;
         let reader = open_generation_reader(&candidate, &generation)?;
-        super::portable_validation::validate_records(&reader, &crate::local_backup::NeverCancelled)?;
+        super::portable_validation::validate_records(&reader, probe)?;
         drop(reader);
-        let integrity: String =
-            connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        let integrity: String = interrupt_on_cancel(&connection, probe, || {
+            Ok(connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?)
+        })?;
         if integrity != "ok" {
             return Err(validation("migrated snapshot integrity check failed"));
         }
@@ -1222,9 +1230,11 @@ fn cas_hash_from_physical_key(value: &[u8]) -> Option<String> {
     String::from_utf8(hash).ok()
 }
 
-fn validate_restore_database(path: &Path) -> StoreResult<()> {
+fn validate_restore_database(path: &Path, probe: &dyn CancellationProbe) -> StoreResult<()> {
     let connection = Connection::open(path)?;
-    let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    let integrity: String = interrupt_on_cancel(&connection, probe, || {
+        Ok(connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?)
+    })?;
     if integrity != "ok" {
         return Err(validation("snapshot integrity check failed"));
     }
@@ -1233,6 +1243,44 @@ fn validate_restore_database(path: &Path) -> StoreResult<()> {
         return Err(validation("snapshot schema version is not supported"));
     }
     Ok(())
+}
+
+fn cancelled(probe: &dyn CancellationProbe) -> StoreResult<()> {
+    if probe.is_cancelled() {
+        return Err(validation("snapshot restore cancelled"));
+    }
+    Ok(())
+}
+
+/// Runs `work` on `connection`, interrupting its statement when `probe` cancels.
+fn interrupt_on_cancel<T>(
+    connection: &Connection,
+    probe: &dyn CancellationProbe,
+    work: impl FnOnce() -> StoreResult<T>,
+) -> StoreResult<T> {
+    cancelled(probe)?;
+    let Some(flag) = probe.cancellation_flag() else {
+        return work();
+    };
+    let interrupt = connection.get_interrupt_handle();
+    let finished = std::sync::atomic::AtomicBool::new(false);
+    let outcome = std::thread::scope(|scope| {
+        let watcher = scope.spawn(|| {
+            while !finished.load(Ordering::Acquire) {
+                if flag.load(Ordering::Acquire) {
+                    interrupt.interrupt();
+                    return;
+                }
+                std::thread::park_timeout(Duration::from_millis(50));
+            }
+        });
+        let outcome = work();
+        finished.store(true, Ordering::Release);
+        watcher.thread().unpark();
+        outcome
+    });
+    cancelled(probe)?;
+    outcome
 }
 
 fn remove_database_files(database_path: &Path) -> StoreResult<()> {
@@ -1263,6 +1311,14 @@ fn validation(message: impl Into<String>) -> StoreError {
     StoreError::Validation {
         message: message.into(),
     }
+}
+
+/// What a snapshot restore reports while it stages.
+pub(crate) enum SnapshotRestoreStep {
+    /// The snapshot file of `bytes` bytes with whole-file hash `sha256` is being read and checked.
+    Reading { bytes: u64, sha256: String },
+    /// The snapshot is checked and its records are being staged.
+    Staging,
 }
 
 impl super::PersistentStore {
@@ -1302,7 +1358,14 @@ impl super::PersistentStore {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot_restore_stage(&mut self, id: &str, request_id: &str) -> StoreResult<super::StagingResult> {
+        self.snapshot_restore_stage_observed(id,request_id,&crate::local_backup::NeverCancelled,&mut |_|Ok(()))
+    }
+
+    /// Stages snapshot `id` for activation under `request_id`, reporting each step to `observe`
+    /// and stopping when `probe` cancels.
+    pub(crate) fn snapshot_restore_stage_observed(&mut self, id: &str, request_id: &str, probe: &dyn CancellationProbe, observe: &mut dyn FnMut(SnapshotRestoreStep)->StoreResult<()>) -> StoreResult<super::StagingResult> {
         if request_id.is_empty() || request_id.len()>256 { return Err(validation("invalid snapshot restore request identity")); }
         let existing:Option<(String,String,String)> = self.connection.query_row("SELECT stage_id,snapshot_id,authority FROM snapshot_restore_stages WHERE request_id=?1",[request_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         if let Some((staging_id,snapshot_id,authority)) = existing {
@@ -1310,45 +1373,48 @@ impl super::PersistentStore {
             return Ok(super::StagingResult {staging_id});
         }
         let archive = Archive::open(&self.snapshots_dir)?;
+        let metadata = archive.metadata(id)?;
+        observe(SnapshotRestoreStep::Reading {bytes:metadata.bytes,sha256:hex::encode(&metadata.file_hash)})?;
         let scratch = archive.scratch()?;
-        archive.restore(id,&scratch.path)?;
-        validate_restore_database(&scratch.path)?;
-        let candidate = prepare_restore_candidate(&self.snapshots_dir,&scratch.path)?;
+        archive.restore_observed(id,&scratch.path,probe)?;
+        validate_restore_database(&scratch.path,probe)?;
+        let candidate = prepare_restore_candidate(&self.snapshots_dir,&scratch.path,probe)?;
         let outcome = (|| {
+            observe(SnapshotRestoreStep::Staging)?;
             let source = Connection::open(&candidate)?;
             let generation = active_generation(&source)?;
             let (source_revision, source_generation): (i64,String) = source.query_row("SELECT revision,generation FROM snapshot_original_meta WHERE singleton=1", [], |row|Ok((row.get(0)?,row.get(1)?)))?;
             if source_revision != current_revision(&source)? || source_generation != generation { return Err(validation("snapshot original source identity differs")); }
             let reader = open_generation_reader(&candidate,&generation)?;
-            let stage = self.stage_portable_records(&reader,&crate::local_backup::NeverCancelled)?;
+            let stage = self.stage_portable_records(&reader,probe)?;
             let result = (|| {
-                let mut original_units=std::collections::BTreeMap::new();
-                {
-                    let mut rows=source.prepare("SELECT key,value FROM snapshot_original_units ORDER BY key")?;
-                    let mut cursor=rows.query([])?;
-                    while let Some(row)=cursor.next()? {
-                        let key:risunest_sync_wire::unit::UnitKey=row.get::<_,String>(0)?.try_into().map_err(|error:risunest_sync_wire::WireError|validation(error.to_string()))?;
-                        let value:risunest_sync_wire::unit::UnitValue=serde_json::from_str(&row.get::<_,String>(1)?)?;
-                        value.validate().map_err(|error|validation(error.to_string()))?;
-                        if matches!(key.components().first().map(String::as_str),Some("hypa"|"plugin-local")) {return Err(validation("snapshot source contains device units"));}
-                        super::lww::validate_received(&source,&key,&value)?;
-                        original_units.insert(key,value);
-                    }
-                }
-                let inventory=super::external_capture::original_unit_dependency_inventory(&original_units,&|hash| {
+                // The original units are read from the snapshot twice, to verify them and then to stage them, instead of being held in memory.
+                let mut rows=source.prepare("SELECT key,value FROM snapshot_original_units ORDER BY key")?;
+                let original_units=rows.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?.map(|row| -> StoreResult<(risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue)> {
+                    cancelled(probe)?;
+                    let (key,value)=row?;
+                    let key:risunest_sync_wire::unit::UnitKey=key.try_into().map_err(|error:risunest_sync_wire::WireError|validation(error.to_string()))?;
+                    let value:risunest_sync_wire::unit::UnitValue=serde_json::from_str(&value)?;
+                    value.validate().map_err(|error|validation(error.to_string()))?;
+                    if matches!(key.components().first().map(String::as_str),Some("hypa"|"plugin-local")) {return Err(validation("snapshot source contains device units"));}
+                    super::lww::validate_received(&source,&key,&value)?;
+                    Ok((key,value))
+                });
+                let inventory=super::external_capture::streamed_unit_dependency_inventory(original_units,&|hash| {
                     let length:Option<i64>=source.query_row("SELECT length(body) FROM message_page_objects WHERE hash=?1",[hash],|row|row.get(0)).optional()?;
                     if length.is_some_and(|length|length<0 || length as u64>risunest_sync_wire::MAX_METADATA_BYTES as u64) {return Err(validation("snapshot control exceeds its byte limit"));}
                     Ok(source.query_row("SELECT body FROM message_page_objects WHERE hash=?1",[hash],|row|row.get(0)).optional()?)
                 },&|hash| {
                     let size:Option<i64>=source.query_row("SELECT byte_size FROM asset_objects WHERE object_hash=?1 UNION ALL SELECT length(body) FROM message_page_objects WHERE hash=?1 LIMIT 1",[hash],|row|row.get(0)).optional()?;
                     size.map(|size|u64::try_from(size).map_err(|_|validation("snapshot payload size is invalid"))).transpose()
-                },&crate::local_backup::NeverCancelled,false,&mut |_,_,_|Ok(()))?;
+                },probe,false,&mut |_,_,_|Ok(()))?;
                 let authority = self.lww_binding_authority()?;
                 let tx = self.connection.transaction()?;
                 tx.execute("INSERT INTO snapshot_restore_stages VALUES(?1,?2,?3,?4,'staged',NULL)",rusqlite::params![stage.staging_id,request_id,id,authority.0.to_string()])?;
                 let mut payloads=source.prepare("SELECT object_hash,byte_size FROM asset_objects ORDER BY object_hash")?;
                 let mut payload_rows=payloads.query([])?;
                 while let Some(row)=payload_rows.next()? {
+                    cancelled(probe)?;
                     let hash:String=row.get(0)?;
                     let size:i64=row.get(1)?;
                     let owner:bool=source.query_row("SELECT EXISTS(SELECT 1 FROM asset_owner_heads WHERE manifest_hash=?1 AND present=1)",[&hash],|row|row.get(0))?;
@@ -1362,14 +1428,21 @@ impl super::PersistentStore {
                     tx.execute("INSERT OR IGNORE INTO snapshot_restore_payloads VALUES(?1,?2,?3,0,?4)",rusqlite::params![stage.staging_id,hash,i64::try_from(size).map_err(|_|validation("snapshot payload size exceeds SQLite range"))?,cached])?;
                     if cached {tx.execute("UPDATE snapshot_restore_payloads SET cached=1 WHERE stage_id=?1 AND hash=?2",rusqlite::params![stage.staging_id,hash])?;}
                 }
-                for (key,value) in &original_units {
-                    tx.execute("INSERT INTO snapshot_restore_units VALUES(?1,?2,?3)",rusqlite::params![stage.staging_id,key.as_str(),serde_json::to_string(value)?])?;
+                let mut cursor=rows.query([])?;
+                while let Some(row)=cursor.next()? {
+                    cancelled(probe)?;
+                    let key:risunest_sync_wire::unit::UnitKey=row.get::<_,String>(0)?.try_into().map_err(|error:risunest_sync_wire::WireError|validation(error.to_string()))?;
+                    let value:risunest_sync_wire::unit::UnitValue=serde_json::from_str(&row.get::<_,String>(1)?)?;
+                    super::lww::insert_replacement_source(&tx,&stage.staging_id,super::lww::STAGED_SOURCE,&key,&value)?;
                 }
+                drop(cursor);
                 let mut statement = source.prepare("SELECT o.hash,o.body FROM message_page_objects o JOIN message_page_verified_objects v ON v.hash=o.hash")?;
                 let mut rows = statement.query([])?;
                 while let Some(row) = rows.next()? {
+                    cancelled(probe)?;
                     super::message_pages::put_object(&tx,&row.get::<_,String>(0)?,&row.get::<_,Vec<u8>>(1)?)?;
                 }
+                cancelled(probe)?;
                 tx.commit()?;
                 Ok(super::StagingResult {staging_id:stage.staging_id.clone()})
             })();
@@ -1392,15 +1465,13 @@ impl super::PersistentStore {
         if state == "committed" { return Ok(super::RevisionResult {revision:revision.ok_or_else(||validation("snapshot commit receipt missing"))?}); }
         let request_completed:bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM lww_requests WHERE request_id=?1)",[&request_id],|r|r.get(0))?;
         if !request_completed && self.revision()? != expected_revision { return Err(super::StoreError::RevisionConflict {expected:expected_revision,actual:self.revision()?}); }
-        let mut units = std::collections::BTreeMap::new();
-        {
-            let mut statement = self.connection.prepare("SELECT key,value FROM snapshot_restore_units WHERE stage_id=?1 ORDER BY key")?;
-            let mut rows = statement.query([stage_id])?;
-            while let Some(row) = rows.next()? { units.insert(row.get::<_,String>(0)?.try_into().map_err(|error:risunest_sync_wire::WireError|validation(error.to_string()))?,serde_json::from_str(&row.get::<_,String>(1)?)?); }
-        }
         let header = super::lww::Header {binding_authority,request_id};
-        let result = self.lww_commit_replacement_units(&header,stage_id,Some(&units))?;
-        self.connection.execute("UPDATE snapshot_restore_stages SET state='committed',revision=?2 WHERE stage_id=?1",rusqlite::params![stage_id,result.revision])?;
+        let result = self.lww_commit_staged_replacement(&header,stage_id)?;
+        // A committed stage returns its receipt above, so its source units are no longer read.
+        let tx = self.connection.transaction()?;
+        tx.execute("UPDATE snapshot_restore_stages SET state='committed',revision=?2 WHERE stage_id=?1",rusqlite::params![stage_id,result.revision])?;
+        super::lww::clear_replacement_source(&tx,stage_id,None)?;
+        tx.commit()?;
         Ok(result)
     }
 
@@ -1414,6 +1485,20 @@ impl super::PersistentStore {
             remove_database_files(&self.snapshot_restore_source_path(stage_id)?)?;
         }
         Ok(())
+    }
+
+    /// The snapshot restore stages, as `stage:state`, and the restore files beside the snapshots.
+    #[cfg(test)]
+    pub(crate) fn snapshot_restore_leftovers(&self)->StoreResult<(Vec<String>,Vec<String>)> {
+        let mut statement=self.connection.prepare("SELECT stage_id||':'||state FROM snapshot_restore_stages ORDER BY stage_id")?;
+        let stages=statement.query_map([],|row|row.get(0))?.collect::<Result<Vec<String>,_>>()?;
+        let mut files=Vec::new();
+        for entry in fs::read_dir(&self.snapshots_dir)? {
+            let name=entry?.file_name().to_string_lossy().into_owned();
+            if name.starts_with("restore-source-") || name.starts_with("capture-") || name.contains(".restore-candidate-") {files.push(name);}
+        }
+        files.sort();
+        Ok((stages,files))
     }
 
     pub(crate) fn snapshot_restore_source_path(&self,stage_id:&str)->StoreResult<PathBuf> {
