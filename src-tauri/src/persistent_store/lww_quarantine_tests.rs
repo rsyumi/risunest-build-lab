@@ -111,7 +111,14 @@ fn quarantined_switch_rejects_stale_diagnosis_and_changed_inputs_without_losing_
                 changed.logical += 1;
                 store.device_store().unwrap().connection().execute("UPDATE lww_intents SET stamp=?1 WHERE request_id=?2", params![serde_json::to_string(&changed).unwrap(), selected.request_id]).unwrap();
             }
-            "device-revision" => { store.device_store().unwrap().write_setting("risuNestDeviceSettings", &serde_json::json!({"synthetic": true})).unwrap(); }
+            "device-revision" => {
+                let device = store.device_store_mut().unwrap();
+                let before = device.revision().unwrap();
+                device.write_plugin_device_values("quarantine-fixture", &[device_store::plugin_values::PluginDeviceMutation::Set {
+                    space: "string".into(), key: "later".into(), value: "later-device".into(),
+                }]).unwrap();
+                assert!(device.revision().unwrap() > before);
+            }
             _ => unreachable!(),
         }
         let evidence = failure_evidence(&store, &selected.request_id);

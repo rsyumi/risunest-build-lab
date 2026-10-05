@@ -35,7 +35,7 @@ test('real markdown and Lua editors retain editing, find, undo and save with a r
         await page.keyboard.press('Control+y')
         await expect.poll(() => page.evaluate(() => window.monacoDriver.state().value)).toBe(`${original} edited`)
         await page.keyboard.press('Control+f')
-        const find = page.locator('#editor .find-widget .monaco-inputbox input').first()
+        const find = page.locator('#editor').getByRole('textbox', { name: 'Find', exact: true })
         await expect(find).toBeFocused()
         await find.fill('hello')
         await expect(page.locator('#editor .find-widget .matchesCount')).toContainText('1 of 1')

@@ -10,6 +10,22 @@ final class PortableSourceCustodyTests: XCTestCase {
     }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
 
+    func testOrphanReceiptArrayEncodesNamesAndExplicitNull() throws {
+        let receipts = [
+            PortableSourceCustody.RetiredSource(token: "named-token", name: "synthetic.risunest"),
+            PortableSourceCustody.RetiredSource(token: "unnamed-token", name: nil),
+        ].map { $0.receipt }
+        let data = try JSONEncoder().encode(receipts)
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        XCTAssertEqual(result.count, 2)
+        XCTAssertEqual(Set(result[0].keys), ["token", "name"])
+        XCTAssertEqual(result[0]["token"] as? String, "named-token")
+        XCTAssertEqual(result[0]["name"] as? String, "synthetic.risunest")
+        XCTAssertEqual(Set(result[1].keys), ["token", "name"])
+        XCTAssertEqual(result[1]["token"] as? String, "unnamed-token")
+        XCTAssertTrue(result[1]["name"] is NSNull)
+    }
+
     private func select(_ custody: PortableSourceCustody, owner: String, name: String = "synthetic.risunest") throws -> String {
         let file = root.appendingPathComponent(name)
         try Data(repeating: 7, count: 131072).write(to: file)
