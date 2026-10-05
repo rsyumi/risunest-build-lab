@@ -453,8 +453,8 @@
     {
       "path": "benchmarks/lww-native/src/receive_traffic.rs",
       "mode": "100644",
-      "bytes": 3798,
-      "sha256": "fb311da801758d81881106a4f41332b76ec7b0c57559d966cdfdd0588aa2191f"
+      "bytes": 4008,
+      "sha256": "0a805c4275e37d603e9f378bda7c7e23e151d999d753f160032310edcd198276"
     },
     {
       "path": "benchmarks/lww-native/src/scale_certificate.rs",
@@ -2007,8 +2007,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/ios/Sources/PortableSourceCustody.swift",
       "mode": "100644",
-      "bytes": 13302,
-      "sha256": "91806d99f56f3c0474791992096731d10556564c30708f963fb1ac18c6afdcb4"
+      "bytes": 13286,
+      "sha256": "1654179d7f3016ed2bc635229025f9518def810b4f11d9b75bbff7d813e0bc3c"
     },
     {
       "path": "crates/tauri-plugin-ios-native/ios/Tests/NativeFileStateTests.swift",
@@ -2019,8 +2019,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/ios/Tests/PortableSourceCustodyTests.swift",
       "mode": "100644",
-      "bytes": 7908,
-      "sha256": "301d42480295f2afa19201f93ebd52f35694eac28cd9fd87702e3dc76572c7cb"
+      "bytes": 8805,
+      "sha256": "ee957b72c1f61f6235390b1a30b987eedc1719403a30818876415905978d2dea"
     },
     {
       "path": "crates/tauri-plugin-ios-native/src/lib.rs",
@@ -6687,14 +6687,14 @@
     {
       "path": "src-tauri/src/native_file_jobs/restore.rs",
       "mode": "100644",
-      "bytes": 219403,
-      "sha256": "bf3492d92e4a67f4baef3bb1675f686b54fa1b4f341658b698bcce5219fc2713"
+      "bytes": 219343,
+      "sha256": "d98288a8c0c627ce50d849544124cf28fc74ca208ec48f0401f16424960c98f7"
     },
     {
       "path": "src-tauri/src/native_file_jobs/restore/legacy_stream_tests.rs",
       "mode": "100644",
-      "bytes": 50261,
-      "sha256": "08b2b2f200e1894414c9e8b67822ad34ae93c5bbec77e3c81f30f4af11d80131"
+      "bytes": 51898,
+      "sha256": "3011a582f44c5a0add18460ee7b37d04592ec47a0cb8269c22946d107718e38e"
     },
     {
       "path": "src-tauri/src/native_file_jobs/risum_export.rs",
@@ -16641,8 +16641,8 @@
     {
       "path": "tests/browser/monaco.browser.spec.ts",
       "mode": "100644",
-      "bytes": 3166,
-      "sha256": "6e09ca4750918a0c9d49a090621a8b1e2ec72077a9c598253b97c1e9513a8ba7"
+      "bytes": 3174,
+      "sha256": "c640d98c726a34d1d75757df3a90d57454661bb6192e10a215978164572c3336"
     },
     {
       "path": "tests/browser/monaco.html",

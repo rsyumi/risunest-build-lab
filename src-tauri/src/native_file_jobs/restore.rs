@@ -816,7 +816,6 @@ fn finish_legacy_database<R: Read>(
         root.begin("pluginCustomStorage",FieldKind::Object).map_err(|error|legacy_staging_error(job,error))?;
     }
     reader.counts.presets = preset_count;
-    reader.counts.characters_total = Some(character_count);
 
     job.set_phase(JobPhase::StagingDatabase)
         .map_err(|error| job_error(job, error))?;

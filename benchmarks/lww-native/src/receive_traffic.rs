@@ -1,18 +1,22 @@
 //! Synthetic receive accounting through the real loopback client and native preparation.
 use crate::server_sync::{cache::Cache, client::TestTraffic, lww_tests::{local, save, drain_publications, receive_cycle, LocalServerFixture}};
-use risunest_sync_wire::{canonical, hash};
+use risunest_sync_wire::{hash, payload_value, unit::MAX_INLINE_UNIT_BYTES};
 
 fn own_publication(missing_body: bool) -> TestTraffic {
     let server = LocalServerFixture::new();
     let (_root, mut store) = local();
     let client = server.client(&store);
-    let cached = serde_json::json!("synthetic cached control ".repeat(4096));
-    let recoverable = serde_json::json!("synthetic recoverable control ".repeat(4096));
+    let cached = serde_json::json!("c".repeat(MAX_INLINE_UNIT_BYTES));
+    let recoverable = serde_json::json!("r".repeat(MAX_INLINE_UNIT_BYTES));
     save(&mut store, &["root", "language"], serde_json::json!("en"));
     save(&mut store, &["root", "mainPrompt"], cached.clone());
     save(&mut store, &["root", "globalNote"], recoverable.clone());
-    let cached_hash = hash(&canonical::encode(&cached).unwrap());
-    let recovery_hash = hash(&canonical::encode(&recoverable).unwrap());
+    let cached_body = payload_value::encode(&cached).unwrap();
+    let recovery_body = payload_value::encode(&recoverable).unwrap();
+    assert!(cached_body.len() > MAX_INLINE_UNIT_BYTES);
+    assert!(recovery_body.len() > MAX_INLINE_UNIT_BYTES);
+    let cached_hash = hash(&cached_body);
+    let recovery_hash = hash(&recovery_body);
     assert!(store.lww_verified_object_present(&cached_hash).unwrap());
     assert!(store.lww_verified_object_present(&recovery_hash).unwrap());
     drain_publications(&client, &mut store, &[]).unwrap();

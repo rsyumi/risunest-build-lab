@@ -473,6 +473,37 @@ fn legacy_restore_reports_character_progress_during_the_database_read() {
 }
 
 #[test]
+fn legacy_restore_keeps_source_character_total_when_records_are_excluded() {
+    for retained in [0, 17] {
+        let mut characters = vec![messagepack_from_json(&json!({
+            "type": "group", "chaId": "synthetic-group", "name": "Synthetic group"
+        }))];
+        characters.extend((0..retained).map(golden_character));
+        characters.push(messagepack_from_json(&json!({
+            "type": "character", "chaId": "§temp", "name": "Synthetic temporary character"
+        })));
+        let total = characters.len() as u64;
+        let payload = root_with_characters_at(3, MessagePackValue::Array(characters));
+        for (label, wire) in legacy_wires(&payload) {
+            let run = run_legacy(&wire, RestoreLimits::default(), Decoder::Streaming);
+            assert_eq!(run.outcome.unwrap(), (retained as u64, 2), "{label}");
+            let staged = run.sink.characters.lock().unwrap();
+            assert_eq!(staged.len(), retained, "{label}");
+            for (index, character) in staged.iter().enumerate() {
+                assert_eq!(character["chaId"], format!("golden-{index}"), "{label}");
+            }
+            for detail in run.sink.details_at_batches.lock().unwrap().iter() {
+                assert_eq!(detail.as_ref().unwrap().counts.characters_total, Some(total), "{label}");
+            }
+            let detail = run.detail.unwrap();
+            assert_eq!(detail.stage, JobStage::FinalizingStaging, "{label}");
+            assert_eq!(detail.counts.characters, retained as u64, "{label}");
+            assert_eq!(detail.counts.characters_total, Some(total), "{label}");
+        }
+    }
+}
+
+#[test]
 fn legacy_restore_matches_the_whole_value_decoder_wherever_characters_appear() {
     let others = golden_other_entries().len();
     for count in [0, 1, 17, 40] {
