@@ -453,8 +453,8 @@
     {
       "path": "benchmarks/lww-native/src/receive_traffic.rs",
       "mode": "100644",
-      "bytes": 4008,
-      "sha256": "0a805c4275e37d603e9f378bda7c7e23e151d999d753f160032310edcd198276"
+      "bytes": 4718,
+      "sha256": "2443b16321598d64e1357ea8606e40509afce9e3271933f1b9a3e12665962dda"
     },
     {
       "path": "benchmarks/lww-native/src/scale_certificate.rs",
@@ -501,8 +501,8 @@
     {
       "path": "benchmarks/macos/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 187491,
-      "sha256": "c449c7abe08640175e4a590072e0f3b5836583a716107826af3376e505b1db83"
+      "bytes": 187536,
+      "sha256": "3710a372f488f568f892df47602c0a2abdd1eb6c030da270552094bbf7085626"
     },
     {
       "path": "benchmarks/macos/native/Cargo.toml",
@@ -7269,8 +7269,8 @@
     {
       "path": "src-tauri/src/persistent_store/tests.rs",
       "mode": "100644",
-      "bytes": 5706,
-      "sha256": "775947a898221ffba0439506a50a0bb49d9fde84eabdb63bfcf5b6e35080b765"
+      "bytes": 5765,
+      "sha256": "e3086deda5ab03178e9a741a945c385d6403fae279aae6f706360408ac551ce2"
     },
     {
       "path": "src-tauri/src/persistent_store/tests/activation_golden_tests.rs",
