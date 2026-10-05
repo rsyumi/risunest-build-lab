@@ -6,9 +6,10 @@ import {
   type NativeTokenizerId,
 } from "../../src/ts/tokenizer/nativeTokenizer";
 import corpus from "../tokenizer/native-tokenizer-corpus.json";
-import { check } from "./contracts";
+import { check, pause } from "./contracts";
 import { PersistentBenchmarkMarker } from "./persistentMarker";
 import type { SyncBindingState } from "../../src/ts/storage/sync/bindingFlow";
+import type { NativeFileJobStatus } from "../../src/ts/storage/nativeFileJobs";
 
 export async function streaming() {
   const base = await invoke<string>("ios_bench_stream_url");
@@ -106,26 +107,31 @@ export async function snapshotRestore(): Promise<boolean> {
     "pds_lww_binding_state",
   );
   check(state.target.kind === "none", "snapshot contract uses an unbound synthetic library");
-  const staged = await invoke<{ stagingId: string }>("pds_snapshot_restore_stage", {
-    id: snapshot.id,
-    requestId: crypto.randomUUID(),
-  });
   const current = await invoke<{ revision: number }>("pds_open");
-  const activation = {
-    stagingId: staged.stagingId,
-    expectedRevision: current.revision,
-    bindingAuthority: state.targetAuthority,
+  const { jobId } = await invoke<{ jobId: string }>("native_file_job_start", {
+    request: { kind: "restore-native-snapshot", snapshotId: snapshot.id, expectedRevision: current.revision },
+  });
+  const until = async (ready: (status: NativeFileJobStatus) => boolean, message: string) => {
+    const deadline = performance.now() + 120_000;
+    for (;;) {
+      const status = await invoke<NativeFileJobStatus>("native_file_job_status", { jobId });
+      if (ready(status)) return status;
+      check(!["succeeded", "failed", "cancelled"].includes(status.state) && performance.now() < deadline,
+        message, { state: status.state, phase: status.phase });
+      await pause(50);
+    }
   };
-  const restored = await invoke<{ revision: number }>(
-    "pds_snapshot_restore_activate",
-    activation,
-  );
+  await until(status => status.state === "waitingForInput" && status.phase === "awaiting-activation",
+    "snapshot restore job did not stage the snapshot");
+  await invoke("native_file_job_finalize", { jobId, expectedRevision: current.revision });
+  const restored = await until(status => status.state === "succeeded", "snapshot restore job did not activate");
+  check(restored.result?.revision === restored.activationRevision
+    && typeof restored.activationAuthority === "string" && restored.activationAuthority.length > 0,
+    "snapshot restore job reports its activation receipt");
   await marker.open();
   check((await marker.read()) === "before", "snapshot activated the native SQLite state live");
-  const replay = await invoke<{ revision: number }>(
-    "pds_snapshot_restore_activate",
-    activation,
-  );
-  check(replay.revision === restored.revision, "snapshot activation replays its exact receipt");
+  const replay = await invoke<NativeFileJobStatus>("native_file_job_status", { jobId });
+  check(replay.result?.revision === restored.result?.revision, "a finished snapshot restore keeps its exact receipt");
+  await invoke("native_file_job_forget", { jobId });
   return true;
 }
