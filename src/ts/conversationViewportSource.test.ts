@@ -415,6 +415,67 @@ describe('PersistentConversationViewportSource', () => {
         expect(listener).toHaveBeenCalledTimes(3)
     })
 
+    it('evicts a large optimistic range in one pass over the cached rows', () => {
+        const source = new PersistentConversationViewportSource({
+            reader: { readConversationWindow: vi.fn() },
+            characterId: 'character-a',
+            conversationId: 'conversation-a',
+            revision: 7,
+            totalMessages: 0,
+            rowBudget: 8,
+        })
+        const isPinned = vi.spyOn(source as unknown as { isPinned(index: number): boolean }, 'isPinned')
+        const count = 2_000
+        source.applyOptimisticRange(0, 0, Array.from({ length: count }, (_, index) => message(`m${index}`, `row ${index}`)))
+
+        expect(source.snapshot()).toMatchObject({ totalMessages: count })
+        expect(source.snapshot().rowAt(count - 1)?.message).toMatchObject({ data: `row ${count - 1}` })
+        expect(source.snapshot().rowAt(count - 8)?.message).toMatchObject({ data: `row ${count - 8}` })
+        expect(source.snapshot().rowAt(count - 9)).toBeUndefined()
+        expect(source.snapshot().rowAt(0)).toBeUndefined()
+        expect(isPinned.mock.calls.length).toBeLessThanOrEqual(2 * count)
+    })
+
+    it('publishes an optimistic tail removal and refuses a count change before the tail', async () => {
+        const readConversationWindow = vi.fn(async () => ({
+            revision: 7,
+            value: persistentWindow(0, [
+                message('zero', 'stored-zero'),
+                message('one', 'stored-one'),
+                message('two', 'stored-two'),
+            ], 3),
+        }))
+        const source = new PersistentConversationViewportSource({
+            reader: { readConversationWindow },
+            characterId: 'character-a',
+            conversationId: 'conversation-a',
+            revision: 7,
+            totalMessages: 3,
+            rowBudget: 8,
+        })
+        await source.ensureRange({ startIndex: 0, limit: 3, reason: 'viewport' })
+        const keyBefore = source.snapshot().keyAt(1)
+
+        expect(() => source.applyOptimisticRange(0, 1, [])).toThrow(RangeError)
+        const rollback = source.applyOptimisticRange(2, 1, [])
+        expect(source.snapshot()).toMatchObject({ totalMessages: 2 })
+        expect(source.snapshot().rowAt(2)).toBeUndefined()
+        expect(source.snapshot().keyAt(1)).toBe(keyBefore)
+        await source.ensureRange({ startIndex: 0, limit: 3, reason: 'viewport' })
+        expect(source.snapshot().rowAt(2)).toBeUndefined()
+
+        const replace = source.applyOptimisticRange(1, 1, [
+            message('one', 'replaced-one'),
+            message('generated', 'streamed'),
+        ])
+        expect(source.snapshot()).toMatchObject({ totalMessages: 3 })
+        expect(source.snapshot().rowAt(2)?.message).toMatchObject({ data: 'streamed' })
+        replace()
+        rollback()
+        expect(source.snapshot()).toMatchObject({ totalMessages: 3 })
+        expect(source.snapshot().rowAt(2)?.message).toMatchObject({ data: 'stored-two' })
+    })
+
     it('derives owned keys in constant space and loads an exact persistent window', async () => {
         const readConversationWindow = vi.fn(
             async (input: ConversationWindowQuery): Promise<Versioned<ConversationWindow>> => ({

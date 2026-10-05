@@ -13,6 +13,17 @@ const NOTIFY_CHECK: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const NOTIFY_CHECK: Duration = Duration::from_millis(20);
 
+/// Clients ping every 25 s, so a socket silent for longer lost its peer without
+/// a close and gives its slot back.
+#[cfg(not(test))]
+fn notify_idle() -> Duration {
+    Duration::from_secs(60)
+}
+#[cfg(test)]
+fn notify_idle() -> Duration {
+    Duration::from_millis(tests::IDLE_MS.load(std::sync::atomic::Ordering::SeqCst))
+}
+
 pub(super) async fn time(State(app): State<App>) -> Result<Response> {
     blocking(move || Ok(Json(app.store.time_sample()?).into_response())).await
 }
@@ -167,6 +178,8 @@ async fn notify_socket(
     // then; the timer rechecks the in-memory workload state.
     let mut stale = true;
     let mut check = tokio::time::interval(NOTIFY_CHECK);
+    let idle = notify_idle();
+    let mut silent_until = tokio::time::Instant::now() + idle;
     loop {
         if *app.shutdown.borrow() || !app.workload.status().is_ok_and(|s| s.state == "open") {
             break;
@@ -193,12 +206,15 @@ async fn notify_socket(
             }
         }
         tokio::select! {
-            message = socket.recv() => match message {
-                Some(Ok(Message::Ping(bytes))) => {
-                    if !send_notice(&mut socket, &mut app.shutdown, Message::Pong(bytes)).await { break; }
+            message = socket.recv() => {
+                silent_until = tokio::time::Instant::now() + idle;
+                match message {
+                    Some(Ok(Message::Ping(bytes))) => {
+                        if !send_notice(&mut socket, &mut app.shutdown, Message::Pong(bytes)).await { break; }
+                    }
+                    Some(Ok(Message::Pong(_))) => (),
+                    _ => break,
                 }
-                Some(Ok(Message::Pong(_))) => (),
-                _ => break,
             },
             changed = announced.changed() => {
                 if changed.is_err() { break; }
@@ -208,6 +224,7 @@ async fn notify_socket(
                 #[cfg(test)]
                 tests::CHECKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
+            _ = tokio::time::sleep_until(silent_until) => break,
             _ = stopped(&mut app.shutdown) => break,
         }
     }
@@ -252,6 +269,7 @@ pub(super) mod tests {
 
     pub(crate) static HEAD_READS: AtomicU64 = AtomicU64::new(0);
     pub(crate) static CHECKS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static IDLE_MS: AtomicU64 = AtomicU64::new(60_000);
 
     type Socket = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -327,6 +345,97 @@ pub(super) mod tests {
         );
         assert_eq!(HEAD_READS.load(Ordering::SeqCst), reads + 1);
         socket.send(Message::Close(None)).await.unwrap();
+        server.abort();
+    }
+
+    async fn connect(
+        address: std::net::SocketAddr,
+        credential: &crate::store::DeviceCredential,
+    ) -> Result<Socket, u16> {
+        let mut request = format!("ws://{address}/notify")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {}", credential.token).parse().unwrap(),
+        );
+        request
+            .headers_mut()
+            .insert("x-risu-library", credential.library_id.parse().unwrap());
+        match tokio_tungstenite::connect_async(request).await {
+            Ok((mut socket, _)) => {
+                assert!(next(&mut socket).await.is_text());
+                Ok(socket)
+            }
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                Err(response.status().as_u16())
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    async fn closed(socket: &mut Socket) {
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                Some(Ok(_)) => (),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_silent_socket_releases_its_slot_and_a_pinging_one_keeps_it() {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                IDLE_MS.store(60_000, Ordering::SeqCst);
+            }
+        }
+        let _restore = Restore;
+        IDLE_MS.store(300, Ordering::SeqCst);
+        let bound = Duration::from_secs(30);
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::store::Store::init(dir.path()).unwrap());
+        let credential = store.add_device().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = super::super::router(store.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut alive = connect(address, &credential).await.unwrap();
+        let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
+        let pinger = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(50));
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => return alive,
+                    _ = tick.tick() => {
+                        alive.send(Message::Ping(vec![1].into())).await.unwrap();
+                        assert!(matches!(next(&mut alive).await, Message::Pong(_)));
+                    }
+                }
+            }
+        });
+        let mut silent = Vec::new();
+        for _ in 0..31 {
+            silent.push(connect(address, &credential).await.unwrap());
+        }
+        assert_eq!(connect(address, &credential).await.err(), Some(429));
+        tokio::time::timeout(bound, async {
+            for socket in &mut silent {
+                closed(socket).await;
+            }
+        })
+        .await
+        .expect("silent sockets keep their slots");
+        let mut late = connect(address, &credential).await.unwrap();
+        tokio::time::timeout(bound, closed(&mut late))
+            .await
+            .expect("a silent socket stays open");
+        stop.send(()).unwrap();
+        let mut alive = pinger.await.unwrap();
+        alive.send(Message::Ping(vec![2].into())).await.unwrap();
+        assert!(matches!(next(&mut alive).await, Message::Pong(_)));
+        alive.send(Message::Close(None)).await.unwrap();
         server.abort();
     }
 }

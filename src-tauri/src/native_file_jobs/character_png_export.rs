@@ -1189,45 +1189,4 @@ mod tests {
             6 * 1024 * 1024
         );
     }
-
-    #[test]
-    #[ignore = "manual synthetic peak-memory boundary probe"]
-    fn native_png_writer_round_trips_one_byte_below_the_128_mib_metadata_limit() {
-        let (directory, mut store, revision, mut metadata) = publication_fixture();
-        metadata["data"]["description"] = Value::String(String::new());
-        let baseline_length = serde_json::to_vec(&metadata).unwrap().len();
-        let target_length = super::super::content::JSON_CARD_MAX_METADATA_BYTES - 1;
-        metadata["data"]["description"] =
-            Value::String("x".repeat(target_length - baseline_length));
-        let prepared = store.prepare_risu_save_export(revision).unwrap();
-        let owned = directory.path().join("owned-boundary");
-        let chosen = directory.path().join("chosen-boundary");
-        fs::create_dir(&owned).unwrap();
-        fs::create_dir(&chosen).unwrap();
-        let destination = chosen.join("boundary-metadata.png");
-        let parse_root = directory.path().join("parse-boundary-metadata");
-        fs::create_dir(&parse_root).unwrap();
-        let job = JobRegistry::default()
-            .create(JobKind::ExportCharacterCard)
-            .unwrap();
-
-        export_character_png(
-            prepared,
-            "png-publication",
-            metadata,
-            &owned,
-            &directory.path().join("handoffs"),
-            Some(&destination),
-            &job,
-        )
-        .unwrap();
-        let parsed = parse_png_card(
-            &mut fs::File::open(destination).unwrap(),
-            &parse_root,
-            PngCardLimits::default(),
-            || false,
-        )
-        .unwrap();
-        assert_eq!(parsed.ccv3.unwrap().len(), target_length.div_ceil(3) * 4);
-    }
 }

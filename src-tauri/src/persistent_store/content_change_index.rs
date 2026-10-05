@@ -89,7 +89,7 @@ pub(super) fn validate_schema(db: &Connection) -> StoreResult<()> {
             )
             .optional()?;
         if actual.as_deref() != Some(&sql) {
-            return Err(invalid("Content change schema is incompatible"));
+            return Err(StoreError::SchemaMismatch { message: "Content change schema is incompatible".into() });
         }
     }
     for (table, kind, key1, key2) in super::content_locators::tracked_tables() {
@@ -103,7 +103,7 @@ pub(super) fn validate_schema(db: &Connection) -> StoreResult<()> {
                 )
                 .optional()?;
             if actual.as_deref() != Some(&trigger_sql(table, event, kind, key1, key2)) {
-                return Err(invalid("Content change tracking is incompatible"));
+                return Err(StoreError::SchemaMismatch { message: "Content change tracking is incompatible".into() });
             }
         }
     }

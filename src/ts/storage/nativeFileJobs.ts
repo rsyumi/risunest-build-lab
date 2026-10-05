@@ -77,6 +77,17 @@ export interface NativeOfficialAccountSnapshotRestoreRequest {
         { kind: 'risu-auth'; token: string } | { kind: 'bearer'; token: string }
 }
 
+export interface NativeSnapshotRestoreRequest {
+    snapshotId: string
+}
+
+/** What a snapshot restore activated, which the copy of its missing bodies is bound to. */
+export interface NativeSnapshotRestoreActivation {
+    stagingId: string
+    activationRevision: number
+    bindingAuthority: string
+}
+
 export type NativeOfficialAccountSnapshotRestoreResult =
     | { kind: 'missing' }
     | { kind: 'compatibility-fallback' }
@@ -431,6 +442,7 @@ export interface NativeFileJobStatus {
         | 'import-jpeg-asset'
         | 'kei-backup-upload'
         | 'restore-official-account-snapshot'
+        | 'restore-native-snapshot'
         | 'official-publication-upload'
     expectedRevision?: number
     activationRevision?: number
@@ -489,27 +501,6 @@ export interface NativePortableSelection {
     library: boolean
     deviceSections: NativePortableDeviceSection[]
     allowSourcePreservation?: boolean
-    /** Absent brings the whole library; present brings only the records it names. */
-    items?: NativeArchiveSelection
-}
-/** One record an import can take or leave. */
-export interface NativeArchiveEntry {
-    id: string
-    name: string
-    conversations: number
-    damaged: number
-}
-export interface NativeArchiveInventory {
-    characters: NativeArchiveEntry[]
-    presets: NativeArchiveEntry[]
-    plugins: NativeArchiveEntry[]
-}
-export interface NativeArchiveSelection {
-    characters: string[]
-    presets: string[]
-    plugins: { owner: string; key: string }[]
-    /** Records left out on purpose, whose references come in broken. */
-    excluded: { characters: string[]; presets: string[]; plugins: { owner: string; key: string }[] }
 }
 export interface NativePortableRestorePreview {
     libraryIncluded: boolean
@@ -517,7 +508,6 @@ export interface NativePortableRestorePreview {
     deviceSections: NativePortableDeviceSection[]
     /** What is wrong with the archive's library, even when the gate refuses it. */
     diagnosis?: DataHealthResult
-    items?: NativeArchiveInventory
 }
 
 export type NativeBlockRestoreRuntime = Pick<
@@ -607,6 +597,8 @@ export interface NativeFileRestoreJobOptions extends NativeFileJobOptions {
     afterRefresh?(pluginsAlreadyRestarted?: boolean): void | Promise<void>
     onBlockingChange?(blocking: boolean): void
     afterPortableAdoption?(status: NativeFileJobStatus): Promise<void>
+    /** Runs last when the app recovers a committed restore whose refresh failed. */
+    afterCommittedRecovery?(jobId: string): Promise<void>
 }
 
 export interface NativeFileExportJobOptions extends NativeFileJobOptions {
@@ -1254,7 +1246,7 @@ async function pollNativeFileJobUntilTerminal(
 }
 
 async function abortBeforeNativeRestoreStart(
-    source: NativeFileJobSource | NativeOfficialAccountSnapshotRestoreRequest,
+    source: NativeFileJobSource | NativeOfficialAccountSnapshotRestoreRequest | NativeSnapshotRestoreRequest,
     dependencies: NativeFileJobDependencies,
 ): Promise<never> {
     if (!('type' in source)) throw abortError()
@@ -1279,10 +1271,11 @@ async function runNativeReplacementRestore(
         | 'restore-block-risu-save'
         | 'restore-portable-backup'
         | 'restore-legacy-local-backup'
-        | 'restore-official-account-snapshot',
+        | 'restore-official-account-snapshot'
+        | 'restore-native-snapshot',
     mutationReason: string,
     runtime: NativeBlockRestoreRuntime,
-    source: NativeFileJobSource | NativeOfficialAccountSnapshotRestoreRequest,
+    source: NativeFileJobSource | NativeOfficialAccountSnapshotRestoreRequest | NativeSnapshotRestoreRequest,
     options: NativeFileRestoreJobOptions & {
         choosePortableSections?(
             preview: NativePortableRestorePreview,
@@ -1293,7 +1286,9 @@ async function runNativeReplacementRestore(
     const operation =
         kind === 'restore-official-account-snapshot'
             ? 'Native official account snapshot restore'
-            : kind === 'restore-legacy-local-backup'
+            : kind === 'restore-native-snapshot'
+              ? 'Native snapshot restore'
+              : kind === 'restore-legacy-local-backup'
               ? 'Native legacy local backup restore'
               : 'Native block RisuSave restore'
     if (!dependencies.isTauri()) {
@@ -1316,7 +1311,13 @@ async function runNativeReplacementRestore(
                   ...(source as NativeOfficialAccountSnapshotRestoreRequest),
                   expectedRevision: mutationToken.revision,
               }
-            : {
+            : kind === 'restore-native-snapshot'
+              ? {
+                    kind,
+                    snapshotId: (source as NativeSnapshotRestoreRequest).snapshotId,
+                    expectedRevision: mutationToken.revision,
+                }
+              : {
                   kind,
                   source: source as NativeFileJobSource,
                   expectedRevision: mutationToken.revision,
@@ -1428,7 +1429,7 @@ async function runNativeReplacementRestore(
                     continue
                 }
                 const requiredSections=['hypa','local-plugins','local-settings'] as const
-                if (!selection.library || selection.items!==undefined || selection.deviceSections.length!==3 || new Set(selection.deviceSections).size!==3 || requiredSections.some(section=>!selection.deviceSections.includes(section)||!status.restorePreview!.deviceSections.includes(section)) || !status.restorePreview.libraryIncluded) {
+                if (!selection.library || selection.deviceSections.length!==3 || new Set(selection.deviceSections).size!==3 || requiredSections.some(section=>!selection.deviceSections.includes(section)||!status.restorePreview!.deviceSections.includes(section)) || !status.restorePreview.libraryIncluded) {
                     throw new NativeFileJobError('invalid-full-backup-scope','A full backup requires every section')
                 }
                 if (options.signal?.aborted) {
@@ -1646,7 +1647,7 @@ async function runNativeReplacementRestore(
                     terminal.result.warningCodes,
                 ),
             }
-            const continueAfterRefresh = async (): Promise<void> => {
+            const continueAfterRefresh = async (beforeForget?: () => Promise<void>): Promise<void> => {
                 try {
                     options.onStatus?.(
                         syntheticNativeFileJobStatus(terminal, 'reloading-plugins'),
@@ -1658,13 +1659,17 @@ async function runNativeReplacementRestore(
                     )
                 }
                 try {
-                    await invokeNative(dependencies, 'native_file_job_forget', {
-                        jobId: started.jobId,
-                    })
-                } catch {
-                    committedResult.warningCodes = withCleanupFailedWarning(
-                        committedResult.warningCodes,
-                    )
+                    await beforeForget?.()
+                } finally {
+                    try {
+                        await invokeNative(dependencies, 'native_file_job_forget', {
+                            jobId: started.jobId,
+                        })
+                    } catch {
+                        committedResult.warningCodes = withCleanupFailedWarning(
+                            committedResult.warningCodes,
+                        )
+                    }
                 }
             }
             if (portableAdoptedRevision !== undefined) {
@@ -1696,7 +1701,9 @@ async function runNativeReplacementRestore(
                         terminal.result.revision,
                         runtime,
                         runtime.getStorageAuthorityEpoch(),
-                        continueAfterRefresh,
+                        () => continueAfterRefresh(
+                            options.afterCommittedRecovery && (() => options.afterCommittedRecovery!(started.jobId)),
+                        ),
                     )
                     throw new Error('Committed native restore requires a read-only working-set refresh')
                 }
@@ -1736,6 +1743,7 @@ async function runNativeReplacementRestore(
                 await upstreamBinding!.resume()
                 if (kind==='restore-portable-backup' && terminal) await options.afterPortableAdoption?.(terminal)
                 try { await options.afterRefresh?.(upstreamPause ? true : undefined) } catch {}
+                await options.afterCommittedRecovery?.(started.jobId)
                 try { await invokeNative(dependencies, 'native_file_job_forget', {jobId: started.jobId}) } catch {}
             }, undefined, true)
         }
@@ -1875,6 +1883,58 @@ export async function runNativeOfficialAccountSnapshotRestore(
         sourceSha256: result.sourceSha256,
         warningCodes: result.warningCodes,
     }
+}
+
+function snapshotRestoreActivation(status: NativeFileJobStatus | undefined): NativeSnapshotRestoreActivation | undefined {
+    if (status?.kind !== 'restore-native-snapshot' || status.state !== 'succeeded' || !status.snapshotStagingId
+        || !status.activationAuthority || !Number.isSafeInteger(status.activationRevision)) return undefined
+    return {stagingId: status.snapshotStagingId, activationRevision: status.activationRevision!, bindingAuthority: status.activationAuthority}
+}
+
+/**
+ * Restores a local snapshot. The job stages the snapshot with progress and a
+ * cancel, and the library is replaced only after the replacement is confirmed.
+ * `afterActivationRecovery` runs when the app later recovers a restore whose
+ * refresh failed after activation.
+ */
+export async function runNativeSnapshotRestore(
+    runtime: NativeBlockRestoreRuntime,
+    request: NativeSnapshotRestoreRequest,
+    options: NativeFileRestoreJobOptions & {
+        afterActivationRecovery?(activation: NativeSnapshotRestoreActivation): Promise<void>
+    } = {},
+    dependencies: NativeFileJobDependencies = productionDependencies,
+): Promise<NativeSnapshotRestoreActivation> {
+    const {afterActivationRecovery, ...restoreOptions} = options
+    let activation: NativeSnapshotRestoreActivation | undefined
+    const receipt = (status: NativeFileJobStatus | undefined): NativeSnapshotRestoreActivation => {
+        const value = snapshotRestoreActivation(status)
+        if (!value) throw new NativeFileJobError('invalid-activation-receipt', 'Snapshot activation receipt is unavailable')
+        return value
+    }
+    const result = await runNativeReplacementRestore(
+        'restore-native-snapshot',
+        'native-snapshot-restore',
+        runtime,
+        request,
+        {
+            ...restoreOptions,
+            onStatus(status) {
+                activation = snapshotRestoreActivation(status) ?? activation
+                restoreOptions.onStatus?.(status)
+            },
+            afterCommittedRecovery: afterActivationRecovery && (async jobId => {
+                await afterActivationRecovery(activation ?? receipt(
+                    await invokeNative(dependencies, 'native_file_job_status', {jobId}) as NativeFileJobStatus,
+                ))
+            }),
+        },
+        dependencies,
+    )
+    if (!activation || activation.activationRevision !== result.revision) {
+        throw new NativeFileJobActivationCommittedError(result.revision, new NativeFileJobError('invalid-activation-receipt', 'Snapshot activation receipt differs from its result'))
+    }
+    return activation
 }
 
 export function runNativeLegacyLocalBackupRestore(

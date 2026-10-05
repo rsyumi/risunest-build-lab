@@ -166,6 +166,7 @@ fn publish_prepared_snapshot(
     app: &AppHandle,
     selected: FilePath,
     prepared: snapshot_restore::PreparedRemoteSnapshot,
+    sections: &[super::sections::CapturedSection],
     staging: &std::path::Path,
     cancel: &Cancellation,
 ) -> Result<ExportSnapshotResponse> {
@@ -175,6 +176,7 @@ fn publish_prepared_snapshot(
         .unwrap_or_else(|| staging.join("selected-snapshot.risunest"));
     let receipt = snapshot_export::export_verified_snapshot(
         prepared,
+        sections,
         &local_destination,
         &staging.join("export"),
         cancel,
@@ -261,7 +263,7 @@ pub(crate) async fn external_storage_export_snapshot(
             protection_supported: connected.stored.capabilities.lease_operations,
             ledger: Some(app.state::<super::job_store::JobCommandState>().lease_ledger()?),
         };
-        let prepared = with_export_lease(
+        let (prepared, sections) = with_export_lease(
             &context,
             &connected.stored.capabilities,
             &cancel,
@@ -300,13 +302,24 @@ pub(crate) async fn external_storage_export_snapshot(
                 if prepared.snapshot_id != request.snapshot_id {
                     return Err(ProviderError::new(ErrorKind::Corrupt));
                 }
-                Ok(prepared)
+                let sections = snapshot_export::download_snapshot_sections(
+                    &remote,
+                    &prepared,
+                    &staging.path().join("verified"),
+                    &connected.root_key,
+                    connected.provider.as_ref(),
+                    &connected.handle,
+                    &counters,
+                    &cancel,
+                )
+                .await?;
+                Ok((prepared, sections))
             },
         )
         .await?;
         counters.flush();
         cancel.check()?;
-        publish_prepared_snapshot(&app, selected, prepared, staging.path(), &cancel)
+        publish_prepared_snapshot(&app, selected, prepared, &sections, staging.path(), &cancel)
     }.await)
 }
 

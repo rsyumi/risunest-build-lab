@@ -11,6 +11,8 @@ vi.mock('../parser/parser.svelte', () => ({
     ParseMarkdown: vi.fn(async (value: string) => value),
     risuChatParser: (value: string) => value,
 }))
+const displaySettings = vi.hoisted(() => ({ apply: vi.fn(async () => undefined) }))
+vi.mock('../gui/receivedDisplaySettings', () => ({ applyReceivedDisplaySettings: displaySettings.apply }))
 import { selectedCharID } from '../stores.svelte'
 import { doingChat } from '../process/generationState'
 import { getRuntimePerformanceBudgets } from '../runtimePerformanceProfile'
@@ -47,6 +49,12 @@ afterEach(() => {
 })
 
 describe('production persistent working-set publication', () => {
+    it('applies received root changes as display settings', () => {
+        createProductionStateAdapter().afterRemoteRootChange!(new Set(['colorSchemeName']))
+
+        expect(displaySettings.apply).toHaveBeenCalledExactlyOnceWith(new Set(['colorSchemeName']))
+    })
+
     it.each([true, false])('adopts a complete added preset without a follow-up publication (catalog=%s)', async (catalog) => {
         const initial = normalizeDatabaseDefaults({} as Database)
         initial.botPresets[0].id = 'existing-preset'

@@ -30,7 +30,7 @@ fn snapshot_restore_freezes_finished_held_and_deferred_original_values_without_d
     let snapshot=store.snapshot_create("held-deferred").unwrap();
     let stage=store.snapshot_restore_stage(&snapshot.id,"restore-held-deferred").unwrap();
     for (key,value) in [(&message_key,&message),(&held_key,&held)] {
-        let stored:String=store.connection.query_row("SELECT value FROM snapshot_restore_units WHERE stage_id=?1 AND key=?2",params![stage.staging_id,key.as_str()],|row|row.get(0)).unwrap();
+        let stored:String=store.connection.query_row("SELECT value FROM replacement_source_units WHERE generation=?1 AND layer=0 AND key=?2",params![stage.staging_id,key.as_str()],|row|row.get(0)).unwrap();
         assert_eq!(serde_json::from_str::<UnitValue>(&stored).unwrap(),*value);
     }
     store.snapshot_restore_activate(&stage.staging_id,store.revision().unwrap(),header.binding_authority.clone()).unwrap();
@@ -52,6 +52,27 @@ fn committed_snapshot_receipt_does_not_replay_after_later_edit() {
     assert_eq!(reopened.snapshot_restore_activate(&stage.staging_id,expected,authority).unwrap().revision,receipt.revision);
     assert_eq!(reopened.read_root(None).unwrap().value["username"],"edit after activation");
     assert_eq!(reopened.revision().unwrap(),receipt.revision+1);
+}
+
+#[test]
+fn a_snapshot_stage_holds_its_source_units_in_the_store_until_activation_or_abort() {
+    let (_directory, mut store, _) = open_fixture();
+    let lease=store.lww_acquire_library_backup_capture(store.revision().unwrap()).unwrap().lease;
+    let original=store.lww_backup_unit_values(&lease).unwrap();
+    store.release_revision(&lease).unwrap();
+    assert!(!original.is_empty());
+    let snapshot=store.snapshot_create("manual").unwrap();
+    let aborted=store.snapshot_restore_stage(&snapshot.id,"source-rows-abort").unwrap();
+    assert!(store.replacement_source_rows(&aborted.staging_id).unwrap()>0);
+    store.snapshot_restore_abort(&aborted.staging_id).unwrap();
+    assert_eq!(store.replacement_source_rows(&aborted.staging_id).unwrap(),0);
+    let stage=store.snapshot_restore_stage(&snapshot.id,"source-rows-activate").unwrap();
+    let staged=store.replacement_source_units(&stage.staging_id).collect::<crate::persistent_store::StoreResult<std::collections::BTreeMap<_,_>>>().unwrap();
+    assert_eq!(staged,original);
+    let authority=store.lww_binding_authority().unwrap();
+    let receipt=store.snapshot_restore_activate(&stage.staging_id,store.revision().unwrap(),authority.clone()).unwrap();
+    assert_eq!(store.replacement_source_rows(&stage.staging_id).unwrap(),0);
+    assert_eq!(store.snapshot_restore_activate(&stage.staging_id,0,authority).unwrap().revision,receipt.revision);
 }
 
 #[test]

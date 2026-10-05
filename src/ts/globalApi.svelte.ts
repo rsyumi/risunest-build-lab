@@ -1246,7 +1246,6 @@ export async function fetchNative(url: string, arg: {
             }
         }
         textBody = body
-        realBody = new TextEncoder().encode(body)
     }
     else if (arg.body instanceof Uint8Array) {
         realBody = arg.body
@@ -1271,13 +1270,15 @@ export async function fetchNative(url: string, arg: {
                 : throughProxy ? 'proxy'
                     : 'plain'
     // The Tauri stream route manages its own composed timeout signal.
+    // The Tauri route sends text as is, so only the byte routes encode it.
+    if (textBody !== undefined && route !== 'tauri') realBody = new TextEncoder().encode(textBody)
     const timeoutSignal = route === 'tauri' ? null : buildTimeoutSignal(arg.signal, arg.requestTimeoutMs)
     const requestSignal = timeoutSignal?.signal ?? arg.signal
     const shouldLogFetch = arg.logFetch ?? true
     let fetchLogIndex: number | null = null
     if (shouldLogFetch) {
         fetchLogIndex = addFetchLog({
-            body: new TextDecoder().decode(realBody),
+            body: textBody ?? new TextDecoder().decode(realBody),
             headers: arg.headers,
             response: 'Streamed Fetch',
             success: true,

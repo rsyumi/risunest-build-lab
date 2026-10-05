@@ -17,6 +17,8 @@ private const val MAX_DISPLAY_NAME_CHARS = 180
 private const val SPOOL_OWNERSHIP_FORMAT = "risunest-android-saf-spool"
 private const val SPOOL_STAGING_PREFIX = ".spooling-"
 private const val SPOOL_CLEANUP_PREFIX = ".cleanup-"
+private const val SPOOL_DELIVERY_MARKER = "delivered"
+internal const val SPOOL_INTERRUPTED_CODE = "import-interrupted"
 private val BACKUP_SOURCE_SUFFIXES = listOf(
   ".risunest",
   ".risudat",
@@ -171,7 +173,12 @@ internal class SafSpoolStore(
     val failures = mutableListOf<SafSpoolFailure>()
     for (source in sources) {
       val prior = source.operationId?.let { existing[it] }
-      if (prior != null) { ready.add(prior); continue }
+      if (prior != null) {
+        // Opening the same source again is a new request, not the interrupted earlier delivery.
+        root.resolve(prior.token).resolve(SPOOL_DELIVERY_MARKER).delete()
+        ready.add(prior)
+        continue
+      }
       val displayName = safeSafDisplayName(source.displayName)
       val token = tokenFactory().toString()
       if (!CANONICAL_TOKEN.matches(token)) {
@@ -308,15 +315,7 @@ internal class SafSpoolStore(
   }
 
   fun discardReady(token: String): Boolean {
-    if (!isCanonicalUuidV4(token) || !root.isDirectory) return false
-    val canonicalRoot = runCatching { root.canonicalFile }.getOrNull() ?: return false
-    val ownedDirectory = root.resolve(token)
-    val canonicalOwned = runCatching { ownedDirectory.canonicalFile }.getOrNull() ?: return false
-    if (!ownedDirectory.isDirectory || canonicalOwned.parentFile != canonicalRoot) return false
-    val ownership = runCatching {
-      readSpoolOwnership(ownedDirectory.resolve("ownership.json"))
-    }.getOrNull() ?: return false
-    if (ownership.token != token || readReadySpool(ownedDirectory, token) == null) return false
+    val ownedDirectory = ownedReadyDirectory(token) ?: return false
     val cleanupDirectory = root.resolve("$SPOOL_CLEANUP_PREFIX$token")
     if (cleanupDirectory.exists()) return false
     return try {
@@ -325,6 +324,32 @@ internal class SafSpoolStore(
     } catch (error: Exception) {
       false
     }
+  }
+
+  /**
+   * Records that a WebView received this spool. A spool that is still ready at a later start was
+   * never consumed, because its import was interrupted.
+   */
+  fun markDelivered(token: String): Boolean {
+    val ownedDirectory = ownedReadyDirectory(token) ?: return false
+    writeDurableJson(ownedDirectory, SPOOL_DELIVERY_MARKER, "{}", "SAF spool delivery marker")
+    return true
+  }
+
+  fun isDelivered(token: String): Boolean =
+    ownedReadyDirectory(token)?.resolve(SPOOL_DELIVERY_MARKER)?.isFile == true
+
+  private fun ownedReadyDirectory(token: String): File? {
+    if (!isCanonicalUuidV4(token) || !root.isDirectory) return null
+    val canonicalRoot = runCatching { root.canonicalFile }.getOrNull() ?: return null
+    val ownedDirectory = root.resolve(token)
+    val canonicalOwned = runCatching { ownedDirectory.canonicalFile }.getOrNull() ?: return null
+    if (!ownedDirectory.isDirectory || canonicalOwned.parentFile != canonicalRoot) return null
+    val ownership = runCatching {
+      readSpoolOwnership(ownedDirectory.resolve("ownership.json"))
+    }.getOrNull() ?: return null
+    if (ownership.token != token || readReadySpool(ownedDirectory, token) == null) return null
+    return ownedDirectory
   }
 
   private fun copySource(
@@ -448,6 +473,8 @@ internal class SafSpoolStore(
       "source.json",
       "ownership.json.tmp",
       "ownership.json",
+      "$SPOOL_DELIVERY_MARKER.tmp",
+      SPOOL_DELIVERY_MARKER,
       "claim.lock",
     )) {
       val file = canonicalDirectory.resolve(name)
@@ -465,6 +492,44 @@ internal suspend fun spoolOpenedFilesOnIo(
   onProgress: (SafSpoolProgress) -> Unit = {},
 ): SafSpoolBatch = withContext(Dispatchers.IO) {
   store.spool(sources, importDestination, isCancelled, onProgress)
+}
+
+/**
+ * Marks each ready spool before it reaches the WebView. A spool that cannot be marked is withdrawn
+ * and reported, because an unmarked spool would be imported again on every start.
+ */
+internal fun markSpoolBatchDelivered(store: SafSpoolStore, batch: SafSpoolBatch): SafSpoolBatch {
+  val ready = mutableListOf<SafSpoolReady>()
+  val failures = batch.failures.toMutableList()
+  for (spool in batch.ready) {
+    if (runCatching { store.markDelivered(spool.token) }.getOrDefault(false)) {
+      ready += spool
+    } else {
+      store.discardReady(spool.token)
+      failures += SafSpoolFailure(spool.displayName, "spool-write-failed")
+    }
+  }
+  return SafSpoolBatch(ready, failures)
+}
+
+/**
+ * Ready spools for a new WebView. A spool an earlier WebView received but never consumed is
+ * discarded and reported instead of being imported again. [handedOff] holds the tokens the current
+ * WebView already received; it is read after the marker so a concurrent hand-off is never discarded.
+ */
+internal fun replayReadySpoolBatch(store: SafSpoolStore, handedOff: Set<String>): SafSpoolBatch {
+  val ready = mutableListOf<SafSpoolReady>()
+  val failures = mutableListOf<SafSpoolFailure>()
+  for (spool in store.listReady()) {
+    if (!shouldUseNativeFileJobSpool(spool.displayName)) continue
+    if (!store.isDelivered(spool.token)) {
+      ready += spool
+    } else if (spool.token !in handedOff) {
+      val code = if (store.discardReady(spool.token)) SPOOL_INTERRUPTED_CODE else "cleanup-failed"
+      failures += SafSpoolFailure(spool.displayName, code)
+    }
+  }
+  return SafSpoolBatch(ready, failures)
 }
 
 internal data class SafDestinationResult(

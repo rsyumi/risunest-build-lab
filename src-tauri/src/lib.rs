@@ -42,6 +42,7 @@ mod persistent_commit_raw;
 #[cfg(windows)]
 mod persistent_commit_transport;
 mod persistent_store;
+mod platform_tls;
 mod portable_backup;
 #[cfg(feature = "official-publication-upload-pilot")]
 mod publication_upload;
@@ -197,7 +198,10 @@ async fn native_request(url: String, body: String, header: String, method: Strin
         return format!(r#"{{"success":false,"body":"Invalid header JSON"}}"#);
     }
 
-    let client = reqwest::Client::new();
+    let client = match platform_tls::client_builder().build() {
+        Ok(client) => client,
+        Err(e) => return format!(r#"{{"success":false,"body":"{}"}}"#, e.to_string()),
+    };
     let response: Result<reqwest::Response, reqwest::Error>;
 
     if method == "POST" {
@@ -455,7 +459,7 @@ fn builder_with_main_window(
                 ios_lifecycle::main_document_started(webview.app_handle());
                 #[cfg(target_os = "macos")]
                 macos_lifecycle::document_started(webview.app_handle());
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 renderer_recovery::document_started(webview.app_handle());
                 if let Some(state) = webview.try_state::<persistent_store::PersistentStoreState>() {
                     if let Err(error) = state.reset_renderer_session() {
@@ -664,7 +668,7 @@ fn builder_with_main_window(
         .manage(server_sync::commands::ServerSyncCommandState::default())
         .manage(external_storage::connection_commands::ConnectionCommandState::default())
         .manage(external_storage::job_store::JobCommandState::default())
-        .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_http::init_with_client_builder(platform_tls::apply))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
@@ -732,7 +736,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         opened_files::desktop_relaunch,
         #[cfg(any(windows, target_os = "linux"))]
         desktop_session::desktop_flush_complete,
-        #[cfg(any(windows, target_os = "linux"))]
+        #[cfg(desktop)]
         renderer_recovery::desktop_close_ack,
         #[cfg(not(target_os = "android"))]
         renderer_recovery::renderer_recovery_take,
@@ -944,9 +948,6 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_checkpoint,
         persistent_store::commands::pds_snapshot_create,
         persistent_store::commands::pds_snapshot_list,
-        persistent_store::commands::pds_snapshot_restore_stage,
-        persistent_store::commands::pds_snapshot_restore_activate,
-        persistent_store::commands::pds_snapshot_restore_abort,
         persistent_store::commands::pds_get_device_setting,
         persistent_store::commands::pds_set_device_setting,
         persistent_store::commands::pds_patch_device_setting,

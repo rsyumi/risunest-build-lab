@@ -91,6 +91,19 @@ impl PersistentStore {
         })
     }
 
+    /// The authorized new-device registration that reserved `writer_id`.
+    pub(crate) fn lww_new_device_authorization(&self, writer_id: &str) -> StoreResult<Option<String>> {
+        Ok(self
+            .device_store()?
+            .connection()
+            .query_row(
+                "SELECT authorization_id FROM lww_new_device_authorizations WHERE writer_id=?1 AND authorized=1",
+                [writer_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// Takes over the writer a changed registration claimed. The clock, unsent versions,
     /// publications and receive progress stay, so retained versions keep their stamps.
     pub(crate) fn lww_adopt_fresh_writer(

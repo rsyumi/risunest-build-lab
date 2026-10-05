@@ -3,6 +3,7 @@
     import { language } from 'src/lang'
     import { alertCheckboxConfirm, alertConfirm } from 'src/ts/alert'
     import { isTauri } from 'src/ts/platform'
+    import { platform as nativePlatform } from '@tauri-apps/plugin-os'
     import { completeServerSyncBinding, connectServerSync, disconnectServerSync, holdServerSync, retryServerSync, getServerSyncController, getServerSyncCacheUsage, cleanupServerSyncCache, type ServerSyncCacheUsage } from 'src/ts/storage/sync/serverSyncProduction'
     import { parseServerRegistration } from 'src/ts/storage/sync/serverSyncRegistration'
     import { serverRegistrationInbox } from 'src/ts/storage/sync/serverSyncRegistrationInbox'
@@ -33,14 +34,15 @@
     let inboxDispose = () => {}
     const writerRecoveryCodes = ['writer-collision', 'equal-stamp-integrity']
     let writerRecovery = $derived(writerRecoveryCodes.includes(view.error))
+    const linux = (() => { try { return isTauri && nativePlatform() === 'linux' } catch { return false } })()
     const errorCode = (error: unknown) => typeof error === 'object' && error && 'code' in error ? String(error.code) : ''
     const message = (error: unknown) => {
         const token = errorCode(error)
         if (['clock-skew', 'incoming-clock-skew', 'accepted-clock-correction-required'].includes(token)) return language.lwwSync.clockBlocked
         if (writerRecoveryCodes.includes(token)) return language.lwwSync.writerCollision
         if (token === 'unit-too-large') return language.lwwSync.unitTooLarge
-        if (token === 'device-credential-unavailable') return copy.credentialUnavailable
-        if (token === 'unauthorized' || token === 'invalid-device-token') return language.lwwSync.registrationRevoked
+        if (token === 'device-credential-unavailable') return linux ? copy.credentialUnavailableLinux : copy.credentialUnavailable
+        if (token === 'unauthorized' || token === 'invalid-device-token' || token === 'server-epoch-changed') return language.lwwSync.registrationRevoked
         if (token === PREVIOUS_FILES_DOWNLOAD_FAILED) return language.lwwSync.downloadFailedNotConnected
         if (token === 'previous-storage-unavailable') return language.lwwSync.previousStorageUnavailable
         if (token.startsWith('qr-')) return token.includes('permission') ? copy.cameraDenied : copy.cameraUnavailable
@@ -91,7 +93,7 @@
 {#if isTauri}
     <SettingGroup title={copy.title} description={copy.description}>
         <p class="mb-3 text-sm text-textcolor">{language.lwwSync.concurrentEditNotice}</p>
-        <SettingRow label={copy.connectRow} help={copy.connectRowHelpScan}>
+        <SettingRow label={copy.connectRow} help={canScanServerRegistration ? copy.connectRowHelpScan : copy.connectRowHelp}>
             <span>{view.status.configured && !view.paused ? copy.ready : copy.disconnected}</span>
         </SettingRow>
         <label class="block text-sm" for="server-registration">{copy.registrationCode}</label>
@@ -126,10 +128,11 @@
         {/if}
         {#if view.error || failure}<p role="alert" class="mt-2 text-sm">{failure || message({ code: view.error })}</p>{/if}
     </SettingGroup>
-    {#if residency && view.status.configured}
+    {#if residency && view.status.configured && view.status.bound}
         <SettingGroup title={copy.residency.title} description={copy.residency.description}>
             <SettingRow label={copy.residency.local}><span>{bytes(residency.localBytes)}</span></SettingRow>
             <SettingRow label={copy.residency.remoteOnly}><span>{bytes(residency.serverBytes)}</span></SettingRow>
+            {#if residency.remoteObjects > residency.serverObjects}<SettingRow label={copy.residency.externalOnly}><span>{bytes(residency.remoteBytes - residency.serverBytes)}</span></SettingRow>{/if}
             <SettingRow label={copy.residency.unavailable}><span>{residency.unavailableObjects}</span></SettingRow>
             <div class="flex flex-wrap gap-2">
                 <SettingButton onclick={() => void run(() => setAssetResidencyPolicy('full'))} disabled={busy || residency.policy === 'full'}>{copy.residency.full}</SettingButton>

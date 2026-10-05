@@ -2779,5 +2779,261 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             expect((await store.readRoot()).revision).toBe(imported.revision)
             expect((await store.readCharacter('char-a'))?.value.name).toBe('Alpha')
         })
+
+        it('applies root, collection record, identity and chat variable units', async () => {
+            const { store } = await createHarness()
+            const database = structuredClone(fixtureDatabase)
+            Object.assign(database, {
+                personas: [
+                    { id: 'persona-a', name: 'Persona A', personaPrompt: '', icon: '', largePortrait: false },
+                    { id: 'persona-b', name: 'Persona B', personaPrompt: '', icon: '', largePortrait: false },
+                ],
+                modules: [{ id: 'module-a', name: 'Module A', description: '' }],
+                plugins: [{ name: 'plugin-a', displayName: 'Plugin A', script: '', version: 3 }],
+                characterOrder: ['char-b', 'char-a', 'char-c'],
+                explicitGlobalChatVariables: { kept: 'yes', toggle_old: '1' },
+                protectedPresetValues: { seperateModels: { memory: 'old' } },
+            })
+            const imported = await store.replaceFromDatabase(database)
+
+            const committed = await store.commit({
+                expectedRevision: imported.revision,
+                unitMutations: [
+                    { type: 'set', key: '["root","username"]', value: 'Unit User' },
+                    { type: 'delete', key: '["root","apiType"]' },
+                    { type: 'set', key: '["exists","modules","module-b"]', value: true },
+                    {
+                        type: 'set',
+                        key: '["record","modules","module-b"]',
+                        value: { id: 'module-b', name: 'Module B', description: '' },
+                    },
+                    { type: 'set', key: '["order","modules"]', value: ['module-b', 'module-a'] },
+                    {
+                        type: 'set',
+                        key: '["record","plugins","plugin-b"]',
+                        value: { name: 'plugin-b', displayName: 'Plugin B', script: '', version: 3 },
+                    },
+                    { type: 'delete', key: '["record","plugins","plugin-a"]' },
+                    { type: 'set', key: '["exists","persona","persona-c"]', value: true },
+                    { type: 'set', key: '["persona","persona-c","name"]', value: 'Persona C' },
+                    { type: 'set', key: '["persona","persona-b","personaPrompt"]', value: 'Unit prompt' },
+                    { type: 'delete', key: '["exists","persona","persona-a"]' },
+                    { type: 'set', key: '["order","personas"]', value: ['persona-c', 'persona-b'] },
+                    { type: 'set', key: '["order","characters"]', value: ['char-a', 'char-b', 'char-c'] },
+                    { type: 'set', key: '["preset-protected","seperateModels"]', value: { memory: 'new' } },
+                    { type: 'set', key: '["variable","added"]', value: 'value' },
+                    { type: 'delete', key: '["variable","kept"]' },
+                    { type: 'set', key: '["toggle","toggle_new"]', value: '1' },
+                ],
+            })
+
+            expect(committed.revision).toBe(imported.revision + 1)
+            const root = (await store.readRoot()).value as unknown as Record<string, unknown>
+            expect(root.username).toBe('Unit User')
+            expect(root).not.toHaveProperty('apiType')
+            expect(root.modules).toEqual([
+                { id: 'module-b', name: 'Module B', description: '' },
+                { id: 'module-a', name: 'Module A', description: '' },
+            ])
+            expect(root.plugins).toEqual([
+                { name: 'plugin-b', displayName: 'Plugin B', script: '', version: 3 },
+            ])
+            expect((root.personas as Array<Record<string, unknown>>).map(({ id, name, personaPrompt }) => (
+                { id, name, personaPrompt }
+            ))).toEqual([
+                { id: 'persona-c', name: 'Persona C', personaPrompt: undefined },
+                { id: 'persona-b', name: 'Persona B', personaPrompt: 'Unit prompt' },
+            ])
+            expect(root.characterOrder).toEqual(['char-a', 'char-b', 'char-c'])
+            expect(root.protectedPresetValues).toEqual({ seperateModels: { memory: 'new' } })
+            expect(root.explicitGlobalChatVariables).toEqual({
+                added: 'value',
+                toggle_old: '1',
+                toggle_new: '1',
+            })
+        })
+
+        it('applies character, group member and conversation units', async () => {
+            const { store } = await createHarness()
+            const imported = await store.replaceFromDatabase(fixtureDatabase)
+
+            await store.commit({
+                expectedRevision: imported.revision,
+                unitMutations: [
+                    { type: 'set', key: '["character","char-a","desc"]', value: 'Unit description' },
+                    { type: 'delete', key: '["character","char-a","creatorNotes"]' },
+                    { type: 'set', key: '["exists","character","group-new"]', value: { type: 'group' } },
+                    { type: 'set', key: '["character","group-new","name"]', value: 'Unit group' },
+                    {
+                        type: 'set',
+                        key: '["group-members","group-new"]',
+                        value: {
+                            characters: ['char-a', 'char-b'],
+                            characterTalks: [1, 0.5],
+                            characterActive: [true, false],
+                        },
+                    },
+                    { type: 'delete', key: '["exists","character","char-c"]' },
+                    { type: 'set', key: '["conversation","char-a","conv-short","name"]', value: 'Unit chat' },
+                    { type: 'set', key: '["conversation","char-a","conv-short","note"]', value: 'Unit note' },
+                    { type: 'set', key: '["conversation","char-a","conv-short","lastDate"]', value: 900 },
+                    { type: 'delete', key: '["conversation","char-b","conv-beta","note"]' },
+                    { type: 'set', key: '["exists","conversation","char-b","conv-new"]', value: true },
+                    { type: 'delete', key: '["exists","conversation","char-a","conv-long"]' },
+                ],
+            })
+
+            const alpha = (await store.readCharacter('char-a'))?.value
+            expect(alpha).toMatchObject({ name: 'Alpha', desc: 'Unit description' })
+            expect(alpha).not.toHaveProperty('creatorNotes')
+            expect((await store.readCharacter('group-new'))?.value).toMatchObject({
+                type: 'group',
+                name: 'Unit group',
+                characters: ['char-a', 'char-b'],
+                characterTalks: [1, 0.5],
+                characterActive: [true, false],
+            })
+            expect(await store.readCharacter('char-c')).toBeNull()
+            const renamed = (await store.readConversationMetadata('char-a', 'conv-short'))?.value
+            expect(renamed?.conversation).toMatchObject({ name: 'Unit chat', note: 'Unit note' })
+            expect(renamed?.totalMessages).toBe(2)
+            expect((await store.queryConversations({ characterId: 'char-a', order: 'configured', limit: 10 }))
+                .items.map(({ id, name, recentAt }) => ({ id, name, recentAt })))
+                .toEqual([{ id: 'conv-short', name: 'Unit chat', recentAt: 900 }])
+            expect((await store.readConversation('char-a', 'conv-short'))?.value.message)
+                .toEqual(fixtureDatabase.characters[1].chats[1].message)
+            expect((await store.readConversationMetadata('char-b', 'conv-beta'))?.value.conversation)
+                .not.toHaveProperty('note')
+            expect((await store.readConversationMetadata('char-b', 'conv-new'))?.value.totalMessages).toBe(0)
+            expect(await store.readConversationMetadata('char-a', 'conv-long')).toBeNull()
+        })
+
+        it('applies a conversation order unit with the conversations created in the same commit', async () => {
+            const { store } = await createHarness()
+            const imported = await store.replaceFromDatabase(fixtureDatabase)
+            const folders = [{ id: 'folder-unit', name: 'Unit folder', folded: false }]
+
+            await store.commit({
+                expectedRevision: imported.revision,
+                unitMutations: [{
+                    type: 'set',
+                    key: '["order","conversations","char-a"]',
+                    value: { ids: ['conv-short', 'conv-new', 'conv-long'], folders },
+                }],
+                conversations: [{
+                    type: 'replace-range',
+                    characterId: 'char-a',
+                    conversationId: 'conv-new',
+                    start: 0,
+                    deleteCount: 0,
+                    messages: [{ role: 'user', data: 'new chat', chatId: 'new-chat' }],
+                    conversation: { id: 'conv-new', name: 'New chat', note: '', localLore: [] },
+                    configuredIndex: 1,
+                }],
+            })
+
+            expect((await store.queryConversations({ characterId: 'char-a', order: 'configured', limit: 10 }))
+                .items.map(({ id }) => id)).toEqual(['conv-short', 'conv-new', 'conv-long'])
+            expect((await store.readCharacter('char-a'))?.value.chatFolders).toEqual(folders)
+            expect((await store.readConversation('char-a', 'conv-long'))?.value.message)
+                .toEqual(fixtureDatabase.characters[1].chats[0].message)
+        })
+
+        it('applies preset field, existence and order units', async () => {
+            const { store } = await createHarness()
+            const imported = await store.replaceFromDatabase(fixtureDatabase)
+
+            await store.commit({
+                expectedRevision: imported.revision,
+                unitMutations: [
+                    { type: 'set', key: '["preset","preset-alpha","mainPrompt"]', value: 'unit prompt' },
+                    { type: 'set', key: '["exists","preset","preset-gamma"]', value: true },
+                    { type: 'set', key: '["preset","preset-gamma","name"]', value: 'Preset Gamma' },
+                    { type: 'delete', key: '["exists","preset","preset-beta"]' },
+                    { type: 'set', key: '["order","presets"]', value: ['preset-gamma', 'preset-alpha'] },
+                ],
+            })
+
+            expect((await store.readPreset('preset-alpha'))?.value).toMatchObject({
+                name: 'Preset Alpha',
+                mainPrompt: 'unit prompt',
+            })
+            expect((await store.readPreset('preset-gamma'))?.value).toMatchObject({ name: 'Preset Gamma' })
+            expect(await store.readPreset('preset-beta')).toBeNull()
+            expect((await store.queryPresets()).items.map(({ id, name }) => ({ id, name }))).toEqual([
+                { id: 'preset-gamma', name: 'Preset Gamma' },
+                { id: 'preset-alpha', name: 'Preset Alpha' },
+            ])
+        })
+
+        it('refuses an unsupported unit without applying the rest of the commit', async () => {
+            const { store } = await createHarness()
+            const imported = await store.replaceFromDatabase(fixtureDatabase)
+            const before = await store.materializeDatabase()
+
+            await expect(store.commit({
+                expectedRevision: imported.revision,
+                unitMutations: [
+                    { type: 'set', key: '["root","username"]', value: 'Must not apply' },
+                    { type: 'set', key: '["unsupported-unit","value"]', value: true },
+                ],
+            })).rejects.toThrow()
+
+            expect((await store.readRoot()).revision).toBe(imported.revision)
+            expect(await store.materializeDatabase()).toEqual(before)
+        })
+
+        it('reads message metadata windows at the exact current and leased revisions', async () => {
+            const { store } = await createHarness()
+            const imported = await store.replaceFromDatabase(fixtureDatabase)
+            const lease = await store.acquireRevision(imported.revision)
+            try {
+                const committed = await store.commit({
+                    expectedRevision: imported.revision,
+                    conversations: [{
+                        type: 'replace-range',
+                        characterId: 'char-a',
+                        conversationId: 'conv-long',
+                        start: 1,
+                        deleteCount: 1,
+                        messages: [
+                            { role: 'char', data: '{{history}}', chatId: 'dynamic', disabled: 'allBefore' },
+                            { role: 'user', data: 'disabled', chatId: 'disabled', disabled: true },
+                        ],
+                    }],
+                })
+                const query = {
+                    characterId: 'char-a',
+                    conversationId: 'conv-long',
+                    startIndex: 0,
+                    limit: 3,
+                }
+
+                const current = await store.readConversationMessageMetadataWindow!(query)
+                expect(current?.revision).toBe(committed.revision)
+                expect(current?.value).toMatchObject({
+                    characterId: 'char-a',
+                    conversationId: 'conv-long',
+                    startIndex: 0,
+                    endIndex: 3,
+                    totalMessages: 131,
+                    hasMoreBefore: false,
+                    hasMoreAfter: true,
+                })
+                expect(current?.value.messages).toEqual([
+                    { chatId: 'msg-000', role: 'user', parserInert: true },
+                    { chatId: 'dynamic', role: 'char', disabled: 'allBefore', parserInert: false },
+                    { chatId: 'disabled', role: 'user', disabled: true, parserInert: true },
+                ])
+                const pinned = await lease.readConversationMessageMetadataWindow!(query)
+                expect(pinned?.revision).toBe(imported.revision)
+                expect(pinned?.value.totalMessages).toBe(130)
+                expect(pinned?.value.messages.map(({ chatId }) => chatId)).toEqual(['msg-000', 'msg-001', 'msg-002'])
+                expect(await store.readConversationMessageMetadataWindow!({ ...query, conversationId: 'conv-missing' }))
+                    .toBeNull()
+            } finally {
+                await lease.release()
+            }
+        })
     })
 }

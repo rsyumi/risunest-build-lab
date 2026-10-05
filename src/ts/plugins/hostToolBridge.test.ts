@@ -124,6 +124,32 @@ describe('host tool bridge', () => {
         expect(host.get('internal:graphmem')!.callTool).toHaveBeenCalledTimes(1)
     })
 
+    it('rejects a stale-scope call before the built-in handshake, the source lookup or the tool list', async () => {
+        const { access, builtIns, dependencies, select } = setup()
+        const { scope } = await access.listTools()
+        const files = builtIns['internal:fs']
+        vi.mocked(dependencies.loadHostSources).mockClear()
+        files.getToolList.mockClear()
+
+        select({ characterId: 'char-a', conversationId: 'conv-b' })
+        await expect(access.callTool({ scope, source: 'internal:fs', name: 'read_file', arguments: {} }))
+            .rejects.toThrow(/selected conversation changed/)
+        expect(files.checkHandshake).not.toHaveBeenCalled()
+        expect(files.getToolList).not.toHaveBeenCalled()
+        expect(dependencies.loadHostSources).not.toHaveBeenCalled()
+    })
+
+    it('rejects a call whose conversation changed while the built-in shook hands', async () => {
+        const { access, builtIns, select } = setup()
+        const { scope } = await access.listTools()
+        builtIns['internal:fs'].checkHandshake.mockImplementationOnce(async () => {
+            select({ characterId: 'char-a', conversationId: 'conv-b' })
+        })
+        await expect(access.callTool({ scope, source: 'internal:fs', name: 'read_file', arguments: {} }))
+            .rejects.toThrow(/selected conversation changed/)
+        expect(builtIns['internal:fs'].callTool).not.toHaveBeenCalled()
+    })
+
     it('shakes hands with a built-in source on its first call and again after a failed one', async () => {
         const { access, builtIns } = setup()
         const { scope } = await access.listTools()

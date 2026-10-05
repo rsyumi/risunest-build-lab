@@ -150,7 +150,7 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 vi.mock('@tauri-apps/plugin-http', () => ({ fetch: vi.fn() }))
 
 import { fetch as pluginFetch } from '@tauri-apps/plugin-http'
-import { fetchNative, globalFetch } from './globalApi.svelte'
+import { fetchNative, getFetchLogs, globalFetch } from './globalApi.svelte'
 
 describe('network requests without application URL restrictions', () => {
     beforeEach(() => {
@@ -294,6 +294,20 @@ describe('Tauri route request bodies', () => {
         expect(init.dataText).toBe('{"stream":true}')
         expect('body' in init).toBe(false)
         expect(init.headers).toEqual({ 'X-Request': 'value' })
+    })
+
+    test('nativeFetch logs a string body without encoding it for the Tauri route', async () => {
+        const body = '{"stream":true,"prompt":"synthetic"}'
+        const encode = vi.spyOn(TextEncoder.prototype, 'encode')
+        try {
+            await fetchNative('https://api.example.invalid/v1', { method: 'POST', body })
+            expect(encode).not.toHaveBeenCalledWith(body)
+        } finally {
+            encode.mockRestore()
+        }
+        const [, init] = vi.mocked(pluginFetch).mock.calls[0] as [string, any]
+        expect(init.dataText).toBe(body)
+        expect(getFetchLogs()[0]).toMatchObject({ url: 'https://api.example.invalid/v1', body })
     })
 
     test('nativeFetch keeps a byte body as bytes', async () => {

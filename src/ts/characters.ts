@@ -910,7 +910,9 @@ export async function removeChar(identifier:string|number,name:string, type:'nor
     if(type !== 'permanentForce'){
         if (!(await alertCheckboxConfirm({
             title: language.removeConfirm + name,
-            description: language.removeConfirm2 + name,
+            description: type === 'normal'
+                ? language.checkboxConfirmation.characterTrashDescription
+                : language.checkboxConfirmation.characterDeletionDescription,
             checkboxLabel: language.checkboxConfirmation.characterDeletion,
             actionLabel: language.confirm,
             cancelLabel: language.cancel,

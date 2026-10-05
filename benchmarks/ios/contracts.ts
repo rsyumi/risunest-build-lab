@@ -17,8 +17,9 @@ import { makeRegexFixture } from "../../src/ts/process/tests/phase1Fixtures";
 import fixture from "../../src-tauri/fixtures/persistent-fixture.json";
 
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-function check(value: unknown, message: string): asserts value {
-  if (!value) throw new Error(message);
+// The failure report carries `detail`, so a failed comparison records what was actually read.
+function check(value: unknown, message: string, detail?: unknown): asserts value {
+  if (!value) throw Object.assign(new Error(message), { detail });
 }
 async function guard() {
   check(

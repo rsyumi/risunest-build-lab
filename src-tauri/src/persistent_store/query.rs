@@ -959,18 +959,23 @@ pub(super) fn read_conversation_message_metadata_window(
     };
     let start_index = start_index.min(total_messages);
     let end_index = (start_index + limit).min(total_messages);
-    let mut statement = connection.prepare(
-        "SELECT message_id, json_extract(value, '$.role'), value -> '$.disabled',
-                COALESCE(json_type(value, '$.data') = 'text'
+    // Scanning bodies for parser markers is most of this read's cost.
+    let parser_inert = if query.skip_parser_work == Some(true) {
+        "0"
+    } else {
+        "COALESCE(json_type(value, '$.data') = 'text'
                 AND instr(json_extract(value, '$.data'), '{{') = 0
                 AND instr(json_extract(value, '$.data'), '}}') = 0
                 AND instr(json_extract(value, '$.data'), '<Thoughts>') = 0
-                AND instr(json_extract(value, '$.data'), '</Thoughts>') = 0, 0)
+                AND instr(json_extract(value, '$.data'), '</Thoughts>') = 0, 0)"
+    };
+    let mut statement = connection.prepare(&format!(
+        "SELECT message_id, json_extract(value, '$.role'), value -> '$.disabled', {parser_inert}
          FROM messages
          WHERE generation = ?1 AND character_id = ?2 AND conversation_id = ?3
            AND message_index >= ?4 AND message_index < ?5
          ORDER BY message_index ASC",
-    )?;
+    ))?;
     let rows = statement.query_map(
         params![
             target.generation,

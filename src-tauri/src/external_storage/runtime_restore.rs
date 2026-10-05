@@ -264,12 +264,16 @@ fn decode_hash(value: &str) -> Result<[u8; 32]> {
 }
 
 const FULL_RESTORE_AREAS: [&str;5]=["library","referencedAssets","hypa","local-plugins","local-settings"];
+/// The device sections a backup that a device captured carries.
+pub(super) fn device_section_ids()->BTreeSet<String> {
+    BTreeSet::from(["hypa".into(),"local-plugins".into(),"local-settings".into()])
+}
 fn restore_selection(restore_areas:Option<&[String]>)->Result<RestoreSelection> {
     if let Some(areas)=restore_areas {
         let unique=areas.iter().map(String::as_str).collect::<BTreeSet<_>>();
         if unique.len()!=areas.len() || unique!=FULL_RESTORE_AREAS.into_iter().collect() {return Err(corrupt());}
     }
-    Ok(RestoreSelection{library:true,sections:BTreeSet::from(["hypa".into(),"local-plugins".into(),"local-settings".into()])})
+    Ok(RestoreSelection{library:true,sections:device_section_ids()})
 }
 fn require_restorable_sections(_selection:&RestoreSelection,snapshot:&PreparedRemoteSnapshot,_store_id:&str)->Result<()> {
     if snapshot.captured_by_device.as_deref().is_none_or(str::is_empty) {return Err(ProviderError::new(ErrorKind::PreconditionFailed));}
@@ -549,23 +553,36 @@ async fn receive_restore_bodies_in_store(mut store:PersistentStore,root:&Path,co
     }
     let groups=super::lww_residency::packed_body_groups(sources,&priority);
     let stage=root.join("native-file-jobs/jobs").join(&job.id).join("external-restore-bodies");
+    // One handle records every body; opening the journal again reads every pin it holds.
+    let mut pins=restore_pins(&root,&job.id)?;
+    let cas=crate::asset_repository::PayloadCas::new(&root).map_err(runtime::local_error)?;
     for mut group in groups {
         group.sort_by_key(|source|!priority.contains(&source.hash));
-        let cas=crate::asset_repository::PayloadCas::new(&root).map_err(runtime::local_error)?;
+        let mut present=Vec::new();
         let mut missing=Vec::new();
         for source in group {
+            super::lww_residency::validate_packed_source(&source,&connected.handle)?;
             match cas.stat_object(&source.hash).map_err(runtime::local_error)? {
-                Some(size) if size==source.byte_length=>{store=receive_restore_body(store,&root,connected,job,revision,&source,None,cancel).await?;}
+                Some(size) if size==source.byte_length=>present.push(source),
                 Some(_)=>return Err(corrupt()),
                 None=>missing.push(source),
             }
+        }
+        if !present.is_empty() {
+            cancel.check()?;
+            require_activated_target(&store,job,revision)?;
+            let batch=present.iter().map(|source|(source.hash.clone(),source.byte_length,crate::asset_repository::job_pins::CasObjectRole::DirectObject)).collect::<Vec<_>>();
+            pins.pin_existing_batch(&cas,&batch).map_err(runtime::local_error)?;
+            require_activated_target(&store,job,revision)?;
+            for source in &present {jobs.settle_restore_body(&job.id,&source.hash)?;}
         }
         if missing.is_empty() {continue;}
         cancel.check()?;require_activated_target(&store,job,revision)?;
         let mut files=snapshot_restore::download_packed_body_files(&missing,&stage,&connected.root_key,connected.provider.as_ref(),&connected.handle,cancel).await?;
         for source in missing {
             let path=files.remove(&source.hash).ok_or_else(corrupt)?;
-            store=receive_restore_body(store,&root,connected,job,revision,&source,Some(path),cancel).await?;
+            (store,pins)=receive_restore_body(store,pins,&root,job,revision,&source,path,cancel).await?;
+            jobs.settle_restore_body(&job.id,&source.hash)?;
         }
         cleanup_staging(&stage);
     }
@@ -574,7 +591,6 @@ async fn receive_restore_bodies_in_store(mut store:PersistentStore,root:&Path,co
     let worker_root=root.clone();let worker_id=job.id.clone();let worker_job=job.clone();
     spawn_blocking(move || {
         require_activated_target(&store,&worker_job,revision)?;
-        let mut pins=restore_pins(&worker_root,&worker_id)?;
         pins.seal(&mut store,runtime::now_ms() as i64).map_err(runtime::local_error)?;
         pins.release(crate::asset_repository::job_pins::CasReleaseOutcome::Committed).map_err(runtime::local_error)?;
         let jobs=JobStore::open(&worker_root)?;
@@ -586,48 +602,55 @@ async fn receive_restore_bodies_in_store(mut store:PersistentStore,root:&Path,co
     Ok(result)
 }
 
-async fn receive_restore_body(mut store:PersistentStore,root:&Path,connected:&ConnectedRepository,job:&DurableJob,revision:i64,
-    source:&super::lww_residency::SharedPackedSource,path:Option<std::path::PathBuf>,cancel:&Cancellation)->Result<PersistentStore> {
+#[allow(clippy::too_many_arguments)]
+async fn receive_restore_body(store:PersistentStore,mut pins:crate::asset_repository::job_pins::DurableCasJob,root:&Path,job:&DurableJob,revision:i64,
+    source:&super::lww_residency::SharedPackedSource,path:std::path::PathBuf,cancel:&Cancellation)->Result<(PersistentStore,crate::asset_repository::job_pins::DurableCasJob)> {
     cancel.check()?;
     require_activated_target(&store,job,revision)?;
-    super::lww_residency::validate_packed_source(source,&connected.handle)?;
     let cas=crate::asset_repository::PayloadCas::new(root).map_err(runtime::local_error)?;
-    match cas.stat_object(&source.hash).map_err(runtime::local_error)? {
+    let (store,pins)=match cas.stat_object(&source.hash).map_err(runtime::local_error)? {
         Some(size) if size==source.byte_length=>{
-            let mut pins=restore_pins(root,&job.id)?;
             pins.pin_existing(&cas,&source.hash,source.byte_length,crate::asset_repository::job_pins::CasObjectRole::DirectObject).map_err(runtime::local_error)?;
+            (store,pins)
         }
         Some(_)=>return Err(corrupt()),
         None=>{
-            let path=path.ok_or_else(corrupt)?;
-            cancel.check()?;
-            require_activated_target(&store,job,revision)?;
-            let worker_root=root.to_path_buf();let worker_id=job.id.clone();let worker_source=source.clone();let worker_cancel=cancel.clone();let worker_job=job.clone();
-            store=spawn_blocking(move || {
+            let worker_source=source.clone();let worker_cancel=cancel.clone();let worker_job=job.clone();
+            spawn_blocking(move || {
                 require_activated_target(&store,&worker_job,revision)?;
-                let cas=crate::asset_repository::PayloadCas::new(&worker_root).map_err(runtime::local_error)?;
-                let mut pins=restore_pins(&worker_root,&worker_id)?;
                 let adopted=pins.adopt_import_payload(&cas,&path,&worker_source.hash,worker_source.byte_length,&|| {
                     worker_cancel.check().is_err() || require_activated_target(&store,&worker_job,revision).is_err()
                 });
                 require_activated_target(&store,&worker_job,revision)?;
                 adopted.map_err(runtime::local_error)?;
-                Ok::<_,ProviderError>(store)
-            }).await.map_err(runtime::local_error)??;
+                Ok::<_,ProviderError>((store,pins))
+            }).await.map_err(runtime::local_error)??
         }
-    }
+    };
     require_activated_target(&store,job,revision)?;
-    JobStore::open(root)?.settle_restore_body(&job.id,&source.hash)?;
-    Ok(store)
+    Ok((store,pins))
+}
+
+/// The units as the store reads them. A read failure is kept in `failure` so
+/// it is reported as itself rather than as invalid data.
+fn store_units<'a>(
+    units:&'a snapshot_restore::OriginalUnits,
+    content:&'a super::content_store::ContentStore,
+    failure:&'a mut Option<ProviderError>,
+) -> impl Iterator<Item = crate::persistent_store::StoreResult<(risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue)>> + 'a {
+    units.units(content).map(move |unit| unit.map_err(|error| {
+        if failure.is_none() {*failure=Some(error);}
+        StoreError::Validation{message:"Original unit control is unavailable".into()}
+    }))
 }
 
 fn stage_original_backup_controls(
     store:&mut PersistentStore,
     snapshot:&PreparedRemoteSnapshot,
-    units:&std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
+    units:&snapshot_restore::OriginalUnits,
     cancel:&Cancellation,
 ) -> Result<()> {
-    use crate::persistent_store::external_capture::{original_unit_control_lengths,original_unit_dependency_inventory,BackupBodyRole};
+    use crate::persistent_store::external_capture::{original_unit_control_lengths,streamed_unit_dependency_inventory,BackupBodyRole};
     let content=super::content_store::ContentStore::open(&snapshot.staging_root.join("external-storage")).map_err(pds_error)?;
     let declared=snapshot.objects.iter().map(|object| (object.content_hash.as_str(),object)).collect::<std::collections::BTreeMap<_,_>>();
     if declared.len() != snapshot.objects.len() {return Err(corrupt())}
@@ -648,17 +671,20 @@ fn stage_original_backup_controls(
     // Nothing above the bound is read here. Message pages and large unit
     // bodies are read once, in the second pass, at the lengths their
     // manifests and the snapshot declare.
-    let metadata=original_unit_control_lengths(units,
+    let mut failure=None;
+    let metadata=original_unit_control_lengths(store_units(units,&content,&mut failure),
         &|hash| read(hash,risunest_sync_wire::MAX_METADATA_BYTES as u64),
         &size,&size,&probe);
     cancel.check()?;
+    if let Some(failure)=failure.take() {return Err(failure)}
     let metadata=metadata.map_err(pds_error)?;
     let mut spool=super::capture::BackupDependencySpool::new(&snapshot.staging_root.join("verified-original-controls")).map_err(pds_error)?;
-    let inventory=original_unit_dependency_inventory(units,
+    let inventory=streamed_unit_dependency_inventory(store_units(units,&content,&mut failure),
         &|hash| match metadata.controls.get(hash) {Some(length)=>read(hash,*length),None=>Ok(None)},
         &size,&probe,true,&mut |hash,bytes,role| Ok(spool.push(hash,bytes,role)?),
     );
     cancel.check()?;
+    if let Some(failure)=failure.take() {return Err(failure)}
     let inventory=inventory.map_err(pds_error)?;
     if !inventory.spooled_payloads.is_empty() {return Err(corrupt())}
     cancel.check()?;
@@ -672,13 +698,31 @@ fn stage_original_backup_controls(
     result.map_err(pds_error)
 }
 
+/// Stages the original units as the source units of the replacement `staging_id`.
+fn stage_original_units(
+    store:&mut PersistentStore,
+    staging_id:&str,
+    staging_root:&Path,
+    units:&snapshot_restore::OriginalUnits,
+    cancel:&Cancellation,
+) -> Result<()> {
+    let content=super::content_store::ContentStore::open_existing(&staging_root.join("external-storage")).map_err(pds_error)?.ok_or_else(corrupt)?;
+    let writer=store.replacement_source_writer(staging_id).map_err(pds_error)?;
+    for unit in units.units(&content) {
+        cancel.check()?;
+        let (key,value)=unit?;
+        writer.put(&key,&value).map_err(pds_error)?;
+    }
+    writer.finish().map_err(pds_error)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_local_restore(
     app: &AppHandle,
     job: &DurableJob,
     expected_revision: i64,
     snapshot: PreparedRemoteSnapshot,
-    original_units: std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
+    original_units: snapshot_restore::OriginalUnits,
     selection: RestoreSelection,
     sections: Vec<super::sections::CapturedSection>,
     cancel: Cancellation,
@@ -697,7 +741,7 @@ fn prepare_local_restore_in_store(
     job: &DurableJob,
     expected_revision: i64,
     snapshot: PreparedRemoteSnapshot,
-    original_units: std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
+    original_units: snapshot_restore::OriginalUnits,
     selection: RestoreSelection,
     sections: Vec<super::sections::CapturedSection>,
     cancel: Cancellation,
@@ -720,14 +764,17 @@ fn prepare_local_restore_in_store(
     }
     stage_original_backup_controls(store,&snapshot,&original_units,&cancel)?;
     JobStore::open(&root)?.freeze_restore_bodies(job,&sources,&present)?;
+    // A catalog row needs its body or its remote source, so the sources are registered first.
+    super::lww_residency::register_verified_packed_many(store.repository_root(),&sources)?;
+    #[cfg(test)] registration_crash(&root,RegistrationCrash::AfterFirst)?;
     let registrations=sources.iter().map(|source|crate::persistent_store::asset_object_catalog::AssetObjectRegistration{object_hash:source.hash.clone(),byte_size:source.byte_length}).collect::<Vec<_>>();
     for batch in registrations.chunks(crate::persistent_store::asset_object_catalog::ASSET_OBJECT_CATALOG_MAX_PAGE as usize) {
         store.asset_object_catalog().register(batch,runtime::now_ms() as i64).map_err(pds_error)?;
     }
+    #[cfg(test)] registration_crash(&root,RegistrationCrash::AfterSecond)?;
     let current=JobStore::open(&root)?.read(&job.id)?;
     let previous_intent=current.summary.get("restoreCommit").map(|value|serde_json::from_value::<RestoreCommitIntent>(value.clone()).map_err(|_|corrupt())).transpose()?;
     if previous_intent.is_some() {completed_restore_in_store(store,&current)?;}
-    super::lww_residency::register_verified_packed_many(store.repository_root(),&sources)?;
     let cas=crate::asset_repository::PayloadCas::new(store.repository_root()).map_err(runtime::local_error)?;
     let mut pins=restore_pins(store.repository_root(),&job.id)?;
     for batch in sources.iter().filter(|source|present.contains(&source.hash)).map(|source|(source.hash.clone(),source.byte_length,crate::asset_repository::job_pins::CasObjectRole::DirectObject)).collect::<Vec<_>>().chunks(128) {
@@ -790,14 +837,16 @@ fn prepare_local_restore_in_store(
     };
     restore_intent(job,expected_revision,header,prepared.as_ref().ok_or_else(corrupt)?.external_staging_id())?
     };
+    stage_original_units(store,&intent.staging_id,&staging_root,&original_units,&cancel)?;
     cancel.check()?;
     permit.upgrade_staging().map_err(runtime::local_error)?;
     let maintenance=state.acquire_device_maintenance().map_err(pds_error)?;
     if store.revision().map_err(pds_error)?!=expected_revision {return Err(ProviderError::new(ErrorKind::PreconditionFailed));}
     persist_restore_intent(&root,job,&intent)?;
-    let revision = store.lww_commit_replacement_with_device_sections(
-        &intent.header,&intent.staging_id,Some(&original_units),&prepared_sections.iter().collect::<Vec<_>>(),
+    let revision = store.lww_commit_staged_replacement_with_device_sections(
+        &intent.header,&intent.staging_id,&prepared_sections.iter().collect::<Vec<_>>(),
     ).map_err(pds_error)?;
+    store.release_replacement_source(&intent.staging_id).map_err(pds_error)?;
     drop(prepared);
     drop(maintenance);
     cleanup_staging(&staging_root);
@@ -811,6 +860,35 @@ fn prepare_local_restore_in_store(
     current.summary["phase"]=json!("awaiting-adoption");
     jobs.put(&current)?;
     Ok((result,permit))
+}
+
+#[cfg(test)]
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+enum RegistrationCrash {AfterFirst,AfterSecond}
+
+#[cfg(test)]
+static REGISTRATION_CRASHES:std::sync::Mutex<std::collections::BTreeMap<std::path::PathBuf,RegistrationCrash>>=std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Stops a restore preparation of `root` at `point` as a process exit would, leaving what was
+/// already on disk.
+#[cfg(test)]
+fn registration_crash(root:&Path,point:RegistrationCrash)->Result<()> {
+    let root=std::fs::canonicalize(root).unwrap_or_else(|_|root.to_owned());
+    if REGISTRATION_CRASHES.lock().unwrap().get(&root)==Some(&point) {return Err(ProviderError::new(ErrorKind::Cancelled));}
+    Ok(())
+}
+
+#[cfg(test)]
+struct RegistrationCrashGuard(std::path::PathBuf);
+#[cfg(test)]
+impl Drop for RegistrationCrashGuard {
+    fn drop(&mut self) {REGISTRATION_CRASHES.lock().unwrap().remove(&self.0);}
+}
+#[cfg(test)]
+fn crash_registration_at(root:&Path,point:RegistrationCrash)->RegistrationCrashGuard {
+    let root=std::fs::canonicalize(root).unwrap();
+    REGISTRATION_CRASHES.lock().unwrap().insert(root.clone(),point);
+    RegistrationCrashGuard(root)
 }
 
 #[cfg(test)]
@@ -862,7 +940,7 @@ fn cleanup_staging(path: &Path) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::persistent_store::sync_selection::CaptureIdentity;
 
@@ -896,6 +974,7 @@ mod tests {
         let mut invalid=RecordDescriptor::content(risunest_sync_wire::hash(b"synthetic absent opaque payload"));
         invalid.dependency_root=Some("ab".repeat(32));
         invalid_units.insert(UnitKey::new(&["z-future-unit","missing-tree"]).unwrap(),UnitValue::object(invalid).unwrap());
+        let (invalid_units,units)=(snapshot_restore::OriginalUnits::staged(&mut content,&invalid_units),snapshot_restore::OriginalUnits::staged(&mut content,&units));
         assert!(stage_original_backup_controls(&mut store,&snapshot,&invalid_units,&Cancellation::default()).is_err());
         assert!(store.lww_object_body(&manifest.hash).unwrap().is_none());
         stage_original_backup_controls(&mut store,&snapshot,&units,&Cancellation::default()).unwrap();
@@ -912,6 +991,7 @@ mod tests {
         let mut snapshot=prepared(Some("source-device"));
         snapshot.staging_root=directory.path().join("staging");
         snapshot.objects.push(snapshot_restore::PreparedObject {content_hash:body.content_hash.clone(),byte_length:body.byte_size,source:super::super::content_store::ObjectSource::Library(body.content_hash)});
+        let units=snapshot_restore::OriginalUnits::staged(&mut super::super::content_store::ContentStore::open(&snapshot.staging_root.join("external-storage")).unwrap(),&units);
         crate::asset_repository::body_io::reset_body_io();
         stage_original_backup_controls(&mut store,&snapshot,&units,&Cancellation::default()).unwrap();
         let observed=crate::asset_repository::body_io::take_body_io();
@@ -937,11 +1017,12 @@ mod tests {
             snapshot.objects.push(snapshot_restore::PreparedObject {content_hash:hash.clone(),byte_length:bytes.len() as u64,source:super::super::content_store::ObjectSource::Captured(hash)});
         }
         content.commit().unwrap();
-        let unit=|key:&[&str],bytes:&[u8]| std::collections::BTreeMap::from([(UnitKey::new(key).unwrap(),UnitValue::object(RecordDescriptor::content(risunest_sync_wire::hash(bytes))).unwrap())]);
-        assert!(stage_original_backup_controls(&mut store,&snapshot,&unit(&["root","additionalPrompt"],&padded),&Cancellation::default()).is_err());
+        let mut unit=|key:&[&str],bytes:&[u8]| snapshot_restore::OriginalUnits::staged(&mut content,&std::collections::BTreeMap::from([(UnitKey::new(key).unwrap(),UnitValue::object(RecordDescriptor::content(risunest_sync_wire::hash(bytes))).unwrap())]));
+        let (padded_units,body_units)=(unit(&["root","additionalPrompt"],&padded),unit(&["root","additionalPrompt"],&body));
+        assert!(stage_original_backup_controls(&mut store,&snapshot,&padded_units,&Cancellation::default()).is_err());
         assert!(store.lww_object_body(&risunest_sync_wire::hash(&body)).unwrap().is_none());
         crate::persistent_store::hash_work::reset_hash_work();
-        stage_original_backup_controls(&mut store,&snapshot,&unit(&["root","additionalPrompt"],&body),&Cancellation::default()).unwrap();
+        stage_original_backup_controls(&mut store,&snapshot,&body_units,&Cancellation::default()).unwrap();
         let work=crate::persistent_store::hash_work::take_hash_work();
         assert_eq!(work.domains["native_backup_large_unit_source"].calls,1);
         assert!(store.lww_object_body(&risunest_sync_wire::hash(&body)).unwrap()==Some(body));
@@ -1173,6 +1254,131 @@ mod tests {
         assert_eq!(store.revision().unwrap(),revision);
         assert_eq!(store.read_root(None).unwrap().value,library);
         assert_eq!(stop_restore(root,&job.id).err().unwrap().kind,ErrorKind::PreconditionFailed);
+    }
+
+    /// A full backup of a library holding `assets`, uploaded to a fake repository.
+    pub(in crate::external_storage) struct PackagedBackup {
+        _source_root:tempfile::TempDir,
+        _work:tempfile::TempDir,
+        pub(in crate::external_storage) connected:ConnectedRepository,
+        backup_id:String,
+        pub(in crate::external_storage) restore_source:Value,
+        assets:Vec<String>,
+    }
+
+    async fn packaged_backup(assets:&[Vec<u8>]) -> PackagedBackup {
+        packaged_backup_seeded(assets,|_|{}).await
+    }
+
+    /// A packaged backup whose source device `seed` prepared first.
+    pub(in crate::external_storage) async fn packaged_backup_seeded(assets:&[Vec<u8>],seed:impl FnOnce(&mut PersistentStore)) -> PackagedBackup {
+        use super::super::{fake,journal::{JobIdentity,TransferJournal},packaging,phase_progress::PhaseProgress};
+        use std::sync::Arc;
+        let source_root=tempfile::tempdir().unwrap();
+        let mut source=PersistentStore::open(source_root.path()).unwrap();
+        seed(&mut source);
+        let assets=assets.iter().enumerate().map(|(index,bytes)| crate::server_sync::lww_tests::put_asset(&mut source,&format!("assets/synthetic-restore-{index}.bin"),bytes).object_hash.unwrap()).collect::<Vec<_>>();
+        let probe=runtime::CancelProbe(Cancellation::default());
+        let hydration=source.hydrate_external_capture_dependencies("sender",&probe).unwrap();
+        let (lease,prepared)=source.lww_acquire_backup_capture(source.revision().unwrap()).unwrap();
+        let sections=super::super::sections::capture_prepared_backup_sections(&prepared,&source_root.path().join("backup-sections"),&probe.0).unwrap();
+        let capture=source.capture_external_library_from_lease_with_sections("sender",&hydration,&lease.lease,sections,&probe).unwrap();
+        let sections=capture.catalog.backup_sections().unwrap();
+        let original_units=capture.catalog.original_backup_units().unwrap();
+        let repository=fake::repository();
+        let connected=ConnectedRepository {
+            stored:synthetic_connection(&repository),provider:Arc::new(fake::FakeProvider::new(false)),handle:repository,
+            dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new([21;32]),
+        };
+        let backup_id=uuid::Uuid::new_v4().to_string();
+        let work=tempfile::tempdir().unwrap();
+        let mut transfer=TransferJournal::open(&work.path().join("backup-journal"),JobIdentity {
+            job_id:backup_id.clone(),connection_id:connected.stored.id.clone(),repository_id:connected.handle.repository_id.clone(),
+            capture_id:capture.id.clone(),capture:capture.identity.clone(),
+        }).unwrap();
+        let metadata=packaging::SnapshotMetadata {
+            snapshot_id:backup_id.clone(),repository_id:connected.stored.descriptor.repository_id.clone(),
+            library_id:capture.identity.library_epoch.clone(),author_device_id:capture.identity.store_id.clone(),
+            created_at_ms:runtime::now_ms(),logical_revision:capture.identity.revision as u64,parent_snapshot_id:None,
+            content_fingerprint:capture.catalog.content_fingerprint(&risunest_external_storage_format::format::library_fingerprint_domain()).unwrap(),
+            purpose:packaging::SnapshotPurpose::BackupBundle {
+                source:risunest_external_storage_format::control::BundleSource::Device{writer_id:source.lww_clock_state().unwrap().writer_id},
+                remote_generation:None,original_units,
+            },
+        };
+        let backup=packaging::package_and_upload(capture,sections,source_root.path(),&work.path().join("cache"),metadata,
+            &connected.root_key,packaging::PackageLimits::from_capabilities(&connected.stored.capabilities).unwrap(),None,&mut transfer,
+            connected.provider.as_ref(),&connected.handle,&PhaseProgress::silent(),&Cancellation::default()).await.unwrap();
+        let restore_source=serde_json::to_value(backup.reference.stored(&connected.handle).unwrap()).unwrap();
+        PackagedBackup {_source_root:source_root,_work:work,connected,backup_id,restore_source,assets}
+    }
+
+    /// A restore of `backup` admitted against the library at `root`.
+    fn restore_job(root:&Path,store:&PersistentStore,backup:&PackagedBackup) -> DurableJob {
+        let request=serde_json::from_value(json!({"connectionId":"synthetic-connection","kind":"restore","snapshotId":backup.backup_id,"targetRevision":"0"})).unwrap();
+        let mut job=DurableJob::new(request,1,store.external_identity().unwrap());
+        job.summary["restoreSource"]=backup.restore_source.clone();
+        JobStore::open(root).unwrap().put(&job).unwrap();
+        job
+    }
+
+    #[test]
+    fn an_interrupted_restore_preparation_never_leaves_a_catalog_row_without_its_body_or_source() {
+        use std::sync::Arc;
+        for point in [RegistrationCrash::AfterFirst,RegistrationCrash::AfterSecond] {
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+                let backup=packaged_backup(&[vec![41;4096],vec![42;8192]]).await;
+                let destination=tempfile::tempdir().unwrap();
+                let root=destination.path();
+                let mut store=PersistentStore::open(root).unwrap();
+                ConnectionStore::open(root).unwrap().insert(&backup.connected.stored).unwrap();
+                let job=restore_job(root,&store,&backup);
+                let (database,sections)=prepare_database_first_backup(root,&backup.connected,&job,&Cancellation::default()).await.unwrap();
+                assert_eq!(database.missing.len(),backup.assets.len());
+                let admission=Arc::new(crate::native_file_jobs::admission::Admission::default());
+                let state=PersistentStoreState::default();
+                let crash=crash_registration_at(root,point);
+                assert!(activate_database_first_backup(&mut store,&state,&job,database,sections,Cancellation::default(),admission.staging().unwrap()).is_err());
+                drop(crash);
+                let cas=crate::asset_repository::PayloadCas::new(root).unwrap();
+                for asset in &backup.assets {assert!(cas.stat_object(asset).unwrap().is_none());}
+                store.asset_gc_dry_run(1024,None,runtime::now_ms() as i64,0).unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn receiving_restored_bodies_opens_the_restore_journal_once() {
+        use crate::asset_repository::job_pins::journal_opens;
+        use std::sync::Arc;
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let bodies=(0..300u16).map(|index| {
+                let mut body=index.to_le_bytes().to_vec();
+                body.resize(1024+usize::from(index%64),(index%251) as u8);
+                body
+            }).collect::<Vec<_>>();
+            let backup=packaged_backup(&bodies).await;
+            let destination=tempfile::tempdir().unwrap();
+            let root=destination.path();
+            let mut store=PersistentStore::open(root).unwrap();
+            ConnectionStore::open(root).unwrap().insert(&backup.connected.stored).unwrap();
+            let job=restore_job(root,&store,&backup);
+            let (database,sections)=prepare_database_first_backup(root,&backup.connected,&job,&Cancellation::default()).await.unwrap();
+            assert_eq!(database.missing.len(),bodies.len());
+            let admission=Arc::new(crate::native_file_jobs::admission::Admission::default());
+            let state=PersistentStoreState::default();
+            let (receipt,permit)=activate_database_first_backup(&mut store,&state,&job,database,sections,Cancellation::default(),admission.staging().unwrap()).unwrap();
+            assert_eq!(store.replacement_source_row_total().unwrap(),0);
+            // Bodies that arrive locally before the transfer are pinned in place, the rest are downloaded.
+            let local=crate::asset_repository::PayloadCas::new(root).unwrap();
+            for body in bodies.iter().step_by(3) {local.prepare_bytes(body).unwrap();}
+            let before=journal_opens(root,&job.id);
+            let adoption=RestoreAdoptionRequest{job_id:job.id.clone(),received_revision:receipt["receivedRevision"].as_str().unwrap().into(),selected_character_id:None};
+            settle_database_first_backup(store,&backup.connected,&job,adoption,&mut Some(permit),&Cancellation::default()).await.unwrap();
+            assert_eq!(journal_opens(root,&job.id)-before,1);
+            let cas=crate::asset_repository::PayloadCas::new(root).unwrap();
+            for asset in &backup.assets {assert!(cas.stat_object(asset).unwrap().is_some());}
+        });
     }
 
     #[test]

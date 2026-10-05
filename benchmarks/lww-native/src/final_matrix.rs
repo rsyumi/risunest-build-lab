@@ -665,8 +665,9 @@ async fn costly_external(output:&Path,fixture:&mut CycleFixture,hashes:&[String]
     let hashes=current_hashes.as_slice();
     let backup=if route=="remote-backup" && scenario!=Scenario::DuringCompaction && scenario!=Scenario::DuringBackup && scenario!=Scenario::DuringAssetTransfer {Some(prepare_remote_backup(&mut fixture.a,&connected,&setup.path().join("remote-backup")).await?)}else{None};
     if scenario==Scenario::ConsolidatedSnapshot {
-        fixture.sender.compact_published(&setup.path().join("consolidated"),&uuid::Uuid::new_v4().to_string(),
-            &fixture.a.lww_clock_state().map_err(|e|e.to_string())?.writer_id,&fixture.sender.capabilities,&Cancellation::default(),None)
+        let writer=fixture.a.lww_clock_state().map_err(|e|e.to_string())?.writer_id;
+        fixture.sender.compact_published(&mut fixture.a,&setup.path().join("consolidated"),&uuid::Uuid::new_v4().to_string(),
+            &writer,&fixture.sender.capabilities,&Cancellation::default(),None)
             .await.map_err(|e|format!("{e:?}"))?;
     }
     if scenario==Scenario::IncomparableSnapshots {
@@ -677,7 +678,7 @@ async fn costly_external(output:&Path,fixture:&mut CycleFixture,hashes:&[String]
         let writers=[fixture.a.lww_clock_state().map_err(|e|e.to_string())?.writer_id,fixture.b.lww_clock_state().map_err(|e|e.to_string())?.writer_id];
         let paths=[setup.path().join("incomparable-a"),setup.path().join("incomparable-b")];
         let ids=[uuid::Uuid::new_v4().to_string(),uuid::Uuid::new_v4().to_string()];
-        let raw=native_maintenance::produce_incomparable_native(&fixture.sender,&fixture.provider,[&paths[0],&paths[1]],
+        let raw=native_maintenance::produce_incomparable_native(&fixture.sender,&fixture.provider,[&mut fixture.a,&mut fixture.b],[&paths[0],&paths[1]],
             [&ids[0],&ids[1]],[&writers[0],&writers[1]],&fixture.sender.capabilities).await?;
         write(output,"excluded-incomparable-producer.json",&raw)?;
     }
@@ -860,7 +861,7 @@ async fn authenticated_source_ids(fixture:&CycleFixture,backup:Option<&crate::ex
             &backup.snapshot_id,&fixture.sender.connection_id,&fixture.sender.connection_root,&fixture.sender.root_key,
             fixture.sender.provider.as_ref(),&fixture.sender.repository,&cancel).await.map_err(|e|format!("{e:?}"))?;
     } else {
-        let mut state=fixture.sender.published_state(directory,&cancel).await.map_err(|e|format!("{e:?}"))?;
+        let mut state=fixture.sender.published_state(&mut metadata,directory,&cancel).await.map_err(|e|format!("{e:?}"))?;
         fixture.sender.stage_published_objects(&mut metadata,&mut state,directory,&cancel).await.map_err(|e|format!("{e:?}"))?;
     }
     let mut ids=BTreeMap::<String,BTreeSet<String>>::new();

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { classifyTestRequest, createTestNetworkPolicy } from './testNetwork'
+import { classifyTestRequest, createTestNetworkPolicy, testNetwork } from './testNetwork'
 
 describe('test network policy', () => {
     it('denies arbitrary HTTP and Realm paths even on an approved origin', () => {
@@ -8,6 +8,24 @@ describe('test network policy', () => {
         expect(classifyTestRequest('http://127.0.0.1:4321/api', origins)).toBeNull()
         expect(classifyTestRequest('http://127.0.0.1:4322/api', origins)).toBeTruthy()
         expect(classifyTestRequest('http://127.0.0.1:4321/rs/fixture', origins)).toContain('RisuRealm')
+    })
+    it('checks sockets against the origin of the same host and port', () => {
+        const origins = new Set(['http://127.0.0.1:4321'])
+        expect(classifyTestRequest('ws://127.0.0.1:4321/socket', origins)).toBeNull()
+        expect(classifyTestRequest('wss://127.0.0.1:4321/socket', origins)).toBeTruthy()
+        expect(classifyTestRequest('ws://127.0.0.1:4322/socket', origins)).toBeTruthy()
+        expect(classifyTestRequest(new URL('wss://example.test/socket'), origins)).toBeTruthy()
+    })
+    it('refuses an unplanned socket before connecting and restores the guard after a mock', () => {
+        const policy = createTestNetworkPolicy()
+        expect(() => policy.check(new URL('wss://unexpected.invalid/socket'))).toThrow('Unexpected test network request')
+        expect(() => policy.finish()).toThrow('Blocked test requests (1)')
+        const guard = globalThis.WebSocket
+        vi.stubGlobal('WebSocket', vi.fn())
+        vi.unstubAllGlobals()
+        expect(globalThis.WebSocket).toBe(guard)
+        expect(() => new WebSocket('wss://unexpected.invalid/socket')).toThrow('Unexpected test network request')
+        expect(() => testNetwork.finish()).toThrow('Blocked test requests (1)')
     })
     it('reports swallowed failures and resets both violations and scoped permissions', () => {
         const policy = createTestNetworkPolicy()

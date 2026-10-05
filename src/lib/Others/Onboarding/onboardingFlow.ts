@@ -22,7 +22,7 @@ export const ONBOARDING_STATES = [
 export type OnboardingState = (typeof ONBOARDING_STATES)[number]
 
 /** How the reader got their data. It decides the wording on the last screen. */
-export type OnboardingPath = 'fresh' | 'import' | 'server' | 'account' | 'external'
+export type OnboardingPath = 'fresh' | 'import' | 'server' | 'account' | 'external' | 'existing'
 
 export interface OnboardingFlow {
     readonly state: OnboardingState

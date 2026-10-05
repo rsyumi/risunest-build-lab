@@ -58,7 +58,7 @@ vi.mock('./plugins/plugins.svelte', () => ({
     pluginV2: { providerOptions: new Map() },
 }))
 
-import { ChatTokenizer, encode, strongBan } from './tokenizer'
+import { ChatTokenizer, encode, encodeWithTokenizer, strongBan } from './tokenizer'
 import { pluginV2 } from './plugins/plugins.svelte'
 
 describe('chat tokenizer native count batching', () => {
@@ -333,5 +333,19 @@ describe('strong ban native batch routing', () => {
 
         expect(fallbackError).toEqual(baselineError)
         expect(fallbackBias).toEqual(baselineBias)
+    })
+})
+
+describe('encodeWithTokenizer', () => {
+    it('encodes with o200k_base when it is named', async () => {
+        const { Tiktoken } = await import('@dqbd/tiktoken')
+        const o200k = await import('src/etc/o200k_base.json')
+        const expected = new Tiktoken(o200k.bpe_ranks, o200k.special_tokens, o200k.pat_str)
+        const text = '합성 테스트 문장입니다. Synthetic sentence.'
+        try {
+            expect([...await encodeWithTokenizer(text, 'o200k_base')]).toEqual([...expected.encode(text)])
+        } finally {
+            expected.free()
+        }
     })
 })

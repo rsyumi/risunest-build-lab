@@ -16,7 +16,7 @@
     import { hotReloadPluginFiles } from "src/ts/plugins/apiV3/developMode";
     import { resetAllPluginPermissions } from "src/ts/plugins/apiV3/v3.svelte";
 
-    import { deletePluginDataForOwner } from "src/ts/plugins/pluginDataInventory";
+    import { removeInstalledPlugin } from "src/ts/plugins/pluginRemoval";
 
     let showParams = $state([])
 
@@ -139,12 +139,7 @@
                     });
                     if (!result.confirmed) return;
                     try {
-                        if (result.checked) await deletePluginDataForOwner(owner);
-                        const index = DBState.db.plugins.findIndex((installed) => installed.name === owner);
-                        if (index === -1) return;
-                        if (DBState.db.currentPluginProvider === owner) DBState.db.currentPluginProvider = "";
-                        DBState.db.plugins.splice(index, 1);
-                        await loadPlugins();
+                        await removeInstalledPlugin(owner, result.checked);
                     } catch (error) {
                         alertError(error);
                     }

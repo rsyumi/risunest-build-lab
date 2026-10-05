@@ -2323,6 +2323,32 @@ describe('Chats imperative mount lifecycle', () => {
         expect(pendingEditorDrafts('character-id', 'chat-room-id')).toEqual([])
     })
 
+    test('brings an older windowed message with a draft back into view when the chat is opened again', async () => {
+        const messages = Array.from({ length: 200 }, (_, index) => makeMessage(index))
+        mounted = mount(ChatsHarness, { target, props: { initialCharacter: makeMetadataOnlyCharacter(), initialViewportSource: makePersistentViewportSource(messages) } })
+        await vi.waitFor(() => expect(probeElements(target).some((node) => node.dataset.message === 'message-199')).toBe(true))
+        await expect((mounted as HarnessInstance).jumpTo(5)).resolves.toBe(true)
+        await vi.waitFor(() => expect(probeElements(target).some((node) => node.dataset.message === 'message-5')).toBe(true))
+        const instance = probeIdForMessage(target, 'message-5')
+        chatMountProbe.activeEditors.add(instance)
+        chatMountProbe.editorDrafts.set(instance, { kind: 'original', draft: 'windowed draft', evidence: structuredClone(messages[5]) })
+        await unmount(mounted)
+        expect(pendingEditorDrafts('character-id', 'chat-room-id')).toHaveLength(1)
+
+        const reopened = makePersistentViewportSource(messages)
+        const ensureRange = vi.spyOn(reopened, 'ensureRange')
+        mounted = mount(ChatsHarness, { target, props: { initialCharacter: makeMetadataOnlyCharacter(), initialViewportSource: reopened } })
+        await vi.waitFor(() => expect(probeElements(target).find((node) => node.dataset.message === 'message-5')?.dataset.restoredDraft).toBe('windowed draft'))
+        expect(pendingEditorDrafts('character-id', 'chat-room-id')).toEqual([])
+        // The view jumped to the draft row instead of staying at the latest messages.
+        await vi.waitFor(() => expect(ensureRange.mock.calls.some(([input]) => input.reason === 'jump')).toBe(true))
+        const jump = ensureRange.mock.calls.find(([input]) => input.reason === 'jump')![0]
+        expect(jump.startIndex).toBeLessThanOrEqual(5)
+        expect(jump.startIndex + jump.limit).toBeGreaterThan(5)
+        await vi.waitFor(() => expect(probeElements(target).some((node) => node.dataset.message === 'message-6')).toBe(true))
+        expect(probeElements(target).some((node) => node.dataset.message === 'message-199')).toBe(false)
+    })
+
     test.each(['middle', 'home'] as const)('seeks directly into a distant virtual gap: %s', async (position) => {
         const messages = Array.from({ length: 10_000 }, (_, index) => makeMessage(index))
         mounted = mount(ChatsHarness, { target, props: { initialMessages: messages, initialCharacter: makeCharacter(messages) } })

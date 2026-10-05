@@ -702,7 +702,7 @@ fn authenticated_headers(
 }
 
 fn build_client() -> Result<Client, NativeJobError> {
-    Client::builder()
+    crate::platform_tls::client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(CONNECT_TIMEOUT)
         .build()

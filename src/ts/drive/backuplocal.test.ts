@@ -358,7 +358,7 @@ describe('local backup persistent snapshot', () => {
         createElement.mockRestore()
         if (native) {
             expect(alertCheckboxConfirm).not.toHaveBeenCalled()
-            expect(state.replacePersistentDatabase.mock.calls[0][2]).toMatchObject({upstreamImport:true, upstreamImportWarnings:[language.backupLoadConfirm2]})
+            expect(state.replacePersistentDatabase.mock.calls[0][2]).toMatchObject({upstreamImport:true, upstreamImportWarnings:[language.checkboxConfirmation.dataReplacementDescription]})
         } else {
             expect(alertCheckboxConfirm).toHaveBeenCalledOnce()
             expect(alertCheckboxConfirm).toHaveBeenCalledWith(expect.objectContaining({title:language.pocketRisuImportConfirm}))

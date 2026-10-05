@@ -24,7 +24,12 @@ static int sessionEnding(void) {
 }
 
 static NSApplicationTerminateReply shouldTerminate(id delegate, SEL command, NSApplication *sender) {
-    if (pending) return NSTerminateLater;
+    if (pending) {
+        // A repeated quit ends the app when the document left the pending one unanswered.
+        if (!requestQuit || requestQuit(sessionEnding()) != 0) return NSTerminateLater;
+        pending = NO;
+        return NSTerminateNow;
+    }
     pending = YES;
     int disposition = requestQuit ? requestQuit(sessionEnding()) : 0;
     if (disposition > 0) return NSTerminateLater;

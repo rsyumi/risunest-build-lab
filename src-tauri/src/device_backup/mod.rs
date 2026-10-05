@@ -386,33 +386,43 @@ impl DeviceBackupState {
         })
     }
 
-    pub(crate) fn set_library_replacement(&self, id: &str, header: &crate::persistent_store::lww::Header, units: &std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>) -> Result<()> {
+    pub(crate) fn set_library_replacement(&self, id: &str, header: &crate::persistent_store::lww::Header, units: impl IntoIterator<Item = crate::persistent_store::StoreResult<(risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue)>>) -> Result<()> {
         let mut inner = self.lock()?;
         let db = inner.connection.as_mut().unwrap();
         let session = active_session_for(db,id)?;
         require(session.phase == "loading-source", "Replacement metadata requires loading source")?;
         let transaction=db.transaction()?;
         transaction.execute("INSERT INTO replacements VALUES(?1,?2)",params![id,serde_json::to_string(header).map_err(|_| error("device-metadata-invalid","Replacement header could not be encoded"))?])?;
-        for (key,value) in units {
-            transaction.execute("INSERT INTO replacement_units VALUES(?1,?2,?3)",params![id,String::from(key.clone()),serde_json::to_string(value).map_err(|_|error("device-metadata-invalid","Replacement unit could not be encoded"))?])?;
+        for unit in units {
+            let (key,value)=unit.map_err(|failure| match failure {
+                crate::persistent_store::StoreError::Validation{..} => error("device-metadata-invalid","Replacement unit is invalid"),
+                _ => error("device-storage-failed","Replacement unit could not be read"),
+            })?;
+            transaction.execute("INSERT INTO replacement_units VALUES(?1,?2,?3)",params![id,String::from(key),serde_json::to_string(&value).map_err(|_|error("device-metadata-invalid","Replacement unit could not be encoded"))?])?;
         }
         transaction.commit()?;
         Ok(())
     }
 
-    pub(crate) fn library_replacement(&self,id:&str) -> Result<(crate::persistent_store::lww::Header,std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>)> {
+    pub(crate) fn library_replacement_header(&self,id:&str) -> Result<crate::persistent_store::lww::Header> {
         let inner = self.lock()?;
         let db=inner.connection.as_ref().unwrap();
         let header:String = db.query_row("SELECT header FROM replacements WHERE session=?1",[id],|r|r.get(0))?;
-        let mut units=std::collections::BTreeMap::new();
+        serde_json::from_str(&header).map_err(|_| error("device-metadata-invalid","Replacement header is invalid"))
+    }
+
+    /// Hands the journaled replacement units of `id` to `visit` in key order.
+    pub(crate) fn visit_library_replacement_units(&self,id:&str,visit:&mut dyn FnMut(risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue)->Result<()>) -> Result<()> {
+        let inner = self.lock()?;
+        let db=inner.connection.as_ref().unwrap();
         let mut statement=db.prepare("SELECT key,value FROM replacement_units WHERE session=?1 ORDER BY key")?;
         let mut rows=statement.query([id])?;
         while let Some(row)=rows.next()? {
             let key=row.get::<_,String>(0)?.try_into().map_err(|_|error("device-metadata-invalid","Replacement key is invalid"))?;
             let value=serde_json::from_str(&row.get::<_,String>(1)?).map_err(|_|error("device-metadata-invalid","Replacement unit is invalid"))?;
-            units.insert(key,value);
+            visit(key,value)?;
         }
-        Ok((serde_json::from_str(&header).map_err(|_| error("device-metadata-invalid","Replacement header is invalid"))?,units))
+        Ok(())
     }
 
     pub(crate) fn session(&self, id: &str) -> Result<Session> {

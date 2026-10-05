@@ -2,12 +2,17 @@
 //! same gate that guards a backup, and only then activated in one transaction. Nothing is
 //! written to the live generation until that activation, so a refused repair leaves no trace.
 
+use super::lww::{Header, MessageLocator, UnitMutation};
 use super::portable::TABLES;
-use super::{snapshot, PersistentStore, RevisionResult, StoreError, StoreResult};
+use super::{
+    snapshot, ConversationMutation, PersistentStore, PluginStorageMutation, RevisionResult,
+    StoreError, StoreResult, WorkingSetCommit,
+};
 use crate::data_health::journal::{Journal, RecordChange};
 use crate::data_health::repair::{RepairAction, RepairCandidate};
+use risunest_sync_wire::stamp::Stamp;
 use rusqlite::{types::ValueRef, Connection, TransactionBehavior};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One step of a JSON path the reference graph emits, such as `$.enabledModules[0]`.
@@ -562,6 +567,112 @@ fn released_objects(
     Ok(released)
 }
 
+/// The records a repair changed, named the way a save names them, so the units they hold are
+/// captured before and after the repair. Nothing in `targets` is applied.
+struct RepairTargets {
+    targets: WorkingSetCommit,
+    conversation_orders: BTreeSet<String>,
+    /// Conversations whose messages the repair rewrote, added or removed. Their stored pages no
+    /// longer describe their messages.
+    repaged: BTreeSet<(String, String)>,
+}
+
+fn repair_targets(records: &[RecordChange]) -> StoreResult<RepairTargets> {
+    let mut targets = WorkingSetCommit::default();
+    let mut whole_characters = BTreeSet::new();
+    let mut characters = BTreeSet::new();
+    let mut conversations = BTreeSet::new();
+    let mut repaged = BTreeSet::new();
+    let mut plugin_values = BTreeSet::new();
+    let mut aliases = BTreeSet::new();
+    for change in records {
+        let whole = change.before.is_none() || change.after.is_none();
+        match (change.table.as_str(), change.identity.as_slice()) {
+            ("root", []) => targets.root = Some(json!({})),
+            ("bot_presets", [_]) => targets.replace_presets = Some(Vec::new()),
+            ("characters", [id]) if whole => {
+                whole_characters.insert(id.clone());
+            }
+            ("characters", [id]) => {
+                characters.insert(id.clone());
+            }
+            ("conversations", [character, conversation]) if whole => {
+                repaged.insert((character.clone(), conversation.clone()));
+            }
+            ("conversations", [character, conversation]) => {
+                conversations.insert((character.clone(), conversation.clone()));
+            }
+            ("messages", [character, conversation, _]) => {
+                repaged.insert((character.clone(), conversation.clone()));
+            }
+            ("plugin_storage", [owner, key]) => {
+                plugin_values.insert((owner.clone(), key.clone()));
+            }
+            ("asset_aliases", [kind, key]) => {
+                aliases.insert(super::lww::unit_key(&[kind, key])?);
+            }
+            ("asset_owner_heads", _) => {}
+            (table, _) => return Err(validation(format!("{table} records cannot be repaired"))),
+        }
+    }
+    let conversation_orders = characters
+        .iter()
+        .chain(conversations.iter().chain(&repaged).map(|(character, _)| character))
+        .filter(|character| !whole_characters.contains(*character))
+        .cloned()
+        .collect();
+    targets.character_details = Some(
+        characters
+            .iter()
+            .map(|id| json!({ "chaId": id }))
+            .collect(),
+    );
+    targets.delete_character_ids = Some(whole_characters.into_iter().collect());
+    // An empty range names a conversation whose messages the repair left alone, so its stored
+    // pages are kept.
+    targets.conversations = Some(
+        conversations
+            .difference(&repaged)
+            .map(|(character, conversation)| ConversationMutation::ReplaceRange {
+                character_id: character.clone(),
+                conversation_id: conversation.clone(),
+                start: 0,
+                delete_count: 0,
+                messages: Vec::new(),
+                conversation: None,
+                configured_index: None,
+            })
+            .collect(),
+    );
+    targets.messages_changed = Some(
+        repaged
+            .iter()
+            .map(|(character, conversation)| MessageLocator {
+                character_id: character.clone(),
+                conversation_id: conversation.clone(),
+                start: None,
+            })
+            .collect(),
+    );
+    targets.plugin_storage = Some(
+        plugin_values
+            .into_iter()
+            .map(|(owner, key)| PluginStorageMutation::Delete { owner, key })
+            .collect(),
+    );
+    targets.unit_mutations = Some(
+        aliases
+            .into_iter()
+            .map(|key| UnitMutation::Delete { key })
+            .collect(),
+    );
+    Ok(RepairTargets {
+        targets,
+        conversation_orders,
+        repaged,
+    })
+}
+
 /// Groups the reference removals by the record that holds them, so one record is rewritten once.
 fn reference_edits(
     candidates: &[RepairCandidate],
@@ -596,6 +707,7 @@ impl PersistentStore {
         if candidates.is_empty() {
             return Err(validation("a repair needs at least one selected change"));
         }
+        self.lww_recover_intents()?;
         let staging = self.replace_begin()?.staging_id;
         let outcome = self.stage_and_activate(&staging, expected_revision, candidates, now_ms);
         if outcome.is_err() {
@@ -688,6 +800,7 @@ impl PersistentStore {
         journal: &Journal,
         expected_revision: i64,
     ) -> StoreResult<(RevisionResult, Vec<String>)> {
+        self.lww_recover_intents()?;
         let staging = self.replace_begin()?.staging_id;
         let outcome = self.stage_undo(&staging, journal, expected_revision);
         if outcome.is_err() {
@@ -733,7 +846,8 @@ impl PersistentStore {
         transaction.commit()?;
         // An undo restores a state the store already held, which the backup gate may well have
         // refused: that is why it was repaired. The activation contract inside the commit is the
-        // gate here, so a repair stays reversible.
+        // gate here, so a repair stays reversible, except where the restored messages cannot be
+        // paged to be shared, such as indexes with a gap: the activation refuses those.
         let committed = self.activate_repaired_records(staging, expected_revision, &records)?;
         Ok((committed, skipped))
     }
@@ -745,11 +859,19 @@ impl PersistentStore {
         records: &[RecordChange],
     ) -> StoreResult<RevisionResult> {
         self.prepare_replace_commit(staging, Some(expected_revision))?;
+        let RepairTargets {
+            targets,
+            conversation_orders,
+            repaged,
+        } = repair_targets(records)?;
+        let (header, stamp) = self.reserve_repair_stamp()?;
         super::commit::incremental_commit(
             &mut self.connection,
             expected_revision,
-            |_, _| Ok(()),
-            |transaction, active, ()| {
+            |transaction, active| {
+                super::commit::LocalCapture::begin(transaction, active, &targets, &[], conversation_orders)
+            },
+            |transaction, active, capture| {
                 for change in records {
                     let table = TABLES.iter().find(|table| table.name == change.table)
                         .ok_or_else(|| validation("unknown repair record table"))?;
@@ -758,10 +880,27 @@ impl PersistentStore {
                         None => delete_row(transaction, table, active, &change.identity)?,
                     }
                 }
+                for (character, conversation) in &repaged {
+                    super::message_pages::forget_pages(transaction, active, character, conversation)?;
+                }
+                capture.record(transaction, active, &header, &stamp)?;
                 super::commit::delete_generation(transaction, staging)?;
                 Ok(())
             },
         )
+    }
+
+    /// A repair is a local edit, so the units it changes are queued under a new stamp of this
+    /// device, for the binding the device holds.
+    fn reserve_repair_stamp(&mut self) -> StoreResult<(Header, Stamp)> {
+        let transaction = self.device_store_mut()?.transaction()?;
+        let header = Header {
+            binding_authority: super::lww::authority(&transaction)?,
+            request_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let stamp = super::lww::reserve_stamp(&transaction)?;
+        transaction.commit()?;
+        Ok((header, stamp))
     }
 }
 

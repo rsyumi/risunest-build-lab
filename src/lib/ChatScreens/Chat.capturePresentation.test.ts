@@ -174,6 +174,7 @@ import Chat from './Chat.svelte'
 import Chats from './Chats.svelte'
 import { alertToast } from 'src/ts/alert'
 import ChatCaptureBatchHarness from './ChatCaptureBatchHarness.test.svelte'
+import ChatsHarness from './ChatsHarness.test.svelte'
 import { chatViewEvents } from 'src/ts/plugins/chatViewHost.svelte'
 import type { ChatViewEvent } from 'src/ts/plugins/chatViewEvents'
 
@@ -1052,7 +1053,7 @@ describe('Chat frozen capture presentation', () => {
         },
     )
 
-    function mountRetainedEditChats(db: Record<string, unknown>) {
+    function mountRetainedEditChats(db: Record<string, unknown>, options: { reactiveProps?: boolean } = {}) {
         const messages: Message[] = [
             { role: 'user', data: 'Earlier row', chatId: 'earlier-row' },
             { role: 'char', data: 'Original edited row', chatId: 'edited-row' },
@@ -1087,10 +1088,14 @@ describe('Chat frozen capture presentation', () => {
             useChatCopy: false, enableBookmark: false, askRemoval: false, instantRemove: false, ...db }
         vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
         const mountList = () => {
-            mounted = mount(Chats, { target, props: {
-                currentCharacter: owner, viewportSource: source, selectedConversationOperations: operations,
-                onReroll: () => {}, unReroll: () => {}, currentUsername: 'User', userIcon: '',
-            } })
+            mounted = options.reactiveProps
+                ? mount(ChatsHarness, { target, props: {
+                    initialCharacter: owner, initialViewportSource: source, selectedConversationOperations: operations,
+                } })
+                : mount(Chats, { target, props: {
+                    currentCharacter: owner, viewportSource: source, selectedConversationOperations: operations,
+                    onReroll: () => {}, unReroll: () => {}, currentUsername: 'User', userIcon: '',
+                } })
         }
         let editedIndex: string | undefined
         const editedRow = () => vi.waitFor(() => {
@@ -1103,7 +1108,7 @@ describe('Chat frozen capture presentation', () => {
             return element!
         })
         mountList()
-        return { owner, conversation, session, source, state, mountList, editedRow }
+        return { owner, conversation, session, source, current, state, mountList, editedRow }
     }
 
     test.each(['saved', 'refused'] as const)(
@@ -1151,6 +1156,53 @@ describe('Chat frozen capture presentation', () => {
             }
         },
     )
+
+    test('carries a typed inline draft and its caret into the row a new navigation generation mounts', async () => {
+        const harness = mountRetainedEditChats({ risunestChatEditPopup: false }, { reactiveProps: true })
+        const list = mounted as unknown as {
+            setViewportNavigationGeneration(generation: number): void
+            setViewportSource(source: SynchronousSessionConversationViewportSource): void
+        }
+        const nextSource = new SynchronousSessionConversationViewportSource({ session: harness.session, captureCurrent: harness.current })
+        try {
+            ;(await harness.editedRow()).querySelector<HTMLButtonElement>('.button-icon-edit')!.click()
+            const editor = await vi.waitFor(() => {
+                const element = target.querySelector<HTMLTextAreaElement>('textarea.message-edit-area')
+                expect(element).not.toBeNull()
+                return element!
+            })
+            editor.value = 'Inline draft'
+            editor.dispatchEvent(new Event('input', { bubbles: true }))
+            editor.focus()
+            editor.setSelectionRange(2, 6)
+            await tick()
+
+            // The working set publishes the same conversation under a new navigation generation.
+            harness.state.selection = { ...harness.state.selection, navigationGeneration: 2 }
+            list.setViewportNavigationGeneration(1)
+            list.setViewportSource(nextSource)
+
+            await vi.waitFor(() => expect(editor.isConnected).toBe(false))
+            const row = await harness.editedRow()
+            const restored = await vi.waitFor(() => {
+                const element = row.querySelector<HTMLTextAreaElement>('textarea.message-edit-area')
+                expect(element?.value).toBe('Inline draft')
+                return element!
+            })
+            await vi.waitFor(() => expect([restored.selectionStart, restored.selectionEnd]).toEqual([2, 6]))
+            expect(document.activeElement).toBe(restored)
+            expect(pendingEditorDrafts(harness.owner.chaId, 'retained-chat')).toEqual([])
+
+            row.querySelector<HTMLButtonElement>('.button-icon-edit')!.click()
+            await vi.waitFor(() => expect(harness.conversation.message[1].data).toBe('Inline draft'))
+            expect(alertToast).not.toHaveBeenCalled()
+        } finally {
+            if (mounted) await unmount(mounted)
+            mounted = undefined
+            nextSource.dispose()
+            harness.source.dispose()
+        }
+    })
 
     test('reports the edited row to chat view listeners again when its inline editor closes', async () => {
         const harness = mountRetainedEditChats({ risunestChatEditPopup: false })

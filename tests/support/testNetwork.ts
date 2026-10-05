@@ -7,6 +7,8 @@ export function classifyTestRequest(input: unknown, origins: ReadonlySet<string>
     try { url = new URL(String(value)) }
     catch { return 'Unplanned relative or invalid request' }
     if (url.protocol === 'data:' || url.protocol === 'blob:') return null
+    // A socket to an approved origin is allowed like the origin's HTTP requests.
+    if (url.protocol === 'ws:' || url.protocol === 'wss:') url.protocol = url.protocol === 'ws:' ? 'http:' : 'https:'
     if ((url.protocol === 'http:' || url.protocol === 'https:') && origins.has(url.origin)) return null
     return 'Unexpected test network request'
 }

@@ -9,6 +9,7 @@ export interface MessageButtonDef extends MenuDef {
 }
 
 export interface MessageButtonTarget {
+    /** The position `getCharacterFromIndex` and `getChatFromIndex` use, or -1. */
     characterIndex: number
     chatIndex: number
     /** Absolute stored index, also in a windowed conversation. */
@@ -18,6 +19,8 @@ export interface MessageButtonTarget {
     characterId: string
     conversationId: string
 }
+
+export type MessageButtonMessage = Omit<MessageButtonTarget, 'characterIndex' | 'chatIndex'>
 
 export const additionalMessageButtons = $state([] as MessageButtonDef[])
 
@@ -35,18 +38,15 @@ export function messageButtonsForRole(role: unknown): MessageButtonDef[] {
 }
 
 export function createMessageButtonTarget(input: {
-    characterIndex: number
-    character: { chaId: string; chatPage?: number } | undefined
+    character: { chaId: string } | undefined
     conversationId: string | undefined
     messageIndex: number
     message: Readonly<Message> | undefined
-}): MessageButtonTarget | null {
+}): MessageButtonMessage | null {
     const { character, conversationId, message } = input
     if (!character || !conversationId || input.messageIndex < 0 || !message) return null
     if (message.role !== 'user' && message.role !== 'char') return null
     return {
-        characterIndex: input.characterIndex,
-        chatIndex: character.chatPage ?? 0,
         messageIndex: input.messageIndex,
         messageId: message.chatId ?? null,
         role: message.role,
@@ -55,6 +55,13 @@ export function createMessageButtonTarget(input: {
     }
 }
 
-export function invokeMessageButton(button: MessageButtonDef, target: MessageButtonTarget): void {
-    Promise.resolve(button.callback(target)).catch((error) => console.error(error))
+export async function invokeMessageButton(button: MessageButtonDef, target: MessageButtonMessage): Promise<void> {
+    try {
+        // The working set keeps archived characters in place, so its index is not the one the index APIs use.
+        const { resolvePinnedConversationPosition } = await import('./pinnedConversationPosition')
+        const position = await resolvePinnedConversationPosition(target.characterId, target.conversationId)
+        await button.callback({ characterIndex: position.characterIndex, chatIndex: position.chatIndex, ...target })
+    } catch (error) {
+        console.error(error)
+    }
 }

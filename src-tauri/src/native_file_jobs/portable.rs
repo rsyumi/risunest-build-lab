@@ -25,10 +25,6 @@ use tauri::Manager;
 pub(crate) struct PortableSelection {
     pub(crate) library: bool,
     pub(crate) device_sections: Vec<String>,
-    /// Absent brings the whole library; present brings only the records it names, closed over
-    /// what those records refer to.
-    #[serde(default)]
-    pub(crate) items: Option<portable_backup::ArchiveSelection>,
     #[serde(default)]
     pub(crate) allow_source_preservation: bool,
 }
@@ -37,7 +33,6 @@ impl Default for PortableSelection {
         Self {
             library: true,
             device_sections: vec!["hypa".into(), "local-plugins".into(), "local-settings".into()],
-            items: None,
             allow_source_preservation: false,
         }
     }
@@ -52,9 +47,6 @@ pub(crate) struct RestorePreview {
     /// which is the only way a reader learns what to leave out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) diagnosis: Option<crate::data_health::ScanResult>,
-    /// The records the reader can choose between.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) items: Option<portable_backup::ArchiveInventory>,
 }
 fn restore_preview(
     archive: &VerifiedArchive,
@@ -81,30 +73,24 @@ fn restore_preview(
         })?;
         sections.push(section);
     }
-    let (diagnosis, items) = match archive.manifest.library_included {
+    let diagnosis = match archive.manifest.library_included {
         true => {
             let mut findings = crate::data_health::Findings::new(2000);
             archive.scan_library(&mut findings, probe).map_err(error)?;
-            let items =
-                portable_backup::archive_inventory(&archive.db, &findings.items).map_err(error)?;
-            (
-                Some(crate::data_health::ScanResult::new(
-                    0,
-                    archive_scanned_at(),
-                    crate::data_health::ScanDepth::Deep,
-                    findings,
-                )),
-                Some(items),
-            )
+            Some(crate::data_health::ScanResult::new(
+                0,
+                archive_scanned_at(),
+                crate::data_health::ScanDepth::Deep,
+                findings,
+            ))
         }
-        false => (None, None),
+        false => None,
     };
     Ok(RestorePreview {
         library_included: archive.manifest.library_included,
         repair_required: archive.manifest.repair_required,
         device_sections: sections,
         diagnosis,
-        items,
     })
 }
 
@@ -395,7 +381,7 @@ fn export_portable_running(
     source_build: &str,
 ) -> Result<JobResultSummary, NativeJobError> {
     #[cfg(test)] let _source_observer = portable_backup::source_io::attach(&job.source_io_scope);
-    if !selection.library || selection.items.is_some() || selection.device_sections.len()!=3 || selection.device_sections.iter().cloned().collect::<std::collections::BTreeSet<_>>()
+    if !selection.library || selection.device_sections.len()!=3 || selection.device_sections.iter().cloned().collect::<std::collections::BTreeSet<_>>()
         != ["hypa".to_owned(),"local-plugins".to_owned(),"local-settings".to_owned()].into() {
         return Err(NativeJobError::new("invalid-full-backup-scope","A full backup requires every section"));
     }
@@ -489,7 +475,6 @@ fn begin_native_restore(
     source: &[crate::device_backup::PreparedDeviceSection],
     probe: &dyn CancellationProbe,
     durable_session_started: &mut bool,
-    source_units: &std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
 ) -> Result<String, NativeJobError> {
     let guard = context.persistent
         .acquire_device_maintenance()
@@ -519,7 +504,8 @@ fn begin_native_restore(
     *durable_session_started = true;
     let prepared = (|| {
         let header = crate::persistent_store::lww::Header { binding_authority: store.lww_binding_authority().map_err(error)?, request_id: job.id() };
-        coordinator.set_library_replacement(&id,&header,source_units).map_err(error)?;
+        let staged: &PersistentStore = store;
+        coordinator.set_library_replacement(&id,&header,stage.into_iter().flat_map(|stage| staged.replacement_source_units(stage))).map_err(error)?;
         journal_prepared_native_sections(&coordinator, &id, Spool::Source, source)
             .map_err(error)?;
         coordinator.source_ready(&id).map_err(error)?;
@@ -607,12 +593,12 @@ fn restore_portable_inner(
         .and_then(|(_, selection)| selection)
         .unwrap_or(&fallback);
     let context = device.map(|(context, _)| context);
-    if !selection.library || selection.items.is_some() || selection.device_sections.len()!=3 || selection.device_sections.iter().cloned().collect::<std::collections::BTreeSet<_>>()
+    if !selection.library || selection.device_sections.len()!=3 || selection.device_sections.iter().cloned().collect::<std::collections::BTreeSet<_>>()
         != ["hypa".to_owned(),"local-plugins".to_owned(),"local-settings".to_owned()].into() {
         return Err(NativeJobError::new("invalid-full-backup-scope","A full backup requires every section"));
     }
     job.set_replaces_library(selection.library).map_err(error)?;
-    if selection.library && selection.items.is_none() {
+    if selection.library {
         archive.validate_library(&probe).map_err(error)?;
     }
     let mut pins = new_pins_for_job(&store, CasJobKind::LocalBackupRestore, &job.id())?;
@@ -622,7 +608,7 @@ fn restore_portable_inner(
         let stage = store
             .stage_portable_records(&archive.db, &probe)
             .map_err(error)?;
-        let source_units = store.stage_portable_units(&archive.db,&probe).map_err(error)?;
+        store.stage_portable_units(&stage.staging_id,&archive.db,&probe).map_err(error)?;
         let prepared_device =
             prepare_native_sections(&archive, &selection.device_sections, &probe).map_err(error)?;
         let mut committed = false;
@@ -666,7 +652,6 @@ fn restore_portable_inner(
                     &prepared_device,
                     &probe,
                     &mut durable_session_started,
-                    &source_units,
                 ) {
                     Ok(session) => session,
                     Err(failure) => {
@@ -690,8 +675,9 @@ fn restore_portable_inner(
                 result
             } else {
                 let header = crate::persistent_store::lww::Header { binding_authority: store.lww_binding_authority().map_err(error)?, request_id: job.id() };
-                let result = store.lww_commit_replacement_units(&header,&stage.staging_id,Some(&source_units)).map_err(error)?;
+                let result = store.lww_commit_staged_replacement(&header,&stage.staging_id).map_err(error)?;
                 committed = true;
+                store.release_replacement_source(&stage.staging_id).map_err(error)?;
                 result.revision
             };
             job.publish_portable_activation(final_revision, store.lww_binding_authority().map_err(error)?.0.to_string()).map_err(error)?;
@@ -917,7 +903,7 @@ mod tests {
         assert_eq!(store.revision().unwrap(), 1);
     }
 
-    pub(super) fn library(root: &Path) -> PersistentStore {
+    fn library(root: &Path) -> PersistentStore {
         let mut store = PersistentStore::open(root).unwrap();
         let database: serde_json::Value =
             serde_json::from_str(include_str!("../../fixtures/persistent-fixture.json")).unwrap();
@@ -1220,7 +1206,7 @@ mod tests {
         fs::create_dir_all(&owned).unwrap();
         let job = super::super::JobRegistry::default().create(super::super::JobKind::ExportPortableBackup).unwrap();
         job.start(JobPhase::WritingExport).unwrap();
-        let selection = PortableSelection { library: false, device_sections: vec!["local-settings".into()], items: None, allow_source_preservation: false };
+        let selection = PortableSelection { library: false, device_sections: vec!["local-settings".into()], allow_source_preservation: false };
         let failure = export_portable_running(None, 1, &owned, &directory.path().join("handoffs"), store, &job, &selection, "9.8.7-device").unwrap_err();
         assert_eq!(failure.code,"invalid-full-backup-scope");
         assert!(!directory.path().join("handoffs").exists());
@@ -1755,6 +1741,7 @@ mod tests {
             .snapshot_list()
             .unwrap()
             .is_empty());
+        assert_eq!(PersistentStore::open(&target).unwrap().replacement_source_row_total().unwrap(), 0);
         let mut store = PersistentStore::open(&target).unwrap();
         let mut pins =
             new_pins(&store, CasJobKind::OfficialPublicationOrExportPreparation).unwrap();
@@ -1940,7 +1927,3 @@ mod tests {
         assert!(durable_cas_job_ids(&source).unwrap().is_empty());
     }
 }
-
-#[cfg(test)]
-#[path = "portable_scale_tests.rs"]
-mod scale_tests;

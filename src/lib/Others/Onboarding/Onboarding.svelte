@@ -69,6 +69,9 @@
     import { getNativeOfficialAccountFlow } from 'src/ts/storage/sync/nativeOfficialAccountFlow'
     import ServerSyncSettings from 'src/lib/Setting/Pages/ServerSyncSettings.svelte'
     import type { ServerConfig } from 'src/ts/storage/sync/serverSync'
+    import { connectServerSync, getServerSyncController } from 'src/ts/storage/sync/serverSyncProduction'
+    import { canScanServerRegistration } from 'src/ts/storage/sync/serverSyncQr'
+    import { createNativeSyncBindingBridge } from 'src/ts/storage/sync/bindingNative'
     import ConnectionForm from 'src/lib/Setting/ExternalStorage/ConnectionForm.svelte'
     import {
         externalConnectionTitle,
@@ -87,7 +90,6 @@
     } from './onboardingFlow'
     import {
         bindExternalOnboardingTarget,
-        connectServerOnboardingTarget,
         externalOnboardingRestorable,
         externalOnboardingRestoreAreas,
         externalOnboardingRestoreRestarts,
@@ -242,12 +244,29 @@
         languageRevision += 1
     }
 
+    /** Where the library on this device is synced, or `undefined` when that cannot be read. */
+    async function libraryBinding(): Promise<'none' | 'server' | 'external' | undefined> {
+        if (!isTauri) return 'none'
+        try {
+            return (await createNativeSyncBindingBridge().state()).target.kind
+        } catch {
+            return undefined
+        }
+    }
+
     /** The defaults a reader who skips setup would otherwise have to choose. */
     async function startFresh(): Promise<void> {
         // Data that arrived outside this screen, such as a backup opened from
         // a file manager, already carries its own settings.
         if (DBState.db.didFirstSetup) {
             flow = goToOnboardingState(flow, 'done', 'import')
+            return
+        }
+        // A library with data keeps its settings too. A synced library shares
+        // them with every other device.
+        const binding = await libraryBinding()
+        if (binding !== 'none' || DBState.db.characters.length > 0) {
+            flow = goToOnboardingState(flow, 'done', binding === 'server' || binding === 'external' ? binding : 'existing')
             return
         }
         DBState.db = setPreset(DBState.db, prebuiltPresets.OAI2)
@@ -335,12 +354,37 @@
         externalKey += 1
     }
 
+    let serverConnecting = false
+    let serverConnectFailed = false
+
     async function onServerConnected(config: ServerConfig, newDevice: boolean): Promise<void> {
-        const outcome = await connectServerOnboardingTarget(config, newDevice)
-        if (outcome.kind === 'bound' && flow.state === 'sync-server') {
-            flow = goToOnboardingState(flow, 'done', 'server')
+        serverConnecting = true
+        try {
+            const outcome = await connectServerSync(config, newDevice)
+            if (outcome.kind === 'bound' && flow.state === 'sync-server') {
+                flow = goToOnboardingState(flow, 'done', 'server')
+            }
+        } catch (error) {
+            serverConnectFailed = true
+            throw error
+        } finally {
+            serverConnecting = false
         }
     }
+
+    // A device already connected to the server has nothing left to set up
+    // here. After a connection on this screen fails, its error stays up until
+    // sync runs.
+    $effect(() => {
+        if (flow.state !== 'sync-server' || !isTauri) return
+        serverConnectFailed = false
+        return getServerSyncController().subscribe((view) => {
+            if (flow.state !== 'sync-server' || serverConnecting) return
+            if (!view.status.bound || view.bindingIncomplete) return
+            if (serverConnectFailed && (view.paused || view.error)) return
+            flow = goToOnboardingState(flow, 'done', 'server')
+        })
+    })
 
     async function onExternalConnected(result: ExternalConnectionResult): Promise<void> {
         externalConnection = result.connection
@@ -880,7 +924,7 @@
                         {:else if flow.state === 'sync-server' && isTauri}
                             {@render back('sync', t.back)}
                             <h1>{t.hub.title}</h1>
-                            <p class="lead">{t.hub.leadScan}</p>
+                            <p class="lead">{canScanServerRegistration ? t.hub.leadScan : t.hub.lead}</p>
                             <ServerSyncSettings connectTarget={onServerConnected} />
                         {:else if flow.state === 'sync-external'}
                             {#if !isTauri}

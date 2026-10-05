@@ -43,14 +43,14 @@ export function diffMaterializedCharacter(before: CompleteCharacter, after: Comp
     }
     const conversations: ConversationMutation[] = []
     const previous = new Map(before.chats.map((chat) => [chat.id, chat]))
-    for (const chat of after.chats) {
+    for (const [index, chat] of after.chats.entries()) {
         if (!chat.id) throw new TypeError('Conversation requires a stable ID')
         const old = previous.get(chat.id)
         if (!old) {
             if (!Object.hasOwn(chat, 'message')) throw new TypeError('New conversation requires messages')
             const { message, ...conversation } = chat
             conversations.push({ type: 'replace-range', characterId: after.chaId, conversationId: chat.id,
-                start: 0, deleteCount: 0, messages: message, conversation })
+                start: 0, deleteCount: 0, messages: message, conversation, configuredIndex: index })
             continue
         }
         unitMutations.push(...diffFields(['conversation', after.chaId, chat.id], old, chat, new Set(['message', 'id'])))

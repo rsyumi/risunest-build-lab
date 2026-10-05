@@ -242,6 +242,7 @@ mod tests {
             owner_raw_receipts:BTreeMap::new(),errors:vec![]}
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn all_present_requires_real_complete_zero_source_destination_and_body_receipts() {
         let valid=all_present();valid.validate_server_body_cycle().unwrap();
         let mut sample=valid.clone();sample.source=None;assert!(sample.validate_server_body_cycle().is_err());
@@ -254,6 +255,7 @@ mod tests {
         sample=valid;sample.destination_writer_after=Some("copied-writer".into());assert!(sample.validate_server_body_cycle().is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn missing_inventory_is_exact_and_missing_work_cannot_be_replaced_by_activation() {
         let mut sample=all_present();sample.scenario=Scenario::RestoreMissing;
         let inventory=sample.inventory.as_mut().unwrap();inventory.already_present.clear();inventory.missing.insert("b".repeat(64));
@@ -262,6 +264,7 @@ mod tests {
         inventory.already_present.insert("b".repeat(64));assert!(inventory.validate().is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn costly_matrix_retains_warmup_and_exact_five_recorded_slots_in_both_directions() {
         let slots=slots();assert_eq!(slots.len(),8*2*6);
         assert_eq!(slots.iter().filter(|slot|slot.warmup).count(),16);

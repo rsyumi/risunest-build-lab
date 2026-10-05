@@ -180,34 +180,45 @@ it('keeps real runtime writes fenced after partial restart, then ordinary retry 
     await expect(h.runtime.retryCommittedWorkingSetRefresh()).resolves.toBeNull()
 })
 
-it('retains a failed post-release adapter resume for ordinary runtime retry', async () => {
-    const h = await harness()
-    const resume = vi.fn(async () => {
-        expect(() => h.runtime.markPersistentDataDirty(1)).not.toThrow()
-        if (resume.mock.calls.length === 1) throw Error('adapter resume failed')
-        h.events.push('resume')
-    })
-    h.transport.resumeBinding = resume
-    await expect(h.flow.bind(h.target, h.transport)).rejects.toThrow('adapter resume failed')
-    expect(() => h.runtime.markPersistentDataDirty(1)).toThrow()
-    expect((await h.runtime.retryCommittedWorkingSetRefresh())?.projection).toBe('applied')
-    expect(resume).toHaveBeenCalledTimes(2)
-    expect(h.events.filter(event => event === 'resume')).toHaveLength(1)
-    await expect(h.runtime.retryCommittedWorkingSetRefresh()).resolves.toBeNull()
-})
-
-it.each([false, true])('retries initialized adapter resume without repeating initial publication (shared data: %s)', async nonDefault => {
+it.each(['resume', 'initial publication'])('stops sync and keeps the library writable when the %s never succeeds after a committed switch', async failing => {
     const h = await harness()
     h.transport.inspectTarget = async () => ({ inspectionId: 'inspection', targetId: 'target', libraryId: 'library', empty: true, previouslyBoundLibrary: false })
-    h.dependencies.hasNonDefaultSharedData = async () => nonDefault
-    const resume = vi.fn(async () => { if (resume.mock.calls.length === 1) throw Error('adapter resume failed') })
-    h.transport.resumeBinding = resume
-    await expect(h.flow.bind(h.target, h.transport)).rejects.toThrow('adapter resume failed')
-    expect(h.transport.publishInitialSharedState).toHaveBeenCalledTimes(nonDefault ? 1 : 0)
+    const fence = vi.fn<SyncBindingTransport['fenceOldJobs']>(async () => {})
+    h.transport.fenceOldJobs = fence
+    const unreachable = async () => { throw Error('storage unreachable') }
+    if (failing === 'resume') h.transport.resumeBinding = vi.fn(unreachable)
+    else h.transport.publishInitialSharedState = vi.fn(unreachable)
+    await expect(h.flow.bind(h.target, h.transport)).rejects.toThrow('storage unreachable')
+    expect(() => h.runtime.markPersistentDataDirty(1)).not.toThrow()
+    await expect(h.runtime.retryCommittedWorkingSetRefresh()).resolves.toBeNull()
+    expect(fence.mock.lastCall![0].state).toMatchObject({ targetAuthority: '1', selectionEpoch: 'new' })
+    expect(fence.mock.lastCall![0].signal.aborted).toBe(true)
+    h.transport.resumeBinding = vi.fn(async () => { h.events.push('resume') })
+    h.dependencies.resolveTransport = () => h.transport
+    await h.flow.resumeCurrent(h.target)
+    expect(h.transport.resumeBinding).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ state: expect.objectContaining({ targetAuthority: '1' }) }))
+    expect(h.transport.publishInitialSharedState).toHaveBeenCalledOnce()
+})
+
+it('lifts the recovery fence once the working set is refreshed, even when the adapter still cannot resume', async () => {
+    const h = await harness()
+    let restarts = 0
+    h.dependencies.plugins.restart = async () => { if (++restarts === 1) throw Error('partial restart failed') }
+    const fence = vi.fn<SyncBindingTransport['fenceOldJobs']>(async () => {})
+    h.transport.fenceOldJobs = fence
+    h.transport.resumeBinding = vi.fn(async () => { throw Error('storage unreachable') })
+    const reportStopped = vi.fn<NonNullable<SyncBindingTransport['reportStopped']>>()
+    h.transport.reportStopped = reportStopped
+    await expect(h.flow.bind(h.target, h.transport)).rejects.toThrow('partial restart failed')
+    expect(reportStopped).not.toHaveBeenCalled()
+    expect(() => h.runtime.markPersistentDataDirty(1)).toThrow()
     expect((await h.runtime.retryCommittedWorkingSetRefresh())?.projection).toBe('applied')
-    expect(resume).toHaveBeenCalledTimes(2)
-    expect(h.transport.publishInitialSharedState).toHaveBeenCalledTimes(nonDefault ? 1 : 0)
-    expect(h.events).not.toContain('activate')
+    expect(h.database.username).toBe('Activated synthetic target')
+    expect(() => h.runtime.markPersistentDataDirty(1)).not.toThrow()
+    expect(h.transport.resumeBinding).toHaveBeenCalledOnce()
+    expect(fence.mock.lastCall![0].state).toMatchObject({ targetAuthority: '1' })
+    expect(reportStopped).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: 'storage unreachable' }))
+    await expect(h.runtime.retryCommittedWorkingSetRefresh()).resolves.toBeNull()
 })
 
 it.each([false, true])('settles lost initialized switch before projection without reset or plugin restart (shared data: %s)', async nonDefault => {

@@ -91,4 +91,16 @@ io.github.rsyumi.risunest.ServerSyncSecrets -> io.github.rsyumi.risunest.ServerS
         assertEquals(setOf("ExternalStorageSecrets"), missingServer)
         assertFalse("ServerSyncSecrets" in missingServer)
     }
+
+    @Test fun platformTlsInitializerTakesTheApplicationContext() {
+        val context = "(Landroid/content/Context;)V"
+        assertEquals(setOf("PlatformTls"), retainedJniNativeInitializers(nativeInitializer("PlatformTls", signature = context)))
+        for (dump in listOf(
+            nativeInitializer("PlatformTls"),
+            nativeInitializer("PlatformTls", signature = context, access = "0111"),
+            nativeInitializer("ServerSyncSecrets", signature = context),
+        )) {
+            assertTrue(retainedJniNativeInitializers(dump).isEmpty())
+        }
+    }
 }

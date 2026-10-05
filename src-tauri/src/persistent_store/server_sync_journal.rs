@@ -48,6 +48,6 @@ pub(super) fn create_schema(db: &Connection) -> super::StoreResult<()> {
 }
 pub(super) fn validate_schema(db: &Connection) -> super::StoreResult<()> {
     let actual: Option<String> = db.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='server_sync_state'", [], |row| row.get(0)).optional()?;
-    if actual.as_deref() != Some("CREATE TABLE server_sync_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),config TEXT NOT NULL)") { return Err(super::StoreError::Validation { message: "Server connection schema is incompatible".into() }); }
+    if actual.as_deref() != Some("CREATE TABLE server_sync_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),config TEXT NOT NULL)") { return Err(super::StoreError::SchemaMismatch { message: "Server connection schema is incompatible".into() }); }
     Ok(())
 }

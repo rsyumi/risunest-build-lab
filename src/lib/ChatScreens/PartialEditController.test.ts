@@ -2,10 +2,9 @@
 
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
-import { writable } from 'svelte/store'
 
-vi.mock('src/ts/stores.svelte', () => ({
-    alertStore: writable({ type: 'none', msg: '' }),
+vi.mock('src/ts/stores.svelte', async () => ({
+    alertStore: (await import('src/ts/alertQueue')).createAlertQueue({ type: 'none', msg: '' }, { gapMs: 0 }),
     DBState: {
         db: {
             zoomsize: 100,

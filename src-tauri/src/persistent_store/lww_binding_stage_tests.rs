@@ -118,7 +118,7 @@ fn held_message_deferred_during_generation_projects_after_restart_and_drain_with
     assert_eq!(value["characters"][0]["chats"][0]["message"][0]["data"],"deferred-held-message");
     assert_eq!(read_unit(&store.connection,&messages.key).unwrap(),Some((messages.stamp.clone(),messages.value.clone())));
     assert_eq!(store.connection.query_row("SELECT version FROM lww_units WHERE key=?1",[messages.key.as_str()],|r|r.get::<_,String>(0)).unwrap(),header.request_id);
-    assert_eq!(store.connection.query_row("SELECT status FROM lww_receive_rows WHERE request_id=?1 AND key=?2",params![header.request_id,messages.key.as_str()],|r|r.get::<_,String>(0)).unwrap(),"done");
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM lww_receive_rows WHERE request_id=?1",[&header.request_id],|r|r.get::<_,i64>(0)).unwrap(),0);
     assert!(store.lww_read_outbox(store.lww_binding_authority().unwrap(),100).unwrap().entries.is_empty());
 }
 

@@ -26,6 +26,7 @@ import {
     type PluginFullObjectCallContext,
     PluginIdentityReplacementRejectedError,
 } from './pluginDatabaseAccess'
+import { createPinnedConversationPositionResolver } from './pinnedConversationPosition'
 
 vi.mock('../storage/persistentDataStoreFactory', () => ({
     getPersistentDataStore: vi.fn(),
@@ -848,6 +849,31 @@ describe('plugin database access', () => {
         ]))
 
         await expect(harness.access.getCharacterFromIndex(1, callContext())).resolves.toBeNull()
+    })
+
+    it('resolves a conversation by ID to the position the index APIs read', async () => {
+        const harness = createHarness()
+        harness.archivedCharacterIds.add('archived-a')
+        harness.pinnedDatabases.push(makeFullObjectDatabase([
+            makeCharacter('archived-a'),
+            makeCharacter('trashed-b', true),
+            makeCharacter('active-c'),
+        ]))
+        const resolvePosition = createPinnedConversationPositionResolver(() => ({
+            store: harness.store,
+            flushPendingData: harness.flushPendingData,
+        }))
+
+        const position = await resolvePosition('active-c', 'active-c-chat-b')
+
+        expect(position).toEqual({ characterIndex: 1, chatIndex: 1 })
+        expect(harness.flushPendingData).toHaveBeenCalledOnce()
+        const chat = await harness.access.getChatFromIndex(position.characterIndex, position.chatIndex, callContext())
+        expect(chat?.id).toBe('active-c-chat-b')
+        await expect(resolvePosition('active-c', null)).resolves.toEqual({ characterIndex: 1, chatIndex: -1 })
+        await expect(resolvePosition('active-c', 'missing-chat')).resolves.toEqual({ characterIndex: 1, chatIndex: -1 })
+        await expect(resolvePosition('archived-a', 'archived-a-chat-a')).resolves.toEqual({ characterIndex: -1, chatIndex: -1 })
+        expect(harness.releasedLeases.every((release) => release.mock.calls.length === 1)).toBe(true)
     })
 
     it('returns exact detached current, indexed character, and indexed chat objects', async () => {

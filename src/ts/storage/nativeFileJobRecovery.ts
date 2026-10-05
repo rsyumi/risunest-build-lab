@@ -194,6 +194,7 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
         switch (kind) {
             case 'restore-block-risu-save':
             case 'restore-official-account-snapshot':
+            case 'restore-native-snapshot':
             case 'restore-portable-backup':
             case 'restore-legacy-local-backup': {
                 if (job.kind === 'restore-portable-backup' && job.restoreAdoptionConfirmed === true

@@ -21,15 +21,24 @@ async function until(predicate: () => boolean, message: string) {
 export async function productApp(restart: boolean) {
   if (restart) {
     await invoke("pds_open");
-    const expected = JSON.parse(localStorage.getItem(expectedKey)!);
-    check(expected, "previous synthetic product edit required");
-    const saved = await invoke<{ value: { message: { data: string }[] } }>(
+    const stored = localStorage.getItem(expectedKey);
+    const expected = JSON.parse(stored!);
+    check(expected, "previous synthetic product edit required", { stored });
+    const saved = await invoke<{ revision: number; value: { message: { data: string }[] } }>(
       "pds_read_conversation",
       { characterId: "char-a", conversationId: expected.conversationId },
     );
     check(
       saved.value.message.at(-1)?.data === expected.marker,
       "product edit survives process restart",
+      {
+        stored,
+        actual: {
+          revision: saved.revision,
+          messages: saved.value.message.length,
+          last: saved.value.message.at(-1)?.data,
+        },
+      },
     );
     return { passed: true, restarted: true };
   }
@@ -111,6 +120,7 @@ export async function productApp(restart: boolean) {
   check(
     persisted.value.message.at(-1)?.data === marker,
     "product edit persisted through Rust",
+    { revision: persisted.revision, last: persisted.value.message.at(-1)?.data },
   );
   localStorage.setItem(expectedKey, JSON.stringify({ conversationId, marker }));
   return {

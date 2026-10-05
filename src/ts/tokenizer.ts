@@ -54,6 +54,8 @@ export async function encodeWithTokenizer(data: string, tokenizerType: string): 
     switch (tokenizerType) {
         case 'tik':
             return await tikJS(data, 'cl100k_base');
+        case 'o200k_base':
+            return await tikJS(data, 'o200k_base');
         case 'mistral':
             return await tokenizeWebTokenizers(data, 'mistral');
         case 'novelai':

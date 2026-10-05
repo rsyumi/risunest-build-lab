@@ -85,10 +85,12 @@ class SafFileBridgeTest {
     }
     val first = SafSpoolStore(root, atomicPublisher = testAtomicPublisher).spool(listOf(source))
     val recreated = SafSpoolStore(root, atomicPublisher = testAtomicPublisher)
+    assertTrue(recreated.markDelivered(first.ready.single().token))
     val second = recreated.spool(listOf(source))
     assertEquals(1, opened)
     assertEquals(first.ready, second.ready)
     assertEquals("한글 \"é\" 😀.charx", second.ready.single().displayName)
+    assertFalse(recreated.isDelivered(second.ready.single().token))
   }
 
   @Test
@@ -446,6 +448,94 @@ class SafFileBridgeTest {
     assertFalse(store.discardReady(token))
     assertFalse(store.discardReady("../unrelated"))
     assertEquals("preserve", unrelated.readText())
+  }
+
+  @Test
+  fun `a spool an earlier WebView received is discarded and reported instead of replayed`() {
+    val root = temporaryDirectory()
+    val received = "11111111-1111-4111-8111-111111111111"
+    val waiting = "22222222-2222-4222-8222-222222222222"
+    val store = SafSpoolStore(
+      root = root,
+      atomicPublisher = testAtomicPublisher,
+      tokenFactory = sequenceOf(UUID.fromString(received), UUID.fromString(waiting)).iterator()::next,
+    )
+    store.spool(listOf(
+      TestSafSource("large.json", 2) { ByteArrayInputStream(byteArrayOf(1, 2)) },
+      TestSafSource("next.json", 2) { ByteArrayInputStream(byteArrayOf(3, 4)) },
+    ))
+    val handedOff = markSpoolBatchDelivered(store, SafSpoolBatch(store.listReady().take(1), emptyList()))
+    assertEquals(listOf(received), handedOff.ready.map(SafSpoolReady::token))
+
+    val restarted = SafSpoolStore(root, atomicPublisher = testAtomicPublisher)
+    val replay = replayReadySpoolBatch(restarted, emptySet())
+
+    assertEquals(listOf(waiting), replay.ready.map(SafSpoolReady::token))
+    assertEquals(listOf(SafSpoolFailure("large.json", SPOOL_INTERRUPTED_CODE)), replay.failures)
+    assertFalse(root.resolve(received).exists())
+    assertEquals(SafSpoolBatch(replay.ready, emptyList()), replayReadySpoolBatch(restarted, emptySet()))
+  }
+
+  @Test
+  fun `replay leaves a spool the current WebView already received`() {
+    val root = temporaryDirectory()
+    val token = "33333333-3333-4333-8333-333333333333"
+    val store = SafSpoolStore(
+      root = root,
+      atomicPublisher = testAtomicPublisher,
+      tokenFactory = { UUID.fromString(token) },
+    )
+    val batch = store.spool(listOf(TestSafSource("card.lorebook", 1) { ByteArrayInputStream(byteArrayOf(1)) }))
+    markSpoolBatchDelivered(store, batch)
+
+    val replay = replayReadySpoolBatch(store, setOf(token))
+
+    assertEquals(SafSpoolBatch(emptyList(), emptyList()), replay)
+    assertTrue(store.isDelivered(token))
+  }
+
+  @Test
+  fun `a spool that cannot be marked is withdrawn and reported`() {
+    val root = temporaryDirectory()
+    val store = SafSpoolStore(root, atomicPublisher = testAtomicPublisher)
+    val missing = SafSpoolReady("44444444-4444-4444-8444-444444444444", "gone.json", 1, 1)
+
+    val batch = markSpoolBatchDelivered(
+      store,
+      SafSpoolBatch(listOf(missing), listOf(SafSpoolFailure("other.json", "source-copy-failed"))),
+    )
+
+    assertEquals(emptyList<SafSpoolReady>(), batch.ready)
+    assertEquals(
+      listOf(
+        SafSpoolFailure("other.json", "source-copy-failed"),
+        SafSpoolFailure("gone.json", "spool-write-failed"),
+      ),
+      batch.failures,
+    )
+  }
+
+  @Test
+  fun `delivered spools can still be discarded and swept as stale`() {
+    val root = temporaryDirectory()
+    val discarded = "55555555-5555-4555-8555-555555555555"
+    val stale = "66666666-6666-4666-8666-666666666666"
+    val store = SafSpoolStore(
+      root = root,
+      atomicPublisher = testAtomicPublisher,
+      nowMillis = { 1_000 },
+      tokenFactory = sequenceOf(UUID.fromString(discarded), UUID.fromString(stale)).iterator()::next,
+    )
+    store.spool(listOf(
+      TestSafSource("first.json", 1) { ByteArrayInputStream(byteArrayOf(1)) },
+      TestSafSource("second.json", 1) { ByteArrayInputStream(byteArrayOf(2)) },
+    ))
+    assertTrue(store.markDelivered(discarded))
+    assertTrue(store.markDelivered(stale))
+
+    assertTrue(store.discardReady(discarded))
+    assertEquals(listOf(stale), store.cleanupStale(nowMillis = 1_000 + 25 * 60 * 60 * 1_000L))
+    assertEquals(emptyList<String>(), root.list().orEmpty().toList())
   }
 
   @Test

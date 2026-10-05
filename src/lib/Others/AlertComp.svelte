@@ -232,7 +232,7 @@
     <div class="absolute w-full h-full z-modal bg-black/50 flex justify-center items-center p-4">
         <button type="button" class="absolute inset-0" aria-label={dialog.cancelLabel} onclick={() => finishCheckboxConfirm(false)}></button>
         <div role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="checkbox-confirm-title" aria-describedby="checkbox-confirm-description" class="relative bg-darkbg text-textcolor p-4 rounded-md flex flex-col gap-4 w-full max-w-lg max-h-full overflow-y-auto">
-            <h2 id="checkbox-confirm-title" class="text-xl font-bold">{dialog.title}</h2>
+            <h2 id="checkbox-confirm-title" class="text-xl font-bold whitespace-pre-wrap">{dialog.title}</h2>
             <p id="checkbox-confirm-description" class="whitespace-pre-wrap">{dialog.description}</p>
             <label class="flex items-start gap-2">
                 <input type="checkbox" bind:checked={checkboxChecked} class="mt-1 accent-selected" />

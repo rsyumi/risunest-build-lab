@@ -232,7 +232,7 @@ pub async fn fetch<R: Runtime>(
             )
             .is_allowed(&url)
             {
-                let mut builder = reqwest::ClientBuilder::new();
+                let mut builder = (state.client_builder)(reqwest::ClientBuilder::new());
 
                 if let Some(danger_config) = danger {
                     #[cfg(not(feature = "dangerous-settings"))]

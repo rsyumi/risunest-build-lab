@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Chat, character, customscript } from '../storage/database.svelte'
 import { selectSingleFile } from '../util'
 import { importRegex } from './scripts'
@@ -11,6 +11,8 @@ it('keeps the existing regex list when file selection is cancelled', async () =>
     await expect(importRegex()).resolves.toEqual([])
 })
 import { setRuntimePerformanceProfile } from '../runtimePerformanceProfile'
+import { registerActiveHistoryWindow } from './historyWindowIndex'
+import { createStoreHistoryWindow, historyMessages } from './tests/historyWindowTestUtils'
 import {
     ActiveConversationSession,
     cloneConversationMetadata,
@@ -1395,4 +1397,121 @@ it('retains an already-started Lua effect but skips regex and plugin stages afte
     expect(effect).toHaveBeenCalledOnce()
     expect(plugin).not.toHaveBeenCalled()
     mocks.pluginV2.editoutput.delete(plugin)
+})
+
+describe('regex history actions over a history window', () => {
+    let unregister: (() => void) | null = null
+
+    beforeEach(() => {
+        resetScriptCache()
+        mocks.state.session = null
+        mocks.state.selectedCharIndex = 0
+    })
+
+    afterEach(() => {
+        unregister?.()
+        unregister = null
+    })
+
+    function windowedCharacter(scripts: customscript[]) {
+        const store = historyMessages(1000)
+        const { controller } = createStoreHistoryWindow(store, 900)
+        const shell = {
+            id: 'conversation-1',
+            fmIndex: -1,
+            get message(): never {
+                throw new Error('metadata-only conversation')
+            },
+        } as unknown as Chat
+        const char = makeCharacter(scripts)
+        char.chaId = 'window-character'
+        char.chats = [shell]
+        char.chatPage = 0
+        char.firstMessage = 'mgreeting'
+        char.alternateGreetings = []
+        mocks.database.characters = [char] as never
+        mocks.state.currentChat = shell
+        unregister = registerActiveHistoryWindow({
+            characterId: char.chaId,
+            conversationId: 'conversation-1',
+            shell,
+            controller,
+        })
+        return { store, char, controller }
+    }
+
+    it('writes @@inject to the message at its absolute index through the window', async () => {
+        const { store, char } = windowedCharacter([makeScript('x', '@@inject')])
+
+        const result = await processScriptFull(char, 'x', 'editoutput', 950, {}, {
+            cache: 'bypass',
+            regexWorker: false,
+        })
+
+        expect(result.data).toBe('')
+        expect(store[950].data).toBe('x')
+        expect(store.slice(0, 900)).toEqual(historyMessages(900))
+    })
+
+    it('reads @@repeat_back from the previous same-role message inside the window', async () => {
+        const { char } = windowedCharacter([makeScript('m\\w+', '@@repeat_back end')])
+
+        const inside = await processScriptFull(char, 'plain', 'editoutput', 951, {}, {
+            cache: 'bypass',
+            regexWorker: false,
+        })
+        // The previous character message is before the window, so the greeting is used.
+        const atStart = await processScriptFull(char, 'plain', 'editoutput', 901, {}, {
+            cache: 'bypass',
+            regexWorker: false,
+        })
+
+        expect(inside.data).toBe('plainm949')
+        expect(atStart.data).toBe('plainmgreeting')
+    })
+
+    it('keeps a window scope across a promotion and writes @@inject through the window', async () => {
+        const { store, char, controller } = windowedCharacter([makeScript('x', '@@inject')])
+        const scope = createPromptScriptOperationScope(char, {
+            historyWindow: { chat: controller.chat, conversationId: 'conversation-1' },
+        })
+        // The display parser promotes the conversation while the prompt builds.
+        const complete = { id: 'conversation-1', message: structuredClone(store) } as Chat
+        char.chats[0] = complete
+        mocks.state.currentChat = complete
+
+        expect(() => scope.assertOwnerCurrent()).not.toThrow()
+        const result = await processScriptFull(char, 'x', 'editoutput', 950, {}, {
+            promptOperationScope: scope,
+            cache: 'bypass',
+            regexWorker: false,
+        })
+
+        expect(result.data).toBe('')
+        expect(store[950].data).toBe('x')
+        expect(complete.message[950].data).toBe('m950')
+        char.chats[0] = { id: 'conversation-2', message: [] } as unknown as Chat
+        expect(() => scope.assertOwnerCurrent()).toThrow()
+        scope.release()
+    })
+
+    it('keeps chat variables an editinput regex sets on the window chat', async () => {
+        const { char, controller } = windowedCharacter([
+            { ...makeScript('^input$', '{{setvar::scratch::regex}}'), type: 'editinput' },
+        ])
+        const scope = createPromptScriptOperationScope(char, {
+            historyWindow: { chat: controller.chat, conversationId: 'conversation-1' },
+        })
+
+        const result = await processScriptFull(char, 'input', 'editinput', -1, {}, {
+            promptOperationScope: scope,
+            cache: 'bypass',
+            regexWorker: false,
+        })
+        scope.finish()
+
+        expect(result.data).toBe('written')
+        expect(controller.chat.scriptstate).toEqual({ $scratch: 'regex' })
+        expect(Object.hasOwn(char.chats[0], 'scriptstate')).toBe(false)
+    })
 })

@@ -1,5 +1,5 @@
 import type { Message } from './database.svelte'
-import type { ConversationMutation, WorkingSetCommit } from './persistentDataStore'
+import type { ConversationMutation, PersistentUnitMutation, WorkingSetCommit } from './persistentDataStore'
 import { jsonByteLength } from './nativePersistenceValue'
 
 /** Message bytes of inserted conversations in one commit of a split save. */
@@ -36,7 +36,8 @@ function messagePages(messages: Message[], pageBytes: number): { messages: Messa
  * applied in order. The first carries everything except the reorders, the
  * selected character's detail and the created conversations; each created
  * conversation then starts with its first message page and gains one page per
- * commit, and the last commit also carries the reorders and the detail.
+ * commit, and the last commit also carries the reorders, the conversation order
+ * of every character that gains a conversation, and the detail.
  * Returns null when the save creates no conversation.
  */
 export function planConversationInsertPages(
@@ -46,8 +47,16 @@ export function planConversationInsertPages(
     const conversations = commit.conversations ?? []
     if (!conversations.some(createsConversation)) return null
     const { expectedRevision: _revision, conversations: _conversations, character, ...rest } = commit
+    // An order unit names conversations that later steps create, so it applies once they all exist.
+    const gaining = new Set(conversations.filter(createsConversation).map((mutation) => mutation.characterId))
+    const isGainingOrder = (mutation: PersistentUnitMutation) => {
+        const [kind, scope, characterId] = JSON.parse(mutation.key) as string[]
+        return kind === 'order' && scope === 'conversations' && gaining.has(characterId)
+    }
+    const orders = (rest.unitMutations ?? []).filter(isGainingOrder)
     let current: ConversationInsertStep = {
         ...rest,
+        ...(orders.length ? { unitMutations: rest.unitMutations!.filter((mutation) => !isGainingOrder(mutation)) } : {}),
         conversations: conversations.filter((mutation) => mutation.type !== 'reorder' && !createsConversation(mutation)),
     }
     const steps = [current]
@@ -79,6 +88,7 @@ export function planConversationInsertPages(
         }
     }
     current.conversations.push(...conversations.filter((mutation) => mutation.type === 'reorder'))
+    if (orders.length) current.unitMutations = [...(current.unitMutations ?? []), ...orders]
     if (character) current.character = character
     return { steps }
 }

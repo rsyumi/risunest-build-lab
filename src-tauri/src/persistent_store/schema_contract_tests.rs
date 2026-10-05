@@ -56,7 +56,7 @@ fn all_live_tables_have_an_explicit_preservation_owner() {
         "snapshot_restore_body_jobs",
         "snapshot_restore_payloads",
         "snapshot_restore_stages",
-        "snapshot_restore_units",
+        "replacement_source_units",
     ];
     let shared_unit_state = ["lww_units", "lww_retired", "message_page_objects"];
     let derived_message_state = [

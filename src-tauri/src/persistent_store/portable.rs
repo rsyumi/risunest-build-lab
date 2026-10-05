@@ -294,25 +294,33 @@ impl PersistentStore {
         Ok(inventory)
     }
 
-    pub(crate) fn stage_portable_units(&self, source: &Connection, probe: &dyn CancellationProbe) -> StoreResult<std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>> {
-        let mut units = std::collections::BTreeMap::new();
-        let mut statement = source.prepare("SELECT key,value FROM backup_units ORDER BY key")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            cancelled(probe)?;
-            let key = row.get::<_,String>(0)?.try_into().map_err(|_|invalid("invalid original unit key"))?;
-            let value: risunest_sync_wire::unit::UnitValue = serde_json::from_str(&row.get::<_,String>(1)?)?;
-            value.validate().map_err(|e| invalid(&e.to_string()))?;
-            units.insert(key,value);
+    /// Stages the original units of a portable backup as the source units of
+    /// `staging_id` and verifies the controls and payloads they name.
+    pub(crate) fn stage_portable_units(&mut self, staging_id: &str, source: &Connection, probe: &dyn CancellationProbe) -> StoreResult<()> {
+        let mut large = std::collections::BTreeSet::new();
+        let mut manifests = Vec::new();
+        {
+            let writer = self.replacement_source_writer(staging_id)?;
+            let mut statement = source.prepare("SELECT key,value FROM backup_units ORDER BY key")?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                cancelled(probe)?;
+                let key: risunest_sync_wire::unit::UnitKey = row.get::<_,String>(0)?.try_into().map_err(|_|invalid("invalid original unit key"))?;
+                let value: risunest_sync_wire::unit::UnitValue = serde_json::from_str(&row.get::<_,String>(1)?)?;
+                value.validate().map_err(|e| invalid(&e.to_string()))?;
+                large.extend(super::external_capture::large_unit_body_hash(&key,&value));
+                manifests.extend(super::external_capture::message_manifest_hash(&key,&value));
+                writer.put(&key,&value)?;
+            }
+            writer.finish()?;
         }
         let temporary=tempfile::tempdir_in(&self.snapshots_dir)?;
         let certified=Connection::open(temporary.path().join("certified.sqlite"))?;
         certified.execute_batch("PRAGMA cache_size=-16384; PRAGMA temp_store=FILE; CREATE TABLE controls(hash TEXT PRIMARY KEY,body BLOB NOT NULL)")?;
-        let large = super::external_capture::large_unit_body_hashes(&units);
         let bounded = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
             Ok(source.query_row("SELECT body FROM backup_controls WHERE hash=?1 AND length(body)<=?2",rusqlite::params![hash,risunest_sync_wire::MAX_METADATA_BYTES as i64],|row|row.get(0)).optional()?)
         };
-        let pages = super::external_capture::OriginalMessagePages::new(&units,&bounded);
+        let pages = super::external_capture::OriginalMessagePages::from_manifests(manifests,&bounded);
         // A control above the bound is read only as a large unit body or as a
         // page whose manifest declares that length.
         let read = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
@@ -327,7 +335,7 @@ impl PersistentStore {
             }
             Ok(source.query_row("SELECT body FROM backup_controls WHERE hash=?1",[hash],|row|row.get(0)).optional()?)
         };
-        let inventory = super::external_capture::original_unit_dependency_inventory(&units,
+        let inventory = super::external_capture::streamed_unit_dependency_inventory(self.replacement_source_units(staging_id),
             &read,
             &|hash| {
                 let size:Option<i64>=source.query_row("SELECT byte_length FROM backup_payloads WHERE hash=?1",[hash],|row|row.get(0)).optional()?;
@@ -356,10 +364,11 @@ impl PersistentStore {
             cancelled(probe)?;
             super::message_pages::put_object(&self.connection,&row.get::<_,String>(0)?,&row.get::<_,Vec<u8>>(1)?)?;
         }
-        for (key,value) in &units {
-            super::lww::validate_received(&self.connection,key,value)?;
+        for unit in self.replacement_source_units(staging_id) {
+            let (key,value) = unit?;
+            super::lww::validate_received(&self.connection,&key,&value)?;
         }
-        Ok(units)
+        Ok(())
     }
 
     pub(crate) fn capture_portable_records(
@@ -591,6 +600,7 @@ fn validate_live_columns(source: &Connection) -> StoreResult<()> {
                     | "content_change_floor"
                     | "message_page_indexes"
                     | "message_page_manifests"
+                    | "replacement_source_units"
             )
         {
             return Err(invalid(&format!(

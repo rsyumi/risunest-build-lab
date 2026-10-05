@@ -50,8 +50,9 @@ fn compaction_captures_large_unit_bodies_before_segments_retire() {
         let (mut f, segment, catalog) = large_fixture();
         f.publish_a().await;
         let job = tempfile::tempdir().unwrap();
-        f.sender.compact_published(job.path(), "00000000-0000-4000-8000-000000000099",
-            &f.a.lww_clock_state().unwrap().writer_id, &super::fake::capabilities(true), &Cancellation::default(), None)
+        let writer = f.a.lww_clock_state().unwrap().writer_id;
+        f.sender.compact_published(&mut f.a, job.path(), "00000000-0000-4000-8000-000000000099",
+            &writer, &super::fake::capabilities(true), &Cancellation::default(), None)
             .await.unwrap();
         for object in f.sender.listing(&Cancellation::default()).await.unwrap() {
             f.provider.delete_object(&f.sender.repository, &object.locator, &Cancellation::default()).await.unwrap();

@@ -17,6 +17,8 @@ import { getStopStrings, stringlizeAINChat, unstringlizeAIN, unstringlizeChat } 
 import { applyChatTemplate } from "../templates/chatTemplate";
 import { runTransformers } from "../transformers";
 import { runTrigger } from "../triggers";
+import { findActiveHistoryWindow } from "../historyWindowIndex";
+import { openHistoryWindowCopy } from "../historyWindowWrite";
 import { requestClaude } from './anthropic';
 import { requestGoogleCloudVertex } from './google';
 import { requestOpenAI, requestOpenAILegacyInstruct, requestOpenAIResponseAPI } from "./openAI/requests";
@@ -247,11 +249,18 @@ export async function requestChatData(arg:requestDataArgument, model:ModelModeEx
                 const currentChar = getCurrentCharacter()
                 if(currentChar?.type !== 'group'){
                     const perf = performance.now()
+                    const currentChat = getCurrentChat()
+                    // A send that builds from a history window hands the trigger the window.
+                    const historyWindow = findActiveHistoryWindow(currentChar.chaId, currentChat?.id)
+                    const historyWindowCopy = historyWindow ? openHistoryWindowCopy(historyWindow) : null
                     const d = await runTrigger(currentChar, 'request', {
-                        chat: getCurrentChat(),
+                        chat: historyWindowCopy?.chat ?? currentChat,
                         displayMode: true,
                         displayData: JSON.stringify(arg.formated)
                     })
+                    if (historyWindowCopy && !historyWindowCopy.commit()) {
+                        throw new Error('The conversation changed during the request trigger')
+                    }
         
                     const got = JSON.parse(d.displayData)
                     if(!got || !Array.isArray(got)){

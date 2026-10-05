@@ -190,7 +190,7 @@ def run_phase(app, phase, artifacts, fixtures):
             if process.returncode != 0:
                 raise RuntimeError(f'{phase}: app exited {process.returncode}')
             result = records(report)
-            required = {phase: {phase}}[phase] if phase.startswith('appearance-') else {'termination-probe': {'termination-probe-cancel', 'termination-probe-reload', 'termination-probe-approved'}, 'contracts': {'persistence', 'regex', 'tokenizer', 'reload', 'closed', 'reopened', 'finder', 'quit-cancelled', 'quit-saved'}, 'restart': {'restart'}, 'app': {'app', 'app-native-saving', 'app-native-reload-cancelled', 'app-native-stale-rejected', 'app-native-saved', 'app-native-exit'}, 'app-restart': {'app-restart'}, 'streaming': {'streaming'}}[phase]
+            required = {phase: {phase}}[phase] if phase.startswith('appearance-') else {'termination-probe': {'termination-probe-cancel', 'termination-probe-reload', 'termination-probe-approved'}, 'contracts': {'persistence', 'regex', 'tokenizer', 'reload', 'closed', 'reopened', 'finder', 'quit-cancelled', 'quit-saved'}, 'restart': {'restart'}, 'app': {'app', 'app-native-saving', 'app-native-reload-cancelled', 'app-native-stale-rejected', 'app-native-saved', 'app-native-exit'}, 'app-restart': {'app-restart'}, 'streaming': {'streaming'}, 'quit-escape': {'quit-escape-armed', 'quit-escape-exit'}}[phase]
             stages = {entry['stage'] for entry in result}
             if not required <= stages or 'failure' in stages:
                 raise RuntimeError(f'{phase}: incomplete results {stages}')
@@ -378,8 +378,8 @@ def main():
     for fixture in fixtures:
         fixture.write_text('synthetic file association fixture')
     configured_phases = os.environ.get('RISUNEST_MACOS_PHASES')
-    phases = configured_phases.split(',') if configured_phases else ['contracts', 'restart', 'app', 'app-restart', 'streaming']
-    allowed_phases = {'termination-probe', 'contracts', 'restart', 'app', 'app-restart', 'streaming',
+    phases = configured_phases.split(',') if configured_phases else ['contracts', 'restart', 'app', 'app-restart', 'streaming', 'quit-escape']
+    allowed_phases = {'termination-probe', 'contracts', 'restart', 'app', 'app-restart', 'streaming', 'quit-escape',
                       'appearance-seed-light', 'appearance-app-light', 'appearance-seed-dark', 'appearance-app-dark'}
     if not phases or any(phase not in allowed_phases for phase in phases):
         raise RuntimeError('invalid RISUNEST_MACOS_PHASES')

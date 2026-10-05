@@ -23,6 +23,12 @@
 # Native credential access uses this class by name through JNI.
 -keep class io.github.rsyumi.risunest.ServerSyncSecrets { *; }
 
+# Native TLS calls the Android certificate verifier by name through JNI.
+-keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }
+-keep class io.github.rsyumi.risunest.PlatformTls {
+    public static native void initialize(android.content.Context);
+}
+
 # Rust invokes these static entry points by name; keep their JNI signatures.
 -keep class io.github.rsyumi.risunest.ExternalStorageSecrets {
     public static native void initialize();

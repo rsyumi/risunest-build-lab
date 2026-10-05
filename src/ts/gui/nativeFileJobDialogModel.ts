@@ -247,6 +247,7 @@ function exportTitleOf(
 function titleOf(format: NativeFileOperationFormat | undefined, status?: NativeFileJobStatus): string {
     if (status?.kind === 'restore-official-account-snapshot') return language.risuNest.backup.officialRestore
     const copy = language.risuNest.importDialog
+    if (status?.kind === 'restore-native-snapshot' || status?.kind === 'snapshot-bodies') return copy.titleSnapshot
     switch (format) {
         case 'risu-save':
             return copy.titleRisuSave
@@ -551,6 +552,8 @@ export function failureReason(code: string, direction: 'import' | 'export' = 'im
             return copy.reasonIo
         case 'source-reselect-required':
             return copy.reasonReselectSource
+        case 'import-interrupted':
+            return copy.reasonImportInterrupted
         case 'capability-unavailable':
             return copy.reasonCapability
         case 'rescue-format-not-restorable':

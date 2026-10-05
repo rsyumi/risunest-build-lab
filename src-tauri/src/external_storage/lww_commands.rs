@@ -366,28 +366,16 @@ pub(crate) async fn external_lww_receive(
         let authority = request.header.binding_authority;
         // One page per call: pages from the last listing come first, and a
         // new listing runs only once every one of them is finished.
-        let mut page = None;
-        while let Some(id) = session.receive_pages.front() {
-            match store.external_lww_unfinished_receive(id).map_err(runtime::local_error)? {
-                Some(stored) if stored.header.binding_authority == authority => {
-                    page = Some(stored);
-                    break;
-                }
-                Some(_) => session.receive_pages.clear(),
-                None => {
-                    session.receive_pages.pop_front();
-                }
-            }
-        }
+        let mut page = next_receive_page(&store, &mut session.receive_pages, authority)?;
         if page.is_none() {
-            let pages = session
+            session.receive_pages = session
                 .engine
                 .as_ref()
                 .ok_or_else(lww_segment::corrupt)?
                 .receive_requests_cached(&mut store, authority, &context.checkpoints, &session.cancel)
-                .await?;
-            session.receive_pages = pages.iter().map(|page| page.header.request_id.clone()).collect();
-            page = pages.into_iter().next();
+                .await?
+                .into();
+            page = next_receive_page(&store, &mut session.receive_pages, authority)?;
         }
         let own = store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
         if page.as_ref().is_some_and(|page| page.progress.writer_id.as_deref() != Some(own.as_str())) {
@@ -395,6 +383,25 @@ pub(crate) async fn external_lww_receive(
         }
         Ok(page)
     }.await)
+}
+
+/// The first unfinished page in `queue`, dropping finished ones. A page of
+/// another binding empties the queue.
+fn next_receive_page(
+    store: &crate::persistent_store::PersistentStore,
+    queue: &mut VecDeque<String>,
+    authority: risunest_sync_wire::stamp::DecimalU64,
+) -> Result<Option<StageReceive>> {
+    while let Some(id) = queue.front() {
+        match store.external_lww_unfinished_receive(id).map_err(runtime::local_error)? {
+            Some(stored) if stored.header.binding_authority == authority => return Ok(Some(stored)),
+            Some(_) => queue.clear(),
+            None => {
+                queue.pop_front();
+            }
+        }
+    }
+    Ok(None)
 }
 
 #[tauri::command]
@@ -427,7 +434,7 @@ async fn maintain(app:&AppHandle,request:&Request,context:&Context,session:&mut 
     }
     session.cancel=cancel.clone();
     open(app,&request.connection_id,session).await?;
-    let store=check(app,request,true)?;
+    let mut store=check(app,request,true)?;
     let writer=store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
     let engine=session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
     let due=engine.maintenance_needed_cached(&context.checkpoints,cancel).await?;
@@ -444,7 +451,7 @@ async fn maintain(app:&AppHandle,request:&Request,context:&Context,session:&mut 
         let result=owner.run(&protection,cancel,async {
             if let Some(reason)=owner.recheck(&protection,cancel).await? {return Err(super::leases::yield_error(reason));}
             check(app,request,true)?;
-            let completed=engine.compact_published(&directory,&job,&writer,&stored.capabilities,cancel,Some((&owner,&protection))).await?;
+            let completed=engine.compact_published(&mut store,&directory,&job,&writer,&stored.capabilities,cancel,Some((&owner,&protection))).await?;
             check(app,request,true)?;
             Ok(completed)
         }).await?;
