@@ -137,6 +137,27 @@ jobs:
         run: |
           set -euo pipefail
           python3 ../control/scripts/ios-shell-inputs.py src-tauri/gen/apple artifacts
+      - name: Portable receipt Swift contract
+        run: |
+          set -euo pipefail
+          receipt_test="$(mktemp -d "$RUNNER_TEMP/portable-receipts.XXXXXX")"
+          mkdir -p "$receipt_test/Sources/tauri-plugin-ios-native" "$receipt_test/Tests/NativeFileStateTests"
+          cp crates/tauri-plugin-ios-native/ios/Sources/PortableSourceCustody.swift "$receipt_test/Sources/tauri-plugin-ios-native/"
+          cp crates/tauri-plugin-ios-native/ios/Tests/PortableSourceCustodyTests.swift "$receipt_test/Tests/NativeFileStateTests/"
+          cat > "$receipt_test/Package.swift" <<'SWIFT'
+          // swift-tools-version:5.3
+          import PackageDescription
+          let package = Package(
+              name: "PortableReceiptContracts",
+              platforms: [.macOS("14.0")],
+              targets: [
+                  .target(name: "tauri-plugin-ios-native"),
+                  .testTarget(name: "NativeFileStateTests", dependencies: ["tauri-plugin-ios-native"])
+              ]
+          )
+          SWIFT
+          swift test --package-path "$receipt_test" --filter PortableSourceCustodyTests/testOrphanReceiptArrayEncodesNamesAndExplicitNull 2>&1 | tee artifacts/portable-receipts-swift.log
+          grep -Eq 'Executed 1 test, with 0 failures' artifacts/portable-receipts-swift.log
       - name: Build simulator app
         run: |
           set -euo pipefail
