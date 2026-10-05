@@ -85,10 +85,12 @@ class SafFileBridgeTest {
     }
     val first = SafSpoolStore(root, atomicPublisher = testAtomicPublisher).spool(listOf(source))
     val recreated = SafSpoolStore(root, atomicPublisher = testAtomicPublisher)
+    assertTrue(recreated.markDelivered(first.ready.single().token))
     val second = recreated.spool(listOf(source))
     assertEquals(1, opened)
     assertEquals(first.ready, second.ready)
     assertEquals("한글 \"é\" 😀.charx", second.ready.single().displayName)
+    assertFalse(recreated.isDelivered(second.ready.single().token))
   }
 
   @Test
@@ -446,6 +448,94 @@ class SafFileBridgeTest {
     assertFalse(store.discardReady(token))
     assertFalse(store.discardReady("../unrelated"))
     assertEquals("preserve", unrelated.readText())
+  }
+
+  @Test
+  fun `a spool an earlier WebView received is discarded and reported instead of replayed`() {
+    val root = temporaryDirectory()
+    val received = "11111111-1111-4111-8111-111111111111"
+    val waiting = "22222222-2222-4222-8222-222222222222"
+    val store = SafSpoolStore(
+      root = root,
+      atomicPublisher = testAtomicPublisher,
+      tokenFactory = sequenceOf(UUID.fromString(received), UUID.fromString(waiting)).iterator()::next,
+    )
+    store.spool(listOf(
+      TestSafSource("large.json", 2) { ByteArrayInputStream(byteArrayOf(1, 2)) },
+      TestSafSource("next.json", 2) { ByteArrayInputStream(byteArrayOf(3, 4)) },
+    ))
+    val handedOff = markSpoolBatchDelivered(store, SafSpoolBatch(store.listReady().take(1), emptyList()))
+    assertEquals(listOf(received), handedOff.ready.map(SafSpoolReady::token))
+
+    val restarted = SafSpoolStore(root, atomicPublisher = testAtomicPublisher)
+    val replay = replayReadySpoolBatch(restarted, emptySet())
+
+    assertEquals(listOf(waiting), replay.ready.map(SafSpoolReady::token))
+    assertEquals(listOf(SafSpoolFailure("large.json", SPOOL_INTERRUPTED_CODE)), replay.failures)
+    assertFalse(root.resolve(received).exists())
+    assertEquals(SafSpoolBatch(replay.ready, emptyList()), replayReadySpoolBatch(restarted, emptySet()))
+  }
+
+  @Test
+  fun `replay leaves a spool the current WebView already received`() {
+    val root = temporaryDirectory()
+    val token = "33333333-3333-4333-8333-333333333333"
+    val store = SafSpoolStore(
+      root = root,
+      atomicPublisher = testAtomicPublisher,
+      tokenFactory = { UUID.fromString(token) },
+    )
+    val batch = store.spool(listOf(TestSafSource("card.lorebook", 1) { ByteArrayInputStream(byteArrayOf(1)) }))
+    markSpoolBatchDelivered(store, batch)
+
+    val replay = replayReadySpoolBatch(store, setOf(token))
+
+    assertEquals(SafSpoolBatch(emptyList(), emptyList()), replay)
+    assertTrue(store.isDelivered(token))
+  }
+
+  @Test
+  fun `a spool that cannot be marked is withdrawn and reported`() {
+    val root = temporaryDirectory()
+    val store = SafSpoolStore(root, atomicPublisher = testAtomicPublisher)
+    val missing = SafSpoolReady("44444444-4444-4444-8444-444444444444", "gone.json", 1, 1)
+
+    val batch = markSpoolBatchDelivered(
+      store,
+      SafSpoolBatch(listOf(missing), listOf(SafSpoolFailure("other.json", "source-copy-failed"))),
+    )
+
+    assertEquals(emptyList<SafSpoolReady>(), batch.ready)
+    assertEquals(
+      listOf(
+        SafSpoolFailure("other.json", "source-copy-failed"),
+        SafSpoolFailure("gone.json", "spool-write-failed"),
+      ),
+      batch.failures,
+    )
+  }
+
+  @Test
+  fun `delivered spools can still be discarded and swept as stale`() {
+    val root = temporaryDirectory()
+    val discarded = "55555555-5555-4555-8555-555555555555"
+    val stale = "66666666-6666-4666-8666-666666666666"
+    val store = SafSpoolStore(
+      root = root,
+      atomicPublisher = testAtomicPublisher,
+      nowMillis = { 1_000 },
+      tokenFactory = sequenceOf(UUID.fromString(discarded), UUID.fromString(stale)).iterator()::next,
+    )
+    store.spool(listOf(
+      TestSafSource("first.json", 1) { ByteArrayInputStream(byteArrayOf(1)) },
+      TestSafSource("second.json", 1) { ByteArrayInputStream(byteArrayOf(2)) },
+    ))
+    assertTrue(store.markDelivered(discarded))
+    assertTrue(store.markDelivered(stale))
+
+    assertTrue(store.discardReady(discarded))
+    assertEquals(listOf(stale), store.cleanupStale(nowMillis = 1_000 + 25 * 60 * 60 * 1_000L))
+    assertEquals(emptyList<String>(), root.list().orEmpty().toList())
   }
 
   @Test
@@ -929,6 +1019,79 @@ class SafFileBridgeTest {
   }
 
   @Test
+  fun `destination source accepts only exact app-owned download handoffs`() {
+    val appData = temporaryDirectory()
+    val handoffs = appData.resolve("native-file-jobs/handoffs")
+    handoffs.mkdirs()
+    val id = "99999999-9999-4999-8999-999999999999"
+    val source = handoffs.resolve("risu-download-$id.bin").apply {
+      writeBytes(byteArrayOf(1, 2, 3))
+    }
+    val outside = appData.resolve("outside/risu-download-$id.bin").apply {
+      parentFile!!.mkdirs()
+      writeBytes(byteArrayOf(9))
+    }
+    val otherSuffix = handoffs.resolve("risu-download-$id.json").apply {
+      writeBytes(byteArrayOf(8))
+    }
+
+    assertEquals(source.canonicalFile, resolveManagedExportSource(appData, source.path))
+    assertEquals(id, managedExportId(source))
+    assertEquals(SafDestinationSourceKind.DOWNLOAD, managedExportSourceKind(source))
+    assertEquals(source.canonicalFile, resolveManagedExportById(appData, id))
+    assertNull(resolveManagedExportSource(appData, outside.path))
+    assertNull(resolveManagedExportSource(appData, otherSuffix.path))
+  }
+
+  @Test
+  fun `a download terminal is acknowledged without publication proof and keeps its handoff`() {
+    val appData = temporaryDirectory()
+    val stateFile = appData.resolve("native-file-jobs/android-saf-destination.json")
+    val store = SafDestinationStateStore(stateFile, testAtomicPublisher)
+    val download = terminalDestinationRecord(
+      requestId = "d0d0d0d0-d0d0-40d0-80d0-d0d0d0d0d0d0",
+      exportId = "e0e0e0e0-e0e0-40e0-80e0-e0e0e0e0e0e0",
+      sourceKind = SafDestinationSourceKind.DOWNLOAD,
+      publicationPrerequisitesComplete = false,
+    )
+    val handoff = appData.resolve("native-file-jobs/handoffs/risu-download-${download.exportId}.bin")
+    handoff.parentFile!!.mkdirs()
+    handoff.writeBytes(byteArrayOf(1))
+    store.save(download)
+    assertEquals(SafDestinationSourceKind.DOWNLOAD, store.load()?.sourceKind)
+
+    assertTrue(acknowledgeStoredDestination(appData, store, download.requestId))
+    assertNull(store.load())
+    assertTrue(handoff.isFile)
+
+    store.save(download)
+    assertTrue(handoff.delete())
+    assertTrue(acknowledgeStoredDestination(appData, store, download.requestId))
+    assertNull(store.load())
+  }
+
+  @Test
+  fun `destination source accepts only exact app-owned dataset handoffs`() {
+    val appData = temporaryDirectory()
+    val handoffs = appData.resolve("native-file-jobs/handoffs")
+    handoffs.mkdirs()
+    val id = "99999999-9999-4999-8999-999999999999"
+    val source = handoffs.resolve("risu-dataset-$id.json").apply { writeBytes(byteArrayOf(1)) }
+    val outside = appData.resolve("outside/risu-dataset-$id.json").apply {
+      parentFile!!.mkdirs()
+      writeBytes(byteArrayOf(2))
+    }
+    val otherSuffix = handoffs.resolve("risu-dataset-$id.bin").apply { writeBytes(byteArrayOf(3)) }
+
+    assertEquals(source.canonicalFile, resolveManagedExportSource(appData, source.path))
+    assertEquals(id, managedExportId(source))
+    assertEquals(SafDestinationSourceKind.RISU_SAVE, managedExportSourceKind(source))
+    assertEquals(source.canonicalFile, resolveManagedExportById(appData, id))
+    assertNull(resolveManagedExportSource(appData, outside.path))
+    assertNull(resolveManagedExportSource(appData, otherSuffix.path))
+  }
+
+  @Test
   fun `destination source accepts only exact app-owned portable backup handoffs`() {
     val appData = temporaryDirectory()
     val handoffs = appData.resolve("native-file-jobs/handoffs")
@@ -1123,6 +1286,29 @@ class SafFileBridgeTest {
     val longBackup = "b".repeat(181) + ".risunest"
     assertEquals(180, safeSafDestinationName(longBackup).length)
     assertTrue(safeSafDestinationName(longBackup).endsWith(".risunest"))
+  }
+
+  @Test
+  fun `a download picker keeps the name and extension the app gave it`() {
+    fun download(name: String) = safDestinationPickerName(name, SafDestinationSourceKind.DOWNLOAD)
+    assertEquals("chat.txt", download("chat.txt"))
+    assertEquals("Alice_chat.html", download("folder/Alice_chat.html"))
+    assertEquals("subtitle.vtt", download("subtitle.vtt"))
+    assertEquals("translated.po", download("translated.po"))
+    assertEquals("preset.risup", download("preset.risup"))
+    assertEquals("export", download("export"))
+    assertEquals("opened-file", download("///"))
+    val long = "c".repeat(200) + ".json"
+    assertEquals(180, download(long).length)
+    assertTrue(download(long).endsWith(".json"))
+    val longText = "c".repeat(200) + ".txt"
+    assertEquals(180, download(longText).length)
+    assertTrue(download(longText).endsWith(".txt"))
+    assertEquals(180, download("c".repeat(200) + ".a‮").length)
+    assertEquals(
+      "chat.txt.risudat",
+      safDestinationPickerName("chat.txt", SafDestinationSourceKind.RISU_SAVE),
+    )
   }
 
   @Test

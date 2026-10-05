@@ -899,12 +899,17 @@ pub(crate) fn resume_journaled_native_restore(
     let stage = session.stage_id.as_deref().ok_or_else(|| error("device-invalid-state", "Native recovery library stage is absent"))?;
     let prepared = prepare_journaled_native_sections(state,id,Spool::Source,&session.selected_sections)?;
     let rows = prepared.iter().map(PreparedDeviceSection::rows).collect::<Vec<_>>();
-    let (header,units) = state.library_replacement(id)?;
+    let header = state.library_replacement_header(id)?;
+    // The journal keeps the accepted source units, so the stage reads them from it again.
+    let writer = store.replacement_source_writer(stage).map_err(device_store_error)?;
+    state.visit_library_replacement_units(id,&mut |key,value| writer.put(&key,&value).map_err(device_store_error))?;
+    writer.finish().map_err(device_store_error)?;
     let pending = state.pending_source_sections(id)?;
     if matches!(session.phase.as_str(),"prepared"|"applying-device") {
         for section in &pending { state.section_intent(id,section)?; }
     }
-    let committed = store.lww_commit_replacement_with_device_sections(&header,stage,Some(&units),&rows).map_err(device_store_error)?;
+    let committed = store.lww_commit_staged_replacement_with_device_sections(&header,stage,&rows).map_err(device_store_error)?;
+    store.release_replacement_source(stage).map_err(device_store_error)?;
     let phase = state.session(id)?.phase;
     if matches!(phase.as_str(), "applying-device" | "committed") {
         let manifests = state.section_list(id,Spool::Source)?.into_iter().map(|manifest|(manifest.section_id.clone(),manifest)).collect::<BTreeMap<_,_>>();

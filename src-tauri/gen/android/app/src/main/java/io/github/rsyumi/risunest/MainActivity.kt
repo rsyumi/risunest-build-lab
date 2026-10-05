@@ -57,6 +57,7 @@ private const val NATIVE_RESILIENCE_PREFERENCES = "risu-native-resilience"
 private const val RENDERER_RECOVERY_MARKER = "renderer-recovery-warning"
 private const val SAF_PROGRESS_INTERVAL_MILLIS = 100L
 private const val LEGACY_OPENED_FILE_STALE_MILLIS = 24 * 60 * 60 * 1_000L
+private val LEGACY_OPENED_FILE_PREFIX = Regex("^[0-9a-f]{64}-[0-9]+-")
 private const val OPENED_FILE_INTENT_CONSUMED = "io.github.rsyumi.risunest.OPENED_FILE_INTENT_CONSUMED"
 private const val OPENED_FILE_FINGERPRINT_STATE = "risu.opened-file-fingerprint"
 private const val BACKUP_SOURCE_REQUEST_STATE = "risu.backup-source-request"
@@ -427,13 +428,44 @@ internal fun cleanupLegacyOpenedFiles(
   val cutoff = nowMillis - staleAfterMillis
   return runCatching { directory.listFiles().orEmpty().toList() }.getOrDefault(emptyList())
     .filter {
-      val pending = if (it.name.endsWith(".pending")) {
-        File(it.absolutePath.removeSuffix(".pending")).isFile
-      } else File("${it.absolutePath}.pending").isFile
+      val pending = when {
+        it.name.endsWith(".pending") -> File(it.absolutePath.removeSuffix(".pending")).isFile
+        it.name.endsWith(".delivered") -> File("${it.absolutePath.removeSuffix(".delivered")}.pending").isFile
+        else -> File("${it.absolutePath}.pending").isFile
+      }
       !pending && it.isFile && it.lastModified() <= cutoff && runCatching(it::delete).getOrDefault(false)
     }
     .map(File::getName)
     .sorted()
+}
+
+internal class LegacyOpenedFileReplay(val deliver: List<String>, val interrupted: List<String>)
+
+/**
+ * Pending opened files for a new WebView. A file an earlier WebView received but never acknowledged
+ * is removed and reported by its display name instead of being imported again. [handedOff] holds
+ * the paths the current WebView already received; it is read after the marker so a concurrent
+ * delivery is never removed.
+ */
+internal fun replayLegacyOpenedFiles(directory: File, handedOff: Set<String>): LegacyOpenedFileReplay {
+  val deliver = mutableListOf<String>()
+  val interrupted = mutableListOf<String>()
+  val markers = runCatching { directory.listFiles().orEmpty().toList() }.getOrDefault(emptyList())
+    .filter { it.name.endsWith(".pending") && it.isFile }
+    .sortedBy(File::getName)
+  for (marker in markers) {
+    val source = File(marker.parentFile, marker.name.removeSuffix(".pending"))
+    if (!source.isFile) continue
+    val delivered = File("${source.absolutePath}.delivered")
+    if (!delivered.isFile) {
+      deliver += source.absolutePath
+    } else if (source.absolutePath !in handedOff && marker.delete()) {
+      source.delete()
+      delivered.delete()
+      interrupted += source.name.replace(LEGACY_OPENED_FILE_PREFIX, "")
+    }
+  }
+  return LegacyOpenedFileReplay(deliver, interrupted)
 }
 
 internal fun androidSafDestinationScriptForRecord(
@@ -564,7 +596,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private val safDestinationCancellations = ConcurrentHashMap<String, AtomicBoolean>()
   private val safProgressThrottle = SafProgressThrottle()
   private val deliveredSpoolTokens = ConcurrentHashMap.newKeySet<String>()
-  private val deliveredLegacyPaths = mutableSetOf<String>()
+  private val deliveredLegacyPaths = ConcurrentHashMap.newKeySet<String>()
   private var pendingSafDestination: PendingSafDestination? = null
   private var pendingLegacyBackupSource: PendingLegacyBackupSource? = null
   private val safPickerSlot = SafDestinationSlot()
@@ -659,6 +691,8 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         }
     }
     enableEdgeToEdge()
+    // super.onCreate starts the native app, which may connect right away.
+    PlatformTls.initialize(applicationContext)
     super.onCreate(savedInstanceState)
     safScope.launch(Dispatchers.IO) {
       cleanupLegacyOpenedFiles(File(cacheDir, "opened_files"))
@@ -912,13 +946,18 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     val webView = lifecycleWebView ?: return
     if (!frontendReady.markReady()) return
     safScope.launch {
-      val paths = withContext(Dispatchers.IO) {
-        File(cacheDir, "opened_files").listFiles().orEmpty()
-          .filter { it.name.endsWith(".pending") && it.isFile }
-          .map { File(it.parentFile, it.name.removeSuffix(".pending")) }
-          .filter { it.isFile }.map { it.absolutePath }
+      val replay = withContext(Dispatchers.IO) {
+        replayLegacyOpenedFiles(File(cacheDir, "opened_files"), deliveredLegacyPaths)
       }
-      if (lifecycleWebView === webView) deliverLegacyOpenedFiles(webView, paths)
+      if (lifecycleWebView !== webView) return@launch
+      deliverLegacyOpenedFiles(webView, replay.deliver)
+      if (replay.interrupted.isNotEmpty() && lifecycleWebView === webView) {
+        val failures = replay.interrupted.map { SafSpoolFailure(it, SPOOL_INTERRUPTED_CODE) }
+        webView.evaluateJavascript(
+          androidSpoolBatchScript(UUID.randomUUID().toString(), SafSpoolBatch(emptyList(), failures)),
+          null,
+        )
+      }
     }
     // Asked at startup so sync and backups started later, onboarding included,
     // keep their progress notification while the app is in the background.
@@ -1256,7 +1295,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
             source,
             cancellation,
           )
-          safDestinationPicker.launch(safeSafDestinationName(suggestedName))
+          safDestinationPicker.launch(safDestinationPickerName(suggestedName, sourceKind))
         } catch (error: SafDestinationException) {
           terminalRecord = destinationTerminalRecord(
             requestId = requestId,
@@ -1437,7 +1476,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
           remaining.map { SafSpoolFailure(it.displayName, "cleanup-failed") },
         )
       } else {
-        batch
+        handOffSpools(batch)
       }
       finishBackupSourcePick(pending, terminalBatch)
     }
@@ -1538,8 +1577,10 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
           remaining,
           remaining.map { SafSpoolFailure(it.displayName, "cleanup-failed") },
         )
-      } else {
+      } else if (pending.content && pending.restored) {
         batch
+      } else {
+        handOffSpools(batch)
       }
       finishLegacyBackupSourcePick(pending, terminalBatch)
     }
@@ -2064,11 +2105,9 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         ready.await()
         if (!copyContext.isActive || lifecycleWebView !== webView) return@launch
         if (legacyFiles.isNotEmpty()) deliverLegacyOpenedFiles(webView, legacyFiles)
-        val newlyReady = batch.ready.filter { deliveredSpoolTokens.add(it.token) }
-        webView.evaluateJavascript(
-          androidSpoolBatchScript(requestId, batch.copy(ready = newlyReady)),
-          null,
-        )
+        val delivered = handOffSpools(batch)
+        if (lifecycleWebView !== webView) return@launch
+        webView.evaluateJavascript(androidSpoolBatchScript(requestId, delivered), null)
       } finally {
         releaseOpenedIntentClaim(openedIntent, uris)
         safSourceCancellations.remove(requestId, cancellation)
@@ -2079,18 +2118,32 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
 
   private fun replayReadySpools(webView: WebView) {
     safScope.launch {
-      val ready = withContext(Dispatchers.IO) {
+      if (lifecycleWebView !== webView || !frontendReady.isReady) return@launch
+      val replay = withContext(Dispatchers.IO) {
         val store = safSpoolStore()
         store.cleanupStale()
-        store.listReady().filter { shouldUseNativeFileJobSpool(it.displayName) }
+        replayReadySpoolBatch(store, deliveredSpoolTokens)
       }
-      if (ready.isEmpty() || lifecycleWebView !== webView || !frontendReady.isReady) return@launch
-      val newlyReady = ready.filter { deliveredSpoolTokens.add(it.token) }
-      if (newlyReady.isEmpty()) return@launch
+      if (lifecycleWebView !== webView || !frontendReady.isReady) return@launch
+      val batch = handOffSpools(replay)
+      if (batch.ready.isEmpty() && batch.failures.isEmpty()) return@launch
+      if (lifecycleWebView !== webView) return@launch
       webView.evaluateJavascript(
-        androidSpoolBatchScript(UUID.randomUUID().toString(), SafSpoolBatch(newlyReady, emptyList())),
+        androidSpoolBatchScript(UUID.randomUUID().toString(), batch),
         null,
       )
+    }
+  }
+
+  /**
+   * Records each spool as received by the current WebView before it is dispatched, so a later start
+   * reports an unconsumed spool instead of importing it again.
+   */
+  private suspend fun handOffSpools(batch: SafSpoolBatch): SafSpoolBatch {
+    val fresh = batch.ready.filter { deliveredSpoolTokens.add(it.token) }
+    if (fresh.isEmpty()) return batch.copy(ready = fresh)
+    return withContext(Dispatchers.IO) {
+      markSpoolBatchDelivered(safSpoolStore(), batch.copy(ready = fresh))
     }
   }
 
@@ -2174,10 +2227,14 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     }
   }
 
-  private fun deliverLegacyOpenedFiles(webView: WebView, paths: List<String>) {
+  private suspend fun deliverLegacyOpenedFiles(webView: WebView, paths: List<String>) {
     val fresh = paths.filter { deliveredLegacyPaths.add(it) }
     if (fresh.isEmpty()) return
-    webView.evaluateJavascript(openedFilesEventScript(fresh), null)
+    // An unmarked file is still delivered; at worst it is offered once more after a restart.
+    withContext(Dispatchers.IO) {
+      fresh.forEach { path -> runCatching { publishLegacyMarker(File("$path.delivered")) } }
+    }
+    if (lifecycleWebView === webView) webView.evaluateJavascript(openedFilesEventScript(fresh), null)
   }
 
   private fun acknowledgeLegacyOpenedFile(path: String) {
@@ -2185,6 +2242,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     val source = File(path)
     if (source.parentFile?.canonicalFile != directory || source.canonicalFile.parentFile != directory) return
     if (File("${source.absolutePath}.pending").delete()) {
+      File("${source.absolutePath}.delivered").delete()
       mainHandler.post { deliveredLegacyPaths.remove(source.absolutePath) }
     }
   }
@@ -2192,6 +2250,10 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private fun markLegacyFileReady(file: File) {
     val marker = File("${file.absolutePath}.pending")
     if (marker.isFile) return
+    publishLegacyMarker(marker)
+  }
+
+  private fun publishLegacyMarker(marker: File) {
     val temporary = File("${marker.absolutePath}.tmp")
     temporary.outputStream().use { it.fd.sync() }
     AndroidSafAtomicPublisher.publish(temporary, marker)
@@ -2209,6 +2271,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         val sourceId = openedFileIntentFingerprint(action, listOf(uri.toString()))
         val openedTarget = File(directory, "$sourceId-$index-${resolveLegacyDisplayName(uri)}")
         if (openedTarget.isFile && File("${openedTarget.absolutePath}.pending").isFile) {
+          File("${openedTarget.absolutePath}.delivered").delete()
           markLegacyFileReady(openedTarget)
           return@mapIndexedNotNull openedTarget.absolutePath
         }

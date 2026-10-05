@@ -18,7 +18,7 @@ use risunest_sync_wire::{
         AckRequest, CancelOperationRequest, ChangesPage, OperationReceipt, PushReceipt,
         PushRequest, StatePage, StatePin, TimeSample, UnitChange,
     },
-    stamp::{ClockSample, DecimalU64},
+    stamp::{AdmittedClock, ClockSample, DecimalU64},
     unit::UnitValue,
     MAX_METADATA_BYTES,
 };
@@ -231,6 +231,11 @@ fn observe_descriptor_purposes(
         register_object_purpose(root, BodyPurpose::Control);
     }
 }
+/// Admitted clock samples by repository, address and library. A sample serves
+/// every request until it expires or the server rejects a stamp.
+type ClockKey = (std::path::PathBuf, String, String);
+static CLOCKS: std::sync::Mutex<std::collections::BTreeMap<ClockKey, (Instant, AdmittedClock)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 pub(crate) struct LwwClient {
     pub client: ServerClient,
     pub log: OperationLog,
@@ -275,7 +280,32 @@ impl LwwClient {
             Ok(())
         }
     }
+    fn clock_key(&self) -> ClockKey {
+        let config = self.client.config();
+        (self.root.clone(), config.endpoint, config.library_id)
+    }
+    fn forget_clock(&self) {
+        if let Ok(mut clocks) = CLOCKS.lock() {
+            clocks.remove(&self.clock_key());
+        }
+    }
+    /// The incoming bound from the library's current sample, sampling the
+    /// server clock only when there is none or it expired.
     pub(crate) fn admission(&self) -> Result<DecimalU64> {
+        let key = self.clock_key();
+        let cached = CLOCKS.lock().ok().and_then(|clocks| clocks.get(&key).cloned());
+        if let Some((sampled, clock)) = cached {
+            let age = u64::try_from(sampled.elapsed().as_millis())
+                .map_err(|_| SyncError::new("clock-overflow", 409))?;
+            if let Ok(upper) = clock.incoming_upper_ms(&key.2, age) {
+                return Ok(upper.into());
+            }
+        }
+        self.fresh_admission()
+    }
+    /// Samples the server clock and replaces the library's sample with it.
+    pub(crate) fn fresh_admission(&self) -> Result<DecimalU64> {
+        self.forget_clock();
         let sent_wall = now_ms()?;
         let sent = Instant::now();
         let (_, sample): (_, TimeSample) =
@@ -296,7 +326,11 @@ impl LwwClient {
             cached_or_aged: false,
         }
         .admit()?;
-        Ok(admitted.incoming_upper_ms(&target, elapsed)?.into())
+        let upper = admitted.incoming_upper_ms(&target, elapsed)?;
+        if let Ok(mut clocks) = CLOCKS.lock() {
+            clocks.insert(self.clock_key(), (sent, admitted));
+        }
+        Ok(upper.into())
     }
     /// The client for the registration that sent a publication. The current
     /// address asks for it when that registration is the one in use.
@@ -484,7 +518,7 @@ impl LwwClient {
             entries = store
                 .lww_read_outbox_generating(header.binding_authority, 256, generating)?
                 .entries;
-            admitted = self.admission()?;
+            admitted = self.fresh_admission()?;
             if entries
                 .iter()
                 .any(|entry| entry.stamp.physical_ms > admitted)
@@ -654,7 +688,10 @@ impl LwwClient {
         match terminal {
             OperationReceipt::Accepted { receipt, .. } => Ok(Some(receipt)),
             OperationReceipt::Rejected { error, .. } => Err(SyncError::new(
-                if error == "operation-cancelled" {
+                if error == "clock-skew" {
+                    self.forget_clock();
+                    error
+                } else if error == "operation-cancelled" {
                     failure.unwrap_or_else(|| "server-unreachable".into())
                 } else {
                     error
@@ -668,7 +705,10 @@ impl LwwClient {
         store: &mut PersistentStore,
         upper: DecimalU64,
     ) -> Result<(DecimalU64, Vec<Change>)> {
+        // Each attempt makes the server copy the whole library under a new pin.
+        let mut attempts = 0;
         loop {
+            attempts += 1;
             let (_, pin): (_, StatePin) = self.client.json(
                 reqwest::Method::POST,
                 "state/pins",
@@ -767,7 +807,8 @@ impl LwwClient {
             }
             match result {
                 Err(error)
-                    if matches!(error.code.as_str(), "state-pin-expired" | "journal-floor") =>
+                    if attempts < 3
+                        && matches!(error.code.as_str(), "state-pin-expired" | "journal-floor") =>
                 {
                     continue
                 }
@@ -781,7 +822,7 @@ impl LwwClient {
         header: &Header,
     ) -> Result<ApplyResult> {
         self.fence(store)?;
-        self.admission()?;
+        self.fresh_admission()?;
         let corrected = now_ms()?;
         let upper = corrected
             .checked_add(risunest_sync_wire::stamp::MAX_CLOCK_SKEW_MS)
@@ -942,6 +983,11 @@ impl LwwClient {
                 self.log
                     .0
                     .execute("DELETE FROM bootstrap WHERE authority=?1", [&authority])?;
+                // A pin kept from an earlier page is replaced once; one made by this
+                // call that already expired is reported instead of pinning again.
+                if existing_pin.is_none() {
+                    return Err(SyncError::new("state-pin-expired", 410));
+                }
                 return self.receive_page(store, header);
             }
             if !(200..300).contains(&reply.status) {
@@ -1011,6 +1057,13 @@ impl LwwClient {
             }
         }
         let changes = unique.into_values().collect::<Vec<_>>();
+        let upper = if changes.iter().any(|change| change.stamp.physical_ms > upper) {
+            // A stamp beyond the kept sample is checked against a new one before
+            // it is rejected.
+            self.fresh_admission()?
+        } else {
+            upper
+        };
         self.prepare_bodies(store, &changes, upper)?;
         self.check()?;
         let staged = StageReceive {
@@ -1090,12 +1143,13 @@ impl LwwClient {
         };
         let page: StageReceive = serde_json::from_str(&body)
             .map_err(|_| SyncError::new("receive-page-integrity", 409))?;
-        if page.header != *header
-            || !store
-                .lww_receive_progress(header.binding_authority)?
-                .iter()
-                .any(|p| p.kind == "server" && p.cursor == page.progress.cursor)
-        {
+        // A page that keeps the cursor at 0 writes no progress row.
+        let durable = store
+            .lww_receive_progress(header.binding_authority)?
+            .into_iter()
+            .find(|p| p.kind == "server")
+            .map_or(DecimalU64(0), |p| p.cursor);
+        if page.header != *header || durable != page.progress.cursor {
             return Err(SyncError::new("receive-not-durable", 409));
         }
         store.server_assert_receive_finished(&page)?;

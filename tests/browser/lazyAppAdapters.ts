@@ -22,6 +22,7 @@ export const readModule = () => {}, alertConfirm = () => {}, alertNormal = () =>
 export const keepFocusedInputVisible = () => {}, restoreFocusAfterInputBlock = () => {}, backNavigationLayer = () => {}
 export const confirmRecoveryExclusions = () => {}, isStartupExcluded = () => true, getStartupExclusions = () => [], updateStartupExclusions = () => {}
 export const exportOriginalData = () => {}, openRisuNestSettingsTab = () => {}
+export const textEditorPopup = { request: null }
 
 let failingRoute = ''
 let attempts = 0

@@ -6,6 +6,10 @@ const expectedCases = {
     read: ['readback', 'restart-without-reseed'],
     abort: ['commit', 'readback', 'abort-released'],
     'read-abort': ['readback', 'restart-without-reseed'],
+    'close-escape': ['unanswered-close-kept', 'early-repeat-kept'],
+    'session-end': ['commit', 'stop-requested', 'saved'],
+    'read-session-end': ['saved-before-exit'],
+    'session-end-unanswered': ['commit', 'stop-requested'],
 }
 export function verifyReport(report, runId, phase, status) {
     assert.ok(Object.hasOwn(expectedCases, phase), 'unknown phase')

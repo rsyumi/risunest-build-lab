@@ -112,6 +112,7 @@ describe('nativeFileJobDialogModel', () => {
         ['source-open-failed', 'reasonIo'],
         ['source-read-failed', 'reasonIo'],
         ['source-reselect-required', 'reasonReselectSource'],
+        ['import-interrupted', 'reasonImportInterrupted'],
         ['unsupported-source', 'reasonUnsupportedFormat'],
         ['publication-pending', 'reasonIncompletePublication'],
         ['length-mismatch', 'reasonIncompletePublication'],
@@ -133,6 +134,17 @@ describe('nativeFileJobDialogModel', () => {
         const model = buildNativeFileJobDialogModel(null, outcome({ state: 'failed', error: { code, message: 'synthetic detail', recoveryRequired: false } }), 0)
         expect(model.terminal?.reason).toBe(copy[key])
         expect(model.terminal?.details).toBe(`[${code}] synthetic detail`)
+    })
+
+    it('names the kind of an item too large to import', () => {
+        for (const [kind, item] of Object.entries(copy.tooLargeItems)) {
+            const model = buildNativeFileJobDialogModel(null, outcome({ state: 'failed', error: {
+                code: 'payload-too-large', message: 'synthetic detail', recoveryRequired: false, itemKind: kind,
+            } }), 0)
+            expect(model.terminal?.reason).toBe(copy.reasonTooLarge.replace('{0}', item))
+        }
+        expect(failureReason('payload-too-large', 'import', 'commit')).toBe(copy.reasonUnknown)
+        expect(failureReason('payload-too-large')).toBe(copy.reasonUnknown)
     })
 
     it('asks to connect sync when a bound restore cannot reach its sync target', () => {
@@ -469,6 +481,15 @@ describe('nativeFileJobDialogModel', () => {
             1_000,
         )
         expect(unknown.title).toBe(copy.titleBackup)
+
+        for (const kind of ['restore-native-snapshot', 'snapshot-bodies'] as const) {
+            const snapshot = buildNativeFileJobDialogModel(
+                running({ format: 'library-backup', status: status({ kind }) }),
+                null,
+                1_000,
+            )
+            expect(snapshot.title).toBe(copy.titleSnapshot)
+        }
     })
 
     it('uses the RisuSave template and inserts optional stages only when observed', () => {

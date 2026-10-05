@@ -351,5 +351,10 @@ void main().catch(async (error) => {
   const detail = document.createElement("pre");
   detail.textContent = "verification-error:" + message;
   document.getElementById("benchmark")?.append(detail);
-  await report("failure", { message });
+  await report("failure", {
+    message,
+    detail: !phase.startsWith("cloud") && error instanceof Error
+      ? (error as Error & { detail?: unknown }).detail
+      : undefined,
+  });
 });

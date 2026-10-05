@@ -3,6 +3,7 @@
     import Chats from './Chats.svelte'
     import type { ChatViewportHandle, ChatViewportJumpOptions } from 'src/ts/chatViewport'
     import type { ConversationViewportSource } from 'src/ts/conversationViewportSource'
+    import type { SelectedConversationOperations } from 'src/ts/selectedConversationOperations'
     import type {
         LiveChatParserConversationStartRequest,
         LiveChatParserProjectionResolver,
@@ -15,6 +16,7 @@
         initialViewportNavigationGeneration = 0,
         parserProjectionResolver,
         acquireConversationStartParserLease,
+        selectedConversationOperations,
     }: {
         initialMessages?: Message[]
         initialCharacter: character
@@ -24,6 +26,7 @@
         acquireConversationStartParserLease?: (
             request: LiveChatParserConversationStartRequest,
         ) => Promise<{ release(): void } | null>
+        selectedConversationOperations?: SelectedConversationOperations
     } = $props()
 
     let messages = $state<Message[] | undefined>()
@@ -116,6 +119,7 @@
         {viewportNavigationGeneration}
         {parserProjectionResolver}
         {acquireConversationStartParserLease}
+        {selectedConversationOperations}
         {currentCharacter}
         onReroll={() => {}}
         unReroll={() => {}}

@@ -29,7 +29,7 @@ pub(crate) struct NativeHttpTransport {
 }
 impl NativeHttpTransport {
     pub fn new() -> Result<Self> {
-        let client = reqwest::Client::builder()
+        let client = crate::platform_tls::client_builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_gzip().no_brotli().no_deflate()
             .connect_timeout(Duration::from_secs(30))

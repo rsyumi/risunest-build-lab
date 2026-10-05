@@ -43,12 +43,19 @@ export async function consumeOpenedFiles(files: string[]): Promise<void> {
                     const data = await readFile(file)
                     if (await importer(file, data) === 'failed') continue
                 }
-                if (isTauriAndroid) await window.RisuLifecycleBridge?.acknowledgeOpenedFile?.(file)
             } catch (error) {
                 alertError(
                     `Failed to open the selected file: ${file}\n${error}`,
                 )
             } finally {
+                // Every outcome has been reported by now, so Android must not offer the file again.
+                if (isTauriAndroid) {
+                    try {
+                        window.RisuLifecycleBridge?.acknowledgeOpenedFile?.(file)
+                    } catch (error) {
+                        console.warn('Failed to acknowledge the opened file:', error)
+                    }
+                }
                 if (isTauriIOS) await discardIOSFile(file).catch(() => {
                     alertError('The imported temporary file could not be removed.')
                 })

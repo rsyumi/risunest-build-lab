@@ -9,6 +9,8 @@ import type { ConversationViewportKey, ConversationViewportRow } from 'src/ts/co
 const live = vi.hoisted(() => ({
     db: {} as Record<string, any>,
     popup: { openId: 0, children: null as unknown, mouseX: 0, mouseY: 0 },
+    selection: { selId: 0 },
+    resolvePosition: vi.fn(async (_characterId: string, _conversationId: string | null) => ({ characterIndex: 0, chatIndex: 0 })),
 }))
 
 vi.mock('./ChatBody.svelte', async () => ({
@@ -23,7 +25,7 @@ vi.mock('src/ts/stores.svelte', () => ({
     selectedCharID: writable(0),
     HideIconStore: writable(false),
     ReloadGUIPointer: writable(0),
-    selIdState: { selId: 0 },
+    selIdState: live.selection,
     createSimpleCharacter: (char: unknown) => char,
 }))
 vi.mock('src/ts/characters', () => ({ getCharImage: async () => '' }))
@@ -57,6 +59,7 @@ vi.mock('src/ts/process/files/inlayRenderSource', () => ({
     DeferredInlayMarkerRegistry: class {}, withResolvedDeferredInlaySources: vi.fn(),
 }))
 vi.mock('src/ts/process/files/chatCopyInlays', () => ({ copyImageSourceToDataUrl: vi.fn() }))
+vi.mock('src/ts/plugins/pinnedConversationPosition', () => ({ resolvePinnedConversationPosition: live.resolvePosition }))
 vi.mock('../../ts/storage/persistentDataRuntime.svelte', () => ({
     acquireDestructiveReplacementFence: vi.fn(),
     capturePersistentMutationToken: vi.fn(),
@@ -111,6 +114,8 @@ describe('plugin message buttons in the message action row', () => {
         installCharacter({ id: 'conversation-a', message: messages, isStreaming: false })
         live.popup.children = null
         live.popup.openId = 0
+        live.selection.selId = 0
+        live.resolvePosition.mockClear()
         setWidth(1024)
         target = document.createElement('div')
         document.body.append(target)
@@ -133,10 +138,10 @@ describe('plugin message buttons in the message action row', () => {
         expect(first.closest('.button-icon-menu')).toBeNull()
 
         first.click()
-        expect(additionalMessageButtons[0].callback).toHaveBeenCalledWith({
+        await vi.waitFor(() => expect(additionalMessageButtons[0].callback).toHaveBeenCalledWith({
             characterIndex: 0, chatIndex: 0, messageIndex: 1, messageId: 'm-1', role: 'char',
             characterId: 'character-a', conversationId: 'conversation-a',
-        })
+        }))
 
         const userRow = document.createElement('div')
         document.body.append(userRow)
@@ -147,7 +152,7 @@ describe('plugin message buttons in the message action row', () => {
     test('reports a missing message ID as null and follows registration changes', async () => {
         await mountChat({ message: 'unnamed', role: 'char', idx: 2, totalLength: 4 })
         target.querySelectorAll<HTMLButtonElement>('.button-icon-plugin')[1].click()
-        expect(additionalMessageButtons[2].callback).toHaveBeenCalledWith(expect.objectContaining({ messageIndex: 2, messageId: null }))
+        await vi.waitFor(() => expect(additionalMessageButtons[2].callback).toHaveBeenCalledWith(expect.objectContaining({ messageIndex: 2, messageId: null })))
 
         additionalMessageButtons.push(button('late', ['char']))
         await tick()
@@ -172,7 +177,23 @@ describe('plugin message buttons in the message action row', () => {
         expect(pluginButtons(popup)).toEqual(['Button char-only', 'Button both'])
         expect([...popup.querySelectorAll('.button-icon-plugin span')].map((element) => element.textContent)).toEqual(['Button char-only', 'Button both'])
         popup.querySelector<HTMLButtonElement>('.button-icon-plugin')!.click()
-        expect(additionalMessageButtons[0].callback).toHaveBeenCalledWith(expect.objectContaining({ messageIndex: 1, messageId: 'm-1' }))
+        await vi.waitFor(() => expect(additionalMessageButtons[0].callback).toHaveBeenCalledWith(expect.objectContaining({ messageIndex: 1, messageId: 'm-1' })))
+    })
+
+    test('moves the buttons between the row and the popup when the window is resized', async () => {
+        await mountChat({ message: 'answer', role: 'char', idx: 1, totalLength: 3 })
+        expect(pluginButtons()).toEqual(['Button char-only', 'Button both'])
+
+        setWidth(400)
+        window.dispatchEvent(new Event('resize'))
+        await tick()
+        expect(pluginButtons()).toEqual([])
+        expect(target.querySelector('.button-icon-menu')).not.toBeNull()
+
+        setWidth(1000)
+        window.dispatchEvent(new Event('resize'))
+        await tick()
+        expect(pluginButtons()).toEqual(['Button char-only', 'Button both'])
     })
 
     test('addresses a windowed row by its absolute index without reading the conversation body', async () => {
@@ -188,10 +209,28 @@ describe('plugin message buttons in the message action row', () => {
         await mountChat({ message: 'far answer', role: 'char', idx: 4123, totalLength: 5000, viewportRow: row, viewportSourceToken: 'source' })
 
         target.querySelector<HTMLButtonElement>('.button-icon-plugin')!.click()
-        expect(additionalMessageButtons[0].callback).toHaveBeenCalledWith({
+        await vi.waitFor(() => expect(additionalMessageButtons[0].callback).toHaveBeenCalledWith({
             characterIndex: 0, chatIndex: 0, messageIndex: 4123, messageId: 'm-4123', role: 'char',
             characterId: 'character-a', conversationId: 'conversation-a',
-        })
+        }))
+    })
+
+    test('reports the position the index APIs resolve, not the working-set index', async () => {
+        const selected = { type: 'character', name: 'Selected', chaId: 'character-b', chatPage: 1, ttsMode: 'none', chats: [
+            { id: 'conversation-b0', message: [] },
+            { id: 'conversation-b1', message: messages, isStreaming: false },
+        ] }
+        live.db = { theme: '', clickToEdit: false, characters: [{ type: 'character', name: 'Archived', chaId: 'archived-a', chatPage: 0, chats: [] }, selected] }
+        live.selection.selId = 1
+        live.resolvePosition.mockResolvedValueOnce({ characterIndex: 0, chatIndex: 1 })
+        await mountChat({ message: 'answer', role: 'char', idx: 1, totalLength: 3 })
+
+        target.querySelector<HTMLButtonElement>('.button-icon-plugin')!.click()
+        await vi.waitFor(() => expect(additionalMessageButtons[0].callback).toHaveBeenCalledWith({
+            characterIndex: 0, chatIndex: 1, messageIndex: 1, messageId: 'm-1', role: 'char',
+            characterId: 'character-b', conversationId: 'conversation-b1',
+        }))
+        expect(live.resolvePosition).toHaveBeenCalledExactlyOnceWith('character-b', 'conversation-b1')
     })
 
     test('leaves out comments, rows without a stored index and the streamed message', async () => {

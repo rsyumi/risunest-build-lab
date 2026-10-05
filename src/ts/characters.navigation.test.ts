@@ -31,7 +31,7 @@ const mocks = vi.hoisted(() => ({
     flushPendingData: vi.fn(async (_reason: string) => {}),
     getSelectedConversationMode: vi.fn((): 'complete' | 'windowed' | null => null),
     editWindowedChatList: vi.fn(),
-    alertConfirm: vi.fn(async () => true),
+    alertConfirm: vi.fn(async (_options?: unknown) => true),
     alertSelect: vi.fn(async () => '0'),
     alertAddCharacter: vi.fn(async () => 'createfromScratch'),
     alertError: vi.fn(),
@@ -64,7 +64,7 @@ vi.mock('./alert', async () => {
     return {
         alertAddCharacter: mocks.alertAddCharacter,
         alertConfirm: mocks.alertConfirm,
-        alertCheckboxConfirm: async () => ({ confirmed: await mocks.alertConfirm(), checked: true }),
+        alertCheckboxConfirm: async (options: unknown) => ({ confirmed: await mocks.alertConfirm(options), checked: true }),
         alertError: mocks.alertError,
         alertToast: mocks.alertToast,
         alertNormal: vi.fn(),
@@ -73,7 +73,11 @@ vi.mock('./alert', async () => {
         alertWait: vi.fn(),
     }
 })
-vi.mock('../lang', () => ({ language: { errors: {}, checkboxConfirmation: { characterDeletion: "Delete character" } } }))
+vi.mock('../lang', () => ({ language: { errors: {}, checkboxConfirmation: {
+    characterDeletion: "Delete character",
+    characterTrashDescription: "Moves to the trash.",
+    characterDeletionDescription: "Deleted permanently.",
+} } }))
 vi.mock('./util', () => ({
     checkNullish: (value: unknown) => value === null || value === undefined,
     findCharacterbyId: mocks.findCharacterbyId,
@@ -422,6 +426,19 @@ describe('runtime chat identity', () => {
         expect(mocks.replacePersistentDatabase).not.toHaveBeenCalled()
         expect(mocks.database.characters.map((character: any) => character.chaId)).toEqual([second.chaId])
         expect(mocks.deactivateActiveWorkingSet).toHaveBeenCalledTimes(2)
+    })
+
+    it.each([
+        ['normal', 'Moves to the trash.'],
+        ['permanent', 'Deleted permanently.'],
+    ] as const)('describes a %s removal by what it does', async (type, description) => {
+        const character = createBlankChar()
+        mocks.database.characters.push(character)
+        mocks.alertConfirm.mockResolvedValueOnce(false)
+
+        await removeChar(character.chaId, character.name, type)
+
+        expect(mocks.alertConfirm).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ description }))
     })
 
     it('removes the character ID captured before confirmation', async () => {
@@ -972,6 +989,38 @@ describe('chat list operations', () => {
             expect.stringMatching(/^generated-/),
         ])
         expect(new Set(imported.message.map((message: any) => message.chatId)).size).toBe(2)
+    })
+
+    it('imports a risuChat file without decoding it through Buffer', async () => {
+        const character = buildSelectedCharacter()
+        mocks.editWindowedChatList.mockReturnValue({ kind: 'unsupported' })
+        const message = [
+            { role: 'user', data: '"Synthetic line." 한글 🐿️', chatId: 'synthetic-msg-0', time: 1710000000000 },
+            { role: 'char', data: '*Synthetic action.* 한글 🐿️', chatId: 'synthetic-msg-1', time: 1710000000001 },
+        ]
+        mocks.selectSingleFile.mockResolvedValueOnce({
+            name: 'synthetic-chat.json',
+            data: new TextEncoder().encode(JSON.stringify({
+                type: 'risuChat',
+                ver: 2,
+                data: { id: 'synthetic-source', name: 'Synthetic import', note: '', localLore: [], message },
+                folders: [],
+            })),
+        })
+        const bufferFrom = vi.spyOn(Buffer, 'from')
+        let bufferCalls: number
+        try {
+            await importChat()
+        } finally {
+            bufferCalls = bufferFrom.mock.calls.length
+            bufferFrom.mockRestore()
+        }
+
+        const imported = character.chats[0]
+        expect(imported.name).toBe('Synthetic import')
+        expect(imported.id).not.toBe('synthetic-source')
+        expect(imported.message).toEqual(message)
+        expect(bufferCalls).toBe(0)
     })
 
     it('keeps the selected chat when another chat is removed', async () => {

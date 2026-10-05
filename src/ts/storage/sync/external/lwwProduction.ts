@@ -41,14 +41,17 @@ function createAdapter(connectionId: string): Adapter {
         if (state.target.kind !== 'external' || state.target.connectionId !== connectionId) throw new Error('Sync binding changed')
         return { state, signal: active?.signal ?? new AbortController().signal }
     }
+    // Native code returns one bounded page per call until none remain.
     const receive = async (binding: BindingContext): Promise<number> => {
-        binding.signal.throwIfAborted()
-        const requests = await invoke<LwwStageReceive[]>('external_lww_receive', { request: header(connectionId, binding) })
-        for (const request of requests) {
+        let received = 0
+        for (;;) {
+            binding.signal.throwIfAborted()
+            const request = await invoke<LwwStageReceive | null>('external_lww_receive', { request: header(connectionId, binding) })
+            if (!request) return received
             binding.signal.throwIfAborted()
             await getPersistentDataRuntime().applyLwwReceive(request)
+            received++
         }
-        return requests.length
     }
     const publish = async (binding?: BindingContext, flush = true): Promise<void> => {
         const current = binding ?? await context()
@@ -83,6 +86,10 @@ function createAdapter(connectionId: string): Adapter {
             ...header(connectionId, binding), inspectionId: target.inspectionId, targetId: target.targetId, libraryId: target.libraryId,
         } }),
         replaceFromTarget: replaceNativeSyncBinding,
+        reportStopped(error) {
+            const cause = error instanceof AggregateError ? error.errors[0] : error
+            if ((cause as { name?: unknown } | null)?.name !== 'AbortError') reportFailure(connectionId, cause)
+        },
         publishInitialSharedState: binding => publish(binding, false),
         async resumeBinding(binding) {
             binding.signal.throwIfAborted()

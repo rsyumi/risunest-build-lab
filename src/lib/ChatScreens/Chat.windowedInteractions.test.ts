@@ -1,11 +1,65 @@
 // @vitest-environment happy-dom
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
 import { bootChatInteractionApp, interactionCharacterId, interactionConversationId } from './chatInteractionApp.testSupport'
 
 let app: Awaited<ReturnType<typeof bootChatInteractionApp>> | undefined
 let mounted: Record<string, any> | undefined
 let target: HTMLDivElement
+
+// The UI starts sidebar and chat list edits without awaiting them, and each one is a
+// store round trip. Recording every edit where it starts lets a test await that edit
+// and then assert its result, instead of polling for the result against a clock.
+const startedEdits: { name: string, done: Promise<unknown> }[] = []
+let editWaiters: (() => void)[] = []
+function recordEdit<T>(name: string, done: Promise<T>): Promise<T> {
+    startedEdits.push({ name, done })
+    for (const wake of editWaiters.splice(0)) wake()
+    return done
+}
+async function finishedEdit(name: string) {
+    for (;;) {
+        const index = startedEdits.findIndex((edit) => edit.name === name)
+        if (index !== -1) {
+            await startedEdits.splice(index, 1)[0].done
+            return
+        }
+        await new Promise<void>((resolve) => editWaiters.push(resolve))
+    }
+}
+// Registered before every boot so each boot's module graph gets its own recorders.
+function recordEditsOfNextBoot() {
+    vi.doMock('src/ts/characters', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('src/ts/characters')>()
+        return {
+            ...actual,
+            editSelectedChatList: (...args: Parameters<typeof actual.editSelectedChatList>) =>
+                recordEdit(args[1], actual.editSelectedChatList(...args)),
+        }
+    })
+    vi.doMock('src/ts/sidebarToggles', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('src/ts/sidebarToggles')>()
+        return {
+            ...actual,
+            setToggleValue: (...args: Parameters<typeof actual.setToggleValue>) =>
+                recordEdit('toggle-value', actual.setToggleValue(...args)),
+            removeLocalToggleValue: (...args: Parameters<typeof actual.removeLocalToggleValue>) =>
+                recordEdit('remove-local-toggle-value', actual.removeLocalToggleValue(...args)),
+            setLocalToggleMode: (...args: Parameters<typeof actual.setLocalToggleMode>) =>
+                recordEdit('local-toggle-mode', actual.setLocalToggleMode(...args)),
+            setCharacterMemory: (...args: Parameters<typeof actual.setCharacterMemory>) =>
+                recordEdit('character-memory', actual.setCharacterMemory(...args)),
+        }
+    })
+}
+
+// The first boot transforms the whole app graph. Paying that once here keeps it
+// out of the first test's own time budget.
+beforeAll(async () => {
+    const warm = await bootChatInteractionApp()
+    await import('./ChatInteractionSurfaces.test.svelte')
+    warm.restore()
+}, 180_000)
 
 beforeEach(() => {
     target = document.createElement('div')
@@ -27,9 +81,12 @@ afterEach(async () => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
     document.body.replaceChildren()
+    startedEdits.length = 0
+    editWaiters = []
 })
 
 async function mountSurface(surface: 'desktop' | 'mobile' | 'bookmark') {
+    recordEditsOfNextBoot()
     app = await bootChatInteractionApp()
     expect(app.runtime.getSelectedConversationMode()).toBe('windowed')
     const { default: Harness } = await import('./ChatInteractionSurfaces.test.svelte')
@@ -117,9 +174,11 @@ it.each(['desktop', 'mobile'] as const)('browses and edits the mounted %s chat l
     folder('folder-a').querySelectorAll<HTMLElement>('[role="button"]')[1].click()
     await current.svelte.tick()
     changeInput(folder('folder-a').querySelector<HTMLInputElement>('input')!, 'Renamed folder')
-    await vi.waitFor(() => expect(current.selected().chatFolders![0].name).toBe('Renamed folder'))
+    await finishedEdit('edit-chat-folder')
+    expect(current.selected().chatFolders![0].name).toBe('Renamed folder')
     changeInput(target.querySelector<HTMLInputElement>('[data-risu-chat-idx="0"] input')!, 'Renamed conversation')
-    await vi.waitFor(() => expect(current.selected().chats[0].name).toBe('Renamed conversation'))
+    await finishedEdit('rename-chat')
+    expect(current.selected().chats[0].name).toBe('Renamed conversation')
     await current.runtime.flushPendingData('mounted-menu-edits')
 
     if (surface === 'mobile') current.stores.MobileSideBar.set(0)
@@ -163,30 +222,35 @@ it.each(['desktop', 'mobile'] as const)('saves the %s chat list toggle edits of 
         (await current.raw.readConversationMetadata(interactionCharacterId, interactionConversationId))?.value.conversation
 
     await toggleSwitch(language.localToggles)
-    await vi.waitFor(() => expect(selectedChat().useLocallySetGlobalVariables).toBe(true))
+    await finishedEdit('local-toggle-mode')
+    expect(selectedChat().useLocallySetGlobalVariables).toBe(true)
     await toggleSwitch('Probe toggle')
-    await vi.waitFor(() => expect(selectedChat().GLGlobalVariables?.toggle_probe).toBe('1'))
+    await finishedEdit('toggle-value')
+    expect(selectedChat().GLGlobalVariables?.toggle_probe).toBe('1')
     await current.runtime.flushPendingData('sidebar-local-toggles')
     expect((await savedChat())?.useLocallySetGlobalVariables).toBe(true)
     expect((await savedChat())?.GLGlobalVariables?.toggle_probe).toBe('1')
     expect(db.globalChatVariables.toggle_probe).toBeUndefined()
 
     await toggleSwitch(language.localToggles)
-    await vi.waitFor(() => expect(selectedChat().useLocallySetGlobalVariables).toBe(false))
+    await finishedEdit('local-toggle-mode')
+    expect(selectedChat().useLocallySetGlobalVariables).toBe(false)
     const pin = await vi.waitFor(() => {
         const button = [...target.querySelectorAll('button')].find((node) => node.textContent?.trim() === '📌')
         expect(button).toBeDefined()
         return button!
     })
     pin.click()
-    await vi.waitFor(() => expect(selectedChat().GLGlobalVariables?.toggle_probe).toBeUndefined())
+    await finishedEdit('remove-local-toggle-value')
+    expect(selectedChat().GLGlobalVariables?.toggle_probe).toBeUndefined()
     await current.runtime.flushPendingData('sidebar-unpin-toggle')
     expect((await savedChat())?.useLocallySetGlobalVariables).toBe(false)
     expect((await savedChat())?.GLGlobalVariables?.toggle_probe).toBeUndefined()
     expect(current.fullReads).toEqual([])
 
     await toggleSwitch(language.ToggleHypaMemory)
-    await vi.waitFor(() => expect(current.selected().supaMemory).toBe(true))
+    await finishedEdit('character-memory')
+    expect(current.selected().supaMemory).toBe(true)
     await current.runtime.flushPendingData('sidebar-memory-toggle')
     expect((await current.raw.readCharacter(interactionCharacterId))?.value.supaMemory).toBe(true)
 
@@ -210,7 +274,8 @@ it('applies delayed folder color and deletion by identity after persisted folder
         return null
     })).toBe(true)
     current.stores.alertStore.set({ type: 'none', msg: '1' })
-    await vi.waitFor(() => expect(current.selected().chatFolders!.find((item) => item.id === 'folder-a')?.color).toBe('green'))
+    await finishedEdit('edit-chat-folder')
+    expect(current.selected().chatFolders!.find((item) => item.id === 'folder-a')?.color).toBe('green')
     expect(current.selected().chatFolders!.find((item) => item.id === 'folder-b')?.color).not.toBe('green')
     await current.runtime.flushPendingData('mounted-folder-color')
     expect((await current.raw.readCharacter(interactionCharacterId))?.value.chatFolders?.find((item) => item.id === 'folder-a')?.color).toBe('green')
@@ -222,7 +287,8 @@ it('applies delayed folder color and deletion by identity after persisted folder
         return null
     })).toBe(true)
     current.stores.alertStore.set({ type: 'none', msg: 'yes' })
-    await vi.waitFor(() => expect(current.selected().chatFolders!.map((item) => item.id)).toEqual(['folder-b']))
+    await finishedEdit('remove-chat-folder')
+    expect(current.selected().chatFolders!.map((item) => item.id)).toEqual(['folder-b'])
     await current.runtime.flushPendingData('mounted-folder-delete')
     expect(current.selected().chats[0].folderId).toBeNull()
     expect((await current.raw.readCharacter(interactionCharacterId))?.value.chatFolders?.map((item) => item.id)).toEqual(['folder-b'])

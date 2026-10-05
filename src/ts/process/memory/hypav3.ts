@@ -105,11 +105,15 @@ export interface HypaV3Result {
     memory?: SerializableHypaV3Data;
 }
 
-export interface HypaV3PreparedHistory {
-    boundaryMemo: string;
-    effectiveMessageMemos: readonly string[];
-    historyStartIndex: number;
-}
+export type HypaV3PreparedHistory =
+    | {
+        boundaryMemo: string;
+        effectiveMessageMemos: readonly string[];
+        historyStartIndex: number;
+    }
+    // A history window: chats hold only recent messages, so orphan cleaning
+    // also counts the memos of the whole conversation.
+    | { effectiveMessageMemos: readonly string[] };
 
 const logPrefix = "[HypaV3]";
 const memoryPromptTag = "Past Events Summary";
@@ -142,7 +146,7 @@ export async function hypaMemoryV3(
 
     try {
         if (settings.useExperimentalImpl) {
-            if (preparedHistory) throw new Error('Prepared history is unsupported by experimental Hypa V3');
+            if (preparedHistory && 'historyStartIndex' in preparedHistory) throw new Error('Prepared history is unsupported by experimental Hypa V3');
             console.log(logPrefix, "Using experimental implementation.");
 
             return await hypaMemoryV3MainExp(
@@ -153,6 +157,7 @@ export async function hypaMemoryV3(
                 char,
                 tokenizer,
                 signal,
+                preparedHistory?.effectiveMessageMemos,
             );
         }
 
@@ -200,6 +205,7 @@ async function hypaMemoryV3MainExp(
     char: character | groupChat,
     tokenizer: ChatTokenizer,
     signal?: AbortSignal,
+    effectiveMessageMemos?: readonly string[],
 ): Promise<HypaV3Result> {
     const db = getDatabase();
     const settings = getCurrentHypaV3Preset().settings;
@@ -225,7 +231,7 @@ async function hypaMemoryV3MainExp(
 
     // Clean orphaned summaries
     if (!settings.preserveOrphanedMemory) {
-        cleanOrphanedSummary(chats, data);
+        cleanOrphanedSummary(chats, data, effectiveMessageMemos);
     }
 
     // Determine starting index
@@ -1016,7 +1022,7 @@ async function hypaMemoryV3Main(
     if (data.summaries.length > 0) {
         const lastSummary = data.summaries.at(-1);
         const lastSummaryMemo = [...lastSummary.chatMemos].at(-1);
-        if (preparedHistory) {
+        if (preparedHistory && 'historyStartIndex' in preparedHistory) {
             if (lastSummaryMemo !== preparedHistory.boundaryMemo) {
                 throw new Error('Prepared history summary boundary became stale');
             }

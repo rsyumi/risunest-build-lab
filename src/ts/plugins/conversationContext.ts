@@ -181,7 +181,7 @@ function pickFields(
     return result
 }
 
-async function findCharacterIndex(
+export async function findCharacterIndex(
     reader: PersistentRevisionReader,
     characterId: string,
 ): Promise<number | null> {
@@ -193,7 +193,7 @@ async function findCharacterIndex(
     return null
 }
 
-async function findChatIndex(
+export async function findChatIndex(
     reader: PersistentRevisionReader,
     characterId: string,
     conversationId: string,

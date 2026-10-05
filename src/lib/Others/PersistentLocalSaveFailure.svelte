@@ -13,7 +13,9 @@
     } as Record<string, string>)[error.area] ?? copy.data : copy.data)
     const message = $derived(error?.code === 'unsaveable-value'
         ? copy.invalid.replace('{0}', area)
-        : error?.name === 'QuotaExceededError' ? copy.storage : copy.failed)
+        : error?.code === 'payload-too-large' ? copy.tooLarge
+        : error?.name === 'QuotaExceededError' ? copy.storage
+        : error?.name === 'WindowedConversationSaveError' ? copy.currentChat : copy.failed)
 
     async function retry() {
         if (saving) return

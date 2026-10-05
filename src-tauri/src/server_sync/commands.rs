@@ -315,14 +315,14 @@ pub(crate) fn hydrate_binding_assets(store:&crate::persistent_store::PersistentS
 
 #[tauri::command]
 pub(crate) async fn server_sync_notify_stop(app:AppHandle)->Result<()> {recorded("notify-stop",stop_notification_job(&app).await)}
-async fn stop_notification_job(app:&AppHandle)->Result<()> {
+async fn stop_notification_job<R: tauri::Runtime>(app:&AppHandle<R>)->Result<()> {
     let job=app.state::<ServerSyncCommandState>().stop_notification()?;
     if let Some(job)=job {job.abort();let _=job.await;}
     Ok(())
 }
 #[tauri::command]
 pub(crate) async fn server_sync_notify_start(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {recorded("notify-start",start_notification_job(app,request).await)}
-async fn start_notification_job(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
+async fn start_notification_job<R: tauri::Runtime>(app:AppHandle<R>,request:crate::persistent_store::lww::Header)->Result<()> {
     stop_notification_job(&app).await?;
     if app.state::<ServerSyncCommandState>().cleanup_closed.load(Ordering::Acquire){return Err(SyncError::new("cleanup-pending",409));}
     let start=app.state::<ServerSyncCommandState>().begin_notification()?;
@@ -424,6 +424,126 @@ mod tests {
         assert_eq!(error.code,"cancelled");
         assert_eq!(released.load(Ordering::Acquire),inspected_pins+1);
         drop(stage);assert!(state.stage.lock().unwrap().is_none());
+    }
+
+    use crate::persistent_store::commands::{with_store, PersistentStoreState};
+    use super::super::residency::AssetPolicy;
+    use tauri::test::MockRuntime;
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+    fn mock_app(store: PersistentStore) -> tauri::App<MockRuntime> {
+        let root = store.repository_root().to_owned();
+        mock_app_with(PersistentStoreState::with_test_store(store), &root)
+    }
+    fn mock_app_with(store: PersistentStoreState, root: &std::path::Path) -> tauri::App<MockRuntime> {
+        let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        app.manage(store);
+        app.manage(crate::native_file_jobs::NativeFileJobState::initialize(root.join("native-file-jobs")));
+        app.manage(ServerSyncCommandState::default());
+        app
+    }
+    fn policy(app: &tauri::App<MockRuntime>) -> AssetPolicy {
+        with_store(app.state(), |store| store.device_store()?.asset_residency_policy()).unwrap()
+    }
+    fn assert_released(app: &tauri::App<MockRuntime>) {
+        assert!(!app.state::<ServerSyncCommandState>().running.load(Ordering::Acquire));
+        drop(app.state::<crate::native_file_jobs::NativeFileJobState>().admission.server().unwrap());
+    }
+    #[test]
+    fn a_refused_asset_policy_change_keeps_the_previous_policy_and_releases_admission() {
+        let (_root, store) = super::super::lww_tests::local();
+        let app = mock_app(store);
+        assert_eq!(policy(&app), AssetPolicy::Full);
+        let error = server_sync_asset_policy_operation(app.handle(), AssetPolicy::Remote, None).err().expect("remote assets need a server");
+        assert_eq!((error.code.as_str(), error.retryable), ("server-not-bound", false));
+        assert_eq!(policy(&app), AssetPolicy::Full);
+        assert_released(&app);
+    }
+    #[test]
+    fn an_unavailable_job_store_returns_a_retryable_fault_and_releases_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let app = mock_app_with(PersistentStoreState::default(), root.path());
+        let error = server_sync_asset_evict_operation(app.handle()).err().expect("eviction without a local store must fail");
+        assert_eq!((error.code.as_str(), error.status, error.retryable), ("local-store-unavailable", 503, true));
+        assert_released(&app);
+        let error = server_sync_asset_policy_operation(app.handle(), AssetPolicy::Full, None).err().expect("a policy change without a local store must fail");
+        assert_eq!((error.code.as_str(), error.status, error.retryable), ("local-store-unavailable", 503, true));
+        assert_released(&app);
+    }
+    #[test]
+    fn a_cancel_reaches_the_running_asset_command_and_a_retry_gets_a_fresh_flag() {
+        use super::super::lww_tests::{drain_publications, local, put_asset, LocalServerFixture};
+        let armed = Arc::new(AtomicBool::new(false));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (hold, wait) = (armed.clone(), gate.clone());
+        // The first request of the armed command waits until the test releases it.
+        let server = LocalServerFixture::with_router(move |router| router.layer(axum::middleware::from_fn(move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let (hold, wait, entered) = (hold.clone(), wait.clone(), entered_tx.clone());
+            async move {
+                if hold.swap(false, Ordering::AcqRel) {
+                    entered.send(()).unwrap();
+                    wait.notified().await;
+                }
+                next.run(request).await
+            }
+        })));
+        let (_root, mut store) = local();
+        let core = server.client(&store);
+        put_asset(&mut store, "assets/cancel-command.png", b"synthetic cancel command");
+        drain_publications(&core, &mut store, &[]).unwrap();
+        store.asset_residency_set_policy(AssetPolicy::Remote, || Ok(())).unwrap();
+        store.asset_residency_evict(|| Ok(())).unwrap();
+        let app = mock_app(store);
+        armed.store(true, Ordering::Release);
+        let handle = app.handle().clone();
+        let worker = std::thread::spawn(move || server_sync_asset_policy_operation(&handle, AssetPolicy::Full, None).map(|_| ()));
+        entered_rx.recv_timeout(WAIT).unwrap();
+        let state = app.state::<ServerSyncCommandState>();
+        assert!(state.running.load(Ordering::Acquire));
+        let cancelled = state.cancelled.lock().unwrap().clone();
+        assert!(!cancelled.load(Ordering::Acquire));
+        state.cancel().unwrap();
+        assert!(cancelled.load(Ordering::Acquire));
+        gate.notify_one();
+        let error = worker.join().unwrap().err().expect("a cancelled asset policy command must fail");
+        assert_eq!(error.code, "cancelled");
+        assert_released(&app);
+        server_sync_asset_policy_operation(app.handle(), AssetPolicy::Remote, None).unwrap();
+        let current = state.cancelled.lock().unwrap().clone();
+        assert!(!Arc::ptr_eq(&current, &cancelled));
+        assert!(!current.load(Ordering::Acquire));
+        assert_eq!(policy(&app), AssetPolicy::Remote);
+        assert_released(&app);
+    }
+    #[test]
+    fn a_head_move_on_the_server_reaches_the_remote_hint_event() {
+        use super::super::lww_tests::{drain_publications, header, local, save, LocalServerFixture};
+        use risunest_sync_wire::lww::SeqNotification;
+        use tauri::Listener;
+        let server = LocalServerFixture::new();
+        let (_source_root, mut source) = local();
+        let sender = server.client(&source);
+        let (_root, store) = local();
+        server.client(&store);
+        let request = header(&store);
+        let app = mock_app(store);
+        let (hint_tx, hint_rx) = std::sync::mpsc::channel();
+        app.listen("risu-server-sync-remote-hint", move |event| {
+            let _ = hint_tx.send(serde_json::from_str::<SeqNotification>(event.payload()).unwrap());
+        });
+        let (link_tx, link_rx) = std::sync::mpsc::channel();
+        app.listen("risu-server-sync-notification", move |event| {
+            let _ = link_tx.send(serde_json::from_str::<serde_json::Value>(event.payload()).unwrap());
+        });
+        tauri::async_runtime::block_on(start_notification_job(app.handle().clone(), request)).unwrap();
+        assert_eq!(link_rx.recv_timeout(WAIT).unwrap(), serde_json::json!({"connected": true}));
+        let SeqNotification::Seq { seq: before } = hint_rx.recv_timeout(WAIT).unwrap();
+        save(&mut source, &["root", "language"], serde_json::json!("ja"));
+        drain_publications(&sender, &mut source, &[]).unwrap();
+        let SeqNotification::Seq { seq: after } = hint_rx.recv_timeout(WAIT).unwrap();
+        assert!(after.0 > before.0, "{} after {}", after.0, before.0);
+        tauri::async_runtime::block_on(stop_notification_job(app.handle())).unwrap();
+        assert!(app.state::<ServerSyncCommandState>().cleanup_drained().unwrap());
     }
 }
 

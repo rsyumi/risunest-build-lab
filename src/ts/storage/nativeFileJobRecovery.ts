@@ -46,6 +46,8 @@ export const ANDROID_SAF_HANDOFF_ID_PATTERNS: Partial<
         /(?:^|[\\/])risu-character-card-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?:json|png)$/,
     'export-risu-module':
         /(?:^|[\\/])risu-module-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.risum$/,
+    'export-dataset':
+        /(?:^|[\\/])risu-dataset-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/,
 }
 
 function androidSafHandoffId(status: NativeFileJobStatus): string | null {
@@ -136,6 +138,15 @@ async function reconcileExportInBackground(
                 path: status.result.handoffPath,
             })
             retainNativeJob = false
+        } else if (
+            status.kind === 'export-dataset' &&
+            status.result?.handoffPath
+        ) {
+            retainNativeJob = true
+            await dependencies.invoke('native_dataset_export_handoff_cleanup', {
+                path: status.result.handoffPath,
+            })
+            retainNativeJob = false
         }
     }
     finally {
@@ -183,6 +194,7 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
         switch (kind) {
             case 'restore-block-risu-save':
             case 'restore-official-account-snapshot':
+            case 'restore-native-snapshot':
             case 'restore-portable-backup':
             case 'restore-legacy-local-backup': {
                 if (job.kind === 'restore-portable-backup' && job.restoreAdoptionConfirmed === true
@@ -214,6 +226,7 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
             case 'export-character-charx':
             case 'export-character-card':
             case 'export-risu-module':
+            case 'export-dataset':
             case 'kei-backup-upload':
                 void reconcileExportInBackground(job, dependencies).catch(
                     (error) => {

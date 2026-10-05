@@ -11,22 +11,47 @@ fn boundary_phase(app: tauri::AppHandle) -> serde_json::Value {
     serde_json::json!({"runId": value("RISUNEST_BOUNDARY_ID"), "phase": value("RISUNEST_BOUNDARY_PHASE")})
 }
 
-#[tauri::command]
-fn boundary_finish(app: tauri::AppHandle, report: serde_json::Value) -> Result<(), String> {
+fn write_report(report: &serde_json::Value, options: &mut fs::OpenOptions) -> Result<(), String> {
     if report["runId"] != value("RISUNEST_BOUNDARY_ID") || report["phase"] != value("RISUNEST_BOUNDARY_PHASE") {
         return Err("incorrect report identity".into());
     }
     let path = PathBuf::from(value("RISUNEST_BOUNDARY_REPORT"));
-    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| e.to_string())?;
+    let mut file = options.write(true).open(path).map_err(|e| e.to_string())?;
     use std::io::Write;
     file.write_all(report.to_string().as_bytes()).map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn boundary_finish(app: tauri::AppHandle, report: serde_json::Value) -> Result<(), String> {
+    write_report(&report, fs::OpenOptions::new().create_new(true))?;
     app.exit(if report["success"] == true { 0 } else { 1 });
     Ok(())
 }
 
+/// Records the report of a phase that the app's own native exit ends; a failure exits with `exit`.
+#[tauri::command]
+fn boundary_record(app: tauri::AppHandle, report: serde_json::Value, exit: Option<i32>) -> Result<(), String> {
+    write_report(&report, fs::OpenOptions::new().create(true).truncate(true))?;
+    if let Some(code) = exit { app.exit(code); }
+    Ok(())
+}
+
+/// Tells the runner that the document listens for the session end it is about to send.
+#[tauri::command]
+fn boundary_ready() -> Result<(), String> {
+    fs::OpenOptions::new().write(true).create_new(true)
+        .open(format!("{}.ready", value("RISUNEST_BOUNDARY_REPORT"))).map(drop).map_err(|e| e.to_string())
+}
+
+/// Closes the main window the way a user does, so the close request reaches the app first.
+#[tauri::command]
+fn boundary_close_main(app: tauri::AppHandle) -> Result<(), String> {
+    app.get_webview_window("main").ok_or("main window unavailable")?.close().map_err(|e| e.to_string())
+}
+
 fn boundary_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
-    tauri::generate_handler![boundary_phase, boundary_finish]
+    tauri::generate_handler![boundary_phase, boundary_finish, boundary_record, boundary_ready, boundary_close_main]
 }
 
 fn main() {

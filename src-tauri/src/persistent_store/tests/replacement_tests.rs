@@ -117,7 +117,15 @@ fn unfinished_ordinary_replacement_rejects_changed_stage_before_recovery() {
     assert_eq!(store.read_root(None).unwrap().value["username"], "Original");
     assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(), before);
     drop(store);
-    assert!(PersistentStore::open(directory.path()).is_err());
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    assert_eq!(store.revision().unwrap(), 1);
+    assert_eq!(store.read_root(None).unwrap().value["username"], "Original");
+    assert_eq!(store.device_store().unwrap().connection().query_row(
+        "SELECT failures FROM lww_intent_failures WHERE request_id=?1", [&stage], |row| row.get::<_, i64>(0),
+    ).unwrap(), 1);
+    assert!(store.replace_commit(&stage, Some(1)).is_err());
+    assert_eq!(store.revision().unwrap(), 1);
+    assert_eq!(store.read_root(None).unwrap().value["username"], "Original");
 }
 
 #[test]
@@ -267,4 +275,211 @@ fn store_errors_serialize_to_the_command_contract() {
         .expect("serialize empty page"),
         json!({ "revision": 4, "items": [] })
     );
+}
+
+fn generation_rows(store: &PersistentStore, generation: &str, table: &str, order: &str) -> Vec<Vec<rusqlite::types::Value>> {
+    let mut statement = store
+        .connection
+        .prepare(&format!("SELECT * FROM {table} WHERE generation = ?1 ORDER BY {order}"))
+        .unwrap();
+    let columns = statement.column_count();
+    statement
+        .query_map([generation], |row| {
+            (0..columns)
+                .map(|index| {
+                    // The generation names the staging itself, never staged content.
+                    row.get::<_, rusqlite::types::Value>(index).map(|value| match value {
+                        rusqlite::types::Value::Text(text) if text == generation => {
+                            rusqlite::types::Value::Text("<generation>".into())
+                        }
+                        value => value,
+                    })
+                })
+                .collect()
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn assert_same_staged_tables(store: &PersistentStore, left: &str, right: &str, tables: &[(&str, &str)]) {
+    for (table, order) in tables {
+        let rows = generation_rows(store, left, table, order);
+        assert!(!rows.is_empty(), "{table} has staged rows");
+        assert_eq!(rows, generation_rows(store, right, table, order), "{table}");
+    }
+}
+
+// Characters whose chats take their recency from lastDate, from the last
+// message, and from neither.
+fn paged_characters() -> Vec<Value> {
+    let mut characters = fixture()["characters"].as_array().unwrap().clone();
+    let chats = characters[1]["chats"].as_array_mut().unwrap();
+    chats[0].as_object_mut().unwrap().remove("lastDate");
+    chats[1].as_object_mut().unwrap().remove("lastDate");
+    let last = chats[1]["message"].as_array_mut().unwrap().last_mut().unwrap();
+    last.as_object_mut().unwrap().remove("time");
+    characters
+}
+
+fn stage_character_in_pieces(store: &mut PersistentStore, staging: &str, character: &Value, page: usize) {
+    let mut detail = character.as_object().unwrap().clone();
+    let chats = detail.shift_remove("chats").and_then(|chats| chats.as_array().cloned()).unwrap_or_default();
+    store
+        .replace_put_character_detail(staging, &Value::Object(detail), chats.len() as i64)
+        .unwrap();
+    let character_id = character["chaId"].as_str().unwrap();
+    for (index, chat) in chats.iter().enumerate() {
+        let mut conversation = chat.as_object().unwrap().clone();
+        let messages = conversation
+            .shift_remove("message")
+            .and_then(|messages| messages.as_array().cloned())
+            .unwrap_or_default();
+        store
+            .replace_put_conversation(
+                staging,
+                character_id,
+                index as i64,
+                &Value::Object(conversation),
+                messages.len() as i64,
+                messages.last().and_then(|message| message.get("time")),
+            )
+            .unwrap();
+        for (number, messages) in messages.chunks(page).enumerate() {
+            store
+                .replace_add_conversation_messages(
+                    staging,
+                    character_id,
+                    chat["id"].as_str().unwrap(),
+                    (number * page) as i64,
+                    messages,
+                )
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn characters_staged_in_pieces_match_characters_staged_whole() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let characters = paged_characters();
+    let whole = store.replace_begin().unwrap().staging_id;
+    store.replace_add_characters(&whole, &characters).unwrap();
+    let pieces = store.replace_begin().unwrap().staging_id;
+    store.replace_add_characters(&pieces, &characters[..1]).unwrap();
+    for character in &characters[1..] {
+        stage_character_in_pieces(&mut store, &pieces, character, 7);
+    }
+
+    assert_same_staged_tables(&store, &whole, &pieces, &[
+        ("characters", "character_id"),
+        ("conversations", "character_id, conversation_id"),
+        ("messages", "character_id, conversation_id, message_index"),
+    ]);
+    assert_eq!(
+        super::super::query::materialize_staging(&store.connection, &pieces).unwrap(),
+        super::super::query::materialize_staging(&store.connection, &whole).unwrap()
+    );
+    let recency: Vec<(String, i64)> = store
+        .connection
+        .prepare("SELECT conversation_id, recent_at FROM conversations WHERE generation = ?1 AND character_id = 'char-a' ORDER BY configured_index")
+        .unwrap()
+        .query_map([&pieces], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(recency, [("conv-long".to_owned(), 1_700_000_000_129), ("conv-short".to_owned(), 0)]);
+}
+
+#[test]
+fn conversations_staged_in_pieces_reject_the_chat_ids_whole_characters_reject() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    for ids in [["same", "same"], ["", "other"]] {
+        let mut character = paged_characters().remove(1);
+        let chats = character["chats"].as_array_mut().unwrap();
+        for (chat, id) in chats.iter_mut().zip(ids) {
+            chat["id"] = json!(id);
+        }
+        let whole = store.replace_begin().unwrap().staging_id;
+        assert!(store.replace_add_characters(&whole, &[character.clone()]).is_err());
+
+        let pieces = store.replace_begin().unwrap().staging_id;
+        let mut detail = character.as_object().unwrap().clone();
+        let chats = detail.shift_remove("chats").unwrap();
+        store.replace_put_character_detail(&pieces, &Value::Object(detail), 2).unwrap();
+        let staged = chats.as_array().unwrap().iter().enumerate().map(|(index, chat)| {
+            let mut conversation = chat.as_object().unwrap().clone();
+            conversation.shift_remove("message");
+            store.replace_put_conversation(&pieces, "char-a", index as i64, &Value::Object(conversation), 0, None)
+        });
+        assert!(staged.collect::<Result<Vec<_>, _>>().is_err());
+    }
+}
+
+#[test]
+fn appended_preset_batches_stage_like_one_preset_list() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let mut presets = fixture()["botPresets"].as_array().unwrap().clone();
+    presets.push(json!({ "id": "preset-gamma", "name": "Gamma" }));
+    let whole = store.replace_begin().unwrap().staging_id;
+    store.replace_put_presets(&whole, &presets).unwrap();
+    let pieces = store.replace_begin().unwrap().staging_id;
+    store.replace_put_presets(&pieces, &presets[..1]).unwrap();
+    store.replace_add_presets(&pieces, &presets[1..]).unwrap();
+
+    assert_same_staged_tables(&store, &whole, &pieces, &[("bot_presets", "preset_id")]);
+    assert!(store.replace_add_presets(&pieces, &presets[..1]).is_err());
+    let twice = [json!({ "id": "preset-delta" }), json!({ "id": "preset-delta" })];
+    assert!(store.replace_add_presets(&pieces, &twice).is_err());
+    assert_same_staged_tables(&store, &whole, &pieces, &[("bot_presets", "preset_id")]);
+}
+
+#[test]
+fn appended_plugin_storage_batches_stage_like_the_whole_root() {
+    use crate::persistent_store::{plugin_owner::UNOWNED_OWNER, PluginStorageValue};
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let root = json!({ "username": "synthetic" });
+
+    let values = [
+        ("synthetic-plugin", "a", json!(1)),
+        (UNOWNED_OWNER, "b", json!("two")),
+        ("other-plugin", "a", json!({ "x": 3 })),
+    ]
+    .map(|(owner, key, value)| PluginStorageValue { owner: owner.into(), key: key.into(), value });
+    let whole = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root_with_plugin_storage(&whole, &root, Some(&values)).unwrap();
+    let pieces = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root_with_plugin_storage(&pieces, &root, Some(&[])).unwrap();
+    store.replace_add_plugin_storage_values(&pieces, &values[..1]).unwrap();
+    store.replace_add_plugin_storage_values(&pieces, &values[1..]).unwrap();
+    assert_same_staged_tables(&store, &whole, &pieces, &[
+        ("root", "generation"),
+        ("plugin_storage", "ordinal"),
+    ]);
+
+    let mut embedded = root.clone();
+    embedded["pluginCustomStorage"] = json!({ "a": 1, "b": "two", "c": { "x": 3 } });
+    embedded["pluginStorageMeta"] = json!({
+        "a": { "plugin": "synthetic-plugin" },
+        "c": { "plugin": "other-plugin" },
+    });
+    let whole = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root(&whole, &embedded).unwrap();
+    let pieces = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root(&pieces, &root).unwrap();
+    let batch = |value: Value| value.as_object().unwrap().clone();
+    store
+        .replace_add_plugin_storage(&pieces, &batch(json!({ "a": 1 })), Some(&batch(json!({ "a": { "plugin": "synthetic-plugin" } }))))
+        .unwrap();
+    store
+        .replace_add_plugin_storage(&pieces, &batch(json!({ "b": "two", "c": { "x": 3 } })), Some(&batch(json!({ "c": { "plugin": "other-plugin" } }))))
+        .unwrap();
+    assert_same_staged_tables(&store, &whole, &pieces, &[
+        ("root", "generation"),
+        ("plugin_storage", "ordinal"),
+    ]);
 }

@@ -68,6 +68,7 @@ impl NativeFixtureConfiguration {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn endpoint_and_provider_fields_are_local_bounded_and_coherent() {
         let configuration=NativeFixtureConfiguration {local_sse:Some(LocalSseEndpoint {address:"127.0.0.1".parse().unwrap(),port:32123})};
         let (root,presets)=configuration.initial_values().unwrap();

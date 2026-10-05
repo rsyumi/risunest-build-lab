@@ -18,8 +18,7 @@ export const languageChinese = {
         "hypaDeletion": "删除后续摘要",
         "pluginDataDeletion": "删除插件数据",
         "lorebookDeletion": "删除世界书文件夹及条目",
-        "partialBackup": "备份不包含其他资源",
-        "onlySelectedMessage": "仅删除此消息"
+        "partialBackup": "备份不包含其他资源"
     },
 
     "formating": {

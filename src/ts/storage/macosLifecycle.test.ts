@@ -1,5 +1,18 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createMacosExitHandler } from './macosLifecycle'
+
+const tauri = vi.hoisted(() => ({
+    invoke: vi.fn(async (_command: string, _args?: unknown) => undefined),
+    listeners: new Map<string, (event: { payload: unknown }) => void>(),
+}))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: tauri.invoke }))
+vi.mock('@tauri-apps/api/event', () => ({
+    listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
+        tauri.listeners.set(name, handler)
+        return () => tauri.listeners.delete(name)
+    }),
+}))
+
+import { createMacosExitHandler, registerMacosLifecycle } from './macosLifecycle'
 
 function harness() {
     const dependencies = {
@@ -129,5 +142,45 @@ describe('macOS acknowledged quit', () => {
         )
         await h.handle('first')
         expect(h.respond).toHaveBeenLastCalledWith('first', false)
+    })
+})
+
+describe('macOS quit acknowledgement', () => {
+    async function registered() {
+        tauri.invoke.mockClear()
+        let finishExit!: (disposition: 'exit' | 'cancelled') => void
+        const coordinator = {
+            requestExit: vi.fn(() => new Promise<'exit' | 'cancelled'>((resolve) => { finishExit = resolve })),
+        }
+        const acknowledge = vi.fn(async () => undefined)
+        const dispose = await registerMacosLifecycle({ coordinator, saveLocally: vi.fn(async () => {}) }, acknowledge)
+        const deliver = (payload: unknown) => tauri.listeners.get('risu-macos-exit-requested')!({ payload })
+        return { coordinator, acknowledge, dispose, deliver, finishExit: (value: 'exit' | 'cancelled') => finishExit(value) }
+    }
+
+    it('acknowledges a quit request on receipt, before the exit decision settles', async () => {
+        const r = await registered()
+        expect(tauri.invoke).toHaveBeenCalledExactlyOnceWith('macos_lifecycle_ready')
+        r.deliver({ token: 'first', sessionEnd: false })
+        expect(r.acknowledge).toHaveBeenCalledOnce()
+        expect(r.coordinator.requestExit).toHaveBeenCalledOnce()
+        r.finishExit('cancelled')
+        await vi.waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('macos_exit_response', { token: 'first', exit: false }))
+        r.dispose()
+    })
+
+    it('acknowledges a repeated quit without deciding the pending request again', async () => {
+        const r = await registered()
+        r.deliver({ token: 'first', sessionEnd: false })
+        r.deliver({ token: 'first', sessionEnd: false, repeated: true })
+        expect(r.acknowledge).toHaveBeenCalledTimes(2)
+        expect(r.coordinator.requestExit).toHaveBeenCalledOnce()
+        r.finishExit('exit')
+        await vi.waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith('macos_exit_response', { token: 'first', exit: true }))
+        r.deliver({ token: 'first', sessionEnd: false, repeated: true })
+        expect(r.acknowledge).toHaveBeenCalledTimes(3)
+        expect(r.coordinator.requestExit).toHaveBeenCalledOnce()
+        expect(tauri.invoke.mock.calls.filter(([command]) => command === 'macos_exit_response')).toHaveLength(1)
+        r.dispose()
     })
 })

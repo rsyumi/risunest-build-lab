@@ -193,12 +193,13 @@ describe('RisuNest backup and restore layout', () => {
         expect(confirmation).toContain('cancelLabel: language.lwwSync.cancelAction')
         expect(confirmation).toContain('requireChecked: true')
         inOrder(restoreFlow, [
-            'confirmUpstreamLibraryReplacement(binding.bound)',
-            "await invoke('pds_snapshot_restore_abort'",
-            'return false',
-            'await binding.fence()',
-            "invoke<{revision:number}>('pds_snapshot_restore_activate'",
+            "runSharedNativeFileOperation('import', `snapshot-restore:${id}`",
+            'runNativeSnapshotRestore(runtime, {snapshotId: id}',
+            "{presentation: 'dialog', format: 'library-backup'}",
+            'await copyBodies(activation)',
         ])
+        expect(restoreFlow).not.toContain('pds_snapshot_restore')
+        expect(tauriLibSource).not.toContain('pds_snapshot_restore_')
         expect(alertSource).toContain('disabled={dialog.requireChecked && !checkboxChecked}')
         expect(alertSource).toContain('if (confirmed && dialog.checkboxConfirm?.requireChecked && !checkboxChecked) return;')
         expect(alertSource).toContain('onclick={() => finishCheckboxConfirm(false)}>{dialog.cancelLabel}')
@@ -285,8 +286,9 @@ describe('RisuNest startup failure language schema', () => {
         'restart',
         'copyDetails',
         'copied',
-        'dataPathWindows',
+        'dataFolder',
         'dataPathAndroid',
+        'dataPathIos',
         'stage',
     ]
 
@@ -302,12 +304,4 @@ describe('RisuNest startup failure language schema', () => {
             }
         },
     )
-
-    it('names the Windows data folder the user has to clear', () => {
-        for (const translation of [languageEnglish, languageKorean]) {
-            expect(translation.risuNest.boot.dataPathWindows).toContain(
-                '%APPDATA%\\RisuNest\\',
-            )
-        }
-    })
 })

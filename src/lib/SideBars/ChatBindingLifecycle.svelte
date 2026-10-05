@@ -4,6 +4,7 @@
     import { flushEffectiveToggleEdits, deriveEffectiveToggleVariables } from 'src/ts/storage/database.svelte'
     import { isConversationSummaryStub } from 'src/ts/storage/conversationResidency'
     import { activeRerollConversations, recoverInterruptedReroll } from 'src/ts/durableReroll'
+    import { getHistoryWindowMemoryMode, openSelectedHistoryWindow, type SelectedHistoryWindow } from 'src/ts/process/index.svelte'
     import {
         acquireCompleteConversation,
         captureSelectedConversationTarget,
@@ -19,18 +20,32 @@
         const target = captureSelectedConversationTarget()
         if (!target) return
         recovering.add(chat.id)
+        const startIndex = chat.rerollRecovery.startIndex
+        const isSelected = () => {
+            const selected = DBState.db.characters[$selectedCharID]
+            const current = selected?.chats[selected.chatPage]
+            return selected?.chaId === character.chaId && current?.id === chat.id ? current : null
+        }
         void (async () => {
             let lease: Awaited<ReturnType<typeof acquireCompleteConversation>> | undefined
+            let window: SelectedHistoryWindow | null = null
             try {
-                lease = await acquireCompleteConversation('recover-reroll', target)
-                const selected = DBState.db.characters[$selectedCharID]
-                const current = selected?.chats[selected.chatPage]
-                if (selected?.chaId !== character.chaId || current?.id !== chat.id) return
-                recoverInterruptedReroll(current, lease.session)
+                if (getHistoryWindowMemoryMode(true) !== null) {
+                    // The tail from the message before the reroll holds everything recovery rewrites.
+                    window = await openSelectedHistoryWindow({ tailStart: () => Math.max(startIndex - 1, 0) })
+                    if (!window || window.chat.id !== chat.id || !isSelected()) return
+                    recoverInterruptedReroll(window.chat, window.controller)
+                } else {
+                    lease = await acquireCompleteConversation('recover-reroll', target)
+                    const current = isSelected()
+                    if (!current) return
+                    recoverInterruptedReroll(current, lease.session)
+                }
                 await flushPendingData('recover-reroll')
             } catch (error) {
                 alertError(error)
             } finally {
+                window?.release()
                 lease?.release()
                 recovering.delete(chat.id)
             }

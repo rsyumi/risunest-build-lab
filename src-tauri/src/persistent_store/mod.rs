@@ -47,6 +47,7 @@ pub(crate) mod sync_selection;
 pub(crate) use asset_object_catalog::{AssetObjectCatalog, AssetObjectCatalogPage};
 pub(crate) use commands::PersistentStoreState;
 pub(crate) use snapshot::RevisionReadLease;
+pub(crate) use snapshot::SnapshotRestoreStep;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -133,6 +134,10 @@ pub(crate) enum StoreError {
     Validation {
         message: String,
     },
+    /// The store was written by a build with a different schema and cannot be opened by this one.
+    SchemaMismatch {
+        message: String,
+    },
     #[serde(rename = "store-error")]
     Store {
         message: String,
@@ -153,7 +158,7 @@ impl std::fmt::Display for StoreError {
             }
             Self::RawBodyUnavailable => formatter.write_str("raw commit body unavailable"),
             Self::CommitBusy => formatter.write_str("previous commit is still finishing"),
-            Self::Committed { message, .. } | Self::CommitDecode { message } | Self::Validation { message } | Self::Store { message } => formatter.write_str(message),
+            Self::Committed { message, .. } | Self::CommitDecode { message } | Self::Validation { message } | Self::SchemaMismatch { message } | Self::Store { message } => formatter.write_str(message),
         }
     }
 }
@@ -170,6 +175,7 @@ impl crate::native_log::CommandFailure for StoreError {
             Self::CommitDecode { .. } => "commit-decode",
             Self::Committed { .. } => "committed",
             Self::Validation { .. } => "validation",
+            Self::SchemaMismatch { .. } => "schema-mismatch",
             Self::Store { .. } => "store-error",
         }
         .into()
@@ -736,6 +742,9 @@ pub(crate) struct ConversationWindowQuery {
     pub(crate) before: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) after: Option<i64>,
+    /// Lets a metadata window read report every message as not parser-inert instead of scanning bodies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) skip_parser_work: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -923,7 +932,7 @@ pub(crate) struct PersistentStore {
     snapshots_dir: PathBuf,
     // A device store that cannot be opened must not block the library, so the
     // failure is carried until something actually needs per-device state.
-    device_store: Result<device_store::DeviceStore, String>,
+    device_store: Result<device_store::DeviceStore, StoreError>,
     message_object_roots: MessageObjectRootsCache,
 }
 
@@ -998,6 +1007,7 @@ pub(crate) struct DataHealthReader {
     connection: Connection,
     cas: crate::asset_repository::PayloadCas,
     revision: i64,
+    quarantined: Vec<lww::QuarantinedIntent>,
 }
 
 impl DataHealthReader {
@@ -1011,10 +1021,23 @@ impl DataHealthReader {
         probe: &dyn crate::local_backup::CancellationProbe,
     ) -> StoreResult<crate::data_health::Findings> {
         let mut findings = crate::data_health::Findings::new(limit);
+        self.note_quarantined_intents(&mut findings);
         crate::portable_backup::scan_live_library(&self.connection, &self.cas, &mut findings, probe)
         .map_err(scan_failure)?;
         self.note_unreferenced_objects(&mut findings, probe)?;
         Ok(findings)
+    }
+
+    /// Reports the changes recovery set aside because their replay kept failing. They come
+    /// first, so the bound on the report never drops them.
+    fn note_quarantined_intents(&self, findings: &mut crate::data_health::Findings) {
+        use crate::data_health::{codes, FindingSink, Finding};
+        for intent in &self.quarantined {
+            findings.record(
+                Finding::new(codes::INTENT_QUARANTINED, "intent", intent.request_id.clone(), intent.error.clone())
+                    .targeting("intent", intent.kind.clone()),
+            );
+        }
     }
 
     /// Reports the stored objects no alias in this generation names. They cost space and nothing
@@ -1424,12 +1447,22 @@ pub(super) fn validate_app_kv_key(key: &str) -> StoreResult<()> {
     })
 }
 
-fn open_device_store(persistent_dir: &Path) -> Result<device_store::DeviceStore, String> {
+fn open_device_store(persistent_dir: &Path) -> Result<device_store::DeviceStore, StoreError> {
     device_store::DeviceStore::open(persistent_dir).map_err(|error| {
         let message = format!("device store is unavailable: {error}");
         crate::nlog!("warn", "{message}");
-        message
+        match error {
+            StoreError::SchemaMismatch { .. } => StoreError::SchemaMismatch { message },
+            _ => StoreError::Store { message },
+        }
     })
+}
+
+fn unavailable_device_store(error: &StoreError) -> StoreError {
+    match error {
+        StoreError::SchemaMismatch { message } => StoreError::SchemaMismatch { message: message.clone() },
+        other => StoreError::Store { message: other.to_string() },
+    }
 }
 
 pub(crate) fn register_asset_objects_at_root(
@@ -1519,8 +1552,9 @@ impl PersistentStore {
             device_store,
             message_object_roots: MessageObjectRootsCache::default(),
         };
-        if store.device_store.is_ok() {
-            store.lww_recover_intents()?;
+        // A pending intent may still need its staging generation, so the sweep waits until
+        // every intent recovery still runs has settled.
+        if store.device_store.is_ok() && store.lww_recover_intents_at_open()? {
             snapshot::sweep_temporary_generations(&mut store.connection, retained_stage.as_deref())?;
         }
         snapshot::checkpoint(&store.connection, CheckpointMode::Truncate)?;
@@ -1550,19 +1584,11 @@ impl PersistentStore {
     }
 
     pub(crate) fn device_store(&self) -> StoreResult<&device_store::DeviceStore> {
-        self.device_store
-            .as_ref()
-            .map_err(|message| StoreError::Store {
-                message: message.clone(),
-            })
+        self.device_store.as_ref().map_err(unavailable_device_store)
     }
 
     pub(crate) fn device_store_mut(&mut self) -> StoreResult<&mut device_store::DeviceStore> {
-        self.device_store
-            .as_mut()
-            .map_err(|message| StoreError::Store {
-                message: message.clone(),
-            })
+        self.device_store.as_mut().map_err(|error| unavailable_device_store(error))
     }
 
     pub(crate) fn revision(&self) -> StoreResult<i64> {
@@ -1853,15 +1879,20 @@ impl PersistentStore {
         Ok(database)
     }
 
-    pub(crate) fn materialize_without_chats(&self) -> StoreResult<Value> {
-        let (mut database, target) = query::materialize_without_chats(&self.connection)?;
+    /// Root fields and presets with the number of characters (see
+    /// [`query::binding_library`]).
+    pub(crate) fn binding_library(&self) -> StoreResult<(Value, u64)> {
+        let (mut database, characters, target) = query::binding_library(&self.connection)?;
+        let root = database.as_object_mut().ok_or_else(|| StoreError::Store {
+            message: "Persistent root must be an object".to_owned(),
+        })?;
         owner_projection::OwnerManifestProjector::from_snapshots_dir(
             &self.connection,
             &target,
             &self.snapshots_dir,
         )?
-        .project_database(&mut database)?;
-        Ok(database)
+        .project_root(root)?;
+        Ok((database, characters))
     }
 
     pub(crate) fn materialize_lease(&self, lease: &str) -> StoreResult<Value> {
@@ -2096,6 +2127,51 @@ impl PersistentStore {
             start,
             messages,
         )
+    }
+
+    pub(crate) fn replace_put_conversation(
+        &mut self,
+        staging_id: &str,
+        character_id: &str,
+        configured_index: i64,
+        conversation: &Value,
+        message_count: i64,
+        last_message_time: Option<&Value>,
+    ) -> StoreResult<()> {
+        commit::replace_put_conversation(
+            &mut self.connection,
+            staging_id,
+            character_id,
+            configured_index,
+            conversation,
+            message_count,
+            last_message_time,
+        )
+    }
+
+    pub(crate) fn replace_add_presets(
+        &mut self,
+        staging_id: &str,
+        presets: &[Value],
+    ) -> StoreResult<()> {
+        commit::replace_add_presets(&mut self.connection, staging_id, presets)
+    }
+
+    pub(crate) fn replace_add_plugin_storage_values(
+        &mut self,
+        staging_id: &str,
+        values: &[PluginStorageValue],
+    ) -> StoreResult<()> {
+        commit::replace_add_plugin_storage_values(&mut self.connection, staging_id, values)
+    }
+
+    pub(crate) fn replace_add_plugin_storage(
+        &mut self,
+        staging_id: &str,
+        storage: &serde_json::Map<String, Value>,
+        meta: Option<&serde_json::Map<String, Value>>,
+    ) -> StoreResult<()> {
+        commit::replace_add_plugin_storage(&mut self.connection, staging_id, storage, meta)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -3311,6 +3387,10 @@ impl PersistentStore {
             connection: snapshot::open_generation_reader(&self.database_path, &target.generation)?,
             cas: crate::asset_repository::PayloadCas::new(self.repository_root())?,
             revision: target.revision,
+            quarantined: match self.device_store {
+                Ok(_) => self.lww_quarantined_intents()?,
+                Err(_) => Vec::new(),
+            },
         })
     }
 

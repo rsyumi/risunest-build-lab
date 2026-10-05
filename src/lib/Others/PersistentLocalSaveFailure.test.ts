@@ -12,6 +12,8 @@ vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).langu
 import { persistentLocalSaveFailure } from 'src/ts/storage/persistentDataRuntime.svelte'
 import { languageEnglish } from 'src/lang/en'
 import Banner from './PersistentLocalSaveFailure.svelte'
+import { PayloadTooLargeError } from 'src/ts/storage/nativePersistenceValue'
+import { WindowedConversationSaveError } from 'src/ts/storage/saveCoordinator'
 const failure = persistentLocalSaveFailure as ReturnType<typeof writable<unknown | null>>
 let component: ReturnType<typeof mount>
 beforeEach(() => { failure.set(null); state.retry.mockReset(); component = mount(Banner, { target: document.body }) })
@@ -44,4 +46,15 @@ it('offers storage recovery for quota failures', async () => {
     failure.set(new DOMException('private database', 'QuotaExceededError')); await tick()
     expect(document.body.textContent).toContain(languageEnglish.risuNest.localSaveFailure.storage)
     expect(document.body.textContent).not.toContain('private database')
+})
+it('asks to remove what was just added when a save is too large', async () => {
+    failure.set(new PayloadTooLargeError('commit', 70 * 1024 * 1024)); await tick()
+    expect(document.body.textContent).toContain(languageEnglish.risuNest.localSaveFailure.tooLarge)
+})
+it('reports the current chat and keeps the retry when its changes cannot be completed for saving', async () => {
+    failure.set(new WindowedConversationSaveError('private reason', new Error('private cause'))); await tick()
+    expect(document.body.textContent).toContain(languageEnglish.risuNest.localSaveFailure.currentChat)
+    expect(document.body.textContent).toContain('Changes to the current chat could not be saved.')
+    expect(document.body.textContent).not.toContain('private')
+    expect(document.querySelector('button')).not.toBeNull()
 })

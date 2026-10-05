@@ -177,6 +177,50 @@ describe('plugin load orchestration', () => {
         expect(loadedV3).toEqual([['latest-v3']])
     })
 
+    it.each([false, true])('settles a superseded load with the load that replaced it (latest fails: %s)', async (latestFails) => {
+        const resetStarted = deferred<void>()
+        const finishReset = deferred<void>()
+        const latestStarted = deferred<void>()
+        const finishLatest = deferred<void>()
+        const error = new Error('latest load failed')
+        let resets = 0
+        const load = createPluginLoadOrchestrator<string>({
+            resetRegistry: async () => {
+                if (++resets === 1) {
+                    resetStarted.resolve(undefined)
+                    await finishReset.promise
+                }
+            },
+            loadV3: async () => {
+                latestStarted.resolve(undefined)
+                await finishLatest.promise
+                if (latestFails) throw error
+            },
+        })
+
+        let supersededSettled = false
+        const superseded = load(['stale-v3']).finally(() => {
+            supersededSettled = true
+        })
+        await resetStarted.promise
+        const latest = load(['latest-v3'])
+        finishReset.resolve(undefined)
+        await latestStarted.promise
+        // Drain every queued continuation before checking that nothing settled early.
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(supersededSettled).toBe(false)
+
+        finishLatest.resolve(undefined)
+        if (latestFails) {
+            await expect(latest).rejects.toBe(error)
+            await expect(superseded).rejects.toBe(error)
+        } else {
+            await latest
+            await superseded
+        }
+        expect(supersededSettled).toBe(true)
+    })
+
     it('allows an awaited reentrant plugin load to queue without deadlocking its loader', async () => {
         const events: string[] = []
         const nestedComplete = deferred<void>()

@@ -289,6 +289,8 @@ export interface PersistentDataRuntimeStateAdapter {
     captureCharacterIndex?(): ReadonlyMap<string, CompleteCharacter>
     beforeCapture?(): void
     afterRemoteApply?(): void
+    /** Root fields whose working-set value changed when stored units were projected into it. */
+    afterRemoteRootChange?(fields: ReadonlySet<string>): void
     canonicalCapture?: PersistenceCanonicalCapture
     captureRoot(): RootDatabase
     capturePluginStorage?(): Database['pluginCustomStorage'] | null
@@ -678,8 +680,10 @@ export function createPersistentDataRuntime(
             dependencies.onLocalRevision?.(revision)
         }),
         onStorageOnlyRevision: (revision) => workingSet.advanceStoreRevision(revision),
-        onWindowedSelectedConversationRevision: (revision) =>
-            workingSet.advanceStoreRevision(revision),
+        onWindowedSelectedConversationRevision: (revision, totalMessages) =>
+            workingSet.advanceStoreRevision(revision, totalMessages),
+        completeWindowedSelectedConversation: (authority, messages) =>
+            workingSet.completeWindowedConversationForSave(authority, messages),
         onConversationMutationPersistenceStarted: (event) =>
             workingSet.beginConversationMutationPersistence(event),
         onConversationMutationPersisted: (event) => {
@@ -1036,12 +1040,20 @@ export function createPersistentDataRuntime(
         const authorityEpoch = coordinator.storageAuthorityEpoch
         const lease = await dependencies.store.acquireRevision(result.revision)
         const projectionBaseline = baseline
+        const rootFields = [...new Set(result.affectedKeys.flatMap((key) => {
+            const [kind, field] = JSON.parse(key) as string[]
+            return kind === 'root' ? [field] : []
+        }))]
+        const rootValue = (field: string) => canonicalJson({ value: (database as unknown as Record<string, unknown>)[field] })
+        let rootBefore: string[] = []
         let applied: ReturnType<typeof captureLwwWorkingSetBaseline>
+        let windowedConversation: { characterId: string; conversationId: string; totalMessages: number } | undefined
         try {
             applied = await applyLwwWorkingSetUnits(database, projectionBaseline, lease, result.affectedKeys, dependencies.state.captureCharacterIndex?.(), localIntent, () => {
                 coordinator.assertPersistentMutationAllowed(authorityEpoch)
                 if (dependencies.state.captureWorkingSetDatabase?.() !== database) throw new Error('Persistent working set changed during unit projection')
                 dependencies.state.beforeCapture?.()
+                rootBefore = rootFields.map(rootValue)
             }, () => {
                 const canonicalCapture = dependencies.state.canonicalCapture
                 const beforeDerive = canonicalCapture?.root() ?? canonicalJson(dependencies.state.captureRoot())
@@ -1056,8 +1068,21 @@ export function createPersistentDataRuntime(
                     else delete root[mutation.key]
                 }
             })
+            // A windowed shell holds no messages to patch; its row source needs the received count instead.
+            if (selectedTarget && workingSet.selectedConversationMode === 'windowed' && result.affectedKeys.some((key) => {
+                const [kind, characterId, conversationId] = JSON.parse(key) as string[]
+                return kind === 'messages' && characterId === selectedTarget.characterId && conversationId === selectedTarget.conversationId
+            })) {
+                const stored = await lease.readConversationMetadata(selectedTarget.characterId, selectedTarget.conversationId)
+                if (stored) windowedConversation = { characterId: selectedTarget.characterId, conversationId: selectedTarget.conversationId, totalMessages: stored.value.totalMessages }
+            }
         } finally { await releasePersistentRevisionLease(lease) }
-        coordinator.adoptAppliedUnitState(result.revision, applied.root, applied.presets, applied.characters, applied.presetRecords)
+        coordinator.adoptAppliedUnitState(result.revision, applied.root, applied.presets, applied.characters, applied.presetRecords, windowedConversation)
+        const changedRootFields = new Set(rootFields.filter((field, index) => rootValue(field) !== rootBefore[index]))
+        if (changedRootFields.size > 0) {
+            try { dependencies.state.afterRemoteRootChange?.(changedRootFields) }
+            catch (error) { dependencies.onBackgroundError?.(error) }
+        }
         if (selectedFields && [...selectedFields].some(([field, value]) => (selectedChat as unknown as Record<string, unknown>)[field] !== value) &&
             selectedSession!.matchesConversation(selectedTarget!.characterId, selectedChat!) &&
             !selectedSession!.adoptPersistedMetadata(selectedChat!, result.revision)) {
@@ -1148,7 +1173,8 @@ export function createPersistentDataRuntime(
                 const store = dependencies.store
                 if (!store.lwwStageReceive || !store.lwwApplyReceive || !store.lwwFinishReceive) throw new Error('LWW receive is unavailable')
                 const database = dependencies.state.captureWorkingSetDatabase?.()
-                const baseline = database ? captureLwwWorkingSetBaseline(database, dependencies.state.captureRoot(), dependencies.state.capturePresets?.() ?? null, coordinator.captureMaterializedBaseline(), coordinator.capturePresetRecordBaseline()) : undefined
+                // An empty pull leaves the library alone; any key it still reports is projected against a lazy baseline.
+                const baseline = database && staged.changes.length > 0 ? captureLwwWorkingSetBaseline(database, dependencies.state.captureRoot(), dependencies.state.capturePresets?.() ?? null, coordinator.captureMaterializedBaseline(), coordinator.capturePresetRecordBaseline()) : undefined
                 await store.lwwStageReceive(staged)
                 const header = { bindingAuthority: staged.bindingAuthority, requestId: staged.requestId }
                 const result = await store.lwwApplyReceive({ ...header, generating: generating() })

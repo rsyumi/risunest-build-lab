@@ -164,6 +164,7 @@ mod tests {
                 verified_file_hash:hash,active_aliases:1,verified_owner_references:1}]}
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn only_live_native_allocation_and_physical_owned_payloads_pass() {
         let certificate = tiny();
         assert!(certificate.validate().is_ok());
@@ -181,6 +182,7 @@ mod tests {
         }
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn target_and_above_counts_cannot_be_replaced_by_catalog_claims_or_duplicate_rows() {
         let mut certificate = tiny();
         certificate.requirement=ScaleRequirement::Target;

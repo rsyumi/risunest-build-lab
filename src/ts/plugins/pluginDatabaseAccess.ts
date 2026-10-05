@@ -806,7 +806,7 @@ export function createPluginDatabaseAccess(
                 if (!detail) return target.characterIndex === undefined ? undefined : null
                 assertPinnedRevision(reader.revision, detail.revision, 'Character')
                 const chunks = (async function* (): AsyncGenerator<PluginDatabaseSnapshotChunk> {
-                    const baseline = { characters: [] } as unknown as Record<string, any>
+                    let baseline: Record<string, any> | undefined = { characters: [] }
                     yield { type: 'arrayStart', key: 'characters' }
                     if ('conversationId' in resolved) {
                         baseline.characters.push({ ...structuredClone(detail.value as object), chats: [] })
@@ -821,10 +821,11 @@ export function createPluginDatabaseAccess(
                             yield chunk
                         }
                     }
-                    const character = baseline.characters[0]
-                    if ('conversationId' in resolved) readBaselines.track(character.chats[0], 'conversation', JSON.stringify([resolved.characterId, resolved.conversationId]), reader.revision, readAuthority)
-                    else readBaselines.track(character, 'character', resolved.characterId, reader.revision, readAuthority)
-                    yield { type: 'provenance', entries: collectPluginReadProvenance(baseline) }
+                    if ('conversationId' in resolved) readBaselines.track(baseline.characters[0].chats[0], 'conversation', JSON.stringify([resolved.characterId, resolved.conversationId]), reader.revision, readAuthority)
+                    else readBaselines.track(baseline.characters[0], 'character', resolved.characterId, reader.revision, readAuthority)
+                    const entries = collectPluginReadProvenance(baseline)
+                    baseline = undefined
+                    yield { type: 'provenance', entries }
                 })()
                 let closed = false
                 const close = async () => {
@@ -1217,21 +1218,22 @@ export function createPluginDatabaseAccess(
                     }
                 }
             })()
-            const baseline: Record<string, any> = {}
-            let emittedProvenance = false
+            // Released once tracked, so the stream holds no copy of the library after it ends.
+            let baseline: Record<string, any> | undefined = {}
             return new ReadableStream<PluginDatabaseSnapshotChunk>({
                 async pull(controller) {
                     try {
                         const next = await iterator.next()
                         if (next.done) {
-                            if (!emittedProvenance) {
+                            if (baseline) {
                                 readBaselines.track(baseline, 'database', 'database', reader.revision, readAuthority)
-                                emittedProvenance = true
-                                controller.enqueue({ type: 'provenance', entries: collectPluginReadProvenance(baseline) })
+                                const entries = collectPluginReadProvenance(baseline)
+                                baseline = undefined
+                                controller.enqueue({ type: 'provenance', entries })
                             }
                             controller.close()
                         } else {
-                            accumulatePluginSnapshotChunk(baseline, next.value)
+                            accumulatePluginSnapshotChunk(baseline!, next.value)
                             controller.enqueue(next.value)
                         }
                     } catch (error) {

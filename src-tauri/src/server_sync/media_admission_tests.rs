@@ -390,15 +390,21 @@ fn injected_refusal_drains_a_fragmented_post_before_closing() {
     use std::io::{Read, Write};
     let (fixture, state) = admission_fixture();
     *state.inject.lock().unwrap() = Some((403, r#"{"error":"forbidden"}"#));
-    for _ in 0..3 {
+    for index in 0..3 {
         let address = fixture.endpoint.strip_prefix("http://").unwrap();
         let mut stream = std::net::TcpStream::connect(address).unwrap();
         stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
             .unwrap();
         write!(stream, "POST /media/access HTTP/1.1\r\nHost: {address}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n").unwrap();
         stream.flush().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(30));
+        // The body is sent only after the server parsed the header and counted
+        // the request, so it always arrives as a second segment.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while state.accesses.load(Ordering::SeqCst) == index {
+            assert!(std::time::Instant::now() < deadline, "the server never read the header");
+            std::thread::yield_now();
+        }
         stream.write_all(b"{}").unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();

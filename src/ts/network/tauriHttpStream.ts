@@ -14,6 +14,8 @@ export interface TauriHttpStreamOptions {
     method: string
     headers: { [key: string]: string }
     body?: Uint8Array
+    /** A body given as text crosses IPC as one string instead of a byte array. */
+    text?: string
     signal?: AbortSignal
     /** Inactivity window in milliseconds. A nonpositive value disables the timer. */
     idleTimeoutMs?: number
@@ -87,13 +89,14 @@ function createRequestLifecycle(options: TauriHttpStreamOptions) {
 export async function fetchTauriHttpStream(options: TauriHttpStreamOptions): Promise<Response> {
     const lifecycle = createRequestLifecycle(options)
     let response: Response
+    const sendsBody = options.method !== 'GET' && options.method !== 'HEAD'
     try {
         response = await tauriFetch(options.url, {
             method: options.method,
             headers: options.headers,
-            body: options.method === 'GET' || options.method === 'HEAD'
-                ? undefined
-                : options.body as unknown as BodyInit,
+            ...(sendsBody && options.text !== undefined
+                ? { dataText: options.text }
+                : { body: sendsBody ? options.body as unknown as BodyInit : undefined }),
             signal: lifecycle.signal,
         })
     }

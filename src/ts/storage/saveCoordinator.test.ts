@@ -1776,6 +1776,45 @@ describe('SaveCoordinator', () => {
         expect(commit.mock.calls[0][0].addCharacter).toMatchObject({ chaId: 'char-added' })
     })
 
+    it.each([
+        ['another writer changed the replaced conversation', { kind: 'conversation', key1: 'char-a', key2: 'one' }, 1],
+        ['another writer changed only a sibling conversation', { kind: 'conversation', key1: 'char-a', key2: 'two' }, 2],
+        ['only an unrelated record moved', { kind: 'asset', key1: 'assets/synthetic.png', key2: '' }, 2],
+    ])('resends a replaced conversation after a conflict only when %s', async (_name, change, commits) => {
+        const database = makeChattyDatabase()
+        const conflict = new RevisionConflictError(2, 3)
+        const commit = vi.fn(async ({ expectedRevision }: { expectedRevision: number }) => {
+            if (commit.mock.calls.length === 1) throw conflict
+            return { revision: expectedRevision + 1 }
+        })
+        const readWorkingSetChangePage = vi.fn(async () => [change])
+        const store = {
+            ...makeStore(commit),
+            acquireRevision: vi.fn(async (revision: number) => ({
+                revision, readWorkingSetChangePage, release: vi.fn(async () => undefined),
+            })),
+        } as unknown as PersistentDataStore
+        const coordinator = new SaveCoordinator({
+            store,
+            captureRoot: () => captureRoot(database),
+            captureSelectedCharacter: () => database.characters[0],
+            replaceDatabase: () => undefined,
+        })
+        coordinator.initialize(2)
+        database.characters[0].chats[0].name = 'Renamed'
+
+        const flushed = coordinator.flushPendingData('replaced-conversation-conflict')
+        if (commits === 1) await expect(flushed).rejects.toBe(conflict)
+        else await flushed
+
+        expect(commit.mock.calls[0][0]).toMatchObject({ conversations: [expect.objectContaining({
+            type: 'replace-range', characterId: 'char-a', conversationId: 'one', conversation: expect.objectContaining({ name: 'Renamed' }),
+        })] })
+        expect(commit).toHaveBeenCalledTimes(commits)
+        expect(readWorkingSetChangePage).toHaveBeenCalledWith(2, null, expect.any(Number))
+        if (commits === 2) expect(commit.mock.calls[1][0]).toMatchObject({ expectedRevision: 3 })
+    })
+
     it('retries a revision conflict once and preserves a failed addition when the conflict cannot advance', async () => {
         const { database, added } = makeAdditionDatabase()
         const gate = deferred<{ revision: number }>()

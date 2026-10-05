@@ -235,7 +235,7 @@
     if (
       (await alertCheckboxConfirm({
           title: language.hypaV3Modal.deleteAfterConfirmMessage,
-          description: language.hypaV3Modal.deleteAfterConfirmSecondMessage,
+          description: language.checkboxConfirmation.hypaDeletionDescription,
           checkboxLabel: language.checkboxConfirmation.hypaDeletion,
           actionLabel: language.confirm,
           cancelLabel: language.cancel,

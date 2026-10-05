@@ -113,7 +113,7 @@ fn first_state_page(core: &LwwClient) -> Result<StatePage> {
 pub(crate) fn inspect(store: &PersistentStore, header: &Header) -> Result<Inspection> {
     assert_authority(store, header)?;
     let core = candidate(store)?;
-    core.admission()?;
+    core.fresh_admission()?;
     let head = core.client.resolve_identity()?;
     let page = first_state_page(&core)?;
     let config = core
@@ -341,7 +341,7 @@ pub(crate) fn stage(
     if core.client.resolve_identity()?.epoch != target.epoch {
         return Err(SyncError::new("server-epoch-changed", 409));
     }
-    let upper = core.admission()?;
+    let upper = core.fresh_admission()?;
     let (cursor, changes) = core.state(store, upper)?;
     if core.client.resolve_identity()?.epoch != target.epoch {
         return Err(SyncError::new("server-epoch-changed", 409));
@@ -583,6 +583,30 @@ fn resume_fresh_writer(
         _ => Ok(()),
     }
 }
+/// The claim of a new-device binding that stopped after replacing the library and
+/// before installing its registration: the clock already runs on the writer the
+/// claim reserved while another registration is still stored.
+fn stopped_new_device_claim(
+    store: &PersistentStore,
+    log: &OperationLog,
+    header: &Header,
+) -> Result<Option<VerifiedClaim>> {
+    let writer = store.lww_clock_state()?.writer_id;
+    let Some(authorization_id) = store.lww_new_device_authorization(&writer)? else {
+        return Ok(None);
+    };
+    let Ok(claim) = log.verified::<VerifiedClaim>("claims", &authorization_id) else {
+        return Ok(None);
+    };
+    let installed = store.server_stored_config()?.is_some_and(|stored| {
+        stored.library_id == claim.stage.target.config.library_id
+            && stored.device_id == claim.stage.target.config.device_id
+    });
+    Ok((claim.receipt.writer_id == writer
+        && claim.stage.target.authority.0.checked_add(1) == Some(header.binding_authority.0)
+        && !installed)
+        .then_some(claim))
+}
 pub(crate) fn activate(
     store: &mut PersistentStore,
     header: &Header,
@@ -602,6 +626,8 @@ pub(crate) fn activate(
         {
             return Err(SyncError::new("new-device-registration-integrity", 409));
         }
+        (claim.stage.target.clone(), Some(claim.stage))
+    } else if let Some(claim) = stopped_new_device_claim(store, &log, header)? {
         (claim.stage.target.clone(), Some(claim.stage))
     } else {
         let active = log.verified::<VerifiedTarget>("bindings", "active").ok();
@@ -696,7 +722,7 @@ pub(crate) fn activate(
                 cursor: stage.cursor,
                 writer_id: None,
             },
-            admitted_time_upper_ms: core.admission()?,
+            admitted_time_upper_ms: core.fresh_admission()?,
         };
         store.lww_stage_receive(&receive)?;
         store.lww_apply_receive(&ApplyReceive {
@@ -985,6 +1011,41 @@ mod tests {
         assert!(LwwClient::new(store.repository_root(), fresh)
             .unwrap()
             .push(&mut store, &next, &[])
+            .unwrap()
+            .is_some());
+    }
+    #[test]
+    fn a_new_device_binding_stopped_before_activation_installs_the_claimed_registration() {
+        let server = LocalServerFixture::new();
+        let (root, mut store) = local();
+        let old = configure(&server, &store);
+        let bound = bind(&mut store);
+        save(&mut store, &["root", "language"], serde_json::json!("ja"));
+        let mut core = LwwClient::new(store.repository_root(), old.clone()).unwrap();
+        core.access = store.server_stored_config().unwrap();
+        core.push(&mut store, &bound, &[]).unwrap();
+        let fresh = configure(&server, &store);
+        let request = header(&store);
+        let inspected = inspect(&store, &request).unwrap();
+        let request = header(&store);
+        let staged = stage(&mut store, &request, &inspected.inspection_id, None).unwrap();
+        let prepared = prepare_new_device(&mut store, &request, &staged.staging_id).unwrap();
+        store
+            .lww_replace_target_as_new_device(&request, &staged.staging_id, &prepared.authorization_id)
+            .unwrap();
+        // The app stops before the new device is activated and starts again.
+        drop(store);
+        let mut store = PersistentStore::open(root.path()).unwrap();
+        let restarted = header(&store);
+        activate(&mut store, &restarted, None).unwrap();
+        assert_eq!(
+            store.server_stored_config().unwrap().unwrap().device_id,
+            fresh.device_id
+        );
+        assert_eq!(store.read_root(None).unwrap().value["language"], "ja");
+        save(&mut store, &["root", "language"], serde_json::json!("ko"));
+        assert!(bound_client(&store)
+            .push(&mut store, &restarted, &[])
             .unwrap()
             .is_some());
     }

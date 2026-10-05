@@ -1157,7 +1157,10 @@ pub(crate) async fn run_connected_cleanup(
     engine:Option<&super::lww_engine::ExternalLwwEngine>,cancel:&Cancellation,
 )->Result<Value> {
     let root = root(app)?;
-    let writer_id = native_store(app)?
+    let store = std::sync::Mutex::new(native_store(app)?);
+    let writer_id = store
+        .lock()
+        .map_err(|_| ProviderError::new(ErrorKind::Transient))?
         .external_identity()
         .map_err(local_error)?
         .store_id;
@@ -1231,7 +1234,7 @@ pub(crate) async fn run_connected_cleanup(
         selected.admit(&sample)?;opened=Some(selected);
     }
     let outcome=if let Some(engine)=engine.or(opened.as_ref()) {
-        super::cleanup::run_lww(&protection,&request,engine,view,&scratch,cancel).await?
+        super::cleanup::run_lww(&protection,&request,engine,&store,view,&scratch,cancel).await?
     } else {
         super::cleanup::run(&protection,&request,&view,&documents,cancel).await?
     };

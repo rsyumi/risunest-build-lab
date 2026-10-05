@@ -4,8 +4,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 
 vi.mock('src/ts/stores.svelte', async () => {
-    const { writable } = await import('svelte/store')
-    return { alertStore: writable({ type: 'none', msg: '' }) }
+    const { createAlertQueue } = await import('src/ts/alertQueue')
+    return { alertStore: createAlertQueue({ type: 'none', msg: '' }, { gapMs: 0 }) }
 })
 
 vi.mock('src/lang', () => ({

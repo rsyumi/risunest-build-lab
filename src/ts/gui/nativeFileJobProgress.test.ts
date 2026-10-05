@@ -93,6 +93,9 @@ describe('nativeFileJobProgress', () => {
         expect(nativeFileJobProgressText(upload)).toBe(`${languageEnglish.risuNest.backup.progressTransferring}: 25%`)
         expect(nativeFileJobTitle('import', status({ kind: 'restore-official-account-snapshot' })))
             .toBe(languageEnglish.risuNest.backup.officialRestore)
+        for (const kind of ['restore-native-snapshot', 'snapshot-bodies'] as const) {
+            expect(nativeFileJobTitle('import', status({ kind }))).toBe(languageEnglish.risuNest.importDialog.titleSnapshot)
+        }
     })
 
 })

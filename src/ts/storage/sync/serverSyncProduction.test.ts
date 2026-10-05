@@ -9,7 +9,11 @@ const f = vi.hoisted(() => ({
     install: vi.fn(),
     register: vi.fn(),
     resumeCurrent: vi.fn(),
-    viewport: undefined as undefined | (() => void),
+    viewport: undefined as undefined | ((source?: unknown) => void),
+    revision: undefined as undefined | ((revision: number, cause?: string) => void),
+    conversation: null as null | { characterId: string; conversationId: string },
+    mobile: vi.fn(),
+    flush: vi.fn(),
     paused: vi.fn(),
     guard: vi.fn(),
     refresh: vi.fn(),
@@ -20,7 +24,8 @@ const f = vi.hoisted(() => ({
     runtime: {
         revision: 31,
         getStorageAuthorityEpoch: vi.fn(() => 'storage-epoch'),
-        subscribeActiveConversationViewportSource: (callback: () => void) => { f.viewport = callback; return () => {} },
+        subscribeActiveConversationViewportSource: (callback: (source: unknown) => void) => { f.viewport = callback; return () => {} },
+        captureSelectedConversationTarget: () => f.conversation,
         setActivatedLibraryRecoveryLifecycle: vi.fn(),
         markCommittedWorkingSetRefreshRequired: vi.fn(),
     },
@@ -46,16 +51,20 @@ vi.mock('../persistentDataRuntime.svelte', () => ({
     beginActivatedLibraryGuard: f.guard,
     refreshActivatedLibraryUnderPause: f.refresh,
     applyPersistentLwwReceive: f.apply,
+    flushPendingDataLocally: f.flush,
     getPersistentDataRuntime: () => f.runtime,
 }))
+vi.mock('../../mobileBackgroundTask', () => ({ runWithMobileBackgroundTask: f.mobile }))
 vi.mock('src/ts/plugins/apiV3/v3.svelte', () => ({ fencePluginExecutionForAuthorityReplacement: vi.fn(), invalidatePluginCachesAfterAuthorityReplacement: vi.fn(), restartPluginsAfterAuthorityReplacement: vi.fn() }))
-vi.mock('../persistentRevisionEvents', () => ({ subscribeLocalPersistentRevision: () => () => {} }))
+vi.mock('../persistentRevisionEvents', () => ({ subscribeLocalPersistentRevision: (callback: (revision: number, cause?: string) => void) => { f.revision = callback; return () => {} } }))
 vi.mock('../generatingConversationRegistry', () => ({ generatingConversations: { snapshot: () => f.generating } }))
 
 let production: typeof import('./serverSyncProduction')
 beforeEach(async () => {
     vi.resetModules(); vi.clearAllMocks(); vi.useFakeTimers()
-    f.native = true; f.transport = undefined; f.dependencies = undefined; f.generating = []; f.selectedIndex = 0; f.viewport = undefined
+    f.native = true; f.transport = undefined; f.dependencies = undefined; f.generating = []; f.selectedIndex = 0; f.viewport = undefined; f.revision = undefined; f.conversation = null
+    f.mobile.mockImplementation(async (_kind: string, operation: (task: object) => Promise<unknown>) => operation({ progress() {}, async dispose() {} }))
+    f.flush.mockResolvedValue(undefined)
     const document = new EventTarget() as EventTarget & { visibilityState: string }
     document.visibilityState = 'hidden'
     vi.stubGlobal('document', document)
@@ -76,8 +85,20 @@ const bindingContext = () => ({ state: { target: { kind: 'server' as const, conn
 const visible = (value: boolean) => { Object.defineProperty(document, 'visibilityState', { value: value ? 'visible' : 'hidden', configurable: true }); document.dispatchEvent(new Event('visibilitychange')) }
 const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
 const hydrationCalls = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_hydrate')
+const pullCalls = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_pull').length
+const openConversation = (conversationId: string) => { f.conversation = { characterId: 'selected-stable-id', conversationId }; f.viewport!({}) }
+const callOrder = (command: string) => f.invoke.mock.invocationCallOrder[f.invoke.mock.calls.findIndex(([name]) => name === command)]
 
 describe('production server LWW composition', () => {
+    it('shows why sync stopped when a committed switch cannot resume', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        f.transport!.reportStopped!({ code: 'server-unreachable' })
+        expect(production.getServerSyncController().snapshot().error).toBe('server-unreachable')
+        f.transport!.reportStopped!(new AggregateError([{ code: 'unauthorized' }], 'stopped'))
+        expect(production.getServerSyncController().snapshot().error).toBe('unauthorized')
+        f.transport!.reportStopped!(new Error('no code'))
+        expect(production.getServerSyncController().snapshot().error).toBe('server-unreachable')
+    })
     it('exposes native configuration without starting a second binding', async () => {
         const config = { endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }
         await production.configureServerSyncConnection(config)
@@ -122,7 +143,7 @@ describe('production server LWW composition', () => {
         visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
         expect(production.getServerSyncController().snapshot().error).toBe('server-unreachable')
         await vi.advanceTimersByTimeAsync(120_000); expect(hydrationCalls()).toHaveLength(1)
-        f.viewport!(); await settle()
+        openConversation('opened'); await settle()
         expect(hydrationCalls()).toHaveLength(2); expect(production.getServerSyncController().snapshot().error).toBe('')
     })
     it('coalesces newly received asset work without cancelling an in-flight hydration', async () => {
@@ -168,16 +189,16 @@ describe('production server LWW composition', () => {
         expect(production.getServerSyncController().snapshot().paused).toBe(true)
         await vi.advanceTimersByTimeAsync(120_000)
         expect(f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_retry')).toHaveLength(0)
-        f.viewport!(); await settle()
+        openConversation('first'); await settle()
         expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_retry', { request: { bindingAuthority: '0', requestId: expect.any(String) } })
         expect(production.getServerSyncController().snapshot().paused).toBe(false)
         future = true; accepted = true
         visible(false); await settle(); visible(true); await settle()
-        f.viewport!(); await settle()
+        openConversation('second'); await settle()
         expect(production.getServerSyncController().snapshot().paused).toBe(true)
         expect(production.getServerSyncController().snapshot().error).toBe('accepted-clock-correction-required')
         const retries = f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_retry').length
-        visible(false); await settle(); visible(true); f.viewport!(); await settle()
+        visible(false); await settle(); visible(true); openConversation('third'); await settle()
         expect(f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_retry')).toHaveLength(retries)
     })
     it('drains and clears the old hydration context before a binding fence permits foreground return', async () => {
@@ -370,6 +391,90 @@ describe('production server LWW composition', () => {
         expect(f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_fence').map(([, args]) => args)).toEqual([{ newDevice: false }, { newDevice: true }])
         expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_prepare_fresh_writer', { inspectionId: 'synthetic-inspection', request: { bindingAuthority: '0', requestId: expect.any(String) } })
         expect(f.invoke.mock.calls.some(([command]) => command === 'server_sync_lww_push' || command === 'server_sync_lww_activate')).toBe(false)
+    })
+    it('pulls when another conversation opens, not when a local commit renews the open one', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        openConversation('first'); await settle()
+        const opened = pullCalls()
+        f.viewport!({}); f.viewport!({}); f.viewport!({}); f.viewport!(null); await settle()
+        expect(pullCalls()).toBe(opened)
+        openConversation('second'); await settle()
+        expect(pullCalls()).toBe(opened + 1)
+    })
+    it('stops on a local apply failure instead of pulling the same page again as an unreachable server', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        f.apply.mockRejectedValue(Object.assign(new Error('request-id-integrity'), { code: 'validation' }))
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: true, error: 'local-validation' })
+        const pulls = pullCalls()
+        await vi.advanceTimersByTimeAsync(120_000); await settle()
+        openConversation('other'); await settle()
+        expect(pullCalls()).toBe(pulls)
+    })
+    it('retries a local storage failure during apply', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        f.apply.mockRejectedValue(Object.assign(new Error('disk I/O error'), { code: 'store-error' }))
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: 'local-storage' })
+        f.apply.mockResolvedValue({ revision: 31, affectedKeys: [], heldKeys: [], deferredKeys: [] })
+        await vi.advanceTimersByTimeAsync(5000); await settle()
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: '' })
+    })
+    it('finishes initial publication while the document is hidden', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const pending = Array.from({ length: 300 }, (_, index) => `synthetic-unit-${index}`)
+        f.invoke.mockImplementation(async command => {
+            if (command === 'server_sync_lww_push') { const batch = pending.splice(0, 256); return batch.length ? { operationId: 'batch' } : null }
+            return null
+        })
+        await f.transport!.publishInitialSharedState(bindingContext())
+        expect(pending).toEqual([])
+        expect(f.invoke.mock.calls.some(([command]) => command === 'server_sync_lww_pull' || command === 'server_sync_notify_start')).toBe(false)
+    })
+    it('binds a server connection under a sync background task', async () => {
+        const { bindSyncTarget } = await import('./bindingRegistry')
+        let inTask = false
+        f.mobile.mockImplementation(async (_kind: string, operation: (task: object) => Promise<unknown>) => { inTask = true; try { return await operation({ progress() {}, async dispose() {} }) } finally { inTask = false } })
+        vi.mocked(bindSyncTarget).mockImplementation(async () => { expect(inTask).toBe(true); return { kind: 'cancelled' } })
+        await production.connectServerSync({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' })
+        await production.completeServerSyncBinding()
+        expect(bindSyncTarget).toHaveBeenCalledTimes(2)
+        expect(f.mobile.mock.calls.map(([kind]) => kind)).toEqual(['sync', 'sync'])
+    })
+    it('publishes pending local work under a sync background task before it disconnects on hide', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        let unsent = 2
+        f.invoke.mockImplementation(async command => {
+            if (command === 'server_sync_lww_push') return unsent-- > 0 ? { operationId: 'hidden' } : null
+            return command === 'server_sync_lww_pull' ? emptyReceive() : null
+        })
+        f.invoke.mockClear(); f.mobile.mockClear()
+        f.revision!(32, 'edit')
+        visible(false); await settle()
+        expect(f.mobile).toHaveBeenCalledWith('sync', expect.any(Function))
+        expect(f.flush).toHaveBeenCalledOnce()
+        expect(unsent).toBeLessThan(0)
+        expect(callOrder('server_sync_lww_push')).toBeLessThan(callOrder('server_sync_notify_stop'))
+        expect(f.flush.mock.invocationCallOrder[0]).toBeLessThan(callOrder('server_sync_lww_push'))
+        await vi.advanceTimersByTimeAsync(5000)
+        expect(f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_push')).toHaveLength(3)
+    })
+    it('keeps a failed binding visible as a paused connection that 지금 동기화 resumes', async () => {
+        const { bindSyncTarget } = await import('./bindingRegistry')
+        const state = bindingContext().state
+        let bound = false
+        f.invoke.mockImplementation(async command => command === 'server_sync_status' ? { configured: true, writerId: 'writer', bindingAuthority: '0' }
+            : command === 'pds_lww_binding_state' ? (bound ? state : { target: { kind: 'none' }, targetAuthority: '0', selectionEpoch: '0', libraryId: null, progress: null })
+                : command === 'server_sync_lww_pull' ? emptyReceive() : null)
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        vi.mocked(bindSyncTarget).mockImplementation(async () => { bound = true; throw { code: 'server-unreachable', retryable: true } })
+        f.resumeCurrent.mockImplementation(async () => { await f.transport!.resumeBinding(bindingContext()) })
+        await expect(production.connectServerSync({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' })).rejects.toMatchObject({ code: 'server-unreachable' })
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: true, error: 'server-unreachable' })
+        await production.retryServerSync()
+        expect(f.resumeCurrent).toHaveBeenCalledExactlyOnceWith(state.target)
     })
     it('guards native initialization and transport registration on the web', async () => {
         f.native = false

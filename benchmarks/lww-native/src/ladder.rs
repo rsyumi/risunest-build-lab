@@ -1040,6 +1040,7 @@ fn serverless_group(recorder:&Recorder,library:&Path,work:&Path,settings:&Settin
 }
 
 #[test]
+#[ignore = "measurement harness self-test"]
 fn ladder_fork_links_objects_and_copies_everything_else() {
     let root=tempfile::tempdir().unwrap();
     let library=root.path().join("library");

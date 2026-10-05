@@ -50,14 +50,15 @@ const mocks = vi.hoisted(() => {
     }
 })
 
-vi.mock('./alert', () => ({
+vi.mock('./alert', async (importOriginal) => ({
     alertMd: vi.fn(),
     alertSelect: vi.fn(),
     alertToast: mocks.alertToast,
     alertWait: vi.fn(),
-    doingAlert: vi.fn(() => false),
+    doingAlert: (await importOriginal<typeof import('./alert')>()).doingAlert,
     alertRequestLogs: vi.fn(),
 }))
+vi.mock('./storage/deviceMarkers', () => ({ getDeviceMarkers: vi.fn() }))
 vi.mock('./characters', () => ({ changeChar: mocks.changeChar }))
 vi.mock('./storage/database.svelte', () => ({
     changeToPreset: mocks.changeToPreset,
@@ -66,8 +67,8 @@ vi.mock('./storage/database.svelte', () => ({
 vi.mock('./storage/persistentDataRuntime.svelte', () => ({
     deactivateActiveWorkingSet: mocks.deactivateActiveWorkingSet,
 }))
-vi.mock('./stores.svelte', () => ({
-    alertStore: mocks.store({ type: 'none' }),
+vi.mock('./stores.svelte', async () => ({
+    alertStore: (await import('./alertQueue')).createAlertQueue({ type: 'none', msg: '' }, { gapMs: 0 }),
     DBState: { db: mocks.database },
     loadoutModalStore: { open: false },
     MobileGUIStack: mocks.MobileGUIStack,
@@ -92,6 +93,7 @@ vi.mock('./process/index.svelte', () => ({
 vi.mock('./dragTypes', () => ({ RISU_SIDEBAR_DRAG_TYPE: 'character' }))
 
 import { initHotkey, initMobileGesture } from './hotkey'
+import { alertStore } from './stores.svelte'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -169,6 +171,66 @@ describe('character hotkeys', () => {
 
         expect(mocks.alertToast).toHaveBeenCalledWith('Changed to Preset: Target')
         vi.restoreAllMocks()
+    })
+})
+
+describe('Escape', () => {
+    let keydown!: (event: KeyboardEvent) => Promise<void>
+    const escape = () => keydown(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true }))
+
+    beforeEach(() => {
+        vi.useFakeTimers()
+        mocks.alertToast.mockClear()
+        vi.spyOn(document, 'addEventListener').mockImplementation((type, handler) => {
+            if (type === 'keydown') keydown = handler as unknown as typeof keydown
+        })
+        initHotkey()
+    })
+    afterEach(async () => {
+        while (alertStore.hasDialogs()) {
+            await vi.advanceTimersByTimeAsync(0)
+            alertStore.set({ type: 'none', msg: '' })
+        }
+        vi.useRealTimers()
+    })
+
+    it('closes the visible dialog and toasts only once no dialog is queued', async () => {
+        const first = alertStore.open({ type: 'normal', msg: 'First' })
+        const second = alertStore.open({ type: 'ask', msg: 'Second' })
+
+        await escape()
+        await expect(first).resolves.toBe('')
+        expect(mocks.alertToast).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(get(alertStore)).toMatchObject({ type: 'ask', msg: 'Second' })
+
+        await escape()
+        await expect(second).resolves.toBe('')
+        expect(mocks.alertToast).toHaveBeenCalledExactlyOnceWith('Alert Closed')
+    })
+
+    it('leaves the next dialog open when Escape arrives before it shows', async () => {
+        const first = alertStore.open({ type: 'normal', msg: 'First' })
+        const second = alertStore.open({ type: 'ask', msg: 'Second' })
+
+        await escape()
+        await escape()
+        await expect(first).resolves.toBe('')
+        await vi.advanceTimersByTimeAsync(0)
+        expect(get(alertStore)).toMatchObject({ type: 'ask', msg: 'Second' })
+        expect(alertStore.hasDialogs()).toBe(true)
+        expect(mocks.alertToast).not.toHaveBeenCalled()
+        alertStore.set({ type: 'none', msg: 'yes' })
+        await expect(second).resolves.toBe('yes')
+    })
+
+    it('keeps a progress status, which is not a dialog', async () => {
+        alertStore.set({ type: 'progress', msg: 'Saving', submsg: '50' })
+
+        await escape()
+        expect(get(alertStore)).toEqual({ type: 'progress', msg: 'Saving', submsg: '50' })
+        expect(mocks.alertToast).not.toHaveBeenCalled()
+        alertStore.clearStatus()
     })
 })
 

@@ -1842,6 +1842,65 @@ pub(crate) async fn download_packed_body_file(
     match &body.source { ObjectSource::File(path)=>Ok(path.clone()), _=>Err(corrupt("body source")) }
 }
 
+/// The original units of a full backup. Their controls stay in the staging
+/// content store they were downloaded to and are decoded again when read.
+pub(crate) struct OriginalUnits {
+    /// Catalog key, control hash and control length, in unit key order.
+    records: Vec<(String, String, u64)>,
+}
+
+impl OriginalUnits {
+    /// The units, read from `content`, the content store of the staging root they were downloaded to.
+    pub(crate) fn units<'a>(&'a self, content: &'a ContentStore) -> impl Iterator<Item = Result<(risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue)>> + 'a {
+        self.records.iter().map(move |(key, hash, length)| {
+            let unit = decode_original_unit(content, key, hash, *length)?;
+            Ok((unit.key, unit.value))
+        })
+    }
+}
+
+#[cfg(test)]
+impl OriginalUnits {
+    /// The units as a download leaves them, with their controls put in `content`.
+    pub(crate) fn staged(
+        content: &mut ContentStore,
+        units: &BTreeMap<risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue>,
+    ) -> Self {
+        let mut records = Vec::new();
+        for (key, value) in units {
+            let bytes = risunest_sync_wire::canonical::encode(&super::packaging::OriginalBackupUnit {
+                schema: "risunest.backup-unit/v1".into(), key: key.clone(), value: value.clone(),
+            }).unwrap();
+            let hash = risunest_sync_wire::hash(&bytes);
+            content.put(&hash, &bytes).unwrap();
+            records.push((format!("original-unit/{}", hex::encode(key.as_str())), hash, bytes.len() as u64));
+        }
+        content.commit().unwrap();
+        Self { records }
+    }
+}
+
+fn decode_original_unit(content: &ContentStore, key: &str, hash: &str, length: u64) -> Result<super::packaging::OriginalBackupUnit> {
+    if length > risunest_sync_wire::MAX_METADATA_BYTES as u64 {
+        return Err(corrupt("original unit control exceeds its bound"));
+    }
+    let mut source=content.open_body(hash).map_err(transient)?;
+    let mut bytes=Vec::new();
+    source.by_ref().take(risunest_sync_wire::MAX_METADATA_BYTES as u64+1).read_to_end(&mut bytes).map_err(transient)?;
+    if bytes.len() as u64 != length {
+        return Err(corrupt("original unit control length"));
+    }
+    let unit: super::packaging::OriginalBackupUnit = risunest_sync_wire::canonical::decode(
+        &bytes, risunest_sync_wire::MAX_METADATA_BYTES,
+    ).map_err(corrupt)?;
+    if unit.schema != "risunest.backup-unit/v1"
+        || key != format!("original-unit/{}", hex::encode(unit.key.as_str()))
+    {
+        return Err(corrupt("original unit catalog key differs from its control"));
+    }
+    Ok(unit)
+}
+
 pub(crate) async fn download_original_backup_units(
     root: &RemoteObject,
     staging_root: &Path,
@@ -1849,46 +1908,34 @@ pub(crate) async fn download_original_backup_units(
     provider: &dyn Provider,
     repository: &RepositoryHandle,
     cancel: &Cancellation,
-) -> Result<BTreeMap<risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue>> {
+) -> Result<OriginalUnits> {
     let (records, objects) = download_checkpoint_data(
         root, staging_root, key, provider, repository, cancel,
     ).await?;
     if !objects.is_empty() { return Err(corrupt("original unit catalog contains non-unit controls")); }
     let content = content_store(staging_root)?;
-    let mut units = BTreeMap::new();
+    let mut keys = BTreeSet::new();
+    let mut kept = Vec::with_capacity(records.len());
     for record in records {
         cancel.check()?;
-        if record.byte_length > risunest_sync_wire::MAX_METADATA_BYTES as u64 {
-            return Err(corrupt("original unit control exceeds its bound"));
-        }
-        let mut source=content.open_body(&record.content_hash).map_err(transient)?;
-        let mut bytes=Vec::new();
-        source.by_ref().take(risunest_sync_wire::MAX_METADATA_BYTES as u64+1).read_to_end(&mut bytes).map_err(transient)?;
-        if bytes.len() as u64 != record.byte_length {
-            return Err(corrupt("original unit control length"));
-        }
-        let unit: super::packaging::OriginalBackupUnit = risunest_sync_wire::canonical::decode(
-            &bytes, risunest_sync_wire::MAX_METADATA_BYTES,
-        ).map_err(corrupt)?;
-        if unit.schema != "risunest.backup-unit/v1"
-            || record.key != format!("original-unit/{}", hex::encode(unit.key.as_str()))
-        {
-            return Err(corrupt("original unit catalog key differs from its control"));
-        }
+        let unit = decode_original_unit(&content, &record.key, &record.content_hash, record.byte_length)?;
         #[cfg(test)]
         crate::persistent_store::hash_work::validation(&unit.value);
         unit.value.validate().map_err(corrupt)?;
-        if units.insert(unit.key, unit.value).is_some() {
+        if !keys.insert(unit.key) {
             return Err(corrupt("duplicate original unit"));
         }
+        kept.push((record.key, record.content_hash, record.byte_length));
     }
-    Ok(units)
+    // A catalog key hex-encodes the unit key, so both orders agree.
+    kept.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    Ok(OriginalUnits { records: kept })
 }
 
 pub(crate) async fn download_backup_original_units(
     snapshot:&RemoteObject, staging_root:&Path, key:&[u8;32], provider:&dyn Provider,
     repository:&RepositoryHandle, cancel:&Cancellation,
-) -> Result<BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>> {
+) -> Result<OriginalUnits> {
     if snapshot.role != ObjectRole::BackupBundle {return Err(corrupt("full backup is required"))}
     let root=open_object(snapshot,key,staging_root,provider,repository,cancel).await?;
     let document=super::control::SnapshotView::read(&read_bytes(&root,wire::MAX_METADATA_BYTES)?,wire::ObjectRole::BackupBundle,&snapshot.repository_id)?;
@@ -1899,7 +1946,7 @@ pub(crate) async fn download_backup_original_units(
 
 pub(crate) struct DatabaseFirstSnapshot {
     pub snapshot:PreparedRemoteSnapshot,
-    pub original_units:BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
+    pub original_units:OriginalUnits,
     pub required:BTreeSet<String>,
     pub present:BTreeSet<String>,
     pub missing:BTreeSet<String>,

@@ -107,6 +107,10 @@
         'record-orphan': strings.codeRecordOrphan,
         'object-unreferenced': strings.codeObjectUnreferenced,
         unclassified: strings.codeUnclassified,
+        'intent-quarantined': strings.codeIntentQuarantined,
+    }
+    const codeHelp: Record<string, string> = {
+        'intent-quarantined': strings.codeIntentQuarantinedHelp,
     }
     const severityColors: Record<DataHealthSeverity, string> = {
         blocking: 'bg-danger-400',
@@ -400,7 +404,7 @@
                 <span class="min-w-0 break-words">{codeLabel(group.code)}</span>
                 <span class="ml-auto shrink-0 text-sm text-textcolor2 tabular-nums">{count(group.total)}</span>
             </summary>
-            <p class="border-t border-darkborderc/55 px-4 py-2 pl-10 text-sm text-textcolor2">{severityHelp[group.severity]}</p>
+            <p class="border-t border-darkborderc/55 px-4 py-2 pl-10 text-sm text-textcolor2">{codeHelp[group.code] ?? severityHelp[group.severity]}</p>
             {#each group.shown as item, index (index)}
                 <div data-data-health-item class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 border-t border-darkborderc/55 py-1.5 pr-4 pl-10 text-sm">
                     <span class="min-w-0 flex-1 break-all">{itemDescription(item) ?? itemLocation(item)}</span>

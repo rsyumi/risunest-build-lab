@@ -210,10 +210,23 @@ pub(crate) fn is_large_unit(key:&risunest_sync_wire::unit::UnitKey)->bool {
 /// The body hashes of the large units in `units`, the only controls besides
 /// indivisible message pages that may exceed the metadata bound.
 pub(crate) fn large_unit_body_hashes(units:&BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>)->BTreeSet<String> {
-    units.iter().filter_map(|(key,value)| match value {
+    units.iter().filter_map(|(key,value)| large_unit_body_hash(key,value)).collect()
+}
+
+pub(crate) fn large_unit_body_hash(key:&risunest_sync_wire::unit::UnitKey,value:&risunest_sync_wire::unit::UnitValue)->Option<String> {
+    match value {
         risunest_sync_wire::unit::UnitValue::Object{descriptor,..} if is_large_unit(key) => Some(descriptor.object_hash.clone()),
         _ => None,
-    }).collect()
+    }
+}
+
+/// The hash of the message manifest a unit names, when it names one.
+pub(crate) fn message_manifest_hash(key:&risunest_sync_wire::unit::UnitKey,value:&risunest_sync_wire::unit::UnitValue)->Option<String> {
+    if !super::lww::lww_known_unit_key(key) || key.components()[0]!="messages" {return None;}
+    match value {
+        risunest_sync_wire::unit::UnitValue::Object{descriptor,..} => Some(descriptor.object_hash.clone()),
+        _ => None,
+    }
 }
 
 pub(crate) fn verified_large_message_page(bytes:&[u8])->StoreResult<Vec<serde_json::Value>> {
@@ -227,7 +240,7 @@ pub(crate) fn verified_large_message_page(bytes:&[u8])->StoreResult<Vec<serde_js
 
 /// The pages the original message manifests list, read once on first use.
 pub(crate) struct OriginalMessagePages<'a> {
-    units:&'a BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
+    manifests:Vec<String>,
     read_manifest:&'a dyn Fn(&str)->StoreResult<Option<Vec<u8>>>,
     pages:std::cell::OnceCell<BTreeMap<String,Option<risunest_external_storage_format::message_pages::ManifestPage>>>,
 }
@@ -237,7 +250,12 @@ impl<'a> OriginalMessagePages<'a> {
         units:&'a BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
         read_manifest:&'a dyn Fn(&str)->StoreResult<Option<Vec<u8>>>,
     ) -> Self {
-        Self {units,read_manifest,pages:std::cell::OnceCell::new()}
+        Self::from_manifests(units.iter().filter_map(|(key,value)|message_manifest_hash(key,value)).collect(),read_manifest)
+    }
+
+    /// The pages of the manifests `manifests` names, as `message_manifest_hash` gives them.
+    pub(crate) fn from_manifests(manifests:Vec<String>,read_manifest:&'a dyn Fn(&str)->StoreResult<Option<Vec<u8>>>) -> Self {
+        Self {manifests,read_manifest,pages:std::cell::OnceCell::new()}
     }
 
     /// The page `hash` names. Two manifests that describe it differently fail.
@@ -255,11 +273,9 @@ impl<'a> OriginalMessagePages<'a> {
 
     fn read(&self) -> StoreResult<BTreeMap<String,Option<risunest_external_storage_format::message_pages::ManifestPage>>> {
         let mut pages=BTreeMap::new();
-        for (key,value) in self.units {
-            if !super::lww::lww_known_unit_key(key) || key.components()[0]!="messages" {continue;}
-            let risunest_sync_wire::unit::UnitValue::Object{descriptor,..}=value else {continue;};
-            let bytes=(self.read_manifest)(&descriptor.object_hash)?.ok_or_else(||invalid("Original message manifest is unavailable"))?;
-            if bytes.len()>risunest_sync_wire::MAX_METADATA_BYTES || hash_backup_body(&bytes,"native_backup_manifest_source")!=descriptor.object_hash {return Err(invalid("Original message manifest identity differs"));}
+        for manifest in &self.manifests {
+            let bytes=(self.read_manifest)(manifest)?.ok_or_else(||invalid("Original message manifest is unavailable"))?;
+            if bytes.len()>risunest_sync_wire::MAX_METADATA_BYTES || hash_backup_body(&bytes,"native_backup_manifest_source")!=*manifest {return Err(invalid("Original message manifest identity differs"));}
             let decoded=risunest_external_storage_format::message_pages::MessageManifest::decode(&bytes);
             #[cfg(test)] crate::persistent_store::hash_work::decoded("native_backup_manifest_decode_identity",&bytes,&decoded);
             for page in decoded.map_err(|_|invalid("Original message manifest integrity failed"))?.pages {
@@ -283,6 +299,18 @@ pub(crate) fn original_unit_dependency_inventory(
     copy_bodies: bool,
     emit: &mut dyn FnMut(&str,&[u8],BackupBodyRole) -> StoreResult<()>,
 ) -> StoreResult<BackupDependencyInventory> {
+    dependency_inventory(units.iter().map(Ok),read_body,payload_size,None,probe,copy_bodies,emit)
+}
+
+/// The inventory of units read one at a time instead of held in a map.
+pub(crate) fn streamed_unit_dependency_inventory(
+    units: impl IntoIterator<Item = StoreResult<(risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue)>>,
+    read_body: &dyn Fn(&str) -> StoreResult<Option<Vec<u8>>>,
+    payload_size: &dyn Fn(&str) -> StoreResult<Option<u64>>,
+    probe: &dyn CancellationProbe,
+    copy_bodies: bool,
+    emit: &mut dyn FnMut(&str,&[u8],BackupBodyRole) -> StoreResult<()>,
+) -> StoreResult<BackupDependencyInventory> {
     dependency_inventory(units,read_body,payload_size,None,probe,copy_bodies,emit)
 }
 
@@ -290,7 +318,7 @@ pub(crate) fn original_unit_dependency_inventory(
 /// Message pages and large unit bodies are recorded at the lengths their
 /// manifests and `large_length` declare, unverified.
 pub(crate) fn original_unit_control_lengths(
-    units: &BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
+    units: impl IntoIterator<Item = StoreResult<(risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue)>>,
     read_body: &dyn Fn(&str) -> StoreResult<Option<Vec<u8>>>,
     payload_size: &dyn Fn(&str) -> StoreResult<Option<u64>>,
     large_length: &dyn Fn(&str) -> StoreResult<Option<u64>>,
@@ -299,8 +327,8 @@ pub(crate) fn original_unit_control_lengths(
     dependency_inventory(units,read_body,payload_size,Some(large_length),probe,false,&mut |_,_,_| Ok(()))
 }
 
-fn dependency_inventory(
-    units: &BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
+fn dependency_inventory<K: std::borrow::Borrow<risunest_sync_wire::unit::UnitKey>, V: std::borrow::Borrow<risunest_sync_wire::unit::UnitValue>>(
+    units: impl IntoIterator<Item = StoreResult<(K,V)>>,
     read_body: &dyn Fn(&str) -> StoreResult<Option<Vec<u8>>>,
     payload_size: &dyn Fn(&str) -> StoreResult<Option<u64>>,
     large_length: Option<&dyn Fn(&str) -> StoreResult<Option<u64>>>,
@@ -325,8 +353,10 @@ fn dependency_inventory(
         }
         Ok(())
     }
-    for (key,value) in units {
+    for unit in units {
         check(probe)?;
+        let (key,value) = unit?;
+        let (key,value):(&risunest_sync_wire::unit::UnitKey,&risunest_sync_wire::unit::UnitValue) = (key.borrow(),value.borrow());
         #[cfg(test)]
         crate::persistent_store::hash_work::validation(value);
         value.validate().map_err(|_| invalid("Invalid original backup value"))?;

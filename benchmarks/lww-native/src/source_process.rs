@@ -225,6 +225,7 @@ impl Drop for SourceProcess {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn whole_protocol_records_never_truncate_or_recover_from_partial_input() {
         assert_eq!(read_record(&mut &b"one\nsecond\n"[..],4).unwrap().unwrap(),b"one\n");
         assert!(read_record(&mut &b"oversized\n"[..],4).is_err());
@@ -232,6 +233,7 @@ mod tests {
         assert!(read_record(&mut &b""[..],20).unwrap().is_none());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn compiled_closure_preserves_same_path_role_pairs_and_rejects_hash_disagreement() {
         let source="a".repeat(64);let binary="b".repeat(64);
         let mut ready=json!({"type":"ready","runId":"synthetic","sourceFingerprint":source,"binarySha256":binary,

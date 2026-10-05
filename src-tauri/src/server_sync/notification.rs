@@ -58,10 +58,17 @@ pub(crate) async fn run(
             .parse()
             .map_err(|_| SyncError::new("invalid-library", 400))?,
     );
+    let secure = url.scheme() == "wss";
     let result = async {
+        let connector = if secure {
+            crate::platform_tls::websocket_connector()
+                .ok_or_else(|| SyncError::new("websocket-unavailable", 503))?
+        } else {
+            tokio_tungstenite::Connector::Plain
+        };
         let (socket, _) = tokio::time::timeout(
             Duration::from_secs(10),
-            tokio_tungstenite::connect_async(request),
+            tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector)),
         )
         .await
         .map_err(|_| SyncError::new("server-timeout", 503))?

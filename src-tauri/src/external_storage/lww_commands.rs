@@ -13,7 +13,7 @@ use crate::persistent_store::{
 use crate::native_log::logged;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
@@ -24,6 +24,8 @@ struct Session {
     dependencies: Option<Dependencies>,
     fresh_after: Instant,
     cancel: Cancellation,
+    /// Ids of the receive pages the last listing produced, in order.
+    receive_pages: VecDeque<String>,
 }
 struct Context {
     session: tokio::sync::Mutex<Session>,
@@ -50,9 +52,10 @@ fn context(id: &str) -> Result<Arc<Context>> {
                     dependencies: None,
                     fresh_after: Instant::now(),
                     cancel: Cancellation::default(),
+                    receive_pages: VecDeque::new(),
                 }),
                 cancel: Mutex::new(Cancellation::default()),
-                maintenance:tokio::sync::Mutex::new(Session{engine:None,dependencies:None,fresh_after:Instant::now(),cancel:Cancellation::default()}),
+                maintenance:tokio::sync::Mutex::new(Session{engine:None,dependencies:None,fresh_after:Instant::now(),cancel:Cancellation::default(),receive_pages:VecDeque::new()}),
                 checkpoints:Default::default(),
                 turn:Mutex::new(Default::default()),
             })
@@ -62,6 +65,7 @@ fn context(id: &str) -> Result<Arc<Context>> {
 async fn connect(app: &AppHandle, id: &str, session: &mut Session) -> Result<()> {
     if session.engine.is_none() {
         session.fresh_after = Instant::now();
+        session.receive_pages.clear();
         let connected =
             connection_commands::open_connected_with_cancel(app, id, &session.cancel).await?;
         if !matches!(
@@ -353,29 +357,51 @@ pub(crate) async fn external_lww_publish(
 pub(crate) async fn external_lww_receive(
     app: AppHandle,
     request: Request,
-) -> Result<Vec<StageReceive>> {
+) -> Result<Option<StageReceive>> {
     logged("external_lww_receive", async move {
         let context = context(&request.connection_id)?;
         let mut session = context.session.lock().await;
         open(&app, &request.connection_id, &mut session).await?;
         let mut store = check(&app, &request, true)?;
-        let requests = session
-            .engine
-            .as_ref()
-            .ok_or_else(lww_segment::corrupt)?
-            .receive_requests_cached(
-                &mut store,
-                request.header.binding_authority,
-                &context.checkpoints,
-                &session.cancel,
-            )
-            .await?;
+        let authority = request.header.binding_authority;
+        // One page per call: pages from the last listing come first, and a
+        // new listing runs only once every one of them is finished.
+        let mut page = next_receive_page(&store, &mut session.receive_pages, authority)?;
+        if page.is_none() {
+            session.receive_pages = session
+                .engine
+                .as_ref()
+                .ok_or_else(lww_segment::corrupt)?
+                .receive_requests_cached(&mut store, authority, &context.checkpoints, &session.cancel)
+                .await?
+                .into();
+            page = next_receive_page(&store, &mut session.receive_pages, authority)?;
+        }
         let own = store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
-        if requests.iter().any(|request| request.progress.writer_id.as_deref() != Some(own.as_str())) {
+        if page.as_ref().is_some_and(|page| page.progress.writer_id.as_deref() != Some(own.as_str())) {
             context.turn.lock().map_err(runtime::local_error)?.observed_foreign(Instant::now());
         }
-        Ok(requests)
+        Ok(page)
     }.await)
+}
+
+/// The first unfinished page in `queue`, dropping finished ones. A page of
+/// another binding empties the queue.
+fn next_receive_page(
+    store: &crate::persistent_store::PersistentStore,
+    queue: &mut VecDeque<String>,
+    authority: risunest_sync_wire::stamp::DecimalU64,
+) -> Result<Option<StageReceive>> {
+    while let Some(id) = queue.front() {
+        match store.external_lww_unfinished_receive(id).map_err(runtime::local_error)? {
+            Some(stored) if stored.header.binding_authority == authority => return Ok(Some(stored)),
+            Some(_) => queue.clear(),
+            None => {
+                queue.pop_front();
+            }
+        }
+    }
+    Ok(None)
 }
 
 #[tauri::command]
@@ -408,7 +434,7 @@ async fn maintain(app:&AppHandle,request:&Request,context:&Context,session:&mut 
     }
     session.cancel=cancel.clone();
     open(app,&request.connection_id,session).await?;
-    let store=check(app,request,true)?;
+    let mut store=check(app,request,true)?;
     let writer=store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
     let engine=session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
     let due=engine.maintenance_needed_cached(&context.checkpoints,cancel).await?;
@@ -425,7 +451,7 @@ async fn maintain(app:&AppHandle,request:&Request,context:&Context,session:&mut 
         let result=owner.run(&protection,cancel,async {
             if let Some(reason)=owner.recheck(&protection,cancel).await? {return Err(super::leases::yield_error(reason));}
             check(app,request,true)?;
-            let completed=engine.compact_published(&directory,&job,&writer,&stored.capabilities,cancel,Some((&owner,&protection))).await?;
+            let completed=engine.compact_published(&mut store,&directory,&job,&writer,&stored.capabilities,cancel,Some((&owner,&protection))).await?;
             check(app,request,true)?;
             Ok(completed)
         }).await?;
@@ -459,6 +485,7 @@ pub(crate) async fn external_lww_fence(
         session.cancel = Cancellation::default();
         let fenced = fence(&app, &connection_id, &mut session, new_device).await;
         session.cancel.cancel();
+        session.receive_pages.clear();
         if let Some(engine) = session.engine.as_mut() {
             engine.invalidate_clock()
         }
@@ -496,6 +523,7 @@ pub(crate) async fn external_lww_resume(connection_id: String) -> Result<()> {
         *context.cancel.lock().map_err(runtime::local_error)? = cancel.clone();
         session.cancel = cancel;
         session.fresh_after = Instant::now();
+        session.receive_pages.clear();
         if let Some(engine) = session.engine.as_mut() {
             engine.invalidate_clock()
         }

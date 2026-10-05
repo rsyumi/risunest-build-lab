@@ -34,7 +34,7 @@ pub(super) fn validate_schema(db: &Connection) -> StoreResult<()> {
             )
             .optional()?;
         if actual.as_deref() != Some(&sql) {
-            return Err(invalid("External operational schema is incompatible"));
+            return Err(StoreError::SchemaMismatch { message: "External operational schema is incompatible".into() });
         }
     }
     sync_selection::read(db)?;

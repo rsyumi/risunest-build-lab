@@ -24,6 +24,7 @@ import {
 } from "./conversationOperationContext";
 import { peekActiveConversationSession } from "../storage/persistentDataRuntime.svelte";
 import { runSerializedUserTrigger } from './conversationUserTrigger';
+import { getHistoryMessage, historyLength, inheritHistoryWindow, sliceHistory } from './historyWindowIndex';
 
 
 export interface triggerscript{
@@ -1155,6 +1156,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
             ? arg.chat
             : safeStructuredClone(arg.chat ?? char.chats[char.chatPage])
     )
+    if (chat !== arg.chat) inheritHistoryWindow(arg.chat, chat)
     char = arg.displayMode ? char : cloneTriggerCharacter(char, chat)
     let varChanged = false
     let stopSending = arg.stopSending ?? false
@@ -1354,7 +1356,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
         for(const condition of trigger.conditions){
             if(condition.type === 'var' || condition.type === 'chatindex' || condition.type === 'value'){
                 let varValue =  (condition.type === 'var') ? (getVar(condition.var) ?? 'null') :
-                                (condition.type === 'chatindex') ? (chat.message.length.toString()) :
+                                (condition.type === 'chatindex') ? (historyLength(chat).toString()) :
                                 (condition.type === 'value') ? condition.var : null
                                 
                 if(varValue === undefined || varValue === null){
@@ -1527,14 +1529,15 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                 case 'cutchat':{
                     const start = Number(risuChatParser(effect.start,{chara:char}))
                     const end = Number(risuChatParser(effect.end,{chara:char}))
-                    chat.message = chat.message.slice(start,end)
+                    chat.message = sliceHistory(chat, start, end)
                     break
                 }
                 case 'modifychat':{
                     const index = Number(risuChatParser(effect.index,{chara:char}))
                     const value = risuChatParser(effect.value,{chara:char})
-                    if(chat.message[index]){
-                        chat.message[index].data = value
+                    const message = getHistoryMessage(chat, index)
+                    if(message){
+                        message.data = value
                     }
                     break
                 }
@@ -1940,17 +1943,18 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                         start = 0
                     }
                     if(isNaN(end)){
-                        end = chat.message.length
+                        end = historyLength(chat)
                     }
                     
-                    chat.message = chat.message.slice(start,end)
+                    chat.message = sliceHistory(chat, start, end)
                     break
                 }
                 case 'v2ModifyChat':{
                     let index = effect.indexType === 'value' ? Number(risuChatParser(effect.index,{chara:char})) : Number(getVar(risuChatParser(effect.index,{chara:char})))
                     let value = effect.valueType === 'value' ? risuChatParser(effect.value,{chara:char}) : getVar(risuChatParser(effect.value,{chara:char}))
-                    if(chat.message[index]){
-                        chat.message[index].data = value
+                    const message = getHistoryMessage(chat, index)
+                    if(message){
+                        message.data = value
                     }
                     break
                 }
@@ -2075,11 +2079,11 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                 }
                 case 'v2GetMessageAtIndex':{
                     let index = effect.indexType === 'value' ? Number(risuChatParser(effect.index,{chara:char})) : Number(getVar(risuChatParser(effect.index,{chara:char})))
-                    setVar(risuChatParser(effect.outputVar, {chara:char}), chat.message[index]?.data ?? 'null')
+                    setVar(risuChatParser(effect.outputVar, {chara:char}), getHistoryMessage(chat, index)?.data ?? 'null')
                     break
                 }
                 case 'v2GetMessageCount':{
-                    setVar(risuChatParser(effect.outputVar, {chara:char}), chat.message.length.toString())
+                    setVar(risuChatParser(effect.outputVar, {chara:char}), historyLength(chat).toString())
                     break
                 }
                 case 'v2ModifyLorebook':{

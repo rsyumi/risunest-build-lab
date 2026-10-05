@@ -50,10 +50,13 @@ function bootstrapLifecycleFlush(
         { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } },
     ).outputText
     return new Function(
-        'runtime', 'isTauriDesktop', 'nativePlatform',
+        'runtime', 'isTauriDesktop', 'isTauriAndroid', 'nativePlatform',
         'forgetInlayProviderImages', 'releaseIdleTransformerModels',
         `${body}\nreturn flush;`,
-    )(runtime, desktop, () => platform, vi.fn(), vi.fn(async () => undefined)) as LifecycleFlush
+    )(
+        runtime, desktop, !desktop && platform === 'android', () => platform,
+        vi.fn(), vi.fn(async () => undefined),
+    ) as LifecycleFlush
 }
 
 const originalVisibilityState = Object.getOwnPropertyDescriptor(document, 'visibilityState')
@@ -84,7 +87,11 @@ describe('registerLifecycleCommitListeners', () => {
         [true, 'macos', 'stop', false],
         [true, 'linux', 'stop', true],
         [true, 'linux', 'exit', false],
-        [false, 'android', 'stop', false],
+        [false, 'android', 'stop', true],
+        [false, 'android', 'trim-memory', true],
+        [false, 'android', 'exit', false],
+        [false, 'android', 'pagehide', false],
+        [false, 'android', 'visibility-hidden', false],
         [false, 'ios', 'stop', false],
         [false, 'windows', 'stop', false],
     ] as const)('uses bootstrap lifecycle persistence policy (desktop=%s, platform=%s, reason=%s)', async (
@@ -163,6 +170,57 @@ describe('registerLifecycleCommitListeners', () => {
             delete (window as any).RisuLifecycleBridge
         }
     })
+
+    it.each(['stop', 'trim-memory'] as const)(
+        'commits a newer Android %s edit while an official publication is pending',
+        async (reason) => {
+            const database = makeDatabase()
+            const publication = deferred<void>()
+            const order: string[] = []
+            const publish = vi.fn(() => publication.promise)
+            const pin = vi.fn(async () => ({ publish, dispose: vi.fn(async () => undefined) }))
+            const commit = vi.fn(async ({ expectedRevision }) => {
+                order.push(`commit-${expectedRevision + 1}`)
+                return { revision: expectedRevision + 1 }
+            })
+            const coordinator = new SaveCoordinator({
+                store: makeStore(commit),
+                captureRoot: () => captureRoot(database),
+                captureSelectedCharacter: () => database.characters[0],
+                replaceDatabase: () => undefined,
+                officialPublisher: { pin },
+                clock: { setTimeout: () => undefined, clearTimeout: () => undefined },
+            })
+            coordinator.initialize(1)
+            database.username = 'Synthetic published edit'
+            coordinator.markPersistentDataDirty(1)
+            const ordinaryFlush = coordinator.flushPendingData('ordinary-save')
+            await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce())
+            database.username = 'Synthetic Android background edit'
+            coordinator.markPersistentDataDirty(1)
+            const checkpoint = vi.fn(async () => { order.push('checkpoint') })
+            const dispose = registerLifecycleCommitListeners(
+                bootstrapLifecycleFlush(coordinator, false, 'android'),
+                undefined,
+                checkpoint,
+            )
+            try {
+                window.dispatchEvent(new CustomEvent('risu-native-lifecycle', { detail: { reason } }))
+                await vi.waitFor(() => expect(checkpoint).toHaveBeenCalledWith('truncate'))
+                expect(commit).toHaveBeenNthCalledWith(2, expect.objectContaining({
+                    expectedRevision: 2,
+                    rootMutations: [{ type: 'set', key: 'username', value: 'Synthetic Android background edit' }],
+                }))
+                expect(order).toEqual(['commit-2', 'commit-3', 'checkpoint'])
+                expect(coordinator.hasPendingOfficialPublication).toBe(true)
+                expect(pin).toHaveBeenCalledExactlyOnceWith(2)
+            } finally {
+                publication.reject(new Error('Synthetic publication teardown'))
+                await ordinaryFlush.catch(() => undefined)
+                dispose()
+            }
+        },
+    )
 
     it('flushes every pagehide event', () => {
         const flush = vi.fn(async () => undefined)

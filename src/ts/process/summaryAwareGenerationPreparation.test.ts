@@ -18,10 +18,12 @@ function fixture(prefixCount = 300, tailCount = 2) {
 
 function storeFor(messages: any[], revision = 7) {
     const bodyReads: number[] = []
+    const metadataQueries: any[] = []
     let released = 0
     const lease = {
         revision,
         async readConversationMessageMetadataWindow(input: any) {
+            metadataQueries.push(input)
             const end = Math.min(messages.length, input.startIndex + input.limit)
             return {
                 revision,
@@ -65,7 +67,7 @@ function storeFor(messages: any[], revision = 7) {
         readConversationMessageMetadataWindow: vi.fn(),
         acquireRevision: vi.fn(async () => lease),
     } as unknown as PersistentDataStore
-    return { store, lease, bodyReads, released: () => released }
+    return { store, lease, bodyReads, metadataQueries, released: () => released }
 }
 
 describe('summary-aware bounded generation preparation', () => {
@@ -113,6 +115,9 @@ describe('summary-aware bounded generation preparation', () => {
             'm300', 'm301',
         ])
         expect(mocked.bodyReads).toEqual([300])
+        expect(mocked.metadataQueries).toHaveLength(3)
+        // The summary-aware route needs parserInert, so it keeps the parser work.
+        expect(mocked.metadataQueries.every((query) => query.skipParserWork === undefined)).toBe(true)
         expect(result.preparation.metrics).toMatchObject({
             metadataRows: 302,
             metadataPages: 3,

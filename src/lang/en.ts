@@ -7,7 +7,16 @@ export const languageEnglish = {
         "pluginDataDeletion": "Delete plugin data",
         "lorebookDeletion": "Delete lorebook folder and entries",
         "partialBackup": "Backup without other assets",
-        "onlySelectedMessage": "Delete only this message"
+        "laterMessageDeletion": "Also delete later messages",
+        "messageDeletionDescription": "Only this message is deleted. If you also delete later messages, every message after it is deleted too.",
+        "hypaResetDescription": "All HypaV3 data in this chat is reset. This cannot be undone.",
+        "hypaDeletionDescription": "Every summary after this one is deleted. This cannot be undone.",
+        "characterTrashDescription": "This character moves to the trash, where you can restore it.",
+        "characterDeletionDescription": "This character and all of its chats are permanently deleted. This cannot be undone.",
+        "lorebookDeletionDescription": "This folder and every lorebook in it are deleted.",
+        "dataReplacementDescription": "Your current data is replaced by the backup, and no automatic backup is created. To keep your current data, cancel and back it up first.",
+        "partialBackupTitle": "Save a partial local backup?",
+        "partialBackupDescription": "This backup includes only the database and the character profile images, user icon, custom background, persona icons, folder images and bot preset images. Emotion images, additional character assets, VITS voice files and other assets are not included."
     },
 
     close: "Close",
@@ -1927,6 +1936,8 @@ export const languageEnglish = {
             failed: 'Changes could not be saved. Retry saving before closing the app.',
             invalid: '{0} could not be saved. Check this data, then retry saving.',
             storage: 'Changes could not be saved. Free storage space, then retry saving.',
+            tooLarge: 'Changes are too large to save. Delete the large chat or data you just added, then retry saving.',
+            currentChat: 'Changes to the current chat could not be saved. Retry saving. If saving keeps failing, restart the app; unsaved changes will be lost.',
             settings: 'Settings', conversation: 'Chat', presets: 'Presets', plugins: 'Plugin data', assets: 'Assets', data: 'Data',
         },
         account: {
@@ -2029,9 +2040,9 @@ export const languageEnglish = {
             deleteConfirmOne: 'Delete this value? Deleted values cannot be restored.',
             deleteConfirmSelected: 'Delete the {0} selected values? Deleted values cannot be restored.',
             deleteAllConfirm: 'Delete all {0} plugin data items?',
-            deleteAllConfirmFinal: 'All plugin data will be gone. Really delete it?',
+            deleteAllConfirmFinal: 'Every value in the list is deleted. Deleted values cannot be restored.',
             deleteVisibleConfirm: 'Delete the {0} values shown?',
-            deleteVisibleConfirmFinal: 'The selected plugin data will be gone. Really delete it?',
+            deleteVisibleConfirmFinal: 'Every value shown is deleted. Deleted values cannot be restored.',
             assignSelected: 'Assign selected',
             reassign: 'Move to another plugin',
             prefixGroup: '{1} starting with {0} · {2}',
@@ -2201,7 +2212,7 @@ export const languageEnglish = {
             serviceWorker: 'Preparing offline support',
             ui: 'Preparing the interface',
             elapsed: (seconds: number) => `${seconds}s elapsed`,
-            rendererRecovered: 'The WebView renderer stopped, so the screen was reloaded.',
+            rendererRecovered: 'The screen was reloaded with your saved data.',
         },
         serverSync: {
             registrationCode: 'Registration code',
@@ -2242,7 +2253,8 @@ export const languageEnglish = {
                 remote: 'Load from the server when needed',
                 local: 'Files on this device',
                 remoteOnly: 'Files only on the server',
-                unavailable: 'Files on neither this device nor the server',
+                externalOnly: 'Files only in external storage',
+                unavailable: 'Files not found',
                 cleanupNote:
                     'Downloaded files stay on this device. Cleanup removes only local copies of files on the server. Files needed by a snapshot stay until that snapshot is deleted.',
                 clean: 'Clear copies on this device',
@@ -2308,6 +2320,8 @@ export const languageEnglish = {
             credentialsHelp:
                 'Enter the address and this device’s credentials made in the server admin screen. Each device needs its own.',
             credentialUnavailable:
+                'The operating system could not open this device’s credentials. Unlock its key storage, or register this device again on the server and enter the new registration code.',
+            credentialUnavailableLinux:
                 'The operating system could not open this device’s credentials. Unlock its key storage, or register this device again on the server and enter the new registration code. Linux requires an unlocked Secret Service.',
             connect: 'Connect and sync',
             disconnect: 'Disconnect',
@@ -2410,6 +2424,12 @@ export const languageEnglish = {
             overflowScopeAll: 'All',
             overflowScopeHelp:
                 'Choose whether UI elements that extend beyond a chat message (setting buttons, overlays, and so on) render only on the latest message or on every message. Choose All if a character you use does not display correctly. All may make scrolling long chats slightly slower.',
+            historyLimit: 'Skip loading older messages',
+            historyLimitHelp:
+                'When you send a message, older messages beyond the set maximum context size are not loaded, which improves speed and memory usage. Lorebook search, triggers, modules, regex scripts, plugins and other features that rely on older messages may not work correctly. Do not use this with modules or plugins that change the whole chat.',
+            historyLimitMultiplier: 'Loading limit',
+            historyLimitMultiplierHelp:
+                'Loads messages up to the given multiple of the set maximum context size. With HypaMemory, messages that are not summarized yet are always loaded. Increase this value if a module or plugin you use needs more older messages.',
         },
         ui: {
             title: 'UI',
@@ -2673,6 +2693,9 @@ export const languageEnglish = {
             codeRecordOrphan: 'Records with no owner',
             codeObjectUnreferenced: 'Files nothing uses',
             codeUnclassified: 'Problems that could not be sorted',
+            codeIntentQuarantined: 'Changes that were not applied',
+            codeIntentQuarantinedHelp:
+                'These changes were not applied to the data. If you still need them, make the same change again.',
             rootFieldCharacters: 'characters',
             rootFieldPresets: 'presets',
             rootFieldPluginStorage: 'plugin storage',
@@ -2750,6 +2773,7 @@ export const languageEnglish = {
             titleRisuSave: 'Import RisuSave',
             titleLocalBackup: 'Import local backup',
             titleBackup: 'Import RisuNest backup',
+            titleSnapshot: 'Restore snapshot',
             formatPocketRisu: 'PocketRisu backup',
             formatRisuAi: 'RisuAI backup',
             elapsed: 'Elapsed {0}',
@@ -2806,6 +2830,10 @@ export const languageEnglish = {
                 'Other changes happened during the import, so it could not be applied. Try again.',
             reasonStoreError: 'A storage error stopped the import.',
             reasonUnknown: 'An unknown error occurred.',
+            reasonTooLarge: '{0} is too large to import.',
+            tooLargeItems: {
+                root: 'Settings data', preset: 'A preset', character: 'A character', conversation: 'A chat', message: 'A message', 'plugin-value': 'Plugin data',
+            },
             warningCleanupFailed:
                 'A temporary file could not be cleaned up. It will be retried at startup.',
             warningUpstreamRestoreLosses: 'Some cold storage or inlay data could not be restored. Review the restored data.',
@@ -2838,6 +2866,7 @@ export const languageEnglish = {
             "reasonCompatibilityImport": 'Select the backup file again to import this format.',
             "reasonIo": 'The file could not be read or written. Check access to the file and try again.',
             "reasonReselectSource": 'Select the file again to retry importing.',
+            "reasonImportInterrupted": 'The import did not finish. Select the file again to import it.',
             "reasonCapability": 'This file operation is unavailable on this device.',
             "reasonRescueFormat": 'This recovery file cannot be restored directly. Use a restorable backup.',
             "reasonNoRecoverySource": 'No data was found to export for recovery.',
@@ -2897,7 +2926,7 @@ export const languageEnglish = {
         boot: {
             title: 'RisuNest could not start',
             schemaUnsupported:
-                'The data folder holds a persistent store from an incompatible pre-release build. RisuNest cannot open it and will not convert it. Remove that store from the data folder yourself, then start RisuNest again.',
+                'The store in the data folder was saved by a different version of RisuNest, so this version cannot open it, and restarting will not open it either. To keep its data, first save the original data with Save a copy. Then delete the data folder and start RisuNest again.',
             storeOpen:
                 'The local data store could not be opened. Another copy of RisuNest may still be using it, or the data folder may be unreadable. Close any other running copy, then start RisuNest again.',
             unknown:
@@ -2905,8 +2934,9 @@ export const languageEnglish = {
             restart: 'Restart',
             copyDetails: 'Copy error details',
             copied: 'Error details copied.',
-            dataPathWindows: 'Windows: %APPDATA%\\RisuNest\\',
+            dataFolder: 'Data folder',
             dataPathAndroid: 'Android: App info > Storage > Clear data',
+            dataPathIos: 'iOS: Delete the app and install it again',
             stage: 'Stage',
         },
         diag: {
@@ -3065,9 +3095,11 @@ export const languageEnglish = {
 
     "syncConflictBackupUnreadable": 'This backup could not be read. Select another backup.',
     "chatMessageActionFailed": "The message changed while the action was in progress. Please try again.",
+    "chatConversationActionFailed": "The conversation changed while the action was in progress. Please try again.",
     "groupCharactersChangeFailed": "Could not change the group characters. Please try again.",
     "regexScriptTimeout": "Regex script execution timed out.",
     "generationInterruptedInBackground": "Response generation was interrupted in the background.",
+    "generationConversationChanged": "The conversation changed during generation, so the response could not be applied. Please try again.",
     "screenshotPreparationFailed": "Screenshot preparation failed. Reduce the range and try again.",
     "mcpDesktopOnly": "Local MCPs are available in the desktop app.",
     lwwSync: {
@@ -3089,6 +3121,7 @@ export const languageEnglish = {
         restoreAction: "Restore",
         previousFilesTitle: "Connect?",
         previousFilesDescription: "Some files are stored only on the server or external storage used before. Connecting also saves them to the new target. To also keep them on this device, choose Download, then connect.",
+        previousFilesUnknownDescription: "RisuNest could not check whether any files are stored only on the server or external storage used before. If there are, connecting also saves them to the new target. To also keep them on this device, choose Download, then connect.",
         downloadThenConnect: "Download, then connect",
         downloadFailedNotConnected: "The files could not be downloaded, so the connection was not made. Try again, or connect without downloading.",
         previousStorageUnavailable: "Files kept only on the server or external storage used before could not be fetched, so sync stopped. Try again when it can be reached.",

@@ -177,6 +177,8 @@ impl<'a> MainPipe<'a> {
             self.env.new_string("")?,
           )?;
           for (i, init_script) in initialization_scripts.into_iter().enumerate() {
+            // RisuNest: document-start scripts run in every frame on Android, so a
+            // main-frame-only script checks for the top frame itself.
             self.env.set_object_array_element(
               &initialization_scripts_array,
               i as i32,

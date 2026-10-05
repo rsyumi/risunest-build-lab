@@ -108,7 +108,7 @@ pub(super) fn initialize(connection: &mut Connection) -> StoreResult<()> {
     match version {
         0 => create_schema(connection),
         SCHEMA_VERSION => validate_schema(connection),
-        _ => Err(StoreError::Store {
+        _ => Err(StoreError::SchemaMismatch {
             message: format!("unsupported persistent schema version {version}"),
         }),
     }
@@ -252,7 +252,7 @@ fn create_schema(connection: &mut Connection) -> StoreResult<()> {
         CREATE TABLE snapshot_restore_stages (stage_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,snapshot_id TEXT NOT NULL,authority TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('staged','committed')),revision INTEGER);
         CREATE TABLE snapshot_original_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1),revision INTEGER NOT NULL CHECK(revision>=0),generation TEXT NOT NULL);
         CREATE TABLE snapshot_original_units (key TEXT PRIMARY KEY,value TEXT NOT NULL);
-        CREATE TABLE snapshot_restore_units (stage_id TEXT NOT NULL REFERENCES snapshot_restore_stages(stage_id) ON DELETE CASCADE,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(stage_id,key));
+        CREATE TABLE replacement_source_units (generation TEXT NOT NULL,layer INTEGER NOT NULL CHECK(layer IN (0,1)),key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(generation,layer,key));
         CREATE TABLE snapshot_restore_payloads (stage_id TEXT NOT NULL REFERENCES snapshot_restore_stages(stage_id) ON DELETE CASCADE,hash TEXT NOT NULL,byte_size INTEGER NOT NULL CHECK(byte_size>=0),owner INTEGER NOT NULL CHECK(owner IN (0,1)),cached INTEGER NOT NULL CHECK(cached IN (0,1)),PRIMARY KEY(stage_id,hash));
         CREATE TABLE snapshot_restore_body_jobs (stage_id TEXT PRIMARY KEY REFERENCES snapshot_restore_stages(stage_id) ON DELETE CASCADE,protection_job_id TEXT NOT NULL,complete INTEGER NOT NULL CHECK(complete IN (0,1)));
         CREATE TABLE asset_objects (
@@ -378,7 +378,7 @@ fn validate_object_sql(
         )
         .optional()?;
     if object_sql.as_deref().map(normalize_schema_sql) != Some(normalize_schema_sql(expected)) {
-        return Err(StoreError::Validation {
+        return Err(StoreError::SchemaMismatch {
             message: message.to_owned(),
         });
     }

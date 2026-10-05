@@ -20,14 +20,14 @@ vi.mock('../../persistentDataRuntime.svelte', () => ({
 vi.mock('../../persistentRevisionEvents', () => ({ subscribeLocalPersistentRevision(callback: (revision: number, cause: string) => void) { fixture.revision = callback; return () => {} } }))
 vi.mock('../bindingNative', () => ({ createNativeSyncBindingBridge: () => ({ state: fixture.state }), replaceNativeSyncBinding: vi.fn(), replaceNativeSyncBindingAsNewDevice: vi.fn() }))
 vi.mock('../bindingRegistry', () => ({ resumeCurrentSyncBinding: fixture.resumeCurrent, registerSyncBindingTransport(target: { connectionId: string }, transport: SyncBindingTransport) { fixture.registrations.set(target.connectionId, transport); return () => fixture.registrations.delete(target.connectionId) } }))
-import { installExternalLwwAdapters, refreshExternalLwwAdapters, externalLwwExitDrain, requestExternalLwwNow } from './lwwProduction'
+import { installExternalLwwAdapters, refreshExternalLwwAdapters, externalLwwExitDrain, requestExternalLwwNow, subscribeExternalLwwFailures } from './lwwProduction'
 const binding = { target: { kind: 'external' as const, connectionId: 'sync' }, targetAuthority: '4', selectionEpoch: 'selection', libraryId: 'library', progress: [] }
 const context = (): BindingContext => ({ state: binding, signal: new AbortController().signal })
 const state = (providers = ['webdav']): ExternalStorageState => ({ connections: providers.map((providerId, i) => ({ id: i ? providerId : 'sync', providerId, purpose: 'sync' })) } as ExternalStorageState)
 let dispose: (() => void) | undefined
 beforeEach(() => {
     vi.useFakeTimers(); fixture.native = true; fixture.registrations.clear()
-    fixture.invoke.mockReset(); fixture.invoke.mockImplementation(async command => command === 'external_lww_receive' ? [] : undefined)
+    fixture.invoke.mockReset(); fixture.invoke.mockImplementation(async command => command === 'external_lww_receive' ? null : undefined)
     fixture.state.mockResolvedValue(binding); fixture.listen.mockResolvedValue(() => {})
     fixture.resumeCurrent.mockReset(); fixture.resumeCurrent.mockImplementation(async target => { const current = await fixture.state(); await fixture.registrations.get(target.connectionId)!.resumeBinding({ state: current, signal: new AbortController().signal }) })
     fixture.apply.mockReset(); fixture.flush.mockReset(); fixture.mobile.mockImplementation(async (_name, work) => work())
@@ -56,10 +56,26 @@ describe('native external LWW adapter', () => {
         dispose = await installExternalLwwAdapters(state()); await settle()
         const transport = fixture.registrations.get('sync') as SyncBindingTransport & { receiveAvailableChanges(context: BindingContext): Promise<void> }
         const request = { header: { bindingAuthority: '4', requestId: 'synthetic-receive' }, changes: [] }
-        fixture.invoke.mockResolvedValueOnce([request]); await transport.receiveAvailableChanges(context())
-        expect(fixture.apply).toHaveBeenCalledWith(request)
+        const next = { header: { bindingAuthority: '4', requestId: 'synthetic-receive-next' }, changes: [] }
+        fixture.invoke.mockClear(); fixture.apply.mockClear()
+        fixture.invoke.mockResolvedValueOnce(request).mockResolvedValueOnce(next); await transport.receiveAvailableChanges(context())
+        expect(fixture.invoke.mock.calls.map(call => call[0])).toEqual(['external_lww_receive', 'external_lww_receive', 'external_lww_receive'])
+        expect(fixture.apply.mock.calls).toEqual([[request], [next]])
         fixture.invoke.mockRejectedValueOnce({ kind: 'corrupt' })
         await expect(transport.receiveAvailableChanges(context())).rejects.toEqual({ kind: 'corrupt' })
+    })
+    it('shows why sync stopped when a committed switch cannot resume', async () => {
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        let failures: ReadonlyMap<string, unknown> = new Map()
+        const unsubscribe = subscribeExternalLwwFailures(value => { failures = value })
+        const transport = fixture.registrations.get('sync')!
+        transport.reportStopped!(new DOMException('aborted', 'AbortError'))
+        expect(failures.has('sync')).toBe(false)
+        transport.reportStopped!({ kind: 'previousStorageUnavailable' })
+        expect(failures.get('sync')).toEqual({ kind: 'previousStorageUnavailable' })
+        transport.reportStopped!(new AggregateError([{ kind: 'corrupt' }], 'stopped'))
+        expect(failures.get('sync')).toEqual({ kind: 'corrupt' })
+        unsubscribe()
     })
     it('keeps checking after clock skew and stops only on corruption', async () => {
         dispose = await installExternalLwwAdapters(state()); await settle()
@@ -69,7 +85,7 @@ describe('native external LWW adapter', () => {
         const skewed = receives()
         await vi.advanceTimersByTimeAsync(20_000); await settle()
         expect(receives()).toBe(skewed + 1)
-        fixture.invoke.mockImplementation(async command => command === 'external_lww_receive' ? [] : undefined)
+        fixture.invoke.mockImplementation(async command => command === 'external_lww_receive' ? null : undefined)
         await vi.advanceTimersByTimeAsync(20_000); await settle()
         expect(receives()).toBe(skewed + 2)
         fixture.invoke.mockImplementation(async command => { if (command === 'external_lww_receive') throw { kind: 'corrupt' } })

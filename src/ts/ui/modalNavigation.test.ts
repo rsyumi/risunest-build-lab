@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-vi.mock('../stores.svelte', async () => ({ alertStore: (await import('svelte/store')).writable({ type: 'none', msg: '' }) }))
+vi.mock('../stores.svelte', async () => ({ alertStore: (await import('../alertQueue')).createAlertQueue({ type: 'none', msg: '' }, { gapMs: 0 }) }))
 import { alertStore } from '../stores.svelte'
 import { get } from 'svelte/store'
 import { modalNavigation, backNavigationLayer } from './modalNavigation'
@@ -99,17 +99,19 @@ it('coalesces nested teardown into one asynchronous traversal', async () => {
     expect(go).toHaveBeenCalledOnce()
     expect(go).toHaveBeenCalledWith(-2)
 })
-it('cancels a sibling confirmation before closing a modal for Escape and Back', () => {
+it('cancels a sibling confirmation before closing a modal for Escape and Back', async () => {
     const close = vi.fn()
     const action = modalNavigation(document.createElement('div'), { close })
-    alertStore.set({ type: 'ask', msg: 'confirm' })
+    const first = alertStore.open({ type: 'ask', msg: 'confirm' })
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
     expect(get(alertStore)).toEqual({ type: 'none', msg: '' })
+    await expect(first).resolves.toBe('')
     expect(close).not.toHaveBeenCalled()
-    alertStore.set({ type: 'ask', msg: 'confirm again' })
+    const second = alertStore.open({ type: 'ask', msg: 'confirm again' })
     history.replaceState(null, '')
     window.dispatchEvent(new PopStateEvent('popstate'))
     expect(get(alertStore)).toEqual({ type: 'none', msg: '' })
+    await expect(second).resolves.toBe('')
     expect(history.state.risunestModal).toHaveLength(1)
     expect(close).not.toHaveBeenCalled()
     history.replaceState(null, '')
@@ -128,7 +130,7 @@ it('lets menu layers keep focus and opt out without a history entry', async () =
     history.replaceState(null, '')
     action.destroy()
 })
-it('leaves Escape to content that asks for it without closing the modal below', () => {
+it('leaves Escape to content that asks for it without closing the modal below', async () => {
     vi.spyOn(history, 'go').mockImplementation(() => {})
     const lower = document.createElement('div'), upper = document.createElement('div')
     upper.innerHTML = '<div data-editor><textarea></textarea></div><button>Close</button>'
@@ -145,11 +147,12 @@ it('leaves Escape to content that asks for it without closing the modal below', 
     expect(closeUpper).not.toHaveBeenCalled()
     expect(closeLower).not.toHaveBeenCalled()
 
-    alertStore.set({ type: 'ask', msg: 'confirm' })
+    const confirmation = alertStore.open({ type: 'ask', msg: 'confirm' })
     const overAlert = escape()
     field.dispatchEvent(overAlert)
     expect(overAlert.defaultPrevented).toBe(true)
     expect(get(alertStore)).toEqual({ type: 'none', msg: '' })
+    await expect(confirmation).resolves.toBe('')
 
     upper.querySelector('button')!.dispatchEvent(escape())
     expect(closeUpper).toHaveBeenCalledOnce()

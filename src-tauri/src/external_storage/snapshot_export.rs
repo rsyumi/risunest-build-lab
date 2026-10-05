@@ -4,7 +4,10 @@
 use super::{
     content_store::ObjectSource,
     capture::{self, CaptureCatalog, DurableCaptureReference},
-    contract::{Cancellation, ErrorKind, ProviderError, Result},
+    contract::{Cancellation, ErrorKind, Provider, ProviderError, RepositoryHandle, Result},
+    packaging::RemoteObject,
+    phase_progress::PhaseProgress,
+    sections::CapturedSection,
     snapshot_restore::{PreparedObject, PreparedRecord, PreparedRemoteSnapshot},
 };
 use crate::{
@@ -14,6 +17,7 @@ use crate::{
     },
     local_backup::CancellationProbe,
     persistent_store::{
+        device_store::sections::PreparedSectionRows,
         external_apply::{
             ExternalSnapshotApplication, ExternalSnapshotObject, ExternalSnapshotRecord,
         },
@@ -187,6 +191,7 @@ pub(crate) fn prepare_local_conflict_snapshot(
 fn create_verified_snapshot_backup(
     store: &mut PersistentStore,
     revision: i64,
+    sections: &[PreparedSectionRows],
     destination: &Path,
     scratch: &Path,
     probe: &dyn CancellationProbe,
@@ -206,8 +211,8 @@ fn create_verified_snapshot_backup(
             .unwrap_or(i64::MAX),
     )?;
     let outcome = (|| {
-        let captured = crate::portable_backup::capture_library_only(
-            store, revision, scratch, &mut pins, false, probe, source_build,
+        let captured = crate::portable_backup::capture_library_with_sections(
+            store, revision, scratch, &mut pins, false, probe, source_build, sections,
         )?;
         if captured.repair_required {
             return Err(crate::portable_backup::Error::Invalid(
@@ -223,7 +228,9 @@ fn create_verified_snapshot_backup(
             probe,
         )?;
         archive.validate_library(probe)?;
-        if !archive.manifest.library_included || archive.manifest.device_included {
+        if !archive.manifest.library_included
+            || archive.manifest.device_included == sections.is_empty()
+        {
             return Err(crate::portable_backup::Error::Invalid(
                 "snapshot export scope differs",
             ));
@@ -241,11 +248,47 @@ fn create_verified_snapshot_backup(
     }
 }
 
+/// The device sections a remote snapshot carries, downloaded for its archive. A snapshot that no
+/// device captured carries none.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn download_snapshot_sections(
+    remote: &RemoteObject,
+    snapshot: &PreparedRemoteSnapshot,
+    staging_root: &Path,
+    root_key: &[u8; 32],
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    progress: &PhaseProgress,
+    cancel: &Cancellation,
+) -> Result<Vec<CapturedSection>> {
+    if snapshot.captured_by_device.as_deref().is_none_or(str::is_empty) {
+        return Ok(Vec::new());
+    }
+    let wanted = super::runtime_restore::device_section_ids();
+    let sections = super::snapshot_restore::download_sections(
+        remote,
+        &wanted,
+        staging_root,
+        root_key,
+        None,
+        provider,
+        repository,
+        progress,
+        cancel,
+    )
+    .await?;
+    if sections.len() != wanted.len() {
+        return Err(ProviderError::new(ErrorKind::NotFound));
+    }
+    Ok(sections)
+}
+
 /// Create a standalone `.risunest` file at the path chosen by the native
 /// save dialog. After this returns, restoring the archive needs neither the
 /// cloud provider nor its credentials or repository key.
 pub(crate) fn export_verified_snapshot(
     snapshot: PreparedRemoteSnapshot,
+    sections: &[CapturedSection],
     destination: &Path,
     scratch_parent: &Path,
     cancel: &Cancellation,
@@ -253,6 +296,7 @@ pub(crate) fn export_verified_snapshot(
 ) -> Result<SnapshotExportReceipt> {
     export_verified_snapshot_controlled(
         snapshot,
+        sections,
         destination,
         scratch_parent,
         cancel,
@@ -263,6 +307,7 @@ pub(crate) fn export_verified_snapshot(
 
 pub(crate) fn export_verified_snapshot_controlled(
     snapshot: PreparedRemoteSnapshot,
+    sections: &[CapturedSection],
     destination: &Path,
     scratch_parent: &Path,
     cancel: &Cancellation,
@@ -278,6 +323,13 @@ pub(crate) fn export_verified_snapshot_controlled(
     {
         return Err(ProviderError::new(ErrorKind::Unsupported));
     }
+    // A backup that a device captured is saved with that device's sections, and only then.
+    if snapshot.captured_by_device.as_deref().is_some_and(|device| !device.is_empty())
+        == sections.is_empty()
+    {
+        return Err(corrupt("snapshot device sections differ from its capture"));
+    }
+    let sections = super::sections::prepare_received_backup_sections(sections, cancel)?;
     let fingerprint = decode_hash(&snapshot.library_fingerprint)?;
     std::fs::create_dir_all(scratch_parent).map_err(transient)?;
     let scratch = tempfile::Builder::new()
@@ -329,6 +381,7 @@ pub(crate) fn export_verified_snapshot_controlled(
     let sha256 = create_verified_snapshot_backup(
         &mut store,
         revision,
+        &sections,
         &candidate,
         &archive_scratch,
         &probe,
@@ -448,6 +501,7 @@ mod tests {
         let destination = root.path().join("snapshot.bin");
         assert!(export_verified_snapshot(
             snapshot,
+            &[],
             &destination,
             &root.path().join("scratch"),
             &Cancellation::default(),
@@ -472,7 +526,7 @@ mod tests {
             [r#"{"account":{"id":"synthetic-account","token":"synthetic-token"}}"#]).unwrap();
         drop(db);
         let destination = scratch.path().join("synthetic.risunest");
-        let result = create_verified_snapshot_backup(&mut store, revision, &destination,
+        let result = create_verified_snapshot_backup(&mut store, revision, &[], &destination,
             scratch.path(), &crate::local_backup::NeverCancelled, "9.8.7-synthetic");
         assert!(matches!(result, Err(crate::portable_backup::Error::SourceNeedsPreservation)));
         assert!(!destination.exists());
@@ -517,6 +571,7 @@ mod tests {
         let destination = root.path().join("snapshot.risunest");
         let receipt = export_verified_snapshot(
             snapshot,
+            &[],
             &destination,
             &root.path().join("scratch"),
             &Cancellation::default(),
@@ -578,6 +633,7 @@ mod tests {
         let destination = root.path().join("local-conflict.risunest");
         export_verified_snapshot(
             snapshot,
+            &[],
             &destination,
             &root.path().join("scratch"),
             &Cancellation::default(),
@@ -639,5 +695,54 @@ mod tests {
                 .kind,
             ErrorKind::Corrupt
         );
+    }
+
+    #[test]
+    fn a_remote_backup_saved_to_a_file_keeps_its_device_sections() {
+        use super::super::runtime_restore::tests::packaged_backup_seeded;
+        use super::super::snapshot_restore::{download_snapshot, SourceTrust};
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let backup = packaged_backup_seeded(&[vec![43; 2048]], |store| {
+                store
+                    .device_store_mut()
+                    .unwrap()
+                    .write_setting("accountst", &serde_json::json!("synthetic-export"))
+                    .unwrap();
+            })
+            .await;
+            let connected = &backup.connected;
+            let stored: risunest_external_storage_format::snapshot::StoredObject =
+                serde_json::from_value(backup.restore_source.clone()).unwrap();
+            let remote = RemoteObject::from_stored(&stored, &connected.handle).unwrap();
+            let work = tempfile::tempdir().unwrap();
+            let staging = work.path().join("verified");
+            let cancel = Cancellation::default();
+            let progress = PhaseProgress::silent();
+            let prepared = download_snapshot(&remote, &staging, &connected.root_key, None, SourceTrust::Downloaded,
+                connected.provider.as_ref(), &connected.handle, &progress, &cancel).await.unwrap();
+            assert!(prepared.captured_by_device.is_some());
+            let sections = download_snapshot_sections(&remote, &prepared, &staging, &connected.root_key,
+                connected.provider.as_ref(), &connected.handle, &progress, &cancel).await.unwrap();
+            let destination = work.path().join("snapshot.risunest");
+            export_verified_snapshot(prepared, &sections, &destination, &work.path().join("scratch"), &cancel, "9.8.7-synthetic")
+                .unwrap();
+            let archive = crate::portable_backup::VerifiedArchive::open(File::open(&destination).unwrap(), work.path(), &Probe(&cancel))
+                .unwrap();
+            assert!(archive.manifest.library_included);
+            assert!(archive.manifest.device_included);
+            let included = archive
+                .db
+                .prepare("SELECT section,record_count FROM device_sections WHERE included=1 AND complete=1 ORDER BY section")
+                .unwrap()
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(
+                included.iter().map(|(section, _)| section.as_str()).collect::<Vec<_>>(),
+                ["hypa", "local-plugins", "local-settings"]
+            );
+            assert!(included.iter().any(|(section, count)| section == "local-settings" && *count > 0));
+        });
     }
 }

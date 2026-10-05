@@ -2,6 +2,38 @@ import { describe, expect, it } from 'vitest'
 import { attachPluginReadProvenance, collectPluginReadProvenance, diffPluginReadBaseline, PluginReadBaselines, rebasePluginFieldIntents } from './pluginReadBaselines'
 import { pluginUnitIntents } from './pluginUnitIntents'
 
+/** Every string reachable from `root` through own properties, Map and Set entries; typed array contents are not strings. */
+function reachableStrings(root: unknown): string[] {
+    const strings: string[] = []
+    const seen = new Set<object>()
+    const pending: unknown[] = [root]
+    while (pending.length) {
+        const value = pending.pop()
+        if (typeof value === 'string') {
+            strings.push(value)
+            continue
+        }
+        if (!value || typeof value !== 'object' || seen.has(value)) continue
+        seen.add(value)
+        if (ArrayBuffer.isView(value)) continue
+        if (value instanceof Map) {
+            for (const [key, entry] of value) pending.push(key, entry)
+            continue
+        }
+        if (value instanceof Set) {
+            for (const entry of value) pending.push(entry)
+            continue
+        }
+        for (const key of Object.getOwnPropertyNames(value)) {
+            strings.push(key)
+            pending.push(Object.getOwnPropertyDescriptor(value, key)!.value)
+        }
+    }
+    return strings
+}
+
+const retainedLength = (root: unknown) => reachableStrings(root).reduce((total, value) => total + value.length, 0)
+
 function fixture() {
     let authority = 1
     const registry = new PluginReadBaselines('synthetic-plugin', () => authority)
@@ -144,8 +176,40 @@ describe('plugin immutable read baselines', () => {
         for (let revision = 2; revision < 1002; revision++) registry.track({ characters: [structuredClone(character)] }, 'database', 'database', revision)
         // The character, its conversation and the database.
         expect(registry.retainedBaselineCount).toBe(3)
+        const retained = retainedLength(registry)
+        registry.track(structuredClone(character), 'character', character.chaId, 1002)
+        expect(retainedLength(registry)).toBe(retained)
         oldest.desc = 'Old read edit'
         expect(registry.intent(oldest, 'character', character.chaId, {})).toEqual([{ path: ['desc'], type: 'set', value: 'Old read edit' }])
+    })
+
+    it('keeps none of the content it read and still diffs a 50,000-message conversation', () => {
+        const registry = new PluginReadBaselines('synthetic-plugin', () => 1)
+        const messages = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => ({
+            role: index % 2 ? 'char' : 'user', data: `retained-marker-${prefix}-${index}`, chatId: `retained-marker-id-${prefix}-${index}`,
+        }))
+        const target = JSON.stringify(['character-a', 'chat-a'])
+        const read = registry.track({ id: 'chat-a', name: 'retained-marker-name', note: '', message: messages('long', 50_000) }, 'conversation', target, 1)
+        registry.track({
+            username: 'retained-marker-username',
+            personas: [{ id: 'persona-a', name: 'retained-marker-persona' }],
+            globalChatVariables: { toggle: 'retained-marker-variable' },
+            characters: Array.from({ length: 4 }, (_, index) => ({
+                chaId: `character-${index}`,
+                desc: `retained-marker-desc-${index}`,
+                chats: [{ id: `chat-${index}`, message: messages(`database-${index}`, 1000) }],
+            })),
+        }, 'database', 'database', 1)
+
+        const strings = reachableStrings(registry)
+        expect(strings.filter((value) => value.includes('retained-marker'))).toEqual([])
+        expect(retainedLength(registry)).toBeLessThan(8192)
+
+        const edited = { ...read, message: read.message.map((message, index) => index === 25_000 ? { ...message, data: 'Edited' } : message) }
+        const intents = registry.intent(edited, 'conversation', target, {})
+        expect(intents.map((intent) => [intent.path, intent.type])).toEqual([[['message'], 'set']])
+        expect((intents[0].value as Array<{ data: string }>)[25_000].data).toBe('Edited')
+        expect(registry.intent(structuredClone(read), 'conversation', target, {})).toEqual([])
     })
 
     it('refuses a read finishing under a different authority', () => {
@@ -184,6 +248,38 @@ describe('plugin immutable read baselines', () => {
             { path: ['username'], type: 'set', value: 'Before' },
         ])
         expect(registry.intent({ personas: [{ id: 'p', name: 'Edited' }] }, 'database', 'database', {})).toEqual([{ path: ['personas', 'p', 'name'], type: 'set', value: 'Edited' }])
+    })
+})
+
+describe('plugin read digests', () => {
+    // The canonical form the baselines compared before they kept digests.
+    const reference = (value: unknown): string => {
+        if (value === undefined) return 'undefined'
+        if (Array.isArray(value)) return '[' + value.map(reference).join(',') + ']'
+        if (value && typeof value === 'object') {
+            return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + reference((value as any)[key])).join(',') + '}'
+        }
+        return JSON.stringify(value)
+    }
+    const values: unknown[] = [
+        NaN, null, Infinity, 0, -0, 1, '1', '', 'undefined', undefined, true, 'true', 'null',
+        {}, [], new Date(0), { a: undefined }, { a: null }, { a: 1, b: 2 }, { b: 2, a: 1 }, { 'a:b': 1 }, { a: { b: 1 } }, { a: { b: 2 } },
+        [1, [2]], [[1], 2], [undefined], [null], ['a', 'b'], ['ab'], [{ id: 'x', v: 1 }], [{ id: 'x', v: '1' }],
+    ]
+
+    it('treats two values as unchanged exactly when their canonical forms match', () => {
+        for (const before of values) {
+            for (const after of values) {
+                const unchanged = reference(before) === reference(after)
+                const field = diffPluginReadBaseline({ v: before }, { v: after }, 'preset')
+                const recordField = diffPluginReadBaseline({ personas: [{ id: 'p', v: before }] }, { personas: [{ id: 'p', v: after }] }, 'preset')
+                const wholeRecord = diffPluginReadBaseline({ modules: [{ id: 'm', v: before }] }, { modules: [{ id: 'm', v: after }] }, 'preset')
+                const pair = `${reference(before)} -> ${reference(after)}`
+                expect(field.length === 0, pair).toBe(unchanged)
+                expect(recordField.length === 0, pair).toBe(unchanged)
+                expect(wholeRecord.length === 0, pair).toBe(unchanged)
+            }
+        }
     })
 })
 

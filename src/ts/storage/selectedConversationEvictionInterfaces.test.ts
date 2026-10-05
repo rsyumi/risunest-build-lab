@@ -24,7 +24,7 @@ const interfaceMockModules = [
     '../process/models/modelString', '../process/inlayScreen', '../process/transformers',
     '../process/memory/hanuraiMemory', '../process/memory/hypav2', '../process/memory/hypav3',
     '../process/scriptings', '../plugins/plugins.svelte', '../process/presetChain',
-    '../model/modellist', '../sync/multiuser',
+    '../model/modellist', '../sync/multiuser', './persistentDataStoreFactory', './deviceSettings',
 ]
 
 afterEach(() => {
@@ -49,6 +49,121 @@ async function waitForWindowed(
     const source = runtime.getActiveConversationViewportSource()
     expect(source).not.toBeNull()
     expect(source!.snapshot().totalMessages).toBeGreaterThan(0)
+}
+
+// Mocks every generation dependency except storage, so sendChat runs against the fixture runtime.
+function mockPublicGeneration(
+    fixture: Awaited<ReturnType<typeof createEvictionFixture>>,
+    historyLimit: boolean,
+) {
+    const { runtime } = fixture
+    const generationDBState = {
+        get db() { return fixture.workingCopy },
+        set db(value: Database) { fixture.workingCopy = value },
+    }
+    vi.doMock('../stores.svelte', () => ({
+        DBState: generationDBState,
+        selectedCharID: writable(0),
+        ReloadGUIPointer: { update: vi.fn() },
+    }))
+    vi.doMock('./persistentDataRuntime.svelte', () => ({
+        acquireDestructiveReplacementFence: vi.fn(),
+        acknowledgeGenerationCompletion: (epoch?: number) => runtime.acknowledgeGenerationCompletion(epoch),
+        assertPersistentMutationAllowed: (epoch?: number) => runtime.assertPersistentMutationAllowed(epoch),
+        getPersistentStorageAuthorityEpoch: () => runtime.getStorageAuthorityEpoch(),
+        getPersistentNavigationGeneration: () => runtime.getNavigationGeneration(),
+        capturePersistentMutationToken: vi.fn(),
+        captureSelectedConversationTarget: () => runtime.captureSelectedConversationTarget(),
+        acquireCompleteConversation: (reason: string, target: never) =>
+            runtime.acquireCompleteConversation(reason, target),
+        getActiveConversationSession: () => runtime.getActiveConversationSession(),
+        getPersistentDataRuntime: () => runtime,
+        invalidateActiveConversationSession: () => runtime.invalidateActiveConversationSession(),
+        captureSelectedConversationAuthority: () => runtime.captureSelectedConversationAuthority(),
+        captureWindowedConversationMutationController: (target: never, chat: Chat, start: number) =>
+            runtime.captureWindowedConversationMutationController(target, chat, start),
+        flushPendingData: (reason: string) => runtime.flushPendingData(reason),
+        drainDeferredLwwReceives: vi.fn(async () => undefined),
+    }))
+    vi.doMock('./persistentDataStoreFactory', () => ({ getPersistentDataStore: () => fixture.store }))
+    vi.doMock('./deviceSettings', () => ({
+        getDeviceSettings: () => ({ generationHistoryLimitEnabled: historyLimit, generationHistoryLimitMultiplier: 2 }),
+    }))
+    vi.doMock('../process/request/request', () => ({
+        requestChatData: vi.fn(async () => ({
+            type: 'streaming',
+            result: new ReadableStream({
+                start(controller) {
+                    controller.enqueue({ response: 'Generation compatibility output' })
+                    controller.close()
+                },
+            }),
+        })),
+    }))
+    vi.doMock('../tokenizer', () => ({
+        ChatTokenizer: class {
+            async tokenizeChat() { return 1 }
+            async tokenizeChats(chats: unknown[]) { return chats.length }
+        },
+        tokenize: vi.fn(async () => 1), tokenizeNum: vi.fn(async () => []),
+        hasObservableHistoryTokenizer: () => false, encodeWithTokenizer: vi.fn(async () => []),
+    }))
+    vi.doMock('../../lang', () => ({ language: { errors: {}, otherUserRequesting: '' } }))
+    vi.doMock('../alert', () => ({ alertError: vi.fn(), alertToast: vi.fn() }))
+    vi.doMock('../parser/chatML', () => ({ parseChatML: (value: string) => value }))
+    vi.doMock('../parser/parser.svelte', () => ({ risuChatParser: (value: string) => value }))
+    vi.doMock('../util', () => ({
+        checkNullish: (value: unknown) => value == null,
+        findCharacterbyId: () => fixture.workingCopy.characters[0],
+        getAuthorNoteDefaultText: () => '', getPersonaPrompt: () => '', getUserName: () => 'User',
+        isLastCharPunctuation: () => true, trimUntilPunctuation: (value: string) => value,
+        parseToggleSyntax: () => [], prebuiltAssetCommand: '',
+    }))
+    vi.doMock('../process/scripts', () => ({
+        createPromptScriptOperationScope: () => ({
+            assertOwnerCurrent: vi.fn(), adoptMessageId: vi.fn(),
+            parse: (_char: unknown, value: string) => value,
+            finish: vi.fn(), finishAfterError: vi.fn(), release: vi.fn(),
+        }),
+        processScript: vi.fn(async (_char: unknown, value: string) => value),
+        processScriptFull: vi.fn(async (_char: unknown, value: string) => ({ data: value, emoChanged: false })),
+        risuChatParser: (value: string) => value, resetScriptCache: vi.fn(),
+    }))
+    vi.doMock('../process/triggers', () => ({
+        runTrigger: vi.fn(async (_char: unknown, mode: string, arg: { chat: Chat }) =>
+            mode === 'start' ? null : { chat: arg.chat }),
+    }))
+    vi.doMock('../process/modules', () => ({
+        getModuleAssets: () => [], getModuleToggles: () => '', moduleUpdate: vi.fn(),
+        getModuleTriggers: () => [],
+        getModuleLorebooks: () => [], getModuleRegexScripts: () => [],
+    }))
+    for (const [id, exports] of [
+        ['../process/lorebook.svelte', { loadLoreBookV3Prompt: vi.fn(async () => ({ actives: [] })) }],
+        ['../process/templates/templates', { prebuiltNAIpresets: [], prebuiltPresets: { OAI: { mainPrompt: '', jailbreak: '' } } }],
+        ['../process/exampleMessages', { exampleMessage: () => [] }],
+        ['../process/tts', { sayTTS: vi.fn() }],
+        ['../process/memory/supaMemory', { supaMemory: vi.fn() }],
+        ['../process/group', { groupOrder: (value: unknown) => value }],
+        ['../process/memory/hypamemory', { HypaProcesser: class {} }],
+        ['../process/embedding/addinfo', { additionalInformations: vi.fn(async () => '') }],
+        ['../process/files/inlays', { getInlayAsset: vi.fn(async () => null) }],
+        ['../process/models/modelString', { getGenerationModelString: () => 'test-model' }],
+        ['../process/inlayScreen', { runInlayScreen: (_char: unknown, data: string) => ({ text: data }) }],
+        ['../process/transformers', { runImageEmbedding: vi.fn() }],
+        ['../process/memory/hanuraiMemory', { hanuraiMemory: vi.fn() }],
+        ['../process/memory/hypav2', { hypaMemoryV2: vi.fn() }],
+        ['../process/memory/hypav3', { hypaMemoryV3: vi.fn() }],
+        ['../process/scriptings', { runLuaEditTrigger: vi.fn(async (_c: unknown, _m: string, value: unknown) => value) }],
+        ['../globalApi.svelte', { readImage: vi.fn() }],
+        ['../plugins/plugins.svelte', { pluginV2: { chatOutput: new Set() } }],
+        ['../process/presetChain', { activatePresetChainForRequest: vi.fn() }],
+    ] as const) vi.doMock(id, () => exports)
+    vi.doMock('../model/modellist', () => ({ getModelInfo: () => ({ flags: [] }), LLMFlags: {} }))
+    vi.doMock('../sync/multiuser', () => ({
+        connectionOpen: false, peerRevertChat: vi.fn(), peerSafeCheck: vi.fn(async () => true),
+        peerSync: vi.fn(),
+    }))
 }
 
 describe('independent windowed conversation interfaces', () => {
@@ -225,103 +340,7 @@ describe('independent windowed conversation interfaces', () => {
             finally { lease.release() }
             await waitForWindowed(runtime, 'readback demotion')
         }
-        const generationDBState = {
-            get db() { return fixture.workingCopy },
-            set db(value: Database) { fixture.workingCopy = value },
-        }
-        vi.doMock('../stores.svelte', () => ({
-            DBState: generationDBState,
-            selectedCharID: writable(0),
-            ReloadGUIPointer: { update: vi.fn() },
-        }))
-        vi.doMock('./persistentDataRuntime.svelte', () => ({
-            acquireDestructiveReplacementFence: vi.fn(),
-            acknowledgeGenerationCompletion: (epoch?: number) => runtime.acknowledgeGenerationCompletion(epoch),
-            assertPersistentMutationAllowed: (epoch?: number) => runtime.assertPersistentMutationAllowed(epoch),
-            getPersistentStorageAuthorityEpoch: () => runtime.getStorageAuthorityEpoch(),
-            getPersistentNavigationGeneration: () => runtime.getNavigationGeneration(),
-            capturePersistentMutationToken: vi.fn(),
-            captureSelectedConversationTarget: () => runtime.captureSelectedConversationTarget(),
-            acquireCompleteConversation: (reason: string, target: never) =>
-                runtime.acquireCompleteConversation(reason, target),
-            getActiveConversationSession: () => runtime.getActiveConversationSession(),
-            getPersistentDataRuntime: () => runtime,
-            invalidateActiveConversationSession: () => runtime.invalidateActiveConversationSession(),
-        }))
-        vi.doMock('../process/request/request', () => ({
-            requestChatData: vi.fn(async () => ({
-                type: 'streaming',
-                result: new ReadableStream({
-                    start(controller) {
-                        controller.enqueue({ response: 'Generation compatibility output' })
-                        controller.close()
-                    },
-                }),
-            })),
-        }))
-        vi.doMock('../tokenizer', () => ({
-            ChatTokenizer: class {
-                async tokenizeChat() { return 1 }
-                async tokenizeChats(chats: unknown[]) { return chats.length }
-            },
-            tokenize: vi.fn(async () => 1), tokenizeNum: vi.fn(async () => []),
-        }))
-        vi.doMock('../../lang', () => ({ language: { errors: {}, otherUserRequesting: '' } }))
-        vi.doMock('../alert', () => ({ alertError: vi.fn(), alertToast: vi.fn() }))
-        vi.doMock('../parser/chatML', () => ({ parseChatML: (value: string) => value }))
-        vi.doMock('../parser/parser.svelte', () => ({ risuChatParser: (value: string) => value }))
-        vi.doMock('../util', () => ({
-            checkNullish: (value: unknown) => value == null,
-            findCharacterbyId: () => fixture.workingCopy.characters[0],
-            getAuthorNoteDefaultText: () => '', getPersonaPrompt: () => '', getUserName: () => 'User',
-            isLastCharPunctuation: () => true, trimUntilPunctuation: (value: string) => value,
-            parseToggleSyntax: () => [], prebuiltAssetCommand: '',
-        }))
-        vi.doMock('../process/scripts', () => ({
-            createPromptScriptOperationScope: () => ({
-                assertOwnerCurrent: vi.fn(), adoptMessageId: vi.fn(),
-                parse: (_char: unknown, value: string) => value,
-                finish: vi.fn(), finishAfterError: vi.fn(), release: vi.fn(),
-            }),
-            processScript: vi.fn(async (_char: unknown, value: string) => value),
-            processScriptFull: vi.fn(async (_char: unknown, value: string) => ({ data: value, emoChanged: false })),
-            risuChatParser: (value: string) => value, resetScriptCache: vi.fn(),
-        }))
-        vi.doMock('../process/triggers', () => ({
-            runTrigger: vi.fn(async (_char: unknown, mode: string, arg: { chat: Chat }) =>
-                mode === 'start' ? null : { chat: arg.chat }),
-        }))
-        vi.doMock('../process/modules', () => ({
-            getModuleAssets: () => [], getModuleToggles: () => '', moduleUpdate: vi.fn(),
-            getModuleTriggers: () => [],
-            getModuleLorebooks: () => [], getModuleRegexScripts: () => [],
-        }))
-        for (const [id, exports] of [
-            ['../process/lorebook.svelte', { loadLoreBookV3Prompt: vi.fn(async () => ({ actives: [] })) }],
-            ['../process/templates/templates', { prebuiltNAIpresets: [], prebuiltPresets: { OAI: { mainPrompt: '', jailbreak: '' } } }],
-            ['../process/exampleMessages', { exampleMessage: () => [] }],
-            ['../process/tts', { sayTTS: vi.fn() }],
-            ['../process/memory/supaMemory', { supaMemory: vi.fn() }],
-            ['../process/group', { groupOrder: (value: unknown) => value }],
-            ['../process/memory/hypamemory', { HypaProcesser: class {} }],
-            ['../process/embedding/addinfo', { additionalInformations: vi.fn(async () => '') }],
-            ['../process/files/inlays', { getInlayAsset: vi.fn(async () => null) }],
-            ['../process/models/modelString', { getGenerationModelString: () => 'test-model' }],
-            ['../process/inlayScreen', { runInlayScreen: (_char: unknown, data: string) => ({ text: data }) }],
-            ['../process/transformers', { runImageEmbedding: vi.fn() }],
-            ['../process/memory/hanuraiMemory', { hanuraiMemory: vi.fn() }],
-            ['../process/memory/hypav2', { hypaMemoryV2: vi.fn() }],
-            ['../process/memory/hypav3', { hypaMemoryV3: vi.fn() }],
-            ['../process/scriptings', { runLuaEditTrigger: vi.fn(async (_c: unknown, _m: string, value: unknown) => value) }],
-            ['../globalApi.svelte', { readImage: vi.fn() }],
-            ['../plugins/plugins.svelte', { pluginV2: { chatOutput: new Set() } }],
-            ['../process/presetChain', { activatePresetChainForRequest: vi.fn() }],
-        ] as const) vi.doMock(id, () => exports)
-        vi.doMock('../model/modellist', () => ({ getModelInfo: () => ({ flags: [] }), LLMFlags: {} }))
-        vi.doMock('../sync/multiuser', () => ({
-            connectionOpen: false, peerRevertChat: vi.fn(), peerSafeCheck: vi.fn(async () => true),
-            peerSync: vi.fn(),
-        }))
+        mockPublicGeneration(fixture, false)
         const generationBefore = oracle.message.length
         const { sendChat } = await import('../process/index.svelte')
         const generationLog = vi.spyOn(console, 'log').mockImplementation(() => undefined)
@@ -346,5 +365,76 @@ describe('independent windowed conversation interfaces', () => {
         await assertWindowed('public generation gateway')
         vi.resetModules()
 
+    }, 30_000)
+
+    it('runs a history window generation without promoting or changing the windowed owner', async () => {
+        // Generation recognizes the runtime's metadata-only shells only when both load the same modules.
+        vi.resetModules()
+        const { createEvictionFixture, makeConversation } = await import('./tests/selectedConversationEvictionFixture')
+        const fixture = await createEvictionFixture(makeConversation(INITIAL_MESSAGE_COUNT, DUPLICATE_POSITIONS))
+        const { store, runtime } = fixture
+        const oracle = makeConversation(INITIAL_MESSAGE_COUNT, DUPLICATE_POSITIONS)
+        await runtime.initializeActiveWorkingSet(fixture.workingCopy)
+        await waitForWindowed(runtime)
+        fixture.workingCopy.maxContext = 400
+        mockPublicGeneration(fixture, true)
+        const promote = vi.spyOn(runtime, 'acquireCompleteConversation')
+        const readConversation = vi.spyOn(store, 'readConversation')
+        const { sendChat } = await import('../process/index.svelte')
+        const generationLog = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(true)
+        generationLog.mockRestore()
+
+        await expect(runtime.flushPendingData('history-window-generation')).resolves.toBeUndefined()
+        expect(promote).not.toHaveBeenCalled()
+        expect(readConversation).not.toHaveBeenCalled()
+        expect(runtime.getSelectedConversationMode()).toBe('windowed')
+        expect(fixture.workingCopy.characters[0]).toMatchObject({ reloadKeys: 0 })
+        expect(fixture.workingCopy.characters[0].lastInteraction).toBeUndefined()
+        const persisted = await store.readConversation('char-a', 'chat-a')
+        expect(persisted!.value.message.slice(0, -1)).toEqual(oracle.message)
+        expect(persisted!.value.message.at(-1)!.data).toBe('Generation compatibility output')
+        vi.resetModules()
+    }, 30_000)
+
+    it('rerolls the last response over a tail window without promoting the windowed owner', async () => {
+        vi.resetModules()
+        const { createEvictionFixture, makeConversation } = await import('./tests/selectedConversationEvictionFixture')
+        const messageCount = INITIAL_MESSAGE_COUNT + 1
+        const fixture = await createEvictionFixture(makeConversation(messageCount, DUPLICATE_POSITIONS))
+        const { store, runtime } = fixture
+        const oracle = makeConversation(messageCount, DUPLICATE_POSITIONS)
+        await runtime.initializeActiveWorkingSet(fixture.workingCopy)
+        await waitForWindowed(runtime)
+        fixture.workingCopy.maxContext = 400
+        mockPublicGeneration(fixture, true)
+        const promote = vi.spyOn(runtime, 'acquireCompleteConversation')
+        const { sendChat, openSelectedHistoryWindow } = await import('../process/index.svelte')
+        const { generateWindowedResponseCandidate } = await import('../durableReroll')
+        let nextId = 0
+        const generationLog = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+        const result = await generateWindowedResponseCandidate({
+            open: (tailStart) => openSelectedHistoryWindow({ tailStart }),
+            isCurrent: () => true,
+            createId: () => `candidate-id-${nextId++}`,
+            flush: () => runtime.flushPendingData('reroll-candidate'),
+            generate: () => sendChat(-1, { historyLimit: true }),
+            aborted: () => false,
+        })
+        generationLog.mockRestore()
+
+        expect(result.completed).toBe(true)
+        await expect(runtime.flushPendingData('history-window-reroll')).resolves.toBeUndefined()
+        expect(promote).not.toHaveBeenCalled()
+        expect(runtime.getSelectedConversationMode()).toBe('windowed')
+        const persisted = (await store.readConversation('char-a', 'chat-a'))!.value
+        expect(persisted.rerollRecovery).toBeUndefined()
+        expect(persisted.message).toHaveLength(messageCount)
+        expect(persisted.message.slice(0, -1)).toEqual(oracle.message.slice(0, -1))
+        const response = persisted.message.at(-1)!
+        expect(response.data).toBe('Generation compatibility output')
+        expect(response.responseVariants?.candidates.map((candidate) => candidate.messages[0].data))
+            .toEqual([oracle.message.at(-1)!.data, 'Generation compatibility output'])
+        vi.resetModules()
     }, 30_000)
 })

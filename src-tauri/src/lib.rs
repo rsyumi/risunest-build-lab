@@ -42,6 +42,7 @@ mod persistent_commit_raw;
 #[cfg(windows)]
 mod persistent_commit_transport;
 mod persistent_store;
+mod platform_tls;
 mod portable_backup;
 #[cfg(feature = "official-publication-upload-pilot")]
 mod publication_upload;
@@ -197,7 +198,10 @@ async fn native_request(url: String, body: String, header: String, method: Strin
         return format!(r#"{{"success":false,"body":"Invalid header JSON"}}"#);
     }
 
-    let client = reqwest::Client::new();
+    let client = match platform_tls::client_builder().build() {
+        Ok(client) => client,
+        Err(e) => return format!(r#"{{"success":false,"body":"{}"}}"#, e.to_string()),
+    };
     let response: Result<reqwest::Response, reqwest::Error>;
 
     if method == "POST" {
@@ -257,6 +261,14 @@ fn window_state_plugin(directory: &std::path::Path) -> tauri::plugin::TauriPlugi
         .build()
 }
 
+/// Keeps IPC responses on the custom protocol after a failed body read.
+fn ipc_read_guard_script() -> String {
+    include_str!("ipc_read_guard.js").replace(
+        "__RISUNEST_ANDROID__",
+        if cfg!(target_os = "android") { "true" } else { "false" },
+    )
+}
+
 /// Product initialization shared by native entry points. An alternative entry
 /// manages its own [`AppPaths`] before building.
 pub fn builder() -> tauri::Builder<tauri::Wry> {
@@ -273,7 +285,8 @@ fn builder_with_main_window(
     let setup_native_startup_state = native_startup_state.clone();
     let mut builder = tauri::Builder::default()
         .manage(native_startup_state)
-        .plugin(tauri_plugin_opener::init());
+        .plugin(tauri_plugin_opener::init())
+        .append_invoke_initialization_script(ipc_read_guard_script());
     #[cfg(not(target_os = "android"))]
     {
         builder = builder.manage(renderer_recovery::RendererRecovery::default());
@@ -446,7 +459,7 @@ fn builder_with_main_window(
                 ios_lifecycle::main_document_started(webview.app_handle());
                 #[cfg(target_os = "macos")]
                 macos_lifecycle::document_started(webview.app_handle());
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 renderer_recovery::document_started(webview.app_handle());
                 if let Some(state) = webview.try_state::<persistent_store::PersistentStoreState>() {
                     if let Err(error) = state.reset_renderer_session() {
@@ -655,7 +668,7 @@ fn builder_with_main_window(
         .manage(server_sync::commands::ServerSyncCommandState::default())
         .manage(external_storage::connection_commands::ConnectionCommandState::default())
         .manage(external_storage::job_store::JobCommandState::default())
-        .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_http::init_with_client_builder(platform_tls::apply))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
@@ -723,7 +736,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         opened_files::desktop_relaunch,
         #[cfg(any(windows, target_os = "linux"))]
         desktop_session::desktop_flush_complete,
-        #[cfg(any(windows, target_os = "linux"))]
+        #[cfg(desktop)]
         renderer_recovery::desktop_close_ack,
         #[cfg(not(target_os = "android"))]
         renderer_recovery::renderer_recovery_take,
@@ -835,6 +848,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_file_jobs::native_character_charx_handoff_cleanup,
         native_file_jobs::native_character_card_handoff_cleanup,
         native_file_jobs::native_risu_module_handoff_cleanup,
+        native_file_jobs::native_dataset_export_handoff_cleanup,
+        native_file_jobs::download_handoff::native_download_handoff_create,
+        native_file_jobs::download_handoff::native_download_handoff_append,
+        native_file_jobs::download_handoff::native_download_handoff_cleanup,
         native_file_jobs::screenshot_output::native_file_job_screenshot_output_start,
         native_file_jobs::screenshot_output::native_file_job_screenshot_output_append,
         native_file_jobs::screenshot_output::native_file_job_screenshot_output_publish,
@@ -880,6 +897,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         android_commit_transport::pds_commit_android_finish,
         #[cfg(target_os = "android")]
         android_commit_transport::pds_commit_android_cancel,
+        #[cfg(target_os = "android")]
+        android_commit_transport::pds_replace_android_finish,
         #[cfg(any(windows, target_os = "linux", target_os = "ios", target_os = "macos"))]
         persistent_commit_raw::pds_commit_raw,
         persistent_store::lww_commands::pds_lww_read_outbox,
@@ -905,6 +924,12 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_replace_begin,
         persistent_store::commands::pds_replace_put_root,
         persistent_store::commands::pds_replace_put_presets,
+        persistent_store::commands::pds_replace_add_presets,
+        persistent_store::commands::pds_replace_add_plugin_storage_values,
+        persistent_store::commands::pds_replace_add_plugin_storage,
+        persistent_store::commands::pds_replace_put_character_detail,
+        persistent_store::commands::pds_replace_put_conversation,
+        persistent_store::commands::pds_replace_add_conversation_messages,
         persistent_store::commands::pds_replace_add_characters,
         persistent_store::commands::pds_replace_put_asset_aliases,
         persistent_store::commands::pds_replace_put_asset_owner_heads,
@@ -923,9 +948,6 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_checkpoint,
         persistent_store::commands::pds_snapshot_create,
         persistent_store::commands::pds_snapshot_list,
-        persistent_store::commands::pds_snapshot_restore_stage,
-        persistent_store::commands::pds_snapshot_restore_activate,
-        persistent_store::commands::pds_snapshot_restore_abort,
         persistent_store::commands::pds_get_device_setting,
         persistent_store::commands::pds_set_device_setting,
         persistent_store::commands::pds_patch_device_setting,
@@ -1087,6 +1109,14 @@ mod header_map_tests {
         assert_eq!(startup_failure_exit_code(&setup("cleanup-app-still-running")), 0);
         assert_eq!(startup_failure_exit_code(&setup("cleanup-lock-unavailable")), 1);
         assert_eq!(startup_failure_exit_code(&setup("invalid native path")), 1);
+    }
+
+    #[test]
+    fn ipc_read_guard_script_carries_its_target_flag() {
+        let script = ipc_read_guard_script();
+        assert!(!script.contains("__RISUNEST_ANDROID__"));
+        let flag = format!("const android = {};", cfg!(target_os = "android"));
+        assert!(script.contains(&flag));
     }
     use reqwest::header::{HeaderName, HeaderValue};
 

@@ -239,7 +239,7 @@ fn a_broken_device_store_is_reported_without_blocking_the_library() {
     };
     assert_eq!(
         error,
-        StoreError::Store {
+        StoreError::SchemaMismatch {
             message: "device store is unavailable: unsupported device schema version 17".to_owned(),
         }
     );
@@ -251,6 +251,41 @@ fn a_broken_device_store_is_reported_without_blocking_the_library() {
         ..empty_working_set_commit(0)
     }).is_err());
     assert_eq!(store.revision().unwrap(), 0);
+}
+
+#[test]
+fn a_store_written_by_another_build_reports_the_schema_mismatch_code() {
+    let code = |error: &StoreError| serde_json::to_value(error).unwrap()["code"].clone();
+    for change in [
+        "PRAGMA user_version = 17;",
+        "ALTER TABLE generations ADD COLUMN synthetic TEXT;",
+        "ALTER TABLE lww_retired ADD COLUMN synthetic TEXT;",
+        "ALTER TABLE server_sync_state ADD COLUMN synthetic TEXT;",
+        "ALTER TABLE content_change_floor ADD COLUMN synthetic TEXT;",
+        "ALTER TABLE library_sync_selection ADD COLUMN synthetic TEXT;",
+    ] {
+        let directory = tempfile::tempdir().expect("create mismatch directory");
+        drop(PersistentStore::open(directory.path()).expect("create current store"));
+        let connection = rusqlite::Connection::open(database_path(directory.path())).expect("open current database");
+        connection.execute_batch(change).expect("write another build's schema");
+        drop(connection);
+        let Err(error) = PersistentStore::open(directory.path()) else {
+            panic!("{change} must be rejected");
+        };
+        assert_eq!(code(&error), "schema-mismatch", "{change}");
+    }
+
+    let directory = tempfile::tempdir().expect("create device mismatch directory");
+    drop(PersistentStore::open(directory.path()).expect("create current store"));
+    let device_path = directory.path().join("persistent").join(super::super::device_store::DEVICE_DATABASE_FILE);
+    let connection = rusqlite::Connection::open(&device_path).expect("open device database");
+    connection.execute_batch("PRAGMA user_version = 17;").expect("stamp another build's device schema");
+    drop(connection);
+    let store = PersistentStore::open(directory.path()).expect("library opens without the device store");
+    let Err(error) = store.device_store() else {
+        panic!("another build's device store must be reported");
+    };
+    assert_eq!(code(&error), "schema-mismatch");
 }
 
 #[test]
@@ -272,7 +307,7 @@ fn unknown_schema_version_is_rejected() {
         };
         assert_eq!(
             error,
-            StoreError::Store {
+            StoreError::SchemaMismatch {
                 message: format!("unsupported persistent schema version {version}"),
             }
         );

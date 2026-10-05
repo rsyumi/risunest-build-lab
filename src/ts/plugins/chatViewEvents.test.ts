@@ -1,8 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createChatViewEvents, type ChatViewConversation, type ChatViewEvent, type ChatViewRowReport } from './chatViewEvents'
+import {
+    createChatViewEvents,
+    createPinnedChatViewConversation,
+    type ChatViewConversation,
+    type ChatViewEvent,
+    type ChatViewRowReport,
+} from './chatViewEvents'
 
 function setup() {
-    let conversation: ChatViewConversation = { characterId: 'char-a', conversationId: 'conv-a', characterIndex: 0, chatIndex: 0 }
+    let conversation: ChatViewConversation | null = { characterId: 'char-a', conversationId: 'conv-a', characterIndex: 0, chatIndex: 0 }
     const frames: Array<() => void> = []
     let notify: (() => void) | null = null
     const stopWatching = vi.fn(() => { notify = null })
@@ -30,7 +36,7 @@ function setup() {
             for (const frame of frames.splice(0)) frame()
             return received.splice(0)
         },
-        select(next: ChatViewConversation) {
+        select(next: ChatViewConversation | null) {
             conversation = next
             notify?.()
         },
@@ -173,6 +179,24 @@ describe('chat view events', () => {
         expect(drain()).toEqual([])
     })
 
+    it('reports nothing while the selected conversation is still being resolved', () => {
+        const { reporter, listen, drain, select, frames } = setup()
+        listen()
+        reporter.rendered('a1', report(1))
+        drain()
+
+        select(null)
+        reporter.removed('a1')
+        reporter.rendered('b1', report(1, { characterId: 'char-b', conversationId: 'conv-b' }))
+        expect(drain()).toEqual([])
+        expect(frames).toHaveLength(0)
+        select({ characterId: 'char-b', conversationId: 'conv-b', characterIndex: 0, chatIndex: 1 })
+        expect(drain()).toEqual([
+            { type: 'conversation', characterId: 'char-b', conversationId: 'conv-b', characterIndex: 0, chatIndex: 1 },
+            { type: 'rows', characterId: 'char-b', conversationId: 'conv-b', mounted: [row(1)], unmounted: [], rerendered: [] },
+        ])
+    })
+
     it('keeps each listener and reporter apart', async () => {
         const { events, reporter, listen, drain, frames, stopWatching } = setup()
         const first = listen('plugin-a')
@@ -216,5 +240,89 @@ describe('chat view events', () => {
         } finally {
             error.mockRestore()
         }
+    })
+})
+
+describe('pinned chat view conversation', () => {
+    type Position = { characterIndex: number; chatIndex: number }
+    const drainContinuations = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+    function setup() {
+        let selection: ChatViewConversation = { characterId: 'char-b', conversationId: 'conv-b', characterIndex: 1, chatIndex: 0 }
+        let notify: (() => void) | null = null
+        const pending: Array<{ args: [string, string | null]; resolve(position: Position): void; reject(error: unknown): void }> = []
+        const stop = vi.fn(() => { notify = null })
+        const source = createPinnedChatViewConversation({
+            readSelection: () => selection,
+            watchSelection: (onChange) => {
+                notify = onChange
+                return stop
+            },
+            resolvePosition: (characterId, conversationId) => new Promise<Position>((resolve, reject) => {
+                pending.push({ args: [characterId, conversationId], resolve, reject })
+            }),
+        })
+        const changed = vi.fn()
+        return {
+            source, pending, stop, changed,
+            watch: () => source.watchConversation(changed),
+            select(next: ChatViewConversation) {
+                selection = next
+                notify?.()
+            },
+        }
+    }
+
+    it('reports the selection at its resolved position and drops a superseded resolution', async () => {
+        const { source, pending, changed, watch, select } = setup()
+        watch()
+        expect(source.readConversation()).toBeNull()
+        expect(pending.map((entry) => entry.args)).toEqual([['char-b', 'conv-b']])
+
+        select({ characterId: 'char-c', conversationId: 'conv-c', characterIndex: 2, chatIndex: 3 })
+        pending[0].resolve({ characterIndex: 0, chatIndex: 0 })
+        await drainContinuations()
+        expect(source.readConversation()).toBeNull()
+        expect(changed).not.toHaveBeenCalled()
+
+        pending[1].resolve({ characterIndex: 1, chatIndex: 2 })
+        await drainContinuations()
+        expect(changed).toHaveBeenCalledOnce()
+        expect(source.readConversation()).toEqual({ characterId: 'char-c', conversationId: 'conv-c', characterIndex: 1, chatIndex: 2 })
+
+        select({ characterId: 'char-c', conversationId: 'conv-c', characterIndex: 2, chatIndex: 3 })
+        expect(pending).toHaveLength(2)
+    })
+
+    it('reports an empty selection at once and an unresolved one at -1', async () => {
+        const { source, pending, changed, watch, select } = setup()
+        const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+        try {
+            watch()
+            select({ characterId: null, conversationId: null, characterIndex: -1, chatIndex: -1 })
+            expect(changed).toHaveBeenCalledOnce()
+            expect(source.readConversation()).toEqual({ characterId: null, conversationId: null, characterIndex: -1, chatIndex: -1 })
+
+            select({ characterId: 'char-d', conversationId: null, characterIndex: 4, chatIndex: -1 })
+            pending[1].reject(new Error('store closed'))
+            await drainContinuations()
+            expect(source.readConversation()).toEqual({ characterId: 'char-d', conversationId: null, characterIndex: -1, chatIndex: -1 })
+            expect(error).toHaveBeenCalledOnce()
+        } finally {
+            error.mockRestore()
+        }
+    })
+
+    it('resolves again after watching restarts', async () => {
+        const { source, pending, stop, watch } = setup()
+        const stopWatching = watch()
+        pending[0].resolve({ characterIndex: 0, chatIndex: 0 })
+        await drainContinuations()
+        stopWatching()
+        expect(stop).toHaveBeenCalledOnce()
+        expect(source.readConversation()).toBeNull()
+
+        watch()
+        expect(pending).toHaveLength(2)
     })
 })

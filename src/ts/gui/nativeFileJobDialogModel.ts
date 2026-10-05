@@ -247,6 +247,7 @@ function exportTitleOf(
 function titleOf(format: NativeFileOperationFormat | undefined, status?: NativeFileJobStatus): string {
     if (status?.kind === 'restore-official-account-snapshot') return language.risuNest.backup.officialRestore
     const copy = language.risuNest.importDialog
+    if (status?.kind === 'restore-native-snapshot' || status?.kind === 'snapshot-bodies') return copy.titleSnapshot
     switch (format) {
         case 'risu-save':
             return copy.titleRisuSave
@@ -499,9 +500,14 @@ function warningText(code: string): string {
     }
 }
 
-export function failureReason(code: string, direction: 'import' | 'export' = 'import'): string {
+export function failureReason(code: string, direction: 'import' | 'export' = 'import', itemKind?: string): string {
     const copy = language.risuNest.importDialog
     switch (code) {
+        case 'payload-too-large': {
+            const item = itemKind && Object.hasOwn(copy.tooLargeItems, itemKind)
+                ? copy.tooLargeItems[itemKind as keyof typeof copy.tooLargeItems] : undefined
+            return item ? copy.reasonTooLarge.replace('{0}', item) : copy.reasonUnknown
+        }
         case 'destination-required':
         case 'unsupported-without-destination':
             return copy.reasonPlainJpeg
@@ -546,6 +552,8 @@ export function failureReason(code: string, direction: 'import' | 'export' = 'im
             return copy.reasonIo
         case 'source-reselect-required':
             return copy.reasonReselectSource
+        case 'import-interrupted':
+            return copy.reasonImportInterrupted
         case 'capability-unavailable':
             return copy.reasonCapability
         case 'rescue-format-not-restorable':
@@ -745,7 +753,7 @@ export function buildNativeFileJobDialogModel(
             summary = copy.resultFailedAfterCommit
         } else {
             summary = copy.resultFailed
-            reason = failureReason(outcome.error?.code ?? '')
+            reason = failureReason(outcome.error?.code ?? '', 'import', outcome.error?.itemKind)
         }
         if (outcome.interruption === 'background-expired') {
             summary = outcome.partialWritesPossible ? copy.resultBackgroundExpiredPartial : copy.resultBackgroundExpired

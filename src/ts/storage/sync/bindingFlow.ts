@@ -63,6 +63,8 @@ export interface SyncBindingTransport {
     publishInitialSharedState(context: BindingContext): Promise<void>
     resumeBinding(context: BindingContext): Promise<void>
     fenceOldJobs(context: BindingContext): Promise<void>
+    // Told when sync stopped because the transport could not resume after a committed switch.
+    reportStopped?(error: unknown): void
     // Claims a fresh writer for a changed registration to the library this device was bound to, keeping local data.
     prepareFreshWriter?(inspected: InspectedSyncTarget, context: BindingContext): Promise<NewDeviceBindingPreparation>
     // These hooks reserve/register a writer before activation and use it only after activation.
@@ -213,6 +215,19 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
             let activationAttempted = false
             let activatedContext: BindingContext | undefined
             let resumeActivated: (() => Promise<void>) | undefined
+            let workingSetApplied = false
+            // Once the working set shows the activated library, a transport that cannot resume
+            // only stops sync. Edits stay allowed and a later resume starts it again.
+            const stopActivated = async (error: unknown) => {
+                controller.abort()
+                active = undefined
+                try { await transport.fenceOldJobs(activatedContext!) }
+                catch (fenceError) { throw new AggregateError([error, fenceError], 'Sync binding failed while stopping its transport') }
+                transport.reportStopped?.(error)
+            }
+            const resumeAfterRefresh = async () => {
+                try { await resumeActivated!() } catch (error) { await stopActivated(error) }
+            }
             try {
                 const state = await dependencies.native.state()
                 await adoptPersisted(state)
@@ -364,6 +379,7 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
                     await resumeOld(mode)
                     return result
                 }
+                workingSetApplied = true
                 await resumeActivated()
                 return result
             } catch (error) {
@@ -381,10 +397,11 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
                         if (pluginsFenced) { pluginsFenced = false; await dependencies.plugins.restart() }
                         if (jobsFenced) { jobsFenced = false; await resumeOld(mode) }
                     } catch (recoveryError) {
-                        if (activationGuard && activationAttempted && resumeActivated) registerFailure(recoveryError, resumeActivated)
+                        if (activationGuard && activationAttempted && resumeActivated) registerFailure(recoveryError, resumeAfterRefresh)
                         throw new AggregateError([error, recoveryError], 'Sync binding failed while resuming local state')
                     }
-                } else if (activationAttempted && resumeActivated) registerFailure(error, resumeActivated)
+                } else if (workingSetApplied) await stopActivated(error)
+                else if (activationAttempted && resumeActivated) registerFailure(error, resumeAfterRefresh)
                 throw error
             } finally { running = false }
         },

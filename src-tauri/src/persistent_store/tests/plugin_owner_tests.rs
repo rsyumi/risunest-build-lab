@@ -581,8 +581,8 @@ fn a_reserved_claim_recovers_after_reopen_and_a_committed_claim_does_not_replay(
     let after_units: Vec<(String,String,String,String)> = store.connection.prepare("SELECT key,stamp,value,version FROM lww_units ORDER BY key").unwrap()
         .query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
     assert_eq!(after_units, before_units);
-    let (request_id, stamp): (String, String) = store.device_store().unwrap().connection().query_row(
-        "SELECT request_id,stamp FROM lww_intents WHERE complete=0", [], |row| Ok((row.get(0)?,row.get(1)?)),
+    let (request_id, authority, stamp, body, digest): (String, String, String, String, String) = store.device_store().unwrap().connection().query_row(
+        "SELECT request_id,authority,stamp,body,digest FROM lww_intents WHERE complete=0", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
     ).unwrap();
     store.connection.execute_batch("DROP TRIGGER fail_claim;").unwrap();
     drop(store);
@@ -599,13 +599,13 @@ fn a_reserved_claim_recovers_after_reopen_and_a_committed_claim_does_not_replay(
     }).unwrap();
     let later_revision = store.revision().unwrap();
     let clock = serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
-    store.device_store().unwrap().connection().execute("UPDATE lww_intents SET complete=0 WHERE request_id=?1", [&request_id]).unwrap();
+    store.device_store().unwrap().connection().execute("INSERT INTO lww_intents VALUES(?1,?2,?3,?4,?5,0)", rusqlite::params![request_id, authority, stamp, body, digest]).unwrap();
     drop(store);
     let store = PersistentStore::open(directory.path()).unwrap();
     assert_eq!(store.revision().unwrap(), later_revision);
     assert_eq!(store.read_plugin_storage("plugin-a", "claimed", None).unwrap().unwrap().value, json!(3));
     assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(), clock);
-    assert_eq!(store.device_store().unwrap().connection().query_row("SELECT complete FROM lww_intents WHERE request_id=?1", [&request_id], |row| row.get::<_,bool>(0)).unwrap(), true);
+    assert_eq!(store.device_store().unwrap().connection().query_row("SELECT count(*) FROM lww_intents WHERE request_id=?1", [&request_id], |row| row.get::<_,i64>(0)).unwrap(), 0);
 }
 
 /// A full replacement written later must not mint a fresh window for values a

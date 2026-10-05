@@ -33,6 +33,8 @@ import {
     getChatVarFromConversation,
     setChatVarOnConversation,
 } from "../parser/chatVar.svelte";
+import { findActiveHistoryWindow, resolveHistoryWindowChat, toWindowIndex } from "./historyWindowIndex";
+import { writeHistoryWindowMessage } from "./historyWindowWrite";
 
 export type ScriptMode = 'editinput'|'editoutput'|'editprocess'|'editdisplay'
 
@@ -187,6 +189,8 @@ export interface ScriptConversationOwner {
     chat: Chat | null
     version: number | null
     selectedCharacterId: string
+    /** Set when a send builds from a history window, whose writes go through the window. */
+    historyWindowConversationId?: string
 }
 
 function captureScriptConversationOwner(
@@ -236,6 +240,17 @@ function captureScriptConversationOwner(
 function requireScriptConversationOwner(owner: ScriptConversationOwner): void {
     const db = getDatabase()
     if (db !== owner.database) throw new ConversationSessionInactiveError()
+    if (owner.historyWindowConversationId !== undefined) {
+        // The window outlives a promotion of its conversation, so only the selection is checked.
+        const character = db.characters[get(selectedCharID)]
+        if (
+            character?.chaId !== owner.selectedCharacterId ||
+            character.chats[character.chatPage]?.id !== owner.historyWindowConversationId
+        ) {
+            throw new ConversationSessionInactiveError()
+        }
+        return
+    }
     if (
         owner.character &&
         db.characters.find((character) => character.chaId === owner.selectedCharacterId) !==
@@ -442,8 +457,26 @@ export class PromptScriptOperationScope {
 
 export function createPromptScriptOperationScope(
     char: character | groupChat | simpleCharacterArgument,
-    options: { pluginCompatibility?: boolean } = {},
+    options: {
+        pluginCompatibility?: boolean
+        /** The window chat of a send that builds from a history window. */
+        historyWindow?: { chat: Chat, conversationId: string }
+    } = {},
 ): PromptScriptOperationScope {
+    if (options.historyWindow) {
+        const database = getDatabase()
+        const selectedCharacter = database.characters[get(selectedCharID)] ?? null
+        if (selectedCharacter !== char) throw new ConversationSessionInactiveError()
+        return new PromptScriptOperationScope({
+            database,
+            character: selectedCharacter,
+            session: null,
+            chat: options.historyWindow.chat,
+            version: null,
+            selectedCharacterId: char.chaId,
+            historyWindowConversationId: options.historyWindow.conversationId,
+        }, options.pluginCompatibility === true)
+    }
     return new PromptScriptOperationScope(
         captureScriptConversationOwner(char, true),
         options.pluginCompatibility === true,
@@ -791,7 +824,14 @@ async function processScriptFullImpl(char:character|groupChat|simpleCharacterArg
                                 (candidate) => candidate.chaId === conversationOwner?.selectedCharacterId,
                             )
                             if (!selchar) throw new ConversationSessionInactiveError()
-                            selchar.chats[selchar.chatPage].message[chatID].data = data
+                            const chat = selchar.chats[selchar.chatPage]
+                            const historyWindow = conversationOperation
+                                ? null
+                                : findActiveHistoryWindow(selchar.chaId, chat.id)
+                            if (!historyWindow) chat.message[chatID].data = data
+                            else if (!writeHistoryWindowMessage(historyWindow, chatID, (message) => ({ ...message, data }))) {
+                                throw new ConversationSessionInactiveError()
+                            }
                         }
                         reg.lastIndex = 0
                         data = data.replace(reg, "")
@@ -847,9 +887,9 @@ async function processScriptFullImpl(char:character|groupChat|simpleCharacterArg
                                 (candidate) => candidate.chaId === conversationOwner?.selectedCharacterId,
                             )
                         if (!selchar) throw new ConversationSessionInactiveError()
-                        const chat = selchar.chats[selchar.chatPage]
+                        const chat = resolveHistoryWindowChat(selchar.chats[selchar.chatPage])
                         let lastChat = chat.fmIndex === -1 ? selchar.firstMessage : selchar.alternateGreetings[chat.fmIndex]
-                        const historyChatID = options.projectedChatID ?? chatID
+                        const historyChatID = toWindowIndex(chat, options.projectedChatID ?? chatID)
                         let pointer = historyChatID - 1
                         while(pointer >= 0){
                             if(chat.message[pointer].role === chat.message[historyChatID].role){

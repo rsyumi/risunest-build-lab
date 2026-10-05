@@ -265,23 +265,16 @@ pub(crate) fn open(
     }
     Ok(segment)
 }
-pub(crate) fn seal_body(
-    bytes: &[u8],
+pub(crate) fn seal_body_stream(
+    input: &mut impl std::io::Read,
+    output: &mut impl std::io::Write,
     library: &str,
     object: &str,
     root_key: &[u8; 32],
-) -> Result<Vec<u8>> {
+    length: u64,
+) -> Result<()> {
     let key = derive_key(root_key, library, "metadata").map_err(|_| corrupt())?;
-    let mut sealed = Vec::new();
-    encrypt(
-        &mut Cursor::new(bytes),
-        &mut sealed,
-        &key,
-        &binding(library, object, 0, "body")?,
-        bytes.len() as u64,
-    )
-    .map_err(|_| corrupt())?;
-    Ok(sealed)
+    encrypt(input, output, &key, &binding(library, object, 0, "body")?, length).map_err(|_| corrupt())
 }
 pub(crate) fn open_body_stream(input:&mut impl std::io::Read,output:&mut impl std::io::Write,library:&str,object:&str,root_key:&[u8;32],length:u64)->Result<()> {
     let key=derive_key(root_key,library,"metadata").map_err(|_|corrupt())?;

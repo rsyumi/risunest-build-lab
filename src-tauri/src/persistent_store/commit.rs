@@ -87,6 +87,40 @@ pub(super) fn commit_lww(
     commit_inner(connection, input, asset_aliases, Some((header, stamp, digest)))
 }
 
+/// The units a local edit can change, captured before the edit so that `record` queues exactly
+/// the ones the edit changed, under the edit's stamp.
+pub(super) struct LocalCapture<'a> {
+    targets: &'a WorkingSetCommit,
+    asset_aliases: &'a [AssetAlias],
+    conversation_orders: BTreeSet<String>,
+    before: std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue>,
+}
+
+impl<'a> LocalCapture<'a> {
+    pub(super) fn begin(
+        transaction: &Transaction<'_>,
+        generation: &str,
+        targets: &'a WorkingSetCommit,
+        asset_aliases: &'a [AssetAlias],
+        conversation_orders: BTreeSet<String>,
+    ) -> StoreResult<Self> {
+        let before = super::lww::capture_targets(transaction, generation, targets, asset_aliases, true, &conversation_orders)?;
+        Ok(Self { targets, asset_aliases, conversation_orders, before })
+    }
+
+    pub(super) fn record(
+        self,
+        transaction: &Transaction<'_>,
+        generation: &str,
+        header: &super::lww::Header,
+        stamp: &risunest_sync_wire::stamp::Stamp,
+    ) -> StoreResult<()> {
+        let after = super::lww::capture_targets(transaction, generation, self.targets, self.asset_aliases, false, &self.conversation_orders)?;
+        let changed = super::lww::record_changes(transaction, self.before, after, stamp, header.binding_authority, &header.request_id)?;
+        super::lww::refresh_orders(transaction, generation, &changed)
+    }
+}
+
 fn commit_inner(
     connection: &mut Connection,
     input: &WorkingSetCommit,
@@ -157,10 +191,10 @@ fn commit_inner(
                     }
                 }
             }
-            let before = super::lww::capture_targets(transaction, active, input, asset_aliases, true, &conversation_orders)?;
-            Ok((retained, before, conversation_orders))
+            let capture = LocalCapture::begin(transaction, active, input, asset_aliases, conversation_orders)?;
+            Ok((retained, capture))
         },
-        |transaction, generation, (retained, before, conversation_orders)| {
+        |transaction, generation, (retained, capture)| {
             if let Some(root) = &input.root {
                 put_root(transaction, generation, root)?;
             }
@@ -202,9 +236,7 @@ fn commit_inner(
             }
             replace_changed_owner_heads(transaction, generation, input, &retained)?;
             if let Some((header, stamp, digest)) = lww {
-                let after = super::lww::capture_targets(transaction, generation, input, asset_aliases, false, &conversation_orders)?;
-                let changed = super::lww::record_changes(transaction, before, after, stamp, header.binding_authority, &header.request_id)?;
-                super::lww::refresh_orders(transaction, generation,&changed)?;
+                capture.record(transaction, generation, header, stamp)?;
                 transaction.execute("INSERT INTO lww_requests(request_id,digest,revision) VALUES(?1,?2,?3)", params![header.request_id, digest, current_revision(transaction)?+1])?;
             }
             Ok(())
@@ -551,7 +583,17 @@ fn replace_plugin_storage_values(
         "DELETE FROM plugin_storage WHERE generation = ?1",
         [generation],
     )?;
-    for (ordinal, entry) in values.iter().enumerate() {
+    put_plugin_storage_values(transaction, generation, values, carried, 0)
+}
+
+fn put_plugin_storage_values(
+    transaction: &Transaction<'_>,
+    generation: &str,
+    values: &[super::PluginStorageValue],
+    carried: &HashMap<String, String>,
+    first_ordinal: i64,
+) -> StoreResult<()> {
+    for (offset, entry) in values.iter().enumerate() {
         let import_batch = plugin_owner::is_unowned(&entry.owner).then(|| {
             carried
                 .get(entry.key.as_str())
@@ -564,10 +606,50 @@ fn replace_plugin_storage_values(
             &entry.owner,
             &entry.key,
             &entry.value,
-            Some(ordinal as i64),
+            Some(first_ordinal + offset as i64),
             import_batch,
         )?;
     }
+    Ok(())
+}
+
+fn next_plugin_storage_ordinal(transaction: &Transaction<'_>, generation: &str) -> StoreResult<i64> {
+    Ok(transaction.query_row(
+        "SELECT COALESCE(MAX(ordinal) + 1, 0) FROM plugin_storage WHERE generation = ?1",
+        [generation],
+        |row| row.get(0),
+    )?)
+}
+
+/// Appends plugin values after those already staged, in the order given.
+pub(super) fn replace_add_plugin_storage_values(
+    connection: &mut Connection,
+    staging_id: &str,
+    values: &[super::PluginStorageValue],
+) -> StoreResult<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    require_staging(&transaction, staging_id)?;
+    let carried = carried_plugin_import_batches(&transaction)?;
+    let first = next_plugin_storage_ordinal(&transaction, staging_id)?;
+    put_plugin_storage_values(&transaction, staging_id, values, &carried, first)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Appends entries of a root's `pluginCustomStorage`, owned through the
+/// matching `pluginStorageMeta` entries, as staging the whole root would.
+pub(super) fn replace_add_plugin_storage(
+    connection: &mut Connection,
+    staging_id: &str,
+    storage: &Map<String, Value>,
+    meta: Option<&Map<String, Value>>,
+) -> StoreResult<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    require_staging(&transaction, staging_id)?;
+    let carried = carried_plugin_import_batches(&transaction)?;
+    let first = next_plugin_storage_ordinal(&transaction, staging_id)?;
+    put_plugin_storage_map(&transaction, staging_id, storage, meta, &carried, first)?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -671,6 +753,28 @@ pub(super) fn replace_put_conversation_row(
     Ok(())
 }
 
+/// Stages a conversation whose messages follow in pages, with the recency it
+/// would get if it were staged with its messages.
+pub(super) fn replace_put_conversation(
+    connection: &mut Connection,
+    staging_id: &str,
+    character_id: &str,
+    configured_index: i64,
+    conversation: &Value,
+    message_count: i64,
+    last_message_time: Option<&Value>,
+) -> StoreResult<()> {
+    replace_put_conversation_row(
+        connection,
+        staging_id,
+        character_id,
+        configured_index,
+        conversation,
+        conversation_recent_at(conversation, last_message_time),
+        message_count,
+    )
+}
+
 pub(super) fn replace_add_conversation_messages(
     connection: &mut Connection,
     staging_id: &str,
@@ -751,6 +855,39 @@ pub(super) fn replace_put_presets(
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     require_staging(&transaction, staging_id)?;
     replace_presets(&transaction, staging_id, presets)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Appends presets after those already staged.
+pub(super) fn replace_add_presets(
+    connection: &mut Connection,
+    staging_id: &str,
+    presets: &[Value],
+) -> StoreResult<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    require_staging(&transaction, staging_id)?;
+    let mut ids = HashSet::new();
+    for preset in presets {
+        let id = required_string(preset, "id", "Preset")?;
+        let staged = transaction
+            .query_row(
+                "SELECT 1 FROM bot_presets WHERE generation = ?1 AND preset_id = ?2",
+                params![staging_id, id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if staged || !ids.insert(id) {
+            return Err(validation("Duplicate preset ID"));
+        }
+    }
+    let first_index: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM bot_presets WHERE generation = ?1",
+        [staging_id],
+        |row| row.get(0),
+    )?;
+    put_preset_rows(&transaction, staging_id, presets, first_index)?;
     transaction.commit()?;
     Ok(())
 }
@@ -1500,7 +1637,18 @@ pub(super) fn replace_plugin_storage(
         "DELETE FROM plugin_storage WHERE generation = ?1",
         [generation],
     )?;
-    for (ordinal, (key, value)) in values.iter().enumerate() {
+    put_plugin_storage_map(transaction, generation, values, meta, carried, 0)
+}
+
+fn put_plugin_storage_map(
+    transaction: &Transaction<'_>,
+    generation: &str,
+    values: &Map<String, Value>,
+    meta: Option<&Map<String, Value>>,
+    carried: &HashMap<String, String>,
+    first_ordinal: i64,
+) -> StoreResult<()> {
+    for (offset, (key, value)) in values.iter().enumerate() {
         let owner = sidecar_owner(meta, key);
         // The staging identity names this import, so a plugin that starts once
         // afterwards can take a value the save left without an owner.
@@ -1512,7 +1660,7 @@ pub(super) fn replace_plugin_storage(
             owner,
             key,
             value,
-            Some(ordinal as i64),
+            Some(first_ordinal + offset as i64),
             import_batch,
         )?;
     }
@@ -1619,17 +1767,26 @@ pub(super) fn replace_presets(
     for id in existing { if !ids.contains(id.as_str()) {
         transaction.execute("DELETE FROM bot_presets WHERE generation=?1 AND preset_id=?2", params![generation,id])?;
     }}
+    put_preset_rows(transaction, generation, presets, 0)
+}
+
+fn put_preset_rows(
+    transaction: &Transaction<'_>,
+    generation: &str,
+    presets: &[Value],
+    first_index: i64,
+) -> StoreResult<()> {
     let mut statement = transaction.prepare_cached(
         "INSERT INTO bot_presets (generation, preset_id, configured_index, name, image, value)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(generation,preset_id) DO UPDATE SET configured_index=excluded.configured_index,
              name=excluded.name,image=excluded.image,value=excluded.value",
     )?;
-    for (configured_index, preset) in presets.iter().enumerate() {
+    for (offset, preset) in presets.iter().enumerate() {
         statement.execute(params![
             generation,
             required_string(preset, "id", "Preset")?,
-            configured_index as i64,
+            first_index + offset as i64,
             preset
                 .get("name")
                 .and_then(Value::as_str)
@@ -1881,16 +2038,10 @@ fn put_conversation(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let recent_at = object
-        .get("lastDate")
-        .and_then(Value::as_i64)
-        .or_else(|| {
-            messages
-                .last()
-                .and_then(|message| message.get("time"))
-                .and_then(Value::as_i64)
-        })
-        .unwrap_or_default();
+    let recent_at = conversation_recent_at(
+        conversation,
+        messages.last().and_then(|message| message.get("time")),
+    );
     let detail = without_field(conversation, "message")?;
     put_conversation_record(
         transaction,
@@ -1911,6 +2062,14 @@ fn put_conversation(
         0,
         &messages,
     )
+}
+
+fn conversation_recent_at(conversation: &Value, last_message_time: Option<&Value>) -> i64 {
+    conversation
+        .get("lastDate")
+        .and_then(Value::as_i64)
+        .or_else(|| last_message_time.and_then(Value::as_i64))
+        .unwrap_or_default()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2274,6 +2433,7 @@ pub(super) fn delete_generation(
     for (table, _) in GENERATION_TABLES.iter().rev() {
         while delete_generation_rows(transaction, table, generation, 256)? != 0 {}
     }
+    while delete_generation_rows(transaction, "replacement_source_units", generation, 256)? != 0 {}
     transaction.execute(
         "DELETE FROM snapshot_leases WHERE generation = ?1",
         [generation],
@@ -2366,7 +2526,7 @@ pub(super) fn purge_retired_batch(connection: &mut Connection, limit: usize) -> 
         .collect::<Result<Vec<_>, _>>()?;
     let mut budget = limit.max(1);
     for generation in &retired {
-        for (table, _) in GENERATION_TABLES.iter().rev() {
+        for table in GENERATION_TABLES.iter().rev().map(|(table, _)| *table).chain(["replacement_source_units"]) {
             if budget == 0 {
                 break;
             }

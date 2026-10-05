@@ -12,6 +12,9 @@ import { SqlitePersistentDataStore } from './sqlitePersistentDataStore'
 import { nativePersistentRevisionLease } from './nativePersistentExport'
 import { RevisionConflictError, SnapshotReleasedError } from './persistentDataStore'
 import { fixtureDatabase } from './tests/persistentDataFixtures'
+import { MAX_NATIVE_REQUEST_BYTES, PayloadTooLargeError } from './nativePersistenceValue'
+import type { botPreset, character, Database, Message } from './database.svelte'
+import type { PluginStorageValue } from './persistentDataStore'
 
 describe('SqlitePersistentDataStore', () => {
     it('activates a bound upstream staging generation through an immutable LWW replacement request', async () => {
@@ -297,20 +300,18 @@ describe('SqlitePersistentDataStore', () => {
         await expect(store.readRoot()).rejects.toBeInstanceOf(SnapshotReleasedError)
     })
 
-    it('restores native validation errors as ordinary errors', async () => {
-        mocks.invoke.mockRejectedValue({ code: 'validation', message: 'invalid character' })
+    it.each([
+        { code: 'validation', message: 'request-id-integrity' },
+        { code: 'store-error', message: 'disk I/O error' },
+        { code: 'commit-decode', message: 'invalid commit body' },
+        { code: 'schema-mismatch', message: 'invalid-lww-schema' },
+    ])('restores a native $code error as an Error that keeps its code', async (native) => {
+        mocks.invoke.mockRejectedValue(native)
         const store = new SqlitePersistentDataStore()
 
-        await expect(store.readCharacter('char-a')).rejects.toEqual(
-            new Error('invalid character'),
-        )
-    })
-
-    it('restores native store errors as ordinary errors', async () => {
-        mocks.invoke.mockRejectedValue({ code: 'store-error', message: 'disk I/O error' })
-        const store = new SqlitePersistentDataStore()
-
-        await expect(store.readRoot()).rejects.toEqual(new Error('disk I/O error'))
+        const error = await store.readRoot().catch((value: unknown) => value)
+        expect(error).toBeInstanceOf(Error)
+        expect(error).toMatchObject(native)
     })
 
     it('cancels an in-flight native character archive operation with the same operation id', async () => {
@@ -674,4 +675,130 @@ describe('SqlitePersistentDataStore', () => {
         await expect(lease.readRoot()).rejects.toBeInstanceOf(SnapshotReleasedError)
         expect(releaseCalls).toBe(2)
     })
+})
+
+describe('SqlitePersistentDataStore staged replacement pieces', () => {
+    const MiB = 1024 * 1024
+    const stagingId = 'staging-pieces'
+    const store = new SqlitePersistentDataStore()
+    const huge = () => 'x'.repeat(MAX_NATIVE_REQUEST_BYTES)
+
+    beforeEach(() => {
+        mocks.invoke.mockReset()
+        mocks.invoke.mockImplementation(async (command: string) => {
+            if (command === 'pds_replace_begin') return { stagingId }
+            if (command === 'pds_replace_preserve_repositories') return { revision: 4 }
+            if (command === 'pds_replace_commit') return { revision: 5 }
+            return undefined
+        })
+    })
+    const calls = (match: (command: string) => boolean) =>
+        mocks.invoke.mock.calls.filter(([command]) => match(command))
+
+    it('stages a character above the request budget as its detail, each chat and message pages', async () => {
+        const database = structuredClone(fixtureDatabase)
+        const [beta, alpha, gamma] = database.characters as character[]
+        const messages = ['a', 'b', 'c'].map((mark, index) => ({
+            role: 'user', data: mark.repeat(1.5 * MiB), time: 1_700_000_000_000 + index,
+        })) as Message[]
+        alpha.chats[0].message = messages
+        alpha.chats[1].message = [{ role: 'char', data: 'reply' }] as Message[]
+
+        await store.replaceFromDatabase(database, 4)
+
+        const { chats, ...detail } = alpha
+        const [long, short] = chats.map(({ message: _message, ...conversation }) => conversation)
+        const conversation = { stagingId, characterId: 'char-a' }
+        expect(calls((command) => /character|conversation/.test(command))).toEqual([
+            ['pds_replace_add_characters', { stagingId, characters: [beta] }],
+            ['pds_replace_put_character_detail', { stagingId, detail, conversationCount: 2 }],
+            ['pds_replace_put_conversation', {
+                ...conversation, configuredIndex: 0, conversation: long, messageCount: 3, lastMessageTime: 1_700_000_000_002,
+            }],
+            ['pds_replace_add_conversation_messages', {
+                ...conversation, conversationId: 'conv-long', start: 0, messages: messages.slice(0, 2),
+            }],
+            ['pds_replace_add_conversation_messages', {
+                ...conversation, conversationId: 'conv-long', start: 2, messages: messages.slice(2),
+            }],
+            ['pds_replace_put_conversation', { ...conversation, configuredIndex: 1, conversation: short, messageCount: 1 }],
+            ['pds_replace_add_conversation_messages', {
+                ...conversation, conversationId: 'conv-short', start: 0, messages: alpha.chats[1].message,
+            }],
+            ['pds_replace_add_characters', { stagingId, characters: [gamma] }],
+        ])
+        expect(calls((command) => command === 'pds_replace_put_conversation')[1][1]).not.toHaveProperty('lastMessageTime')
+    })
+
+    it('stages presets above the request budget in append batches', async () => {
+        const database = structuredClone(fixtureDatabase)
+        database.botPresets = ['a', 'b', 'c'].map((mark) => ({
+            id: `preset-${mark}`, name: mark, mainPrompt: mark.repeat(1.5 * MiB),
+        })) as unknown as botPreset[]
+
+        await store.replaceFromDatabase(database, 4)
+
+        expect(calls((command) => command.includes('presets'))).toEqual([
+            ['pds_replace_put_presets', { stagingId, presets: database.botPresets.slice(0, 2) }],
+            ['pds_replace_add_presets', { stagingId, presets: database.botPresets.slice(2) }],
+        ])
+    })
+
+    it('stages plugin values that do not fit beside the root in append batches', async () => {
+        const values = ['a', 'b', 'c'].map((mark) => ({
+            owner: 'synthetic-plugin', key: mark, value: mark.repeat(1.5 * MiB),
+        }))
+
+        await store.replaceFromDatabase(fixtureDatabase, 4, [], values)
+
+        const { characters: _characters, botPresets: _presets, ...root } = fixtureDatabase
+        expect(calls((command) => /root|plugin/.test(command))).toEqual([
+            ['pds_replace_put_root', { stagingId, root, pluginStorageValues: [] }],
+            ['pds_replace_add_plugin_storage_values', { stagingId, values: values.slice(0, 2) }],
+            ['pds_replace_add_plugin_storage_values', { stagingId, values: values.slice(2) }],
+        ])
+    })
+
+    it('moves the plugin storage of a root above the request budget into append batches', async () => {
+        const database = structuredClone(fixtureDatabase)
+        const [a, b, c] = ['a', 'b', 'c'].map((mark) => mark.repeat(1.5 * MiB))
+        database.pluginCustomStorage = { a, b, c }
+        database.pluginStorageMeta = { a: { plugin: 'synthetic-plugin', updatedAt: 1 }, c: { plugin: 'other-plugin', updatedAt: 2 } }
+
+        await store.replaceFromDatabase(database, 4)
+
+        const {
+            characters: _characters, botPresets: _presets, pluginCustomStorage: _storage, pluginStorageMeta: meta, ...root
+        } = database
+        expect(calls((command) => /root|plugin/.test(command))).toEqual([
+            ['pds_replace_put_root', { stagingId, root }],
+            ['pds_replace_add_plugin_storage', { stagingId, storage: { a, b }, meta: { a: meta.a } }],
+            ['pds_replace_add_plugin_storage', { stagingId, storage: { c }, meta: { c: meta.c } }],
+        ])
+    })
+
+    it.each([
+        ['root', 'pds_replace_put_root', (database: any) => { database.username = huge() }],
+        ['preset', 'pds_replace_put_presets', (database: any) => { database.botPresets[0].mainPrompt = huge() }],
+        ['character', 'pds_replace_put_character_detail', (database: any) => { database.characters[1].desc = huge() }],
+        ['conversation', 'pds_replace_put_conversation', (database: any) => { database.characters[1].chats[0].note = huge() }],
+        ['message', 'pds_replace_add_conversation_messages', (database: any) => {
+            database.characters[1].chats[0].message[0].data = huge()
+        }],
+        ['plugin-value', 'pds_replace_add_plugin_storage', (database: any) => { database.pluginCustomStorage = { big: huge() } }],
+        ['plugin-value', 'pds_replace_add_plugin_storage_values', () => [{ owner: 'synthetic-plugin', key: 'big', value: huge() }]],
+    ] as const)('refuses a %s above the request limit with %s unsent and aborts the staging', async (kind, command, grow) => {
+        const database = structuredClone(fixtureDatabase)
+        const values = grow(database) as PluginStorageValue[] | undefined
+
+        const error = await store.replaceFromDatabase(database, 4, [], values).catch((caught) => caught)
+
+        expect(error).toBeInstanceOf(PayloadTooLargeError)
+        expect(error.kind).toBe(kind)
+        expect(error.byteLength).toBeGreaterThan(MAX_NATIVE_REQUEST_BYTES)
+        const commands = mocks.invoke.mock.calls.map(([sent]) => sent)
+        expect(commands).not.toContain(command)
+        expect(commands).not.toContain('pds_replace_commit')
+        expect(commands.at(-1)).toBe('pds_replace_abort')
+    }, 60_000)
 })

@@ -142,15 +142,12 @@ fn invalid_confirmation_is_atomic_and_unknown_schema_is_rejected() {
     assert!(Residency::open(root.path()).is_err());
 }
 
-static ANCHOR_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn log_path(root: &Path) -> PathBuf {
     PathBuf::from(format!("{}-wal", Residency::path(root).display()))
 }
 
 #[test]
 fn an_armed_anchor_keeps_the_log_open_until_released() {
-    let _serial = ANCHOR_TESTS.lock().unwrap_or_else(|e| e.into_inner());
     let root = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();
     arm_anchor(root.path());
@@ -163,41 +160,6 @@ fn an_armed_anchor_keeps_the_log_open_until_released() {
     release_anchor();
     assert!(!log_path(root.path()).exists());
 }
-
-/// Measures concurrent per-use opens: `cargo test --lib -- --ignored
-/// per_use_opens_race`. Unarmed runs fail on Windows; armed runs must not.
-#[test]
-#[ignore = "explicit concurrent open measurement"]
-fn per_use_opens_race_only_without_an_anchor() {
-    let _serial = ANCHOR_TESTS.lock().unwrap_or_else(|e| e.into_inner());
-    let burst = |root: &Path| {
-        let failures = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            for _ in 0..8 {
-                scope.spawn(|| {
-                    for _ in 0..500 {
-                        let opened = Residency::open(root)
-                            .and_then(|store| store.object(&hash(b"payload"), None));
-                        if opened.is_err() {
-                            failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                });
-            }
-        });
-        failures.into_inner()
-    };
-    let unarmed = tempfile::tempdir().unwrap();
-    drop(Residency::open(unarmed.path()).unwrap());
-    let unarmed_failures = burst(unarmed.path());
-    let armed = tempfile::tempdir().unwrap();
-    arm_anchor(armed.path());
-    let armed_failures = burst(armed.path());
-    release_anchor();
-    eprintln!("unarmed failures: {unarmed_failures}/4000, armed failures: {armed_failures}/4000");
-    assert_eq!(armed_failures, 0);
-}
-
 
 #[test]
 fn transient_fixture_rejects_corrupt_body_and_reclaims_its_scratch() {

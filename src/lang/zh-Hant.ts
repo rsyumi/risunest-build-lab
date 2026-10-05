@@ -18,8 +18,7 @@ export const languageChineseTraditional = {
         "hypaDeletion": "刪除後續摘要",
         "pluginDataDeletion": "刪除外掛資料",
         "lorebookDeletion": "刪除世界書資料夾及項目",
-        "partialBackup": "備份不包含其他資源",
-        "onlySelectedMessage": "僅刪除此訊息"
+        "partialBackup": "備份不包含其他資源"
     },
 
     "formating": {

@@ -144,6 +144,7 @@ pub(crate) fn require_no_pending_publication(db: &Connection) -> StoreResult<()>
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BindingContent {
     pub library: serde_json::Value,
+    pub character_count: risunest_sync_wire::stamp::DecimalU64,
     pub opaque_shared_unit_count: risunest_sync_wire::stamp::DecimalU64,
     pub shared_variables: serde_json::Value,
     pub protected_values: serde_json::Value,
@@ -186,11 +187,13 @@ impl super::PersistentStore {
                 if let Some(value) = super::lww::json_value_resolved(&self.connection,&value)? { protected.insert(key.components()[1].clone(),value); }
             }
         }
+        // Binding compares this with a factory library, which has no characters, so a count
+        // decides for them, and plugin storage values are counted above. The response then
+        // grows only with root fields and presets.
+        let (library, character_count) = self.binding_library()?;
         Ok(BindingContent {
-            // Binding only compares this with a factory library, which has no characters, so a
-            // character decides the comparison before any chat could. A large library's chats
-            // would not fit in one response on Android.
-            library: self.materialize_without_chats()?,
+            library,
+            character_count: character_count.into(),
             opaque_shared_unit_count: opaque_shared_unit_count.into(),
             shared_variables,
             protected_values:serde_json::Value::Object(protected),
@@ -273,14 +276,14 @@ mod binding_tests {
     fn binding_content_count_dto_uses_only_canonical_decimal_strings() {
         let encoded = serde_json::json!({
             "library":{},"sharedVariables":{},"protectedValues":{},
-            "opaqueSharedUnitCount":"0","managedAliasCount":"18446744073709551615",
+            "characterCount":"3","opaqueSharedUnitCount":"0","managedAliasCount":"18446744073709551615",
             "ordinaryPluginValueCount":"9007199254740993","hypaValueCount":"1","pluginLocalValueCount":"2",
             "pluginLocalParticipating":false
         });
         let decoded:BindingContent = serde_json::from_value(encoded.clone()).unwrap();
         assert_eq!(decoded.managed_alias_count.0,u64::MAX);
         assert_eq!(serde_json::to_value(decoded).unwrap(),encoded);
-        for key in ["opaqueSharedUnitCount","managedAliasCount","ordinaryPluginValueCount","hypaValueCount","pluginLocalValueCount"] {
+        for key in ["characterCount","opaqueSharedUnitCount","managedAliasCount","ordinaryPluginValueCount","hypaValueCount","pluginLocalValueCount"] {
             for invalid in [serde_json::json!(0),serde_json::Value::Null,serde_json::json!(""),serde_json::json!("00"),serde_json::json!("01"),serde_json::json!("+1"),serde_json::json!("-1"),serde_json::json!("1.0"),serde_json::json!("1e3"),serde_json::json!(" 1"),serde_json::json!("18446744073709551616")] {
                 let mut input=encoded.clone();input[key]=invalid;
                 assert!(serde_json::from_value::<BindingContent>(input).is_err(),"accepted invalid {key}");
@@ -315,7 +318,7 @@ mod binding_tests {
         assert_eq!(content.ordinary_plugin_value_count.0, 0);
     }
     #[test]
-    fn binding_content_library_matches_the_materialized_library_without_chats() {
+    fn binding_content_library_is_the_materialized_library_without_characters_or_plugin_values() {
         use serde_json::json;
         let dir = tempfile::tempdir().unwrap();
         let mut store = super::super::PersistentStore::open(dir.path()).unwrap();
@@ -323,7 +326,14 @@ mod binding_tests {
         store.replace_put_root(&staging, &json!({"plugins": [{"name": "Plugin"}], "pluginCustomStorage": {"plugin": {"enabled": true}}})).unwrap();
         store.replace_put_presets(&staging, &[json!({"id": "preset-a", "name": "Preset A"})]).unwrap();
         let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
-        assert_eq!(store.lww_binding_content().unwrap().library, store.materialize(None).unwrap());
+        let mut expected = store.materialize(None).unwrap();
+        assert_eq!(expected["pluginCustomStorage"], json!({"plugin": {"enabled": true}}));
+        expected.as_object_mut().unwrap().shift_remove("pluginCustomStorage");
+        let content = store.lww_binding_content().unwrap();
+        assert_eq!(content.library, expected);
+        assert_eq!(content.library["characters"], json!([]));
+        assert_eq!(content.character_count.0, 0);
+        assert_eq!(content.ordinary_plugin_value_count.0, 1);
 
         let staging = store.replace_begin().unwrap().staging_id;
         store.replace_put_root(&staging, &json!({"plugins": [{"name": "Plugin"}]})).unwrap();
@@ -338,10 +348,11 @@ mod binding_tests {
         store.replace_commit(&staging, Some(revision)).unwrap();
         let mut expected = store.materialize(None).unwrap();
         assert_eq!(expected["characters"][0]["chats"][0]["message"].as_array().unwrap().len(), 2);
-        expected["characters"][0].as_object_mut().unwrap().remove("chats");
-        let library = store.lww_binding_content().unwrap().library;
-        assert!(library["characters"][0].get("chats").is_none());
-        assert_eq!(library, expected);
+        expected["characters"] = json!([]);
+        expected.as_object_mut().unwrap().shift_remove("pluginCustomStorage");
+        let content = store.lww_binding_content().unwrap();
+        assert_eq!(content.library, expected);
+        assert_eq!(content.character_count.0, 1);
     }
     fn staged(store: &mut super::super::PersistentStore, inspection: &str, changes: &[super::super::lww::Change]) -> (String,String) {
         let receive = uuid::Uuid::new_v4().to_string();

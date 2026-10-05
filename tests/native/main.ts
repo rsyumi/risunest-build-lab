@@ -1,4 +1,5 @@
 import { runContractScenarios, verifyContractReadback } from './contractScenarios'
+import { endsByNativeExit, runNativeExitPhase, verifySessionEndReadback } from './lifecycleScenarios'
 import { invoke } from '@tauri-apps/api/core'
 import { SqlitePersistentDataStore } from '../../src/ts/storage/sqlitePersistentDataStore'
 import { RevisionConflictError } from '../../src/ts/storage/persistentDataStore'
@@ -29,6 +30,11 @@ const cases: string[] = []
 try {
     const store = new SqlitePersistentDataStore()
     await store.open()
+    if (endsByNativeExit(phase.phase)) {
+        // The app's own native exit ends these phases, after they record their report.
+        await runNativeExitPhase(phase, store, fixture)
+        await new Promise<never>(() => {})
+    }
     if (phase.phase === 'contract') {
         await runContractScenarios(store, fixture, async () => {
             const reopened = new SqlitePersistentDataStore()
@@ -39,6 +45,9 @@ try {
     } else if (phase.phase === 'read-contract') {
         await verifyContractReadback(store)
         cases.push('contract-restart-without-reseed')
+    } else if (phase.phase === 'read-session-end') {
+        await verifySessionEndReadback(store)
+        cases.push('saved-before-exit')
     } else {
         if (phase.phase === 'write' || phase.phase === 'abort') {
             equal(store.lastOpenResult?.revision, 0, 'fresh store')

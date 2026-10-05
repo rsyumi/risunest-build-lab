@@ -1201,7 +1201,7 @@ fn library_object_roots(db: &Connection, objects: &Connection, roots: &mut Objec
         "SELECT value FROM lww_receive_rows WHERE status<>'done' AND json_extract(value,'$.kind')='object'",
         "SELECT value FROM lww_binding_source_units WHERE json_extract(value,'$.kind')='object'",
         "SELECT value FROM snapshot_original_units WHERE json_extract(value,'$.kind')='object'",
-        "SELECT value FROM snapshot_restore_units WHERE json_extract(value,'$.kind')='object'",
+        "SELECT value FROM replacement_source_units WHERE json_extract(value,'$.kind')='object'",
     ] {
         unit_value_roots(db, objects, sql, roots)?;
     }

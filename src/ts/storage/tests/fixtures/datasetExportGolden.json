@@ -1,0 +1,89 @@
+{
+    "characters": [
+        {
+            "type": "character",
+            "chaId": "dataset-alice",
+            "name": "Alice",
+            "desc": "Alice's description",
+            "globalLore": [
+                { "key": "forest", "content": "A quiet forest", "insertorder": 100, "alwaysActive": false }
+            ],
+            "chats": [
+                {
+                    "id": "alice-first",
+                    "name": "First chat",
+                    "note": "",
+                    "message": [
+                        { "role": "user", "data": "Hello 한글 🐿️", "time": 1700000000000, "chatId": "alice-m1" },
+                        {
+                            "role": "char",
+                            "data": "Line one\nLine \"two\" \\ end",
+                            "saying": "dataset-alice",
+                            "chatId": "alice-m2",
+                            "generationInfo": { "model": "synthetic", "inputTokens": 12, "temperature": 0.7 }
+                        }
+                    ]
+                },
+                { "id": "alice-empty", "name": "Empty chat", "message": [] }
+            ]
+        },
+        {
+            "type": "group",
+            "chaId": "dataset-group",
+            "name": "Group",
+            "characters": ["dataset-alice"],
+            "chats": [
+                { "id": "group-chat", "name": "Group chat", "message": [{ "role": "user", "data": "Not exported" }] }
+            ]
+        },
+        {
+            "type": "character",
+            "chaId": "dataset-bob",
+            "name": "Bob",
+            "desc": null,
+            "chats": [
+                { "id": "bob-only", "name": "Only chat", "message": [{ "role": "user", "data": "", "time": 0 }] }
+            ]
+        },
+        {
+            "type": "character",
+            "chaId": "dataset-carol",
+            "name": "Carol",
+            "desc": "No chats",
+            "globalLore": [],
+            "chats": []
+        }
+    ],
+    "dataset": [
+        {
+            "name": "Alice",
+            "description": "Alice's description",
+            "chats": [
+                { "role": "user", "data": "Hello 한글 🐿️", "time": 1700000000000, "chatId": "alice-m1" },
+                {
+                    "role": "char",
+                    "data": "Line one\nLine \"two\" \\ end",
+                    "saying": "dataset-alice",
+                    "chatId": "alice-m2",
+                    "generationInfo": { "model": "synthetic", "inputTokens": 12, "temperature": 0.7 }
+                }
+            ],
+            "lorebook": [
+                { "key": "forest", "content": "A quiet forest", "insertorder": 100, "alwaysActive": false }
+            ]
+        },
+        {
+            "name": "Alice",
+            "description": "Alice's description",
+            "chats": [],
+            "lorebook": [
+                { "key": "forest", "content": "A quiet forest", "insertorder": 100, "alwaysActive": false }
+            ]
+        },
+        {
+            "name": "Bob",
+            "description": null,
+            "chats": [{ "role": "user", "data": "", "time": 0 }]
+        }
+    ]
+}

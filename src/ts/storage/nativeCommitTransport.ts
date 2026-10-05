@@ -1,4 +1,4 @@
-import { prepareNativePersistenceValue, UnsaveableValueError } from './nativePersistenceValue'
+import { MAX_NATIVE_REQUEST_BYTES, PayloadTooLargeError, prepareNativePersistenceValue, UnsaveableValueError, utf8ByteLength, type PayloadTooLargeKind } from './nativePersistenceValue'
 import { invoke } from '@tauri-apps/api/core'
 import { platform } from '@tauri-apps/plugin-os'
 import type { AssetAlias, WorkingSetCommit } from './persistentDataStore'
@@ -8,7 +8,6 @@ import {
 } from './androidBinaryCommitBridge'
 import {
     ANDROID_LARGE_COMMIT_SIZE,
-    MAX_ANDROID_COMMIT_BYTES,
     sendAndroidCommit,
 } from './androidCommitTransport'
 
@@ -17,8 +16,10 @@ export interface CommitEnvelope {
     assetAliases: AssetAlias[]
 }
 export const LARGE_COMMIT_BYTES = 1024 * 1024
-export const MAX_SHARED_COMMIT_BYTES = 64 * 1024 * 1024
+/** An ordinary invoke carries one staged replace request up to this many bytes. */
+export const STAGED_REQUEST_BYTES = 4 * 1024 * 1024
 const PROBE_VISITS = 4096
+const textEncoder = new TextEncoder()
 
 /** A bounded routing hint, not another full JSON serialization on the UI thread. */
 export function isLargeCommit(value: unknown, threshold = LARGE_COMMIT_BYTES): boolean {
@@ -78,6 +79,32 @@ export class NativeCommitTransport {
         return run
     }
 
+    /**
+     * Sends one staged replace request. Every target refuses a request above
+     * the native limit before sending it, and Android sends one above the
+     * ordinary budget in chunks, in turn with commits.
+     */
+    async stage(command: string, kind: PayloadTooLargeKind, args: Record<string, unknown>): Promise<void> {
+        const json = JSON.stringify(args)
+        const head = `{"command":${JSON.stringify(command)},"args":`
+        const byteLength = utf8ByteLength(head) + utf8ByteLength(json) + 1
+        if (byteLength > MAX_NATIVE_REQUEST_BYTES) throw new PayloadTooLargeError(kind, byteLength)
+        const deps = this.dependencies
+        if (!(deps.android?.() ?? false) || byteLength <= STAGED_REQUEST_BYTES) {
+            await deps.invoke(command, args)
+            return
+        }
+        const body = textEncoder.encode(`${head}${json}}`)
+        const run = this.pending.then(() => sendAndroidCommit<void>(
+            body,
+            deps.invoke,
+            deps.androidBinary ? deps.androidBinary() : getAndroidBinaryCommitBridge(),
+            'pds_replace_android_finish',
+        ))
+        this.pending = run.catch(() => undefined)
+        await run
+    }
+
     private async sendRaw(bytes: Uint8Array): Promise<{ revision: number }> {
         const json = () => this.dependencies.invoke<{ revision: number }>(
             'pds_commit', JSON.parse(new TextDecoder().decode(bytes)),
@@ -119,10 +146,10 @@ export class NativeCommitTransport {
             }
             throw error
         }
+        // The Android transport assembles at most this much, and every target
+        // keeps the same limit so a save that works on one works on all.
+        if (bytes.byteLength > MAX_NATIVE_REQUEST_BYTES) throw new PayloadTooLargeError('commit', bytes.byteLength)
         if (android) {
-            // Keep the existing large-save contract beyond the bounded assembly budget.
-            if (bytes.byteLength > MAX_ANDROID_COMMIT_BYTES)
-                return deps.invoke('pds_commit', { ...prepareNativePersistenceValue(input) })
             return sendAndroidCommit(
                 bytes,
                 deps.invoke,
@@ -131,8 +158,7 @@ export class NativeCommitTransport {
         }
         if (rawPlatform) return this.sendRaw(bytes)
         const webview = deps.shared()
-        if (!webview || bytes.byteLength > MAX_SHARED_COMMIT_BYTES)
-            return this.sendRaw(bytes)
+        if (!webview) return this.sendRaw(bytes)
         const requestId = crypto.randomUUID()
         let buffer: ArrayBuffer | undefined
         let nativeId: string | undefined

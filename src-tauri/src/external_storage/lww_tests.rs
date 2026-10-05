@@ -151,6 +151,12 @@ impl CycleFixture {
             receiver,
         }
     }
+    /// Closes the sender's store and opens it again, as a restart does.
+    pub(crate) fn restart_a(&mut self) {
+        let placeholder = tempfile::tempdir().unwrap();
+        drop(std::mem::replace(&mut self.a, PersistentStore::open(placeholder.path()).unwrap()));
+        self.a = PersistentStore::open(self.directory_a.path()).unwrap();
+    }
     pub(crate) async fn publish_a(&mut self) -> super::lww_engine::PublicationResult {
         self.sender
             .publish(&mut self.a, DecimalU64(0), &[], &Cancellation::default())
@@ -323,7 +329,7 @@ fn small_assets_use_authenticated_catalogs_and_present_bootstrap_reads_no_bodies
         reset_body_io();
         for hash in [&hash, &second_hash] { register_object_purpose(hash, BodyPurpose::Asset); }
         let directory = tempfile::tempdir().unwrap();
-        let mut state = f.receiver.published_state(directory.path(), &cancel).await.unwrap();
+        let mut state = f.receiver.published_state(&mut f.b, directory.path(), &cancel).await.unwrap();
         f.receiver.stage_published_objects(&mut f.b, &mut state, directory.path(), &cancel).await.unwrap();
         let work = take_body_io();
         assert!(work.complete(), "{work:?}");
@@ -375,7 +381,7 @@ fn packed_asset_uncertainty_reopens_frozen_job_and_keeps_original_pack_bytes() {
         assert_eq!(f.a.external_lww_next_sequence(&f.sender.target_scope(), &writer).unwrap(), 2);
         assert!(f.a.lww_read_outbox(0.into(), 100).unwrap().entries.is_empty());
         let directory = tempfile::tempdir().unwrap();
-        let mut state = f.receiver.published_state(directory.path(), &cancel).await.unwrap();
+        let mut state = f.receiver.published_state(&mut f.b, directory.path(), &cancel).await.unwrap();
         f.receiver.stage_published_objects(&mut f.b, &mut state, directory.path(), &cancel).await.unwrap();
         assert!(!f.b.external_lww_object_is_local(&hash).unwrap());
         assert_eq!(super::lww_residency::stat(f.directory_b.path(), &hash).unwrap(), Some(body.len() as u64));
@@ -453,7 +459,7 @@ fn server_held_publication_keeps_captured_source_and_rejects_changed_authority()
                 let writer = f.a.lww_clock_state().unwrap().writer_id;
                 let pending = f.a.external_lww_pending(&f.sender.target_scope(), &writer).unwrap().unwrap().0;
                 assert_eq!(pending.entries, original_pending);
-                assert!(!pending.sealed && !pending.dispatched && pending.bodies.iter().all(|body| body.bytes.is_empty()));
+                assert!(!pending.sealed && !pending.dispatched && pending.bodies.iter().all(|body| body.sha256.is_empty()));
                 assert_eq!(f.a.external_lww_next_sequence(&f.sender.target_scope(), &writer).unwrap(), 1);
             } else {
                 assert!(!workers.is_empty());
@@ -481,7 +487,8 @@ fn real_publish_and_receive_continue_while_checkpoint_inputs_are_paused() {
         let writer=f.a.lww_clock_state().unwrap().writer_id;
         let caps=fake::capabilities(true); let cancel=Cancellation::default();
         let compactor=ExternalLwwEngine{provider:f.provider.clone(),repository:fake::repository(),library:f.sender.library.clone(),root_key:zeroize::Zeroizing::new([7;32]),admission:Some(Admission::synthetic(super::runtime::now_ms())),connection_id:"compactor".into(),connection_root:job.path().into(),capabilities:f.sender.capabilities.clone(),descriptor:f.sender.descriptor.clone()};
-        let compaction=compactor.compact_published(job.path(),id,&writer,&caps,&cancel,None);
+        let compactor_directory=tempfile::tempdir().unwrap();let mut compactor_store=PersistentStore::open(compactor_directory.path()).unwrap();
+        let compaction=compactor.compact_published(&mut compactor_store,job.path(),id,&writer,&caps,&cancel,None);
         let routine=async {
             barrier.reached.notified().await;
             set(&mut f.a,&["root","language"],serde_json::json!("en"));
@@ -660,8 +667,9 @@ fn restart_uses_retained_segments_and_bootstraps_only_after_required_retirement(
                 .find(|receipt| parse_segment_object_id(&receipt.locator.object).unwrap().1==2).unwrap();
             let required_bytes=f.provider.contents(&required.locator.object).unwrap();
             let job=tempfile::tempdir().unwrap();
-            let completed=f.sender.compact_published(job.path(),"00000000-0000-4000-8000-000000000090",
-                &f.a.lww_clock_state().unwrap().writer_id,&f.sender.capabilities,&Cancellation::default(),None).await.unwrap();
+            let writer=f.a.lww_clock_state().unwrap().writer_id;
+            let completed=f.sender.compact_published(&mut f.a,job.path(),"00000000-0000-4000-8000-000000000090",
+                &writer,&f.sender.capabilities,&Cancellation::default(),None).await.unwrap();
             let dependencies=completed.referenced_objects.iter()
                 .filter(|object|matches!(object.role,ObjectRole::Pack|ObjectRole::Catalog))
                 .map(|object|object.receipt.locator.object.clone()).collect::<Vec<_>>();
@@ -700,7 +708,8 @@ fn checkpoint_uses_only_published_units_and_restores_after_segment_retirement() 
         f.publish_a().await;
         set(&mut f.a,&["root","language"],serde_json::json!("en"));
         let job=tempfile::tempdir().unwrap();
-        let completed=f.sender.compact_published(job.path(),"00000000-0000-4000-8000-000000000099",&f.a.lww_clock_state().unwrap().writer_id,&fake::capabilities(true),&Cancellation::default(),None).await.unwrap();
+        let writer=f.a.lww_clock_state().unwrap().writer_id;
+        let completed=f.sender.compact_published(&mut f.a,job.path(),"00000000-0000-4000-8000-000000000099",&writer,&fake::capabilities(true),&Cancellation::default(),None).await.unwrap();
         assert_eq!(completed.reference.role,ObjectRole::Snapshot);
         let snapshots=f.sender.snapshot_listing(&Cancellation::default()).await.unwrap();
         assert_eq!(snapshots.len(),1);
@@ -1055,7 +1064,7 @@ fn gaps_do_not_advance_and_authenticated_variants_stop_even_after_consumption() 
                 .kind,
             ErrorKind::Corrupt
         );
-        assert_eq!(f.provider.read_attempts(&id), 1);
+        assert_eq!(f.provider.read_attempts(&id), 0);
     })
 }
 #[test]
@@ -1136,7 +1145,7 @@ fn large_bodies_stay_remote_then_only_missing_body_hydrates() {
         f.a.lww_put_managed_object(&second_hash,&second).unwrap();
         let mut second_alias=alias.clone();second_alias.key="synthetic-second-asset".into();second_alias.object_hash=Some(second_hash.clone());
         f.a.commit_asset_alias(&second_alias,f.a.revision().unwrap()).unwrap();f.publish_a().await;
-        let inputs=tempfile::tempdir().unwrap();let mut state=f.receiver.published_state(inputs.path(),&Cancellation::default()).await.unwrap();
+        let inputs=tempfile::tempdir().unwrap();let mut state=f.receiver.published_state(&mut f.b,inputs.path(),&Cancellation::default()).await.unwrap();
         let first_root=state.standalone_roots.get(&hash).unwrap().clone();let second_root=state.standalone_roots.get(&second_hash).unwrap().clone();
         assert_ne!(first_root,second_root);
         for (body_hash,root) in [(&hash,&first_root),(&second_hash,&second_root)] {
@@ -1429,7 +1438,7 @@ fn dependency_response_loss_reuses_exact_frozen_ciphertext_before_segment_seal()
         assert_eq!(pending.assets[0].content_hash, hash);
         assert_eq!(pending.assets[0].byte_length, body.len() as u64);
         assert_eq!(pending.bodies[0].content_hash, hash);
-        assert!(!pending.bodies[0].bytes.is_empty());
+        assert!(!pending.bodies[0].sha256.is_empty());
         let draft_bytes = base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &pending.payload).unwrap();
         let draft = lww_segment::Segment::decode_capture(&draft_bytes).unwrap();
         assert!(lww_segment::Segment::decode(&draft_bytes).is_err());
@@ -1443,13 +1452,13 @@ fn dependency_response_loss_reuses_exact_frozen_ciphertext_before_segment_seal()
         changed_capture.assets[0].byte_length += 1;
         assert!(f.a.external_lww_persist(&changed_capture, &bytes).is_err());
         let mut changed_body = pending.clone();
-        changed_body.bodies[0].bytes.push('A');
+        changed_body.bodies[0].byte_length += 1;
         assert!(f.a.external_lww_persist(&changed_body, &bytes).is_err());
         f.a = PersistentStore::open(f.directory_a.path()).unwrap();
         let reopened = f.a.external_lww_pending(&f.sender.target_scope(), &writer).unwrap().unwrap().0;
         assert!(reopened.asset_job == original_job);
         assert_eq!(reopened.assets, pending.assets);
-        assert_eq!(reopened.bodies[0].bytes, pending.bodies[0].bytes);
+        assert_eq!((&reopened.bodies[0].sha256, reopened.bodies[0].byte_length), (&pending.bodies[0].sha256, pending.bodies[0].byte_length));
         f.publish_a().await;
         assert_eq!(f.provider.contents(&object).unwrap(), sealed);
         assert!(held.attempts.lock().unwrap().iter().all(|intent| intent.object_id != object || intent.sha256 == original_intent.sha256));
@@ -2042,10 +2051,12 @@ fn an_owed_initial_publication_reaches_the_repository_after_a_stop() {
             expected_selection_epoch: before.selection_epoch, target, inspection_id: Some(inspection_id), initial_publication: true,
         }).unwrap().target_authority;
         let header = crate::persistent_store::lww::Header { binding_authority: authority, request_id: "synthetic-initial".into() };
-        // Stops between the library and device commits of a page, and between pages.
+        // Stops between the library and device commits of a page, and between
+        // pages, each followed by a restart.
         for commits in [1, 2, 3] {
             f.a.stop_initial_queue_after_commits(1, commits);
             assert!(f.a.lww_finish_initial_publication(&header).is_err());
+            f.restart_a();
             assert!(f.a.lww_owed_initial_publication().unwrap().is_some());
         }
         f.a.stop_initial_queue_after_commits(1, usize::MAX);
@@ -2083,8 +2094,11 @@ fn a_new_device_switch_drops_the_old_writers_segments_and_releases_their_files()
         let pending = send_unconfirmed(&mut f, first, false).await;
         let job = pending.asset_job.clone().expect("the segment holds its asset");
         let old_writer = f.a.lww_clock_state().unwrap().writer_id;
-        assert_eq!(writer_rows(&f.a, "external_lww_segments", &old_writer), 2);
+        // The finished publication left no row; the unconfirmed one keeps its row and files.
+        assert_eq!(writer_rows(&f.a, "external_lww_segments", &old_writer), 1);
         assert_eq!(writer_rows(&f.a, "external_lww_sequences", &old_writer), 1);
+        let files = crate::persistent_store::external_lww::publication_directory(f.directory_a.path(), &job.job_id);
+        assert!(files.exists());
         bind_elsewhere(&mut f.a);
         let (header, inspection) = binding_context(&f.a, &f.sender, "synthetic-new-device");
         let stage = f.sender.stage_binding(&mut f.a, &header, &inspection, &Cancellation::default()).await.unwrap();
@@ -2095,6 +2109,7 @@ fn a_new_device_switch_drops_the_old_writers_segments_and_releases_their_files()
         assert_eq!(writer_rows(&f.a, "external_lww_segments", &old_writer), 0);
         assert_eq!(writer_rows(&f.a, "external_lww_sequences", &old_writer), 0);
         assert!(job_released(&f.a, &job));
+        assert!(!files.exists(), "the retired writer's publication files stay");
     })
 }
 #[test]
@@ -2146,8 +2161,11 @@ fn a_landed_segment_that_cleanup_removed_after_a_checkpoint_keeps_its_sequence_o
         let pending = send_unconfirmed(&mut f, first, true).await;
         let writer = f.a.lww_clock_state().unwrap().writer_id;
         let job = tempfile::tempdir().unwrap();
-        f.sender.compact_published(job.path(), "00000000-0000-4000-8000-0000000000c1", &writer, &fake::capabilities(true), &Cancellation::default(), None).await.unwrap();
-        f.provider.forget(&pending.object_id);
+        f.sender.compact_published(&mut f.a, job.path(), "00000000-0000-4000-8000-0000000000c1", &writer, &fake::capabilities(true), &Cancellation::default(), None).await.unwrap();
+        let collection = tempfile::tempdir().unwrap();
+        let (_, removed) = super::cleanup::tests::collect_after_grace(&f, collection.path()).await;
+        assert!(removed.deleted_objects > 0);
+        assert!(!f.provider.holds(&pending.object_id), "cleanup removes the covered segment");
         bind_elsewhere(&mut f.a);
         let rebound = bind_external(&mut f.a, &f.sender, &target);
         set(&mut f.a, &["root", "askRemoval"], serde_json::json!(true));
@@ -2175,9 +2193,18 @@ fn a_landed_segment_this_device_received_keeps_its_sequence_after_cleanup_remove
         f.sender.receive_and_apply(&mut f.a, rebound, &[], &Cancellation::default()).await.unwrap();
         let writer = f.a.lww_clock_state().unwrap().writer_id;
         assert!(f.a.lww_receive_progress(rebound).unwrap().iter().any(|p| p.writer_id.as_deref() == Some(writer.as_str()) && p.cursor == pending.seq));
-        f.provider.forget(&pending.object_id);
+        let job = tempfile::tempdir().unwrap();
+        let completed = f.sender.compact_published(&mut f.a, job.path(), "00000000-0000-4000-8000-0000000000c2", &writer, &fake::capabilities(true), &Cancellation::default(), None).await.unwrap();
+        let collection = tempfile::tempdir().unwrap();
+        let (_, removed) = super::cleanup::tests::collect_after_grace(&f, collection.path()).await;
+        assert!(removed.deleted_objects > 0);
+        assert!(!f.provider.holds(&pending.object_id), "cleanup removes the covered segment");
+        // The checkpoint also covers the segment; settling must answer from the
+        // receive progress without reading it.
+        f.provider.fail_read(&completed.reference.receipt.locator.object, ErrorKind::Transient);
         set(&mut f.a, &["root", "askRemoval"], serde_json::json!(true));
         assert_eq!(f.sender.publish(&mut f.a, rebound, &[], &Cancellation::default()).await.unwrap().segments.0, 1);
+        assert_eq!(f.sender.checkpoint(&completed.reference.receipt, &Cancellation::default()).await.err().unwrap().kind, ErrorKind::Transient);
         assert_eq!(f.provider.upload_attempts(&pending.object_id), 1);
         assert_eq!(f.a.external_lww_next_sequence(&f.sender.target_scope(), &writer).unwrap(), pending.seq.0 + 2);
         f.receive_b().await;
@@ -2287,7 +2314,7 @@ fn a_segment_left_by_an_earlier_binding_never_gives_away_a_sequence_already_seen
         let rebound = bind_external(&mut f.a, &f.sender, &target);
         assert_eq!(f.sender.publish(&mut f.a, DecimalU64(u64::MAX), &[], &Cancellation::default()).await.err().unwrap().kind, ErrorKind::PreconditionFailed);
         let writer = f.a.lww_clock_state().unwrap().writer_id;
-        f.a.external_lww_record_seen(&f.sender.target_scope(), &writer, pending.seq.0, &"0".repeat(64)).unwrap();
+        f.a.external_lww_record_seen(&f.sender.target_scope(), &writer, pending.seq.0, &"0".repeat(64), None).unwrap();
         assert_eq!(f.sender.publish(&mut f.a, rebound, &[], &Cancellation::default()).await.err().unwrap().kind, ErrorKind::Corrupt);
         assert_eq!(f.a.external_lww_pending(&f.sender.target_scope(), &writer).unwrap().unwrap().0.object_id, pending.object_id);
         assert_eq!(f.a.external_lww_next_sequence(&f.sender.target_scope(), &writer).unwrap(), pending.seq.0);
@@ -2339,9 +2366,10 @@ fn behind_recovery_carries_the_published_catalog_once_across_writer_requests() {
         set(&mut f.b, &["root", "loreBookDepth"], serde_json::json!(3));
         f.receiver.publish(&mut f.b, DecimalU64(0), &[], &cancel).await.unwrap();
         let job = tempfile::tempdir().unwrap();
+        let writer = f.a.lww_clock_state().unwrap().writer_id;
         f.sender
-            .compact_published(job.path(), "00000000-0000-4000-8000-0000000000b1",
-                &f.a.lww_clock_state().unwrap().writer_id, &f.sender.capabilities, &cancel, None)
+            .compact_published(&mut f.a, job.path(), "00000000-0000-4000-8000-0000000000b1",
+                &writer, &f.sender.capabilities, &cancel, None)
             .await
             .unwrap();
         for object in f.sender.listing(&cancel).await.unwrap() {
@@ -2365,6 +2393,105 @@ fn behind_recovery_carries_the_published_catalog_once_across_writer_requests() {
             f.a.lww_clock_state().unwrap().writer_id,
             f.b.lww_clock_state().unwrap().writer_id,
         ];
+        expected.sort();
+        assert_eq!(writers, expected);
+        assert!(engine.receive_requests(&mut store, DecimalU64(0), &cancel).await.unwrap().is_empty());
+    })
+}
+#[test]
+fn receive_pages_keep_change_order_within_the_budget_and_send_a_larger_change_alone() {
+    use crate::persistent_store::lww::Change;
+    let change = |name: &str, length: usize| Change {
+        key: UnitKey::new(&["root", name]).unwrap(),
+        stamp: risunest_sync_wire::stamp::Stamp { physical_ms: DecimalU64(1), logical: 0, writer_id: "synthetic-writer".into() },
+        value: risunest_sync_wire::unit::UnitValue::Inline { bytes: "A".repeat(length) },
+    };
+    let (first, second) = (change("language", 10), change("askRemoval", 10));
+    let budget = [&first, &second].iter().map(|change| serde_json::to_vec(change).unwrap().len() + 1).sum::<usize>();
+    let changes = vec![first, second, change("loreBookDepth", budget * 2), change("additionalPrompt", 10)];
+    let pages = super::lww_engine::receive_pages(changes.clone(), budget).unwrap();
+    assert_eq!(pages.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1, 1]);
+    assert_eq!(pages.concat(), changes);
+    assert_eq!(super::lww_engine::receive_pages(Vec::new(), budget).unwrap(), [Vec::<Change>::new()]);
+}
+#[test]
+fn a_segment_over_the_page_budget_arrives_in_pages_and_resumes_after_the_finished_ones() {
+    run(async {
+        let mut f = CycleFixture::new();
+        let cancel = Cancellation::default();
+        set(&mut f.a, &["root", "language"], serde_json::json!("paged"));
+        set(&mut f.a, &["root", "askRemoval"], serde_json::json!(true));
+        set(&mut f.a, &["root", "loreBookDepth"], serde_json::json!(7));
+        set(&mut f.a, &["root", "additionalPrompt"], serde_json::json!("synthetic prompt"));
+        assert_eq!(f.publish_a().await.segments.0, 1);
+        super::lww_engine::set_receive_page_bytes_for_test(1);
+        let requests = f.receiver.receive_requests(&mut f.b, DecimalU64(0), &cancel).await.unwrap();
+        assert!(requests.len() >= 4);
+        assert!(requests.iter().all(|request| request.changes.len() == 1));
+        let last = requests.last().unwrap().progress.clone();
+        let writer = f.a.lww_clock_state().unwrap().writer_id;
+        assert_eq!(last.writer_id.as_deref(), Some(writer.as_str()));
+        assert!(requests[..requests.len() - 1].iter().all(|request| request.progress.cursor.0 == last.cursor.0 - 1));
+        apply_all(&mut f.b, &requests[..2]);
+        assert!(f.b.lww_receive_progress(DecimalU64(0)).unwrap().is_empty(), "progress waits for the last page");
+        let resumed = f.receiver.receive_requests(&mut f.b, DecimalU64(0), &cancel).await.unwrap();
+        assert_eq!(serde_json::to_value(&resumed).unwrap(), serde_json::to_value(&requests[2..]).unwrap());
+        apply_all(&mut f.b, &resumed);
+        let root = f.b.read_root(None).unwrap().value;
+        assert_eq!(root["language"], "paged");
+        assert_eq!(root["askRemoval"], true);
+        assert_eq!(root["loreBookDepth"], 7);
+        assert_eq!(root["additionalPrompt"], "synthetic prompt");
+        let progress = f.b.lww_receive_progress(DecimalU64(0)).unwrap();
+        assert_eq!(progress.len(), 1);
+        assert_eq!(progress[0].cursor, last.cursor);
+        assert!(f.receiver.receive_requests(&mut f.b, DecimalU64(0), &cancel).await.unwrap().is_empty());
+    })
+}
+#[test]
+fn behind_recovery_pages_the_catalog_and_resumes_after_the_finished_pages() {
+    run(async {
+        let mut f = CycleFixture::new();
+        let cancel = Cancellation::default();
+        set(&mut f.a, &["root", "language"], serde_json::json!("from-a"));
+        set(&mut f.a, &["root", "askRemoval"], serde_json::json!(true));
+        f.publish_a().await;
+        set(&mut f.b, &["root", "loreBookDepth"], serde_json::json!(3));
+        f.receiver.publish(&mut f.b, DecimalU64(0), &[], &cancel).await.unwrap();
+        let job = tempfile::tempdir().unwrap();
+        let writer = f.a.lww_clock_state().unwrap().writer_id;
+        f.sender
+            .compact_published(&mut f.a, job.path(), "00000000-0000-4000-8000-0000000000b2",
+                &writer, &f.sender.capabilities, &cancel, None)
+            .await
+            .unwrap();
+        for object in f.sender.listing(&cancel).await.unwrap() {
+            f.provider.delete_object(&f.sender.repository, &object.locator, &cancel).await.unwrap();
+        }
+        let (_directory, mut store, engine) = third_device(&f);
+        super::lww_engine::set_receive_page_bytes_for_test(1);
+        let requests = engine.receive_requests(&mut store, DecimalU64(0), &cancel).await.unwrap();
+        let catalog = requests.iter().take_while(|request| !request.changes.is_empty()).count();
+        assert!(catalog >= 3);
+        assert_eq!(requests.len(), catalog + 1, "the other writer's progress follows the catalog pages");
+        assert!(requests[..catalog].iter().all(|request| request.changes.len() == 1));
+        assert!(requests[catalog].changes.is_empty());
+        let carrier = requests[0].progress.writer_id.clone();
+        assert!(requests[..catalog].iter().all(|request| request.progress.writer_id == carrier));
+        assert!(requests[..catalog - 1].iter().all(|request| request.progress.cursor == DecimalU64(0)));
+        assert_ne!(requests[catalog - 1].progress.cursor, DecimalU64(0));
+        apply_all(&mut store, &requests[..catalog - 1]);
+        assert!(progress_writers(&store).is_empty(), "progress waits for the last catalog page");
+        let resumed = engine.receive_requests(&mut store, DecimalU64(0), &cancel).await.unwrap();
+        assert_eq!(serde_json::to_value(&resumed).unwrap(), serde_json::to_value(&requests[catalog - 1..]).unwrap());
+        apply_all(&mut store, &resumed);
+        let root = store.read_root(None).unwrap().value;
+        assert_eq!(root["language"], "from-a");
+        assert_eq!(root["askRemoval"], true);
+        assert_eq!(root["loreBookDepth"], 3);
+        let mut writers = progress_writers(&store);
+        writers.sort();
+        let mut expected = vec![f.a.lww_clock_state().unwrap().writer_id, f.b.lww_clock_state().unwrap().writer_id];
         expected.sort();
         assert_eq!(writers, expected);
         assert!(engine.receive_requests(&mut store, DecimalU64(0), &cancel).await.unwrap().is_empty());
@@ -2479,5 +2606,275 @@ fn segment_assembly_writes_control_pages_to_disk_instead_of_holding_them() {
         let held = super::lww_engine::cycle_keys::take().buffered_control_bytes;
         assert!(held < lww_segment::SMALL_BODY_BYTES, "held {held} control bytes in memory while assembling a segment");
         assert_eq!(f.receive_b().await, 1);
+    })
+}
+pub(crate) fn device_rows(store: &PersistentStore, table: &str) -> i64 {
+    store.device_store().unwrap().connection()
+        .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
+}
+/// Stages the published state on a fresh device and activates it as the
+/// binding flow does: stage, switch, then replace from the stage.
+pub(crate) async fn bootstrapped_device(f: &CycleFixture) -> (tempfile::TempDir, PersistentStore, ExternalLwwEngine, DecimalU64) {
+    use crate::persistent_store::sync_selection::{ReplaceBindingRequest, SwitchBindingRequest, SyncTarget};
+    let (directory, mut store, engine) = third_device(f);
+    let (header, inspection) = binding_context(&store, &engine, &uuid::Uuid::new_v4().to_string());
+    let stage = engine.stage_binding(&mut store, &header, &inspection, &Cancellation::default()).await.unwrap();
+    let state = store.lww_binding_state().unwrap();
+    let state = store.switch_lww_binding(&SwitchBindingRequest {
+        initial_publication: false,
+        header: crate::persistent_store::lww::Header { binding_authority: state.target_authority, request_id: uuid::Uuid::new_v4().to_string() },
+        expected_selection_epoch: state.selection_epoch, target: SyncTarget::External(engine.connection_id.clone()), inspection_id: Some(inspection),
+    }).unwrap();
+    store.replace_lww_binding(&ReplaceBindingRequest {
+        header: crate::persistent_store::lww::Header { binding_authority: state.target_authority, request_id: header.request_id.clone() },
+        expected_selection_epoch: state.selection_epoch, staging_id: stage.staging_id, receive_id: header.request_id,
+        target_id: engine.repository.connection_identity.clone(), library_id: engine.library.clone(),
+    }).unwrap();
+    (directory, store, engine, state.target_authority)
+}
+#[test]
+fn a_device_bootstrapped_from_a_checkpoint_never_reads_the_covered_segments_still_listed() {
+    run(async {
+        let mut f = CycleFixture::new();
+        let cancel = Cancellation::default();
+        for value in ["one", "two", "three"] {
+            set(&mut f.a, &["root", "language"], serde_json::json!(value));
+            f.publish_a().await;
+        }
+        let job = tempfile::tempdir().unwrap();
+        let writer = f.a.lww_clock_state().unwrap().writer_id;
+        f.sender.compact_published(&mut f.a, job.path(), "00000000-0000-4000-8000-0000000000d1",
+            &writer, &f.sender.capabilities, &cancel, None).await.unwrap();
+        let segments = f.sender.listing(&cancel).await.unwrap().into_iter().map(|receipt| receipt.locator.object).collect::<Vec<_>>();
+        assert_eq!(segments.len(), 3);
+        let (_directory, mut store, engine, authority) = bootstrapped_device(&f).await;
+        assert_eq!(store.read_root(None).unwrap().value["language"], "three");
+        let reads = |f: &CycleFixture| segments.iter().map(|id| f.provider.read_attempts(id)).collect::<Vec<_>>();
+        let before = reads(&f);
+        for _ in 0..2 {
+            let requests = engine.receive_requests(&mut store, authority, &cancel).await.unwrap();
+            assert!(requests.is_empty(), "covered history is received again: {:?}",
+                requests.iter().map(|request| &request.header.request_id).collect::<Vec<_>>());
+        }
+        assert_eq!(reads(&f), before, "a covered segment is downloaded again after the bootstrap");
+        set(&mut f.a, &["root", "language"], serde_json::json!("four"));
+        f.publish_a().await;
+        let requests = engine.receive_requests(&mut store, authority, &cancel).await.unwrap();
+        assert_eq!(requests.len(), 1);
+        apply_all(&mut store, &requests);
+        assert_eq!(store.read_root(None).unwrap().value["language"], "four");
+        assert_eq!(reads(&f), before);
+    })
+}
+#[test]
+fn finished_publications_and_received_pages_leave_no_rows_behind() {
+    run(async {
+        let mut f = CycleFixture::new();
+        let cancel = Cancellation::default();
+        for (index, value) in ["one", "two", "three"].into_iter().enumerate() {
+            set(&mut f.a, &["root", "language"], serde_json::json!(value));
+            if index == 1 { small_asset(&mut f.a, "retained-large", &vec![29; 5 * 1024 * 1024]); }
+            assert_eq!(f.publish_a().await.segments.0, 1);
+            assert_eq!(device_rows(&f.a, "external_lww_segments"), 0, "a finished publication keeps its row");
+            assert_eq!(f.receive_b().await, 1);
+            assert_eq!(f.receive_b().await, 0);
+            assert_eq!(device_rows(&f.b, "external_lww_receives"), 0, "a finished page keeps its row");
+        }
+        assert_eq!(f.b.read_root(None).unwrap().value["language"], "three");
+        set(&mut f.b, &["root", "loreBookDepth"], serde_json::json!(3));
+        f.receiver.publish(&mut f.b, DecimalU64(0), &[], &cancel).await.unwrap();
+        let job = tempfile::tempdir().unwrap();
+        let writer = f.a.lww_clock_state().unwrap().writer_id;
+        f.sender.compact_published(&mut f.a, job.path(), "00000000-0000-4000-8000-0000000000d2",
+            &writer, &f.sender.capabilities, &cancel, None).await.unwrap();
+        for object in f.sender.listing(&cancel).await.unwrap() {
+            f.provider.delete_object(&f.sender.repository, &object.locator, &cancel).await.unwrap();
+        }
+        let (_directory, mut store, engine) = third_device(&f);
+        super::lww_engine::set_receive_page_bytes_for_test(1);
+        let requests = engine.receive_requests(&mut store, DecimalU64(0), &cancel).await.unwrap();
+        assert!(requests.len() >= 3);
+        apply_all(&mut store, &requests);
+        assert!(engine.receive_requests(&mut store, DecimalU64(0), &cancel).await.unwrap().is_empty());
+        assert_eq!(device_rows(&store, "external_lww_receives"), 0, "the catalog pages of a behind recovery stay");
+    })
+}
+#[test]
+fn each_received_segment_keeps_its_pages_before_the_next_segment_is_read() {
+    run(async {
+        let mut f = CycleFixture::new();
+        let cancel = Cancellation::default();
+        set(&mut f.a, &["root", "language"], serde_json::json!("one"));
+        f.publish_a().await;
+        set(&mut f.a, &["root", "askRemoval"], serde_json::json!(true));
+        f.publish_a().await;
+        let second = f.sender.listing(&cancel).await.unwrap().into_iter().map(|receipt| receipt.locator.object)
+            .find(|id| parse_segment_object_id(id).unwrap().1 == 2).unwrap();
+        f.provider.fail_read(&second, ErrorKind::Transient);
+        assert_eq!(f.receiver.receive_requests(&mut f.b, DecimalU64(0), &cancel).await.err().unwrap().kind, ErrorKind::Transient);
+        assert_eq!(device_rows(&f.b, "external_lww_receives"), 1, "the first segment's page waits until every segment is read");
+        assert_eq!(f.receive_b().await, 2);
+        assert_eq!(f.b.read_root(None).unwrap().value["askRemoval"], true);
+    })
+}
+#[test]
+fn a_large_body_waits_for_its_upload_in_a_file_rather_than_in_the_publication_row() {
+    run(async {
+        let mut f = CycleFixture::new();
+        let body = vec![41; 5 * 1024 * 1024];
+        let hash = small_asset(&mut f.a, "large", &body);
+        let pending = seal_unsent(&mut f, DecimalU64(0)).await;
+        assert_eq!(pending.bodies.len(), 1);
+        let metadata: i64 = f.a.device_store().unwrap().connection()
+            .query_row("SELECT max(length(metadata)) FROM external_lww_segments", [], |r| r.get(0)).unwrap();
+        assert!(metadata < 64 * 1024, "the publication row holds {metadata} bytes");
+        let job = pending.asset_job.as_ref().unwrap().job_id.clone();
+        let publication = f.directory_a.path().join("external-storage").join("lww-publications").join(&job);
+        let sealed = publication.join("bodies").join(&pending.bodies[0].object_id);
+        assert_eq!(std::fs::metadata(&sealed).unwrap().len(), pending.bodies[0].byte_length);
+        assert_eq!(f.publish_a().await.segments.0, 1);
+        assert!(!publication.exists(), "a finished publication leaves its files");
+        assert_eq!(f.provider.upload_attempts(&pending.bodies[0].object_id), 1);
+        assert_eq!(f.receive_b().await, 1);
+        let mut file = super::lww_residency::fulfill(f.directory_b.path(), &hash, f.provider.as_ref(),
+            &f.receiver.repository, &[7; 32], &Cancellation::default()).await.unwrap().unwrap();
+        let mut restored = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut restored).unwrap();
+        assert!(restored == body);
+    })
+}
+#[test]
+fn a_second_compaction_reads_only_the_segments_above_the_retained_checkpoint() {
+    run(async {
+        let mut f = CycleFixture::new();
+        let cancel = Cancellation::default();
+        let writer = f.a.lww_clock_state().unwrap().writer_id;
+        for value in ["one", "two", "three"] {
+            set(&mut f.a, &["root", "language"], serde_json::json!(value));
+            f.publish_a().await;
+        }
+        let job = tempfile::tempdir().unwrap();
+        f.sender.compact_published(&mut f.a, &job.path().join("first"), "00000000-0000-4000-8000-0000000000d3",
+            &writer, &f.sender.capabilities, &cancel, None).await.unwrap();
+        let covered = f.sender.listing(&cancel).await.unwrap().into_iter().map(|receipt| receipt.locator.object).collect::<Vec<_>>();
+        let reads = |f: &CycleFixture| covered.iter().map(|id| f.provider.read_attempts(id)).collect::<Vec<_>>();
+        let before = reads(&f);
+        for value in ["four", "five"] {
+            set(&mut f.a, &["root", "language"], serde_json::json!(value));
+            f.publish_a().await;
+        }
+        let completed = f.sender.compact_published(&mut f.a, &job.path().join("second"), "00000000-0000-4000-8000-0000000000d4",
+            &writer, &f.sender.capabilities, &cancel, None).await.unwrap();
+        assert_eq!(reads(&f), before, "a compaction reads segments its retained checkpoint covers");
+        let (_, checkpoint) = f.sender.checkpoint(&completed.reference.receipt, &cancel).await.unwrap();
+        assert_eq!(checkpoint.covered_prefixes.get(&writer), Some(&DecimalU64(5)));
+        let (_directory, store, _engine, _) = bootstrapped_device(&f).await;
+        assert_eq!(store.read_root(None).unwrap().value["language"], "five");
+    })
+}
+#[test]
+fn one_listing_call_answers_hundreds_of_segments() {
+    run(async {
+        let f = CycleFixture::new();
+        let writer = uuid::Uuid::new_v4().to_string();
+        for seq in 1..=250u64 {
+            let bytes = seq.to_le_bytes().to_vec();
+            let id = segment_object_id(&writer, seq, &lww_segment::digest(&bytes)).unwrap();
+            f.provider.seed(&id, ObjectRole::Segment, bytes);
+        }
+        let before = f.provider.listing_count();
+        assert_eq!(f.sender.listing(&Cancellation::default()).await.unwrap().len(), 250);
+        assert_eq!(f.provider.listing_count() - before, 1);
+        for index in 0..150 {
+            f.provider.seed(&format!("synthetic-checkpoint-{index:03}"), ObjectRole::SyncState, vec![1]);
+        }
+        let before = f.provider.listing_count();
+        assert_eq!(f.sender.snapshot_receipts(&Cancellation::default()).await.unwrap().len(), 150);
+        assert_eq!(f.provider.listing_count() - before, 1);
+    })
+}
+#[test]
+fn incomparable_checkpoints_compact_into_one_that_covers_both_in_either_listing_order() {
+    run(async {
+        let mut f = CycleFixture::new();
+        let cancel = Cancellation::default();
+        let a = f.a.lww_clock_state().unwrap().writer_id;
+        let b = f.b.lww_clock_state().unwrap().writer_id;
+        for (depth, value) in [(1, "a-one"), (2, "a-two")] {
+            set(&mut f.a, &["root", "language"], serde_json::json!(value));
+            f.publish_a().await;
+            set(&mut f.b, &["root", "loreBookDepth"], serde_json::json!(depth));
+            f.receiver.publish(&mut f.b, DecimalU64(0), &[], &cancel).await.unwrap();
+        }
+        let listed = f.sender.listing(&cancel).await.unwrap().into_iter().map(|receipt| receipt.locator.object).collect::<Vec<_>>();
+        let segment = |writer: &str, seq: u64| listed.iter().find(|id| {
+            let (owner, number, _) = parse_segment_object_id(id).unwrap();
+            owner == writer && number == seq
+        }).unwrap().clone();
+        let (a2, b2) = (segment(&a, 2), segment(&b, 2));
+        let hide = |f: &CycleFixture, ids: &[&String]| ids.iter().map(|id| {
+            let bytes = f.provider.contents(id).unwrap();
+            f.provider.forget(id);
+            ((*id).clone(), bytes)
+        }).collect::<Vec<_>>();
+        let restore = |f: &CycleFixture, hidden: Vec<(String, Vec<u8>)>, role: ObjectRole| {
+            for (id, bytes) in hidden { f.provider.seed(&id, role, bytes); }
+        };
+        let job = tempfile::tempdir().unwrap();
+        let mut identities = Vec::new();
+        for (first, second, merged) in [("f1", "f2", "f3"), ("f6", "f5", "f7")] {
+            let id = |suffix: &str| format!("00000000-0000-4000-8000-0000000000{suffix}");
+            let hidden = hide(&f, &[&b2]);
+            let x = f.sender.compact_published(&mut f.a, &job.path().join(first), &id(first), &a, &f.sender.capabilities, &cancel, None).await.unwrap();
+            restore(&f, hidden, ObjectRole::Segment);
+            let x_object = x.reference.receipt.locator.object.clone();
+            let hidden = hide(&f, &[&a2]);
+            let hidden_x = hide(&f, &[&x_object]);
+            let y = f.sender.compact_published(&mut f.a, &job.path().join(second), &id(second), &a, &f.sender.capabilities, &cancel, None).await.unwrap();
+            restore(&f, hidden, ObjectRole::Segment);
+            restore(&f, hidden_x, ObjectRole::Snapshot);
+            let y_object = y.reference.receipt.locator.object.clone();
+            let (_, x) = f.sender.checkpoint(&x.reference.receipt, &cancel).await.unwrap();
+            let (_, y) = f.sender.checkpoint(&y.reference.receipt, &cancel).await.unwrap();
+            assert_eq!(x.covered_prefixes, std::collections::BTreeMap::from([(a.clone(), DecimalU64(2)), (b.clone(), DecimalU64(1))]));
+            assert_eq!(y.covered_prefixes, std::collections::BTreeMap::from([(a.clone(), DecimalU64(1)), (b.clone(), DecimalU64(2))]));
+            let both = f.sender.checkpoints(&cancel).await.unwrap().into_iter().map(|(_, checkpoint)| checkpoint).collect::<Vec<_>>();
+            assert_eq!(both.len(), 2);
+            assert_eq!(super::lww_checkpoint::retained(&both).unwrap().len(), 2, "neither checkpoint covers the other");
+            let completed = f.sender.compact_published(&mut f.a, &job.path().join(merged), &id(merged), &a, &f.sender.capabilities, &cancel, None).await.unwrap();
+            let (object, checkpoint) = f.sender.checkpoint(&completed.reference.receipt, &cancel).await.unwrap();
+            assert_eq!(checkpoint.covered_prefixes, std::collections::BTreeMap::from([(a.clone(), DecimalU64(2)), (b.clone(), DecimalU64(2))]));
+            let all = f.sender.checkpoints(&cancel).await.unwrap().into_iter().map(|(_, checkpoint)| checkpoint).collect::<Vec<_>>();
+            let retained = super::lww_checkpoint::retained(&all).unwrap();
+            assert!(retained.len() == 1 && retained.contains(&checkpoint.snapshot_id), "the merged checkpoint alone is retained");
+            identities.push(checkpoint.state_identity.clone());
+            hide(&f, &[&object.receipt.locator.object, &x_object, &y_object]);
+        }
+        assert_eq!(identities[0], identities[1], "the merged state does not depend on the listing order");
+    })
+}
+#[test]
+fn a_compactor_without_plugin_local_participation_keeps_published_plugin_local_units() {
+    run(async {
+        use crate::persistent_store::device_store::{plugin_values::PluginDeviceMutation, Section};
+        let mut f = CycleFixture::new();
+        let cancel = Cancellation::default();
+        f.a.device_store_mut().unwrap().set_section_participating(Section::LocalPlugins, true).unwrap();
+        f.a.device_store_mut().unwrap().write_plugin_device_values("synthetic-owner", &[PluginDeviceMutation::Set {
+            space: "string".into(), key: "synthetic-key".into(), value: "synthetic plugin value".into(),
+        }]).unwrap();
+        assert_eq!(f.publish_a().await.segments.0, 1);
+        let key = UnitKey::new(&["plugin-local", "synthetic-owner", "string", "synthetic-key"]).unwrap();
+        let job = tempfile::tempdir().unwrap();
+        let writer = f.b.lww_clock_state().unwrap().writer_id;
+        let completed = f.receiver.compact_published(&mut f.b, job.path(), "00000000-0000-4000-8000-0000000000e5",
+            &writer, &f.receiver.capabilities, &cancel, None).await.unwrap();
+        let (_, checkpoint) = f.receiver.checkpoint(&completed.reference.receipt, &cancel).await.unwrap();
+        assert_eq!(checkpoint.covered_prefixes.get(&f.a.lww_clock_state().unwrap().writer_id), Some(&DecimalU64(1)));
+        let inputs = tempfile::tempdir().unwrap();
+        let state = f.receiver.published_state(&mut f.b, inputs.path(), &cancel).await.unwrap();
+        assert!(state.segments.is_empty(), "the checkpoint covers every segment");
+        assert!(state.catalog.changes().unwrap().iter().any(|change| change.key.as_str() == key.as_str()),
+            "a compactor that does not take part in plugin-local sync drops a published plugin-local unit");
     })
 }

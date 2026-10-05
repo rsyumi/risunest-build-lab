@@ -44,7 +44,7 @@ export async function removeChatMessage(options: RemoveChatMessageOptions): Prom
         const result = await options.confirmInstantRemoval()
         if (!result.confirmed) return 'cancelled'
         if (!isCurrentTarget(options, target)) return 'stale'
-        return mutateCapturedTarget(options, target, result.checked ? 'delete' : 'truncate')
+        return mutateCapturedTarget(options, target, result.checked ? 'truncate' : 'delete')
     }
     if (options.askRemoval && !await options.confirmRemoval()) return 'cancelled'
     if (!isCurrentTarget(options, target)) return 'stale'
