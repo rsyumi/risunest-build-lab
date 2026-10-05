@@ -225,12 +225,14 @@ fn main() {
                  events.iter().filter(|event| **event == "exit").count(),
                  events.iter().filter(|event| event.starts_with("product-decision-")).copied().collect::<Vec<_>>())
             };
+            let passed = replies == 0 && runtime_quits == 0 && exits == 1
+                && decisions == ["product-decision-later"];
             let detail = serde_json::json!({
-                "passed": runtime_quits == 0 && exits == 1,
+                "passed": passed,
                 "nativeReplies": replies, "runtimeQuitRequests": runtime_quits, "exitCount": exits,
                 "productDecisions": decisions,
             });
-            let stage = if runtime_quits == 0 && exits == 1 { "quit-escape-exit" } else { "failure" };
+            let stage = if passed { "quit-escape-exit" } else { "failure" };
             let _ = macos_bench_report(stage.into(), detail);
         }
     });

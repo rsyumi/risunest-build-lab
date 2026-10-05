@@ -13,16 +13,6 @@ enum ExitEffect {
     RuntimeExit(i32),
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum NativeQuit {
-    /// No document decides the quit, so AppKit quits now.
-    Now,
-    /// The document decides; a repeated delivery only asks it to acknowledge again.
-    Deliver { token: String, repeated: bool },
-    /// The document never acknowledged the pending quit, so AppKit quits without it.
-    Escape,
-}
-
 #[derive(Clone)]
 struct PendingExit {
     token: String,
@@ -60,26 +50,6 @@ impl ExitDecision {
             return None;
         }
         Some(self.begin(ExitOrigin::Native))
-    }
-
-    /// Decides an AppKit quit request. `unanswered` records the request and reports whether the
-    /// document left an earlier one unacknowledged for too long.
-    fn native_quit(&mut self, unanswered: impl FnOnce() -> bool) -> NativeQuit {
-        if !self.ready || self.allowed {
-            return NativeQuit::Now;
-        }
-        if unanswered() {
-            self.pending = None;
-            self.allowed = true;
-            return NativeQuit::Escape;
-        }
-        match self.request_native() {
-            Some(token) => NativeQuit::Deliver { token, repeated: false },
-            None => NativeQuit::Deliver {
-                token: self.pending.as_ref().map(|pending| pending.token.clone()).unwrap_or_default(),
-                repeated: true,
-            },
-        }
     }
 
     fn begin(&mut self, origin: ExitOrigin) -> String {
@@ -130,30 +100,24 @@ unsafe extern "C" {
     ) -> std::ffi::c_int;
 }
 
-/// Answers AppKit's quit request: 0 quits now, 1 waits for the document, -1 cancels. While a
-/// quit is pending, AppKit asks again for every repeated quit and quits only on 0.
 #[cfg(target_os = "macos")]
 extern "C" fn request_native_quit(session_ending: std::ffi::c_int) -> std::ffi::c_int {
     let Some(app) = APP.get() else { return -1; };
     let Some(state) = app.try_state::<ExitState>() else { return -1; };
-    let (previous, allowed) = {
-        let decision = state.0.lock().unwrap_or_else(|error| error.into_inner());
-        (decision.pending.clone(), decision.allowed)
-    };
+    let previous = state.0.lock().unwrap_or_else(|error| error.into_inner()).pending.clone();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let action = state.0.lock().unwrap_or_else(|error| error.into_inner())
-            .native_quit(|| crate::renderer_recovery::quit_requested(app));
-        match action {
-            NativeQuit::Now => { crate::cancel_incomplete_boot(app); 0 }
-            NativeQuit::Escape => {
-                crate::nlog!("warn", "Quitting because the renderer cannot answer the quit request");
-                0
-            }
-            NativeQuit::Deliver { token, repeated } => {
-                if let Err(error) = notify_quit(app, &token, session_ending != 0, repeated) {
-                    crate::nlog!("warn", "macOS quit notification failed: {error}");
-                    if !repeated {
+        let request = {
+            let mut decision = state.0.lock().unwrap_or_else(|error| error.into_inner());
+            if !decision.ready || decision.allowed { None }
+            else { Some(decision.request_native()) }
+        };
+        match request {
+            None => { crate::cancel_incomplete_boot(app); 0 }
+            Some(token) => {
+                if let Some(token) = token {
+                    if let Err(error) = notify_quit(app, &token, session_ending != 0) {
                         state.0.lock().unwrap_or_else(|error| error.into_inner()).discard(&token);
+                        crate::nlog!("warn", "macOS quit notification failed: {error}");
                         return -1;
                     }
                 }
@@ -161,9 +125,7 @@ extern "C" fn request_native_quit(session_ending: std::ffi::c_int) -> std::ffi::
             }
         }
     })).unwrap_or_else(|_| {
-        let mut decision = state.0.lock().unwrap_or_else(|error| error.into_inner());
-        decision.pending = previous;
-        decision.allowed = allowed;
+        state.0.lock().unwrap_or_else(|error| error.into_inner()).pending = previous;
         -1
     })
 }
@@ -276,11 +238,9 @@ extern "C" fn settle_response(context: *mut std::ffi::c_void) {
 
 #[cfg(target_os = "macos")]
 /// A session-end quit asks the document to save locally and answer without sync or questions.
-fn notify_quit(app: &tauri::AppHandle, token: &str, session_end: bool, repeated: bool) -> Result<(), tauri::Error> {
+fn notify_quit(app: &tauri::AppHandle, token: &str, session_end: bool) -> Result<(), tauri::Error> {
     show_main(app);
-    app.emit_to("main", "risu-macos-exit-requested", serde_json::json!({
-        "token": token, "sessionEnd": session_end, "repeated": repeated,
-    }))
+    app.emit_to("main", "risu-macos-exit-requested", serde_json::json!({ "token": token, "sessionEnd": session_end }))
 }
 
 #[cfg(target_os = "macos")]
@@ -323,7 +283,7 @@ pub(crate) fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 decision.request(code.unwrap_or(0))
             };
             if let Some(token) = token {
-                if let Err(error) = notify_quit(app, &token, false, false) {
+                if let Err(error) = notify_quit(app, &token, false) {
                     state.0.lock().unwrap_or_else(|error| error.into_inner()).discard(&token);
                     crate::nlog!("warn", "macOS quit notification failed: {error}");
                 }
@@ -480,46 +440,5 @@ mod tests {
         assert!(!state.allowed);
         let retry = state.request(7).unwrap();
         assert_eq!(state.respond(&retry, true).unwrap(), Some(ExitEffect::RuntimeExit(7)));
-    }
-
-    #[test]
-    fn a_native_quit_before_the_document_is_ready_quits_without_asking_it() {
-        let mut state = ExitDecision::default();
-        assert_eq!(state.native_quit(|| unreachable!()), NativeQuit::Now);
-        state.ready = true;
-        state.allowed = true;
-        assert_eq!(state.native_quit(|| unreachable!()), NativeQuit::Now);
-    }
-
-    #[test]
-    fn a_repeated_native_quit_delivers_the_pending_request_again() {
-        let mut state = ExitDecision { ready: true, ..Default::default() };
-        let NativeQuit::Deliver { token, repeated: false } = state.native_quit(|| false) else {
-            panic!("the first quit asks the document");
-        };
-        assert_eq!(state.native_quit(|| false), NativeQuit::Deliver { token: token.clone(), repeated: true });
-        assert_eq!(state.respond(&token, false).unwrap(), Some(ExitEffect::NativeReply(false)));
-        assert!(matches!(state.native_quit(|| false), NativeQuit::Deliver { repeated: false, .. }));
-    }
-
-    #[test]
-    fn a_native_quit_repeats_a_pending_runtime_request_and_takes_its_reply() {
-        let mut state = ExitDecision { ready: true, ..Default::default() };
-        let token = state.request(7).unwrap();
-        assert_eq!(state.native_quit(|| false), NativeQuit::Deliver { token: token.clone(), repeated: true });
-        assert_eq!(state.respond(&token, true).unwrap(), Some(ExitEffect::NativeReply(true)));
-    }
-
-    #[test]
-    fn an_unanswered_native_quit_lets_a_repeated_quit_end_the_app() {
-        let mut state = ExitDecision { ready: true, ..Default::default() };
-        let NativeQuit::Deliver { token, .. } = state.native_quit(|| false) else {
-            panic!("the first quit asks the document");
-        };
-        assert_eq!(state.native_quit(|| true), NativeQuit::Escape);
-        assert!(state.allowed);
-        assert!(state.pending.is_none());
-        assert!(state.respond(&token, false).is_err());
-        assert_eq!(state.native_quit(|| unreachable!()), NativeQuit::Now);
     }
 }

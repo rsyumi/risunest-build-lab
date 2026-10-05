@@ -31,8 +31,6 @@ export interface MacosExitRequest {
     token: string
     /** Logout, restart or shutdown asked for the quit. */
     sessionEnd: boolean
-    /** Another quit arrived while this request is unanswered. */
-    repeated?: boolean
 }
 
 const SESSION_END_SAVE_LIMIT_MILLIS = 2_000
@@ -112,7 +110,6 @@ export async function registerMacosLifecycle(
     dependencies:
         | Omit<MacosCoordinatedExitDependencies, 'respond' | 'reportError'>
         | Omit<MacosLegacyExitDependencies, 'respond' | 'reportError'>,
-    acknowledge: () => Promise<unknown> = () => invoke('desktop_close_ack'),
 ): Promise<() => void> {
     const handler = createMacosExitHandler({
         ...dependencies,
@@ -124,9 +121,6 @@ export async function registerMacosLifecycle(
     const unlisten = await listen<MacosExitRequest>(
         'risu-macos-exit-requested',
         ({ payload }) => {
-            // A request left unanswered lets a repeated quit end the app natively.
-            acknowledge().catch(() => {})
-            if (payload.repeated) return
             void handler(payload).catch((error) =>
                 console.error('macOS quit response failed', error),
             )

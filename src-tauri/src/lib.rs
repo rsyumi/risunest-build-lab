@@ -459,7 +459,7 @@ fn builder_with_main_window(
                 ios_lifecycle::main_document_started(webview.app_handle());
                 #[cfg(target_os = "macos")]
                 macos_lifecycle::document_started(webview.app_handle());
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(target_os = "linux")]
                 renderer_recovery::document_started(webview.app_handle());
                 if let Some(state) = webview.try_state::<persistent_store::PersistentStoreState>() {
                     if let Err(error) = state.reset_renderer_session() {
@@ -736,7 +736,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         opened_files::desktop_relaunch,
         #[cfg(any(windows, target_os = "linux"))]
         desktop_session::desktop_flush_complete,
-        #[cfg(desktop)]
+        #[cfg(any(windows, target_os = "linux"))]
         renderer_recovery::desktop_close_ack,
         #[cfg(not(target_os = "android"))]
         renderer_recovery::renderer_recovery_take,

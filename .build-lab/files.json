@@ -489,8 +489,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 27397,
-      "sha256": "be9587e9c75e75bf25ca032aa1744f19c841c1fbb1e6b6cd7b75ffb4a6393c73"
+      "bytes": 26902,
+      "sha256": "b181cebe02f45423a7c4db00e40c6c0b57790c65027b11a687ef2b74f0992f49"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -513,8 +513,8 @@
     {
       "path": "benchmarks/macos/native/src/main.rs",
       "mode": "100644",
-      "bytes": 9513,
-      "sha256": "c4ef3f32b7bd1047c6111388ce6ffe5161a940de44a32a873a1d6a68369593a1"
+      "bytes": 9595,
+      "sha256": "1158181754695f01a820fa887b78ed507c448965096314e0f315405c31e697ff"
     },
     {
       "path": "benchmarks/macos/native/src/termination_probe.m",
@@ -537,8 +537,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 26801,
-      "sha256": "43698a58508184f6518476fd711fcaf894cfe1a13760591b4909f9c49719d839"
+      "bytes": 26805,
+      "sha256": "c4fe46dfe4f67daf9fc69b51fe01a8f56e13378f4e452c30da05c8adb9ae818b"
     },
     {
       "path": "benchmarks/macos/vite.config.ts",
@@ -6370,7 +6370,7 @@
       "path": "src-tauri/src/lib.rs",
       "mode": "100644",
       "bytes": 54560,
-      "sha256": "a88a86f39627abc196d11932e074c8dde65b5d94385d66f38bb4993dc5291b29"
+      "sha256": "4e6e2462f10905c9f0c0a6a34d13567e8edd34ccacdee523dd1311b6666f852f"
     },
     {
       "path": "src-tauri/src/linux_session.rs",
@@ -6405,14 +6405,14 @@
     {
       "path": "src-tauri/src/macos_lifecycle.rs",
       "mode": "100644",
-      "bytes": 20655,
-      "sha256": "758ddb3a6d31d8348c53a0ba8205ce8fb89edef2f8bc211b6bf013d26f6c7a45"
+      "bytes": 16999,
+      "sha256": "0713b5460db7cacbec371fb4fbb6ac47435be62c3ab716e7cbaae762562046e7"
     },
     {
       "path": "src-tauri/src/macos_termination.m",
       "mode": "100644",
-      "bytes": 2834,
-      "sha256": "098e25fe773919f96f6c4c065f24b78e4e7eb84baa3c5787eb68b031fd96e981"
+      "bytes": 2619,
+      "sha256": "7cb1833e20774ba9bf9e0e1774dac99bd58c9d6467fa74cc34d31a19f99d2e1c"
     },
     {
       "path": "src-tauri/src/main.rs",
@@ -7389,8 +7389,8 @@
     {
       "path": "src-tauri/src/renderer_recovery.rs",
       "mode": "100644",
-      "bytes": 9356,
-      "sha256": "ba55051154249445150c2bbfe03b1f1cf689f2b9eb658105fe55d94083fd7a40"
+      "bytes": 8595,
+      "sha256": "be75f41562195d4ced8c5eb9422f4efc00ee79aa51b4895ce6bc3b091173c601"
     },
     {
       "path": "src-tauri/src/server_sync/binding.rs",
@@ -14121,14 +14121,14 @@
     {
       "path": "src/ts/storage/macosLifecycle.test.ts",
       "mode": "100644",
-      "bytes": 7784,
-      "sha256": "9a54e171aa92188574bc7a8b06833ca818286cb7baf062cd3170f62a9c725233"
+      "bytes": 5049,
+      "sha256": "3df7d04c42c72258561a921d7658999682e81f9a11fed066fc1b202e77a9eee7"
     },
     {
       "path": "src/ts/storage/macosLifecycle.ts",
       "mode": "100644",
-      "bytes": 4657,
-      "sha256": "9f27ded9ec386dca32bea18cee40b9bb5a0a141341fc01acb051be715448e393"
+      "bytes": 4324,
+      "sha256": "6d3af9b9835853dd741d1d754c48acfabf81a73b3dbc853f402f80659f374cf4"
     },
     {
       "path": "src/ts/storage/mutationGatedPersistentDataStore.test.ts",
