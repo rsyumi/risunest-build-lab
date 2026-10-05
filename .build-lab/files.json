@@ -489,8 +489,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 27057,
-      "sha256": "cf4d425120f032c7ac9dd60bed9ecf657fd256c49bf530d01dfde4b52ca0f26d"
+      "bytes": 27397,
+      "sha256": "be9587e9c75e75bf25ca032aa1744f19c841c1fbb1e6b6cd7b75ffb4a6393c73"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -513,14 +513,14 @@
     {
       "path": "benchmarks/macos/native/src/main.rs",
       "mode": "100644",
-      "bytes": 8129,
-      "sha256": "1aa584917f9b858525121cc9fa702efe47dc510fbfc6c1f43b176cde4bd68d0d"
+      "bytes": 9513,
+      "sha256": "c4ef3f32b7bd1047c6111388ce6ffe5161a940de44a32a873a1d6a68369593a1"
     },
     {
       "path": "benchmarks/macos/native/src/termination_probe.m",
       "mode": "100644",
-      "bytes": 4124,
-      "sha256": "7d3464853d7039d886ea4f933ba7730ff23e9ba65c112f58362b6e2529233264"
+      "bytes": 4787,
+      "sha256": "1925ec8b19c58d1104c64d2f7457806b903beb035d736b00a6865a5b0819869b"
     },
     {
       "path": "benchmarks/macos/native/src/termination_probe.rs",
@@ -7011,8 +7011,8 @@
     {
       "path": "src-tauri/src/persistent_store/lww_intent_rows.rs",
       "mode": "100644",
-      "bytes": 7959,
-      "sha256": "91e02ecfa3df4e6d2a2eaebac9b11cbf46493525abb0b052e87f363cfb2a03e3"
+      "bytes": 7978,
+      "sha256": "e9377dc072e99121307c10de3581785a5e83a423ab8e3d8cf089d53f37d32ee3"
     },
     {
       "path": "src-tauri/src/persistent_store/lww_large_unit_tests.rs",
@@ -7173,8 +7173,8 @@
     {
       "path": "src-tauri/src/persistent_store/snapshot_archive.rs",
       "mode": "100644",
-      "bytes": 30138,
-      "sha256": "c73d810da19204070bf2ff5fa8beeb82d02b2e9e0cad5f72c653e6b7f853c4a6"
+      "bytes": 30155,
+      "sha256": "8b3ef0e7edce595ecf42945b452fb60e0ceab97c02d6cf704b41617d8595c5f3"
     },
     {
       "path": "src-tauri/src/persistent_store/sync_selection.rs",

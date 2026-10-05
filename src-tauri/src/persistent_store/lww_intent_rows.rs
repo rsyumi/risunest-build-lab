@@ -6,7 +6,7 @@ use risunest_sync_wire::unit::{UnitKey, UnitValue};
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 const BATCH_ROWS: usize = 1024;
 
@@ -210,7 +210,8 @@ pub(super) fn read_target(device: &Connection, request_id: &str, expected: &Inte
     Ok(changes)
 }
 
-pub(super) fn source_digest(units: &BTreeMap<UnitKey, UnitValue>) -> StoreResult<IntentRows> {
+#[cfg(test)]
+pub(super) fn source_digest(units: &std::collections::BTreeMap<UnitKey, UnitValue>) -> StoreResult<IntentRows> {
     digest("source", units.iter().map(|(key, value)| replacement_row(key, value, false)))
 }
 

@@ -33,6 +33,22 @@ extern "C" fn observe_product_reply(approve: i32, main_thread: i32, modal: i32) 
     }
 }
 
+#[cfg(target_os = "macos")]
+extern "C" fn observe_product_decision(reply: i32) {
+    // NSTerminateCancel, NSTerminateNow and NSTerminateLater.
+    let event = match reply {
+        0 => "product-decision-cancel",
+        1 => "product-decision-now",
+        2 => "product-decision-later",
+        _ => "product-decision-other",
+    };
+    let _ = std::panic::catch_unwind(|| {
+        if let Some(app) = PRODUCT_APP.get() {
+            app.state::<Events>().0.lock().unwrap_or_else(|error| error.into_inner()).push(event);
+        }
+    });
+}
+
 #[tauri::command]
 fn macos_bench_phase() -> String {
     std::env::var("RISUNEST_MACOS_PHASE").expect("controller phase")
@@ -62,6 +78,20 @@ fn macos_bench_events(state: tauri::State<'_, Events>) -> Vec<&'static str> {
     state.0.lock().unwrap().clone()
 }
 
+/// Resolves once every closure queued for the main thread before it has run.
+#[tauri::command]
+async fn macos_bench_main_thread_settled(app: tauri::AppHandle) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = sender.send(());
+    })
+    .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn macos_bench_quit(app: tauri::AppHandle) {
     app.exit(0);
@@ -74,12 +104,15 @@ fn macos_bench_native_quit(app: tauri::AppHandle) -> Result<(), String> {
         return Err("Native product quit belongs to the app and quit-escape phases".into());
     }
     unsafe extern "C" {
-        fn risunest_bench_queue_native_quit(observer: extern "C" fn(i32, i32, i32)) -> i32;
+        fn risunest_bench_queue_native_quit(
+            observer: extern "C" fn(i32, i32, i32),
+            decision: extern "C" fn(i32),
+        ) -> i32;
     }
     let handle = app.clone();
     app.run_on_main_thread(move || {
         let _ = PRODUCT_APP.set(handle.clone());
-        if unsafe { risunest_bench_queue_native_quit(observe_product_reply) } != 1 {
+        if unsafe { risunest_bench_queue_native_quit(observe_product_reply, observe_product_decision) } != 1 {
             let _ = macos_bench_report("failure".into(), serde_json::json!({
                 "passed": false, "message": "Unable to queue product native termination",
             }));
@@ -113,6 +146,7 @@ fn benchmark_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send
         macos_bench_phase,
         macos_bench_report,
         macos_bench_expected,
+        macos_bench_main_thread_settled,
         macos_bench_events,
         macos_bench_quit,
         #[cfg(target_os = "macos")]
@@ -184,15 +218,17 @@ fn main() {
         }
         if escape_exit {
             let state = app.state::<Events>();
-            let (replies, runtime_quits, exits) = {
+            let (replies, runtime_quits, exits, decisions) = {
                 let events = state.0.lock().unwrap();
                 (events.iter().filter(|event| event.starts_with("native-reply-")).count(),
                  events.iter().filter(|event| **event == "quit").count(),
-                 events.iter().filter(|event| **event == "exit").count())
+                 events.iter().filter(|event| **event == "exit").count(),
+                 events.iter().filter(|event| event.starts_with("product-decision-")).copied().collect::<Vec<_>>())
             };
             let detail = serde_json::json!({
                 "passed": runtime_quits == 0 && exits == 1,
                 "nativeReplies": replies, "runtimeQuitRequests": runtime_quits, "exitCount": exits,
+                "productDecisions": decisions,
             });
             let stage = if runtime_quits == 0 && exits == 1 { "quit-escape-exit" } else { "failure" };
             let _ = macos_bench_report(stage.into(), detail);

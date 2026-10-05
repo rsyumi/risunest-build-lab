@@ -70,6 +70,8 @@ int risunest_probe_reply(int approve) {
 
 static void (*productReplyObserver)(int, int, int);
 static IMP productReplyOriginal;
+static void (*productDecisionObserver)(int);
+static IMP productDecisionOriginal;
 static BOOL productBeginPending;
 
 static void observeProductReply(id application, SEL selector, BOOL approve) {
@@ -77,17 +79,27 @@ static void observeProductReply(id application, SEL selector, BOOL approve) {
     ((void (*)(id, SEL, BOOL))productReplyOriginal)(application, selector, approve);
 }
 
-int risunest_bench_queue_native_quit(void (*observer)(int, int, int)) {
-    if (![NSThread isMainThread] || !NSApp.delegate || !observer || productBeginPending) return 0;
+static NSApplicationTerminateReply observeProductDecision(id delegate, SEL selector, NSApplication *sender) {
+    NSApplicationTerminateReply reply =
+        ((NSApplicationTerminateReply (*)(id, SEL, NSApplication *))productDecisionOriginal)(delegate, selector, sender);
+    productDecisionObserver((int)reply);
+    return reply;
+}
+
+int risunest_bench_queue_native_quit(void (*observer)(int, int, int), void (*decision)(int)) {
+    if (![NSThread isMainThread] || !NSApp.delegate || !observer || !decision || productBeginPending) return 0;
     CFRunLoopRef loop = CFRunLoopGetMain();
     if (!loop) return 0;
     if (!productReplyOriginal) {
-        if (!class_getInstanceMethod(object_getClass(NSApp.delegate), @selector(applicationShouldTerminate:))) return 0;
+        Method should = class_getInstanceMethod(object_getClass(NSApp.delegate), @selector(applicationShouldTerminate:));
+        if (!should) return 0;
         Method method = class_getInstanceMethod(object_getClass(NSApp), @selector(replyToApplicationShouldTerminate:));
         if (!method) return 0;
         productReplyObserver = observer;
+        productDecisionObserver = decision;
         productReplyOriginal = method_setImplementation(method, (IMP)observeProductReply);
-    } else if (productReplyObserver != observer) {
+        productDecisionOriginal = method_setImplementation(should, (IMP)observeProductDecision);
+    } else if (productReplyObserver != observer || productDecisionObserver != decision) {
         return 0;
     }
     productBeginPending = YES;
