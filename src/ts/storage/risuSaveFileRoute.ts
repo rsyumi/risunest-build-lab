@@ -1,3 +1,4 @@
+import { prepareExternalDatabaseImport } from './upstreamImport'
 import type { ExportExclusions } from './exportExcludedReport'
 import type { Database } from './database.svelte'
 import {
@@ -367,7 +368,7 @@ async function importWithBytes(
 ): Promise<RisuSaveFileRouteResult> {
     webImportStatus(options, 'decoding-database', bytes.byteLength, bytes.byteLength)
     const { prepareUpstreamImport } = await import('./importedIdentity')
-    const database = prepareUpstreamImport(await dependencies.decodeRisuSave(bytes) as Database)
+    const database = prepareUpstreamImport(prepareExternalDatabaseImport(await dependencies.decodeRisuSave(bytes) as Database))
     webImportStatus(options, 'activating', bytes.byteLength, bytes.byteLength)
     let pluginsRestarted = false
     await runtime.replacePersistentDatabase(

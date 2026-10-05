@@ -3,7 +3,7 @@ import { isTauri } from '../platform'
 import { Mutex } from '../mutex'
 import { diffRootMutations } from './rootMutation'
 import type { PersistenceCanonicalCapture } from './reactivePersistenceCapture.svelte'
-import type { Chat, Database, Message, botPreset, character, groupChat } from './database.svelte'
+import type { Chat, Database, Message, botPreset, character } from './database.svelte'
 import type {
     AssetAlias,
     AssetOwnerHead,
@@ -30,7 +30,6 @@ import {
     createConversationSummaryStubFromChat,
     isConversationSummaryStub,
 } from './conversationResidency'
-import { removeGroupMemberReferences } from './groupMembership'
 import { defineOwnEnumerableProperty } from './ownEnumerableProperty'
 import { isMetadataOnlySelectedConversation } from './selectedConversationLifecycle'
 import { applyConversationBindingPatch, type ConversationBindingPatch } from './conversationBinding'
@@ -74,7 +73,7 @@ const SAVE_DEBOUNCE_MS = 500
 const OFFICIAL_PUBLISH_MIN_INTERVAL_MS = 3_000
 const CHARACTER_MUTATION_PAGE_SIZE = 100
 
-type CompleteCharacter = character | groupChat
+type CompleteCharacter = character
 type RootDatabase = PersistentRoot
 
 export interface PinnedPublication {
@@ -517,7 +516,6 @@ export interface PersistentCharacterMutationResult {
     characterId: string
     kind: 'detail' | 'replace' | 'add' | 'delete'
     character: CharacterDetail | CompleteCharacter | null
-    relatedCharacters?: CharacterDetail[]
 }
 
 export interface PersistentMutationToken {
@@ -1822,11 +1820,11 @@ export class SaveCoordinator {
         })
     }
 
-    deletePersistentCharacterWithGroupReferences(
+    deletePersistentCharacter(
         characterId: string,
         reason: string,
     ): Promise<boolean> {
-        return this.deletePersistentCharactersWithGroupReferences([characterId], reason)
+        return this.deletePersistentCharacters([characterId], reason)
             .then((count) => count > 0)
     }
 
@@ -1847,14 +1845,14 @@ export class SaveCoordinator {
         } while (cursor)
         let removed = 0
         for (let offset = 0; offset < expired.length; offset += 128) {
-            removed += await this.deletePersistentCharactersWithGroupReferences(
+            removed += await this.deletePersistentCharacters(
                 expired.slice(offset, offset + 128), 'trash-expiry', cutoff,
             )
         }
         return removed
     }
 
-    deletePersistentCharactersWithGroupReferences(
+    deletePersistentCharacters(
         characterIds: readonly string[],
         reason: string,
         expiryCutoff?: number,
@@ -1874,15 +1872,6 @@ export class SaveCoordinator {
             const mutationGeneration = this.dirtyGeneration
             const lease = await this.dependencies.store.acquireRevision(revision)
             let rootValue: { revision: DataRevision; value: RootDatabase } | undefined
-            const relatedCharacters: CharacterDetail[] = []
-            const relatedResidentsBefore = new Map<
-                string,
-                ReturnType<SaveCoordinator['captureResidentCharacter']>
-            >()
-            const selected = this.dependencies.captureSelectedCharacter()
-            if (selected?.type === 'group' && !deletedIds.has(selected.chaId)) {
-                relatedResidentsBefore.set(selected.chaId, this.captureResidentCharacter(selected.chaId))
-            }
             const found = await withPersistentRevisionLease(lease, async (reader) => {
                 this.assertReadRevision(revision, reader.revision)
                 rootValue = await reader.readRoot()
@@ -1902,47 +1891,11 @@ export class SaveCoordinator {
                 }
                 if (deletedIds.size === 0) return false
 
-                for (const trash of [false, true]) {
-                    let cursor: string | undefined
-                    do {
-                        const page = await reader.queryCharacters({
-                            order: 'configured',
-                            trash,
-                            limit: CHARACTER_MUTATION_PAGE_SIZE,
-                            cursor,
-                        })
-                        this.assertReadRevision(revision, page.revision)
-                        for (const summary of page.items) {
-                            if (deletedIds.has(summary.id) || summary.type !== 'group') continue
-                            const value = await reader.readCharacter(summary.id)
-                            if (!value) throw new Error(`Character ${summary.id} was not found`)
-                            this.assertReadRevision(revision, value.revision)
-                            if (value.value.chaId !== summary.id || value.value.type !== 'group') {
-                                throw new Error(
-                                    `Character ${summary.id} returned mismatched detail`,
-                                )
-                            }
-                            const group = canonicalClone(value.value) as Omit<groupChat, 'chats'>
-                            if (!group.characters.some((id) => deletedIds.has(id))) continue
-                            Object.assign(group, removeGroupMemberReferences(group, deletedIds))
-                            if (!relatedResidentsBefore.has(summary.id)) relatedResidentsBefore.set(
-                                summary.id,
-                                this.captureResidentCharacter(summary.id),
-                            )
-                            relatedCharacters.push(group)
-                        }
-                        cursor = page.nextCursor
-                    } while (cursor)
-                }
                 return true
             })
             if (!found) return 0
             if (!rootValue) return 0
             for (const id of deletedIds) this.assertResidentCharacterUnchanged(id, residentsBefore.get(id) ?? null)
-            for (const [relatedId, before] of relatedResidentsBefore) {
-                this.assertResidentCharacterUnchanged(relatedId, before)
-            }
-
             const mutatedRoot = canonicalClone(rootValue.value)
             for (const id of deletedIds) removeCharacterIdFromOrder(mutatedRoot, id)
             for (const loadout of mutatedRoot.loadouts ?? []) {
@@ -1961,7 +1914,6 @@ export class SaveCoordinator {
                 expectedRevision: revision,
                 unitMutations: [
                     ...[...deletedIds].map((id): PersistentUnitMutation => ({type:'delete',key:JSON.stringify(['exists','character',id])})),
-                    ...relatedCharacters.map((group): PersistentUnitMutation => ({type:'set',key:JSON.stringify(['group-members',group.chaId]),value:{characters:(group as Omit<groupChat,'chats'>).characters,characterTalks:(group as Omit<groupChat,'chats'>).characterTalks,characterActive:(group as Omit<groupChat,'chats'>).characterActive}})),
                     ...(orderChanged ? [{type:'set' as const,key:JSON.stringify(['order','characters']),value:committedRoot.characterOrder}] : []),
                     ...(committedRoot.loadouts ?? []).filter(loadout => {
                         const previous = previousLoadouts.get(loadout.id)
@@ -1981,31 +1933,7 @@ export class SaveCoordinator {
                 (committedLoadouts.get(value.id) ?? value) as typeof value)
             const committed = await this.dependencies.store.commit(commit)
             const changedDuringCommit = this.dirtyGeneration !== mutationGeneration
-            const relatedRaces = new Map<
-                string,
-                NonNullable<ReturnType<SaveCoordinator['captureResidentCharacter']>>
-            >()
-            for (const [relatedId, before] of relatedResidentsBefore) {
-                const after = this.captureResidentCharacter(relatedId)
-                if (!this.residentCharactersMatch(before, after) && after) {
-                    relatedRaces.set(relatedId, after)
-                }
-            }
-            const publishedRelatedCharacters = relatedCharacters.map((detail) => {
-                const raced = relatedRaces.get(detail.chaId)
-                if (!raced) return canonicalClone(detail)
-                const resident = canonicalClone(raced.character)
-                Object.assign(resident, removeGroupMemberReferences(resident as groupChat, deletedIds))
-                const { chats: _chats, ...residentDetail } = resident
-                return residentDetail as CharacterDetail
-            })
             const liveAfterCommit = this.capture()
-            const selectedRelatedDetail = relatedCharacters.find(
-                (detail) => detail.chaId === liveAfterCommit.character?.chaId,
-            )
-            const selectedRelatedBefore = liveAfterCommit.character
-                ? relatedResidentsBefore.get(liveAfterCommit.character.chaId)
-                : null
             const [characterId, ...additionalDeletedCharacterIds] = deletedIds
             this.finishCharacterMutation(
                 {
@@ -2018,21 +1946,11 @@ export class SaveCoordinator {
                     characterId,
                     kind: 'delete',
                     character: null,
-                    relatedCharacters: publishedRelatedCharacters,
                 },
                 committedBaselineRoot,
                 {
-                    preservePendingWork: changedDuringCommit || relatedRaces.size > 0,
+                    preservePendingWork: changedDuringCommit,
                     additionalDeletedCharacterIds,
-                    committedSelectedCharacter: selectedRelatedDetail
-                        ? {
-                              id: selectedRelatedDetail.chaId,
-                              character: this.mergeCommittedDetailWithResident(
-                                  selectedRelatedDetail,
-                                  selectedRelatedBefore?.character ?? null,
-                              ),
-                          }
-                        : undefined,
                 },
             )
             await this.finishExplicitCommit(committed.revision)
@@ -3468,17 +3386,13 @@ export class SaveCoordinator {
                 : {...canonicalClone(result.character), chats: previousMaterialized?.chats ?? []} as CompleteCharacter)
         if (options.publish !== false) {
             for (const id of options.additionalDeletedCharacterIds ?? []) {
-                this.dependencies.publishCharacterMutation?.({ ...result, characterId: id, relatedCharacters: [] })
+                this.dependencies.publishCharacterMutation?.({ ...result, characterId: id })
             }
             this.dependencies.publishCharacterMutation?.(result)
             const published = this.capture()
             if (
                 published.character?.chaId === result.characterId ||
-                (result.kind === 'delete' && !published.character && !published.windowedCharacter) ||
-                (this.dependencies.publishCharacterMutation !== undefined &&
-                    result.relatedCharacters?.some(
-                        (detail) => detail.chaId === published.character?.chaId,
-                    ))
+                (result.kind === 'delete' && !published.character && !published.windowedCharacter)
             ) {
                 this.setCharacterBaseline(published)
             }
@@ -3554,20 +3468,6 @@ export class SaveCoordinator {
             createConversationSummaryStubFromChat(result.characterId, result.conversation, index),
         )
         this.characterBaseline = canonicalJson(baseline)
-    }
-
-    private removeGroupCharacterReference(
-        character: CharacterDetail | CompleteCharacter,
-        characterId: string,
-    ): boolean {
-        if (character.type !== 'group') return false
-        const group = character as Omit<groupChat, 'chats'> | groupChat
-        const retained = removeGroupMemberReferences(group, new Set([characterId]))
-        if (retained.characters.length === group.characters.length) return false
-        group.characters = retained.characters
-        group.characterTalks = retained.characterTalks
-        group.characterActive = retained.characterActive
-        return true
     }
 
     finishUpstreamReplacementPublication(revision: DataRevision, publishOfficial = false): Promise<void> {

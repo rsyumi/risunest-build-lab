@@ -16,7 +16,7 @@ import { get } from "svelte/store";
 import { open } from '@tauri-apps/plugin-shell'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import streamSaver from 'streamsaver';
-import { type Database, defaultSdDataFunc, getDatabase, getCurrentCharacter, type character, type groupChat, appSubVer } from "./storage/database.svelte";
+import { type Database, defaultSdDataFunc, getDatabase, getCurrentCharacter, type character, appSubVer } from "./storage/database.svelte";
 import versionData from "../../version.json";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, DBState, LoadingStatusState, selIdState, ReloadGUIPointer, bodyIntercepterStore } from "./stores.svelte";
@@ -833,7 +833,7 @@ export async function getUncleanables(db: Database, uptype: 'basename' | 'pure' 
  * @returns {Promise<string[]>} - An array of uncleanable resources.
  */
 export function getUncleanablesSync(db: Database, uptype: 'basename' | 'pure' = 'basename', options?:{
-    chars: (character|groupChat)[],
+    chars: (character)[],
 }) {
     const uncleanable = new Set<string>();
 

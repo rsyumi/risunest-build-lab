@@ -277,7 +277,7 @@ impl PersistentStore {
         header: &Header,
         staging_id: &str,
     ) -> StoreResult<(Vec<Change>, BindingSelectionChange)> {
-        let (receive,encoded,activation,library,target,connection,source_authority,source_epoch,inspection):(String,String,Option<String>,String,String,String,String,String,String)=self.connection.query_row("SELECT s.receive_id,s.changes,s.activation_epoch,i.library_id,i.target_id,i.target,i.source_authority,i.source_epoch,s.inspection_id FROM lww_binding_stages s JOIN lww_binding_inspections i USING(inspection_id) WHERE s.staging_id=?1",[staging_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?)))?;
+        let (receive,_encoded,activation,library,target,connection,source_authority,source_epoch,inspection):(String,String,Option<String>,String,String,String,String,String,String)=self.connection.query_row("SELECT s.receive_id,s.changes,s.activation_epoch,i.library_id,i.target_id,i.target,i.source_authority,i.source_epoch,s.inspection_id FROM lww_binding_stages s JOIN lww_binding_inspections i USING(inspection_id) WHERE s.staging_id=?1",[staging_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?)))?;
         let selection = super::super::sync_selection::read(&self.connection)?;
         let target_connection: SyncTarget = serde_json::from_str(&connection)?;
         if receive != header.request_id
@@ -289,7 +289,12 @@ impl PersistentStore {
             return Err(error("stale-or-wrong-target-new-device-stage"));
         }
         super::super::sync_selection::validate_binding_stage_content(&self.connection, staging_id)?;
-        let changes: Vec<Change> = serde_json::from_str(&encoded)?;
+        let rows = super::binding_stage::binding_source_rows(&self.connection, staging_id)?;
+        let mut changes = Vec::new();
+        rows.visit(false, |key, stamp, value, _| {
+            changes.push(Change { key, stamp: stamp.ok_or_else(|| error("request-id-integrity"))?, value });
+            Ok(())
+        })?;
         validate_binding_source(&self.connection, staging_id, header, &changes)?;
         let mut keys = BTreeSet::new();
         for change in &changes {

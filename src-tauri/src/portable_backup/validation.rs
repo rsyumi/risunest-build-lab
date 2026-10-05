@@ -647,7 +647,12 @@ impl LibraryView<'_> {
             ));
             return Ok(());
         };
-        for reference in references {
+        for mut reference in references {
+            // Native row identities stay separate from the upstream F0 display identities.
+            if owner_kind == "preset" || owner_kind == "plugin" {
+                reference.owner_kind = if owner_kind == "plugin" { "plugin-storage" } else { "preset" }.to_owned();
+                reference.owner_id = owner_id.to_owned();
+            }
             check(probe)?;
             counts.total += 1;
             if matches!(reference.status, F0ReferenceStatus::Invalid) {
@@ -713,7 +718,7 @@ impl LibraryView<'_> {
                     .get("characterId")
                     .and_then(Value::as_str)
                     .or_else(|| {
-                        matches!(r.owner_kind.as_str(), "character" | "group")
+                        matches!(r.owner_kind.as_str(), "character")
                             .then_some(r.owner_id.as_str())
                     });
                 if let Some(scope) = scope {

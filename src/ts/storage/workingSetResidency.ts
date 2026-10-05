@@ -1,5 +1,5 @@
 import { isConversationStreaming } from './streamingConversationRegistry'
-import type { Database, character, groupChat } from './database.svelte'
+import type { Database, character } from './database.svelte'
 import { isConversationSummaryStub } from './conversationResidency'
 import {
     createCatalogCharacterStub,
@@ -8,7 +8,7 @@ import {
     isCatalogCharacterStub,
 } from './workingSetCatalog'
 
-type CompleteCharacter = character | groupChat
+type CompleteCharacter = character
 
 export { createConversationSummaryStub, isConversationSummaryStub } from './conversationResidency'
 

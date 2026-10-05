@@ -1149,7 +1149,6 @@ export class ActiveConversationSession {
             'saying',
             'chatId',
             'name',
-            'otherUser',
             'disabled',
             'isComment',
         ] as const

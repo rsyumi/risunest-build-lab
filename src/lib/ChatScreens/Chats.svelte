@@ -1,5 +1,5 @@
 <script lang="ts">
-    import type { character, groupChat, Message, StreamingDisplayOptimizationMode } from 'src/ts/storage/database.svelte'
+    import type { character, Message, StreamingDisplayOptimizationMode } from 'src/ts/storage/database.svelte'
     import { mount, onDestroy, onMount, tick, unmount, untrack } from 'svelte'
     import { get } from 'svelte/store'
     import Chat from './Chat.svelte'
@@ -79,7 +79,7 @@
         hasNewUnreadMessage = $bindable(false),
     }: {
         messages?: Message[]
-        currentCharacter: character | groupChat
+        currentCharacter: character
         onReroll: () => void
         onNextReroll?: () => void
         unReroll: () => void
@@ -278,9 +278,7 @@
     function currentConversationIdentity(): string {
         const currentChat = currentCharacter.chats?.[currentCharacter.chatPage]
         const selectedCharacterIndex = get(selectedCharID)
-        const ownerId = currentCharacter.type === 'group'
-            ? `group:${selectedCharacterIndex}`
-            : `character:${selectedCharacterIndex}:${currentCharacter.chaId}`
+        const ownerId = `character:${selectedCharacterIndex}:${currentCharacter.chaId}`
         const ownerSessionId = objectScopeIdentity(ownerSessionIds, currentCharacter)
         const conversationId = currentChat?.id ?? `page:${currentCharacter.chatPage}`
         const conversationSessionId = currentChat
@@ -297,9 +295,7 @@
     function currentConversationHandoffIdentity(): string {
         const currentChat = currentCharacter.chats?.[currentCharacter.chatPage]
         const selectedCharacterIndex = get(selectedCharID)
-        const ownerId = currentCharacter.type === 'group'
-            ? `group:${selectedCharacterIndex}:${currentCharacter.chaId}`
-            : `character:${currentCharacter.chaId}`
+        const ownerId = `character:${currentCharacter.chaId}`
         const conversationId = currentChat?.id ?? `page:${currentCharacter.chatPage}`
         return [ownerId, conversationId]
             .map((part) => `${part.length}:${part}`)
@@ -322,7 +318,7 @@
     }
 
     function hasConversationStart(): boolean {
-        return currentCharacter.type !== 'group'
+        return true
     }
 
     function conversationStartKey(scope: string): string {
@@ -460,7 +456,7 @@
     }
 
     function currentPins(
-        currentChat: character['chats'][number] | groupChat['chats'][number] | undefined,
+        currentChat: character['chats'][number] | undefined,
         sourceSnapshot: ConversationViewportSnapshot | null,
     ): ChatViewportPin[] {
         const pins: ChatViewportPin[] = []
@@ -495,7 +491,7 @@
 
     function syncSourcePins(
         result: ChatViewportResult,
-        currentChat: character['chats'][number] | groupChat['chats'][number] | undefined,
+        currentChat: character['chats'][number] | undefined,
         sourceSnapshot: ConversationViewportSnapshot | null,
     ): void {
         const source = activeViewportSource
@@ -897,7 +893,7 @@
     function renderViewportRows(
         scope: string,
         result: ChatViewportResult,
-        currentChat: character['chats'][number] | groupChat['chats'][number] | undefined,
+        currentChat: character['chats'][number] | undefined,
         reloadPointerMap: Record<number, number>,
         sourceSnapshot: ConversationViewportSnapshot | null,
         preferredMountKey?: string,
@@ -1657,7 +1653,7 @@
     // Keeps each kept draft's row loaded, hands the draft to a mounted row that
     // shows exactly its message, and otherwise looks the message up by its id.
     function settleEditorDrafts(
-        currentChat: character['chats'][number] | groupChat['chats'][number],
+        currentChat: character['chats'][number],
         sourceSnapshot: ConversationViewportSnapshot | null,
     ): void {
         const conversationId = currentChat.id

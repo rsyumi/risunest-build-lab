@@ -20,8 +20,6 @@ export function pluginUnitIntents(
         const key = JSON.stringify(parts)
         units.push(intent.type === 'delete' || intent.value === undefined ? { key, type: 'delete' } : { key, type: 'set', value: intent.value })
     }
-    const groupFields = ['characters', 'characterTalks', 'characterActive']
-    const groupIds = new Set<string>()
     const conversation = (id: string, chatId: string, fields: Array<string | number>, intent: PluginFieldIntent) => {
         if (!fields.length) {
             if (intent.type === 'delete') emit(['exists', 'conversation', id, chatId], intent)
@@ -40,7 +38,7 @@ export function pluginUnitIntents(
             if (intent.type === 'delete') emit(['exists', 'character', id], intent)
             else {
                 const type = (intent.value as any).type
-                if (type !== 'character' && type !== 'group') throw new TypeError('New plugin character requires a structural type')
+                if (type !== 'character') throw new TypeError('New plugin character requires a structural type')
                 emit(['exists', 'character', id], { ...intent, value: { type } })
                 for (const [field, value] of Object.entries(intent.value as object)) {
                     if (field === 'chats') {
@@ -54,17 +52,11 @@ export function pluginUnitIntents(
             else conversation(id, String(fields[1]), fields.slice(2), intent)
         } else if (fields[0] === 'chatFolders') {
             emitConversationOrder(id, intent)
-        } else if (groupFields.includes(String(fields[0])) && submittedGroup(id)?.type === 'group') {
-            if (!groupIds.has(id)) {
-                groupIds.add(id)
-                const group = submittedGroup(id)
-                emit(['group-members', id], { ...intent, type: 'set', value: Object.fromEntries(groupFields.map(field => [field, group[field]])) })
-            }
         } else if (!['chaId', 'type'].includes(String(fields[0]))) emit(['character', id, String(fields[0])], intent)
     }
-    const submittedGroup = (id: string) => kind === 'character' ? submitted : submitted.characters?.find((record: any) => record.chaId === id)
+    const submittedCharacter = (id: string) => kind === 'character' ? submitted : submitted.characters?.find((record: any) => record.chaId === id)
     const emitConversationOrder = (id: string, intent: PluginFieldIntent) => {
-        const record = submittedGroup(id)
+        const record = submittedCharacter(id)
         emit(['order', 'conversations', id], { ...intent, type: 'set', value: { ids: record.chats.map((chat: any) => chat.id), folders: record.chatFolders ?? [] } })
     }
     for (const intent of intents) {

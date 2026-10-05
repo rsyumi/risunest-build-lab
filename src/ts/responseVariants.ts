@@ -25,21 +25,7 @@ export function responseRange(messages: readonly Message[]): { start: number; en
         (candidate) => candidate.id === carrier.responseVariants?.selectedId,
     )
     if (selected) return { start: Math.max(0, end - selected.messages.length), end }
-    let start = end - 1
-    const speakers = new Set([carrier.saying])
-    while (start > 0) {
-        const previous = messages[start - 1]
-        if (
-            previous.role !== 'char' ||
-            previous.isComment ||
-            previous.disabled ||
-            speakers.has(previous.saying)
-        )
-            break
-        speakers.add(previous.saying)
-        start--
-    }
-    return { start, end }
+    return { start: end - 1, end }
 }
 
 export function captureResponseVariants(
@@ -111,7 +97,7 @@ export function recoverRerollMessages(chat: Chat): Message[] {
     return [...chat.message.slice(0, start), ...safeStructuredClone(recovery.original), ...retained]
 }
 
-/** Synchronize the selected group's carrier when an earlier group member is edited. */
+/** Synchronize the selected response when an earlier message is edited. */
 export function responseEditReplacement(
     messages: readonly Message[],
     index: number,

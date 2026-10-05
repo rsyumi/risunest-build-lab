@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { Chat, character, groupChat } from './database.svelte'
+import type { Chat, character } from './database.svelte'
 import type {
     CharacterDetail,
     PersistentDataStore,
@@ -795,7 +795,7 @@ describe('SaveCoordinator', () => {
         it('rechecks windowed authority after an awaited complete-character commit', async () => {
             const database = makeDatabase()
             const { character: projection } = makeWindowedProjection()
-            let selected: character | groupChat = database.characters[0]
+            let selected: character = database.characters[0]
             let authority: TestWindowedAuthority | null = null
             const committed = deferred<{ revision: number }>()
             const commit = vi.fn(() => committed.promise)

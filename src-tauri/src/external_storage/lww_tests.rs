@@ -101,6 +101,23 @@ pub(crate) fn small_asset(store: &mut PersistentStore, key: &str, body: &[u8]) -
     store.commit_asset_alias(&alias, store.revision().unwrap()).unwrap();
     hash
 }
+pub(crate) async fn hydrate_receiver(f: &CycleFixture, hash: &str) -> std::fs::File {
+    let connected = super::previous_storage_tests::receiver_connection(f);
+    let mut connections=super::connection_store::ConnectionStore::open(f.directory_b.path()).unwrap();
+    match connections.read(&connected.stored.id) {
+        Ok(stored)=>assert_eq!(serde_json::to_value(stored).unwrap(),serde_json::to_value(&connected.stored).unwrap()),
+        Err(error) if error.kind==ErrorKind::NotFound=>connections.insert(&connected.stored).unwrap(),
+        Err(error)=>panic!("synthetic hydration connection: {error:?}"),
+    }
+    drop(connections);
+    let _source = super::lww_residency::install_test_source_connection(f.directory_b.path(), Arc::new(connected)).unwrap();
+    let root = f.directory_b.path().to_owned();
+    let hash = hash.to_owned();
+    super::worker_observation::spawn_blocking(move || {
+        super::lww_residency::hydrate(&root, &hash, &|| Ok(())).unwrap().unwrap()
+    }).await.unwrap()
+}
+
 pub(crate) struct CycleFixture {
     pub directory_a: tempfile::TempDir,
     pub directory_b: tempfile::TempDir,
@@ -287,6 +304,26 @@ fn a_saved_publication_keeps_its_asset_pins_across_a_page_reload_until_it_is_sen
         assert_no_publication_pins_left(&f);
     })
 }
+#[test]
+fn publication_uses_inline_and_local_sources_without_opening_an_unused_server_registry() {
+    run(async {
+        let mut f=CycleFixture::new();
+        set(&mut f.a,&["root","language"],serde_json::json!("synthetic-language"));
+        let body=b"synthetic local publication body";
+        let hash=small_asset(&mut f.a,"synthetic-local-registry",body);
+        let registry=crate::server_sync::residency::Residency::path(f.directory_a.path());
+        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        std::fs::write(&registry,b"synthetic invalid unused SQLite registry").unwrap();
+        assert!(crate::server_sync::residency::Residency::open(f.directory_a.path()).is_err());
+        assert_eq!(f.publish_a().await.segments.0,1);
+        assert_eq!(f.receive_b().await,1);
+        let mut restored=hydrate_receiver(&f,&hash).await;
+        let mut bytes=Vec::new();
+        std::io::Read::read_to_end(&mut restored,&mut bytes).unwrap();
+        assert_eq!(bytes,body);
+    })
+}
+
 #[test]
 fn small_assets_use_authenticated_catalogs_and_present_bootstrap_reads_no_bodies() {
     run(async {
@@ -1170,34 +1207,14 @@ fn large_bodies_stay_remote_then_only_missing_body_hydrates() {
             super::lww_residency::stat(f.directory_b.path(), &hash).unwrap(),
             Some(body.len() as u64)
         );
-        let mut file = super::lww_residency::fulfill(
-            f.directory_b.path(),
-            &hash,
-            f.provider.as_ref(),
-            &f.receiver.repository,
-            &[7; 32],
-            &Cancellation::default(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let mut file = hydrate_receiver(&f, &hash).await;
         let mut restored = Vec::new();
         std::io::Read::read_to_end(&mut file, &mut restored).unwrap();
         assert_eq!(restored, body);
         let hydrated = f.provider.transferred_body_bytes();
         assert!(hydrated.1 > before.1 + body.len() as u64);
         lww_segment::reset_hash_bytes();
-        assert!(super::lww_residency::fulfill(
-            f.directory_b.path(),
-            &hash,
-            f.provider.as_ref(),
-            &f.receiver.repository,
-            &[7; 32],
-            &Cancellation::default()
-        )
-        .await
-        .unwrap()
-        .is_some());
+        drop(hydrate_receiver(&f, &hash).await);
         assert_eq!(f.provider.transferred_body_bytes(), hydrated);
         assert_eq!(lww_segment::take_hash_bytes(), 0);
     })
@@ -2736,8 +2753,7 @@ fn a_large_body_waits_for_its_upload_in_a_file_rather_than_in_the_publication_ro
         assert!(!publication.exists(), "a finished publication leaves its files");
         assert_eq!(f.provider.upload_attempts(&pending.bodies[0].object_id), 1);
         assert_eq!(f.receive_b().await, 1);
-        let mut file = super::lww_residency::fulfill(f.directory_b.path(), &hash, f.provider.as_ref(),
-            &f.receiver.repository, &[7; 32], &Cancellation::default()).await.unwrap().unwrap();
+        let mut file = hydrate_receiver(&f, &hash).await;
         let mut restored = Vec::new();
         std::io::Read::read_to_end(&mut file, &mut restored).unwrap();
         assert!(restored == body);

@@ -14,7 +14,6 @@ use risunest_sync_wire::{
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
-use std::collections::HashSet;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE message_page_indexes (
@@ -351,6 +350,8 @@ pub(super) struct PageWork {
     pub pages_written: usize,
     pub prefix_reused: usize,
     pub suffix_reused: usize,
+    pub peak_page_messages: usize,
+    pub peak_page_bytes: usize,
 }
 
 #[cfg(test)]
@@ -390,6 +391,8 @@ fn record_capture_work(work: &PageWork, succeeded: bool) {
         totals.work.pages_written += work.pages_written;
         totals.work.prefix_reused += work.prefix_reused;
         totals.work.suffix_reused += work.suffix_reused;
+        totals.work.peak_page_messages = totals.work.peak_page_messages.max(work.peak_page_messages);
+        totals.work.peak_page_bytes = totals.work.peak_page_bytes.max(work.peak_page_bytes);
     });
 }
 
@@ -550,6 +553,8 @@ fn capture(
                 #[cfg(test)]
                 {
                     work.bytes_read += body.len() as u64;
+                    work.peak_page_messages = work.peak_page_messages.max(page_hashes.len());
+                    work.peak_page_bytes = work.peak_page_bytes.max(bytes.len() + PAGE_SUFFIX.len());
                 }
                 position += 1;
                 next = next_hash(tx, &mut rows, generation, character, conversation)?;
@@ -639,6 +644,143 @@ fn capture(
     };
     save_index(tx, generation, character, conversation, &pages, &manifest)?;
     unit_value(tx, &manifest)
+}
+
+pub(super) fn stage_conversation_pages(
+    tx: &Transaction<'_>,
+    generation: &str,
+    character: &str,
+    conversation: &str,
+    check_cancelled: &dyn Fn() -> StoreResult<()>,
+) -> StoreResult<()> {
+    #[cfg(not(test))]
+    { stage_pages(tx, generation, character, conversation, check_cancelled) }
+    #[cfg(test)]
+    {
+        let mut work = PageWork::default();
+        let result = stage_pages(tx, generation, character, conversation, check_cancelled, &mut work);
+        record_capture_work(&work, result.is_ok());
+        result
+    }
+}
+
+fn stage_pages(
+    tx: &Transaction<'_>,
+    generation: &str,
+    character: &str,
+    conversation: &str,
+    check_cancelled: &dyn Fn() -> StoreResult<()>,
+    #[cfg(test)] work: &mut PageWork,
+) -> StoreResult<()> {
+    check_cancelled()?;
+    let expected: Option<i64> = tx.query_row(
+        "SELECT message_count FROM conversations WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",
+        params![generation, character, conversation], |row| row.get(0),
+    ).optional()?;
+    let Some(expected) = expected else { return Ok(()); };
+    let available: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(message_index)+1,0) FROM messages
+         WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",
+        params![generation, character, conversation], |row| row.get(0),
+    )?;
+    if expected < 0 || available < 0 || available > expected {
+        return Err(codec_error("conversation message count mismatch"));
+    }
+    // Only the trailing page can change when another batch arrives. Its size
+    // boundary can depend on the first message of that next batch.
+    let mut position: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(page_start),0) FROM message_page_indexes
+         WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",
+        params![generation, character, conversation], |row| row.get(0),
+    )?;
+    tx.execute("DELETE FROM message_page_indexes WHERE generation=?1 AND character_id=?2
+        AND conversation_id=?3 AND page_start>=?4", params![generation, character, conversation, position])?;
+    tx.execute("DELETE FROM message_page_manifests WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",
+        params![generation, character, conversation])?;
+    let mut statement = tx.prepare("SELECT message_index,canonical_hash,canonical_size FROM messages
+        WHERE generation=?1 AND character_id=?2 AND conversation_id=?3 AND message_index>=?4 ORDER BY message_index")?;
+    let mut rows = statement.query(params![generation, character, conversation, position])?;
+    let mut next = next_hash(tx, &mut rows, generation, character, conversation)?;
+    #[cfg(test)]
+    { work.hash_rows_read += usize::from(next.is_some()); }
+    while next.is_some() {
+        check_cancelled()?;
+        let start = position;
+        let mut bytes = PAGE_PREFIX.to_vec();
+        let mut hashes = Vec::new();
+        loop {
+            check_cancelled()?;
+            let (index, hash) = next.take().ok_or_else(|| codec_error("message page index is incomplete"))?;
+            if index as i64 != position {
+                return Err(codec_error("noncontiguous conversation messages"));
+            }
+            let body: String = tx.query_row("SELECT value FROM messages WHERE generation=?1 AND character_id=?2
+                AND conversation_id=?3 AND message_index=?4", params![generation, character, conversation, position],
+                |row| row.get(0))?;
+            let body = payload_value::canonicalize(body.as_bytes()).map_err(codec_error)?;
+            if {
+                #[cfg(test)]
+                crate::persistent_store::hash_work::observe("native_message_verify", body.len());
+                MessageHash::from_bytes(&body)
+            } != hash {
+                return Err(codec_error("cached message hash mismatch"));
+            }
+            if position > start { bytes.push(b','); }
+            bytes.extend(&body);
+            hashes.push(hash.clone());
+            position += 1;
+            next = next_hash(tx, &mut rows, generation, character, conversation)?;
+            #[cfg(test)]
+            {
+                work.messages_read += 1;
+                work.bytes_read += body.len() as u64;
+                work.hash_rows_read += usize::from(next.is_some());
+                work.peak_page_messages = work.peak_page_messages.max(hashes.len());
+                work.peak_page_bytes = work.peak_page_bytes.max(bytes.len() + PAGE_SUFFIX.len());
+            }
+            if hashes.len() == LOGICAL_MESSAGE_PAGE_SIZE
+                || (hashes.len() >= MIN_PAGE_MESSAGES && hash.boundary().map_err(codec_error)?)
+                || bytes.len() + PAGE_SUFFIX.len() > MAX_PAGE_BYTES
+                || next.is_none()
+                || next.as_ref().is_some_and(|(_, hash)| {
+                    bytes.len() as u128 + 1 + hash.byte_length as u128 + PAGE_SUFFIX.len() as u128 > MAX_PAGE_BYTES as u128
+                })
+            { break; }
+        }
+        bytes.extend(PAGE_SUFFIX);
+        let object = {
+            let result = encoded_object(bytes);
+            #[cfg(test)]
+            crate::persistent_store::hash_work::encoded_object("native_page_identity", &result);
+            result
+        }.map_err(codec_error)?;
+        let page = ManifestPage {
+            hash: object.hash.clone(), message_count: hashes.len() as u32, byte_length: DecimalU64(object.size),
+        };
+        put_object(tx, &object.hash, &object.bytes)?;
+        store_page_proof(tx, &page, &hashes)?;
+        tx.execute("INSERT INTO message_page_indexes VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![generation, character, conversation, start, page.message_count, page.hash, sql_i64(page.byte_length.0)?])?;
+        #[cfg(test)]
+        { work.pages_written += 1; }
+    }
+    if position != available {
+        return Err(codec_error("conversation message count mismatch"));
+    }
+    check_cancelled()?;
+    if available == expected {
+        let manifest = MessageManifest {
+            schema: MANIFEST_SCHEMA.into(), message_count: DecimalU64(expected as u64),
+            pages: load_pages(tx, generation, character, conversation)?.into_iter().map(|page| page.page).collect(),
+        };
+        let encoded = manifest.encode().map_err(codec_error)?;
+        #[cfg(test)]
+        crate::persistent_store::hash_work::observe("native_manifest_identity", encoded.bytes.len());
+        tx.execute("INSERT INTO message_page_manifests VALUES(?1,?2,?3,?4)",
+            params![generation, character, conversation, encoded.bytes])?;
+        unit_value(tx, &manifest)?;
+    }
+    Ok(())
 }
 
 fn next_hash(
@@ -1070,25 +1212,45 @@ impl From<risunest_external_storage_format::logical_records::LogicalRecordError>
 fn sql_i64(value: u64) -> StoreResult<i64> {
     i64::try_from(value).map_err(|_| codec_error("message size exceeds database integer range"))
 }
-/// Hashes that some stored row still needs.
-#[derive(Default)]
+/// Roots and traversal state live in a file-backed SQLite scratch
+/// database. Each sweep target has a bounded page cache, independent of its roots.
 pub(super) struct ObjectRoots {
-    hashes: HashSet<String>,
-    walked: HashSet<String>,
+    scratch: Connection,
 }
 
 impl ObjectRoots {
-    fn insert(&mut self, hash: impl Into<String>) {
-        self.hashes.insert(hash.into());
+    fn new(scratch: Connection) -> StoreResult<Self> {
+        scratch.execute_batch("PRAGMA cache_size=-512; PRAGMA mmap_size=0;
+            PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_spill=ON;
+            CREATE TABLE roots(hash TEXT PRIMARY KEY, walked INTEGER NOT NULL DEFAULT 0,
+                pending INTEGER) WITHOUT ROWID;
+            CREATE INDEX pending_roots ON roots(pending,hash) WHERE pending IS NOT NULL;
+            BEGIN IMMEDIATE;")?;
+        Ok(Self { scratch })
+    }
+
+    fn insert(&mut self, hash: impl AsRef<str>) -> StoreResult<()> {
+        self.scratch.prepare_cached("INSERT OR IGNORE INTO roots(hash) VALUES(?1)")?
+            .execute([hash.as_ref()])?;
+        Ok(())
+    }
+
+    fn enqueue(&mut self, hash: &str, relations: bool) -> StoreResult<()> {
+        self.scratch.prepare_cached("INSERT INTO roots(hash,pending) VALUES(?1,?2)
+            ON CONFLICT(hash) DO UPDATE SET pending=excluded.pending WHERE walked=0")?
+            .execute(params![hash, relations])?;
+        Ok(())
     }
 
     fn value(&mut self, objects: &Connection, value: &UnitValue) -> StoreResult<()> {
         let UnitValue::Object { descriptor_hash, descriptor } = value else {
             return Ok(());
         };
-        self.insert(descriptor_hash.as_str());
-        self.insert(descriptor.object_hash.as_str());
-        self.hashes.extend(descriptor.dependencies.iter().cloned());
+        self.insert(descriptor_hash)?;
+        self.insert(&descriptor.object_hash)?;
+        for hash in &descriptor.dependencies {
+            self.insert(hash)?;
+        }
         for (root, relations) in [(&descriptor.dependency_root, false), (&descriptor.relation_root, true)] {
             if let Some(root) = root {
                 self.tree(objects, root, relations)?;
@@ -1099,12 +1261,14 @@ impl ObjectRoots {
 
     fn tree(&mut self, objects: &Connection, root: &str, relations: bool) -> StoreResult<()> {
         use risunest_sync_wire::descriptor::ReferencePage;
-        let mut pending = vec![root.to_owned()];
-        while let Some(hash) = pending.pop() {
-            self.insert(hash.as_str());
-            if !self.walked.insert(hash.clone()) {
-                continue;
-            }
+        self.enqueue(root, relations)?;
+        loop {
+            let pending: Option<(String, bool)> = self.scratch.prepare_cached(
+                "SELECT hash,pending FROM roots WHERE pending IS NOT NULL ORDER BY pending,hash LIMIT 1"
+            )?.query_row([], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            let Some((hash, relations)) = pending else { break; };
+            self.scratch.prepare_cached("UPDATE roots SET walked=1,pending=NULL WHERE hash=?1")?
+                .execute([&hash])?;
             // A node this store does not hold has nothing below it here. A node
             // it holds but cannot read stops the sweep, since what it names is
             // unknown.
@@ -1114,8 +1278,12 @@ impl ObjectRoots {
             let page = risunest_sync_wire::canonical::decode::<ReferencePage>(&body, risunest_sync_wire::MAX_METADATA_BYTES)
                 .map_err(codec_error)?;
             match page {
-                ReferencePage::Branches { children } => pending.extend(children),
-                ReferencePage::Objects { hashes } if !relations => self.hashes.extend(hashes),
+                ReferencePage::Branches { children } => {
+                    for child in children { self.enqueue(&child, relations)?; }
+                }
+                ReferencePage::Objects { hashes } if !relations => {
+                    for hash in hashes { self.insert(hash)?; }
+                }
                 _ => {}
             }
         }
@@ -1142,8 +1310,9 @@ impl ObjectRoots {
         Ok(())
     }
 
-    fn contains(&self, hash: &str) -> bool {
-        self.hashes.contains(hash)
+    fn contains(&self, hash: &str) -> StoreResult<bool> {
+        Ok(self.scratch.prepare_cached("SELECT EXISTS(SELECT 1 FROM roots WHERE hash=?1)")?
+            .query_row([hash], |row| row.get(0))?)
     }
 }
 
@@ -1155,8 +1324,9 @@ pub(super) fn object_roots<'a>(
     leases: impl IntoIterator<Item = &'a Connection>,
     device: &Connection,
     objects: &Connection,
+    scratch: Connection,
 ) -> StoreResult<ObjectRoots> {
-    let mut roots = ObjectRoots::default();
+    let mut roots = ObjectRoots::new(scratch)?;
     library_object_roots(library, objects, &mut roots)?;
     for lease in leases {
         library_object_roots(lease, objects, &mut roots)?;
@@ -1170,6 +1340,7 @@ pub(super) fn object_roots<'a>(
         }
     }
     device_object_roots(device, "main", objects, &mut roots)?;
+    roots.scratch.execute_batch("COMMIT")?;
     Ok(roots)
 }
 
@@ -1178,7 +1349,7 @@ pub(super) fn object_roots<'a>(
 /// and hashes kept by staged restores and external storage captures.
 fn library_object_roots(db: &Connection, objects: &Connection, roots: &mut ObjectRoots) -> StoreResult<()> {
     for sql in [
-        "SELECT DISTINCT hash FROM message_page_indexes",
+        "SELECT hash FROM message_page_indexes",
         "SELECT manifest_hash FROM external_storage_captures",
         "SELECT file_hash FROM external_storage_capture_files",
         "SELECT hash FROM snapshot_restore_payloads",
@@ -1186,13 +1357,13 @@ fn library_object_roots(db: &Connection, objects: &Connection, roots: &mut Objec
         let mut statement = db.prepare(sql)?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         for row in rows {
-            roots.insert(row?);
+            roots.insert(row?)?;
         }
     }
     let mut statement = db.prepare("SELECT body FROM message_page_manifests")?;
     let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
     for row in rows {
-        roots.insert(risunest_sync_wire::hash(&row?));
+        roots.insert(risunest_sync_wire::hash(&row?))?;
     }
     drop(statement);
     for sql in [
@@ -1210,7 +1381,7 @@ fn library_object_roots(db: &Connection, objects: &Connection, roots: &mut Objec
     for row in rows {
         let archived: super::archive::ArchivedObject = serde_json::from_str(&row?)?;
         for hash in super::lww::archive_object_hashes(&archived)? {
-            roots.insert(hash);
+            roots.insert(hash)?;
         }
     }
     Ok(())
@@ -1287,7 +1458,7 @@ pub(super) fn sweep_objects(
     };
     let mut sweep = ObjectSweep::default();
     for (hash, size, mark) in &candidates {
-        if roots.contains(hash) {
+        if roots.contains(hash)? {
             if mark.is_some() {
                 tx.execute("DELETE FROM message_page_object_marks WHERE hash=?1", [hash])?;
             }
@@ -1337,6 +1508,45 @@ fn sql_u64(value: i64, index: usize) -> rusqlite::Result<u64> {
 }
 fn sql_usize(value: i64, index: usize) -> rusqlite::Result<usize> {
     usize::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+#[cfg(test)]
+mod object_root_tests {
+    use super::*;
+
+    #[test]
+    fn root_membership_and_reference_walk_state_are_deduplicated_in_sqlite() {
+        let objects = Connection::open_in_memory().unwrap();
+        objects.execute_batch(SCHEMA).unwrap();
+        let hashes = (0..4097).map(|index| format!("{index:064x}")).collect::<Vec<_>>();
+        let (root, nodes) = build_reference_tree(&hashes, false).unwrap();
+        for (hash, body) in &nodes { put_object(&objects, hash, body).unwrap(); }
+        let mut descriptor = RecordDescriptor::content("f0".repeat(32));
+        descriptor.dependency_root = root;
+        let value = UnitValue::object(descriptor).unwrap();
+        let mut roots = ObjectRoots::new(Connection::open_in_memory().unwrap()).unwrap();
+        roots.value(&objects, &value).unwrap();
+        let count: i64 = roots.scratch.query_row("SELECT count(*) FROM roots", [], |row| row.get(0)).unwrap();
+        roots.json(&objects, &serde_json::json!({"proofs":[value.clone(),value]})).unwrap();
+        assert_eq!(roots.scratch.query_row("SELECT count(*) FROM roots", [], |row| row.get::<_, i64>(0)).unwrap(), count);
+        assert_eq!(roots.scratch.query_row("SELECT count(*) FROM roots WHERE walked=1", [], |row| row.get::<_, i64>(0)).unwrap(), nodes.len() as i64);
+        assert_eq!(roots.scratch.query_row("SELECT count(*) FROM roots WHERE pending IS NOT NULL", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert!(hashes.iter().all(|hash| roots.contains(hash).unwrap()));
+        assert!(nodes.iter().all(|(hash, _)| roots.contains(hash).unwrap()));
+        assert!(!roots.contains(&"fe".repeat(32)).unwrap());
+        assert_eq!(roots.scratch.query_row("PRAGMA cache_size", [], |row| row.get::<_, i64>(0)).unwrap(), -512);
+    }
+
+    #[test]
+    fn unreadable_reference_nodes_abort_root_collection() {
+        let objects = Connection::open_in_memory().unwrap();
+        objects.execute_batch(SCHEMA).unwrap();
+        let body = b"invalid synthetic reference page";
+        let hash = risunest_sync_wire::hash(body);
+        put_object(&objects, &hash, body).unwrap();
+        let mut roots = ObjectRoots::new(Connection::open_in_memory().unwrap()).unwrap();
+        assert!(roots.tree(&objects, &hash, false).is_err());
+    }
 }
 
 #[cfg(test)]

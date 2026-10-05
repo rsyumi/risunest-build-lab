@@ -8,6 +8,9 @@ mod termination_probe;
 struct Events(Mutex<Vec<&'static str>>);
 
 #[cfg(target_os = "macos")]
+static SESSION_STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "macos")]
 static PRODUCT_APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
 #[cfg(target_os = "macos")]
@@ -21,6 +24,15 @@ extern "C" fn observe_product_reply(approve: i32, main_thread: i32, modal: i32) 
             (events.iter().filter(|event| event.starts_with("native-reply-")).count(),
              events.iter().filter(|event| **event == "quit").count())
         };
+        if matches!(macos_bench_phase().as_str(), "session-deadline" | "session-upgrade") {
+            let elapsed = SESSION_STARTED.get().ok_or("Session timer not started")?.elapsed().as_secs_f64();
+            let expected = if macos_bench_phase() == "session-upgrade" { 6.0 } else { 5.0 };
+            let passed = approve == 1 && main_thread == 1 && modal == 1 && reply_count == 1
+                && runtime_quits == 0 && (expected - 0.1..expected + 0.75).contains(&elapsed);
+            macos_bench_report(if passed { "session-deadline-reply" } else { "failure" }.into(),
+                serde_json::json!({ "passed": passed, "elapsedSeconds": elapsed,
+                    "mainThread": main_thread == 1, "modal": modal == 1, "replyCount": reply_count }))?;
+        }
         macos_bench_report("app-native-reply".into(), serde_json::json!({
             "approve": approve != 0, "mainThread": main_thread == 1, "modal": modal == 1,
             "replyCount": reply_count, "runtimeQuitRequests": runtime_quits,
@@ -45,6 +57,10 @@ extern "C" fn observe_product_decision(reply: i32) {
     let _ = std::panic::catch_unwind(|| {
         if let Some(app) = PRODUCT_APP.get() {
             app.state::<Events>().0.lock().unwrap_or_else(|error| error.into_inner()).push(event);
+        }
+        if macos_bench_phase().starts_with("session-dispatch-") {
+            let _ = macos_bench_report("session-dispatch-delegate".into(),
+                serde_json::json!({ "reply": reply }));
         }
     });
 }
@@ -100,7 +116,8 @@ fn macos_bench_quit(app: tauri::AppHandle) {
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn macos_bench_native_quit(app: tauri::AppHandle) -> Result<(), String> {
-    if !matches!(macos_bench_phase().as_str(), "app" | "quit-escape") {
+    if !matches!(macos_bench_phase().as_str(), "app" | "quit-escape")
+        && !macos_bench_phase().starts_with("session-dispatch-") {
         return Err("Native product quit belongs to the app and quit-escape phases".into());
     }
     unsafe extern "C" {
@@ -116,6 +133,45 @@ fn macos_bench_native_quit(app: tauri::AppHandle) -> Result<(), String> {
             let _ = macos_bench_report("failure".into(), serde_json::json!({
                 "passed": false, "message": "Unable to queue product native termination",
             }));
+            handle.exit(1);
+        }
+    }).map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn macos_bench_dispatch_session_event(app: tauri::AppHandle) -> Result<(), String> {
+    if !macos_bench_phase().starts_with("session-dispatch-") {
+        return Err("Session dispatch phase required".into());
+    }
+    unsafe extern "C" {
+        fn risunest_bench_dispatch_session_event(
+            observer: extern "C" fn(i32, i32, i32), decision: extern "C" fn(i32),
+        ) -> i32;
+    }
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = PRODUCT_APP.set(handle.clone());
+        let result = unsafe { risunest_bench_dispatch_session_event(observe_product_reply, observe_product_decision) };
+        let _ = macos_bench_report(if result == 1 { "session-dispatch-sent" } else { "failure" }.into(),
+            serde_json::json!({ "passed": result == 1, "status": result, "route": "self-targeted-apple-event" }));
+        if result != 1 { handle.exit(1); }
+    }).map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn macos_bench_session_quit(app: tauri::AppHandle) -> Result<(), String> {
+    if !matches!(macos_bench_phase().as_str(), "session-deadline" | "session-upgrade") { return Err("Session probe phase required".into()); }
+    unsafe extern "C" {
+        fn risunest_bench_session_quit(observer: extern "C" fn(i32, i32, i32), decision: extern "C" fn(i32), upgrade: i32) -> i32;
+    }
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = PRODUCT_APP.set(handle.clone());
+        let _ = SESSION_STARTED.set(std::time::Instant::now());
+        if unsafe { risunest_bench_session_quit(observe_product_reply, observe_product_decision, i32::from(macos_bench_phase() == "session-upgrade")) } != 1 {
+            let _ = macos_bench_report("failure".into(), serde_json::json!({ "message": "Unable to start session-end probe" }));
             handle.exit(1);
         }
     }).map_err(|error| error.to_string())
@@ -154,6 +210,10 @@ fn benchmark_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send
         #[cfg(target_os = "macos")]
         macos_bench_repeat_native_quit,
         #[cfg(target_os = "macos")]
+        macos_bench_session_quit,
+        #[cfg(target_os = "macos")]
+        macos_bench_dispatch_session_event,
+        #[cfg(target_os = "macos")]
         termination_probe::macos_bench_modal_begin,
         #[cfg(target_os = "macos")]
         termination_probe::macos_bench_modal_ack,
@@ -182,7 +242,9 @@ fn main() {
     );
     app.run(|app, event| {
         let product_exit = matches!(&event, tauri::RunEvent::Exit) && macos_bench_phase() == "app";
+        let session_exit = matches!(&event, tauri::RunEvent::Exit) && matches!(macos_bench_phase().as_str(), "session-deadline" | "session-upgrade");
         let escape_exit = matches!(&event, tauri::RunEvent::Exit) && macos_bench_phase() == "quit-escape";
+        let dispatch_exit = matches!(&event, tauri::RunEvent::Exit) && macos_bench_phase().starts_with("session-dispatch-");
         let name = match &event {
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Opened { .. } => Some("opened"),
@@ -202,6 +264,18 @@ fn main() {
         #[cfg(target_os = "macos")]
         termination_probe::record_run_event(&event);
         risunest_lib::handle_run_event(app, event);
+        if dispatch_exit {
+            let state = app.state::<Events>();
+            let events = state.0.lock().unwrap();
+            let replies = events.iter().filter(|event| event.starts_with("native-reply-")).count();
+            let decisions = events.iter().filter(|event| event.starts_with("product-decision-")).copied().collect::<Vec<_>>();
+            let _ = macos_bench_report("session-dispatch-exit".into(), serde_json::json!({
+                "nativeReplies": replies, "productDecisions": decisions,
+                "runtimeQuitRequests": events.iter().filter(|event| **event == "quit").count(),
+                "exitCount": events.iter().filter(|event| **event == "exit").count(),
+                "productHandlerReturned": true,
+            }));
+        }
         if product_exit {
             let state = app.state::<Events>();
             let (replies, runtime_quits, exits) = {
@@ -215,6 +289,15 @@ fn main() {
                 "nativeReplies": replies, "runtimeQuitRequests": runtime_quits,
                 "exitCount": exits, "productHandlerReturned": true,
             }));
+        }
+        if session_exit {
+            let state = app.state::<Events>();
+            let events = state.0.lock().unwrap();
+            let decisions = if macos_bench_phase() == "session-upgrade" { 3 } else { 2 };
+            let passed = events.iter().filter(|event| **event == "native-reply-yes").count() == 1
+                && events.iter().filter(|event| **event == "product-decision-later").count() == decisions;
+            let _ = macos_bench_report(if passed { "session-deadline-exit" } else { "failure" }.into(),
+                serde_json::json!({ "passed": passed, "repeatedSessionDelivered": true }));
         }
         if escape_exit {
             let state = app.state::<Events>();

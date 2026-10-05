@@ -363,7 +363,7 @@ async fn bounded_bulk_buffers_leave_head_available_and_release_after_completion(
         assert!(interim.starts_with(b"HTTP/1.1 100 Continue"));
         sockets.push(socket);
     }
-    let rejected = server
+    let pending = server
         .auth(
             server
                 .client
@@ -371,14 +371,9 @@ async fn bounded_bulk_buffers_leave_head_available_and_release_after_completion(
             &third,
         )
         .body(frame.clone())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(
-        rejected.json::<serde_json::Value>().await.unwrap()["error"],
-        "transfer-memory-busy"
-    );
+        .send();
+    tokio::pin!(pending);
+    assert!(tokio::time::timeout(Duration::from_millis(200), &mut pending).await.is_err());
     assert_eq!(
         server
             .auth(server.client.get(format!("{}/head", server.base)), &third)
@@ -396,6 +391,7 @@ async fn bounded_bulk_buffers_leave_head_available_and_release_after_completion(
         .unwrap()
         .unwrap();
     assert!(completed.starts_with(b"HTTP/1.1 204 No Content"));
+    assert_eq!(tokio::time::timeout(BOUND, pending).await.unwrap().unwrap().status(), StatusCode::NO_CONTENT);
     assert_eq!(
         server
             .auth(

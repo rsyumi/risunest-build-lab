@@ -7,7 +7,7 @@ import {
     type ChatScreenshotRangeReader,
     type ChatScreenshotRenderContext,
 } from './chatScreenshotRange'
-import type { Chat, character, groupChat } from './storage/database.svelte'
+import type { Chat, character } from './storage/database.svelte'
 import type { ActiveConversationSession } from './storage/activeConversationSession'
 import {
     isSameSelectedConversationTarget,
@@ -302,7 +302,7 @@ export async function openChatScreenshotSourceLease(
                     ...result.value,
                     chats: [emptyChat],
                     chatPage: 0,
-                } as character | groupChat
+                } as character
                 return snapshotChatScreenshotCharacter(hydrated, emptyChat)
             },
         }

@@ -4,7 +4,7 @@
     import { parseToggleSyntax, type sidebarToggle, type sidebarToggleGroup } from "src/ts/util";
     import { language } from "src/lang";
     import type { PromptItem } from "src/ts/process/prompt";
-    import { getCurrentCharacter, getCurrentChat, type character, type groupChat } from "src/ts/storage/database.svelte";
+    import { getCurrentCharacter, getCurrentChat, type character } from "src/ts/storage/database.svelte";
     import Accordion from '../UI/Accordion.svelte'
     import SwitchInput from "../UI/GUI/SwitchInput.svelte";
     import SelectInput from "../UI/GUI/SelectInput.svelte";
@@ -22,7 +22,7 @@
     import { doingChat } from 'src/ts/process/generationState'
 
     interface Props {
-        chara?: character|groupChat
+        chara?: character
         noContainer?: boolean
     }
 

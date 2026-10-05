@@ -1,4 +1,4 @@
-import type { Chat, Database, Message, botPreset, character, groupChat } from './database.svelte'
+import type { Chat, Database, Message, botPreset, character } from './database.svelte'
 
 export type DataRevision = number
 
@@ -7,7 +7,7 @@ export interface Versioned<T> {
     value: T
 }
 
-export type CharacterDetail = Omit<character, 'chats'> | Omit<groupChat, 'chats'>
+export type CharacterDetail = Omit<character, 'chats'>
 
 export interface PersistentConversationMetadata {
     characterId: string
@@ -540,8 +540,8 @@ export interface WorkingSetCommit {
     replacePresets?: botPreset[]
     character?: CharacterDetail
     characterDetails?: CharacterDetail[]
-    replaceCharacter?: character | groupChat
-    addCharacter?: character | groupChat
+    replaceCharacter?: character
+    addCharacter?: character
     conversations?: ConversationMutation[]
     deleteCharacterIds?: string[]
     pluginStorage?: PluginStorageMutation[]

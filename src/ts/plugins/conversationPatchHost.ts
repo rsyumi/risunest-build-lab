@@ -5,6 +5,7 @@ import { doingChat } from '../process/index.svelte'
 import {
     acquireCompleteConversation,
     captureSelectedConversationTarget,
+    captureSelectedConversationAuthority,
     commitPreparedUnitIntent,
     flushPendingDataLocally,
     getActiveConversationSession,
@@ -20,6 +21,7 @@ export const conversationPatchAccess = createConversationPatchAccess({
     captureSelectedConversationTarget: () => captureSelectedConversationTarget(),
     acquireCompleteConversation: (reason, target) => acquireCompleteConversation(reason, target),
     getActiveConversationSession: () => getActiveConversationSession(),
+    captureSelectedConversationAuthority: () => captureSelectedConversationAuthority(),
     getSelectedConversation: () => {
         const character = DBState.db.characters[get(selectedCharID)]
         return character?.chats[character.chatPage ?? 0] ?? null

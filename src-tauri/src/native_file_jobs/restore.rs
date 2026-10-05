@@ -1,3 +1,5 @@
+#[path = "upstream_import.rs"]
+mod upstream_import;
 #[path = "pocket_features.rs"]
 pub(super) mod pocket_features;
 use super::{
@@ -47,6 +49,9 @@ pub(crate) trait ReplacementSink: Send + Sync {
     fn put_root(&self, staging_id: &str, root: &Value) -> StoreResult<()>;
     fn put_presets(&self, staging_id: &str, presets: &[Value]) -> StoreResult<()>;
     fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()>;
+    fn prepare_character(&self, character: Value) -> StoreResult<Value> {
+        Ok(character)
+    }
     fn supports_incremental_characters(&self) -> bool {
         false
     }
@@ -547,6 +552,7 @@ enum LegacyDatabase {
     Root {
         root: Map<String, Value>,
         character_count: Option<u64>,
+        excluded: HashSet<String>,
     },
     NotAnObject,
 }
@@ -570,6 +576,7 @@ fn stream_legacy_database<S: TrackedSource>(
     };
     let mut entries = Vec::new();
     let mut character_count = None;
+    let mut excluded = HashSet::new();
     for _ in 0..length {
         let key = rmpv::decode::read_value_with_max_depth(input, LEGACY_ROOT_ENTRY_DEPTH)
             .map_err(|error| messagepack_error(error, job))?;
@@ -581,7 +588,7 @@ fn stream_legacy_database<S: TrackedSource>(
                 ))
             }
             Some(true) => {
-                character_count = Some(stream_legacy_characters(input, staging_id, job, sink)?);
+                character_count = Some(stream_legacy_characters(input, staging_id, job, sink, &mut excluded)?);
             }
             Some(false) => {
                 let value = rmpv::decode::read_value_with_max_depth(input, LEGACY_ROOT_ENTRY_DEPTH)
@@ -597,6 +604,7 @@ fn stream_legacy_database<S: TrackedSource>(
     Ok(LegacyDatabase::Root {
         root,
         character_count,
+        excluded,
     })
 }
 
@@ -605,6 +613,7 @@ fn stream_legacy_characters<S: TrackedSource>(
     staging_id: &str,
     job: &JobControl,
     sink: &dyn ReplacementSink,
+    excluded: &mut HashSet<String>,
 ) -> Result<u64, NativeJobError> {
     let marker =
         rmp::decode::read_marker(input).map_err(|error| messagepack_error(error.into(), job))?;
@@ -618,6 +627,7 @@ fn stream_legacy_characters<S: TrackedSource>(
         .get_mut()
         .inner
         .report_counts(|counts| counts.characters_total = Some(total))?;
+    let mut retained = 0;
     let mut batch = Vec::new();
     let mut batch_bytes = 0u64;
     for index in 0..total {
@@ -632,6 +642,10 @@ fn stream_legacy_characters<S: TrackedSource>(
             JsonSlot::Value(value) => value,
             JsonSlot::Undefined => Value::Null,
         };
+        if upstream_import::exclude_record(&character, excluded) { continue; }
+        character = sink.prepare_character(character).map_err(store_error)?;
+        if upstream_import::exclude_record(&character, excluded) { continue; }
+        retained += 1;
         pocket_features::character(&mut character, &format!("character:{index}"))
             .map_err(invalid)?;
         assign_legacy_chat_ids(std::slice::from_mut(&mut character))?;
@@ -646,7 +660,7 @@ fn stream_legacy_characters<S: TrackedSource>(
         input
             .get_mut()
             .inner
-            .report_counts(|counts| counts.characters = index + 1)?;
+            .report_counts(|counts| counts.characters = retained)?;
         if batch.len() >= CHARACTER_BATCH_COUNT {
             sink.add_characters(staging_id, &batch)
                 .map_err(store_error)?;
@@ -658,7 +672,7 @@ fn stream_legacy_characters<S: TrackedSource>(
         sink.add_characters(staging_id, &batch)
             .map_err(store_error)?;
     }
-    Ok(total)
+    Ok(retained)
 }
 
 // A root that is not a map is still decoded whole, so it fails the same way.
@@ -710,11 +724,12 @@ fn finish_legacy_database<R: Read>(
     reader: &mut TrackedReader<'_, R>,
     sink: &dyn ReplacementSink,
 ) -> Result<ParsedCounts, NativeJobError> {
-    let (mut root, character_count) = match database {
+    let (mut root, character_count, excluded) = match database {
         LegacyDatabase::Root {
             root,
             character_count: Some(count),
-        } => (root, count),
+            excluded,
+        } => (root, count, excluded),
         LegacyDatabase::Root { .. } => {
             return Err(invalid("legacy MessagePack characters must be an array"))
         }
@@ -722,7 +737,7 @@ fn finish_legacy_database<R: Read>(
             return Err(invalid("legacy MessagePack database must be an object"))
         }
     };
-    let presets = match root.shift_remove("botPresets") {
+    let mut presets = match root.shift_remove("botPresets") {
         Some(Value::Array(presets)) => presets,
         Some(_) => return Err(invalid("legacy MessagePack botPresets must be an array")),
         None => Vec::new(),
@@ -746,12 +761,15 @@ fn finish_legacy_database<R: Read>(
     root.entry("pluginCustomStorage".to_owned())
         .or_insert_with(|| Value::Object(Map::new()));
     reader.counts.presets = presets.len() as u64;
+    reader.counts.characters_total = Some(character_count);
 
     job.set_phase(JobPhase::StagingDatabase)
         .map_err(|error| job_error(job, error))?;
     reader.report_stage_items(JobStage::FinalizingStaging, 0, None)?;
     pocket_features::root(&root).map_err(invalid)?;
     root.shift_remove("account");
+    upstream_import::prepare_root(&mut root, &excluded);
+    upstream_import::prepare_presets(&mut presets);
     sink.put_root(staging_id, &Value::Object(root))
         .map_err(store_error)?;
     sink.put_presets(staging_id, &presets)
@@ -1049,6 +1067,7 @@ fn parse_and_stage<R: Read>(
     reject_cold_references: bool,
 ) -> Result<ParsedCounts, NativeJobError> {
     let cold_detected = Cell::new(false);
+    let mut excluded = HashSet::new();
     let mut loaded = HashSet::new();
     let mut directory = None;
     let mut root = None;
@@ -1103,7 +1122,7 @@ fn parse_and_stage<R: Read>(
             character_batch_bytes = 0;
         }
         if matches!(block_type, 2 | 7) && sink.supports_incremental_characters() {
-            read_character_block(
+            let retained = read_character_block(
                 reader,
                 staging_id,
                 &name,
@@ -1117,7 +1136,7 @@ fn parse_and_stage<R: Read>(
                 &cold_detected,
             )?;
             if reject_cold_references && cold_detected.get() { return Err(cold_expansion_required()); }
-            character_count += 1;
+            if retained { character_count += 1; } else { excluded.insert(name.clone()); }
             reader.counts.characters = character_count;
             reader.counts.blocks += 1;
             reader.complete_item()?;
@@ -1149,6 +1168,17 @@ fn parse_and_stage<R: Read>(
                     return Err(invalid(format!(
                         "character block name does not match chaId {name}"
                     )));
+                }
+                if upstream_import::exclude_record(&value, &mut excluded) {
+                    reader.counts.blocks += 1;
+                    reader.complete_item()?;
+                    continue;
+                }
+                value = sink.prepare_character(value).map_err(store_error)?;
+                if upstream_import::exclude_record(&value, &mut excluded) {
+                    reader.counts.blocks += 1;
+                    reader.complete_item()?;
+                    continue;
                 }
                 if reject_cold_references && has_cold_references(&value) { return Err(cold_expansion_required()); }
                 assign_legacy_chat_ids(std::slice::from_mut(&mut value))?;
@@ -1274,9 +1304,11 @@ fn parse_and_stage<R: Read>(
     if let Some(meta) = plugin_storage_meta {
         root.insert("pluginStorageMeta".to_owned(), meta);
     }
-    let presets = presets.ok_or_else(|| invalid("missing required block preset"))?;
+    let mut presets = presets.ok_or_else(|| invalid("missing required block preset"))?;
     pocket_features::root(&root).map_err(invalid)?;
     root.shift_remove("account");
+    upstream_import::prepare_root(&mut root, &excluded);
+    upstream_import::prepare_presets(&mut presets);
     sink.put_root(staging_id, &Value::Object(root))
         .map_err(store_error)?;
     sink.put_presets(staging_id, &presets)
@@ -1370,14 +1402,16 @@ fn read_character_block<R: Read>(
     sink: &dyn ReplacementSink,
     spool_directory: &Path,
     cold_detected: &Cell<bool>,
-) -> Result<(), NativeJobError> {
+) -> Result<bool, NativeJobError> {
     let block = EncodedBlockReader {
         reader,
         remaining: encoded_length,
     };
     let staging_error = RefCell::new(None);
     let record_bytes = Cell::new(None);
+    let retained = Cell::new(true);
     let seed = CharacterSeed {
+        retained: &retained,
         chats_to_skip: 0,
         limits,
         record_bytes: &record_bytes,
@@ -1406,7 +1440,7 @@ fn read_character_block<R: Read>(
         if !buffered.buffer().is_empty() || buffered.get_ref().inner.remaining != 0 {
             return Err(corrupt(format!("trailing data in block {name}")));
         }
-        return Ok(());
+        return Ok(retained.get());
     }
 
     let buffered = BufReader::with_capacity(READ_CHUNK_BYTES, block);
@@ -1431,7 +1465,7 @@ fn read_character_block<R: Read>(
     if !buffered.buffer().is_empty() || buffered.get_ref().remaining != 0 {
         return Err(corrupt(format!("trailing data in gzip block {name}")));
     }
-    Ok(())
+    Ok(retained.get())
 }
 
 pub(super) struct RecordLimitReader<'a, R> {
@@ -1511,6 +1545,7 @@ fn insert_detail<E: de::Error>(detail: &mut Map<String, Value>, bytes: &mut u64,
 
 #[derive(Default)]
 struct CharacterMetadata {
+    kind: Option<String>,
     character_id: Option<String>,
     name: String,
     cold_key: Option<String>,
@@ -1560,10 +1595,11 @@ impl<'de> Visitor<'de> for CharacterMetadataSeed<'_> {
             } else if !self.wrapped && key == "chats" {
                 metadata.as_mut().unwrap().chats_count += 1;
                 map.next_value::<IgnoredAny>()?;
-            } else if !self.wrapped && matches!(key.as_str(), "chaId" | "name" | "coldstorage") {
+            } else if !self.wrapped && matches!(key.as_str(), "chaId" | "name" | "coldstorage" | "type") {
                 let value = map.next_value_seed(BoundedValueSeed(self.record_bytes))?;
                 let metadata = metadata.as_mut().unwrap();
                 match key.as_str() {
+                    "type" => metadata.kind = value.as_str().map(str::to_owned),
                     "chaId" => metadata.character_id = value.as_str().map(str::to_owned),
                     "name" => metadata.name = value.as_str().unwrap_or_default().to_owned(),
                     _ => metadata.cold_key = value.as_str().filter(|key| !key.is_empty()).map(str::to_owned),
@@ -1591,13 +1627,7 @@ fn read_character_metadata(file: &mut File, seed: &CharacterSeed<'_>, wrapped: b
 }
 
 fn read_character_json<R: Read>(reader: &mut R, seed: CharacterSeed<'_>) -> Result<(), serde_json::Error> {
-    if !seed.sink.expands_cold_payloads() {
-        let reader = RecordLimitReader { inner: reader, bytes: seed.record_bytes };
-        let mut deserializer = serde_json::Deserializer::from_reader(reader);
-        seed.deserialize(&mut deserializer)?;
-        return deserializer.end();
-    }
-    // The reference may follow chats, so inspect metadata before staging any row.
+    // Type and cold references may follow chats; inspect them before staging rows.
     let mut spool = tempfile::tempfile_in(seed.spool_directory).map_err(|error| staging_io(error, seed.staging_error))?;
     let mut buffer = [0u8; READ_CHUNK_BYTES];
     loop {
@@ -1610,15 +1640,23 @@ fn read_character_json<R: Read>(reader: &mut R, seed: CharacterSeed<'_>) -> Resu
     if metadata.character_id.as_deref() != Some(seed.expected_id) {
         return Err(<serde_json::Error as de::Error>::custom("character block name does not match chaId"));
     }
+    if upstream_import::excluded_character(metadata.kind.as_deref(), metadata.character_id.as_deref()) {
+        seed.retained.set(false);
+        return Ok(());
+    }
     let mut name = metadata.name;
     let mut chats_to_skip = metadata.chats_count.saturating_sub(1);
     let mut envelope_occurrence = 0;
     let mut wrapped = false;
-    if let Some(key) = metadata.cold_key {
+    if let Some(key) = metadata.cold_key.filter(|_| seed.sink.expands_cold_payloads()) {
         seed.cold_detected.set(true);
         if let Some(path) = seed.sink.cold_payload_path(&key) {
             let mut payload = File::open(path).map_err(|error| staging_io(error, seed.staging_error))?;
             if let Some(metadata) = read_character_metadata(&mut payload, &seed, true)? {
+                if upstream_import::excluded_character(metadata.kind.as_deref(), metadata.character_id.as_deref()) {
+                    seed.retained.set(false);
+                    return Ok(());
+                }
                 name = metadata.name;
                 chats_to_skip = metadata.chats_count.saturating_sub(1);
                 envelope_occurrence = metadata.envelope_occurrence;
@@ -1751,6 +1789,7 @@ macro_rules! ignored_visits {
 }
 
 struct CharacterSeed<'a> {
+    retained: &'a Cell<bool>,
     chats_to_skip: u64,
     limits: RestoreLimits,
     record_bytes: &'a Cell<Option<u64>>,
@@ -2944,6 +2983,54 @@ mod tests {
 
     fn cold_chat(key: &str) -> Value {
         json!({"id":"chat-1", "name":"Chat", "message":[{"role":"char", "data":format!("\u{ef01}COLDSTORAGE\u{ef01}{key}")}]})
+    }
+
+    #[test]
+    fn upstream_import_discards_groups_and_rooms_before_staging_their_chats() {
+        for compressed in [false, true] {
+            let (directory, sink) = fixture();
+            let mut blocks = valid_blocks();
+            blocks[0] = block(1, false, "root", &json!({
+                "__directory": ["preset", "modules", "loadouts", "plugins", "pluginStorage", "char-1", "group", "§temp", "config"],
+                "characterOrder": ["group", "§temp", {"id":"folder","data":["group","char-1"]}],
+                "groupTemplate": "{{char}}: {{slot}}"
+            }));
+            blocks[1] = block(4, false, "preset", &json!([{"name":"Preset","groupOtherBotRole":"system"}]));
+            blocks[3] = block(10, false, "loadouts", &json!([{"characterIds":["group","char-1","§temp"]}]));
+            let group = br#"{"chaId":"group","name":"Group","chats":[{"id":"skipped","message":[{"role":"user","data":"synthetic"}]}],"characters":["char-1"],"type":"group"}"#;
+            let payload = if compressed { gzip(group) } else { group.to_vec() };
+            blocks.push(raw_block(2, u8::from(compressed), "group", &payload));
+            blocks.push(block(2, compressed, "§temp", &json!({"type":"character","chaId":"§temp","name":"Room","chats":[]})));
+            let source = directory.path().join("upstream.risudat");
+            fs::write(&source, save_bytes(blocks)).unwrap();
+            let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+            let result = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
+            let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+            assert_eq!(result.character_count, 1);
+            assert_eq!(restored["characters"].as_array().unwrap().len(), 1);
+            assert_eq!(restored["characters"][0]["chaId"], "char-1");
+            assert_eq!(restored["characterOrder"], json!([{"id":"folder","data":["char-1"]}]));
+            assert_eq!(restored["loadouts"][0]["characterIds"], json!(["char-1"]));
+            assert_eq!(restored["messageNameTemplate"], "{{char}}: {{slot}}");
+            assert_eq!(restored["botPresets"][0]["namedMessageRole"], "system");
+            assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), 1);
+        }
+    }
+
+    #[test]
+    fn upstream_import_discards_a_group_restored_from_a_cold_character() {
+        let (directory, mut sink) = fixture();
+        sink.cold_payloads = Some(std::collections::HashMap::from([
+            write_cold_payload(directory.path(), "character", &json!({"character":{
+                "chaId":"char-1","name":"Group","chats":[cold_chat("unused")],"type":"group"
+            }})),
+        ]));
+        let source = cold_block_source(directory.path(), br#"{"chaId":"char-1","name":"Stub","chats":[],"coldstorage":"character"}"#, true);
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        let result = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
+        assert_eq!(result.character_count, 0);
+        assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), 0);
+        assert!(sink.unavailable_cold.lock().unwrap().is_empty());
     }
 
     #[test]

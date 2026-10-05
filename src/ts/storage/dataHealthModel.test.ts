@@ -86,6 +86,7 @@ function harness(overrides: Partial<DataHealthDependencies> = {}) {
         planRepair: vi.fn().mockResolvedValue(candidates()),
         previewRepair: vi.fn(async (selection: string[]) => preview(selection)),
         applyRepair: vi.fn().mockResolvedValue({ result: result() }),
+        discardIntent: vi.fn().mockResolvedValue({ result: result() }),
         listJournals: vi.fn().mockResolvedValue([]),
         undoRepair: vi.fn().mockResolvedValue({ result: result(), skipped: [] }),
         ...overrides,
@@ -357,5 +358,38 @@ describe('repairing from the model', () => {
         expect(deps.planRepair).not.toHaveBeenCalled()
         release()
         await running
+    })
+})
+
+
+describe('quarantined intent discard', () => {
+    const item: import('./dataHealth').DataHealthFinding = {
+        code: 'intent-quarantined', severity: 'degraded', owner: { kind: 'intent', id: 'intent-a' },
+        locator: { sourcePath: 'token', occurrence: 0 }, target: null, detail: 'synthetic',
+    }
+    it('rejects confirmation against a diagnosis replaced while the dialog was open', async () => {
+        const diagnosis = result({ items: [item] })
+        const { model, deps } = harness({ getResult: vi.fn().mockResolvedValue(diagnosis) })
+        await model.load()
+        await model.quickScan()
+        await model.discard(item, diagnosis)
+        expect(deps.discardIntent).not.toHaveBeenCalled()
+    })
+    it('does not admit a quarantined record without a native discard token', async () => {
+        const ineligible = { ...item, locator: null }
+        const diagnosis = result({ items: [ineligible] })
+        const { model, deps } = harness({ getResult: vi.fn().mockResolvedValue(diagnosis) })
+        await model.load()
+        await model.discard(ineligible, diagnosis)
+        expect(deps.discardIntent).not.toHaveBeenCalled()
+        expect(model.snapshot()).toMatchObject({ result: diagnosis, activity: null, failure: null })
+    })
+    it('keeps the finding on refusal and allows retry', async () => {
+        const diagnosis = result({ items: [item] })
+        const { model, deps } = harness({ getResult: vi.fn().mockResolvedValue(diagnosis), discardIntent: vi.fn().mockRejectedValue(new Error('stale token')) })
+        await model.load()
+        await expect(model.discard(item, diagnosis)).rejects.toThrow('stale token')
+        expect(model.snapshot()).toMatchObject({ result: diagnosis, failure: 'discard', activity: null })
+        expect(deps.applyRepair).not.toHaveBeenCalled()
     })
 })

@@ -19,7 +19,7 @@ import type {
     WindowedConversationMutationController,
 } from './activeWorkingSet.svelte'
 import type { ConversationViewportSource } from '../conversationViewportSource'
-import type { Chat, Database, botPreset, character, groupChat } from './database.svelte'
+import type { Chat, Database, botPreset, character } from './database.svelte'
 import { getDatabase, setDatabase, setEffectivePresetOverride } from './database.svelte'
 import { getEffectivePresetOverride } from './effectiveIdentityState'
 import { prepareDatabaseForPersistence } from './databasePreparation'
@@ -63,16 +63,7 @@ import type { OfficialRevisionPublisher } from './saveCoordinator'
 import type { PersistentPresetMutation } from './saveCoordinator'
 import type { PersistentReplacementOptions } from './saveCoordinator'
 import { workingSetResidency } from './workingSetResidency'
-import {
-    createPresetCatalogWorkingSetFromValues,
-    hydrateWorkingSetCharacterDetail,
-    carryCatalogCharacterMetadata,
-    patchWorkingSetRoot,
-    isArchivedCharacter,
-    isCatalogCharacterStub,
-    isWorkingSetCharacterStub,
-    isCatalogPresetWorkingSet,
-} from './workingSetCatalog'
+import { createPresetCatalogWorkingSetFromValues, carryCatalogCharacterMetadata, patchWorkingSetRoot, isArchivedCharacter, isWorkingSetCharacterStub, isCatalogPresetWorkingSet } from './workingSetCatalog'
 import {
     notifyPluginStorageAuthorityReplacement,
     notifyPluginStorageCompatibilityMutation,
@@ -100,7 +91,7 @@ export type {
 } from './persistentDataRuntime'
 export { createPersistentDataRuntime } from './persistentDataRuntime'
 
-type CompleteCharacter = character | groupChat
+type CompleteCharacter = character
 
 // Catalog entries carry only their summary and the local fields normalization adds.
 const catalogPresetKeys = new Set(['id', 'name', 'image', 'localNetworkMode', 'localNetworkTimeoutSec'])
@@ -308,31 +299,6 @@ export function createProductionStateAdapter(options: {
             workingSetResidency.reconcileConversationResidency(character)
             database.characters[index] = carryCatalogCharacterMetadata(database.characters[index], character)
             selectedCharID.set(index)
-        },
-        publishCharacterSet(primary, related) {
-            const database = getDatabase()
-            const relatedIndices = related.map((character) =>
-                database.characters.findIndex(
-                    (candidate) => candidate.chaId === character.chaId,
-                ),
-            )
-            const primaryIndex = database.characters.findIndex(
-                (candidate) => candidate.chaId === primary.chaId,
-            )
-            if (primaryIndex < 0 || relatedIndices.some((index) => index < 0)) return
-            for (let index = 0; index < related.length; index++) {
-                const detail = related[index]
-                const character = hydrateWorkingSetCharacterDetail(
-                    database,
-                    relatedIndices[index],
-                    detail,
-                )
-                workingSetResidency.markCharacterHydrated(character.chaId)
-            }
-            workingSetResidency.markCharacterHydrated(primary.chaId)
-            workingSetResidency.reconcileConversationResidency(primary)
-            database.characters[primaryIndex] = carryCatalogCharacterMetadata(database.characters[primaryIndex], primary)
-            selectedCharID.set(primaryIndex)
         },
         publishConversation(
             characterId,
@@ -567,27 +533,7 @@ export const activateCharacter = (
     if (member && isArchivedCharacter(member)) return Promise.resolve(false)
     return getPersistentDataRuntime().activateCharacter(id, options)
 }
-export function hydrateCurrentGroupMemberDetail(
-    groupId: string,
-    detail: CharacterDetail,
-): boolean {
-    const database = getDatabase()
-    const selectedIndex = get(selectedCharID)
-    const selectedGroup = database.characters[selectedIndex]
-    if (selectedGroup?.type !== 'group' || selectedGroup.chaId !== groupId) return false
-    const memberIndex = database.characters.findIndex(
-        (character) => character.chaId === detail.chaId,
-    )
-    if (memberIndex < 0 || detail.chaId === groupId) return false
-    const member = database.characters[memberIndex]
-    // An archived member has no detail to hydrate, so it is unusable rather
-    // than loadable. This must come before the stub check.
-    if (isArchivedCharacter(member)) return false
-    if (!isCatalogCharacterStub(member)) return true
-    const hydrated = hydrateWorkingSetCharacterDetail(database, memberIndex, detail)
-    workingSetResidency.markCharacterHydrated(hydrated.chaId)
-    return true
-}
+
 export const activateConversation = (id: string): Promise<boolean> =>
     getPersistentDataRuntime().activateConversation(id)
 export const getActiveConversationSession = (): ActiveConversationSession | null =>
@@ -621,7 +567,7 @@ export const captureWindowedConversationMutationController = (
     )
 export const editWindowedChatList = (
     target: SelectedConversationTarget,
-    edit: (character: character | groupChat) => string | null | false,
+    edit: (character: character) => string | null | false,
 ): WindowedChatListEditResult =>
     getPersistentDataRuntime().editWindowedChatList(target, edit)
 export const tryDemoteSelectedConversation = (
@@ -683,10 +629,10 @@ export const mutatePersistentCharacterDetail = (
     reason,
     mutate,
 )
-export const deletePersistentCharacterWithGroupReferences = (
+export const deletePersistentCharacter = (
     characterId: string,
     reason: string,
-): Promise<boolean> => getPersistentDataRuntime().deletePersistentCharacterWithGroupReferences(
+): Promise<boolean> => getPersistentDataRuntime().deletePersistentCharacter(
     characterId,
     reason,
 )

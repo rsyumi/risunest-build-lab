@@ -1,5 +1,5 @@
 import { isTauri } from '../platform'
-import type { Database, botPreset, character, groupChat } from './database.svelte'
+import type { Database, botPreset, character } from './database.svelte'
 import type { PersistentRoot, PluginStorageMutation } from './persistentDataStore'
 import { defineOwnEnumerableProperty } from './ownEnumerableProperty'
 import { UNOWNED_PLUGIN_OWNER } from '../plugins/pluginOwner'
@@ -511,7 +511,7 @@ export function rebaseConcurrentLiveDelta<T>(base: T, live: T, candidate: T): T 
 
 export function splitDatabase(database: Database): {
     root: PersistentRoot
-    characters: Array<character | groupChat>
+    characters: Array<character>
     presets: botPreset[]
     pluginStorage: Database['pluginCustomStorage']
 } {

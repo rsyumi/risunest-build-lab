@@ -98,13 +98,7 @@ test("rejects an empty bundle instead of claiming validation", () => {
   assert.throws(() => assertProductionBundle([]), /No JavaScript/);
 });
 
-test("rejects removed peer transport modules but preserves upstream PeerJS", () => {
-  assertProductionBundle([
-    chunk({
-      "/src/ts/sync/multiuser.ts": {},
-      "/node_modules/peerjs/dist/bundler.mjs": {},
-    }),
-  ]);
+test("rejects removed peer transport modules", () => {
   for (const id of [
     "/src/ts/storage/sync/peerClone.ts",
     "/src/ts/storage/sync/deviceSyncController.ts",

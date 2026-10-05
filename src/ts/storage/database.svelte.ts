@@ -1,3 +1,4 @@
+import { importMessageNameSettings, exportMessageNameSettings } from './upstreamImport'
 import { get } from 'svelte/store';
 import { checkNullish, decryptBuffer, encryptBuffer, selectSingleFile } from '../util';
 import { changeLanguage, language } from '../../lang';
@@ -573,7 +574,7 @@ export function normalizeDatabaseDefaults(data:Database): Database {
     }
     data.customQuotes ??= false
     data.customQuotesData ??= ['“','”','‘','’']
-    data.groupOtherBotRole ??= 'user'
+    data.namedMessageRole ??= 'user'
     data.customGUI ??= ''
     data.customAPIFormat ??= LLMFormat.OpenAICompatible
     data.systemContentReplacement ??= `system: {{slot}}`
@@ -771,7 +772,7 @@ export function getDatabase(options:getDatabaseOptions = {}):Database{
     return DBState.db as Database
 }
 
-export function getCurrentCharacter(options:getDatabaseOptions = {}):character|groupChat{
+export function getCurrentCharacter(options:getDatabaseOptions = {}):character{
     const db = getDatabase(options)
     if(!db.characters){
         db.characters = []
@@ -780,14 +781,14 @@ export function getCurrentCharacter(options:getDatabaseOptions = {}):character|g
     return char
 }
 
-export function setCurrentCharacter(char:character|groupChat){
+export function setCurrentCharacter(char:character){
     if(!DBState.db.characters){
         DBState.db.characters = []
     }
     DBState.db.characters[get(selectedCharID)] = char
 }
 
-export function getCharacterByIndex(index:number,options:getDatabaseOptions = {}):character|groupChat{
+export function getCharacterByIndex(index:number,options:getDatabaseOptions = {}):character{
     const db = getDatabase(options)
     if(!db.characters){
         db.characters = []
@@ -796,7 +797,7 @@ export function getCharacterByIndex(index:number,options:getDatabaseOptions = {}
     return char
 }
 
-export function setCharacterByIndex(index:number,char:character|groupChat){
+export function setCharacterByIndex(index:number,char:character){
     if(!DBState.db.characters){
         DBState.db.characters = []
     }
@@ -835,7 +836,7 @@ export interface RisuPersona {
 }
 
 export interface Database{
-    characters: (character|groupChat)[],
+    characters: character[],
     apiType: string
     openAIKey: string
     proxyKey:string
@@ -1135,8 +1136,8 @@ export interface Database{
     }
     customQuotes:boolean
     customQuotesData?:[string, string, string, string]
-    groupTemplate?:string
-    groupOtherBotRole?:string
+    messageNameTemplate?:string
+    namedMessageRole?:string
     customGUI:string
     guiHTML:string
     OAIPrediction:string
@@ -1525,7 +1526,6 @@ export interface character{
     trashTime?:number
     nickname?:string
     source?:string[]
-    group_only_greetings?:string[]
     creation_date?:number
     modification_date?:number
     ccAssets?: Array<{
@@ -1560,77 +1560,7 @@ export interface loreSettings{
 }
 
 
-export interface groupChat{ 
-    type: 'group'
-    image?:string
-    firstMessage:string
-    chats:Chat[]
-    chatFolders: ChatFolder[]
-    chatPage: number
-    name:string
-    viewScreen: 'single'|'multiple'|'none'|'emp',
-    characters:string[]
-    characterTalks:number[]
-    characterActive:boolean[]
-    globalLore: loreBook[]
-    autoMode: boolean
-    useCharacterLore :boolean
-    emotionImages: [string, string][]
-    customscript: customscript[],
-    chaId: string
-    alternateGreetings?: string[]
-    creatorNotes?:string,
-    removedQuotes?:boolean
-    firstMsgIndex?:number,
-    loreSettings?:loreSettings
-    supaMemory?:boolean
-    ttsMode?:string
-    suggestMessages?:string[]
-    orderByOrder?:boolean
-    backgroundHTML?:string,
-    reloadKeys?:number
-    backgroundCSS?:string
-    oneAtTime?:boolean
-    virtualscript?:string
-    lorePlus?:boolean
-    trashTime?:number
-    nickname?:string
-    defaultVariables?:string
-    lowLevelAccess?:boolean
-    hideChatIcon?:boolean
-    lastInteraction?:number
 
-    //lazy hack for typechecking
-    voicevoxConfig?:any
-    ttsSpeech?:string
-    naittsConfig?:any
-    oaiVoice?:string
-    oaiTTSConfig?:any
-    hfTTS?: any
-    vits?: OnnxModelFiles
-    gptSoVitsConfig?:any
-    fishSpeechConfig?:any
-    ttsReadOnlyQuoted?:boolean
-    exampleMessage?:string
-    systemPrompt?:string
-    replaceGlobalNote?:string
-    additionalText?:string
-    personality?:string
-    scenario?:string
-    translatorNote?:string
-    additionalData?: any
-    depth_prompt?: { depth: number, prompt: string }
-    additionalAssets?:[string, string, string][]
-    utilityBot?:boolean
-    license?:string
-    realmId:string
-    prebuiltAssetCommand?:boolean
-    prebuiltAssetStyle?:string
-    prebuiltAssetExclude?:string[]
-    modules?:string[]
-    coldstorage?:string
-    coldStoragedChats?:string[]
-}
 
 export interface botPreset{
     id?:string
@@ -1694,8 +1624,8 @@ export interface botPreset{
     jsonSchema?:string
     strictJsonSchema?:boolean
     extractJson?:string
-    groupTemplate?:string
-    groupOtherBotRole?:string
+    messageNameTemplate?:string
+    namedMessageRole?:string
     seperateParametersEnabled?:boolean
     seperateParameters?:{
         memory: SeparateParameters,
@@ -1920,7 +1850,6 @@ export interface Message{
     generationInfo?: MessageGenerationInfo
     promptInfo?: MessagePresetInfo
     name?:string
-    otherUser?:boolean
     disabled?:false|true|'allBefore'
     isComment?:boolean
 }
@@ -2322,8 +2251,8 @@ export function setPreset(db:Database, newPres: botPreset){
     db.jsonSchema = newPres.jsonSchema ?? ''
     db.strictJsonSchema = newPres.strictJsonSchema ?? true
     db.extractJson = newPres.extractJson ?? ''
-    db.groupOtherBotRole = newPres.groupOtherBotRole ?? 'user'
-    db.groupTemplate = newPres.groupTemplate ?? ''
+    db.namedMessageRole = newPres.namedMessageRole ?? 'user'
+    db.messageNameTemplate = newPres.messageNameTemplate ?? ''
     db.seperateParametersEnabled = newPres.seperateParametersEnabled ?? false
     db.customAPIFormat = safeStructuredClone(newPres.customAPIFormat) ?? LLMFormat.OpenAICompatible
     db.systemContentReplacement = newPres.systemContentReplacement ?? ''
@@ -2401,15 +2330,16 @@ export async function downloadPreset(id:number, type:'json'|'risupreset'|'return
     pres.textgenWebUIStreamURL=  ''
     pres.textgenWebUIBlockingURL=  ''
 
+    const exported = exportMessageNameSettings(pres as unknown as Record<string, unknown>)
     if(type === 'json'){
-        if (!(await downloadFile(pres.name + "_preset.json", Buffer.from(JSON.stringify(pres, null, 2))))) return { data: pres, buf: null }
+        if (!(await downloadFile(pres.name + "_preset.json", Buffer.from(JSON.stringify(exported, null, 2))))) return { data: pres, buf: null }
     }
     else if(type === 'risupreset' || type === 'return'){
         const buf = fflate.compressSync(encodeMsgpack({
             presetVersion: 2,
             type: 'preset',
             preset: await encryptBuffer(
-                encodeMsgpack(pres),
+                encodeMsgpack(exported),
                 'risupreset'
             )
         }))
@@ -2611,6 +2541,7 @@ export async function importPreset(f:{
         await addPreset(pr)
         return
     }
+    importMessageNameSettings(pre)
     pre.name ??= "Imported"
     await addPreset(pre)
 }

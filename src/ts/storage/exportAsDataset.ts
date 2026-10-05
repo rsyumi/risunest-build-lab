@@ -21,9 +21,7 @@ export async function exportAsDataset(){
 
     let dataset = []
     for(const char of db.characters){
-        if(char.type === 'group'){
-            continue
-        }
+
         for(const chat of char.chats){
             
             dataset.push({

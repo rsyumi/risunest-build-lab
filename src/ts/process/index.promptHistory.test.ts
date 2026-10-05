@@ -52,6 +52,7 @@ vi.mock('../storage/persistentDataRuntime.svelte', () => ({
     getPersistentStorageAuthorityEpoch: () => 0,
     getPersistentNavigationGeneration: () => 0,
     acknowledgeGenerationCompletion: vi.fn(async () => undefined),
+    drainDeferredLwwReceives: vi.fn(async () => undefined),
     acquireCompleteConversation: testState.unexpectedNativeRuntimeAccess,
     acquireDestructiveReplacementFence: testState.unexpectedNativeRuntimeAccess,
     captureSelectedConversationTarget: () => null,
@@ -90,7 +91,6 @@ vi.mock('./request/request', () => ({
 vi.mock('./stableDiff', async () => (await import('./tests/sendChatTestHarness')).stableDiffModule())
 vi.mock('./tts', async () => (await import('./tests/sendChatTestHarness')).ttsModule())
 vi.mock('./exampleMessages', async () => (await import('./tests/sendChatTestHarness')).exampleMessagesModule())
-vi.mock('./group', async () => (await import('./tests/sendChatTestHarness')).groupModule())
 vi.mock('./memory/hypamemory', async () => (await import('./tests/sendChatTestHarness')).hypamemoryModule())
 vi.mock('./memory/supaMemory', async () => (await import('./tests/sendChatTestHarness')).supaMemoryModule())
 vi.mock('./memory/hanuraiMemory', async () => (await import('./tests/sendChatTestHarness')).hanuraiMemoryModule())
@@ -103,7 +103,6 @@ vi.mock('./files/inlays', async () => (await import('./tests/sendChatTestHarness
     getInlayAssetMetadata: vi.fn(async () => null),
 }))
 vi.mock('./models/modelString', async () => (await import('./tests/sendChatTestHarness')).modelStringModule())
-vi.mock('../sync/multiuser', async () => (await import('./tests/sendChatTestHarness')).multiuserModule())
 vi.mock('./inlayScreen', () => ({ runInlayScreen: vi.fn() }))
 vi.mock('./transformers', async () => (await import('./tests/sendChatTestHarness')).transformersModule({
     runImageEmbedding: vi.fn(async () => []),
@@ -268,6 +267,27 @@ describe('sendChat prompt history characterization', () => {
         testState.pluginV2.editprocess.clear()
     })
 
+    it('formats ordinary messages with the configured name template and role', async () => {
+        const database = makeDatabase()
+        const character = database.characters[0]
+        character.customscript = []
+        character.triggerscript = []
+        character.chats[0].message = [
+            { role: 'user', data: '', disabled: 'allBefore', chatId: 'reset' },
+            { role: 'char', saying: character.chaId, data: 'Synthetic reply', chatId: 'named-reply' },
+        ]
+        database.promptSettings.sendName = true
+        database.messageNameTemplate = '[{{char}}] {{slot}}'
+        database.namedMessageRole = 'system'
+        setDatabaseLite(database)
+
+        await expect(sendChat({ preview: true })).resolves.toBe(true)
+        expect(previewFormated).toEqual([expect.objectContaining({
+            role: 'system',
+            content: '[Prompt Character] Synthetic reply',
+        })])
+    })
+
     it('preserves final OpenAIChat parity through trigger cloning, scripts, CBS, regex, and 128-message pages', async () => {
         setDatabaseLite(makeDatabase())
         const selectedCharacter = DBState.db.characters[0] as character
@@ -282,7 +302,7 @@ describe('sendChat prompt history characterization', () => {
         testState.activeSession = session
         mockTriggerClone()
 
-        const result = await sendChat(-1, { preview: true })
+        const result = await sendChat({ preview: true })
 
         expect(result).toBe(true)
         expect(testState.runTrigger).toHaveBeenCalledTimes(1)
@@ -343,7 +363,7 @@ describe('sendChat prompt history characterization', () => {
         testState.activeSession = session
         mockTriggerClone()
 
-        await expect(sendChat(-1, { preview: true })).resolves.toBe(true)
+        await expect(sendChat({ preview: true })).resolves.toBe(true)
 
         expect(liveChat.message.map((message) => message.data)).toEqual([
             'first',
@@ -403,7 +423,7 @@ describe('sendChat prompt history characterization', () => {
         testState.activeSession = session
         mockTriggerClone()
 
-        await expect(sendChat(-1, { preview: true })).resolves.toBe(true)
+        await expect(sendChat({ preview: true })).resolves.toBe(true)
 
         expect(previewFormated.slice(-3).map((message) => message.content)).toEqual([
             'first',
@@ -458,7 +478,7 @@ describe('sendChat prompt history characterization', () => {
         testState.activeSession = session
         mockTriggerClone()
 
-        await expect(sendChat(-1, { preview: true })).resolves.toBe(true)
+        await expect(sendChat({ preview: true })).resolves.toBe(true)
 
         const promptMessages = previewFormated.slice(-2)
         expect(promptMessages.map((message) => message.content)).toEqual([
@@ -521,7 +541,7 @@ describe('sendChat prompt history characterization', () => {
             })
         }
 
-        await expect(sendChat(-1, { preview: true })).rejects.toMatchObject({
+        await expect(sendChat({ preview: true })).rejects.toMatchObject({
             name: 'ConversationSessionStaleError',
         })
 
@@ -575,7 +595,7 @@ describe('sendChat prompt history characterization', () => {
         testState.activeSession = session
         testState.runTrigger.mockResolvedValue(null)
 
-        await expect(sendChat(-1, { preview: true })).resolves.toBe(false)
+        await expect(sendChat({ preview: true })).resolves.toBe(false)
 
         expect(sessionChat.scriptstate).toBeUndefined()
         expect(selectedChat.scriptstate).toBeUndefined()
@@ -617,7 +637,7 @@ describe('sendChat prompt history characterization', () => {
         })
         mockTriggerClone()
 
-        const result = await sendChat(-1, { preview: true })
+        const result = await sendChat({ preview: true })
 
         expect(result).toBe(true)
         expect(readRange.mock.calls.map(([start, limit]) => [start, limit])).toEqual([
@@ -666,7 +686,7 @@ describe('sendChat prompt history characterization', () => {
         testState.pluginV2.editprocess.add((content) => content.replace('WRITE:', 'STORE:'))
         mockTriggerClone()
 
-        await expect(sendChat(-1, { preview: true })).resolves.toBe(true)
+        await expect(sendChat({ preview: true })).resolves.toBe(true)
 
         expect(liveChat.message[0].data).toBe('STORE:first')
         expect(session.activePinReasons).toEqual([])
@@ -718,7 +738,7 @@ describe('sendChat prompt history characterization', () => {
             })
         }
 
-        await expect(sendChat(-1, { preview: true })).rejects.toMatchObject({
+        await expect(sendChat({ preview: true })).rejects.toMatchObject({
             name: 'ConversationSessionInactiveError',
         })
 
@@ -736,12 +756,12 @@ describe('sendChat prompt history characterization', () => {
         testState.activeSession = null
         mockTriggerClone()
 
-        expect(await sendChat(-1, { preview: true })).toBe(true)
+        expect(await sendChat({ preview: true })).toBe(true)
         const firstMemo = previewFormated[0].memo
         expect(firstMemo).toBeTruthy()
         expect(selectedCharacter.chats[0].message[3].chatId).toBe(firstMemo)
 
-        expect(await sendChat(-1, { preview: true })).toBe(true)
+        expect(await sendChat({ preview: true })).toBe(true)
         expect(previewFormated[0].memo).toBe(firstMemo)
         expect(selectedCharacter.chats[0].message[3].chatId).toBe(firstMemo)
     })
@@ -781,7 +801,7 @@ describe('sendChat prompt history characterization', () => {
                 }
             }
 
-            await expect(sendChat(-1, { preview: true })).rejects.toMatchObject({
+            await expect(sendChat({ preview: true })).rejects.toMatchObject({
                 name: 'ConversationSessionStaleError',
             })
 
@@ -832,7 +852,7 @@ describe('sendChat prompt history characterization', () => {
                 })
             })
 
-            const pendingSend = sendChat(-1, { preview: true })
+            const pendingSend = sendChat({ preview: true })
             await vi.waitFor(() => expect(releaseTrigger).toBeTypeOf('function'))
             const locator = session.locate(4)
             if (mutation === 'edit') {

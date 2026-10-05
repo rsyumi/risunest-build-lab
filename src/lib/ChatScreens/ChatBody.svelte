@@ -13,7 +13,7 @@
     import type { FrozenChatScreenshotRenderContext } from 'src/ts/chatScreenshotRange'
     import type { ProcessScriptCaptureContext } from 'src/ts/process/scripts'
     import type { BoundedLiveChatParserProjection } from 'src/ts/selectedConversationLiveParserProjection'
-    import type { character as CharacterRecord, groupChat as GroupChatRecord } from 'src/ts/storage/database.svelte'
+    import type { character as CharacterRecord } from 'src/ts/storage/database.svelte'
     import { yieldToMainThread } from 'src/ts/ui/yieldToUi'
     import StreamingThoughtPreviewView from './StreamingThoughtPreview.svelte'
     import type { StreamingThoughtPreview } from '../../ts/parser/streamingThoughtPreview'
@@ -114,11 +114,11 @@
     let parseGeneration = 0
     let lastRenderedRevision: number | null = null
 
-    function parserChara(): string | CharacterRecord | GroupChatRecord {
+    function parserChara(): string | CharacterRecord {
         const parserCharacter = captureContext?.parserContext.character
             ?? parserProjection?.context.parserContext.character
-        const character = parserCharacter as CharacterRecord | GroupChatRecord
-        return character?.type === 'group' ? name : character
+        const character = parserCharacter as CharacterRecord
+        return character
     }
 
     function parserScriptContext(): ProcessScriptCaptureContext | undefined {

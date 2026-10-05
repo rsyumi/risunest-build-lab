@@ -1,7 +1,7 @@
 import { isConversationSummaryStub } from './conversationResidency'
 import { isTauri } from '../platform'
 import { untrack } from 'svelte'
-import type { Chat, character, groupChat } from './database.svelte'
+import type { Chat, character } from './database.svelte'
 import type { RootMutation } from './persistentDataStore'
 import {
     canonicalJson,
@@ -13,7 +13,7 @@ import { diffRootMutations } from './rootMutation'
 
 /** Production-only: read closures must expose the deeply reactive DBState working set. */
 export interface PersistenceCanonicalCapture {
-    materializedCharacters?(): ReadonlyMap<string, character | groupChat>
+    materializedCharacters?(): ReadonlyMap<string, character>
     characters?(): ReadonlyMap<string, string>
     root(): string
     rootFields?(canonical: string): ReadonlyMap<string, unknown> | undefined
@@ -191,7 +191,7 @@ export function createPersistenceCanonicalCapture(read: {
     pluginStorage(): Record<string, unknown> | null
     presets(): unknown
     character(): unknown
-    characters?(): readonly (character | groupChat)[]
+    characters?(): readonly (character)[]
     rootField?(key: string, value: unknown): unknown
 }): PersistenceCanonicalCapture {
     const captureRoot = objectCapture(
@@ -201,9 +201,9 @@ export function createPersistenceCanonicalCapture(read: {
         undefined,
         read.rootField,
     )
-    const characterCaptures = new Map<string, { value: character | groupChat; capture: () => {json:string; value:character | groupChat} }>()
+    const characterCaptures = new Map<string, { value: character; capture: () => {json:string; value:character} }>()
     const captureCharacters = () => {
-        const result = new Map<string, {json:string; value:character | groupChat}>()
+        const result = new Map<string, {json:string; value:character}>()
         for (const value of read.characters?.() ?? []) {
             let entry = characterCaptures.get(value.chaId)
             if (!entry || entry.value !== value) {
@@ -215,7 +215,7 @@ export function createPersistenceCanonicalCapture(read: {
                     if (previous?.json !== json) { previous = {json, value: JSON.parse(json)}; decoded.set(key, previous) }
                     return previous!.value
                 }
-                let previous: {json:string; value:character | groupChat} | undefined
+                let previous: {json:string; value:character} | undefined
                 let previousParts: readonly unknown[] = []
                 const capture = () => {
                     const capturedDetail = detail()!
@@ -252,7 +252,7 @@ export function createPersistenceCanonicalCapture(read: {
                     for (const key of [...fields.keys()].sort()) defineOwnEnumerableProperty(order, key, true)
                     const json = '{' + Object.keys(order).map((key) => JSON.stringify(key) + ':' + fields.get(key)).join(',') + '}'
                     if (previous?.json === json) return previous
-                    return previous = {json, value: {...details, chats:chatValues} as unknown as character | groupChat}
+                    return previous = {json, value: {...details, chats:chatValues} as unknown as character}
                 }
                 entry = {value, capture}
                 characterCaptures.set(value.chaId, entry)
@@ -308,7 +308,7 @@ export function createPersistenceCanonicalCapture(read: {
             return json === 'null' || json === undefined ? null : json
         },
         character: () => {
-            const selected = read.character() as character | groupChat | null
+            const selected = read.character() as character | null
             if (selected && read.characters) return captureCharacters().get(selected.chaId)?.json ?? canonicalJson(selected)
             const result = character()
             const json = result.volatile ? canonicalJson(read.character()) : result.json

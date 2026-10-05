@@ -314,6 +314,47 @@ pub(crate) fn pds_data_health_repair_apply(
     logged("pds_data_health_repair_apply", apply_repair(&state, &health, &selection, snapshot, expected_revision, expected_scanned_at))
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IntentDiscarded {
+    discarded: bool,
+    result: ScanResult,
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_data_health_discard_intent(
+    state: State<'_, PersistentStoreState>,
+    health: State<'_, DataHealthState>,
+    finding: usize,
+    expected_revision: i64,
+    expected_scanned_at: i64,
+) -> Result<IntentDiscarded, StoreError> {
+    logged("pds_data_health_discard_intent", discard_intent(&state, &health, finding, expected_revision, expected_scanned_at))
+}
+
+fn discard_intent(
+    state: &PersistentStoreState,
+    health: &DataHealthState,
+    finding: usize,
+    expected_revision: i64,
+    expected_scanned_at: i64,
+) -> StoreResult<IntentDiscarded> {
+    let guard = state.admit_renderer_operation()?;
+    let (_, diagnosis) = current_diagnosis(state, &guard)?;
+    require_diagnosis_identity(&diagnosis, expected_revision, expected_scanned_at)?;
+    let selected = diagnosis.items.get(finding).filter(|item| {
+        item.code == crate::data_health::codes::INTENT_QUARANTINED && item.owner.kind == "intent"
+    }).ok_or_else(|| StoreError::Validation { message: "select a quarantined recovery record".into() })?;
+    let token = selected.locator.as_ref().ok_or_else(|| StoreError::Validation {
+        message: "check the data before discarding the recovery record".into(),
+    })?;
+    let discarded = with_store_mutex_mut_admitted(state, &guard, |store| {
+        store.lww_discard_quarantined_intent(&selected.owner.id, &token.source_path, expected_revision)
+    })?;
+    drop(guard);
+    Ok(IntentDiscarded { discarded, result: quick_scan(state, health)? })
+}
+
 fn require_diagnosis_identity(result: &ScanResult, revision: i64, scanned_at: i64) -> StoreResult<()> {
     if result.revision != revision {
         return Err(StoreError::RevisionConflict { expected: revision, actual: result.revision });

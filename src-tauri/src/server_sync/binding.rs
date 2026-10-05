@@ -347,6 +347,7 @@ pub(crate) fn stage(
         return Err(SyncError::new("server-epoch-changed", 409));
     }
     assert_authority(store, header)?;
+    core.client.lane().step(super::progress::Step::Staging);
     let staged = store.lww_stage_binding_units(header, inspection_id, &changes, upper)?;
     let result = StagedTarget {
         target_id: target.target_id.clone(),

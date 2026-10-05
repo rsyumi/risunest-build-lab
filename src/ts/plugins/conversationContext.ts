@@ -46,7 +46,6 @@ export interface ConversationContextInclude {
     character: boolean
     lore: boolean
     persona: boolean
-    groupMembers: boolean
     globals: boolean
 }
 
@@ -91,7 +90,6 @@ export interface ConversationContext {
         modules: ConversationContextModule[]
     }
     persona?: { id?: string; name: string; personaPrompt: string } | null
-    groupMembers?: { chaId: string; name: string; nickname?: string }[]
     chatVariables?: Record<string, string | number | boolean>
     /** Null when the requested anchor is not in the conversation. */
     messages?: (Omit<ConversationWindow, 'messages'> & {
@@ -146,7 +144,6 @@ export function normalizeConversationContextInput(input: unknown): ConversationC
             character: optionalBoolean(include.character, 'include.character', true),
             lore: optionalBoolean(include.lore, 'include.lore', false),
             persona: optionalBoolean(include.persona, 'include.persona', false),
-            groupMembers: optionalBoolean(include.groupMembers, 'include.groupMembers', false),
             globals: optionalBoolean(include.globals, 'include.globals', false),
         },
     }
@@ -337,7 +334,7 @@ export async function readPinnedConversationContext(
     if (chatIndex === null) return null
 
     let detail: CharacterDetail | null = null
-    if (include.character || include.lore || include.groupMembers) {
+    if (include.character || include.lore) {
         const found = await reader.readCharacter(characterId)
         throwIfAborted(options.signal)
         if (!found) return null
@@ -405,23 +402,6 @@ export async function readPinnedConversationContext(
         context.persona = used
             ? pickFields(used as unknown as Record<string, unknown>, ['id', 'name', 'personaPrompt']) as NonNullable<ConversationContext['persona']>
             : null
-    }
-
-    if (include.groupMembers && detail) {
-        const members: NonNullable<ConversationContext['groupMembers']> = []
-        if (detail.type === 'group') {
-            for (const memberId of detail.characters ?? []) {
-                const member = await reader.readCharacter(memberId)
-                throwIfAborted(options.signal)
-                if (!member) continue
-                assertPinnedRevision(reader.revision, member.revision, `Character ${memberId}`)
-                members.push(pickFields(
-                    member.value as unknown as Record<string, unknown>,
-                    ['chaId', 'name', 'nickname'],
-                ) as NonNullable<ConversationContext['groupMembers']>[number])
-            }
-        }
-        context.groupMembers = members
     }
 
     if (request.chatVariables !== undefined) {

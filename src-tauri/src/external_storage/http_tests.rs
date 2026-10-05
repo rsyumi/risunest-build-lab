@@ -89,59 +89,79 @@ fn wire_streams_exact_bytes_and_exposes_status_headers_without_redirects_or_retr
 }
 #[test]
 fn cancellation_wakes_header_and_body_waits_and_all_listeners() {
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    struct Wake(AtomicBool);
+    impl futures::task::ArcWake for Wake {
+        fn wake_by_ref(wake: &Arc<Self>) {
+            wake.0.store(true, Ordering::Release);
+        }
+    }
+    fn pending<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> Arc<Wake> {
+        let wake = Arc::new(Wake(AtomicBool::new(false)));
+        let waker = futures::task::waker(wake.clone());
+        assert!(future.poll(&mut std::task::Context::from_waker(&waker)).is_pending());
+        wake
+    }
     runtime().block_on(async {
         let shared = Cancellation::default();
-        let listeners = futures::future::join(shared.cancelled(), shared.cancelled());
-        let trigger = async {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-            shared.cancel();
-        };
-        tokio::time::timeout(
-            Duration::from_millis(200),
-            futures::future::join(listeners, trigger),
-        )
-        .await
-        .unwrap();
-        for reply in [Reply::DelayedHeaders, Reply::DelayedBody] {
-            let server = WireServer::start(vec![reply]);
+        let (first, second) = (shared.cancelled(), shared.cancelled());
+        tokio::pin!(first, second);
+        let first_wake = pending(first.as_mut());
+        let second_wake = pending(second.as_mut());
+        shared.cancel();
+        assert!(first_wake.0.load(Ordering::Acquire));
+        assert!(second_wake.0.load(Ordering::Acquire));
+        assert!(futures::poll!(first.as_mut()).is_ready());
+        assert!(futures::poll!(second.as_mut()).is_ready());
+
+        for send_headers in [false, true] {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let server = WireServer::start(vec![Reply::Gated {
+                send_headers,
+                ready: ready_tx,
+                release: released,
+            }]);
             let transport = NativeHttpTransport::for_loopback_tests();
             let cancel = Cancellation::default();
-            let perform = async {
-                match transport.send(request(&server, None), &cancel).await {
-                    Ok(mut response) => {
-                        let mut byte = [0];
-                        assert_eq!(
-                            response.body.read(&mut byte).await.unwrap_err().kind(),
-                            std::io::ErrorKind::Other
-                        );
-                        assert_eq!(
-                            response.body.read(&mut byte).await.unwrap_err().kind(),
-                            std::io::ErrorKind::Other
-                        );
+            let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                let send = transport.send(request(&server, None), &cancel);
+                tokio::pin!(send);
+                if send_headers {
+                    let mut response = send.await.unwrap();
+                    ready_rx.await.unwrap();
+                    let mut byte = [0];
+                    {
+                        let read = response.body.read(&mut byte);
+                        tokio::pin!(read);
+                        let wake = pending(read.as_mut());
+                        cancel.cancel();
+                        assert!(wake.0.load(Ordering::Acquire));
+                        assert_eq!(read.await.unwrap_err().kind(), std::io::ErrorKind::Other);
                     }
-                    Err(error) => assert_eq!(error.kind, ErrorKind::Cancelled),
+                    assert_eq!(
+                        response.body.read(&mut byte).await.unwrap_err().kind(),
+                        std::io::ErrorKind::Other,
+                    );
+                } else {
+                    tokio::select! {
+                        ready = ready_rx => ready.unwrap(),
+                        _ = &mut send => panic!("header wait ended before cancellation"),
+                    }
+                    let wake = pending(send.as_mut());
+                    cancel.cancel();
+                    assert!(wake.0.load(Ordering::Acquire));
+                    assert_eq!(send.await.err().unwrap().kind, ErrorKind::Cancelled);
                 }
-            };
-            let trigger = async {
-                while server.requests.lock().unwrap().is_empty() {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                cancel.cancel();
-            };
-            tokio::time::timeout(
-                Duration::from_millis(200),
-                futures::future::join(perform, trigger),
-            )
-            .await
-            .unwrap();
-            let listeners = futures::future::join(cancel.cancelled(), cancel.cancelled());
-            tokio::time::timeout(Duration::from_millis(50), listeners)
-                .await
-                .unwrap();
+                futures::future::join(cancel.cancelled(), cancel.cancelled()).await;
+            }).await;
+            drop(release);
+            drop(server);
+            outcome.expect("cancellation did not wake a ready network wait");
         }
     });
 }
+
 #[test]
 fn mybox_quota_denies_wire_dispatch_after_reopen() {
     use super::{

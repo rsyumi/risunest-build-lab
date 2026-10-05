@@ -97,26 +97,46 @@ impl PersistentStore {
     }
 
     pub(crate) fn lww_backup_dependency_inventory(
-        &self,
-        lease: &str,
+        &self, lease: &str,
         units: &BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
-        probe: &dyn CancellationProbe,
-        copy_bodies: bool,
+        probe: &dyn CancellationProbe, copy_bodies: bool,
         emit: &mut dyn FnMut(&str,&[u8],BackupBodyRole) -> StoreResult<()>,
     ) -> StoreResult<BackupDependencyInventory> {
         check(probe)?;
         if self.lww_backup_unit_values(lease)? != *units {
             return Err(invalid("Backup dependency source differs from the complete pinned units"));
         }
+        let source = crate::external_storage::capture::OriginalBackupUnits::capture(&self.repository_root, |emit| {
+            for (key,value) in units {emit(key.clone(),value.clone())?;}
+            Ok(())
+        })?;
+        self.lww_backup_dependency_inventory_streamed(lease,&source,probe,copy_bodies,emit)
+    }
+    fn lww_backup_dependency_inventory_streamed(
+        &self,
+        lease: &str,
+        units: &crate::external_storage::capture::OriginalBackupUnits,
+        probe: &dyn CancellationProbe,
+        copy_bodies: bool,
+        emit: &mut dyn FnMut(&str,&[u8],BackupBodyRole) -> StoreResult<()>,
+    ) -> StoreResult<BackupDependencyInventory> {
+        check(probe)?;
         let reader = self.revision_leases.get(lease)
             .ok_or_else(|| invalid("Backup dependency lease is unavailable"))?;
-        let large = large_unit_body_hashes(units);
+        let mut large = BTreeSet::new();
+        let mut manifests = Vec::new();
+        for unit in units.units()? {
+            check(probe)?;
+            let (key,value) = unit?;
+            if let Some(hash) = large_unit_body_hash(&key,&value) { large.insert(hash); }
+            if let Some(hash) = message_manifest_hash(&key,&value) { manifests.push(hash); }
+        }
         let read_manifest = |manifest: &str| -> StoreResult<Option<Vec<u8>>> {
             let size:Option<i64>=reader.connection.query_row("SELECT length(body) FROM message_page_objects WHERE hash=?1",[manifest],|row|row.get(0)).optional()?;
             if size.is_some_and(|size|size<0 || size as u64>risunest_sync_wire::MAX_METADATA_BYTES as u64) {return Err(invalid("Backup manifest exceeds its bound"));}
             super::message_pages::object_body(&reader.connection,manifest)
         };
-        let pages = OriginalMessagePages::new(units,&read_manifest);
+        let pages = OriginalMessagePages::from_manifests(manifests,&read_manifest);
         let load = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
             check(probe)?;
             let length: Option<i64> = reader.connection.query_row(
@@ -135,7 +155,7 @@ impl PersistentStore {
             ).optional()?;
             size.map(u64::try_from).transpose().map_err(|_| invalid("Pinned backup payload size is invalid"))
         };
-        original_unit_dependency_inventory(units,&load,&payload_size,probe,copy_bodies,emit)
+        streamed_unit_dependency_inventory(units.units()?,&load,&payload_size,probe,copy_bodies,emit)
     }
 }
 
@@ -1244,12 +1264,12 @@ impl PersistentStore {
             return Err(invalid("Capture hydration differs from its pinned lease"));
         }
         check(probe)?;
-        let units = self.lww_backup_unit_values(lease)?;
         let id = uuid::Uuid::new_v4().to_string();
         let root = self.repository_root.join("external-storage");
         let directory = root.join("captures").join(&id);
+        let units = crate::external_storage::capture::OriginalBackupUnits::capture(&directory, |emit| self.lww_visit_backup_units(lease,probe,emit))?;
         let mut spool = BackupDependencySpool::new(&directory)?;
-        let inventory = self.lww_backup_dependency_inventory(lease, &units, probe, true,
+        let inventory = self.lww_backup_dependency_inventory_streamed(lease, &units, probe, true,
             &mut |hash, bytes, role| Ok(spool.push(hash, bytes, role)?))?;
         check(probe)?;
         spool.seal()?;
@@ -1618,11 +1638,11 @@ mod hydration_tests {
         assert_eq!(captured.identity.revision, 1);
         assert_eq!(captured.catalog.content_fingerprint(&scope).unwrap(), fingerprint);
         assert_eq!(store.revision().unwrap(), 2);
-        assert_eq!(captured.catalog.original_backup_units().unwrap(), original_units);
+        assert_eq!(captured.catalog.original_backup_units().unwrap().units().unwrap().collect::<StoreResult<BTreeMap<_,_>>>().unwrap(), original_units);
         assert_eq!(captured.catalog.backup_sections().unwrap().iter().map(|section| (section.kind,section.content_fingerprint)).collect::<Vec<_>>(),fixed_section_identity);
         store.retain_external_capture(&captured.id,"synthetic-backup-job").unwrap();
         let reopened = store.reopen_external_capture(&captured.id).unwrap();
-        assert_eq!(reopened.catalog.original_backup_units().unwrap(),original_units);
+        assert_eq!(reopened.catalog.original_backup_units().unwrap().units().unwrap().collect::<StoreResult<BTreeMap<_,_>>>().unwrap(),original_units);
         assert_eq!(reopened.catalog.backup_sections().unwrap().iter().map(|section| (section.kind,section.content_fingerprint)).collect::<Vec<_>>(),fixed_section_identity);
         assert!(!store.revision_leases.contains_key(&lease.lease));
         assert!(store.capture_external_library_from_lease("backup", &hydration, &lease.lease, &probe).is_err());

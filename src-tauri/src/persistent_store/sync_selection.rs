@@ -651,7 +651,9 @@ impl super::PersistentStore {
                 result
             }.map_err(|e| invalid(&e.to_string()))?;
         }
-        let encoded = serde_json::to_string(changes)?;
+        let frozen = super::lww::FrozenRows::new()?;
+        for change in changes { frozen.insert(super::lww::intent_rows::target_row(change)?)?; }
+        let encoded = super::lww::source_digest_rows(&frozen)?;
         let existing: Option<(String,String,String)> = self.connection.query_row("SELECT inspection_id,receive_id,changes FROM lww_binding_stages WHERE staging_id=?1", [staging_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         if let Some(existing) = existing {
             if existing != (inspection_id.into(),receive_id.into(),encoded) { return Err(invalid("Binding stage identity changed")); }
@@ -712,16 +714,16 @@ impl super::PersistentStore {
         if state.target_authority != request.header.binding_authority || state.selection_epoch != request.expected_selection_epoch || matches!(state.target,SyncTarget::None) { return Err(invalid("Sync binding changed")); }
         let (library,target):(Option<String>,Option<String>) = self.connection.query_row("SELECT library_id,target_id FROM lww_binding_identity WHERE singleton=1", [], |r| Ok((r.get(0)?,r.get(1)?)))?;
         if library.as_deref() != Some(request.library_id.as_str()) || target.as_deref() != Some(request.target_id.as_str()) { return Err(invalid("Wrong replacement target")); }
-        let (receive,encoded,epoch,stage_library,stage_target):(String,String,Option<String>,String,String) = self.connection.query_row("SELECT s.receive_id,s.changes,s.activation_epoch,i.library_id,i.target_id FROM lww_binding_stages s JOIN lww_binding_inspections i USING(inspection_id) WHERE s.staging_id=?1", [&request.staging_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+        let (receive,_encoded,epoch,stage_library,stage_target):(String,String,Option<String>,String,String) = self.connection.query_row("SELECT s.receive_id,s.changes,s.activation_epoch,i.library_id,i.target_id FROM lww_binding_stages s JOIN lww_binding_inspections i USING(inspection_id) WHERE s.staging_id=?1", [&request.staging_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
         if receive != request.receive_id || epoch.as_deref() != Some(request.expected_selection_epoch.as_str()) || stage_library != request.library_id || stage_target != request.target_id { return Err(invalid("Stale or wrong-target replacement stage")); }
         if request.header.request_id != request.receive_id { return Err(invalid("Binding receive request identity changed")); }
         let library_committed:bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM lww_requests WHERE request_id=?1)", [&request.header.request_id], |r| r.get(0))?;
-        let changes:Vec<super::lww::Change> = serde_json::from_str(&encoded)?;
+        let changes = super::lww::binding_source_rows(&self.connection, &request.staging_id)?;
         // The stage catalog is proved once, inside the activation transaction.
         if !library_committed {
-            super::lww::validate_binding_source(&self.connection,&request.staging_id,&request.header,&changes)?;
+            super::lww::validate_binding_source_rows(&self.connection,&request.staging_id,&request.header,&changes)?;
         }
-        self.lww_replace_target(&request.header,&request.staging_id,&changes)
+        self.lww_replace_target_rows(&request.header,&request.staging_id,&changes)
     }
 }
 
@@ -732,11 +734,12 @@ pub(super) fn switch_retains_binding_state(db: &Connection, request_id: &str) ->
 fn validate_binding_inspection_stages(store: &super::PersistentStore, inspection: &str, authority: risunest_sync_wire::stamp::DecimalU64) -> StoreResult<()> {
     let mut stages = store.connection.prepare("SELECT staging_id,receive_id,changes FROM lww_binding_stages WHERE inspection_id=?1")?;
     for staging in stages.query_map([inspection], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))? {
-        let (staging,receive,encoded) = staging?;
+        let (staging,receive,_encoded) = staging?;
         store.prepare_replace_commit(&staging,None)?;
         validate_binding_stage_content(&store.connection,&staging)?;
         let source_header = super::lww::Header { binding_authority:authority,request_id:receive };
-        super::lww::validate_binding_source(&store.connection,&staging,&source_header,&serde_json::from_str::<Vec<super::lww::Change>>(&encoded)?)?;
+        let changes = super::lww::binding_source_rows(&store.connection, &staging)?;
+        super::lww::validate_binding_source_rows(&store.connection,&staging,&source_header,&changes)?;
     }
     Ok(())
 }

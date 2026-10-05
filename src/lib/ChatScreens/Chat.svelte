@@ -15,7 +15,7 @@
     import { runTrigger } from 'src/ts/process/triggers'
     import { sayTTS } from "src/ts/process/tts"
     import { DBState, ReloadChatPointer, CurrentTriggerIdStore, popupStore } from 'src/ts/stores.svelte'
-    import { ConnectionOpenStore } from "src/ts/sync/multiuser"
+
     import { capitalize, getUserIcon, getUserName, sleep } from "src/ts/util"
     import { onDestroy, onMount, tick, untrack } from "svelte"
     import { type Unsubscriber } from "svelte/store"
@@ -56,7 +56,6 @@
     import type { ConversationViewportRow } from 'src/ts/conversationViewportSource'
     import type { ChatDisplayRefresh } from 'src/ts/chatDisplayRefresh'
     import type { BoundedLiveChatParserProjection } from 'src/ts/selectedConversationLiveParserProjection'
-    import type { groupChat as GroupChatRecord } from 'src/ts/storage/database.svelte'
     import type {
         SelectedConversationMessageEditIntent,
         SelectedConversationOperations,
@@ -220,9 +219,9 @@
         return captureContext?.parserContext ?? parserProjection?.context.parserContext
     }
 
-    function parserChara(): string | CharacterRecord | GroupChatRecord {
-        const character = parserContext()?.character as CharacterRecord | GroupChatRecord
-        return character?.type === 'group' ? name : character
+    function parserChara(): string | CharacterRecord {
+        const character = parserContext()?.character as CharacterRecord
+        return character
     }
 
     function parserArgs() {
@@ -904,7 +903,7 @@
                     'manual-chat-trigger',
                     async (context) => {
                         const authority = context.requireCurrent()
-                        if (authority.character.type === 'group') return
+
                         const triggerResult = await runManualTrigger(
                             authority.character,
                             authority.conversation,
@@ -922,7 +921,7 @@
             }
         } else {
             const currentChar = getCurrentCharacter()
-            if(!currentChar || currentChar.type === 'group') return
+            if(!currentChar) return
             const triggerResult = await runManualTrigger(currentChar, getCurrentChat())
             if(triggerResult) {
                 setCurrentChat(triggerResult.chat)
@@ -1460,7 +1459,7 @@
     </button>    
 {/if}
 {#if idx > -1}
-    {#if DBState.db.characters[selIdState.selId].type !== 'group' && DBState.db.characters[selIdState.selId].ttsMode !== 'none' && (DBState.db.characters[selIdState.selId].ttsMode)}
+    {#if DBState.db.characters[selIdState.selId].ttsMode !== 'none' && (DBState.db.characters[selIdState.selId].ttsMode)}
         <button class="flex items-center hover:text-blue-500 transition-colors button-icon-tts" onclick={()=>{
             return sayTTS(null, isOptimizedStreamingMessage ? rawStreamingText : message)
         }}>
@@ -1470,15 +1469,13 @@
             {/if}
         </button>
     {/if}
-    {#if !$ConnectionOpenStore}
-        <button class="flex items-center hover:text-blue-500 transition-colors button-icon-remove" onclick={(e) => rm(e, false)} use:longpress={(e) => rm(e, true)}>
+    <button class="flex items-center hover:text-blue-500 transition-colors button-icon-remove" onclick={(e) => rm(e, false)} use:longpress={(e) => rm(e, true)}>
             <TrashIcon size={20}/>
 
             {#if showNames}
                 <span class="ml-1">{language.remove}</span>
             {/if}
         </button>
-    {/if}
 {/if}
 {/snippet}
 

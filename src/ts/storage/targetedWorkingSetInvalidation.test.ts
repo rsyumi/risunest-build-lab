@@ -268,28 +268,8 @@ function newModel(): Model {
                 ],
             },
             {
-                id: 'group-g',
-                configuredIndex: 2,
-                detail: {
-                    chaId: 'group-g',
-                    name: 'Group',
-                    type: 'group',
-                    chatPage: 0,
-                    characters: ['char-a', 'char-b'],
-                },
-                conversations: [
-                    {
-                        id: 'conv-g1',
-                        name: 'G One',
-                        configuredIndex: 0,
-                        recentAt: 30,
-                        messages: [],
-                    },
-                ],
-            },
-            {
                 id: 'char-t',
-                configuredIndex: 3,
+                configuredIndex: 2,
                 detail: {
                     chaId: 'char-t',
                     name: 'Trashed',
@@ -384,7 +364,7 @@ const STEPS: Step[] = [
         mutate(model) {
             const added: ModelCharacter = {
                 id: 'char-new',
-                configuredIndex: 4,
+                configuredIndex: 3,
                 detail: {
                     chaId: 'char-new',
                     name: 'New',
@@ -522,14 +502,6 @@ const STEPS: Step[] = [
         },
     },
     {
-        name: 'group member reference changes while a member is archived',
-        mutate(model) {
-            const group = characterOf(model, 'group-g')!
-            group.detail = { ...group.detail, characters: ['char-a'] }
-            return [{ kind: 'character', key1: 'group-g', key2: '' }]
-        },
-    },
-    {
         name: 'character unarchived',
         mutate(model) {
             const character = characterOf(model, 'char-b')!
@@ -587,7 +559,7 @@ const STEPS: Step[] = [
 ]
 
 const ALTERNATE_ORDER = [
-    0, 4, 8, 2, 6, 15, 9, 1, 12, 17, 3, 7, 10, 5, 13, 11, 16, 14, 18, 19, 20,
+    0, 4, 8, 2, 6, 15, 9, 1, 12, 16, 3, 7, 10, 5, 13, 11, 14, 17, 18, 19,
 ]
 
 interface Variant {
@@ -612,14 +584,6 @@ const VARIANTS: Variant[] = [
         options: () => ({
             selectedCharacterId: null,
             selectedConversationId: null,
-            activeCharacterIds: new Set<string>(),
-        }),
-    },
-    {
-        name: 'a group selected with resident members',
-        options: () => ({
-            selectedCharacterId: 'group-g',
-            selectedConversationId: 'conv-g1',
             activeCharacterIds: new Set<string>(),
         }),
     },

@@ -1,6 +1,6 @@
 import { DBState } from './stores.svelte'
 import { alertError } from './alert'
-import type { character, groupChat } from './storage/database.svelte'
+import type { character } from './storage/database.svelte'
 import { mutatePersistentCharacterDetail } from './storage/persistentDataRuntime.svelte'
 import {
     captureChatBindingTarget,
@@ -57,7 +57,7 @@ export async function setLocalToggleMode(enabled: boolean): Promise<void> {
     }
 }
 
-export async function setCharacterMemory(owner: character | groupChat, enabled: boolean): Promise<void> {
+export async function setCharacterMemory(owner: character, enabled: boolean): Promise<void> {
     try {
         const saved = await mutatePersistentCharacterDetail(owner.chaId, 'toggle-character-memory', ({ character }) => {
             character.supaMemory = enabled

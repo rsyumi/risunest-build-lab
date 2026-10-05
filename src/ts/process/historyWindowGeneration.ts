@@ -22,7 +22,6 @@ export interface HistoryWindowAdmissionInput {
     requested: boolean
     enabled: boolean
     maxContext: number
-    group: boolean
     supaMemory: boolean
     supaModelType: string
     hanuraiEnable: boolean
@@ -36,7 +35,7 @@ export interface HistoryWindowAdmissionInput {
  * memory dispatch.
  */
 export function admitHistoryWindow(input: HistoryWindowAdmissionInput): HistoryWindowMemoryMode | null {
-    if (!input.requested || !input.enabled || input.group || !(input.maxContext > 0)) return null
+    if (!input.requested || !input.enabled || !(input.maxContext > 0)) return null
     const memoryActive = input.supaMemory
         && (input.supaModelType !== 'none' || input.hanuraiEnable || input.hypav2 || input.hypaV3)
     if (!memoryActive) return 'none'

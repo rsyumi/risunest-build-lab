@@ -5,6 +5,7 @@ import {
     isDataHealthCancellation,
     preferredRepairSelection,
     toggleRepairSelection,
+    type DataHealthFinding,
     type DataHealthGroup,
     type DataHealthResult,
     type RepairCandidate,
@@ -22,9 +23,9 @@ export interface DataHealthSnapshot {
     result: DataHealthResult | null
     groups: DataHealthGroup[]
     deepFraction: number | null
-    failure: 'load' | 'scan' | 'repair' | 'undo' | 'refresh' | 'preview' | null
+    failure: 'load' | 'scan' | 'repair' | 'undo' | 'refresh' | 'preview' | 'discard' | null
     applied: { remaining: number } | null
-    activity: 'quick' | 'deep' | 'repair' | 'undo' | 'preview' | 'load' | null
+    activity: 'quick' | 'deep' | 'repair' | 'undo' | 'preview' | 'load' | 'discard' | null
     failed: boolean
     /** What the diagnosis can be answered with, and what the reader has chosen. */
     candidates: RepairCandidate[]
@@ -50,6 +51,7 @@ export interface DataHealthDependencies {
         expectedRevision: number,
         expectedScannedAt: number,
     ): Promise<{ result: DataHealthResult }>
+    discardIntent(finding: number, expectedRevision: number, expectedScannedAt: number): Promise<{ result: DataHealthResult }>
     listJournals(): Promise<RepairJournalSummary[]>
     undoRepair(
         journalId: string,
@@ -248,6 +250,19 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
                     await loadPlan()
                     update({ journals: await deps.listJournals() })
                 } catch { update({ failure: 'refresh' }) }
+            } finally { update({ repairing: false, activity: null }) }
+        },
+        async discard(item: DataHealthFinding, diagnosis: DataHealthResult): Promise<void> {
+            if (state.activity || state.loading || !state.result || state.result.revision !== diagnosis.revision || state.result.scannedAt !== diagnosis.scannedAt) return
+            const finding = state.result.items.findIndex(current => current.code === item.code && current.owner.kind === item.owner.kind && current.owner.id === item.owner.id && current.locator?.sourcePath === item.locator?.sourcePath)
+            if (finding < 0 || item.code !== 'intent-quarantined' || item.owner.kind !== 'intent' || !item.locator) return
+            update({ repairing: true, activity: 'discard', failure: null, applied: null })
+            try {
+                const discarded = await deps.discardIntent(finding, diagnosis.revision, diagnosis.scannedAt)
+                await finishScan(discarded.result)
+            } catch (error) {
+                update({ failure: 'discard' })
+                throw error
             } finally { update({ repairing: false, activity: null }) }
         },
         async undo(journalId: string): Promise<void> {

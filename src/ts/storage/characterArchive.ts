@@ -14,7 +14,6 @@ export {
     archivedConversationCount,
     characterIsArchived,
     countArchivedCharacters,
-    countBlockedGroupMembers,
     formatArchivedAt,
 } from './characterArchiveView'
 

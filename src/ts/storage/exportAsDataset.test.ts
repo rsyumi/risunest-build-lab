@@ -50,12 +50,6 @@ describe('exportAsDataset', () => {
                     globalLore: [{ key: 'lore' }],
                     chats: [{ id: 'chat', message: [{ role: 'user', data: 'hello' }] }],
                 },
-                {
-                    type: 'group',
-                    chaId: 'group',
-                    name: 'Skipped group',
-                    chats: [{ id: 'group-chat', message: [] }],
-                },
             ],
         })
         mocks.downloadFile.mockReset().mockResolvedValue(undefined)

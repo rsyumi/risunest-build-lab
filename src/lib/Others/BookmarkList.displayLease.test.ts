@@ -121,12 +121,12 @@ function completeLease(release: () => void) {
     return { release, target: { ...state.selection } }
 }
 
-function prepare(lua: boolean, group = false) {
+function prepare(lua: boolean) {
     const message = {
         chatId: 'bookmark-message',
         role: 'char',
         data: 'Synthetic bookmarked message',
-        saying: group ? 'speaker-a' : undefined,
+
     }
     const conversation = createMetadataOnlySelectedConversation({
         id: 'conversation-a',
@@ -157,12 +157,7 @@ function prepare(lua: boolean, group = false) {
               ]
             : [],
     }
-    state.database.characters = group
-        ? [
-              { ...character, type: 'group', triggerscript: [] },
-              { ...character, chaId: 'speaker-a' },
-          ]
-        : [character]
+    state.database.characters = [character]
     state.selection = {
         characterId: character.chaId,
         conversationId: conversation.id,
@@ -217,31 +212,6 @@ afterEach(async () => {
     window.removeEventListener('bookmark-chat-mounted', mountListener)
     document.body.replaceChildren()
 })
-
-test.each([false, true])(
-    'expanded Lua bookmark waits for complete history and holds its lease through display (group=%s)',
-    async (group) => {
-        const { releaseRevision } = prepare(true, group)
-        const pending = deferred<any>()
-        const release = vi.fn()
-        state.acquireCompleteConversation.mockReturnValue(pending.promise)
-        await openExpanded()
-        expect(releaseRevision).toHaveBeenCalledOnce()
-        expect(mounts).toHaveLength(0)
-        expect(state.acquireCompleteConversation).toHaveBeenCalledOnce()
-        pending.resolve(completeLease(release))
-        await vi.waitFor(() => expect(mounts).toHaveLength(1))
-        expect(release).not.toHaveBeenCalled()
-        expect(mounts[0].signal.aborted).toBe(false)
-        ;(target.querySelector('[role="button"]') as HTMLElement).click()
-        await tick()
-        expect(mounts[0].signal.aborted).toBe(true)
-        expect(release).toHaveBeenCalledOnce()
-        await unmount(mounted!)
-        mounted = undefined
-        expect(release).toHaveBeenCalledOnce()
-    },
-)
 
 test.each([false, true])(
     'reactive complete promotion preserves a single bookmark display lease (revision advances=%s)',

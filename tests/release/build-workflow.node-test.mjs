@@ -252,7 +252,12 @@ test("iPhoneOS production uses the lab-verified Xcode and Tauri IPA path", () =>
 test("pnpm preserves the Cargo argument separator for every Tauri build", () => {
   assert.doesNotMatch(workflow, /pnpm exec tauri/);
   assert.equal((workflow.match(/pnpm exec -- tauri/g) ?? []).length, 5);
-  assert.equal((workflow.match(/pnpm exec -- tauri[^\n]* -- --locked/g) ?? []).length, 5);
+  const builds = workflow.match(/pnpm exec -- tauri(?: android| ios)? build[^\n]*/g) ?? [];
+  assert.equal(builds.length, 4);
+  for (const build of builds) assert.match(build, / -- --locked$/);
+  const bundles = workflow.match(/pnpm exec -- tauri bundle[^\n]*/g) ?? [];
+  assert.equal(bundles.length, 1);
+  assert.doesNotMatch(bundles[0], / -- --locked/);
 });
 
 test("Android jobs preserve the committed shell and let Tauri generate ignored build files", () => {
@@ -450,4 +455,14 @@ test("Windows packaging executes the required app uninstall harness after bundli
   const desktop = workflow.slice(workflow.indexOf('  app-desktop:'), workflow.indexOf('  app-android:'));
   assert(desktop.indexOf('app-nsis-uninstall.node-test.mjs') > desktop.indexOf('Bundle app desktop assets'));
   assert.match(desktop, /RISUNEST_REQUIRE_NSIS: "1"/);
+});
+
+test("desktop releases compile once before packaging the same target and configuration", () => {
+  const desktop = workflow.slice(workflow.indexOf('  app-desktop:'), workflow.indexOf('  app-android:'));
+  const compile = desktop.slice(desktop.indexOf('      - name: Compile app desktop binary without signing key'), desktop.indexOf('      - name: Bundle app desktop assets'));
+  const bundle = desktop.slice(desktop.indexOf('      - name: Bundle app desktop assets'), desktop.indexOf('      - name: Verify app uninstall cleanup and retry'));
+  assert.match(compile, /tauri build --target "\$TARGET" --no-bundle --config "\$RUNNER_TEMP\/release-tauri\.json" -- --locked/);
+  assert.match(bundle, /tauri bundle --target "\$TARGET" --bundles "\$BUNDLES" --config "\$RUNNER_TEMP\/release-tauri\.json"/);
+  assert.doesNotMatch(bundle, /tauri build|cargo build|pnpm tauribuild/);
+  assert.equal([...desktop.matchAll(/tauri build /g)].length, 1);
 });

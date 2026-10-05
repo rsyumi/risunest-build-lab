@@ -65,7 +65,7 @@ pub(super) fn known(key: &UnitKey) -> bool {
                 | "customModels"
                 | "plugin-storage"
         ),
-        "toggle" | "variable" | "group-members" | "plugin" | "asset" | "inlay" | "hypa"
+        "toggle" | "variable" | "plugin" | "asset" | "inlay" | "hypa"
         | "plugin-local" | "messages" | "archive" => true,
         _ => false,
     }
@@ -263,15 +263,6 @@ fn capture_character(
                 o.shift_remove("messages");
             }
             add(db, out, &["character", id, "statics"], &statics)?;
-        }
-        if value.get("type").and_then(Value::as_str) == Some("group") {
-            let mut members = Map::new();
-            for field in ["characters", "characterTalks", "characterActive"] {
-                if let Some(v) = value.get(field) {
-                    members.insert(field.into(), v.clone());
-                }
-            }
-            add(db, out, &["group-members", id], &Value::Object(members))?;
         }
         let archived: Option<String> = db.query_row(
             "SELECT archived_object FROM characters WHERE generation=?1 AND character_id=?2",
@@ -524,7 +515,7 @@ fn capture_key(
 ) -> StoreResult<()> {
     let p = key.components();
     match p[0].as_str() {
-        "character" | "group-members" | "archive" => {
+        "character" | "archive" => {
             capture_character(db, generation, &p[1], false, true, out)?
         }
         "order" if p[1] == "conversations" => {
@@ -640,64 +631,80 @@ fn capture_key(
     }
     Ok(())
 }
-pub(in crate::persistent_store) fn character_ids(tx: &Transaction<'_>, generation: &str) -> StoreResult<Vec<String>> {
-    let mut statement = tx.prepare("SELECT character_id FROM characters WHERE generation=?1")?;
-    let ids = statement.query_map([generation], |row| row.get(0))?.collect::<Result<_, _>>()?;
-    Ok(ids)
-}
-/// Every unit of one character, with conversations read from their stored
-/// manifests.
-pub(in crate::persistent_store) fn capture_character_units(
-    tx: &Transaction<'_>,
-    generation: &str,
-    id: &str,
-) -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
-    let mut out = BTreeMap::new();
-    capture_character(tx, generation, id, true, true, &mut out)?;
-    Ok(out)
-}
-/// Every unit outside the characters: root, presets, plugin storage and
-/// asset aliases.
-pub(in crate::persistent_store) fn capture_shared(
-    tx: &Transaction<'_>,
-    generation: &str,
-) -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
-    let mut out = BTreeMap::new();
-    capture_root(tx, generation, &mut out)?;
-    capture_presets(tx, generation, &mut out)?;
-    let plugins: Vec<(String, String)> = {
-        let mut s =
-            tx.prepare("SELECT owner,storage_key FROM plugin_storage WHERE generation=?1")?;
-        let v = s
-            .query_map([generation], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<Result<_, _>>()?;
-        v
+/// Visits one record at a time. Order arrays remain single logical unit values.
+pub(in crate::persistent_store) fn visit_generation_units(
+    tx: &Transaction<'_>, generation: &str,
+    mut emit: impl FnMut(UnitKey, UnitValue) -> StoreResult<()>,
+) -> StoreResult<()> {
+    let mut flush = |values: BTreeMap<UnitKey, UnitValue>| -> StoreResult<()> {
+        for (key, value) in values { emit(key, value)?; }
+        Ok(())
     };
-    for (owner, key) in plugins {
-        capture_key(tx, generation, &unit_key(&["plugin", &owner, &key])?, &mut out)?;
+    let mut values = BTreeMap::new();
+    capture_root(tx, generation, &mut values)?;
+    flush(values)?;
+    let mut characters = tx.prepare("SELECT character_id FROM characters WHERE generation=?1 ORDER BY character_id")?;
+    let mut rows = characters.query([generation])?;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let mut values = BTreeMap::new();
+        capture_character(tx, generation, &id, false, true, &mut values)?;
+        flush(values)?;
+        let Some(detail) = text_value(tx, "SELECT detail FROM characters WHERE generation=?1 AND character_id=?2", params![generation,id])? else { continue; };
+        let mut conversations = tx.prepare("SELECT conversation_id FROM conversations WHERE generation=?1 AND character_id=?2 ORDER BY configured_index,conversation_id")?;
+        let mut conversations = conversations.query(params![generation,id])?;
+        let mut order = Vec::<String>::new();
+        while let Some(row) = conversations.next()? {
+            let conversation: String = row.get(0)?;
+            let mut values = BTreeMap::new();
+            capture_conversation(tx, generation, &id, &conversation, None, true, &mut values)?;
+            flush(values)?;
+            order.push(conversation);
+        }
+        let mut values = BTreeMap::new();
+        add(tx, &mut values, &["order","conversations",&id], &json!({"ids":order,"folders":detail.get("chatFolders").cloned().unwrap_or(json!([]))}))?;
+        flush(values)?;
     }
-    let owners: Vec<String> = {
-        let mut q = tx.prepare("SELECT DISTINCT owner FROM plugin_storage WHERE generation=?1")?;
-        let rows = q
-            .query_map([generation], |r| r.get(0))?
-            .collect::<Result<_, _>>()?;
-        rows
-    };
-    for owner in owners {
-        capture_plugin_order(tx, generation, &owner, &mut out)?;
+    let mut presets = tx.prepare("SELECT preset_id FROM bot_presets WHERE generation=?1 ORDER BY configured_index,preset_id")?;
+    let mut rows = presets.query([generation])?;
+    let mut order = Vec::<String>::new();
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let mut values = BTreeMap::new();
+        capture_preset(tx, generation, &id, &mut values)?;
+        flush(values)?;
+        order.push(id);
     }
-    let aliases: Vec<(String, String)> = {
-        let mut s = tx.prepare("SELECT kind,logical_key FROM asset_aliases WHERE generation=?1")?;
-        let v = s
-            .query_map([generation], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<Result<_, _>>()?;
-        v
-    };
-    for (kind, key) in aliases {
-        capture_key(tx, generation, &unit_key(&[&kind, &key])?, &mut out)?;
+    let mut values = BTreeMap::new();
+    add(tx, &mut values, &["order","presets"], &json!(order))?;
+    flush(values)?;
+    let mut plugins = tx.prepare("SELECT owner,storage_key FROM plugin_storage WHERE generation=?1 ORDER BY owner,storage_key")?;
+    let mut rows = plugins.query([generation])?;
+    while let Some(row) = rows.next()? {
+        let (owner,key): (String,String) = (row.get(0)?,row.get(1)?);
+        let mut values = BTreeMap::new();
+        capture_key(tx, generation, &unit_key(&["plugin",&owner,&key])?, &mut values)?;
+        flush(values)?;
     }
-    Ok(out)
+    let mut owners = tx.prepare("SELECT DISTINCT owner FROM plugin_storage WHERE generation=?1 ORDER BY owner")?;
+    let mut rows = owners.query([generation])?;
+    while let Some(row) = rows.next()? {
+        let owner: String = row.get(0)?;
+        let mut values = BTreeMap::new();
+        capture_plugin_order(tx, generation, &owner, &mut values)?;
+        flush(values)?;
+    }
+    let mut aliases = tx.prepare("SELECT kind,logical_key FROM asset_aliases WHERE generation=?1 ORDER BY kind,logical_key")?;
+    let mut rows = aliases.query([generation])?;
+    while let Some(row) = rows.next()? {
+        let (kind,key): (String,String) = (row.get(0)?,row.get(1)?);
+        let mut values = BTreeMap::new();
+        capture_key(tx, generation, &unit_key(&[&kind,&key])?, &mut values)?;
+        flush(values)?;
+    }
+    Ok(())
 }
+
 /// The whole library in one map, as replacements captured it before they
 /// merged one character at a time. With `current_manifests`, a conversation
 /// that already has a page manifest is read from it rather than paged again.
@@ -785,11 +792,6 @@ pub(in crate::persistent_store) fn validate_received(
         match p[0].as_str() {
             "exists" => {
                 if !(v.is_object() || v == Value::Bool(true)) {
-                    return Err(error("invalid-unit-payload"));
-                }
-            }
-            "group-members" => {
-                if !v.is_object() {
                     return Err(error("invalid-unit-payload"));
                 }
             }
@@ -932,7 +934,7 @@ pub(in crate::persistent_store) fn apply(
 /// touches nothing else.
 pub(in crate::persistent_store) fn character_detail_key(key: &UnitKey) -> Option<String> {
     let mut p = key.components();
-    (matches!(p[0].as_str(), "character" | "group-members") && known(key)).then(|| p.swap_remove(1))
+    (matches!(p[0].as_str(), "character") && known(key)).then(|| p.swap_remove(1))
 }
 pub(in crate::persistent_store) fn character_detail(
     tx: &Transaction<'_>,
@@ -957,15 +959,7 @@ pub(in crate::persistent_store) fn patch_character_detail(
     patch_character(detail, &key.components(), json_value_resolved(tx, value)?, false)
 }
 fn patch_character(v: &mut Value, p: &[String], next: Option<Value>, local: bool) -> StoreResult<()> {
-    if p[0] == "group-members" {
-        for field in ["characters", "characterTalks", "characterActive"] {
-            patch(
-                v,
-                field,
-                next.as_ref().and_then(|v| v.get(field)).cloned(),
-            )?;
-        }
-    } else if p[2] == "statics" {
+    if p[2] == "statics" {
         let messages = if local {
             None
         } else {
@@ -1061,7 +1055,7 @@ fn apply_value(
             patch(field, &p[1], next)?;
             write_root(tx, generation, &v)?;
         }
-        "character" | "group-members" => {
+        "character" => {
             let mut v = character_detail(tx, generation, &p[1])?;
             patch_character(&mut v, &p, next, local)?;
             commit::put_character_detail(tx, generation, &v)?;
@@ -1766,7 +1760,7 @@ pub(in crate::persistent_store) fn reproject_archived_children(
     char_id: &str,
 ) -> StoreResult<()> {
     let rows: Vec<(String, String)> = {
-        let mut q=tx.prepare("SELECT key,value FROM lww_units WHERE (json_extract(key,'$[0]') IN ('character','group-members','conversation','messages') AND json_extract(key,'$[1]')=?1) OR (json_extract(key,'$[0]')='order' AND json_extract(key,'$[1]')='conversations' AND json_extract(key,'$[2]')=?1) OR (json_extract(key,'$[0]')='exists' AND json_extract(key,'$[1]')='conversation' AND json_extract(key,'$[2]')=?1)")?;
+        let mut q=tx.prepare("SELECT key,value FROM lww_units WHERE (json_extract(key,'$[0]') IN ('character','conversation','messages') AND json_extract(key,'$[1]')=?1) OR (json_extract(key,'$[0]')='order' AND json_extract(key,'$[1]')='conversations' AND json_extract(key,'$[2]')=?1) OR (json_extract(key,'$[0]')='exists' AND json_extract(key,'$[1]')='conversation' AND json_extract(key,'$[2]')=?1)")?;
         let rows = q
             .query_map([char_id], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?;
@@ -1814,9 +1808,6 @@ pub(in crate::persistent_store) fn shared_archive_character(mut value: Value) ->
                         | "type"
                         | "chatFolders"
                         | "statics"
-                        | "characters"
-                        | "characterTalks"
-                        | "characterActive"
                 )
         });
         if let Some(statics) = object.get_mut("statics").and_then(Value::as_object_mut) {

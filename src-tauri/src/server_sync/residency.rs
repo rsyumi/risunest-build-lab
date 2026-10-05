@@ -527,12 +527,14 @@ pub(crate) struct HydrationSession {
     directory: Option<tempfile::TempDir>,
     cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     catalog: Option<AssetObjectRegistrar>,
+    /// Whether downloads count as the planned work of the current progress lane.
+    planned: bool,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HydrationOutcome { AlreadyLocal, Downloaded }
 impl HydrationSession {
     pub(crate) fn new(root: &Path, cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Result<Self> {
-        Ok(Self { root: std::fs::canonicalize(root)?, residency: None, clients: Default::default(), cache: None, directory: None, cancellation, catalog: None })
+        Ok(Self { root: std::fs::canonicalize(root)?, residency: None, clients: Default::default(), cache: None, directory: None, cancellation, catalog: None, planned: true })
     }
     pub(crate) fn open(&mut self, digest: &str, check: &dyn Fn() -> Result<()>) -> Result<Option<std::fs::File>> {
         check()?;
@@ -549,6 +551,14 @@ impl HydrationSession {
     pub(crate) fn hydrate_many_observed(&mut self, digests: &[String], check: &dyn Fn() -> Result<()>, on_object_done: &dyn Fn()) -> Result<Vec<String>> {
         self.hydrate_many_outcomes(digests, check, |_, _| on_object_done())
     }
+    /// Hydrates what the plan is read from. The work found in it is planned only afterwards,
+    /// so these downloads are not counted as part of it.
+    pub(crate) fn hydrate_many_before_plan(&mut self, digests: &[String], check: &dyn Fn() -> Result<()>, on_object_done: &dyn Fn()) -> Result<Vec<String>> {
+        self.planned = false;
+        let outcome = self.hydrate_many_observed(digests, check, on_object_done);
+        self.planned = true;
+        outcome
+    }
     pub(crate) fn hydrate_many_outcomes(&mut self, digests: &[String], check: &dyn Fn() -> Result<()>, opened: impl FnMut(&str, HydrationOutcome)) -> Result<Vec<String>> {
         self.hydrate_many_outcomes_prioritized(digests, &Default::default(), check, opened)
     }
@@ -557,6 +567,8 @@ impl HydrationSession {
         let mut external = std::collections::BTreeSet::new();
         let mut server_pages = Vec::new();
         let cas = crate::asset_repository::PayloadCas::new(&self.root)?;
+        let lane = super::progress::current().filter(|_| self.planned);
+        if let Some(lane) = &lane { lane.backlog(0, 0); }
         for page in digests.chunks(64) {
             check()?;
             let hashes = page.iter().collect::<std::collections::BTreeSet<_>>();
@@ -597,6 +609,7 @@ impl HydrationSession {
             drop(guards);
             std::thread::yield_now();
         }
+        if let Some(lane) = &lane { lane.backlog(0, server_pages.iter().map(Vec::len).sum::<usize>() as u64); }
         let external = digests.iter().filter(|hash| external.remove(hash.as_str())).cloned().collect::<Vec<_>>();
         for selected in [true, false] {
             for page in &server_pages {
@@ -616,6 +629,7 @@ impl HydrationSession {
                         let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
                         if cas.stat_object(hash)?.is_some() {
                             opened(hash, HydrationOutcome::AlreadyLocal);
+                            if let Some(lane) = &lane { lane.backlog_step(); }
                             continue;
                         }
                     }
@@ -629,6 +643,7 @@ impl HydrationSession {
                         check()?;
                         outcome?;
                         opened(hash, HydrationOutcome::Downloaded);
+                        if let Some(lane) = &lane { lane.backlog_step(); }
                         continue;
                     }
                     let key = format!("{}:{}", proof.context, serde_json::to_string(&proof.config)
@@ -650,7 +665,9 @@ impl HydrationSession {
                         self.directory = Some(directory);
                     }
                     let cache = self.cache.as_ref().unwrap();
-                    super::transfer::Transfer::new(self.clients.get(&key).unwrap(), cache)?.with_check(check)
+                    let client = self.clients.get(&key).unwrap();
+                    client.lane().plan_files(0, objects.iter().map(|object| object.size).sum());
+                    super::transfer::Transfer::new(client, cache)?.with_check(check)
                         .download(&objects.iter().map(|object| object.hash.clone()).collect::<Vec<_>>(), &[])?;
                     for object in objects {
                         let mut body = cache.open_derived(&object.hash)?.ok_or_else(|| SyncError::new("hydration-incomplete", 502))?;
@@ -663,6 +680,7 @@ impl HydrationSession {
                             check()?;
                             outcome?;
                             opened(&object.hash, HydrationOutcome::Downloaded);
+                            if let Some(lane) = &lane { lane.backlog_step(); }
                         }
                         drop(body);
                         cache.remove_derived(&object.hash)?;

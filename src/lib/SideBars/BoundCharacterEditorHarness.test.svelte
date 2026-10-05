@@ -8,10 +8,6 @@
 
 <!-- Mirrors the sidebar wrapper and CharConfig's name/description bindings. -->
 <SelectedConversationEditor>
-    {#if DBState.db.characters[$selectedCharID].type !== 'group'}
         <TextInput size="xl" marginBottom placeholder="Character Name" bind:value={DBState.db.characters[$selectedCharID].name} />
         <TextAreaInput margin="both" autocomplete="off" bind:value={(DBState.db.characters[$selectedCharID] as character).desc}></TextAreaInput>
-    {:else}
-        <TextInput size="xl" marginBottom placeholder="Group Name" bind:value={DBState.db.characters[$selectedCharID].name} />
-    {/if}
 </SelectedConversationEditor>

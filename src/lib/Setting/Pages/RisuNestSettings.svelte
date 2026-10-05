@@ -8,6 +8,7 @@
         type RisuNestSettingsTab,
     } from 'src/ts/setting/risuNestSettingsTabs'
     import { isTauri, isTauriAndroid, isTauriIOS } from 'src/ts/platform'
+    import { DBState } from 'src/ts/stores.svelte'
     import RisuNestSettingRows from '../RisuNest/RisuNestSettingRows.svelte'
     import RisuNestPerformanceSettings from './RisuNestPerformanceSettings.svelte'
     import RisuNestInlayInventory from './RisuNestInlayInventory.svelte'
@@ -61,7 +62,8 @@
     }
 </script>
 
-<div class="@container w-full max-w-3xl">
+<!-- Korean has no spaces inside a word, so the default break rule splits words mid-syllable. -->
+<div class="@container w-full max-w-3xl" class:break-keep={DBState.db.language === 'ko'}>
     <h1 class="text-2xl font-bold">{language.risuNest.menuTitle}</h1>
     <div
         role="tablist"

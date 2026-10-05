@@ -5,8 +5,22 @@ const fixture = vi.hoisted(() => ({
     store: null as any,
     replacers: new Set<(formated: unknown[], model: string) => Promise<unknown[]>>(),
     modelRequests: 0,
+    historyLimit: false,
+    outputs: new Set<(event: any) => Promise<void>>(),
 }))
 
+// The synthetic database already supplies the generation fields; import migration is outside this fixture.
+vi.mock('src/ts/storage/databasePreparation', async (importOriginal) => ({
+    ...await importOriginal<typeof import('../storage/databasePreparation')>(),
+    prepareDatabaseForPersistence: async (input: unknown) => structuredClone(input),
+}))
+vi.mock('src/ts/storage/deviceSettings', async (importOriginal) => {
+    const original = await importOriginal<typeof import('../storage/deviceSettings')>()
+    return { ...original, getDeviceSettings: () => ({
+        ...original.getDeviceSettings(), generationHistoryLimitEnabled: fixture.historyLimit,
+        generationHistoryLimitMultiplier: 2,
+    }) }
+})
 vi.mock('src/ts/storage/persistentDataStoreFactory', () => ({ getPersistentDataStore: () => fixture.store }))
 vi.mock('src/ts/parser/parser.svelte', () => ({
     assetRegex: /$^/,
@@ -15,7 +29,10 @@ vi.mock('src/ts/parser/parser.svelte', () => ({
     ParseMarkdown: vi.fn(async (value: string) => value),
     risuChatParser: (value: string) => value,
 }))
-vi.mock('src/ts/tokenizer', async () => (await import('../process/tests/sendChatTestHarness')).tokenizerModule())
+vi.mock('src/ts/tokenizer', async () => (await import('../process/tests/sendChatTestHarness')).tokenizerModule({
+    tokenize: vi.fn(async () => 10),
+    encodeWithTokenizer: vi.fn(async () => new Array(10).fill(0)),
+}))
 vi.mock('src/lang', async () => (await import('../process/tests/sendChatTestHarness')).langModule())
 vi.mock('src/ts/alert', async () => (await import('../process/tests/sendChatTestHarness')).alertModule())
 vi.mock('src/ts/parser/chatML', async () => (await import('../process/tests/sendChatTestHarness')).chatMLModule())
@@ -43,14 +60,12 @@ vi.mock('src/ts/process/templates/templates', async () => (await import('../proc
 vi.mock('src/ts/process/exampleMessages', async () => (await import('../process/tests/sendChatTestHarness')).exampleMessagesModule())
 vi.mock('src/ts/process/tts', async () => (await import('../process/tests/sendChatTestHarness')).ttsModule())
 vi.mock('src/ts/process/memory/supaMemory', async () => (await import('../process/tests/sendChatTestHarness')).supaMemoryModule())
-vi.mock('src/ts/process/group', async () => (await import('../process/tests/sendChatTestHarness')).groupModule())
 // A character without trigger scripts: the real `runTrigger` returns null for every mode.
 vi.mock('src/ts/process/triggers', () => ({ runTrigger: vi.fn(async () => null) }))
 vi.mock('src/ts/process/memory/hypamemory', async () => (await import('../process/tests/sendChatTestHarness')).hypamemoryModule())
 vi.mock('src/ts/process/embedding/addinfo', async () => (await import('../process/tests/sendChatTestHarness')).addinfoModule())
 vi.mock('src/ts/process/files/inlays', async () => (await import('../process/tests/sendChatTestHarness')).inlaysModule())
 vi.mock('src/ts/process/models/modelString', async () => (await import('../process/tests/sendChatTestHarness')).modelStringModule())
-vi.mock('src/ts/sync/multiuser', async () => (await import('../process/tests/sendChatTestHarness')).multiuserModule())
 vi.mock('src/ts/process/inlayScreen', () => ({ runInlayScreen: (_char: unknown, data: string) => ({ text: data }) }))
 vi.mock('src/ts/process/transformers', async () => (await import('../process/tests/sendChatTestHarness')).transformersModule())
 vi.mock('src/ts/process/memory/hanuraiMemory', () => ({
@@ -61,11 +76,14 @@ vi.mock('src/ts/process/memory/hypav2', () => ({
 }))
 vi.mock('src/ts/process/memory/hypav3', async () => (await import('../process/tests/sendChatTestHarness')).hypav3Module())
 vi.mock('src/ts/process/scriptings', async () => (await import('../process/tests/sendChatTestHarness')).scriptingsModule())
-vi.mock('src/ts/model/modellist', async () => (await import('../process/tests/sendChatTestHarness')).modellistModule())
+vi.mock('src/ts/model/modellist', async (importOriginal) => ({
+    ...await importOriginal<typeof import('../model/modellist')>(),
+    ...(await import('../process/tests/sendChatTestHarness')).modellistModule(),
+}))
 vi.mock('src/ts/process/modules', async () => (await import('../process/tests/sendChatTestHarness')).modulesModule())
 vi.mock('src/ts/globalApi.svelte', async () => (await import('../process/tests/sendChatTestHarness')).globalApiModule({ forageStorage: {} }))
 vi.mock('src/ts/plugins/plugins.svelte', () => ({
-    pluginV2: { chatOutput: new Set(), editprocess: new Set(), replacerbeforeRequest: fixture.replacers, replacerafterRequest: new Set() },
+    pluginV2: { chatOutput: fixture.outputs, editprocess: new Set(), replacerbeforeRequest: fixture.replacers, replacerafterRequest: new Set() },
 }))
 vi.mock('src/ts/plugins/pluginDatabaseAccess', async (importOriginal) =>
     (await import('../process/tests/sendChatTestHarness')).pluginDatabaseAccessModule(importOriginal as () => Promise<Record<string, unknown>>))
@@ -77,6 +95,8 @@ import { IndexedDbPersistentDataStore } from '../storage/indexedDbPersistentData
 import {
     acquireCompleteConversation,
     captureSelectedConversationTarget,
+    captureSelectedConversationAuthority,
+    replacePersistentDatabase,
     flushPendingDataLocally,
     getActiveConversationSession,
     initializeActiveWorkingSet,
@@ -85,6 +105,8 @@ import { selectedCharID } from '../stores.svelte'
 import { doingChat, sendChat } from '../process/index.svelte'
 import { createRisunestPrivateApi } from './apiV3/risunestPrivateApi'
 import { conversationPatchAccess } from './conversationPatchHost'
+import { normalizeConversationPatchInput } from './conversationPatch'
+import { activeRerollConversations } from '../durableReroll'
 
 const target = { characterId: 'character-a', conversationId: 'chat-a' }
 const factory = new IDBFactory()
@@ -148,7 +170,7 @@ function database(): Database {
     } as unknown as Database
 }
 
-const patches = createRisunestPrivateApi({
+const createPatches = () => createRisunestPrivateApi({
     databaseAccess: { readConversationContext: vi.fn() } as any,
     patchAccess: conversationPatchAccess,
     hostTools: { listTools: vi.fn(), callTool: vi.fn() },
@@ -175,26 +197,48 @@ async function live() {
     }
 }
 
+async function resetDatabase(initial: Database) {
+    const lease = await acquireCompleteConversation('patch-generation-reset', captureSelectedConversationTarget())
+    try { await replacePersistentDatabase(initial, 'patch-generation-reset') }
+    finally { lease.release() }
+    setDatabaseLite(initial)
+    selectedCharID.set(0)
+    await initializeActiveWorkingSet(getDatabase())
+}
+
 async function reloadedConversation() {
     const reopened = new IndexedDbPersistentDataStore(storeName, factory, IDBKeyRange)
     await reopened.open()
     return (await reopened.readConversation(target.characterId, target.conversationId))!.value
 }
 
-describe('plugin conversation patch from a beforeRequest replacer', () => {
+describe.each([false, true])('plugin conversation patch from a beforeRequest replacer (history limit %s)', (historyLimit) => {
+    let patches: ReturnType<typeof createPatches>
     let log: { mockRestore(): void } | undefined
     beforeAll(async () => {
         log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
-        fixture.store = new IndexedDbPersistentDataStore(storeName, factory, IDBKeyRange)
-        await fixture.store.open()
+        fixture.historyLimit = historyLimit
+        fixture.modelRequests = 0
+        patches = createPatches()
         const initial = database()
-        await fixture.store.replaceFromDatabase(initial)
-        setDatabaseLite(initial)
-        selectedCharID.set(0)
-        await initializeActiveWorkingSet(getDatabase())
+        if (!fixture.store) {
+            fixture.store = new IndexedDbPersistentDataStore(storeName, factory, IDBKeyRange)
+            await fixture.store.open()
+            await fixture.store.replaceFromDatabase(initial)
+            setDatabaseLite(initial)
+            selectedCharID.set(0)
+            await initializeActiveWorkingSet(getDatabase())
+        } else {
+            selectedCharID.set(0)
+            await resetDatabase(initial)
+        }
+        const metadata = await fixture.store.readConversationMetadata(target.characterId, target.conversationId)
+        const authority = captureSelectedConversationAuthority()
+        if (authority) expect(authority.totalMessages).toBe(metadata.value.totalMessages)
     })
     afterAll(() => {
         fixture.replacers.clear()
+        fixture.outputs.clear()
         doingChat.set(false)
         selectedCharID.set(-1)
         log?.mockRestore()
@@ -202,6 +246,8 @@ describe('plugin conversation patch from a beforeRequest replacer', () => {
 
     it('applies a plugin field and chat variable during the request, keeps the reply, and refuses message data', async () => {
         const outcomes: unknown[] = []
+        const output = vi.fn(async (_event: unknown) => {})
+        fixture.outputs.add(output)
         fixture.replacers.add(async (formated) => {
             outcomes.push(await patches.patchConversation({
                 ...target,
@@ -217,8 +263,15 @@ describe('plugin conversation patch from a beforeRequest replacer', () => {
             return formated
         })
 
-        await expect(sendChat()).resolves.toBe(true)
+        await expect(sendChat({ historyLimit })).resolves.toBe(true)
 
+        fixture.outputs.delete(output)
+        expect(output).toHaveBeenCalledOnce()
+        expect(output).toHaveBeenCalledWith(expect.objectContaining({
+            characterIndex: 0, chatIndex: 0, messageIndex: 1,
+            char: expect.objectContaining({ chaId: target.characterId }),
+            chat: expect.objectContaining({ id: target.conversationId }),
+        }))
         expect(fixture.modelRequests).toBe(1)
         expect(outcomes).toEqual([
             { status: 'busy', revision: expect.any(Number) },
@@ -249,7 +302,7 @@ describe('plugin conversation patch from a beforeRequest replacer', () => {
             return formated
         })
 
-        await expect(sendChat()).resolves.toBe(true)
+        await expect(sendChat({ historyLimit })).resolves.toBe(true)
 
         await expect(pending).resolves.toEqual({ status: 'applied', revision: expect.any(Number) })
         const applied = await live()
@@ -289,10 +342,13 @@ describe('plugin conversation patch from a beforeRequest replacer', () => {
             return formated
         })
         try {
-            const sending = sendChat()
+            const sending = sendChat({ historyLimit })
             await vi.waitFor(() => expect(held).toBe(true))
             await vi.waitFor(() => expect(fixture.modelRequests).toBe(3))
-            expect(generatingConversation().message).toHaveLength(3)
+            if (historyLimit) {
+                expect(getActiveConversationSession()).toBeNull()
+                expect(captureSelectedConversationAuthority()?.totalMessages).toBe(3)
+            } else expect(generatingConversation().message).toHaveLength(3)
             releaseCommit()
 
             await expect(sending).resolves.toBe(true)
@@ -308,7 +364,97 @@ describe('plugin conversation patch from a beforeRequest replacer', () => {
             expect(stored.message[0]).toMatchObject({ __held: 'landed' })
             expect(stored.scriptstate).toMatchObject({ $held: 'landed' })
         } finally {
+            releaseCommit()
             commits.mockRestore()
         }
     })
+    it('refuses conflicting expected values, cancellation and reroll patches outside the request phase', async () => {
+        fixture.replacers.clear()
+        fixture.replacers.add(async (formated) => {
+            await expect(patches.patchConversation({
+                ...target, mutationId: 'conflicting-metadata',
+                messages: [{ index: 0, messageId: 'user-message', expected: { data: 'wrong' }, set: { __conflict: true } }],
+            })).resolves.toMatchObject({ status: 'conflict' })
+            const abort = new AbortController()
+            abort.abort()
+            await expect(conversationPatchAccess.patchConversation(normalizeConversationPatchInput({
+                ...target, mutationId: 'cancelled-metadata',
+                messages: [{ index: 0, messageId: 'user-message', set: { __cancelled: true } }],
+            }), abort.signal)).rejects.toThrow()
+            return formated
+        })
+        await expect(sendChat({ historyLimit })).resolves.toBe(true)
+        activeRerollConversations.set([target.conversationId])
+        try {
+            await expect(patches.patchConversation({
+                ...target, mutationId: 'reroll-metadata',
+                messages: [{ index: 0, messageId: 'user-message', set: { __reroll: true } }],
+            })).resolves.toMatchObject({ status: 'busy' })
+        } finally { activeRerollConversations.set([]) }
+        const stored = await reloadedConversation()
+        expect(stored.message[0]).not.toHaveProperty('__conflict')
+        expect(stored.message[0]).not.toHaveProperty('__cancelled')
+        expect(stored.message[0]).not.toHaveProperty('__reroll')
+        expect(stored.message.at(-1)?.data).toBe('answer')
+    })
+
+    it('keeps patches outside the loaded history and on its tail without promoting the conversation', async () => {
+        if (!historyLimit) return
+        fixture.replacers.clear()
+        const initial = database()
+        initial.maxContext = 64
+        initial.maxResponse = 8
+        initial.characters[0].chats[0].message = Array.from({ length: 40 }, (_, index) => ({
+            role: 'user', data: `history ${index}`, chatId: `history-${index}`,
+        }))
+        await resetDatabase(initial)
+        const fullReads = vi.spyOn(fixture.store, 'readConversation')
+        const windowReads: Array<{ startIndex?: number; limit?: number }> = []
+        const leasedFullReads = vi.fn()
+        const acquire = fixture.store.acquireRevision.bind(fixture.store)
+        const leases = vi.spyOn(fixture.store, 'acquireRevision').mockImplementation(async (revision: number) => {
+            const lease = await acquire(revision)
+            const readWindow = lease.readConversationWindow.bind(lease)
+            const readConversation = lease.readConversation.bind(lease)
+            lease.readConversationWindow = (query: { startIndex?: number; limit?: number }) => {
+                windowReads.push(query)
+                return readWindow(query)
+            }
+            lease.readConversation = (...args: unknown[]) => {
+                leasedFullReads()
+                return readConversation(...args)
+            }
+            return lease
+        })
+        fixture.replacers.add(async (formated) => {
+            expect(getActiveConversationSession()).toBeNull()
+            await expect(patches.patchConversation({
+                ...target, mutationId: 'outside-window',
+                messages: [
+                    { index: 0, messageId: 'history-0', set: { __outside: 'retained' } },
+                    { index: 39, messageId: 'history-39', set: { __tail: 'retained' } },
+                ],
+                chatVariables: [{ key: '$window', expected: null, value: 'retained' }],
+            })).resolves.toMatchObject({ status: 'applied' })
+            expect(getActiveConversationSession()).toBeNull()
+            return formated
+        })
+        try {
+            await expect(sendChat({ historyLimit })).resolves.toBe(true)
+            await flushPendingDataLocally('patch-window-test')
+            expect(fullReads).not.toHaveBeenCalled()
+            expect(leasedFullReads).not.toHaveBeenCalled()
+            expect(windowReads.some((query) => query.startIndex === 27 && query.limit === 13)).toBe(true)
+            const stored = await reloadedConversation()
+            expect(stored.message).toHaveLength(41)
+            expect(stored.message[0]).toMatchObject({ __outside: 'retained' })
+            expect(stored.message[39]).toMatchObject({ __tail: 'retained' })
+            expect(stored.message[40].data).toBe('answer')
+            expect(stored.scriptstate).toMatchObject({ $window: 'retained' })
+        } finally {
+            fullReads.mockRestore()
+            leases.mockRestore()
+        }
+    })
+
 })

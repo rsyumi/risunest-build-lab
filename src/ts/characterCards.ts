@@ -2,7 +2,7 @@ import { assertModuleMCPImportAllowed } from './process/mcp/moduleImport'
 import { runContentImport } from './storage/contentImportOperation'
 import { writable, type Writable } from 'svelte/store'
 import { alertCardExport, alertClear, alertConfirm, alertError, alertInput, alertMd, alertNormal, alertRisuServiceTOS, alertStore, alertWait } from "./alert"
-import { defaultSdDataFunc, type character, setDatabase, type customscript, type loreSettings, type loreBook, type triggerscript, importPreset, type groupChat, setCurrentCharacter, getCurrentCharacter, getDatabase, setDatabaseLite, appVer } from "./storage/database.svelte"
+import { defaultSdDataFunc, type character, setDatabase, type customscript, type loreSettings, type loreBook, type triggerscript, importPreset, setCurrentCharacter, getCurrentCharacter, getDatabase, setDatabaseLite, appVer } from "./storage/database.svelte"
 import { checkNullish, decryptBuffer, isKnownUri, selectFileByDom, sleep } from "./util"
 import { language } from "src/lang"
 import { v4 as uuidv4, v4 } from 'uuid';
@@ -876,9 +876,7 @@ export async function exportChar(charaID:number):Promise<string> {
     const db = getDatabase({snapshot: true})
     let char = safeStructuredClone(db.characters[charaID])
 
-    if(char.type === 'group'){
-        return ''
-    }
+
 
     const option = await alertCardExport()
     if(option.type === ''){
@@ -1490,7 +1488,6 @@ async function importCharacterCardSpecWithPolicy<T extends boolean = false>(
     }
 
     if (card.spec === 'chara_card_v3') {
-        char.group_only_greetings = card.data.group_only_greetings ?? []
         char.nickname = card.data.nickname ?? ''
         char.source =
             card.data.source ?? card.data?.extensions?.risuai?.source ?? []
@@ -2129,7 +2126,7 @@ export function createBaseV3(char:character){
                 },
                 depth_prompt: char.depth_prompt
             },
-            group_only_greetings: char.group_only_greetings ?? [],
+            group_only_greetings: [],
             nickname: char.nickname ?? '',
             source: char.source ?? [],
             creation_date: char.creation_date ?? 0,
@@ -2209,9 +2206,7 @@ export async function shareRisuHub2(char:character, arg:{
             const resJSON = await res.json()
             alertMd(resJSON.message)
             const currentChar = getCurrentCharacter()
-            if(currentChar.type === 'group'){
-                return
-            }
+
             currentChar.realmId = resJSON.id
             setCurrentCharacter(currentChar)
         }   
@@ -2354,10 +2349,8 @@ export async function getHubResources(id:string) {
     return Buffer.from(await (res).arrayBuffer())
 }
 
-export function isCharacterHasAssets(char:character|groupChat){
-    if(char.type === 'group'){
-        return false
-    }
+export function isCharacterHasAssets(char:character){
+
 
     if(char.additionalAssets && char.additionalAssets.length > 0){
         return true

@@ -1,9 +1,9 @@
-import type { Chat, character, groupChat } from './database.svelte'
+import type { Chat, character } from './database.svelte'
 import type { ConversationMutation, PersistentUnitMutation } from './persistentDataStore'
 import { canonicalJson, canonicalClone, messageReplaceRange } from './saveCoordinatorHelpers'
 import { isConversationSummaryStub } from './conversationResidency'
 
-type CompleteCharacter = character | groupChat
+type CompleteCharacter = character
 
 export function diffFields(
     components: string[], beforeValue: object, afterValue: object,
@@ -35,12 +35,8 @@ export function diffMaterializedCharacter(before: CompleteCharacter, after: Comp
     unitMutations: PersistentUnitMutation[]; conversations: ConversationMutation[]
 } {
     const unitMutations = diffFields(['character', after.chaId], before, after,
-        new Set(['chats', 'chaId', 'characters', 'characterTalks', 'characterActive', 'chatFolders']))
-    if (after.type === 'group' && canonicalJson([(before as groupChat).characters, (before as groupChat).characterTalks, (before as groupChat).characterActive])
-        !== canonicalJson([after.characters, after.characterTalks, after.characterActive])) {
-        unitMutations.push({ key: JSON.stringify(['group-members', after.chaId]), type: 'set',
-            value: { characters: after.characters, characterTalks: after.characterTalks, characterActive: after.characterActive } })
-    }
+        new Set(['chats', 'chaId', 'chatFolders']))
+
     const conversations: ConversationMutation[] = []
     const previous = new Map(before.chats.map((chat) => [chat.id, chat]))
     for (const [index, chat] of after.chats.entries()) {
@@ -100,5 +96,5 @@ export function diffRecordCollection(collection: string, before: unknown[], afte
     return mutations
 }
 
-export const CHARACTER_SHARED_FIELDS: ReadonlySet<string> = new Set(['statics', 'additionalAssets', 'additionalData', 'additionalText', 'alternateGreetings', 'autoMode', 'backgroundCSS', 'backgroundHTML', 'bias', 'ccAssets', 'characterVersion', 'coldStoragedChats', 'coldstorage', 'creation_date', 'creator', 'creatorNotes', 'customModuleToggle', 'customscript', 'defaultVariables', 'depth_prompt', 'desc', 'doNotChangeSeperateModels', 'emotionImages', 'escapeOutput', 'exampleMessage', 'extentions', 'firstMessage', 'firstMsgIndex', 'fishSpeechConfig', 'globalLore', 'gptSoVitsConfig', 'group_only_greetings', 'hfTTS', 'hideChatIcon', 'image', 'imported', 'inlayViewScreen', 'largePortrait', 'license', 'loreExt', 'lorePlus', 'loreSettings', 'lowLevelAccess', 'modification_date', 'moduleNamespace', 'modules', 'naittsConfig', 'name', 'newGenData', 'nickname', 'notes', 'oaiTTSConfig', 'oaiVoice', 'oneAtTime', 'orderByOrder', 'personality', 'postHistoryInstructions', 'prebuiltAssetCommand', 'prebuiltAssetExclude', 'prebuiltAssetStyle', 'private', 'realmId', 'removedQuotes', 'replaceGlobalNote', 'scenario', 'scriptstate', 'sdData', 'source', 'suggestMessages', 'supaMemory', 'systemPrompt', 'tags', 'translatorNote', 'trashTime', 'triggerscript', 'ttsMode', 'ttsReadOnlyQuoted', 'ttsSpeech', 'useCharacterLore', 'utilityBot', 'viewScreen', 'virtualscript', 'vits', 'voicevoxConfig'])
+export const CHARACTER_SHARED_FIELDS: ReadonlySet<string> = new Set(['statics', 'additionalAssets', 'additionalData', 'additionalText', 'alternateGreetings', 'backgroundCSS', 'backgroundHTML', 'bias', 'ccAssets', 'characterVersion', 'coldStoragedChats', 'coldstorage', 'creation_date', 'creator', 'creatorNotes', 'customModuleToggle', 'customscript', 'defaultVariables', 'depth_prompt', 'desc', 'doNotChangeSeperateModels', 'emotionImages', 'escapeOutput', 'exampleMessage', 'extentions', 'firstMessage', 'firstMsgIndex', 'fishSpeechConfig', 'globalLore', 'gptSoVitsConfig', 'hfTTS', 'hideChatIcon', 'image', 'imported', 'inlayViewScreen', 'largePortrait', 'license', 'loreExt', 'lorePlus', 'loreSettings', 'lowLevelAccess', 'modification_date', 'moduleNamespace', 'modules', 'naittsConfig', 'name', 'newGenData', 'nickname', 'notes', 'oaiTTSConfig', 'oaiVoice', 'personality', 'postHistoryInstructions', 'prebuiltAssetCommand', 'prebuiltAssetExclude', 'prebuiltAssetStyle', 'private', 'realmId', 'removedQuotes', 'replaceGlobalNote', 'scenario', 'scriptstate', 'sdData', 'source', 'suggestMessages', 'supaMemory', 'systemPrompt', 'tags', 'translatorNote', 'trashTime', 'triggerscript', 'ttsMode', 'ttsReadOnlyQuoted', 'ttsSpeech', 'utilityBot', 'viewScreen', 'virtualscript', 'vits', 'voicevoxConfig'])
 export const CONVERSATION_SHARED_FIELDS: ReadonlySet<string> = new Set(['GLGlobalVariables', 'bindedPersona', 'bookmarkNames', 'bookmarks', 'fmIndex', 'folderId', 'hypaV2Data', 'hypaV3Data', 'lastDate', 'lastMemory', 'localLore', 'modules', 'name', 'note', 'rerollRecovery', 'savedToggleValues', 'scriptstate', 'sdData', 'suggestMessages', 'supaMemoryData', 'toolCalls', 'useLocallySetGlobalVariables'])

@@ -99,6 +99,7 @@ export default defineConfig(({command, mode}) => {
     envPrefix: ["VITE_", "TAURI_"],
     build: {
       target:'baseline-widely-available',
+      reportCompressedSize: false,
       // don't minify for debug builds
       minify: process.env.TAURI_ENV_DEBUG === 'true' ? false : 'oxc',
       // Desktop release errors must remain translatable offline. Android excludes maps.

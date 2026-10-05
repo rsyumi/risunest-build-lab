@@ -38,11 +38,11 @@ const interfaceMockModules = [
     '../process/request/request', '../process/stableDiff', '../process/luaRuntime',
     '../process/scripts', '../process/triggers', '../process/command',
     '../process/templates/templates', '../process/exampleMessages', '../process/tts',
-    '../process/memory/supaMemory', '../process/group', '../process/embedding/addinfo',
+    '../process/memory/supaMemory', '../process/embedding/addinfo',
     '../process/models/modelString', '../process/inlayScreen', '../process/transformers',
     '../process/memory/hanuraiMemory', '../process/memory/hypav2', '../process/memory/hypav3',
     '../process/scriptings', '../plugins/plugins.svelte', '../process/presetChain',
-    '../model/modellist', '../sync/multiuser',
+    '../model/modellist',
 ]
 
 afterEach(() => {
@@ -658,7 +658,7 @@ describe('selected conversation eviction correctness corpus', () => {
             },
             tokenize: vi.fn(async () => 1), tokenizeNum: vi.fn(async () => []),
         }))
-        vi.doMock('../../lang', () => ({ language: { errors: {}, otherUserRequesting: '' } }))
+        vi.doMock('../../lang', () => ({ language: { errors: {} } }))
         vi.doMock('../alert', () => ({ alertError: vi.fn(), alertToast: vi.fn() }))
         vi.doMock('../parser/chatML', () => ({ parseChatML: (value: string) => value }))
         vi.doMock('../parser/parser.svelte', () => ({ risuChatParser: (value: string) => value }))
@@ -694,7 +694,6 @@ describe('selected conversation eviction correctness corpus', () => {
             ['../process/exampleMessages', { exampleMessage: () => [] }],
             ['../process/tts', { sayTTS: vi.fn() }],
             ['../process/memory/supaMemory', { supaMemory: vi.fn() }],
-            ['../process/group', { groupOrder: (value: unknown) => value }],
             ['../process/memory/hypamemory', { HypaProcesser: class {} }],
             ['../process/embedding/addinfo', { additionalInformations: vi.fn(async () => '') }],
             ['../process/files/inlays', { getInlayAsset: vi.fn(async () => null) }],
@@ -710,10 +709,6 @@ describe('selected conversation eviction correctness corpus', () => {
             ['../process/presetChain', { activatePresetChainForRequest: vi.fn() }],
         ] as const) vi.doMock(id, () => exports)
         vi.doMock('../model/modellist', () => ({ getModelInfo: () => ({ flags: [] }), LLMFlags: {} }))
-        vi.doMock('../sync/multiuser', () => ({
-            connectionOpen: false, peerRevertChat: vi.fn(), peerSafeCheck: vi.fn(async () => true),
-            peerSync: vi.fn(),
-        }))
         const generationBefore = oracle.message.length
         const { sendChat } = await import('../process/index.svelte')
         const generationLog = vi.spyOn(console, 'log').mockImplementation(() => undefined)

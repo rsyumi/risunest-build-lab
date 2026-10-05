@@ -1,3 +1,4 @@
+import { prepareExternalDatabaseImport } from '../storage/upstreamImport'
 import { hubURL } from "../characterCards"
 import { getDatabase } from "../storage/database.svelte"
 import { alertCheckboxConfirm, alertConfirm, alertError, alertMd, alertNormal, alertSelect, alertWait } from "../alert"
@@ -137,7 +138,7 @@ export async function loadRisuAccountBackup() {
         alertWait("Loading backup")
 
         let followupFailed = false
-        const outcome = await installAccountBackup(await decodeRisuSave(buf.buffer), {
+        const outcome = await installAccountBackup(prepareExternalDatabaseImport(await decodeRisuSave(buf.buffer)), {
             replaceDatabase: replacePersistentDatabase,
             loadPlugins: async () => (await import('../plugins/plugins.svelte')).loadPlugins(),
             onPostCommitError: (error) => {

@@ -1,6 +1,6 @@
 <script lang="ts">
     import type { Snippet } from 'svelte'
-    import { LoaderCircleIcon } from '@lucide/svelte'
+    import { CheckIcon, LoaderCircleIcon } from '@lucide/svelte'
 
     interface Props {
         /** What is running, in the user's words. */
@@ -9,19 +9,25 @@
         detail?: string
         /** Share done between 0 and 1. Omit it while the operation reports no total. */
         fraction?: number | null
+        /** The operation finished: a check replaces the spinner. */
+        done?: boolean
         /** Controls for the running operation, such as a cancel button. */
         actions?: Snippet
     }
 
-    let { label, detail, fraction = null, actions }: Props = $props()
+    let { label, detail, fraction = null, done = false, actions }: Props = $props()
 
     let percent = $derived(fraction === null ? null : Math.max(0, Math.min(100, Math.round(fraction * 100))))
 </script>
 
 <div data-setting-progress role="status" aria-live="polite" class="flex flex-col gap-2 rounded-md border border-darkborderc bg-bgcolor px-3 py-2.5">
     <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-        <LoaderCircleIcon size={15} class="shrink-0 text-borderc motion-safe:animate-spin" aria-hidden="true" />
-        <span class="min-w-0 flex-1 text-sm">{label}</span>
+        {#if done}
+            <CheckIcon size={15} class="shrink-0 text-success-500" aria-hidden="true" />
+        {:else}
+            <LoaderCircleIcon size={15} class="shrink-0 text-borderc motion-safe:animate-spin" aria-hidden="true" />
+        {/if}
+        <span class="min-w-0 flex-[1_1_10rem] text-sm">{label}</span>
         {#if detail}
             <span class="text-xs text-textcolor2 tabular-nums">{detail}</span>
         {/if}

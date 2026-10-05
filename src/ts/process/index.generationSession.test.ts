@@ -21,6 +21,10 @@ const mocks = vi.hoisted(() => ({
     moduleRegex: [] as any[],
     editHooks: new Set<unknown>(),
     listeners: new Set<(event: any) => Promise<void> | void>(),
+    resolvePosition: vi.fn(async (_characterId: string, _conversationId: string) => ({
+        characterIndex: 0,
+        chatIndex: 0,
+    })),
     selectedTarget: null as any,
     selectedAuthority: null as any,
     windowedController: null as any,
@@ -96,7 +100,6 @@ vi.mock('./tts', async () => (await import('./tests/sendChatTestHarness')).ttsMo
     sayTTS: mocks.sayTTS,
 }))
 vi.mock('./memory/supaMemory', async () => (await import('./tests/sendChatTestHarness')).supaMemoryModule())
-vi.mock('./group', async () => (await import('./tests/sendChatTestHarness')).groupModule())
 vi.mock('./triggers', () => ({
     runTrigger: vi.fn(async (_char: unknown, mode: string, arg: { chat: any }) => {
         if (mode === 'start') return null
@@ -110,7 +113,6 @@ vi.mock('./memory/hypamemory', async () => (await import('./tests/sendChatTestHa
 vi.mock('./embedding/addinfo', async () => (await import('./tests/sendChatTestHarness')).addinfoModule())
 vi.mock('./files/inlays', async () => (await import('./tests/sendChatTestHarness')).inlaysModule())
 vi.mock('./models/modelString', async () => (await import('./tests/sendChatTestHarness')).modelStringModule())
-vi.mock('../sync/multiuser', async () => (await import('./tests/sendChatTestHarness')).multiuserModule())
 vi.mock('./inlayScreen', () => ({
     runInlayScreen: (_char: unknown, data: string) => {
         mocks.events.push('inlay-sync')
@@ -148,6 +150,9 @@ vi.mock('./modules', async () => (await import('./tests/sendChatTestHarness')).m
 vi.mock('../globalApi.svelte', async () => (await import('./tests/sendChatTestHarness')).globalApiModule())
 vi.mock('../plugins/plugins.svelte', () => ({ pluginV2: { chatOutput: mocks.listeners, editprocess: mocks.editHooks } }))
 vi.mock('../plugins/pluginDatabaseAccess', async (importOriginal) => (await import('./tests/sendChatTestHarness')).pluginDatabaseAccessModule(importOriginal as () => Promise<Record<string, unknown>>))
+vi.mock('../plugins/pinnedConversationPosition', () => ({
+    resolvePinnedConversationPosition: mocks.resolvePosition,
+}))
 vi.mock('./presetChain', () => ({
     activatePresetChainForRequest: vi.fn(async () => {
         mocks.presetActivationCount += 1
@@ -346,6 +351,7 @@ describe('sendChat generation session integration', () => {
         mocks.tokenizeResult = null
         mocks.inlay = null
         mocks.listeners.clear()
+        mocks.resolvePosition.mockClear()
         mocks.editHooks.clear()
         mocks.moduleTriggers = []
         mocks.moduleRegex = []
@@ -438,7 +444,20 @@ describe('sendChat generation session integration', () => {
         expect(mocks.processScriptFull.mock.calls.some((call) => call[1] === 'covered-a')).toBe(preservesEffects)
         expect(mocks.events).toContain('output-trigger')
         expect(mocks.events).toContain('output-script')
-        if (consumer === 'plugin-output') expect(output).toHaveBeenCalledOnce()
+        if (consumer === 'plugin-output') {
+            expect(mocks.resolvePosition).toHaveBeenCalledExactlyOnceWith(installed.currentCharacter.chaId, installed.chat.id)
+            expect(output).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+                characterIndex: 0,
+                chatIndex: 0,
+                chat: expect.objectContaining({
+                    message: [
+                        expect.objectContaining({ data: 'covered-a' }),
+                        expect.objectContaining({ data: 'tail' }),
+                        expect.objectContaining({ data: 'answer' }),
+                    ],
+                }),
+            }))
+        }
     })
 
     it('generates from a pinned unsummarized tail without complete promotion', async () => {
@@ -1427,7 +1446,7 @@ describe('sendChat generation session integration', () => {
                 }
                 return { data, emoChanged: false }
             })
-            const sending = sendChat(-1, { continue: continuing, signal: controller.signal })
+            const sending = sendChat({ continue: continuing, signal: controller.signal })
             await enteredOutput.promise
             expect(
                 mocks.processScriptFull.mock.calls.find((call) => call[2] === 'editoutput')?.[5]
@@ -1463,7 +1482,7 @@ describe('sendChat generation session integration', () => {
                 enteredInlay.resolve()
                 return { text: data, promise: finishInlay.promise }
             }
-            const sending = sendChat(-1, { signal: controller.signal })
+            const sending = sendChat({ signal: controller.signal })
             await enteredInlay.promise
             controller.abort()
             finishInlay.resolve('late inlay')
@@ -1494,7 +1513,7 @@ describe('sendChat generation session integration', () => {
             }
             const listener = vi.fn()
             mocks.listeners.add(listener)
-            const sending = sendChat(-1, { signal: controller.signal })
+            const sending = sendChat({ signal: controller.signal })
             await enteredTrigger.promise
             controller.abort()
             finishTrigger.resolve()
@@ -1517,7 +1536,7 @@ describe('sendChat generation session integration', () => {
         })
         const nextListener = vi.fn()
         mocks.listeners.add(nextListener)
-        const sending = sendChat(-1, { signal: controller.signal })
+        const sending = sendChat({ signal: controller.signal })
         await enteredListener.promise
         controller.abort()
         finishListener.resolve()
@@ -1570,7 +1589,7 @@ describe('sendChat generation session integration', () => {
         Object.assign(chat.message[0], { __translation: 'existing-record' })
         mocks.modelResponse = { type: 'success', result: ' plus' }
 
-        await expect(sendChat(-1, { continue: true })).resolves.toBe(true)
+        await expect(sendChat({ continue: true })).resolves.toBe(true)
 
         expect(DBState.db.characters[0].chats[0].message).toHaveLength(1)
         expect(DBState.db.characters[0].chats[0].message[0].data).toBe('existing plus')
@@ -1597,7 +1616,7 @@ describe('sendChat generation session integration', () => {
         }) }
         vi.mocked(alertNormal).mockClear()
         vi.mocked(notifyIOSGenerationComplete).mockClear()
-        const pending = sendChat(-1, { signal: user.signal })
+        const pending = sendChat({ signal: user.signal })
         await vi.waitFor(() => expect(DBState.db.characters[0].chats[0].message.at(-1)?.data).toBe('Kept partial'))
         if (end === 'user-stop') user.abort()
         else events.dispatchEvent(new CustomEvent('risunest-ios-lifecycle', { detail: { event: end === 'expired' ? 'expired' : 'active', id: 'generation' } }))

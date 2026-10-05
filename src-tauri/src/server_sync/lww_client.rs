@@ -1,6 +1,7 @@
 use super::{
     cache::Cache,
     client::{response_error, ServerClient, ServerConfig},
+    progress::Step,
     transfer::Transfer,
     Result, SyncError,
 };
@@ -503,6 +504,8 @@ impl LwwClient {
         generating: &[MessageLocator],
     ) -> Result<Option<PushReceipt>> {
         self.fence(store)?;
+        let lane = self.client.lane();
+        lane.step(Step::Preparing);
         let mut entries = store
             .lww_read_outbox_generating(header.binding_authority, 256, generating)?
             .entries;
@@ -533,6 +536,7 @@ impl LwwClient {
             changes: Vec::new(),
         };
         fit_push_page(&mut request, &mut entries)?;
+        lane.plan_items(entries.len());
         let cache = Cache::open(&store.repository_root().join("server-sync/lww-cache"))?
             .with_library(store.repository_root())?;
         let mut objects = BTreeSet::new();
@@ -649,6 +653,7 @@ impl LwwClient {
         if store.lww_binding_authority()? != header.binding_authority {
             return Err(SyncError::new("binding-authority-changed", 409));
         }
+        lane.step(Step::Confirming);
         let reply = self.client.request_ambiguous_mutation(
             reqwest::Method::POST,
             "push",
@@ -686,7 +691,10 @@ impl LwwClient {
         self.log.finish(&publication, &terminal)?;
         self.acknowledge(store, &publication, &terminal)?;
         match terminal {
-            OperationReceipt::Accepted { receipt, .. } => Ok(Some(receipt)),
+            OperationReceipt::Accepted { receipt, .. } => {
+                lane.items_done(publication.entries.len());
+                Ok(Some(receipt))
+            }
             OperationReceipt::Rejected { error, .. } => Err(SyncError::new(
                 if error == "clock-skew" {
                     self.forget_clock();
@@ -707,7 +715,9 @@ impl LwwClient {
     ) -> Result<(DecimalU64, Vec<Change>)> {
         // Each attempt makes the server copy the whole library under a new pin.
         let mut attempts = 0;
+        let lane = self.client.lane();
         loop {
+            lane.step(Step::Listing);
             attempts += 1;
             let (_, pin): (_, StatePin) = self.client.json(
                 reqwest::Method::POST,
@@ -734,6 +744,7 @@ impl LwwClient {
                     if page.pin_id != pin.pin_id || page.start_seq != pin.start_seq {
                         return Err(SyncError::new("invalid-state-page", 502));
                     }
+                    lane.listed(page.items.len());
                     changes.extend(page.items.into_iter().map(|c| Change {
                         key: c.key,
                         stamp: c.stamp,
@@ -760,6 +771,7 @@ impl LwwClient {
                     if tail.next_after < cursor || tail.next_after > tail.through_seq {
                         return Err(SyncError::new("invalid-changes-page", 502));
                     }
+                    lane.listed(tail.items.len());
                     for item in tail.items {
                         let incoming = Change {
                             key: item.key,
@@ -904,6 +916,7 @@ impl LwwClient {
             return serde_json::from_str(&pending)
                 .map_err(|_| SyncError::new("receive-page-integrity", 409));
         }
+        self.client.lane().step(Step::Listing);
         let upper = self.admission()?;
         let cursor = store
             .lww_receive_progress(header.binding_authority)?
@@ -997,6 +1010,8 @@ impl LwwClient {
             if page.pin_id != pin.pin_id || page.start_seq != pin.start_seq {
                 return Err(SyncError::new("invalid-state-page", 502));
             }
+            // Reading the whole state has no known size, so its pages count as they arrive.
+            self.client.lane().backlog(page.items.len() as u64, 0);
             next_key = page.next_key.map(|key| key.as_str().to_owned());
             done = next_key.is_none();
             (
@@ -1030,6 +1045,14 @@ impl LwwClient {
             {
                 return Err(SyncError::new("invalid-changes-page", 502));
             }
+            // The journal keeps one entry per key, so a sequence span bounds the
+            // changes in it; it still measures how far through the server this is.
+            // A last page holding only this device's own publications reads back a
+            // push and is not work to show.
+            let left = page.through_seq.0 - page.next_after.0;
+            let writer = store.lww_clock_state().ok().map(|state| state.writer_id);
+            let read_back = left == 0 && page.items.iter().all(|item| writer.as_ref() == Some(&item.stamp.writer_id));
+            self.client.lane().backlog(if read_back { 0 } else { page.next_after.0 - cursor.0 }, left);
             (
                 page.next_after,
                 page.items
@@ -1057,6 +1080,7 @@ impl LwwClient {
             }
         }
         let changes = unique.into_values().collect::<Vec<_>>();
+        self.client.lane().listed(changes.len());
         let upper = if changes.iter().any(|change| change.stamp.physical_ms > upper) {
             // A stamp beyond the kept sample is checked against a new one before
             // it is rejected.
@@ -1125,6 +1149,7 @@ impl LwwClient {
     }
     pub(crate) fn finish_receive(&self, store: &PersistentStore, header: &Header) -> Result<()> {
         self.check()?;
+        self.client.lane().step(Step::Confirming);
         if store.lww_binding_authority()? != header.binding_authority {
             return Err(SyncError::new("binding-authority-changed", 409));
         }
@@ -1213,8 +1238,12 @@ impl LwwClient {
         let mut controls = BTreeSet::new();
         let mut large = BTreeSet::new();
         let mut remote = BTreeSet::new();
+        let lane = self.client.lane();
+        lane.step(Step::Downloading);
+        lane.plan_items(changes.len());
         for change in changes {
             self.check()?;
+            lane.items_done(1);
             if change.stamp.physical_ms > upper {
                 return Err(SyncError::new("incoming-clock-skew", 409));
             }

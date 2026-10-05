@@ -169,8 +169,8 @@ pub(super) const PRESET_MIRRORS: &[(&str, &str)] = &[
     ("jsonSchema", "jsonSchema"),
     ("strictJsonSchema", "strictJsonSchema"),
     ("extractJson", "extractJson"),
-    ("groupOtherBotRole", "groupOtherBotRole"),
-    ("groupTemplate", "groupTemplate"),
+    ("namedMessageRole", "namedMessageRole"),
+    ("messageNameTemplate", "messageNameTemplate"),
     ("seperateParametersEnabled", "seperateParametersEnabled"),
     ("seperateParameters", "seperateParameters"),
     ("customAPIFormat", "customAPIFormat"),
@@ -1429,9 +1429,6 @@ fn project_character_resources(
     replace_mapped_string(character.get_mut("image"), replacements);
     project_tuple_resources(character.get_mut("emotionImages"), replacements);
 
-    if character.get("type").and_then(Value::as_str) == Some("group") {
-        return;
-    }
 
     project_tuple_resources(character.get_mut("additionalAssets"), replacements);
     if let Some(Value::Object(vits)) = character.get_mut("vits") {
@@ -2193,7 +2190,7 @@ mod tests {
     }
 
     #[test]
-    fn projects_non_group_character_resources_without_touching_unrelated_values() {
+    fn projects_character_resources_without_touching_unrelated_values() {
         let replacements = HashMap::from([
             ("old".to_owned(), "new".to_owned()),
             ("chain-start".to_owned(), "chain-middle".to_owned()),
@@ -2231,31 +2228,6 @@ mod tests {
         assert_eq!(character["chats"][0]["message"][0]["data"], json!("old"));
         assert_eq!(character["plugin"]["resource"], json!("old"));
         assert_eq!(character["unrelated"], json!("old"));
-    }
-
-    #[test]
-    fn group_projection_skips_character_only_resource_paths() {
-        let replacements = HashMap::from([("old".to_owned(), "new".to_owned())]);
-        let mut group = into_object(
-            json!({
-                "type": "group",
-                "image": "old",
-                "emotionImages": [["happy", "old"]],
-                "additionalAssets": [["asset", "old"]],
-                "vits": { "files": { "voice": "old" } },
-                "ccAssets": [{ "uri": "old" }]
-            }),
-            "group",
-        )
-        .unwrap();
-
-        project_character_resources(&mut group, &replacements);
-
-        assert_eq!(group["image"], json!("new"));
-        assert_eq!(group["emotionImages"][0][1], json!("new"));
-        assert_eq!(group["additionalAssets"][0][1], json!("old"));
-        assert_eq!(group["vits"]["files"]["voice"], json!("old"));
-        assert_eq!(group["ccAssets"][0]["uri"], json!("old"));
     }
 
     #[test]

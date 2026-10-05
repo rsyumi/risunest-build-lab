@@ -2,7 +2,7 @@
     import { onDestroy, onMount } from 'svelte'
     import { ChevronRight } from '@lucide/svelte'
     import { language } from 'src/lang'
-    import { alertError, alertNormal } from 'src/ts/alert'
+    import { alertCheckboxConfirm, alertError, alertNormal } from 'src/ts/alert'
     import SettingButton from '../RisuNest/SettingButton.svelte'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingRow from '../RisuNest/SettingRow.svelte'
@@ -12,6 +12,7 @@
         applyNativeDataHealthRepair,
         cancelNativeDataHealthScan,
         deepScanNativeDataHealth,
+        discardNativeDataHealthIntent,
         getNativeDataHealthResult,
         listNativeDataHealthJournals,
         planNativeDataHealthRepair,
@@ -66,6 +67,7 @@
         applyRepair: (selection, snapshot, revision, scannedAt) => repair(
             revision, (expected) => applyNativeDataHealthRepair(selection, snapshot, expected, scannedAt),
         ),
+        discardIntent: discardNativeDataHealthIntent,
         listJournals: listNativeDataHealthJournals,
         undoRepair: (journalId, revision) => repair(
             revision, (expected) => undoNativeDataHealthRepair(journalId, expected),
@@ -288,6 +290,20 @@
         await run(() => model.apply(keepSnapshot))
     }
 
+    async function discardIntent(item: DataHealthFinding): Promise<void> {
+        const diagnosis = view.result
+        if (!diagnosis || view.activity) return
+        const confirmed = await alertCheckboxConfirm({
+            title: strings.discardIntentTitle,
+            description: strings.discardIntentDescription,
+            checkboxLabel: strings.discardIntentAcknowledge,
+            actionLabel: strings.discardIntent,
+            cancelLabel: language.cancel,
+            requireChecked: true,
+        })
+        if (confirmed.confirmed && confirmed.checked) await run(() => model.discard(item, diagnosis))
+    }
+
     async function undoRepair(id: string): Promise<void> {
         await run(() => model.undo(id))
     }
@@ -311,6 +327,7 @@
         } catch { preparation = 'failed' }
     }
     const failureMessages = {
+        discard: strings.discardIntentFailed,
         load: strings.loadFailed, scan: strings.scanFailed, repair: strings.repairFailed,
         undo: strings.undoFailed, refresh: strings.refreshFailed, preview: strings.previewFailed,
     }
@@ -352,9 +369,9 @@
                 {/if}
             {/if}
             {#if preparation === 'failed'}
-                <p role="alert">{strings.openFailed}</p><SettingButton onclick={initialize}>{language.retry}</SettingButton>
+                <p class="mt-1 text-sm text-danger-400" role="alert">{strings.openFailed}</p><SettingButton class="mt-2" onclick={initialize}>{language.retry}</SettingButton>
             {/if}
-            {#if view.applied}<p role="status">{strings.repairApplied.replace('{0}', count(view.applied.remaining))}</p>{/if}
+            {#if view.applied}<p class="mt-1 text-sm" role="status">{strings.repairApplied.replace('{0}', count(view.applied.remaining))}</p>{/if}
             {#if view.failure}
                 <p class="mt-1 text-sm text-danger-400" role="alert">{failureMessages[view.failure]}</p>
             {/if}
@@ -408,6 +425,9 @@
             {#each group.shown as item, index (index)}
                 <div data-data-health-item class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 border-t border-darkborderc/55 py-1.5 pr-4 pl-10 text-sm">
                     <span class="min-w-0 flex-1 break-all">{itemDescription(item) ?? itemLocation(item)}</span>
+                    {#if item.code === 'intent-quarantined' && item.owner.kind === 'intent' && item.locator}
+                        <SettingButton variant="secondary" disabled={preparation !== 'ready' || Boolean(view.activity)} onclick={() => discardIntent(item)}>{strings.discardIntent}</SettingButton>
+                    {/if}
                     {#if !itemDescription(item) && itemTarget(item)}
                         <span class="min-w-0 break-all text-textcolor2">{itemTarget(item)}</span>
                     {/if}

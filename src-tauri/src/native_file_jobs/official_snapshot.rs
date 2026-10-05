@@ -719,35 +719,84 @@ mod tests {
 
     #[test]
     fn chunked_download_reports_known_or_unknown_total_before_staging() {
+        // Reach the byte reporting threshold without depending on elapsed time.
+        const FIRST_CHUNK: usize = 256 * 1024;
+        const LENGTH: usize = FIRST_CHUNK + 3;
         for declared in [false, true] {
-            let metadata = if declared { "Content-Length: 6\r\n" } else { "" };
-            let (base_url, server) = scripted_server(vec![
-                (Duration::ZERO, format!("HTTP/1.1 200 OK\r\n{metadata}Connection: close\r\n\r\n").into_bytes()),
-                (Duration::from_millis(150), b"abc".to_vec()),
-                (Duration::from_millis(150), b"def".to_vec()),
-            ]);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let (release, released) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if matches!(released.try_recv(), Err(mpsc::TryRecvError::Disconnected)) {
+                                return;
+                            }
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("fixture accept failed: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let metadata = if declared { format!("Content-Length: {LENGTH}\r\n") } else { String::new() };
+                write!(stream, "HTTP/1.1 200 OK\r\n{metadata}Connection: close\r\n\r\n").unwrap();
+                stream.write_all(&vec![b'a'; FIRST_CHUNK]).unwrap();
+                stream.flush().unwrap();
+                if released.recv_timeout(Duration::from_secs(30)).is_ok() {
+                    stream.write_all(b"def").unwrap();
+                    stream.flush().unwrap();
+                    stream.shutdown(Shutdown::Write).unwrap();
+                }
+            });
             let directory = TempDir::new().unwrap();
             let job = job();
-            let (outcome, observations) = tauri::async_runtime::block_on(async {
-                let request = request(base_url);
-                let download = download_snapshot(&request, directory.path(), &job);
-                let observe = async {
-                    let mut observations = Vec::new();
-                    for _ in 0..45 {
-                        observations.push(job.status().progress);
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                    observations
-                };
-                tokio::join!(download, observe)
+            let result = tauri::async_runtime::block_on(async {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    let request = request(base_url);
+                    let download = download_snapshot(&request, directory.path(), &job);
+                    let observe = async {
+                        let mut observations = Vec::new();
+                        loop {
+                            let progress = job.status().progress;
+                            let ready = progress.completed_bytes > 0;
+                            observations.push(progress);
+                            if ready {
+                                release.send(()).unwrap();
+                                return observations;
+                            }
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                    };
+                    tokio::join!(download, observe)
+                }).await
             });
+            drop(release);
+            server.join().unwrap();
+            let (outcome, mut observations) = result.expect("download did not report its held first chunk");
             assert!(matches!(outcome.unwrap(), DownloadOutcome::File(_)));
-            assert!(observations.iter().any(|progress| progress.completed_bytes == 3 && progress.total_bytes == if declared { Some(12) } else { None }));
-            assert_eq!(job.status().progress.completed_bytes, 6);
-            assert_eq!(job.status().progress.total_bytes, Some(12));
+            let before_release = observations.last().unwrap();
+            assert!(before_release.completed_bytes > 0 && before_release.completed_bytes <= FIRST_CHUNK as u64);
+            assert_eq!(observations.last().unwrap().total_bytes, if declared { Some((LENGTH * 2) as u64) } else { None });
+            observations.push(job.status().progress);
+            assert_eq!(job.status().progress.completed_bytes, LENGTH as u64);
+            assert_eq!(job.status().progress.total_bytes, Some((LENGTH * 2) as u64));
             assert!(observations.windows(2).all(|pair| pair[0].completed_bytes <= pair[1].completed_bytes));
             assert!(observations.iter().all(|progress| progress.total_bytes.is_none_or(|total| progress.completed_bytes <= total)));
-            server.join().unwrap();
+            let bytes = fs::read(directory.path().join(SNAPSHOT_FILE)).unwrap();
+            assert_eq!(&bytes[..FIRST_CHUNK], vec![b'a'; FIRST_CHUNK]);
+            assert_eq!(&bytes[FIRST_CHUNK..], b"def");
+            assert!(!directory.path().join(SNAPSHOT_PART_FILE).exists());
         }
     }
 

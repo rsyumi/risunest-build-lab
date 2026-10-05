@@ -8,7 +8,6 @@ import {
     getCurrentChat,
     getDatabase,
     type character,
-    type groupChat,
     type Database,
     type Chat,
 } from './storage/database.svelte'
@@ -20,7 +19,7 @@ import { pluginV2 } from './plugins/plugins.svelte'
 import { findCharacterbyId, getPersonaPrompt } from './util'
 import { createChatParserDependencyStamp } from './chatRenderIdentity'
 
-type DisplayCharacter = character | groupChat | simpleCharacterArgument | string | null
+type DisplayCharacter = character | simpleCharacterArgument | string | null
 type DisplayRuntime = Pick<
     PersistentDataRuntime,
     'captureSelectedConversationTarget' | 'acquireCompleteConversation'
@@ -32,11 +31,11 @@ interface LiveDisplayParserInputs extends ChatParserHistoryClassificationInput {
 
 export function createLiveChatParserIndirections(
     database: Database,
-    selectedCharacter: character | groupChat,
+    selectedCharacter: character,
     conversation: Chat,
     personaPrompt: string,
 ): Readonly<Record<string, unknown>> {
-    const character = selectedCharacter.type === 'group' ? null : selectedCharacter
+    const character = selectedCharacter
     let authorNote = conversation.note ?? ''
     if (!authorNote) {
         for (const item of database.promptTemplate ?? []) {
@@ -94,13 +93,8 @@ export function captureLiveDisplayParserInputs(
     const moduleRegex = getModuleRegexScripts()
     const moduleTriggers = getModuleTriggers()
     const triggers =
-        character.type === 'group'
-            ? moduleTriggers
-            : [...(character.triggerscript ?? []), ...moduleTriggers]
+        [...(character.triggerscript ?? []), ...moduleTriggers]
     return {
-        // The live CBS parser resolves a group speaker from the last message even
-        // when its source contains no history expression.
-        requiresCompleteConversation: character.type === 'group',
         source: [source, createLiveChatParserSource(database, character, moduleRegex)],
         indirections: createLiveChatParserIndirections(
             database,

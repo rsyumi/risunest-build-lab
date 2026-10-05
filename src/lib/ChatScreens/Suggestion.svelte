@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { requestChatData } from "src/ts/process/request/request";
     import { doingChat, type OpenAIChat } from "../../ts/process/index.svelte";
-    import { type character, type Message, type groupChat } from "../../ts/storage/database.svelte";
+    import { type character, type Message } from "../../ts/storage/database.svelte";
 	import { DBState } from 'src/ts/stores.svelte';
     import { selectedCharID } from "../../ts/stores.svelte";
     import { isTauri } from 'src/ts/platform';
@@ -67,7 +67,7 @@
         }
 
         const requestCharId = $selectedCharID
-        const currentChar:character|groupChat = DBState.db.characters[requestCharId];
+        const currentChar:character = DBState.db.characters[requestCharId];
         if(!currentChar){
             return
         }

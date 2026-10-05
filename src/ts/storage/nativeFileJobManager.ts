@@ -245,7 +245,7 @@ export function runSharedNativeFileOperation<T>(
     }
     if (options.snapshotBodyOwner) {
         const receipt = options.snapshotBodyOwner
-        return invoke<NativeFileJobStatus>('native_file_job_status', {jobId: receipt.jobId}).then(status => {
+        return invoke<NativeFileJobStatus>('native_snapshot_restore_bodies_status', {receipt}).then(status => {
             if (kind !== 'import' || receipt.kind !== 'snapshot-bodies' || status.kind !== 'snapshot-bodies'
                 || status.jobId !== receipt.jobId || status.snapshotStagingId !== receipt.stagingId
                 || String(status.activationRevision) !== receipt.activationRevision
@@ -396,13 +396,40 @@ export function runExternalAndroidNativeFileOperation<T>(
     })
 }
 
+export async function waitForActiveNativeFileOperation(): Promise<void> {
+    while (activeOperation) {
+        try { await activeOperation } catch {}
+    }
+}
+
+export async function waitForSnapshotBodyOutcomeDismissal(): Promise<void> {
+    while (true) {
+        await waitForActiveNativeFileOperation()
+        const outcome = get(nativeFileOperationOutcome)
+        if (outcome?.status?.kind !== 'snapshot-bodies') return
+        let unsubscribe: (() => void) | undefined
+        await new Promise<void>(resolve => {
+            unsubscribe = nativeFileOperationOutcome.subscribe(current => {
+                if (current !== outcome) resolve()
+            })
+        })
+        unsubscribe?.()
+    }
+}
+
 export function cancelActiveNativeFileOperation(): void {
     if (!activeController) return
     activeController.abort()
     updateActiveState({ cancelRequested: true })
 }
 
-export function dismissNativeFileOperationOutcome(): void {
+export function dismissNativeFileOperationOutcome(): void | Promise<void> {
+    const outcome = get(nativeFileOperationOutcome)
+    if (outcome?.status?.kind === 'snapshot-bodies') {
+        return invoke('native_file_job_forget', {jobId: outcome.status.jobId}).then(() => {
+            if (get(nativeFileOperationOutcome) === outcome) nativeFileOperationOutcome.set(null)
+        })
+    }
     nativeFileOperationOutcome.set(null)
 }
 

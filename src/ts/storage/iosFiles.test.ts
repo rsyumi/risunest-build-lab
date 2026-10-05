@@ -11,7 +11,7 @@ beforeEach(() => {
 })
 describe('iOS file publication', () => {
     it('returns native custody without an app-owned copy or a descriptor in JavaScript', async () => {
-        invoke.mockImplementation(async command => command === 'native_portable_source_cleanup_orphans' ? 0
+        invoke.mockImplementation(async command => command === 'native_portable_source_cleanup_orphans' ? {names:[],cleanupFailed:false}
             : {cancelled:false, token:'selected-token', name:'synthetic.risunest', bytes:4_294_967_296})
         await expect(pickIOSBackupSource()).resolves.toEqual({token:'selected-token', name:'synthetic.risunest', bytes:4_294_967_296})
         expect(invoke.mock.calls.map(call => call[0])).toEqual(['native_portable_source_cleanup_orphans','plugin:ios-native|pick_backup_source'])
@@ -21,20 +21,50 @@ describe('iOS file publication', () => {
         const order: string[] = []
         invoke.mockImplementation(async command => {
             order.push(command)
-            return command === 'native_portable_source_cleanup_orphans' ? 1
+            return command === 'native_portable_source_cleanup_orphans' ? {names:['earlier.risunest'],cleanupFailed:false}
                 : {cancelled:false, token:'selected-token', name:'synthetic.risunest', bytes:42}
         })
         alertError.mockImplementation(message => order.push(`alert:${message}`))
         waitAlert.mockImplementation(async () => { order.push('dismissed') })
         await pickIOSBackupSource()
-        expect(order).toEqual(['native_portable_source_cleanup_orphans','alert:reason:import-interrupted','dismissed','plugin:ios-native|pick_backup_source'])
+        expect(order).toEqual(['native_portable_source_cleanup_orphans','alert:earlier.risunest: reason:import-interrupted','dismissed','plugin:ios-native|pick_backup_source'])
     })
     it('reports sources a reloaded page left unimported once', async () => {
-        invoke.mockResolvedValueOnce(2).mockResolvedValueOnce(0)
+        invoke.mockResolvedValueOnce({names:['one.risunest','two.risunest'],cleanupFailed:false}).mockResolvedValueOnce({names:[],cleanupFailed:false})
         await reportInterruptedIOSBackupSources()
         await reportInterruptedIOSBackupSources()
         expect(invoke.mock.calls).toEqual([['native_portable_source_cleanup_orphans'],['native_portable_source_cleanup_orphans']])
+        expect(alertError.mock.calls).toEqual([['one.risunest: reason:import-interrupted'], ['two.risunest: reason:import-interrupted']])
+    })
+    it('keeps unavailable names anonymous and never displays a source path', async () => {
+        invoke.mockResolvedValueOnce({names:[null],cleanupFailed:false})
+        await reportInterruptedIOSBackupSources()
         expect(alertError).toHaveBeenCalledExactlyOnceWith('reason:import-interrupted')
+        invoke.mockResolvedValueOnce({names:['/private/synthetic.risunest'],cleanupFailed:false})
+        await expect(reportInterruptedIOSBackupSources()).rejects.toThrow('receipt is invalid')
+        expect(alertError).toHaveBeenCalledOnce()
+    })
+    it('delivers cleaned receipts before refusing the next pick and retries only unfinished cleanup', async () => {
+        invoke.mockResolvedValueOnce({names:['first.risunest'],cleanupFailed:true})
+        await expect(pickIOSBackupSource()).rejects.toThrow('cleanup failed')
+        expect(invoke).not.toHaveBeenCalledWith('plugin:ios-native|pick_backup_source')
+        invoke.mockResolvedValueOnce({names:['second.risunest'],cleanupFailed:false})
+            .mockResolvedValueOnce({cancelled:true})
+        await expect(pickIOSBackupSource()).resolves.toBeNull()
+        expect(alertError.mock.calls).toEqual([['first.risunest: reason:import-interrupted'], ['second.risunest: reason:import-interrupted']])
+    })
+    it('joins simultaneous startup and picker notices until dismissal', async () => {
+        let dismiss!: () => void
+        waitAlert.mockImplementationOnce(() => new Promise<void>(resolve => { dismiss = resolve }))
+        invoke.mockResolvedValueOnce({names:['first.risunest'],cleanupFailed:false})
+            .mockResolvedValueOnce({cancelled:true})
+        const notice = reportInterruptedIOSBackupSources()
+        const pick = pickIOSBackupSource()
+        await vi.waitFor(() => expect(alertError).toHaveBeenCalledOnce())
+        expect(invoke).toHaveBeenCalledOnce()
+        dismiss()
+        await Promise.all([notice, pick])
+        expect(invoke).toHaveBeenLastCalledWith('plugin:ios-native|pick_backup_source')
     })
     it('releases native and scoped custody after cancellation during selection', async () => {
         const controller = new AbortController()
@@ -43,7 +73,7 @@ describe('iOS file publication', () => {
                 controller.abort()
                 return {cancelled:false, token:'selected-token', name:'synthetic.risunest', bytes:42}
             }
-            if (command === 'native_portable_source_cleanup_orphans') return 0
+            if (command === 'native_portable_source_cleanup_orphans') return {names:[],cleanupFailed:false}
             return true
         })
         await expect(pickIOSBackupSource(controller.signal)).rejects.toMatchObject({name:'AbortError'})

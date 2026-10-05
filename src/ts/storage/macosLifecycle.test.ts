@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createMacosExitHandler } from './macosLifecycle'
+import { SaveCoordinator } from './saveCoordinator'
+import { createSyncExitCoordinator } from './syncExitCoordinator'
+import { deferred, makeStore } from './saveCoordinator.testSupport'
 
 function harness() {
     const dependencies = {
@@ -39,6 +42,94 @@ function coordinated(limitMillis?: number) {
 }
 
 describe('macOS acknowledged quit', () => {
+    it('coalesces the real local save across conditional handler supersession and settles both checkpoints', async () => {
+        const commitGate = deferred<{ revision: number }>()
+        const normalCheckpoint = deferred<void>()
+        const sessionCheckpoint = deferred<void>()
+        const commit = vi.fn(() => commitGate.promise)
+        let root = { username: 'before' }
+        const save = new SaveCoordinator({
+            store: makeStore(commit),
+            captureRoot: () => root,
+            captureSelectedCharacter: () => null,
+            captureCharacter: () => null,
+            replaceDatabase: vi.fn(),
+        })
+        save.initialize(0)
+        root = { username: 'synthetic-after' }
+        save.markPersistentDataDirty(32)
+        const pendingFlushes: Promise<void>[] = []
+        const flushLocal = () => {
+            const promise = save.flushPendingDataLocally('conditional-session-upgrade')
+            pendingFlushes.push(promise)
+            return promise
+        }
+        const checkpoint = vi.fn()
+            .mockImplementationOnce(() => normalCheckpoint.promise)
+            .mockImplementationOnce(() => sessionCheckpoint.promise)
+        const coordinator = createSyncExitCoordinator({
+            flushLocal,
+            checkpointLocal: checkpoint,
+            acquireEditFence: async () => ({ release: vi.fn() }),
+            captureTarget: async () => ({
+                revision: save.revision, libraryEpoch: 'synthetic-library',
+                selectionEpoch: 'synthetic-selection', selectionId: 'synthetic-target',
+            }),
+            selectedDrain: () => null,
+        })
+        const respond = vi.fn(async () => {})
+        const handler = createMacosExitHandler({
+            coordinator,
+            saveLocally: async () => { await flushLocal(); await checkpoint() },
+            respond,
+            reportError: vi.fn(),
+        })
+        const ordinary = handler({ token: 'same', sessionEnd: false })
+        const session = handler({ token: 'same', sessionEnd: true, deadlineUnixMillis: Date.now() + 5_000 })
+        await vi.waitFor(() => expect(commit).toHaveBeenCalledTimes(1))
+        expect(pendingFlushes).toHaveLength(2)
+        expect(pendingFlushes[0]).toBe(pendingFlushes[1])
+        expect(checkpoint).not.toHaveBeenCalled()
+        commitGate.resolve({ revision: 1 })
+        await vi.waitFor(() => expect(checkpoint).toHaveBeenCalledTimes(2))
+        expect(save.revision).toBe(1)
+        expect(respond).not.toHaveBeenCalled()
+        sessionCheckpoint.resolve()
+        await session
+        expect(respond).toHaveBeenCalledExactlyOnceWith('same', true)
+        normalCheckpoint.resolve()
+        await ordinary
+        expect(commit).toHaveBeenCalledTimes(1)
+        expect(checkpoint).toHaveBeenCalledTimes(2)
+        expect(respond).toHaveBeenCalledExactlyOnceWith('same', true)
+    })
+
+    it('uses the remaining native budget instead of starting five more seconds on delivery', async () => {
+        vi.useFakeTimers()
+        try {
+            const c = coordinated()
+            c.saveLocally.mockImplementation(() => new Promise<void>(() => {}))
+            const request = c.handle({ token: 'late', sessionEnd: true, deadlineUnixMillis: Date.now() + 500 })
+            await vi.advanceTimersByTimeAsync(499)
+            expect(c.respond).not.toHaveBeenCalled()
+            await vi.advanceTimersByTimeAsync(1)
+            await request
+            expect(c.respond).toHaveBeenCalledExactlyOnceWith('late', true)
+        } finally { vi.useRealTimers() }
+    })
+
+    it('upgrades an ordinary pending quit without responding from its superseded handler', async () => {
+        const c = coordinated()
+        let finish!: (value: 'exit') => void
+        c.coordinator.requestExit.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+        const ordinary = c.handle({ token: 'same', sessionEnd: false })
+        await c.handle({ token: 'same', sessionEnd: true, deadlineUnixMillis: Date.now() + 5_000 })
+        finish('exit')
+        await ordinary
+        expect(c.respond).toHaveBeenCalledExactlyOnceWith('same', true)
+        expect(c.saveLocally).toHaveBeenCalledOnce()
+    })
+
     it('delegates the held request to the shared coordinator', async () => {
         const c = coordinated()
 
@@ -52,7 +143,7 @@ describe('macOS acknowledged quit', () => {
     it('saves locally and approves a session-end quit without sync or questions', async () => {
         const c = coordinated()
 
-        await c.handle({ token: 'logout', sessionEnd: true })
+        await c.handle({ token: 'logout', sessionEnd: true, deadlineUnixMillis: Date.now() + 5_000 })
 
         expect(c.saveLocally).toHaveBeenCalledOnce()
         expect(c.coordinator.requestExit).not.toHaveBeenCalled()
@@ -62,13 +153,13 @@ describe('macOS acknowledged quit', () => {
     it('approves a session-end quit when the local save fails or stalls', async () => {
         const failed = coordinated()
         failed.saveLocally.mockRejectedValueOnce(new Error('synthetic failure'))
-        await failed.handle({ token: 'failed', sessionEnd: true })
+        await failed.handle({ token: 'failed', sessionEnd: true, deadlineUnixMillis: Date.now() + 5_000 })
         expect(failed.reportError).toHaveBeenCalledOnce()
         expect(failed.respond).toHaveBeenCalledExactlyOnceWith('failed', true)
 
         const stalled = coordinated(10)
         stalled.saveLocally.mockImplementationOnce(() => new Promise<void>(() => {}))
-        await stalled.handle({ token: 'stalled', sessionEnd: true })
+        await stalled.handle({ token: 'stalled', sessionEnd: true, deadlineUnixMillis: Date.now() + 5_000 })
         expect(stalled.reportError).toHaveBeenCalledOnce()
         expect(stalled.respond).toHaveBeenCalledExactlyOnceWith('stalled', true)
     })

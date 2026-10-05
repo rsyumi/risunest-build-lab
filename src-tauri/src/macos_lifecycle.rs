@@ -1,5 +1,8 @@
 //! macOS window lifetime and an acknowledged, cancellable application quit.
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+const SESSION_END_LIMIT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExitOrigin {
@@ -17,6 +20,7 @@ enum ExitEffect {
 struct PendingExit {
     token: String,
     origin: ExitOrigin,
+    session_deadline: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -29,6 +33,9 @@ struct ExitDecision {
 impl ExitDecision {
     fn document_started(&mut self) -> Option<ExitEffect> {
         self.ready = false;
+        if self.pending.as_ref().is_some_and(|pending| pending.session_deadline.is_some()) {
+            return None;
+        }
         self.pending.take().and_then(|pending| {
             (pending.origin == ExitOrigin::Native).then_some(ExitEffect::NativeReply(false))
         })
@@ -54,13 +61,32 @@ impl ExitDecision {
 
     fn begin(&mut self, origin: ExitOrigin) -> String {
         let token = uuid::Uuid::new_v4().to_string();
-        self.pending = Some(PendingExit { token: token.clone(), origin });
+        self.pending = Some(PendingExit { token: token.clone(), origin, session_deadline: None });
         token
+    }
+
+    fn begin_session_end(&mut self, now: Instant) -> Option<(String, Instant)> {
+        let pending = self.pending.as_mut()?;
+        if pending.session_deadline.is_some() { return None; }
+        let deadline = now + SESSION_END_LIMIT;
+        pending.session_deadline = Some(deadline);
+        Some((pending.token.clone(), deadline))
+    }
+
+    fn expire_session_end(&mut self, token: &str, now: Instant) -> Option<ExitEffect> {
+        let pending = self.pending.as_ref()?;
+        if pending.token != token || !pending.session_deadline.is_some_and(|deadline| now >= deadline) {
+            return None;
+        }
+        self.respond(token, true).ok().flatten()
     }
 
     fn response_effect(&self, token: &str, exit: bool) -> Result<Option<ExitEffect>, String> {
         let pending = self.pending.as_ref().filter(|pending| pending.token == token)
             .ok_or("No matching macOS quit request")?;
+        if pending.session_deadline.is_some() && !exit {
+            return Err("Session-end termination cannot be cancelled".into());
+        }
         Ok(match pending.origin {
             ExitOrigin::Native => Some(ExitEffect::NativeReply(exit)),
             ExitOrigin::Runtime(code) => exit.then_some(ExitEffect::RuntimeExit(code)),
@@ -94,6 +120,11 @@ static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 unsafe extern "C" {
     fn risunest_reply_termination(approve: std::ffi::c_int) -> std::ffi::c_int;
     fn risunest_termination_pending() -> std::ffi::c_int;
+    fn risunest_queue_termination_deadline(
+        callback: extern "C" fn(*mut std::ffi::c_void),
+        context: *mut std::ffi::c_void,
+        seconds: f64,
+    ) -> std::ffi::c_int;
     fn risunest_queue_termination_response(
         callback: extern "C" fn(*mut std::ffi::c_void),
         context: *mut std::ffi::c_void,
@@ -104,6 +135,7 @@ unsafe extern "C" {
 extern "C" fn request_native_quit(session_ending: std::ffi::c_int) -> std::ffi::c_int {
     let Some(app) = APP.get() else { return -1; };
     let Some(state) = app.try_state::<ExitState>() else { return -1; };
+    let requested_at = Instant::now();
     let previous = state.0.lock().unwrap_or_else(|error| error.into_inner()).pending.clone();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let request = {
@@ -114,11 +146,22 @@ extern "C" fn request_native_quit(session_ending: std::ffi::c_int) -> std::ffi::
         match request {
             None => { crate::cancel_incomplete_boot(app); 0 }
             Some(token) => {
-                if let Some(token) = token {
+                let session = if session_ending != 0 {
+                    state.0.lock().unwrap_or_else(|error| error.into_inner()).begin_session_end(requested_at)
+                } else { None };
+                if let Some((token, deadline)) = session.as_ref() {
+                    if !queue_session_deadline(app, token, *deadline) {
+                        state.0.lock().unwrap_or_else(|error| error.into_inner()).discard(token);
+                        return 0;
+                    }
+                }
+                if let Some(token) = session.map(|(token, _)| token).or(token) {
                     if let Err(error) = notify_quit(app, &token, session_ending != 0) {
-                        state.0.lock().unwrap_or_else(|error| error.into_inner()).discard(&token);
                         crate::nlog!("warn", "macOS quit notification failed: {error}");
-                        return -1;
+                        if session_ending == 0 {
+                            state.0.lock().unwrap_or_else(|error| error.into_inner()).discard(&token);
+                            return -1;
+                        }
                     }
                 }
                 1
@@ -128,6 +171,33 @@ extern "C" fn request_native_quit(session_ending: std::ffi::c_int) -> std::ffi::
         state.0.lock().unwrap_or_else(|error| error.into_inner()).pending = previous;
         -1
     })
+}
+
+#[cfg(target_os = "macos")]
+struct SessionDeadline { app: tauri::AppHandle, token: String }
+
+#[cfg(target_os = "macos")]
+fn queue_session_deadline(app: &tauri::AppHandle, token: &str, deadline: Instant) -> bool {
+    let context = Box::into_raw(Box::new(SessionDeadline { app: app.clone(), token: token.to_owned() }));
+    if unsafe { risunest_queue_termination_deadline(expire_session_end, context.cast(),
+        deadline.saturating_duration_since(Instant::now()).as_secs_f64()) } == 1 { return true; }
+    unsafe { drop(Box::from_raw(context)); }
+    false
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn expire_session_end(context: *mut std::ffi::c_void) {
+    let SessionDeadline { app, token } = *unsafe { Box::from_raw(context.cast::<SessionDeadline>()) };
+    let state = app.state::<ExitState>();
+    let deadline = state.0.lock().unwrap_or_else(|error| error.into_inner()).pending.as_ref()
+        .filter(|pending| pending.token == token).and_then(|pending| pending.session_deadline);
+    let Some(deadline) = deadline else { return; };
+    if Instant::now() < deadline && queue_session_deadline(&app, &token, deadline) { return; }
+    let effect = state.0.lock().unwrap_or_else(|error| error.into_inner())
+        .expire_session_end(&token, deadline);
+    if let Some(ExitEffect::NativeReply(true)) = effect {
+        unsafe { risunest_reply_termination(1); }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -239,8 +309,15 @@ extern "C" fn settle_response(context: *mut std::ffi::c_void) {
 #[cfg(target_os = "macos")]
 /// A session-end quit asks the document to save locally and answer without sync or questions.
 fn notify_quit(app: &tauri::AppHandle, token: &str, session_end: bool) -> Result<(), tauri::Error> {
-    show_main(app);
-    app.emit_to("main", "risu-macos-exit-requested", serde_json::json!({ "token": token, "sessionEnd": session_end }))
+    if !session_end { show_main(app); }
+    let remaining = app.state::<ExitState>().0.lock().unwrap_or_else(|error| error.into_inner())
+        .pending.as_ref().and_then(|pending| pending.session_deadline)
+        .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+    let deadline_unix_millis = remaining.map(|remaining| {
+        (std::time::SystemTime::now() + remaining).duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_millis() as u64
+    });
+    app.emit_to("main", "risu-macos-exit-requested", serde_json::json!({ "token": token, "sessionEnd": session_end, "deadlineUnixMillis": deadline_unix_millis }))
 }
 
 #[cfg(target_os = "macos")]
@@ -296,6 +373,36 @@ pub(crate) fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_deadline_survives_repeats_reload_and_settles_only_its_token() {
+        let mut state = ExitDecision { ready: true, ..Default::default() };
+        let token = state.request_native().unwrap();
+        let now = Instant::now();
+        assert_eq!(state.begin_session_end(now), Some((token.clone(), now + Duration::from_secs(5))));
+        assert_eq!(state.begin_session_end(now + Duration::from_secs(4)), None);
+        assert_eq!(state.expire_session_end(&token, now + Duration::from_secs(4)), None);
+        assert_eq!(state.document_started(), None);
+        assert!(state.respond(&token, false).is_err());
+        assert_eq!(state.expire_session_end("stale", now + SESSION_END_LIMIT), None);
+        assert_eq!(state.expire_session_end(&token, now + SESSION_END_LIMIT), Some(ExitEffect::NativeReply(true)));
+        assert_eq!(state.expire_session_end(&token, now + SESSION_END_LIMIT), None);
+        assert!(state.respond(&token, true).is_err());
+    }
+
+    #[test]
+    fn ordinary_quit_has_no_deadline_and_a_completed_session_timer_cannot_approve_a_new_quit() {
+        let mut state = ExitDecision { ready: true, ..Default::default() };
+        let first = state.request_native().unwrap();
+        let now = Instant::now();
+        assert_eq!(state.expire_session_end(&first, now + SESSION_END_LIMIT), None);
+        state.respond(&first, false).unwrap();
+        let next = state.request_native().unwrap();
+        state.begin_session_end(now).unwrap();
+        assert_eq!(state.expire_session_end(&first, now + SESSION_END_LIMIT), None);
+        assert_eq!(state.respond(&next, true).unwrap(), Some(ExitEffect::NativeReply(true)));
+        assert_eq!(state.expire_session_end(&next, now + SESSION_END_LIMIT), None);
+    }
 
     #[test]
     fn quit_requires_readiness_and_a_matching_single_response() {

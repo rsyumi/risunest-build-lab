@@ -10,8 +10,7 @@ import { roadmap14Corpus, roadmap14Payloads } from './losslessCorpus'
 describe('roadmap 14 lossless corpus', () => {
     it('covers rich ordered database semantics without using production serializers', () => {
         const { database } = roadmap14Corpus
-        const normalCharacter = database.characters.find((character) => character.type !== 'group')
-        const group = database.characters.find((character) => character.type === 'group')
+        const normalCharacter = database.characters[0]
         const completeChat = normalCharacter?.chats[0]
         const completeMessage = completeChat?.message[0]
 
@@ -22,9 +21,6 @@ describe('roadmap 14 lossless corpus', () => {
             modules: ['module-main', 'module-main'],
         })
         expect(normalCharacter?.triggerscript).toHaveLength(1)
-        expect(group).toMatchObject({
-            characters: ['character-main', 'character-main', 'character-known-missing'],
-        })
         expect(completeChat).toMatchObject({
             sdData: '',
             supaMemoryData: '',
@@ -44,7 +40,6 @@ describe('roadmap 14 lossless corpus', () => {
             promptInfo: {
                 promptToggles: [{ key: 'empty', value: '' }],
             },
-            otherUser: false,
             disabled: false,
             isComment: false,
         })

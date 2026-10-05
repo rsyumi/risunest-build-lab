@@ -78,7 +78,7 @@
             <BackgroundDom />
             <div style={bgImg} class="h-full w-full" class:max-w-6xl={DBState.db.classicMaxWidth}>
                 {#if $selectedCharID >= 0}
-                    {#if DBState.db.characters[$selectedCharID].viewScreen !== 'none' && (DBState.db.characters[$selectedCharID].type === 'group' || (!DBState.db.characters[$selectedCharID].inlayViewScreen))}
+                    {#if DBState.db.characters[$selectedCharID].viewScreen !== 'none' && (!DBState.db.characters[$selectedCharID].inlayViewScreen)}
                         <ResizeBox />
                     {/if}
                 {/if}

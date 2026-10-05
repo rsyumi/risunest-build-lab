@@ -31,9 +31,10 @@ export interface MacosExitRequest {
     token: string
     /** Logout, restart or shutdown asked for the quit. */
     sessionEnd: boolean
+    deadlineUnixMillis?: number
 }
 
-const SESSION_END_SAVE_LIMIT_MILLIS = 2_000
+const SESSION_END_SAVE_LIMIT_MILLIS = 5_000
 
 function settleWithin(work: Promise<void>, millis: number): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -58,16 +59,20 @@ export function createMacosExitHandler(
     dependencies: MacosExitDependencies,
     sessionEndLimitMillis = SESSION_END_SAVE_LIMIT_MILLIS,
 ) {
-    let pending = false
-    return async ({ token, sessionEnd }: MacosExitRequest): Promise<void> => {
-        if (pending) return
-        pending = true
+    let pending: MacosExitRequest | undefined
+    return async (request: MacosExitRequest): Promise<void> => {
+        const { token, sessionEnd, deadlineUnixMillis } = request
+        if (pending && (!sessionEnd || pending.sessionEnd)) return
+        pending = request
         let exit = false
         try {
             if (sessionEnd) {
                 // The session ends either way, so a failed or slow save still lets it go.
                 try {
-                    await settleWithin(dependencies.saveLocally(), sessionEndLimitMillis)
+                    await settleWithin(dependencies.saveLocally(), Math.max(0, Math.min(
+                        sessionEndLimitMillis,
+                        (deadlineUnixMillis ?? Date.now()) - Date.now(),
+                    )))
                 } catch (error) {
                     dependencies.reportError(error)
                 }
@@ -87,6 +92,7 @@ export function createMacosExitHandler(
                 exit = await dependencies.confirmExitWithoutSaving()
             }
             if (
+                pending === request &&
                 exit &&
                 dependencies.sync.isSyncActive() &&
                 dependencies.sync.hasPendingSync()
@@ -98,9 +104,9 @@ export function createMacosExitHandler(
             dependencies.reportError(error)
         } finally {
             try {
-                await dependencies.respond(token, exit)
+                if (pending === request) await dependencies.respond(token, exit)
             } finally {
-                pending = false
+                if (pending === request) pending = undefined
             }
         }
     }

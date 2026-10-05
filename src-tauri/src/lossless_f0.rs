@@ -249,11 +249,7 @@ pub(crate) fn scan_portable_fragment(
                     .unwrap_or_else(|| Value::String(format!("#{}", display_template(index))));
                 collector.emit(
                     Owner {
-                        kind: if value.get("type").and_then(Value::as_str) == Some("group") {
-                            "group"
-                        } else {
-                            "character"
-                        },
+                        kind: "character",
                         id: character_id,
                     },
                     "$.chatPage",
@@ -469,7 +465,7 @@ impl ReferenceIndexes {
         let character_id = metadata
             .get("characterId")
             .and_then(Value::as_str)
-            .or_else(|| matches!(owner.kind, "character" | "group").then_some(owner.id));
+            .or_else(|| matches!(owner.kind, "character").then_some(owner.id));
         let present = if kind == "conversation" {
             character_id.is_some_and(|character_id| {
                 self.conversations_by_character
@@ -865,25 +861,10 @@ fn scan_characters(database: &Value, collector: &mut GraphCollector<'_>) -> Resu
         };
         let character_id = string_field(character, "chaId").unwrap_or_default();
         let owner = Owner {
-            kind: if string_field(character, "type") == Some("group") {
-                "group"
-            } else {
-                "character"
-            },
+            kind: "character",
             id: character_id,
         };
         scan_character_assets(character, owner, "$", collector);
-        if owner.kind == "group" {
-            for (index, character_id) in array_field(character, "characters").iter().enumerate() {
-                collector.emit(
-                    owner,
-                    format!("$.characters[{index}]"),
-                    "character",
-                    Some(character_id),
-                    empty_object(),
-                );
-            }
-        }
         for (index, module_id) in array_field(character, "modules").iter().enumerate() {
             collector.emit(
                 owner,
@@ -1038,7 +1019,7 @@ fn scan_character_assets(
         array_field(character, "additionalAssets"),
         collector,
     );
-    if string_field(character, "type") != Some("group") {
+    {
         if let Some(files) = character
             .get("vits")
             .and_then(|vits| vits.get("files"))
@@ -1724,7 +1705,7 @@ mod tests {
             "pluginCustomStorage":{"synthetic":"{{inlay::plugin}}"},
             "characters":[
                 {"chaId":"character","type":"character","image":"assets/portrait","chatPage":0,"additionalAssets":[["one","assets/one","png"]],"chats":[{"id":"chat","name":"{{inlay::title}}","folderId":"folder","message":[{"role":"user","data":"{{inlay::first}} {{inlay::first}}"},{"role":"char","data":"{{inlay::second}}","swipes":["{{inlay::swipe}}"]}]}]},
-                {"chaId":"group","type":"group","characters":["character"],"chatPage":0,"chats":[{"id":"group-chat","message":[{"role":"char","data":"{{inlay::group}}"}]}]}
+                {"chaId":"second","type":"character","chatPage":0,"chats":[{"id":"second-chat","message":[{"role":"char","data":"{{inlay::second}}"}]}]}
             ]
         });
         let expected = rebuild_f0_v1(&database, &[], &[]).unwrap().references;

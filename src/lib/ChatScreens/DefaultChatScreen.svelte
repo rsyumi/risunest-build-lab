@@ -5,11 +5,11 @@
 
     import Suggestion from './Suggestion.svelte';
     import { createLiveChatParserIndirections, createLiveChatParserSource } from 'src/ts/liveDisplayParserLease';
-    import { CameraIcon, DatabaseIcon, DicesIcon, GlobeIcon, ImagePlusIcon, LanguagesIcon, Laugh, MenuIcon, MicOffIcon, PackageIcon, Plus, RefreshCcwIcon, ReplyIcon, Send, StepForwardIcon, XIcon, BrainIcon, ArrowDown, SparkleIcon } from "@lucide/svelte";
+    import { CameraIcon, DatabaseIcon, GlobeIcon, ImagePlusIcon, LanguagesIcon, Laugh, MenuIcon, MicOffIcon, PackageIcon, Plus, RefreshCcwIcon, ReplyIcon, Send, StepForwardIcon, XIcon, BrainIcon, ArrowDown, SparkleIcon } from "@lucide/svelte";
     import { selectedCharID, PlaygroundStore, createSimpleCharacter, hypaV3ModalOpen, ScrollToMessageStore, additionalChatMenu, additionalFloatingActionButtons, easyPanelStore, chatPanelStore } from "../../ts/stores.svelte";
     import { onDestroy } from 'svelte';
     import { isCompositionKey } from 'src/ts/hotkeyModifier';
-    import { type Chat as ChatRecord, type Database, type character, type groupChat, type Message } from "../../ts/storage/database.svelte";
+    import { type Chat as ChatRecord, type Database, type character, type Message } from "../../ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
     import { chatProcessStage, doingChat, sendChat, notifyGenerationCompletion, getSelectedBoundedGenerationFallbackReason, getHistoryWindowMemoryMode, openSelectedHistoryWindow } from "../../ts/process/index.svelte";
     import { getPersonaPrompt, parseKeyValue, sleep } from "../../ts/util";
@@ -30,7 +30,7 @@
     import { processMultiCommand } from 'src/ts/process/command'
     import { postChatFile } from 'src/ts/process/files/multisend';
     import InlayFilePreview from './InlayFilePreview.svelte';
-    import { ConnectionOpenStore } from 'src/ts/sync/multiuser';
+
     import Chats from './Chats.svelte';
     import Button from '../UI/GUI/Button.svelte';
     import PluginDefinedIcon from '../Others/PluginDefinedIcon.svelte';
@@ -111,7 +111,6 @@
     let messageInput:string = $state('')
     let messageInputTranslate:string = $state('')
     let openMenu = $state(false)
-    let autoMode = $state(false)
     let rerollBusy = $state(false)
     let sending = $state(false)
     let doingChatInputTranslate = false
@@ -342,7 +341,7 @@
                 !submittedInput.startsWith('/') && submittedFiles.length === 0 &&
                 (submittedInput !== '' || (continueResponse && !DBState.db.useSayNothing)) &&
                 !pluginV2.editinput?.size &&
-                ![...(DBState.db.presetRegex ?? []), ...(currentCharacter.type === 'character' ? currentCharacter.customscript ?? [] : []), ...getModuleRegexScripts()]
+                ![...(DBState.db.presetRegex ?? []), ...(currentCharacter.customscript ?? []), ...getModuleRegexScripts()]
                     .some((script) => script.type === 'editinput')) {
                 const target = persistentRuntime.captureSelectedConversationTarget()
                 const authority = persistentRuntime.captureSelectedConversationAuthority()
@@ -352,7 +351,7 @@
                     const controller = persistentRuntime.captureWindowedConversationMutationController(target, chat, authority.totalMessages)
                     if (!controller) return
                     try {
-                        if (!controller.applyRange(0, 0, [{ role: 'user', data: submittedInput, time: Date.now(), name: $ConnectionOpenStore ? DBState.db.username : null, chatId: v4() }], 'append')) return
+                        if (!controller.applyRange(0, 0, [{ role: 'user', data: submittedInput, time: Date.now(), name: null, chatId: v4() }], 'append')) return
                     } finally { controller.release() }
                     if (messageInput === submittedInput) { messageInput = ''; messageInputTranslate = '' }
                     await persistentRuntime.flushPendingData('generation-input')
@@ -404,7 +403,7 @@
     ) {
         const character = DBState.db.characters[$selectedCharID]
         const target = persistentRuntime.captureSelectedConversationTarget()
-        if (character?.type !== 'character' || !target) return
+        if (!character || !target) return
         let input = submittedInput
         for (const file of submittedFiles) {
             input += `{{inlayed::${file}}}`
@@ -415,7 +414,7 @@
             return
         }
         try {
-            const name = $ConnectionOpenStore ? DBState.db.username : null
+            const name = null
             if (input === '') {
                 if (DBState.db.useSayNothing && window.chat.message.at(-1)?.role !== 'user') {
                     const message: Message = { role: 'user', data: '*says nothing*', name, chatId: v4() }
@@ -486,60 +485,48 @@
         }
 
         if(input === ''){
-            if(character.type !== 'group'){
-                if(messages.length === 0 || messages[messages.length - 1].role !== 'user'){
-                    if(DBState.db.useSayNothing){
-                        appendConversationMessage(mutationTarget, {
-                            role: 'user',
-                            data: '*says nothing*',
-                            name: $ConnectionOpenStore ? DBState.db.username : null
-                        })
-                    }
+            if(messages.length === 0 || messages[messages.length - 1].role !== 'user'){
+                if(DBState.db.useSayNothing){
+                    appendConversationMessage(mutationTarget, {
+                        role: 'user',
+                        data: '*says nothing*',
+                        name: null
+                    })
                 }
             }
         }
         else{
-            if(character.type === 'character'){
-                const appended = await appendDefaultChatInput({
-                    target: mutationTarget,
-                    recaptureTarget: () =>
-                        requireConversationMutationTarget(context),
-                    runInputTrigger: (onConversationCommit) =>
-                        runTrigger(character, 'input', {
-                            chat: mutationTarget.conversation,
-                            onConversationCommit,
-                        }),
-                    processInput: (onConversationCommit) =>
-                        processScript(
-                            character,
-                            input,
-                            'editinput',
-                            {},
-                            { onConversationCommit },
-                        ),
-                    isTargetCurrent: (target) => {
-                        context.requireCurrent()
-                        return conversationTargetIsCurrent(target)
-                    },
-                    createMessage: (data) => ({
-                        role: 'user',
-                        data,
-                        time: Date.now(),
-                        name: $ConnectionOpenStore ? DBState.db.username : null,
+            const appended = await appendDefaultChatInput({
+                target: mutationTarget,
+                recaptureTarget: () =>
+                    requireConversationMutationTarget(context),
+                runInputTrigger: (onConversationCommit) =>
+                    runTrigger(character, 'input', {
+                        chat: mutationTarget.conversation,
+                        onConversationCommit,
                     }),
-                })
-                context.requireCurrent()
-                if (!appended) return
-                mutationTarget = requireConversationMutationTarget(context)
-            }
-            else{
-                appendConversationMessage(mutationTarget, {
+                processInput: (onConversationCommit) =>
+                    processScript(
+                        character,
+                        input,
+                        'editinput',
+                        {},
+                        { onConversationCommit },
+                    ),
+                isTargetCurrent: (target) => {
+                    context.requireCurrent()
+                    return conversationTargetIsCurrent(target)
+                },
+                createMessage: (data) => ({
                     role: 'user',
-                    data: input,
+                    data,
                     time: Date.now(),
-                    name: $ConnectionOpenStore ? DBState.db.username : null
-                })
-            }
+                    name: null,
+                }),
+            })
+            context.requireCurrent()
+            if (!appended) return
+            mutationTarget = requireConversationMutationTarget(context)
         }
         if (messageInput === submittedInput) {
             messageInput = ''
@@ -595,7 +582,7 @@
                     isCurrent,
                     createId: v4,
                     flush: () => persistentRuntime.flushPendingData('reroll-candidate'),
-                    generate: () => sendChat(-1, { signal: abortController!.signal, historyLimit: true }),
+                    generate: () => sendChat({ signal: abortController!.signal, historyLimit: true }),
                     aborted: () => abortController!.signal.aborted,
                 })
                 if (completed) {
@@ -620,7 +607,7 @@
             isCurrent: () => isSelectedConversationTarget(target),
             createId: v4,
             flush: () => persistentRuntime.flushPendingData('reroll-candidate'),
-            generate: () => sendChat(-1, { signal, historyLimit: true }),
+            generate: () => sendChat({ signal, historyLimit: true }),
             aborted: () => signal.aborted,
             expectedLastMessage,
         })
@@ -713,7 +700,7 @@
         try {
             await runSelectedConversationOperation('select-alternate-greeting', (context) => {
                 const { character, conversation, session } = context.requireCurrent()
-                if (character.type === 'group') return
+
                 moveAlternateGreeting(
                     conversation,
                     session,
@@ -729,13 +716,13 @@
 
     async function removeCreatorQuote(): Promise<void> {
         const character = DBState.db.characters[$selectedCharID]
-        if (!character || character.type === 'group') return
+        if (!character) return
         try {
             const changed = await persistentRuntime.mutatePersistentCharacterDetail(
                 character.chaId,
                 'remove-creator-quote',
                 ({ character: storedCharacter }) => {
-                    if (storedCharacter.type !== 'group') storedCharacter.removedQuotes = true
+                    storedCharacter.removedQuotes = true
                 },
             )
             if (!changed) alertError(language.errors.noData)
@@ -769,7 +756,7 @@
         abortController = new AbortController()
         let completed = false
         try {
-            completed = await sendChat(-1, {
+            completed = await sendChat({
                 signal: abortController.signal,
                 continue: continued,
                 historyLimit,
@@ -793,21 +780,7 @@
         }
     }
 
-    async function runAutoMode() {
-        if(autoMode){
-            autoMode = false
-            return
-        }
-        if ($doingChat || sending || rerollBusy) return
-        const selectedChar = $selectedCharID
-        autoMode = true
-        while(autoMode){
-            await sendChatMain()
-            if(selectedChar !== $selectedCharID){
-                autoMode = false
-            }
-        }
-    }
+
 
     async function appendPlaygroundMessage() {
         return runSelectedConversationOperation(
@@ -999,7 +972,7 @@
         releaseScreenshotSource()
     }
 
-    function captureVariables(source: character | groupChat, chat: ChatRecord) {
+    function captureVariables(source: character, chat: ChatRecord) {
         const variables = Object.fromEntries([
             ...parseKeyValue(DBState.db.templateDefaultVariables ?? ''),
             ...parseKeyValue(source.defaultVariables ?? ''),
@@ -1011,19 +984,12 @@
     }
 
     function createCaptureParserContext(
-        source: character | groupChat,
+        source: character,
         chat: ChatRecord,
     ) {
         const character = snapshotChatScreenshotCharacter(source, chat)
-        const memberIds = new Set(source.type === 'group' ? source.characters : [])
-        const members = DBState.db.characters
-            .filter((candidate) => candidate !== source && memberIds.has(candidate.chaId))
-            .map((candidate) => snapshotChatScreenshotCharacter(
-                candidate,
-                candidate.chats[candidate.chatPage] ?? chat,
-            ))
         const database = {
-            characters: [character, ...members],
+            characters: [character],
             mainPrompt: DBState.db.mainPrompt,
             jailbreak: DBState.db.jailbreak,
             globalNote: DBState.db.globalNote,
@@ -1067,16 +1033,14 @@
     }
 
     function createScreenshotRenderContext(
-        source: character | groupChat,
+        source: character,
         chat: ChatRecord,
     ): ChatScreenshotRenderContext {
         return {
             character: createSimpleCharacter(source),
             characterName: source.name,
             characterImageSource: source.image,
-            characterLargePortrait: source.type === 'group'
-                ? false
-                : source.largePortrait ?? false,
+            characterLargePortrait: source.largePortrait ?? false,
             userName: currentUsername,
             userImageSource: userIcon,
             userLargePortrait: userIconPortrait ?? false,
@@ -1174,9 +1138,7 @@
         parserIndirections: liveParserIndirections,
         unsafeDependencies: (current) => {
             const moduleTriggers = getModuleTriggers()
-            const triggers = current.character.type === 'group'
-                ? moduleTriggers
-                : [...(current.character.triggerscript ?? []), ...moduleTriggers]
+            const triggers = [...(current.character.triggerscript ?? []), ...moduleTriggers]
             const regexScripts = [
                 ...(DBState.db.presetRegex ?? []),
                 ...(current.character.customscript ?? []),
@@ -1397,7 +1359,7 @@
                     class="{DBState.db.fixedChatTextarea ? 'sticky pt-2 pb-2 right-0 bottom-0 bg-bgcolor' : 'mt-2 mb-2'} flex items-stretch w-full"
                     style="{DBState.db.fixedChatTextarea ? 'z-index:29;' : ''}"
             >
-                {#if DBState.db.useChatSticker && currentCharacter.type !== 'group'}
+                {#if DBState.db.useChatSticker}
                     <div onclick={()=>{toggleStickers = !toggleStickers}}
                          class={"ml-4 bg-textcolor2 flex justify-center items-center  w-12 h-12 rounded-md hover:bg-blue-500 transition-colors "+(toggleStickers ? 'text-green-500':'text-textcolor')}>
                         <Laugh/>
@@ -1473,7 +1435,7 @@
                             class="peer-focus:border-textcolor  flex justify-center border-y border-darkborderc items-center text-textcolor p-3 hover:bg-blue-500 hover:text-white transition-colors" onclick={abortChat}
                             style:height={inputHeight}
                     >
-                        <div class="loadmove chat-process-stage-{$chatProcessStage}" class:autoload={autoMode}></div>
+                        <div class="loadmove chat-process-stage-{$chatProcessStage}"></div>
                     </button>
                 {:else}
                     <button
@@ -1638,12 +1600,7 @@
                 <div class="{DBState.db.fixedChatTextarea ? 'fixed' : 'absolute'} right-2 bottom-16 p-5 bg-darkbg flex flex-col gap-3 text-textcolor rounded-md" onclick={(e) => {
                     e.stopPropagation()
                 }}>
-                    {#if DBState.db.characters[$selectedCharID].type === 'group'}
-                        <div class="flex items-center cursor-pointer hover:text-green-500 transition-colors" onclick={runAutoMode}>
-                            <DicesIcon />
-                            <span class="ml-2">{language.autoMode}</span>
-                        </div>
-                    {/if}
+
 
                     
                     <!-- svelte-ignore block_empty -->
@@ -1820,11 +1777,6 @@
     .chat-process-stage-4{
         border-top: 0.4rem solid #8b5cf6;
         border-left: 0.4rem solid #8b5cf6;
-    }
-
-    .autoload{
-        border-top: 0.4rem solid #10b981;
-        border-left: 0.4rem solid #10b981;
     }
 
     @keyframes spin {

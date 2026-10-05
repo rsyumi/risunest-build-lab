@@ -1,6 +1,6 @@
 import { normalizePocketColdPayload } from '../drive/pocketRisuFeatures'
 import { safeStructuredClone } from "../polyfill"
-import type { Database, character, groupChat } from "../storage/database.svelte"
+import type { Database, character } from "../storage/database.svelte"
 import { compress, decompress } from 'fflate'
 
 export const coldStorageHeader = '\uEF01COLDSTORAGE\uEF01'
@@ -99,22 +99,20 @@ export function listDatabaseRootResources(
     return resources
 }
 
-export function listCharacterResources(value: character | groupChat): string[] {
+export function listCharacterResources(value: character): string[] {
     const resources: string[] = []
     addResource(resources, value.image)
     for (const emotion of value.emotionImages ?? []) {
         addResource(resources, emotion[1])
     }
-    if (value.type !== 'group') {
-        for (const asset of value.additionalAssets ?? []) {
-            addResource(resources, asset[1])
-        }
-        for (const file of Object.values(value.vits?.files ?? {})) {
-            addResource(resources, file)
-        }
-        for (const asset of value.ccAssets ?? []) {
-            addResource(resources, asset.uri)
-        }
+    for (const asset of value.additionalAssets ?? []) {
+        addResource(resources, asset[1])
+    }
+    for (const file of Object.values(value.vits?.files ?? {})) {
+        addResource(resources, file)
+    }
+    for (const asset of value.ccAssets ?? []) {
+        addResource(resources, asset.uri)
     }
     return resources
 }
@@ -152,7 +150,7 @@ export function replaceDatabaseRootResources<T extends Omit<Database, 'character
     return cloned
 }
 
-export function replaceCharacterResources<T extends character | groupChat>(
+export function replaceCharacterResources<T extends character>(
     value: T,
     replacements: Readonly<Record<string, string>>,
 ): T {
@@ -165,16 +163,14 @@ export function replaceCharacterResources<T extends character | groupChat>(
         }
     }
 
-    if (cha.type !== 'group') {
-        for (const asset of cha.additionalAssets ?? []) {
-            asset[1] = replaceData(asset[1], replacements)
-        }
-        for (const key of Object.keys(cha.vits?.files ?? {})) {
-            cha.vits!.files[key] = replaceData(cha.vits!.files[key], replacements)
-        }
-        for (const asset of cha.ccAssets ?? []) {
-            asset.uri = replaceData(asset.uri, replacements)
-        }
+    for (const asset of cha.additionalAssets ?? []) {
+        asset[1] = replaceData(asset[1], replacements)
+    }
+    for (const key of Object.keys(cha.vits?.files ?? {})) {
+        cha.vits!.files[key] = replaceData(cha.vits!.files[key], replacements)
+    }
+    for (const asset of cha.ccAssets ?? []) {
+        asset.uri = replaceData(asset.uri, replacements)
     }
     return cha
 }
@@ -190,12 +186,12 @@ export function replaceColdStoragePayloadResources(data: unknown, replacer: { [k
         return data
     }
 
-    const cloned = safeStructuredClone(data) as { character: character | groupChat }
+    const cloned = safeStructuredClone(data) as { character: character }
     cloned.character = replaceCharacterResources(cloned.character, replacer)
     return cloned
 }
 
-export function listColdDataKeysFromCharacter(character: character | groupChat): string[] {
+export function listColdDataKeysFromCharacter(character: character): string[] {
     const keys: string[] = []
     if (character.coldstorage) {
         keys.push(character.coldstorage)

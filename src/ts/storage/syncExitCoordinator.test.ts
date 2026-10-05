@@ -43,6 +43,119 @@ function harness(adapter: SyncExitDrainAdapter | null = null) {
 }
 
 describe('sync exit coordinator', () => {
+    it.each(['flushLocal', 'checkpointLocal', 'captureTarget'] as const)(
+        'remembers repeated close during %s and cancels sync only after saving and fencing', async (step) => {
+            const gate = deferred<void>()
+            const adapter = { id: 'server', drain: vi.fn(), cancel: vi.fn(async () => {}) }
+            const h = harness(adapter)
+            if (step === 'captureTarget') h.dependencies.captureTarget.mockImplementation(async () => {
+                await gate.promise
+                return target
+            })
+            else h.dependencies[step].mockImplementation(() => gate.promise)
+            const exit = h.coordinator.requestExit()
+            await vi.waitFor(() => expect(h.dependencies[step]).toHaveBeenCalled())
+            expect(h.coordinator.requestExitWithoutSync()).toBe(true)
+            expect(adapter.cancel).not.toHaveBeenCalled()
+            gate.resolve()
+            await expect(exit).resolves.toBe('exit')
+            expect(h.dependencies.checkpointLocal).toHaveBeenCalledOnce()
+            expect(h.dependencies.acquireEditFence).toHaveBeenCalledOnce()
+            expect(adapter.drain).not.toHaveBeenCalled()
+            expect(adapter.cancel).toHaveBeenCalledExactlyOnceWith('exit-unsynced')
+        },
+    )
+
+    it('cancels a drain before its soft prompt and waits for cancellation', async () => {
+        const cancelled = deferred<void>()
+        let signal!: AbortSignal
+        const adapter = {
+            id: 'server',
+            drain: vi.fn((_target: SyncExitTarget, current: AbortSignal) => {
+                signal = current
+                return new Promise<{ kind: 'complete' }>(() => {})
+            }),
+            cancel: vi.fn(() => cancelled.promise),
+        }
+        const h = harness(adapter)
+        const exit = h.coordinator.requestExit()
+        await vi.waitFor(() => expect(adapter.drain).toHaveBeenCalledOnce())
+        h.coordinator.requestExitWithoutSync()
+        await vi.waitFor(() => expect(adapter.cancel).toHaveBeenCalledOnce())
+        expect(signal.aborted).toBe(true)
+        h.coordinator.requestExitWithoutSync()
+        expect(h.fence.release).not.toHaveBeenCalled()
+        cancelled.resolve()
+        await expect(exit).resolves.toBe('exit')
+        expect(adapter.cancel).toHaveBeenCalledOnce()
+    })
+
+    it('does not turn repeated close into permission to discard a failed local save', async () => {
+        const h = harness()
+        h.dependencies.flushLocal.mockRejectedValueOnce(new Error('disk full'))
+        const exit = h.coordinator.requestExit()
+        h.coordinator.requestExitWithoutSync()
+        await vi.waitFor(() => expect(h.coordinator.snapshot().phase).toBe('local-failed'))
+        h.coordinator.requestExitWithoutSync()
+        await Promise.resolve()
+        expect(h.dependencies.acquireEditFence).not.toHaveBeenCalled()
+        h.coordinator.decide('cancel-exit')
+        await expect(exit).resolves.toBe('cancelled')
+        await expect(h.coordinator.requestExit()).resolves.toBe('exit')
+        expect(h.dependencies.captureTarget).toHaveBeenCalledOnce()
+    })
+
+    it('retains an explicit cancel choice while a repeated close arrives during cancellation', async () => {
+        const cancelled = deferred<void>()
+        const adapter = {
+            id: 'server',
+            drain: vi.fn(async () => ({ kind: 'blocked' as const, reason: 'offline' })),
+            cancel: vi.fn(() => cancelled.promise),
+        }
+        const h = harness(adapter)
+        const exit = h.coordinator.requestExit()
+        await vi.waitFor(() => expect(h.coordinator.snapshot().phase).toBe('remote-blocked'))
+        h.coordinator.decide('cancel-exit')
+        await vi.waitFor(() => expect(adapter.cancel).toHaveBeenCalledOnce())
+        h.coordinator.requestExitWithoutSync()
+        cancelled.resolve()
+        await expect(exit).resolves.toBe('cancelled')
+        adapter.drain.mockResolvedValueOnce({ kind: 'blocked', reason: 'offline' })
+        const retry = h.coordinator.requestExit()
+        await vi.waitFor(() => expect(adapter.drain).toHaveBeenCalledTimes(2))
+        expect(h.coordinator.snapshot().phase).toBe('remote-blocked')
+        h.coordinator.decide('exit-unsynced')
+        await expect(retry).resolves.toBe('exit')
+    })
+
+    it('does not bypass a replacement fence on repeated close', async () => {
+        const h = harness()
+        h.dependencies.acquireEditFence.mockRejectedValue(new Error('replacement active'))
+        const exit = h.coordinator.requestExit()
+        await vi.waitFor(() => expect(h.coordinator.snapshot().phase).toBe('edit-blocked'))
+        h.coordinator.requestExitWithoutSync()
+        await Promise.resolve()
+        expect(h.dependencies.captureTarget).not.toHaveBeenCalled()
+        h.coordinator.decide('cancel-exit')
+        await expect(exit).resolves.toBe('cancelled')
+    })
+
+    it('honors repeated close after choosing to wait', async () => {
+        vi.useFakeTimers()
+        try {
+            const adapter = { id: 'server', drain: vi.fn(() => new Promise<{ kind: 'complete' }>(() => {})), cancel: vi.fn(async () => {}) }
+            const h = harness(adapter)
+            const exit = h.coordinator.requestExit()
+            await vi.advanceTimersByTimeAsync(5_000)
+            h.coordinator.decide('wait')
+            await vi.advanceTimersByTimeAsync(0)
+            expect(h.coordinator.snapshot().phase).toBe('remote-waiting')
+            h.coordinator.requestExitWithoutSync()
+            await expect(exit).resolves.toBe('exit')
+            expect(adapter.cancel).toHaveBeenCalledExactlyOnceWith('exit-unsynced')
+        } finally { vi.useRealTimers() }
+    })
+
     it('resumes a cancelled adapter only after its destructive exit fence releases', async () => {
         const adapter = {
             id: 'external',

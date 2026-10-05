@@ -46,7 +46,6 @@ RisuNest has a few screens that are used to interact with the software.
     - Send button: A button that you can click to send the message. You can also press enter key to send the message.
     - Hamburger button: A button that you can click to open the input box menu.
 - Input box menu: 
-    - Automode button: A button that you can click to enable or disable the automode. If enabled, it will automatically send the message. only appears on group chat.
     - Stop TTS button: A button that you can click to stop the TTS. only appears if TTS is playing.
     - Continue Response button: If pressed, it will continue generating the response.
     - Chat list button: If pressed, it will open the chat list.

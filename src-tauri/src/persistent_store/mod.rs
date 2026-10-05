@@ -936,12 +936,12 @@ pub(crate) struct PersistentStore {
     message_object_roots: MessageObjectRootsCache,
 }
 
-/// The message object roots each sweep target last read, kept while neither
+/// Disk-backed roots each sweep target last read, kept while neither
 /// connection has seen a change and the same revision leases are held.
 #[derive(Default)]
 struct MessageObjectRootsCache {
-    library: Option<(MessageObjectRootsToken, message_pages::ObjectRoots)>,
-    device: Option<(MessageObjectRootsToken, message_pages::ObjectRoots)>,
+    library: Option<(MessageObjectRootsToken, message_pages::ObjectRoots, tempfile::TempDir)>,
+    device: Option<(MessageObjectRootsToken, message_pages::ObjectRoots, tempfile::TempDir)>,
     #[cfg(test)]
     computed: usize,
 }
@@ -971,19 +971,22 @@ impl MessageObjectRootsCache {
         &mut self,
         target: MessageObjectStore,
         token: MessageObjectRootsToken,
-        read: impl FnOnce() -> StoreResult<message_pages::ObjectRoots>,
+        repository_root: &Path,
+        read: impl FnOnce(Connection) -> StoreResult<message_pages::ObjectRoots>,
     ) -> StoreResult<&message_pages::ObjectRoots> {
         let slot = match target {
             MessageObjectStore::Library => &mut self.library,
             MessageObjectStore::Device => &mut self.device,
         };
         let current = match slot.take() {
-            Some((cached, roots)) if cached == token => (cached, roots),
+            Some((cached, roots, scratch)) if cached == token => (cached, roots, scratch),
             _ => {
-                let roots = read()?;
+                let scratch = crate::external_storage::leftovers::managed_scratch(repository_root, "message-roots-")
+                    .map_err(|error| StoreError::Store { message: error.to_string() })?;
+                let roots = read(Connection::open(scratch.path().join("roots.sqlite"))?)?;
                 #[cfg(test)]
                 { self.computed += 1; }
-                (token, roots)
+                (token, roots, scratch)
             }
         };
         Ok(&slot.insert(current).1)
@@ -993,7 +996,7 @@ impl MessageObjectRootsCache {
     /// its own commit. Its cursor, marks and deletions reach no target's roots.
     fn committed(&mut self, before: (u64, u64), library: &Connection, device: &Connection) {
         let after = (library.total_changes(), device.total_changes());
-        for (token, _) in [&mut self.library, &mut self.device].into_iter().flatten() {
+        for (token, _, _) in [&mut self.library, &mut self.device].into_iter().flatten() {
             if token.changes == before {
                 token.changes = after;
             }
@@ -1033,10 +1036,13 @@ impl DataHealthReader {
     fn note_quarantined_intents(&self, findings: &mut crate::data_health::Findings) {
         use crate::data_health::{codes, FindingSink, Finding};
         for intent in &self.quarantined {
-            findings.record(
-                Finding::new(codes::INTENT_QUARANTINED, "intent", intent.request_id.clone(), intent.error.clone())
-                    .targeting("intent", intent.kind.clone()),
-            );
+            let finding = Finding::new(codes::INTENT_QUARANTINED, "intent", intent.request_id.clone(), intent.error.clone())
+                .targeting("intent", intent.kind.clone());
+            findings.record(if intent.discardable {
+                finding.at(intent.token.clone(), 0)
+            } else {
+                finding
+            });
         }
     }
 
@@ -2903,8 +2909,8 @@ impl PersistentStore {
             let transaction = device.transaction()?;
             let token = MessageObjectRootsToken::read(&self.connection, &transaction, lease_ids)?;
             let before = token.changes;
-            let roots = self.message_object_roots.roots(target, token, || {
-                message_pages::object_roots(&self.connection, leases, &transaction, &transaction)
+            let roots = self.message_object_roots.roots(target, token, &self.repository_root, |scratch| {
+                message_pages::object_roots(&self.connection, leases, &transaction, &transaction, scratch)
             })?;
             let sweep = message_pages::sweep_objects(
                 &transaction,
@@ -2922,8 +2928,8 @@ impl PersistentStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let token = MessageObjectRootsToken::read(&transaction, device.connection(), lease_ids)?;
         let before = token.changes;
-        let roots = self.message_object_roots.roots(target, token, || {
-            message_pages::object_roots(&transaction, leases, device.connection(), &transaction)
+        let roots = self.message_object_roots.roots(target, token, &self.repository_root, |scratch| {
+            message_pages::object_roots(&transaction, leases, device.connection(), &transaction, scratch)
         })?;
         let sweep = message_pages::sweep_objects(
             &transaction,
@@ -2941,6 +2947,11 @@ impl PersistentStore {
     #[cfg(test)]
     pub(crate) fn message_object_roots_computed(&self) -> usize {
         self.message_object_roots.computed
+    }
+
+    pub(super) fn invalidate_message_object_roots(&mut self) {
+        self.message_object_roots.library = None;
+        self.message_object_roots.device = None;
     }
 
     fn record_asset_gc_maintenance_cursor(&mut self, cursor: Option<&str>) -> StoreResult<()> {

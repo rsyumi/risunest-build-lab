@@ -97,13 +97,6 @@ vi.mock('src/ts/process/scripts', () => ({
         })
         if (!value.includes('{{char}}')) return value
         if (typeof arg.chara === 'string') return value.replaceAll('{{char}}', arg.chara)
-        if (arg.chara?.type === 'group') {
-            const message = arg.chara.chats[arg.chara.chatPage].message.at(-1)
-            const member = arg.chara.characters
-                .map((id: string) => live.db.characters.find((candidate: any) => candidate.chaId === id))
-                .find((candidate: any) => candidate?.chaId === message?.saying)
-            return value.replaceAll('{{char}}', member?.name ?? arg.chara.name)
-        }
         return value.replaceAll('{{char}}', arg.chara?.name ?? '')
     },
 }))
@@ -115,7 +108,6 @@ vi.mock('src/ts/process/scriptings', () => ({
 }))
 vi.mock('src/ts/process/triggers', () => ({ runTrigger: actionMocks.runTrigger }))
 vi.mock('src/ts/process/tts', () => ({ sayTTS: vi.fn() }))
-vi.mock('src/ts/sync/multiuser', () => ({ ConnectionOpenStore: writable(false) }))
 vi.mock('src/ts/util', () => ({
     capitalize: (value: string) => value,
     getUserIcon: () => '',
@@ -1918,51 +1910,5 @@ describe('Chat frozen capture presentation', () => {
             )
             expect(requireCurrent).toHaveBeenCalledTimes(2)
         })
-    })
-
-    test('renders each frozen group turn with the same names as the normal Chat presentation', async () => {
-        const memberA = { ...context().parserContext.character, name: 'Member A', chaId: 'member-a' }
-        const memberB = { ...context().parserContext.character, name: 'Member B', chaId: 'member-b' }
-        const messages = [
-            { role: 'char' as const, data: '{{char}}', saying: 'member-a' },
-            { role: 'char' as const, data: '{{char}}', saying: 'member-b' },
-        ]
-        const group = {
-            type: 'group' as const,
-            name: 'Frozen Group',
-            chaId: 'group',
-            chatPage: 0,
-            chats: [{ message: messages, note: '', name: '', localLore: [], bookmarks: [] }],
-            characters: ['member-a', 'member-b'],
-            customscript: [],
-        }
-        const frozen = context()
-        frozen.character = null
-        frozen.characterName = group.name
-        frozen.parserContext.character = group as any
-        frozen.parserContext.database = { characters: [group, memberA, memberB] } as any
-        live.db.characters = [group, memberA, memberB]
-
-        mounted = mount(ChatCaptureBatchHarness, {
-            target,
-            props: { messages, captureContext: frozen as any, firstIndex: 4 },
-        })
-
-        await vi.waitFor(() => expect(target.querySelectorAll('[data-chat-body-probe]')).toHaveLength(2))
-        expect([...target.querySelectorAll('[data-chat-body-probe]')].map((node) => node.textContent)).toEqual([
-            'Frozen Group',
-            'Frozen Group',
-        ])
-        expect(parserCalls.filter((call) => call.role === 'char').map((call) => call.chara)).toEqual([
-            'Frozen Group',
-            'Frozen Group',
-        ])
-        expect(parserCalls.filter((call) => call.role === 'char').map((call) => [
-            call.chatID,
-            call.projectedChatID,
-        ])).toEqual([
-            [4, 0],
-            [5, 1],
-        ])
     })
 })

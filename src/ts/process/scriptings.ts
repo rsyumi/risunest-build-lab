@@ -8,7 +8,7 @@ import {
 } from "../parser/chatVar.svelte";
 import { hasher, type simpleCharacterArgument, risuChatParser } from "../parser/parser.svelte";
 import type { LuaEngine, LuaFactory } from "wasmoon";
-import { getCurrentCharacter, getCurrentChat, getDatabase, setDatabase, type Chat, type Database, type character, type groupChat, type triggerscript } from "../storage/database.svelte";
+import { getCurrentCharacter, getCurrentChat, getDatabase, setDatabase, type Chat, type Database, type character, type triggerscript } from "../storage/database.svelte";
 import { get } from "svelte/store";
 import { DBState, ReloadChatPointer, ReloadGUIPointer, selectedCharID } from "../stores.svelte";
 import { alertSelect, alertError, alertInput, alertNormal, alertConfirm } from "../alert";
@@ -57,7 +57,7 @@ type CapturedCharacterField = 'name'|'desc'|'firstMessage'|'backgroundHTML'
 
 interface CapturedCharacterOwner {
     database: Database
-    character: character|groupChat
+    character: character
     fields: Record<CapturedCharacterField, string|undefined>
 }
 
@@ -71,7 +71,7 @@ interface BasicScriptingEngineState {
     setVar?: (key:string, value:string) => boolean|void,
     getVar?: (key:string) => string,
     operationDatabase?: ReturnType<ConversationOperationContext['createDatabaseView']>
-    operationCharacter?: character|groupChat|simpleCharacterArgument
+    operationCharacter?: character|simpleCharacterArgument
     selectedCharacterId?: string
     capturedCharacterOwner?: CapturedCharacterOwner
     ensureConversationOperation?: () => void
@@ -112,7 +112,7 @@ subscribeRuntimePerformanceProfile(() => {
 })
 
 export async function runScripted(code:string, arg:{
-    char?:character|groupChat|simpleCharacterArgument,
+    char?:character|simpleCharacterArgument,
     chat?:Chat
     data?: string|OpenAIChat[],
     setVar?: (key:string, value:string) => boolean|void,
@@ -142,9 +142,7 @@ export async function runScripted(code:string, arg:{
             character: capturedCharacter,
             fields: {
                 name: capturedCharacter.name,
-                desc: capturedCharacter.type === 'group'
-                    ? undefined
-                    : capturedCharacter.desc,
+                desc: capturedCharacter.desc,
                 firstMessage: capturedCharacter.firstMessage,
                 backgroundHTML: capturedCharacter.backgroundHTML,
             },
@@ -661,7 +659,7 @@ export async function runScripted(code:string, arg:{
 
                     const character = db.characters[selectedChar]
                     
-                    if (!character || character.type === 'group' || !character.image) {
+                    if (!character || !character.image) {
                         return ''
                     }
                     
@@ -924,9 +922,7 @@ export async function runScripted(code:string, arg:{
                 }
                 const selectedChar = getScriptingCharacterIndex(DBState.db)
                 const char = DBState.db.characters[selectedChar]
-                if(char.type === 'group'){
-                    throw('Character is a group')
-                }
+
                 return char.desc
             })
 
@@ -937,9 +933,7 @@ export async function runScripted(code:string, arg:{
                 if(typeof desc !== 'string'){
                     throw('Invalid data type')
                 }
-                if(ScriptingEngineState.capturedCharacterOwner?.character.type === 'group'){
-                    throw('Character is a group')
-                }
+
                 updateCapturedCharacterField('desc', desc)
             })
 
@@ -1000,9 +994,7 @@ export async function runScripted(code:string, arg:{
             declareAPI('getLoreBooksMain', (id:string, search:string) => {
                 const db = getScriptingDatabase()
                 const selectedChar = db.characters[getScriptingCharacterIndex(db)]
-                if (selectedChar.type !== 'character') {
-                    return
-                }
+
 
                 const loreSources = [
                     selectedChar.chats[selectedChar.chatPage]?.localLore ?? [],
@@ -1035,7 +1027,7 @@ export async function runScripted(code:string, arg:{
                     return
                 }
 
-                if (ScriptingEngineState.operationCharacter?.type !== 'character') {
+                if (!ScriptingEngineState.operationCharacter) {
                     return
                 }
 
@@ -1079,9 +1071,7 @@ export async function runScripted(code:string, arg:{
 
                 const selectedChar = db.characters[getScriptingCharacterIndex(db)]
 
-                if (selectedChar.type !== 'character') {
-                    return
-                }
+
 
                 const fullLoreBooks = (await loadLoreBookV3PromptFromCompatibilitySnapshot()).actives
                 const maxContext = db.maxContext - reserve
@@ -1740,7 +1730,7 @@ function createCurrentConversationOperation(
 }
 
 export async function runLuaEditTrigger<T extends string | OpenAIChat[]>(
-    char: character | groupChat | simpleCharacterArgument,
+    char: character | simpleCharacterArgument,
     mode: string,
     content: T,
     meta?: object,
@@ -1766,7 +1756,7 @@ export async function runLuaEditTrigger<T extends string | OpenAIChat[]>(
         const hasLuaTrigger = (trigger: triggerscript) =>
             trigger?.effect?.[0]?.type === 'triggerlua'
         if (
-            !(char.type !== 'group' && char.triggerscript?.some(hasLuaTrigger)) &&
+            !(char.triggerscript?.some(hasLuaTrigger)) &&
             !getModuleTriggers().some(hasLuaTrigger)
         ) {
             return content
@@ -1818,7 +1808,7 @@ export async function runLuaEditTrigger<T extends string | OpenAIChat[]>(
 }
 
 async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
-    char: character | groupChat | simpleCharacterArgument,
+    char: character | simpleCharacterArgument,
     mode: string,
     content: T,
     meta?: object,
@@ -1833,9 +1823,7 @@ async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
         let data = content
 
         const triggers =
-            char.type === 'group'
-                ? getModuleTriggers()
-                : char.triggerscript
+            char.triggerscript
                       .map<triggerscript>((v) => ({ ...v, lowLevelAccess: false }))
                       .concat(getModuleTriggers())
         if (!triggers.some((trigger) => trigger?.effect?.[0]?.type === 'triggerlua')) {
@@ -1890,7 +1878,7 @@ async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
 }
 
 export async function runLuaButtonTrigger(
-    char: character | groupChat | simpleCharacterArgument,
+    char: character | simpleCharacterArgument,
     data: string,
     conversationOperation?: ConversationOperationContext,
 ): Promise<any> {
@@ -1903,7 +1891,7 @@ export async function runLuaButtonTrigger(
 }
 
 async function runLuaButtonTriggerBatch(
-    char: character|groupChat|simpleCharacterArgument,
+    char: character|simpleCharacterArgument,
     data: string,
     conversationOperation?: ConversationOperationContext,
 ): Promise<any>{
@@ -1911,7 +1899,7 @@ async function runLuaButtonTriggerBatch(
     let ownedOperation: ReturnType<typeof createCurrentConversationOperation> = null
     let operationContext = conversationOperation
     try {
-        const triggers = char.type === 'group' ? getModuleTriggers() : char.triggerscript.map<triggerscript>((v) => ({
+        const triggers = char.triggerscript.map<triggerscript>((v) => ({
             ...v,
             lowLevelAccess: char.type !== 'simple' ? char.lowLevelAccess ?? false : false
         })).concat(getModuleTriggers())

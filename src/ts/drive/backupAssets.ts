@@ -224,26 +224,24 @@ export function createPinnedBackupReferenceAccumulator(
                     characterLabels,
                 )
             }
-            if (value.type !== 'group') {
-                for (const item of value.additionalAssets ?? []) {
-                    addAsset(
-                        assets,
-                        item?.[1],
-                        label(item?.[0] ?? 'Asset'),
-                        characterLabels,
-                    )
-                }
-                for (const [name, key] of Object.entries(value.vits?.files ?? {})) {
-                    addAsset(assets, key, label(name), characterLabels)
-                }
-                for (const item of value.ccAssets ?? []) {
-                    addAsset(
-                        assets,
-                        item?.uri,
-                        label(item?.name ?? 'Asset'),
-                        characterLabels,
-                    )
-                }
+            for (const item of value.additionalAssets ?? []) {
+                addAsset(
+                    assets,
+                    item?.[1],
+                    label(item?.[0] ?? 'Asset'),
+                    characterLabels,
+                )
+            }
+            for (const [name, key] of Object.entries(value.vits?.files ?? {})) {
+                addAsset(assets, key, label(name), characterLabels)
+            }
+            for (const item of value.ccAssets ?? []) {
+                addAsset(
+                    assets,
+                    item?.uri,
+                    label(item?.name ?? 'Asset'),
+                    characterLabels,
+                )
             }
         }
         if (assets.size > 0) characterAssets.set(id, assets)

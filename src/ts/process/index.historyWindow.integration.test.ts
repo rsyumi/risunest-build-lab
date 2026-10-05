@@ -99,12 +99,10 @@ vi.mock('./templates/templates', async () => (await import('./tests/sendChatTest
 vi.mock('./exampleMessages', async () => (await import('./tests/sendChatTestHarness')).exampleMessagesModule())
 vi.mock('./tts', async () => (await import('./tests/sendChatTestHarness')).ttsModule())
 vi.mock('./memory/supaMemory', async () => (await import('./tests/sendChatTestHarness')).supaMemoryModule())
-vi.mock('./group', async () => (await import('./tests/sendChatTestHarness')).groupModule())
 vi.mock('./memory/hypamemory', async () => (await import('./tests/sendChatTestHarness')).hypamemoryModule())
 vi.mock('./embedding/addinfo', async () => (await import('./tests/sendChatTestHarness')).addinfoModule())
 vi.mock('./files/inlays', async () => (await import('./tests/sendChatTestHarness')).inlaysModule({ writeInlayImage: vi.fn() }))
 vi.mock('./models/modelString', async () => (await import('./tests/sendChatTestHarness')).modelStringModule())
-vi.mock('../sync/multiuser', async () => (await import('./tests/sendChatTestHarness')).multiuserModule())
 vi.mock('./inlayScreen', () => ({ runInlayScreen: (_char: unknown, data: string) => ({ text: data }) }))
 vi.mock('./transformers', async () => (await import('./tests/sendChatTestHarness')).transformersModule())
 vi.mock('./memory/hanuraiMemory', async () => (await import('./tests/sendChatTestHarness')).hanuraiMemoryModule())
@@ -339,7 +337,7 @@ describe('a windowed send through the production runtime', () => {
         const { sendChat } = await import('./index.svelte')
         vi.spyOn(console, 'log').mockImplementation(() => undefined)
 
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
         await current.runtime.flushPendingData('history-window-send-test')
 
         expect(current.runtime.getSelectedConversationMode()).toBe('windowed')

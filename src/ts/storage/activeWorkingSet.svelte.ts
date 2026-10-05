@@ -1,4 +1,4 @@
-import type { Chat, Database, Message, character, groupChat } from './database.svelte'
+import type { Chat, Database, Message, character } from './database.svelte'
 import type { CommittedApplyOutcome } from './persistentDataRuntime'
 import { safeStructuredClone } from '../polyfill'
 import { replaceArrayRange } from '../arrayRange'
@@ -14,6 +14,7 @@ import type {
     DataRevision,
     PersistentConversationMetadata,
     PersistentDataStore,
+    PersistentRevisionReader,
 } from './persistentDataStore'
 import {
     createConversationSummaryFromMetadata,
@@ -36,13 +37,11 @@ import {
     createMetadataOnlySelectedConversation,
     isMetadataOnlySelectedConversation,
 } from './selectedConversationLifecycle'
-import { removeGroupMemberReferences } from './groupMembership'
 import { isConversationStreaming } from './streamingConversationRegistry'
 
-type CompleteCharacter = character | groupChat
+type CompleteCharacter = character
 
 const CONVERSATION_HYDRATION_CONCURRENCY = 8
-const RELATED_CHARACTER_HYDRATION_CONCURRENCY = 4
 const WINDOWED_PUBLISH_SETTLE_ATTEMPTS = 8
 const WINDOWED_CHARACTER_ACTIVATION_RETRIES = 3
 
@@ -103,7 +102,6 @@ export interface ActiveWorkingSetDependencies {
     getSelectedCharacterId(): string | null | undefined
     getResidentCharacter?(id: string): CompleteCharacter | null
     publishCharacter(character: CompleteCharacter): void
-    publishCharacterSet(primary: CompleteCharacter, related: CharacterDetail[]): void
     publishConversation(
         characterId: string,
         conversation: Chat,
@@ -291,6 +289,7 @@ export class ActiveWorkingSet {
     private activeSession: ActiveConversationSession | null = null
     private selectedConversationState: SelectedConversationState | null = null
     private promotionFlight: Promise<CompleteSelectedConversationState> | null = null
+    private readonly windowedControllers = new Set<WindowedConversationMutationController>()
     private demotionScheduled = false
     private readonly viewportSourceListeners = new Set<
         ActiveConversationViewportSourceListener
@@ -398,6 +397,54 @@ export class ActiveWorkingSet {
         }
     }
 
+    async prepareWindowedMetadataAdoption(reader: PersistentRevisionReader): Promise<() => void> {
+        const state = this.selectedConversationState
+        if (state?.kind !== 'windowed' ||
+            state.authority.sessionVersion !== state.authority.persistedSessionVersion ||
+            reader.revision < state.authority.storeRevision) return () => {}
+        const authority = state.authority
+        const adoptions: Array<{ controller: WindowedConversationMutationController; messages: Message[] }> = []
+        for (const controller of this.windowedControllers) {
+            if (!controller.isCurrent()) {
+                this.windowedControllers.delete(controller)
+                continue
+            }
+            const messages: Message[] = []
+            const length = controller.chat.message.length
+            for (let offset = 0; offset < length;) {
+                const startIndex = controller.absoluteStartIndex + offset
+                const page = await reader.readConversationWindow({
+                    characterId: state.characterId, conversationId: state.conversationId,
+                    startIndex, limit: Math.min(100, length - offset),
+                })
+                if (!page || page.revision !== reader.revision || page.value.startIndex !== startIndex ||
+                    page.value.characterId !== state.characterId || page.value.conversationId !== state.conversationId ||
+                    page.value.totalMessages !== authority.totalMessages || page.value.messages.length === 0) {
+                    controller.release()
+                    break
+                }
+                messages.push(...page.value.messages)
+                offset += page.value.messages.length
+            }
+            const contentKeys = ['role', 'data', 'saying', 'chatId', 'name', 'disabled', 'isComment'] as const
+            if (messages.length !== length || !messages.every((message, index) =>
+                contentKeys.every((key) => Object.is(message[key], controller.chat.message[index]?.[key])))) {
+                controller.release()
+                continue
+            }
+            adoptions.push({ controller, messages })
+        }
+        return () => {
+            const current = this.selectedConversationState
+            if (current?.kind !== 'windowed' || current.authority.sessionToken !== authority.sessionToken ||
+                current.authority.sessionVersion !== authority.sessionVersion ||
+                current.authority.storeRevision !== reader.revision) return
+            for (const { controller, messages } of adoptions) {
+                if (controller.isCurrent()) replaceArrayRange(controller.chat.message, 0, messages.length, safeStructuredClone(messages))
+            }
+        }
+    }
+
     captureWindowedConversationMutationController(
         target: SelectedConversationTarget,
         chat: Chat,
@@ -415,12 +462,13 @@ export class ActiveWorkingSet {
                 : absoluteStartIndex + chat.message.length !== initialState.authority.totalMessages)
         ) return null
         let released = false
+        const navigationGeneration = initialState.navigationGeneration
         let expectedSessionVersion = initialState.authority.sessionVersion
         const requireState = (): WindowedSelectedConversationState | null => {
             const state = this.selectedConversationState
             return !released
                 && state?.kind === 'windowed'
-                && state.navigationGeneration === initialState.navigationGeneration
+                && state.navigationGeneration === navigationGeneration
                 && state.characterId === initialState.characterId
                 && state.conversationId === initialState.conversationId
                 && state.authority.sessionToken === initialState.authority.sessionToken
@@ -453,7 +501,7 @@ export class ActiveWorkingSet {
                 target[key] = safeStructuredClone(value)
             }
         }
-        return {
+        const controller: WindowedConversationMutationController = {
             chat,
             absoluteStartIndex,
             isCurrent: () => requireState() !== null,
@@ -535,8 +583,16 @@ export class ActiveWorkingSet {
                     throw error
                 }
             },
-            release() { released = true },
+            release: () => {
+                released = true
+                this.windowedControllers.delete(controller)
+            },
         }
+        for (const previous of this.windowedControllers) {
+            if (!previous.isCurrent()) this.windowedControllers.delete(previous)
+        }
+        this.windowedControllers.add(controller)
+        return controller
     }
 
     async captureWindowedMessageMutation(
@@ -972,13 +1028,7 @@ export class ActiveWorkingSet {
             this.activeIds = new Set()
             return this.activeCharacterIds
         }
-        const existingIds = new Set(database.characters.map((character) => character.chaId))
-        const relatedIds = selected.type === 'group' && Array.isArray(selected.characters)
-            ? selected.characters.filter(
-                (id, index) => existingIds.has(id) && selected.characters.indexOf(id) === index,
-            )
-            : []
-        this.activeIds = new Set([selected.chaId, ...relatedIds])
+        this.activeIds = new Set([selected.chaId])
         return this.activeCharacterIds
     }
 
@@ -1208,47 +1258,8 @@ export class ActiveWorkingSet {
             generation,
         )
         if (!characterValue) return false
-        let relatedIds = characterValue.type === 'group'
-            ? [...new Set(characterValue.characters)].filter((memberId) => memberId !== id)
-            : []
-        const relatedValues: Array<CharacterDetail | null | undefined> = []
-        for (
-            let start = 0;
-            start < relatedIds.length;
-            start += RELATED_CHARACTER_HYDRATION_CONCURRENCY
-        ) {
-            const chunk = relatedIds.slice(
-                start,
-                start + RELATED_CHARACTER_HYDRATION_CONCURRENCY,
-            )
-            const hydratedChunk = await Promise.all(chunk.map(async (memberId) => {
-                try {
-                    return await this.hydrateCharacterDetail(
-                        memberId,
-                        revision,
-                        mutationGeneration,
-                        generation,
-                    )
-                } catch (error) {
-                    if (error instanceof MissingCharacterError) return undefined
-                    throw error
-                }
-            }))
-            relatedValues.push(...hydratedChunk)
-            if (hydratedChunk.some((value) => value === null)) return false
-        }
-        const missingRelatedIds = new Set(
-            relatedIds.filter((_memberId, index) => relatedValues[index] === undefined),
-        )
         const persistedCharacterValue = safeStructuredClone(characterValue)
-        if (characterValue.type === 'group' && missingRelatedIds.size > 0) {
-            const groupValue = characterValue
-            characterValue = {
-                ...groupValue,
-                ...removeGroupMemberReferences(groupValue, missingRelatedIds),
-            }
-            relatedIds = relatedIds.filter((memberId) => !missingRelatedIds.has(memberId))
-        }
+
         characterValue = this.normalizeCharacterCandidate(
             characterValue,
             options.normalize,
@@ -1263,19 +1274,12 @@ export class ActiveWorkingSet {
             return false
         }
         if (this.dependencies.canActivateWorkingSet?.() === false) return false
-        const completeRelated = relatedValues.filter(
-            (value): value is CharacterDetail => value !== null && value !== undefined,
-        )
-        if (completeRelated.length > 0) {
-            this.dependencies.publishCharacterSet(characterValue, completeRelated)
-        } else {
-            this.dependencies.publishCharacter(characterValue)
-        }
+        this.dependencies.publishCharacter(characterValue)
         const selectedConversation = characterValue.chats[characterValue.chatPage ?? 0]
         if (selectedConversation) {
             this.publishActiveConversationSession(id, selectedConversation, revision)
         } else this.clearActiveConversationSession()
-        const nextActiveIds = new Set([id, ...relatedIds])
+        const nextActiveIds = new Set([id])
         this.activeIds = nextActiveIds
         for (const previousId of previousActiveIds) {
             if (!nextActiveIds.has(previousId)) {
@@ -1337,48 +1341,6 @@ export class ActiveWorkingSet {
         if (this.dependencies.getSelectedCharacterId() !== previousCharacterId)
             return false
 
-        let relatedIds =
-            hydrated.character.type === 'group'
-                ? [...new Set(hydrated.character.characters)].filter(
-                      (memberId) => memberId !== id,
-                  )
-                : []
-        const relatedValues: Array<CharacterDetail | null | undefined> = []
-        for (
-            let start = 0;
-            start < relatedIds.length;
-            start += RELATED_CHARACTER_HYDRATION_CONCURRENCY
-        ) {
-            const chunk = relatedIds.slice(
-                start,
-                start + RELATED_CHARACTER_HYDRATION_CONCURRENCY,
-            )
-            const values = await Promise.all(
-                chunk.map(async (memberId) => {
-                    try {
-                        return await this.hydrateCharacterDetail(
-                            memberId,
-                            revision,
-                            mutationGeneration,
-                            generation,
-                        )
-                    } catch (error) {
-                        if (error instanceof MissingCharacterError)
-                            return undefined
-                        throw error
-                    }
-                }),
-            )
-            relatedValues.push(...values)
-            if (!this.isCurrent(generation, revision, mutationGeneration))
-                return false
-            if (!this.canDirectlyActivateWindowed(options))
-                return 'complete-fallback'
-            if (values.some((value) => value === null)) return false
-        }
-        if (relatedValues.some((value) => value === undefined)) {
-            return 'complete-fallback'
-        }
         const settled = await this.settleBeforeWindowedPublish(
             generation,
             revision,
@@ -1430,10 +1392,6 @@ export class ActiveWorkingSet {
             activationChange.character || activationChange.conversation
                 ? activationChange
                 : undefined
-        const completeRelated = relatedValues.filter(
-            (value): value is CharacterDetail =>
-                value !== null && value !== undefined,
-        )
         return this.publishWindowedSelection({
             character: normalized,
             metadata: hydrated.selectedMetadata,
@@ -1443,8 +1401,7 @@ export class ActiveWorkingSet {
             generation,
             previousState,
             previousActiveIds,
-            nextActiveIds: new Set([id, ...relatedIds]),
-            related: completeRelated,
+            nextActiveIds: new Set([id]),
             publishAsConversation: false,
             activation,
         })
@@ -1757,7 +1714,6 @@ export class ActiveWorkingSet {
             nextActiveIds: new Set(
                 previousActiveIds.size > 0 ? previousActiveIds : [characterId],
             ),
-            related: [],
             publishAsConversation: true,
             activation,
         })
@@ -2030,7 +1986,6 @@ export class ActiveWorkingSet {
         previousState: SelectedConversationState | null
         previousActiveIds: ReadonlySet<string>
         nextActiveIds: Set<string>
-        related: CharacterDetail[]
         publishAsConversation: boolean
         activation?: WindowedConversationActivationChange
     }): boolean {
@@ -2066,7 +2021,6 @@ export class ActiveWorkingSet {
                 ...input.previousActiveIds,
                 ...input.nextActiveIds,
                 input.character.chaId,
-                ...input.related.map((detail) => detail.chaId),
             ]),
         ]
         const restorePublication =
@@ -2105,11 +2059,6 @@ export class ActiveWorkingSet {
                         input.character.chaId,
                         conversation,
                         input.character,
-                    )
-                } else if (input.related.length > 0) {
-                    this.dependencies.publishCharacterSet(
-                        input.character,
-                        input.related,
                     )
                 } else {
                     this.dependencies.publishCharacter(input.character)
@@ -2221,6 +2170,7 @@ export class ActiveWorkingSet {
     }
 
     private clearActiveConversationSession(notify = true): boolean {
+        for (const controller of this.windowedControllers) controller.release()
         const changed = this.selectedConversationState !== null || this.activeSession !== null
         this.selectedConversationState?.viewportSource.dispose()
         this.activeSession?.invalidate()

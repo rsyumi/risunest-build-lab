@@ -20,11 +20,11 @@ const interfaceMockModules = [
     '../process/request/request', '../process/stableDiff', '../process/luaRuntime',
     '../process/scripts', '../process/triggers', '../process/command',
     '../process/templates/templates', '../process/exampleMessages', '../process/tts',
-    '../process/memory/supaMemory', '../process/group', '../process/embedding/addinfo',
+    '../process/memory/supaMemory', '../process/embedding/addinfo',
     '../process/models/modelString', '../process/inlayScreen', '../process/transformers',
     '../process/memory/hanuraiMemory', '../process/memory/hypav2', '../process/memory/hypav3',
     '../process/scriptings', '../plugins/plugins.svelte', '../process/presetChain',
-    '../model/modellist', '../sync/multiuser', './persistentDataStoreFactory', './deviceSettings',
+    '../model/modellist', './persistentDataStoreFactory', './deviceSettings',
 ]
 
 afterEach(() => {
@@ -108,7 +108,7 @@ function mockPublicGeneration(
         tokenize: vi.fn(async () => 1), tokenizeNum: vi.fn(async () => []),
         hasObservableHistoryTokenizer: () => false, encodeWithTokenizer: vi.fn(async () => []),
     }))
-    vi.doMock('../../lang', () => ({ language: { errors: {}, otherUserRequesting: '' } }))
+    vi.doMock('../../lang', () => ({ language: { errors: {} } }))
     vi.doMock('../alert', () => ({ alertError: vi.fn(), alertToast: vi.fn() }))
     vi.doMock('../parser/chatML', () => ({ parseChatML: (value: string) => value }))
     vi.doMock('../parser/parser.svelte', () => ({ risuChatParser: (value: string) => value }))
@@ -144,7 +144,6 @@ function mockPublicGeneration(
         ['../process/exampleMessages', { exampleMessage: () => [] }],
         ['../process/tts', { sayTTS: vi.fn() }],
         ['../process/memory/supaMemory', { supaMemory: vi.fn() }],
-        ['../process/group', { groupOrder: (value: unknown) => value }],
         ['../process/memory/hypamemory', { HypaProcesser: class {} }],
         ['../process/embedding/addinfo', { additionalInformations: vi.fn(async () => '') }],
         ['../process/files/inlays', { getInlayAsset: vi.fn(async () => null) }],
@@ -160,10 +159,6 @@ function mockPublicGeneration(
         ['../process/presetChain', { activatePresetChainForRequest: vi.fn() }],
     ] as const) vi.doMock(id, () => exports)
     vi.doMock('../model/modellist', () => ({ getModelInfo: () => ({ flags: [] }), LLMFlags: {} }))
-    vi.doMock('../sync/multiuser', () => ({
-        connectionOpen: false, peerRevertChat: vi.fn(), peerSafeCheck: vi.fn(async () => true),
-        peerSync: vi.fn(),
-    }))
 }
 
 describe('independent windowed conversation interfaces', () => {
@@ -382,7 +377,7 @@ describe('independent windowed conversation interfaces', () => {
         const readConversation = vi.spyOn(store, 'readConversation')
         const { sendChat } = await import('../process/index.svelte')
         const generationLog = vi.spyOn(console, 'log').mockImplementation(() => undefined)
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
         generationLog.mockRestore()
 
         await expect(runtime.flushPendingData('history-window-generation')).resolves.toBeUndefined()
@@ -418,7 +413,7 @@ describe('independent windowed conversation interfaces', () => {
             isCurrent: () => true,
             createId: () => `candidate-id-${nextId++}`,
             flush: () => runtime.flushPendingData('reroll-candidate'),
-            generate: () => sendChat(-1, { historyLimit: true }),
+            generate: () => sendChat({ historyLimit: true }),
             aborted: () => false,
         })
         generationLog.mockRestore()

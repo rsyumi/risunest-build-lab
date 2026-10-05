@@ -346,7 +346,7 @@ fn empty_incoming_stage_copies_no_active_records_and_preserves_exact_empty_recei
     save(&mut store,vec![UnitMutation::Set{key:unit_key(&["exists","character","local"]).unwrap(),value:json!(true)}]);
     let (header,inspection)=context(&store); let stage=store.lww_stage_binding_units(&header,&inspection,&[],0.into()).unwrap();
     assert!(catalog(&store,&stage.staging_id)["characters"].as_array().unwrap().is_empty());
-    assert_eq!(store.connection.query_row("SELECT changes FROM lww_binding_stages WHERE staging_id=?1",[&stage.staging_id],|r|r.get::<_,String>(0)).unwrap(),"[]");
+    assert_eq!(store.connection.query_row("SELECT changes FROM lww_binding_stages WHERE staging_id=?1",[&stage.staging_id],|r|r.get::<_,String>(0)).unwrap(),stage.source_digest);
     activate(&mut store,&header,&inspection,&stage);
     assert!(catalog(&store,&active_generation(&store.connection).unwrap())["characters"].as_array().unwrap().is_empty());
 }
@@ -559,4 +559,51 @@ fn a_binding_stage_cannot_be_activated_as_an_ordinary_replacement() {
     assert_eq!(commit::generation_state(&store.connection, &stage.staging_id).unwrap().as_deref(), Some("staging"));
     activate(&mut store, &header, &inspection, &stage);
     assert_eq!(active_generation(&store.connection).unwrap(), stage.staging_id);
+}
+
+#[test]
+fn streaming_binding_rejects_late_producer_failure_and_retries_without_partial_stage() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(dir.path()).unwrap();
+    let (header, inspection) = context(&store);
+    let generation = active_generation(&store.connection).unwrap();
+    let failed = store.lww_stage_binding_units_stream(&header, &inspection, 7.into(), |emit| {
+        for index in 0..1025 { emit(change(&["root", &format!("synthetic-{index:04}")], json!(index)))?; }
+        Err(error("synthetic-producer-tail"))
+    });
+    assert!(failed.is_err());
+    for table in ["lww_binding_stages", "lww_binding_sources", "lww_binding_source_units"] {
+        assert_eq!(store.connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+    }
+    assert_eq!(active_generation(&store.connection).unwrap(), generation);
+    let stage = store.lww_stage_binding_units_stream(&header, &inspection, 7.into(), |emit| {
+        for index in (0..1025).rev() { emit(change(&["root", &format!("synthetic-{index:04}")], json!(index)))?; }
+        Ok(())
+    }).unwrap();
+    let retry = store.lww_stage_binding_units_stream(&header, &inspection, 7.into(), |emit| {
+        for index in 0..1025 { emit(change(&["root", &format!("synthetic-{index:04}")], json!(index)))?; }
+        Ok(())
+    }).unwrap();
+    assert_eq!(retry, stage);
+    assert_eq!(store.connection.query_row("SELECT length(changes) FROM lww_binding_stages WHERE staging_id=?1", [&stage.staging_id], |row| row.get::<_,i64>(0)).unwrap(), 64);
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM lww_binding_source_units WHERE staging_id=?1", [&stage.staging_id], |row| row.get::<_,i64>(0)).unwrap(), 1025);
+    activate(&mut store, &header, &inspection, &stage);
+    assert_eq!(store.revision().unwrap(), 1);
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM lww_units", [], |row| row.get::<_,i64>(0)).unwrap(), 1025);
+}
+
+#[test]
+fn streamed_binding_source_digest_matches_the_complete_sorted_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(dir.path()).unwrap();
+    let (header, inspection) = context(&store);
+    let changes = vec![change(&["root","username"], json!("synthetic")), change(&["root","language"], json!("ko"))];
+    let expected = source_digest(&sorted_source(&changes).unwrap()).unwrap();
+    let stage = store.lww_stage_binding_units_stream(&header, &inspection, 7.into(), |emit| {
+        for change in &changes { emit(change.clone())?; }
+        Ok(())
+    }).unwrap();
+    assert_eq!(stage.source_digest, expected);
+    let rows = binding_source_rows(&store.connection, &stage.staging_id).unwrap();
+    assert_eq!(source_digest_rows(&rows).unwrap(), expected);
 }

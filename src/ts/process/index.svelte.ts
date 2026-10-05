@@ -1,8 +1,9 @@
+import { resolvePinnedConversationPosition } from '../plugins/pinnedConversationPosition'
 import { registerGeneratingConversation } from '../storage/generatingConversationRegistry'
 import { openGenerationRequestPhase } from './generationRequestPhase'
 import { boundedGenerationFallbackReason } from './boundedGenerationAdmission'
 import { get, writable } from "svelte/store";
-import { type character, type groupChat, type MessageGenerationInfo, type Chat, type MessagePresetInfo, activatePresetOverride, setCurrentChat, type Message } from "../storage/database.svelte";
+import { type character, type MessageGenerationInfo, type Chat, type MessagePresetInfo, activatePresetOverride, setCurrentChat, type Message } from "../storage/database.svelte";
 import { DBState } from '../stores.svelte';
 import { CharEmotion, selectedCharID } from "../stores.svelte";
 import { ChatTokenizer, encodeWithTokenizer, tokenize, tokenizeNum } from "../tokenizer";
@@ -18,14 +19,14 @@ import { exampleMessage } from "./exampleMessages";
 import { sayTTS } from "./tts";
 import { supaMemory } from "./memory/supaMemory";
 import { v4 } from "uuid";
-import { groupOrder } from "./group";
+
 import { runTrigger } from "./triggers";
 import { HypaProcesser } from "./memory/hypamemory";
 import { additionalInformations } from "./embedding/addinfo";
 import { getInlayAsset } from "./files/inlays";
 import { inlayImageForProvider } from "./files/inlayProviderImage";
 import { getGenerationModelString } from "./models/modelString";
-import { connectionOpen, peerRevertChat, peerSafeCheck, peerSync } from "../sync/multiuser";
+
 import { runInlayScreen } from "./inlayScreen";
 import { runImageEmbedding } from "./transformers";
 import { hanuraiMemory } from "./memory/hanuraiMemory";
@@ -141,7 +142,7 @@ const projectPluginChatOutput = createProductionPluginChatOutputProjector(
     <T>(value: T) => $state.snapshot(value) as T,
 )
 
-export async function runChatOutputListeners(char: any, chat: any, characterIndex: number, chatIndex: number, messageIndex: number, signal?: AbortSignal){
+export async function runChatOutputListeners(char: any, chat: any, messageIndex: number, signal?: AbortSignal){
     if(pluginV2.chatOutput.size === 0){
         return
     }
@@ -149,8 +150,7 @@ export async function runChatOutputListeners(char: any, chat: any, characterInde
         listeners: pluginV2.chatOutput,
         char,
         chat,
-        characterIndex,
-        chatIndex,
+        resolvePosition: resolvePinnedConversationPosition,
         messageIndex,
         signal,
         projectScalable: projectPluginChatOutput,
@@ -177,7 +177,7 @@ export let previewFormated:OpenAIChat[] = []
 export let previewBody:string = ''
 
 function beginPromptHistoryOperation(
-    owner: character | groupChat,
+    owner: character,
     chat: Chat,
 ): ConversationHistoryOperation {
     const session = getActiveConversationSession()
@@ -236,7 +236,7 @@ export async function notifyGenerationCompletion(result: string): Promise<void> 
             }
         } catch {}
     }
-    void peerSync()
+
 }
 
 interface GenerationConversationResources {
@@ -270,7 +270,6 @@ export function getHistoryWindowMemoryMode(historyLimit: boolean | undefined): H
         requested: true,
         enabled: getDeviceSettings().generationHistoryLimitEnabled,
         maxContext: DBState.db.maxContext,
-        group: owner.type === 'group',
         supaMemory: !!owner.supaMemory,
         supaModelType: DBState.db.supaModelType,
         hanuraiEnable: !!DBState.db.hanuraiEnable,
@@ -530,18 +529,18 @@ function hasObservableHistoryTokenizer(): boolean {
 export function getSelectedBoundedGenerationFallbackReason(): string | null {
     const owner = DBState.db.characters[get(selectedCharID)]
     const conversation = owner?.chats[owner.chatPage]
-    const hypaSettings = owner?.type !== 'group' && owner?.supaMemory
+    const hypaSettings = owner?.supaMemory
         && DBState.db.hypaV3 && !DBState.db.hypav2 && !DBState.db.hanuraiEnable
         ? getCurrentHypaV3Preset().settings : null
     const authority = hypaSettings ? captureSelectedConversationAuthority() : null
-    const scripts = owner?.type !== 'group' && hypaSettings
+    const scripts = hypaSettings
         ? [
             ...(DBState.db.presetRegex ?? []),
             ...(owner.customscript ?? []),
             ...getModuleRegexScripts(),
         ]
         : []
-    const parserHistory = owner?.type !== 'group' && conversation && hypaSettings
+    const parserHistory = conversation && hypaSettings
         ? classifyChatParserHistory({
             source: [
                 DBState.db.mainPrompt,
@@ -556,7 +555,7 @@ export function getSelectedBoundedGenerationFallbackReason(): string | null {
                 owner.replaceGlobalNote,
                 owner.exampleMessage,
                 owner.postHistoryInstructions,
-                DBState.db.groupTemplate,
+                DBState.db.messageNameTemplate,
                 DBState.db.promptSettings,
                 owner.firstMessage,
                 owner.alternateGreetings,
@@ -568,7 +567,6 @@ export function getSelectedBoundedGenerationFallbackReason(): string | null {
         : null
     return boundedGenerationFallbackReason({
         selected: !!owner && !!conversation,
-        group: owner?.type === 'group',
         hypaEnabled: !!hypaSettings,
         windowed: !!authority,
         observableTokenizer: !!hasObservableHistoryTokenizer(),
@@ -576,17 +574,17 @@ export function getSelectedBoundedGenerationFallbackReason(): string | null {
         editprocess: (pluginV2.editprocess?.size ?? 0) > 0,
         editoutput: (pluginV2.editoutput?.size ?? 0) > 0,
         chatOutput: pluginV2.chatOutput.size > 0,
-        triggers: (owner?.type !== 'group' && (owner?.triggerscript?.length ?? 0) > 0) || getModuleTriggers().length > 0,
+        triggers: ((owner?.triggerscript?.length ?? 0) > 0) || getModuleTriggers().length > 0,
         historyRegex: scripts.some(script => script.type === 'editprocess' || script.type === 'editoutput'),
-        lorebooks: (owner?.type !== 'group' && (owner?.globalLore?.length ?? 0) > 0) || (conversation?.localLore?.length ?? 0) > 0 || getModuleLorebooks().length > 0,
-        additionalText: owner?.type !== 'group' && !!owner?.additionalText,
-        inlayView: owner?.type !== 'group' && !!owner?.inlayViewScreen,
+        lorebooks: ((owner?.globalLore?.length ?? 0) > 0) || (conversation?.localLore?.length ?? 0) > 0 || getModuleLorebooks().length > 0,
+        additionalText: !!owner?.additionalText,
+        inlayView: !!owner?.inlayViewScreen,
         dynamicHistory: parserHistory?.requiresFullHistory !== false,
         explicitHistory: (parserHistory?.absoluteMessageIndices.length ?? 0) > 0,
     })
 }
 
-export async function sendChat(chatProcessIndex = -1,arg:{
+export async function sendChat(arg:{
     chatAdditonalTokens?:number,
     signal?:AbortSignal,
     continue?:boolean,
@@ -678,7 +676,6 @@ export async function sendChat(chatProcessIndex = -1,arg:{
         iosGeneration = await beginIOSGeneration(arg.signal)
         lifecycle.onProgress = iosGeneration.progress;
         const result = await sendChatInternal(
-          chatProcessIndex,
           { ...arg, signal: iosGeneration.signal },
           lifecycle,
           reservation,
@@ -737,7 +734,7 @@ export async function sendChat(chatProcessIndex = -1,arg:{
     }
 }
 
-async function sendChatInternal(chatProcessIndex: number,arg:{
+async function sendChatInternal(arg:{
     chatAdditonalTokens?:number,
     signal?:AbortSignal,
     continue?:boolean,
@@ -811,9 +808,6 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     }
 
     function reformatContent(data:string){
-        if(chatProcessIndex === -1){
-            return data.trim()
-        }
         return data.trim()
     }
 
@@ -888,26 +882,14 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     const generationSetupSession = getActiveConversationSession()
     if (hasMismatchedActiveConversationSession()) return false
 
-    if (chatProcessIndex === -1) {
-        await activatePresetChainForRequest(
-            DBState.db,
-            activatePresetOverride,
-            Math.random,
-            (name) => alertToast(`Cannot find preset: ${name}`),
-        )
-    }
+    await activatePresetChainForRequest(
+        DBState.db,
+        activatePresetOverride,
+        Math.random,
+        (name) => alertToast(`Cannot find preset: ${name}`),
+    )
 
-    if(connectionOpen){
-        chatProcessStage.set(4)
-        const peerSafe = await peerSafeCheck()
-        if(!peerSafe){
-            peerRevertChat()
-            throwError(language.otherUserRequesting)
-            return false
-        }
-        await peerSync()
-        chatProcessStage.set(0)
-    }
+
 
     if (
         !lifecycle.isTargetCurrent()
@@ -920,7 +902,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         const ownerIndex = get(selectedCharID)
         const owner = DBState.db.characters[ownerIndex]
         const conversation = owner?.chats[owner.chatPage]
-        const hypaSettings = owner?.type !== 'group' && owner?.supaMemory
+        const hypaSettings = owner?.supaMemory
             && DBState.db.hypaV3 && !DBState.db.hypav2 && !DBState.db.hanuraiEnable
             ? getCurrentHypaV3Preset().settings
             : null
@@ -1102,51 +1084,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         caculatedChatTokens += 3
     }
 
-    if(nowChatroom.type === 'group'){
-        if(chatProcessIndex === -1){
-            const charNames =nowChatroom.characters.map((v) => findCharacterbyIdwithCache(v).name)
-
-            const messages = nowChatroom.chats[nowChatroom.chatPage].message
-            const lastMessage = messages[messages.length-1]
-            let order = nowChatroom.characters.map((v,i) => {
-                return {
-                    id: v,
-                    talkness: nowChatroom.characterActive[i] ? nowChatroom.characterTalks[i] : -1,
-                    index: i
-                }
-            }).filter((v) => {
-                return v.talkness > 0
-            })
-            if(!nowChatroom.orderByOrder){
-                order = groupOrder(order, lastMessage?.data).filter((v) => {
-                    if(v.id === lastMessage?.saying){
-                        return false
-                    }
-                    return true
-                })
-            }
-            for(let i=0;i<order.length;i++){
-                const r = await sendChat(order[i].index, {
-                    chatAdditonalTokens: caculatedChatTokens,
-                    signal: abortSignal
-                }, reservation)
-                if(!r){
-                    return false
-                }
-            }
-            return true
-        }
-        else{
-            currentChar = findCharacterbyIdwithCache(nowChatroom.characters[chatProcessIndex])
-            if(!currentChar){
-                throwError(`cannot find character: ${nowChatroom.characters[chatProcessIndex]}`)
-                return false
-            }
-        }
-    }
-    else{
-        currentChar = nowChatroom
-    }
+    currentChar = nowChatroom
 
     let chatAdditonalTokens = arg.chatAdditonalTokens ?? caculatedChatTokens
     const tokenizer = new ChatTokenizer(chatAdditonalTokens, DBState.db.aiModel.startsWith('gpt') ? 'noName' : 'name',
@@ -1297,13 +1235,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         }
         unformated.description.push(baseDescriptionPrompt)
 
-        if(nowChatroom.type === 'group'){
-            const systemMsg = `[Write the next reply only as ${currentChar.name}]`
-            unformated.postEverything.push({
-                role: 'system',
-                content: systemMsg
-            })
-        }
+
     }
 
     const loreHistory = beginPromptHistoryOperation(nowChatroom, currentChat)
@@ -1669,7 +1601,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     const greetingOutsideWindow = historyWindow !== null
         && historyWindow.start > 0
         && !historyWindow.endedAtAllBefore
-    if(nowChatroom.type !== 'group' && !greetingHistorySelection.resetByAllBefore && !greetingOutsideWindow){
+    if(!greetingHistorySelection.resetByAllBefore && !greetingOutsideWindow){
         const firstMsg = currentChat.fmIndex === -1 ? nowChatroom.firstMessage : nowChatroom.alternateGreetings[currentChat.fmIndex]
 
         const chat:OpenAIChat = {
@@ -1726,7 +1658,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     }
 
     const requiresLivePromptCompatibility = (pluginV2.editprocess?.size ?? 0) > 0
-    if (!historyWindow && !summaryAwareHistoryPlan && nowChatroom.type !== 'group' && nowChatroom.supaMemory
+    if (!historyWindow && !summaryAwareHistoryPlan && nowChatroom.supaMemory
         && DBState.db.hypaV3 && !DBState.db.hypav2 && !DBState.db.hanuraiEnable) {
         const settings = getCurrentHypaV3Preset().settings
         if (!settings.useExperimentalImpl && !requiresLivePromptCompatibility && !hasObservableHistoryTokenizer()
@@ -1887,22 +1819,20 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         let role:'user'|'assistant'|'system' = msg.role === 'user' ? 'user' : 'assistant'
 
         if(
-            (nowChatroom.type === 'group' && findCharacterbyIdwithCache(msg.saying).chaId !== currentChar.chaId) ||
-            (nowChatroom.type === 'group' && DBState.db.groupOtherBotRole === 'assistant') ||
             (usingPromptTemplate && DBState.db.promptSettings.sendName)
         ){
-            const form = DBState.db.groupTemplate || `<{{char}}\'s Message>\n{{slot}}\n</{{char}}\'s Message>`
-            const groupTemplate = promptScriptOperationScope
+            const form = DBState.db.messageNameTemplate || `<{{char}}\'s Message>\n{{slot}}\n</{{char}}\'s Message>`
+            const messageNameTemplate = promptScriptOperationScope
                 ? promptScriptOperationScope.parse(nowChatroom, form, {
                     chara: findCharacterbyIdwithCache(msg.saying).name,
                 })
                 : risuChatParser(form, {chara: findCharacterbyIdwithCache(msg.saying).name})
-            formatedChat = groupTemplate.replace('{{slot}}', formatedChat)
-            switch(DBState.db.groupOtherBotRole){
+            formatedChat = messageNameTemplate.replace('{{slot}}', formatedChat)
+            switch(DBState.db.namedMessageRole){
                 case 'user':
                 case 'assistant':
                 case 'system':
-                    role = DBState.db.groupOtherBotRole
+                    role = DBState.db.namedMessageRole
                     break
                 default:
                     role = 'assistant'
@@ -2549,13 +2479,12 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             biasString: biases,
             currentChar: currentChar,
             useStreaming: true,
-            isGroupChat: nowChatroom.type === 'group',
             bias: {},
             continue: arg.continue,
             chatId: generationId,
             imageResponse: DBState.db.outputImageModal,
             previewBody: arg.previewPrompt,
-            escape: nowChatroom.type === 'character' && nowChatroom.escapeOutput,
+            escape: nowChatroom.escapeOutput,
             rememberToolUsage: DBState.db.rememberToolUsage,
         }, 'model', abortSignal)
     } finally {
@@ -2664,8 +2593,6 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 runChatOutputListeners(
                     currentChar,
                     chat,
-                    selectedChar,
-                    selectedChat,
                     historyWindow ? toWindowIndex(chat, messageIndex) : messageIndex,
                     abortSignal,
                 ),
@@ -2713,7 +2640,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     if(needsAutoContinue){
         await acknowledgeCompletedGeneration()
         responseApplication.release()
-        return await sendChat(chatProcessIndex, {
+        return await sendChat({
             chatAdditonalTokens: arg.chatAdditonalTokens,
             continue: true,
             signal: abortSignal,
@@ -2770,7 +2697,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
 
         await acknowledgeCompletedGeneration()
         responseApplication.release()
-        return await sendChat(chatProcessIndex, {
+        return await sendChat({
             signal: abortSignal,
             historyLimit: arg.historyLimit,
         }, reservation)
@@ -2983,9 +2910,6 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
 
         }
         else if(currentChar.viewScreen === 'imggen'){
-            if(chatProcessIndex !== -1){
-                throwError("Stable diffusion in group chat is not supported")
-            }
 
             const msgs = (boundedChat ?? DBState.db.characters[selectedChar].chats[selectedChat]).message
             let msgStr = ''

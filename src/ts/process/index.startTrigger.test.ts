@@ -37,7 +37,6 @@ vi.mock('./templates/templates', async () => (await import('./tests/sendChatTest
 vi.mock('./exampleMessages', async () => (await import('./tests/sendChatTestHarness')).exampleMessagesModule())
 vi.mock('./tts', async () => (await import('./tests/sendChatTestHarness')).ttsModule())
 vi.mock('./memory/supaMemory', async () => (await import('./tests/sendChatTestHarness')).supaMemoryModule())
-vi.mock('./group', async () => (await import('./tests/sendChatTestHarness')).groupModule())
 vi.mock('./command', () => ({ processMultiCommand: vi.fn() }))
 vi.mock('./infunctions', () => ({ calcString: vi.fn(() => 0) }))
 vi.mock('./memory/hypamemory', async () => (await import('./tests/sendChatTestHarness')).hypamemoryModule())
@@ -46,7 +45,6 @@ vi.mock('./files/inlays', async () => (await import('./tests/sendChatTestHarness
     writeInlayImage: vi.fn(async () => ''),
 }))
 vi.mock('./models/modelString', async () => (await import('./tests/sendChatTestHarness')).modelStringModule())
-vi.mock('../sync/multiuser', async () => (await import('./tests/sendChatTestHarness')).multiuserModule())
 vi.mock('./inlayScreen', async () => (await import('./tests/sendChatTestHarness')).inlayScreenModule())
 vi.mock('./transformers', async () => (await import('./tests/sendChatTestHarness')).transformersModule())
 vi.mock('./memory/hanuraiMemory', async () => (await import('./tests/sendChatTestHarness')).hanuraiMemoryModule())

@@ -1,4 +1,4 @@
-import type { Database, character, groupChat, loreBook } from './storage/database.svelte';
+import type { Database, character, loreBook } from './storage/database.svelte';
 import type { CbsConditions } from './parser/parser.svelte';
 import type { RisuModule } from './process/modules';
 import type { LLMModel } from './model/modellist';
@@ -54,7 +54,7 @@ export type matcherArg = {
     projectedChatID?: number,
     historyOffset?: number,
     db: Database,
-    chara: character | groupChat | string,
+    chara: character | string,
     rmVar: boolean,
     var?: { [key: string]: string }
     tokenizeAccurate?: boolean
@@ -165,7 +165,7 @@ export function registerCBS(arg:CBSRegisterArg) {
         return currentMatcher?.selectedCharID ?? getDefaultSelectedCharID()
     }
     // While a send builds from a history window, a metadata-only conversation reads as the window.
-    const historyChat = (character: character | groupChat | undefined) =>
+    const historyChat = (character: character | undefined) =>
         resolveHistoryWindowChat(character?.chats?.[character.chatPage])
     const selectedHistoryStart = () =>
         getHistoryWindowStart(historyChat(getDatabase().characters[getSelectedCharID()])) ?? 0
@@ -211,7 +211,7 @@ export function registerCBS(arg:CBSRegisterArg) {
             const db = getDatabase()
             let selectedChar = getSelectedCharID()
             let currentChar = db.characters[selectedChar]
-            if(currentChar && currentChar.type !== 'group'){
+            if(currentChar){
                 return currentChar.nickname || currentChar.name
             }
             if(matcherArg.chara){
@@ -225,7 +225,7 @@ export function registerCBS(arg:CBSRegisterArg) {
             return currentChar.nickname || currentChar.name
         },
         alias: ['bot'],
-        description: 'Returns the name or nickname of the current character/bot. In consistent character mode, returns "botname". For group chats, returns the group name.\n\nUsage:: {{char}}',
+        description: 'Returns the name or nickname of the current character/bot. In consistent character mode, returns "botname".\n\nUsage:: {{char}}',
     });
 
     registerFunction({
@@ -302,13 +302,11 @@ export function registerCBS(arg:CBSRegisterArg) {
             const db = getDatabase()
             const argChara = matcherArg.chara
             const achara = (argChara && typeof(argChara) !== 'string') ? argChara : (db.characters[getSelectedCharID()])
-            if(achara.type === 'group'){
-                return ""
-            }
+
             return risuChatParser(achara.personality, matcherArg)
         },
         alias: ['charpersona'],
-        description: 'Returns the personality field of the current character. The text is processed through the chat parser for variable substitution. Returns empty string for group chats.\n\nUsage:: {{personality}}',
+        description: 'Returns the personality field of the current character. The text is processed through the chat parser for variable substitution.\n\nUsage:: {{personality}}',
     });
 
     registerFunction({
@@ -317,13 +315,11 @@ export function registerCBS(arg:CBSRegisterArg) {
             const db = getDatabase()
             const argChara = matcherArg.chara
             const achara = (argChara && typeof(argChara) !== 'string') ? argChara : (db.characters[getSelectedCharID()])
-            if(achara.type === 'group'){
-                return ""
-            }
+
             return risuChatParser(achara.desc, matcherArg)
         },
         alias: ['chardesc'],
-        description: 'Returns the description field of the current character. The text is processed through the chat parser for variable substitution. Returns empty string for group chats.\n\nUsage:: {{description}}',
+        description: 'Returns the description field of the current character. The text is processed through the chat parser for variable substitution.\n\nUsage:: {{description}}',
     });
 
     registerFunction({
@@ -332,13 +328,11 @@ export function registerCBS(arg:CBSRegisterArg) {
             const db = getDatabase()
             const argChara = matcherArg.chara
             const achara = (argChara && typeof(argChara) !== 'string') ? argChara : (db.characters[getSelectedCharID()])
-            if(achara.type === 'group'){
-                return ""
-            }
+
             return risuChatParser(achara.scenario, matcherArg)
         },
         alias: [],
-        description: 'Returns the scenario field of the current character. The text is processed through the chat parser for variable substitution. Returns empty string for group chats.\n\nUsage:: {{scenario}}',
+        description: 'Returns the scenario field of the current character. The text is processed through the chat parser for variable substitution.\n\nUsage:: {{scenario}}',
     });
 
     registerFunction({
@@ -347,13 +341,11 @@ export function registerCBS(arg:CBSRegisterArg) {
             const db = getDatabase()
             const argChara = matcherArg.chara
             const achara = (argChara && typeof(argChara) !== 'string') ? argChara : (db.characters[getSelectedCharID()])
-            if(achara.type === 'group'){
-                return ""
-            }
+
             return risuChatParser(achara.exampleMessage, matcherArg)
         },
         alias: ['examplemessage', 'example_dialogue'],
-        description: 'Returns the example dialogue/message field of the current character. The text is processed through the chat parser for variable substitution. Returns empty string for group chats.\n\nUsage:: {{exampledialogue}}',
+        description: 'Returns the example dialogue/message field of the current character. The text is processed through the chat parser for variable substitution.\n\nUsage:: {{exampledialogue}}',
     });
 
     // Prompt and system functions
@@ -384,7 +376,7 @@ export function registerCBS(arg:CBSRegisterArg) {
             const achara = (argChara && typeof(argChara) !== 'string') ? argChara : (db.characters[getSelectedCharID()])
             const selchar = db.characters[getSelectedCharID()]
             const chat = selchar.chats[selchar.chatPage]
-            const characterLore = (achara.type === 'group') ? [] : (achara.globalLore ?? [])
+            const characterLore = (achara.globalLore ?? [])
             const chatLore = chat.localLore ?? []
             const fullLore = characterLore.concat(chatLore.concat(getModuleLorebooks()))
             return makeArray(fullLore.map((v) => {
@@ -1405,7 +1397,7 @@ export function registerCBS(arg:CBSRegisterArg) {
         callback: (str, matcherArg, args, vars) => {
             const db = getDatabase()
             const selchar = db.characters[getSelectedCharID()]
-            if(!selchar || selchar.type === 'group'){
+            if(!selchar){
                 return ''
             }
             return makeArray(selchar.additionalAssets?.map((f) => {
@@ -1413,7 +1405,7 @@ export function registerCBS(arg:CBSRegisterArg) {
             }))
         },
         alias: [],
-        description: 'Returns a JSON array of additional asset names for the current character. These are extra images/files beyond the main avatar. Returns empty string for groups or characters without assets.\n\nUsage:: {{assetlist}}',
+        description: 'Returns a JSON array of additional asset names for the current character. These are extra images/files beyond the main avatar. Returns empty string for characters without assets.\n\nUsage:: {{assetlist}}',
     });
 
     registerFunction({

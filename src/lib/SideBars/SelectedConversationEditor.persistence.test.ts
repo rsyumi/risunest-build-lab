@@ -26,7 +26,7 @@ vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
 }))
 
 describe('upstream bound editors with windowed persistence', () => {
-    it.each(['character', 'group'] as const)(
+    it.each(['character'] as const)(
         'saves %s detail and conversation edits without losing unloaded history',
         async (type) => {
             const indexedDB = new IDBFactory()

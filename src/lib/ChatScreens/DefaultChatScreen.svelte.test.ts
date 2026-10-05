@@ -29,7 +29,6 @@ vi.mock('src/ts/process/tts', () => ({}))
 vi.mock('src/ts/process/command', () => ({}))
 vi.mock('src/ts/process/files/multisend', () => ({ postChatFile: mocks.postFile }))
 vi.mock('src/ts/globalApi.svelte', () => ({ aiLawApplies: false, chatFoldedState: writable(false), chatFoldedStateMessageIndex: writable(0) }))
-vi.mock('src/ts/sync/multiuser', () => ({ ConnectionOpenStore: writable(false) }))
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
     getActiveConversationSession: () => null,
     getPersistentDataRuntime: () => ({
@@ -239,7 +238,7 @@ it('runs the input step over a history window when the loading limit is on', asy
     expect(store[4]).toEqual(expect.objectContaining({ role: 'user', chatId: expect.any(String) }))
     expect(window.release).toHaveBeenCalledOnce()
     expect(mocks.flush).toHaveBeenCalledWith('generation-input')
-    expect(mocks.generate).toHaveBeenCalledWith(-1, expect.objectContaining({ historyLimit: true }))
+    expect(mocks.generate).toHaveBeenCalledWith(expect.objectContaining({ historyLimit: true }))
     expect(mocks.acquireComplete).not.toHaveBeenCalled()
     expect(DBState.db.characters[0].chats[0].message).toEqual([])
     expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('')
@@ -268,7 +267,7 @@ it('rerolls over a tail window when the loading limit is on', async () => {
     type('').dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true }))
     await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
     await vi.waitFor(() => expect(store.at(-1)?.responseVariants?.candidates).toHaveLength(2))
-    expect(mocks.generate).toHaveBeenCalledWith(-1, expect.objectContaining({ historyLimit: true }))
+    expect(mocks.generate).toHaveBeenCalledWith(expect.objectContaining({ historyLimit: true }))
     expect(store.slice(0, 39)).toEqual(before)
     expect(store.at(-1).data).toBe('new')
     for (const [options] of mocks.openWindow.mock.calls) expect(options.tailStart(store.length)).toBeGreaterThan(30)

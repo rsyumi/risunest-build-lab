@@ -24,7 +24,6 @@ vi.mock('src/ts/util', () => ({ selectMultipleFile: mocks.selectMultiple, select
 vi.mock('src/ts/characterCards', () => ({}))
 vi.mock('src/ts/process/tts', () => ({}))
 vi.mock('src/ts/globalApi.svelte', () => ({ getFileSrc: mocks.fileSrc }))
-vi.mock('src/ts/process/group', () => ({}))
 vi.mock('src/ts/process/inlayScreen', () => ({}))
 vi.mock('src/ts/process/transformers', () => ({ registerOnnxModel: mocks.registerModel }))
 vi.mock('src/ts/process/modules', () => ({}))

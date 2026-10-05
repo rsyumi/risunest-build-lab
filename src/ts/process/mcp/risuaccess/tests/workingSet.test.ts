@@ -211,21 +211,6 @@ test('returns an empty history when a character has no selected conversation', a
   expect(runtimeMocks.readSelectedConversationWindow).toHaveBeenCalledTimes(1)
 })
 
-test('reports a group before treating its null selected conversation as empty history', async () => {
-  runtimeMocks.readSelectedConversationWindow.mockResolvedValue({
-    revision: 4,
-    character: { ...makeCharacterDetail(), type: 'group', name: 'Group' },
-    conversation: null,
-  })
-
-  const result = await new ChatHandler().getChatHistory('char-1', 20, 0)
-
-  expect((result[0] as RPCToolCallTextContent).text).toBe(
-    'Error: The id pointed to a group chat, not a character.',
-  )
-  expect(runtimeMocks.readSelectedConversationWindow).toHaveBeenCalledTimes(1)
-})
-
 test('preserves newest-first offset paging without requesting a complete conversation', async () => {
   runtimeMocks.readSelectedConversationWindow.mockResolvedValue({
     revision: 4,
@@ -358,37 +343,17 @@ test('routes lore, regex, asset, and Lua writes through persistent detail mutati
   expect(runtimeMocks.mutateCharacter).toHaveBeenCalledTimes(6)
 })
 
-test('preserves missing and group error responses without changing selection', async () => {
+test('preserves missing character error responses without changing selection', async () => {
   const handler = new CharacterHandler()
   runtimeMocks.readCharacter.mockResolvedValueOnce(null)
   expect(text(await handler.getCharacterInfo('char-1', ['name']))).toBe(
     'Error: Character with ID char-1 not found.',
   )
 
-  runtimeMocks.readCharacter.mockResolvedValueOnce({
-    chaId: 'char-1',
-    name: 'Group',
-    type: 'group',
-    chats: [],
-  })
-  expect(text(await handler.getCharacterInfo('char-1', ['name']))).toBe(
-    'Error: The id pointed to a group chat, not a character.',
-  )
-
   runtimeMocks.readCharacter.mockResolvedValue(makeCharacterDetail())
   runtimeMocks.mutateCharacter.mockResolvedValueOnce(false)
   expect(text(await handler.setCharacterInfo('char-1', { name: 'Updated' }))).toBe(
     'Error: Character with ID char-1 not found.',
-  )
-
-  runtimeMocks.mutateCharacter.mockImplementationOnce(
-    async (_id: string, _reason: string, mutate: (state: { character: any }) => void) => {
-      await mutate({ character: { chaId: 'char-1', name: 'Group', type: 'group' } })
-      return true
-    },
-  )
-  expect(text(await handler.setCharacterInfo('char-1', { name: 'Updated' }))).toBe(
-    'Error: The id pointed to a group chat, not a character.',
   )
   expect(DBState.db.characters[0].chaId).toBe('char-1')
 })

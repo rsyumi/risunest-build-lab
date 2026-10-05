@@ -1,6 +1,6 @@
 import type { Tiktoken } from "@dqbd/tiktoken";
 import type { Tokenizer } from "@mlc-ai/web-tokenizers";
-import { type groupChat, type character, type Chat, getCurrentCharacter, getDatabase } from "./storage/database.svelte";
+import {  type character, type Chat, getCurrentCharacter, getDatabase } from "./storage/database.svelte";
 import type { MultiModal, OpenAIChat } from "./process/index.svelte";
 import { supportsInlayImage } from "./process/files/inlays";
 import { risuChatParser } from "./parser/parser.svelte";
@@ -724,7 +724,7 @@ export async function strongBan(data:string, bias:{[key:number]:number}) {
     return bias
 }
 
-export async function getCharToken(char?:character|groupChat|null){
+export async function getCharToken(char?:character|null){
     let persistant = 0
     let dynamic = 0
 
@@ -732,9 +732,7 @@ export async function getCharToken(char?:character|groupChat|null){
         const c = getCurrentCharacter()
         char = c
     }
-    if(char.type === 'group'){
-        return {persistant:0, dynamic:0}
-    }
+
 
     const basicTokenize = async (data:string) => {
         data = data.replace(/{{char}}/g, char.name).replace(/<char>/g, char.name)

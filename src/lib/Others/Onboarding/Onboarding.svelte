@@ -925,7 +925,7 @@
                             {@render back('sync', t.back)}
                             <h1>{t.hub.title}</h1>
                             <p class="lead">{canScanServerRegistration ? t.hub.leadScan : t.hub.lead}</p>
-                            <ServerSyncSettings connectTarget={onServerConnected} />
+                            <ServerSyncSettings connectTarget={onServerConnected} tone="onboarding" />
                         {:else if flow.state === 'sync-external'}
                             {#if !isTauri}
                                 {@render back('sync', t.back)}

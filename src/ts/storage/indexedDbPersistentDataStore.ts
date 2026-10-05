@@ -2451,7 +2451,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                 const existing = await requestResult(transaction.objectStore('characters').get(this.characterKey(generation, field)))
                 if (!existing) {
                     const type = (mutation.value as {type?: string})?.type
-                    if (type !== 'character' && type !== 'group') throw new TypeError('Character existence requires its structural type')
+                    if (type !== 'character') throw new TypeError('Character existence requires its structural type')
                     await this.putCharacter(transaction, generation, {chaId:field, type, name:''} as CharacterDetail)
                 }
             }
@@ -2471,13 +2471,10 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             }
             return
         }
-        if (kind === 'character' || kind === 'group-members') {
+        if (kind === 'character') {
             const detail = await requestResult<StoredRecord<CharacterDetail> | undefined>(transaction.objectStore('characters').get(this.characterKey(generation, id)))
             if (!detail) throw new TypeError('Missing character parent')
-            if (kind === 'group-members') {
-                if (mutation.type !== 'set') throw new TypeError('Group membership requires a value')
-                Object.assign(detail.value, structuredClone(mutation.value))
-            } else patch(detail.value, field)
+            patch(detail.value, field)
             await this.putCharacter(transaction, generation, detail.value)
             return
         }
