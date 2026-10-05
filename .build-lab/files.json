@@ -495,8 +495,8 @@
     {
       "path": "benchmarks/macos/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 188364,
-      "sha256": "9cf017d7623c6eac171da7f3c31802d4fa0a1f8b16bc5a9e3e8b07f1b979e1d3"
+      "bytes": 187491,
+      "sha256": "c449c7abe08640175e4a590072e0f3b5836583a716107826af3376e505b1db83"
     },
     {
       "path": "benchmarks/macos/native/Cargo.toml",
