@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { registerMacosLifecycle } from "../../src/ts/storage/macosLifecycle";
+import { registerMacosLifecycle, type MacosExitRequest } from "../../src/ts/storage/macosLifecycle";
 import {
   invokeNativeTokenizerBatch,
   resolveNativeTokenizerRoute,
@@ -219,6 +219,10 @@ async function lifecycle() {
       isSyncActive: () => false,
       hasPendingSync: () => false,
       confirmExit: async () => false,
+    },
+    saveLocally: async () => {
+      // The harness quits through terminate:, which never ends the session.
+      await report("failure", { passed: false, message: "Unexpected session-end quit" });
     },
   });
   await invoke("macos_bench_quit");
@@ -549,9 +553,9 @@ async function main() {
       }
     };
     let nativeRequests = 0;
-    const unlisten = await listen<string>("risu-macos-exit-requested", ({ payload }) => {
+    const unlisten = await listen<MacosExitRequest>("risu-macos-exit-requested", ({ payload }) => {
       nativeRequests++;
-      if (attempt === 1) localStorage.setItem("macos-app-departed-token", payload);
+      if (attempt === 1) localStorage.setItem("macos-app-departed-token", payload.token);
     });
     await invoke("macos_bench_native_quit");
     await until(async () => flushEntered && get(syncExitDialogState).phase === "saving"

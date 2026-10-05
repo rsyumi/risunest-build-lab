@@ -385,20 +385,34 @@ def main():
                       'appearance-seed-light', 'appearance-app-light', 'appearance-seed-dark', 'appearance-app-dark'}
     if not phases or any(phase not in allowed_phases for phase in phases):
         raise RuntimeError('invalid RISUNEST_MACOS_PHASES')
+    # A failed phase skips only the phases that read the data it leaves; the rest still run.
+    dependencies = {'restart': 'contracts', 'app': 'contracts', 'app-restart': 'app',
+                    'appearance-app-light': 'appearance-seed-light', 'appearance-app-dark': 'appearance-seed-dark'}
     results = {}
+    failures = {}
     for phase in phases:
-        expected = None
-        if phase == 'restart' and 'contracts' in results:
-            expected = next(entry['result'] for entry in results['contracts'] if entry['stage'] == 'quit-saved')
-        if phase == 'app-restart' and 'app' in results:
-            expected = next(entry['result'] for entry in results['app'] if entry['stage'] == 'app-native-saved')
-        results[phase] = run_phase(app, phase, artifacts, fixtures, expected)
+        if dependencies.get(phase) in failures:
+            failures[phase] = f'skipped because {dependencies[phase]} did not pass'
+            print(f'{phase}: {failures[phase]}', flush=True)
+            continue
+        try:
+            expected = None
+            if phase == 'restart' and 'contracts' in results:
+                expected = next(entry['result'] for entry in results['contracts'] if entry['stage'] == 'quit-saved')
+            if phase == 'app-restart' and 'app' in results:
+                expected = next(entry['result'] for entry in results['app'] if entry['stage'] == 'app-native-saved')
+            results[phase] = run_phase(app, phase, artifacts, fixtures, expected)
+        except Exception as error:
+            failures[phase] = f'{type(error).__name__}: {error}'
+            print(f'{phase}: FAILED {failures[phase]}', flush=True)
     if 'app' in results and 'app-restart' in results:
         saved = next(entry['result']['revision'] for entry in results['app'] if entry['stage'] == 'app-native-saved')
         restarted = next(entry['result']['revision'] for entry in results['app-restart'] if entry['stage'] == 'app-restart')
         if saved != restarted:
-            raise RuntimeError('Product restart revision differs from the native-approved saved revision')
-    (artifacts / 'result.json').write_text(json.dumps({'passed': True, 'phases': results}, indent=2))
+            failures['app-restart'] = 'Product restart revision differs from the native-approved saved revision'
+    (artifacts / 'result.json').write_text(json.dumps({'passed': not failures, 'phases': results, 'failures': failures}, indent=2))
+    if failures:
+        raise RuntimeError(f'Failed phases: {json.dumps(failures, indent=2)}')
     print('Mac WKWebView contracts, restart and product app passed', flush=True)
 
 

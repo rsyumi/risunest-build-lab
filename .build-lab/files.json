@@ -489,8 +489,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 27102,
-      "sha256": "21f5d5b27b3c5547e2b7b13bac9bc838ee5d4180beb4d58a1c6117e565787b71"
+      "bytes": 27346,
+      "sha256": "06c903f6a2285443c32f20fc5a08e49b96e05336e7d405ec16068163e06d30b2"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -537,8 +537,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 26976,
-      "sha256": "c7a97186b91961dfc6d581de643cea3cf24aa1c6e863f58da3d48c337d3a8307"
+      "bytes": 27840,
+      "sha256": "e02220f3223c46f8430ec9232ac64dd2917faa54c2d4371a12059f2a50d63ecc"
     },
     {
       "path": "benchmarks/macos/vite.config.ts",
@@ -2775,8 +2775,8 @@
     {
       "path": "package.json",
       "mode": "100644",
-      "bytes": 10120,
-      "sha256": "b8c9fc13c5f5a5a12fc0923540cdb6a2aa3bb16735cd2e55bb381e816d3bfa71"
+      "bytes": 10154,
+      "sha256": "5d2be1b858044e2ed157d0ef92c90e43f03356b226813fdb1dd69380eec471bb"
     },
     {
       "path": "patches/@tauri-apps__plugin-http@2.6.1.patch",
@@ -16543,6 +16543,12 @@
       "sha256": "31eaf7db10e12fe942ea8404b1adade69ced5cbe96352ee688039bc52bd343ad"
     },
     {
+      "path": "tests/harnessCommands.mjs",
+      "mode": "100644",
+      "bytes": 2718,
+      "sha256": "953e8d729f506bab1e44554120cc07215829c38fc9821a9ec0464c04486ffbe3"
+    },
+    {
       "path": "tests/native/contractScenarios.ts",
       "mode": "100644",
       "bytes": 13365,
@@ -17063,8 +17069,8 @@
     {
       "path": "benchmarks/macos/README.md",
       "mode": "100644",
-      "bytes": 1305,
-      "sha256": "0c79b3d97c99e8f51844db646a06cf8dcc1f1a6a2b42ac3bbdcecbf5c841be10",
+      "bytes": 2268,
+      "sha256": "310ed5226dbf357a9b2de3bfa5dc7410cf95aeddfad6eba37a933f0666ca974b",
       "reason": "explanatory-document"
     },
     {
