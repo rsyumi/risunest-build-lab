@@ -270,6 +270,8 @@ pub(super) mod tests {
     pub(crate) static HEAD_READS: AtomicU64 = AtomicU64::new(0);
     pub(crate) static CHECKS: AtomicU64 = AtomicU64::new(0);
     pub(crate) static IDLE_MS: AtomicU64 = AtomicU64::new(60_000);
+    // Notify sockets of every test share the counters and the idle limit above.
+    static NOTIFY_SOCKETS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     type Socket = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -284,6 +286,7 @@ pub(super) mod tests {
 
     #[tokio::test]
     async fn an_idle_socket_reads_the_head_only_when_it_is_announced() {
+        let _serial = NOTIFY_SOCKETS.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(crate::store::Store::init(dir.path()).unwrap());
         let credential = store.add_device().unwrap();
@@ -385,6 +388,7 @@ pub(super) mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_silent_socket_releases_its_slot_and_a_pinging_one_keeps_it() {
+        let _serial = NOTIFY_SOCKETS.lock().await;
         struct Restore;
         impl Drop for Restore {
             fn drop(&mut self) {
