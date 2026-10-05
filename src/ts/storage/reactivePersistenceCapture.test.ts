@@ -7,6 +7,8 @@ import {
     PluginStorageCaptureCache,
 } from './saveCoordinatorHelpers'
 import type { Database } from './database.svelte'
+import { captureMaterializedCharacter } from './persistentUnitCapture'
+import { cloneConversationByMessage } from './conversationInsertPages'
 
 function fixture() {
     return createPersistentSaveObserverHarness({
@@ -38,6 +40,138 @@ function root(state: ReturnType<typeof fixture>) {
 }
 
 describe('production reactive persistence captures', () => {
+    it('preserves full chat hook receivers, transformed messages and nested serialization order', () => {
+        const state = fixture()
+        const calls: string[] = []
+        let outside = 'before'
+        const chat = state.database.characters[0].chats[0] as any
+        chat.id = 'hook-chat'
+        chat.toJSON = function (key: string) {
+            calls.push(`chat:${key}`)
+            return { id: this.id, note: `${this.message.length}:${outside}`,
+                message: this.message.map((value: { data: string }) => ({
+                    toJSON(messageKey: string) { calls.push(`message:${messageKey}`); return { data: `${value.data}:${outside}` } },
+                })) }
+        }
+        const cached = createPersistenceCanonicalCapture({ root: () => state.database, pluginStorage: () => null,
+            presets: () => [], character: () => state.database.characters[0], characters: () => state.database.characters })
+        const first = cached.materializedCharacters!().get('synthetic')!
+        expect(first.chats[0]).toEqual({ id: 'hook-chat', note: '1:before', message: [{ data: 'hello:before' }] })
+        expect(calls).toEqual(['chat:', 'message:0'])
+        calls.length = 0
+        expect(cached.materializedCharacters!().get('synthetic')).toBe(first)
+        expect(calls).toEqual(['chat:', 'message:0'])
+        outside = 'after'
+        expect(cached.materializedCharacters!().get('synthetic')!.chats[0].message[0].data).toBe('hello:after')
+        expect(cached.characterShell!()!.value.chats[0]).toEqual({ id: 'hook-chat', note: '1:after' })
+        expect(cloneConversationByMessage(chat)).toEqual(JSON.parse(canonicalJson(chat)))
+        expect(captureMaterializedCharacter(state.database.characters[0]).chats[0]).toEqual(JSON.parse(canonicalJson(chat)))
+    })
+
+    it('preserves full character hook receivers and transformed chat bodies', () => {
+        const state = fixture()
+        const calls: string[] = []
+        const owner = state.database.characters[0] as any
+        owner.toJSON = function (key: string) {
+            calls.push(`character:${key}`)
+            return { chaId: this.chaId, name: `messages:${this.chats[0].message.length}`,
+                chats: this.chats.map((chat: { message: unknown[] }) => ({
+                    toJSON(chatKey: string) { calls.push(`chat:${chatKey}`); return { id: 'transformed', message: [...chat.message, { data: 'extra' }] } },
+                })) }
+        }
+        const cached = createPersistenceCanonicalCapture({ root: () => state.database, pluginStorage: () => null,
+            presets: () => [], character: () => owner, characters: () => state.database.characters })
+        const first = cached.materializedCharacters!().get('synthetic')!
+        expect(first.name).toBe('messages:1')
+        expect(first.chats[0].message.map((message) => message.data)).toEqual(['hello', 'extra'])
+        expect(calls).toEqual(['character:', 'chat:0'])
+        owner.chats[0].message.push({ data: 'second' })
+        expect(cached.materializedCharacters!().get('synthetic')!.name).toBe('messages:2')
+        expect(cached.characterShell!()!.value.chats).toEqual([{ id: 'transformed' }])
+        expect(captureMaterializedCharacter(owner)).toEqual(JSON.parse(canonicalJson(owner)))
+    })
+
+    it('keeps accessor side effects in complete chat serialization order', () => {
+        let note = 'before'
+        const chat = { id: 'accessor-chat',
+            get note() { return note },
+            get message() { note = 'after'; return [{ data: 'body' }] },
+        }
+        const owner = { chaId: 'accessor-owner', chats: [chat] }
+        const cached = createPersistenceCanonicalCapture({ root: () => ({}), pluginStorage: () => null,
+            presets: () => [], character: () => owner, characters: () => [owner as any] })
+        expect(cached.materializedCharacters!().get(owner.chaId)!.chats[0].note).toBe('before')
+        expect(cached.materializedCharacters!().get(owner.chaId)!.chats[0].note).toBe('after')
+    })
+
+    it.each(['hidden', 'inherited'] as const)('does not read %s toJSON accessors on message bodies or messages', (placement) => {
+        const message = { data: 'body' }
+        const body = [message]
+        const ignored = { get() { throw new Error('ignored serialization accessor was evaluated') }, configurable: true }
+        for (const value of [body, message]) {
+            if (placement === 'hidden') Object.defineProperty(value, 'toJSON', ignored)
+            else {
+                const prototype = Object.create(Object.getPrototypeOf(value))
+                Object.defineProperty(prototype, 'toJSON', { ...ignored, enumerable: true })
+                Object.setPrototypeOf(value, prototype)
+            }
+        }
+        const owner = { chaId: 'ignored-hooks', chats: [{ id: 'chat', message: body }] }
+        const cached = createPersistenceCanonicalCapture({ root: () => ({}), pluginStorage: () => null,
+            presets: () => [], character: () => owner, characters: () => [owner as any] })
+        expect(cached.materializedCharacters!().get(owner.chaId)!.chats[0].message).toEqual([{ data: 'body' }])
+    })
+
+    it('returns to ordinary character capture after a serialization hook is removed', () => {
+        const state = fixture()
+        const owner = state.database.characters[0] as any
+        owner.name = 'normal'
+        owner.chats = []
+        const cached = createPersistenceCanonicalCapture({ root: () => state.database, pluginStorage: () => null,
+            presets: () => [], character: () => owner, characters: () => state.database.characters })
+        expect(cached.materializedCharacters!().get(owner.chaId)!.name).toBe('normal')
+        owner.toJSON = () => ({ chaId: owner.chaId, name: 'hook', chats: [] })
+        expect(cached.materializedCharacters!().get(owner.chaId)!.name).toBe('hook')
+        delete owner.toJSON
+        expect(cached.materializedCharacters!().get(owner.chaId)!.name).toBe('normal')
+    })
+
+    it('owns shell fields without reading bodies and invalidates nested metadata from reactive evidence', () => {
+        const state = fixture()
+        const owner = state.database.characters[0] as any
+        owner.metadata = { nested: { value: 'x'.repeat(1024 * 1024) } }
+        const chat = { id: 'shell', note: '' }
+        Object.defineProperty(chat, 'message', { enumerable: false, get: () => { throw new Error('body must stay unread') } })
+        owner.chats = [chat]
+        const cached = createPersistenceCanonicalCapture({ root: () => state.database, pluginStorage: () => null,
+            presets: () => [], character: () => owner, characters: () => state.database.characters })
+        const first = cached.characterShell!()!
+        expect(cached.characterShell!()).toBe(first)
+        owner.lastInteraction = 42
+        const next = cached.characterShell!()!
+        expect((next.value as typeof owner).metadata).toBe((first.value as typeof owner).metadata)
+        owner.metadata.nested.value = 'nested edit'
+        const edited = cached.characterShell!()!
+        expect((edited.value as typeof owner).metadata).not.toBe((first.value as typeof owner).metadata)
+        expect((edited.value as any).metadata.nested.value).toBe('nested edit')
+        expect((first.value as any).metadata.nested.value.length).toBe(1024 * 1024)
+    })
+
+    it('preserves message serialization hook indices and detects nonreactive hook changes', () => {
+        const state = fixture()
+        let outside = 'before'
+        state.database.characters[0].chats[0].message = [0, 1].map(() => ({
+            role: 'user', data: '', toJSON(key: string) { return { role: 'user', data: `${key}:${outside}` } },
+        })) as any
+        const cached = createPersistenceCanonicalCapture({ root: () => state.database, pluginStorage: () => null,
+            presets: () => [], character: () => state.database.characters[0], characters: () => state.database.characters })
+        const first = cached.materializedCharacters!().get('synthetic')!
+        expect(first.chats[0].message.map((message) => message.data)).toEqual(['0:before', '1:before'])
+        expect(cached.materializedCharacters!().get('synthetic')).toBe(first)
+        outside = 'after'
+        expect(cached.materializedCharacters!().get('synthetic')!.chats[0].message.map((message) => message.data)).toEqual(['0:after', '1:after'])
+    })
+
     it('reuses unchanged message encoding and decoded values when resident chat metadata changes', () => {
         const state=fixture()
         state.database.characters[0].chats[0].id='conversation'

@@ -156,14 +156,17 @@ pub(crate) fn application_started(job: &DurableJob) -> bool {
 }
 
 /// Whether the restore that began a CAS journal can no longer use it. A restore
-/// of this process that has not finished keeps it. One left by an earlier run
-/// keeps it only while running the same restore again can still finish it.
+/// with a live worker keeps it. An unsettled local application keeps its
+/// journal until recovery or an explicit stop resolves its receipt.
 pub(crate) fn restore_journal_owner_ended(
     root: &Path,
     job_id: &str,
-    started_in_this_process: bool,
+    worker_active: bool,
     open_store: &dyn Fn() -> std::result::Result<PersistentStore, String>,
 ) -> std::result::Result<bool, String> {
+    if worker_active {
+        return Ok(false);
+    }
     let job = match JobStore::open(root).and_then(|jobs| jobs.read(job_id)) {
         Ok(job) => job,
         Err(error) if error.kind == ErrorKind::NotFound => return Ok(true),
@@ -172,17 +175,9 @@ pub(crate) fn restore_journal_owner_ended(
     if job.request.kind != JobKind::Restore || job.terminal() {
         return Ok(true);
     }
-    if started_in_this_process {
-        return Ok(false);
-    }
     // Before application a resumed restore pins what it needs again.
     if !application_started(&job) {
         return Ok(true);
-    }
-    match ConnectionStore::open(root).and_then(|connections| connections.read(&job.request.connection_id)) {
-        Ok(_) => {}
-        Err(error) if error.kind == ErrorKind::NotFound => return Ok(true),
-        Err(error) => return Err(error.to_string()),
     }
     let store = open_store()?;
     let Some(receipt) = completed_restore_in_store(&store, &job).map_err(|error| error.to_string())? else {
@@ -1181,7 +1176,7 @@ pub(super) mod tests {
         let native_jobs=|| -> std::result::Result<Vec<crate::native_file_jobs::JobStatus>,String> {Ok(Vec::new())};
         let open_store=|| store.open_native_job_store().map_err(|error| error.to_string());
         crate::asset_repository::commands::DurableCasJobState::default().sweep_after_page_start(store.repository_root(),
-            &crate::asset_repository::commands::CasJobOwnerProbe{native_jobs:&native_jobs,device_session_active:false,open_store:&open_store}).unwrap();
+            &crate::asset_repository::commands::CasJobOwnerProbe{native_jobs:&native_jobs,device_job_owned:&|_|Ok(false),external_job_active:&|_|Ok(false),open_store:&open_store}).unwrap();
     }
 
     #[test]
@@ -1193,17 +1188,19 @@ pub(super) mod tests {
         let ended=|id:&str,here:bool| restore_journal_owner_ended(root,id,here,&open_store).unwrap();
         let input=serde_json::from_value(json!({"connectionId":"synthetic-connection","kind":"restore","snapshotId":"synthetic-snapshot","targetRevision":"0"})).unwrap();
         let job=DurableJob::new(input,1,store.external_identity().unwrap());
-        assert!(ended(&job.id,true));
+        assert!(!ended(&job.id,true));
         assert!(ended(&job.id,false));
         JobStore::open(root).unwrap().put(&job).unwrap();
         assert!(!ended(&job.id,true));
         assert!(ended(&job.id,false));
         mark_application_started(root,&job).unwrap();
-        assert!(ended(&job.id,false));
+        assert!(!ended(&job.id,false));
         ConnectionStore::open(root).unwrap().insert(&synthetic_connection(&super::super::fake::repository())).unwrap();
         assert!(!ended(&job.id,false));
         commit_fixture(&mut store,root,&job);
         assert!(!ended(&job.id,false));
+        ConnectionStore::open(root).unwrap().remove(&job.request.connection_id).unwrap();
+        assert!(!ended(&job.id,false), "connection removal does not settle an application receipt");
         let stage=store.replace_begin().unwrap();
         store.replace_put_root(&stage.staging_id,&json!({"language":"synthetic later replacement"})).unwrap();
         store.replace_commit(&stage.staging_id,Some(1)).unwrap();
@@ -1213,7 +1210,8 @@ pub(super) mod tests {
         let mut failed=jobs.read(&job.id).unwrap();
         failed.summary["state"]=json!("failed");
         jobs.put(&failed).unwrap();
-        assert!(ended(&job.id,true));
+        assert!(!ended(&job.id,true));
+        assert!(ended(&job.id,false));
     }
 
     #[test]

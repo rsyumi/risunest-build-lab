@@ -309,21 +309,23 @@ pub(crate) struct Roots {
 
 #[tauri::command]
 pub(crate) async fn app_paths_roots(app: tauri::AppHandle) -> Result<Roots, String> {
-    // The renderer cannot name a staged file before it has a root, so this is
-    // where the native side is guaranteed to have received one.
-    #[cfg(target_os = "ios")]
-    {
-        use tauri_plugin_ios_native::IosNativeExt;
-        app.ios_native().ensure_data_root().await?;
-    }
-    let paths = manifest(&app)?;
-    Ok(Roots {
-        data: paths
-            .data
-            .to_str()
-            .ok_or("application data root is not valid UTF-8")?
-            .to_owned(),
-    })
+    crate::native_log::logged_without_detail("app_paths_roots", async {
+        // The renderer cannot name a staged file before it has a root, so this is
+        // where the native side is guaranteed to have received one.
+        #[cfg(target_os = "ios")]
+        {
+            use tauri_plugin_ios_native::IosNativeExt;
+            app.ios_native().ensure_data_root().await?;
+        }
+        let paths = manifest(&app)?;
+        Ok(Roots {
+            data: paths
+                .data
+                .to_str()
+                .ok_or("application data root is not valid UTF-8")?
+                .to_owned(),
+        })
+    }.await)
 }
 
 /// Permit the renderer to reach the manifest roots. The static capability scope

@@ -34,7 +34,7 @@ import {
     setChatVarOnConversation,
 } from "../parser/chatVar.svelte";
 import { findActiveHistoryWindow, resolveHistoryWindowChat, toWindowIndex } from "./historyWindowIndex";
-import { writeHistoryWindowMessage } from "./historyWindowWrite";
+import { openHistoryWindowCopy, writeHistoryWindowMessage, type HistoryWindowCopy } from "./historyWindowWrite";
 
 export type ScriptMode = 'editinput'|'editoutput'|'editprocess'|'editdisplay'
 
@@ -608,7 +608,7 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
     }
     options.signal?.throwIfAborted()
 
-    const conversationOwner = captureContext
+    let conversationOwner = captureContext
         ? null
         : promptOperationScope?.getOwner() ?? captureScriptConversationOwner(char)
     const usesPluginCompatibility = !captureContext &&
@@ -637,6 +637,7 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
     let conversationOperation: ConversationOperationContext | null = null
     let conversationAccess: ConversationAccess = 'none'
     let readPin: ActiveConversationPin | null = null
+    let windowCopy: HistoryWindowCopy | null = null
     try {
         const globalRegexOff = isStartupExcluded(
             'regex',
@@ -654,6 +655,20 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
             ? 'none'
             : classifyConversationAccess(plan, data)
         const needsConversationOperation = conversationAccess === 'mutating'
+        const historyWindow = needsConversationOperation && !captureContext && !promptOperationScope
+            && (mode === 'editinput' || mode === 'editoutput')
+            ? findActiveHistoryWindow(char.chaId, getCurrentChat()?.id)
+            : null
+        if (historyWindow && conversationOwner) {
+            windowCopy = openHistoryWindowCopy(historyWindow, options.onConversationCommit)
+            conversationOwner = {
+                ...conversationOwner,
+                session: null,
+                version: null,
+                chat: windowCopy.chat,
+                historyWindowConversationId: windowCopy.chat.id,
+            }
+        }
         if (conversationAccess !== 'none' && conversationOwner) {
             requireScriptConversationOwner(conversationOwner)
         }
@@ -682,7 +697,11 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
     const needsConversationOperation = conversationAccess === 'mutating'
     const ownsConversationOperation = conversationOperation !== null &&
         promptOperationScope === undefined
-    const operationDatabase = conversationOperation?.createDatabaseView(db) ?? db
+    const operationDatabase = conversationOperation?.createDatabaseView(db) ?? (windowCopy && conversationOwner
+        ? { ...db, characters: db.characters.map((character) => character.chaId === conversationOwner!.selectedCharacterId
+            ? { ...character, chats: character.chats.map((chat) => chat.id === windowCopy!.chat.id ? windowCopy!.chat : chat) }
+            : character) }
+        : db)
     const operationChat = conversationOperation?.chat ?? conversationOwner?.chat ?? null
     const parseCbs = (value: string) => captureContext
         ? risuChatParserOrg(value, {
@@ -726,6 +745,10 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
     let conversationOperationCommitted = false
     const finish = <T>(result: T): T => {
         options.signal?.throwIfAborted()
+        if (windowCopy) {
+            if (!windowCopy.commit()) throw new ConversationSessionInactiveError()
+            windowCopy = null
+        }
         if (conversationOperation && ownsConversationOperation) {
             conversationOperation.commit(peekActiveConversationSession(), {
                 origin: mode === 'editdisplay' ? 'display' : undefined,
@@ -823,10 +846,14 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
                             )
                             if (!selchar) throw new ConversationSessionInactiveError()
                             const chat = selchar.chats[selchar.chatPage]
-                            const historyWindow = conversationOperation
+                            const historyWindow = conversationOperation || windowCopy
                                 ? null
                                 : findActiveHistoryWindow(selchar.chaId, chat.id)
-                            if (!historyWindow) chat.message[chatID].data = data
+                            if (windowCopy) {
+                                const index = toWindowIndex(chat, chatID)
+                                if (chat.message[index]) chat.message[index].data = data
+                            }
+                            else if (!historyWindow) chat.message[chatID].data = data
                             else if (!writeHistoryWindowMessage(historyWindow, chatID, (message) => ({ ...message, data }))) {
                                 throw new ConversationSessionInactiveError()
                             }
@@ -1032,6 +1059,10 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
     return finish({data, emoChanged})
     } catch (error) {
         try {
+            if (!options.signal?.aborted && windowCopy) {
+                if (!windowCopy.commit()) throw new ConversationSessionInactiveError()
+                windowCopy = null
+            }
             if (
                 !options.signal?.aborted &&
                 ownsConversationOperation &&

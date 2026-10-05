@@ -123,6 +123,7 @@ export async function runScripted(code:string, arg:{
     type?: 'lua'|'py'
     operationContext?: ConversationOperationContext
     createConversationOperation?: () => ConversationOperationContext | undefined
+    createConversationChat?: () => Chat
 }){
     const type: 'lua'|'py' = arg.type ?? 'lua'
     if (type === 'py' && isTauriMobile) {
@@ -190,7 +191,19 @@ export async function runScripted(code:string, arg:{
         ScriptingEngineState.selectedCharacterId = selectedCharacterId
         ScriptingEngineState.capturedCharacterOwner = capturedCharacterOwner
         let invocationOperationContext = arg.operationContext
+        let invocationChatReady = false
         ScriptingEngineState.ensureConversationOperation = () => {
+            if (arg.createConversationChat) {
+                if (invocationChatReady) return
+                const ownedChat = arg.createConversationChat()
+                invocationChatReady = true
+                ScriptingEngineState.chat = ownedChat
+                ScriptingEngineState.setVar = (key: string, value: string) =>
+                    setChatVarOnConversation(ownedChat, key, value)
+                ScriptingEngineState.getVar = (key: string) =>
+                    getChatVarFromConversation(capturedDatabase, selectedCharacterId, ownedChat, key)
+                return
+            }
             if (invocationOperationContext || !arg.createConversationOperation) return
             const context = arg.createConversationOperation()
             if (!context) return
@@ -1833,7 +1846,21 @@ async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
         const historyWindow = !operationContext && mode !== 'editDisplay'
             ? findActiveHistoryWindow(char.chaId, getCurrentChat()?.id)
             : null
-        historyWindowCopy = historyWindow ? openHistoryWindowCopy(historyWindow) : null
+        const sourceCurrent = historyWindow?.isCurrent()
+        const sourceVersion = historyWindow?.mutationVersion
+        const sourceMessages = historyWindow ? [...historyWindow.chat.message] : null
+        const createWindowChat = historyWindow ? () => {
+            if (!historyWindowCopy) {
+                if (!sourceCurrent || !historyWindow.isCurrent()
+                    || sourceVersion !== historyWindow.mutationVersion
+                    || sourceMessages!.length !== historyWindow.chat.message.length
+                    || sourceMessages!.some((message, index) => historyWindow.chat.message[index] !== message)) {
+                    throw new PersistentMutationFencedError()
+                }
+                historyWindowCopy = openHistoryWindowCopy(historyWindow, onConversationCommit)
+            }
+            return historyWindowCopy.chat
+        } : undefined
         const createOperation = () => {
             ownedOperation ??= createCurrentConversationOperation(onConversationCommit)
             return ownedOperation?.context
@@ -1849,8 +1876,9 @@ async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
                     data,
                     meta,
                     operationContext,
-                    chat: historyWindowCopy?.chat,
-                    createConversationOperation: operationContext || historyWindowCopy
+                    chat: historyWindow?.chat,
+                    createConversationChat: createWindowChat,
+                    createConversationOperation: operationContext || historyWindow
                         ? undefined
                         : createOperation,
                 })

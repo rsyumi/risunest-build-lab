@@ -238,11 +238,13 @@ pub(crate) fn macos_lifecycle_ready(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, ExitState>,
 ) -> Result<(), String> {
-    if window.label() != "main" {
-        return Err("macOS lifecycle belongs to the main window".into());
-    }
-    state.0.lock().map_err(|_| "Quit state unavailable")?.ready = true;
-    Ok(())
+    crate::native_log::logged_without_detail("macos_lifecycle_ready", (|| {
+        if window.label() != "main" {
+            return Err("macOS lifecycle belongs to the main window".into());
+        }
+        state.0.lock().map_err(|_| "Quit state unavailable")?.ready = true;
+        Ok(())
+    })())
 }
 
 #[cfg(target_os = "macos")]
@@ -252,21 +254,23 @@ pub(crate) async fn macos_exit_response(
     token: String,
     exit: bool,
 ) -> Result<(), String> {
-    if window.label() != "main" {
-        return Err("macOS lifecycle belongs to the main window".into());
-    }
-    let receiver = {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let context = Box::into_raw(Box::new(ExitResponse {
-            app: window.app_handle().clone(), token, exit, sender,
-        }));
-        if unsafe { risunest_queue_termination_response(settle_response, context.cast()) } != 1 {
-            unsafe { drop(Box::from_raw(context)); }
-            return Err("Unable to schedule macOS quit response".into());
+    crate::native_log::logged_without_detail("macos_exit_response", async {
+        if window.label() != "main" {
+            return Err("macOS lifecycle belongs to the main window".into());
         }
-        receiver
-    };
-    receiver.await.map_err(|_| "macOS quit response was not completed")?
+        let receiver = {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let context = Box::into_raw(Box::new(ExitResponse {
+                app: window.app_handle().clone(), token, exit, sender,
+            }));
+            if unsafe { risunest_queue_termination_response(settle_response, context.cast()) } != 1 {
+                unsafe { drop(Box::from_raw(context)); }
+                return Err("Unable to schedule macOS quit response".into());
+            }
+            receiver
+        };
+        receiver.await.map_err(|_| "macOS quit response was not completed")?
+    }.await)
 }
 
 #[cfg(target_os = "macos")]

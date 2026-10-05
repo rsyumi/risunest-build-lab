@@ -46,10 +46,10 @@ pub(crate) struct StagedPayload {
     body_identity: super::body_io::OwnedIdentity,
     verified_file: File,
     staging: StagingFile,
-    repository_root: PathBuf,
+    pub(super) repository_root: PathBuf,
     identity: ExactFileIdentity,
-    content_hash: String,
-    byte_size: u64,
+    pub(super) content_hash: String,
+    pub(super) byte_size: u64,
     directory_entries_synced: bool,
 }
 

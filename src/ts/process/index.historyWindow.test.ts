@@ -111,6 +111,7 @@ vi.mock('../storage/persistentDataRuntime.svelte', () => ({
     drainDeferredLwwReceives: vi.fn(async () => undefined),
     captureSelectedConversationTarget: () => mocks.selectedTarget,
     captureSelectedConversationAuthority: () => mocks.selectedAuthority,
+    recordSelectedCharacterLastInteraction: vi.fn(() => true),
     captureWindowedConversationMutationController: (...args: any[]) => mocks.windowedController?.(...args) ?? null,
     acquireCompleteConversation: mocks.acquireCompleteConversation,
     flushPendingData: mocks.flushPendingData,

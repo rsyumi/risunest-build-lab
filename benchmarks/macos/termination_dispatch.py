@@ -14,6 +14,8 @@ def validate_dispatch(phase, records):
     requests = entries('session-dispatch-renderer-request')
     responses = entries('session-dispatch-renderer-response')
     delegates = entries('session-dispatch-delegate')
+    observations = entries('session-dispatch-observation-complete')
+    cleanup = entries('session-dispatch-cleanup-repeated-terminate')
     assert ready['route'] == sent['route'] == 'self-targeted-apple-event'
     assert ready['passed'] and sent['passed'] and sent['status'] == 1
     assert exited['exitCount'] == 1 and exited['runtimeQuitRequests'] == 0
@@ -22,6 +24,7 @@ def validate_dispatch(phase, records):
     scenario = phase.removeprefix('session-dispatch-')
     session_requests = [request for request in requests if request['sessionEnd']]
     if scenario == 'initial':
+        assert not observations and not cleanup
         assert len(requests) == len(session_requests) == len(delegates) == len(responses) == 1
         assert session_requests[0]['hasDeadline'] is True
         assert responses[0]['exit'] is True and exited['nativeReplies'] == 1
@@ -31,14 +34,38 @@ def validate_dispatch(phase, records):
     else:
         expected = {'local': 'saving', 'drain': 'syncing', 'dialog': 'remote-delayed'}[scenario]
         assert ready['coordinator'] == expected and ready['rendererRequests'] == 1
+        assert ready['dialogOpen'] is True
+        assert ready['choiceButtons'] == (3 if scenario == 'dialog' else 0)
         assert ready['commits'] == ready['maximumActiveCommits'] == 1
         assert ready['activeCommits'] == (1 if scenario == 'local' else 0)
         assert ready['checkpoints'] == ready['remoteStarts'] == (0 if scenario == 'local' else 1)
         if not session_requests:
             assert len(requests) == len(delegates) == 1
             assert not responses and exited['nativeReplies'] == 0
-            outcome = 'pending-quit-bypassed-delegate'
+            if observations:
+                observation = one('session-dispatch-observation-complete')
+                assert observation['observationMillis'] >= 6_000
+                assert observation['rendererRequests'] == 1
+                assert observation['sessionRequests'] == observation['rendererReplies'] == 0
+                assert observation['coordinator'] == ('remote-delayed' if scenario == 'dialog' else 'syncing')
+                assert observation['commits'] == observation['checkpoints'] == observation['remoteStarts'] == 1
+                assert observation['maximumActiveCommits'] == 1
+                assert observation['activeCommits'] == observation['remoteCancels'] == 0
+                assert observation['dialogOpen'] is True
+                assert observation['choiceButtons'] == (3 if scenario == 'dialog' else 0)
+                assert one('session-dispatch-cleanup-repeated-terminate')['purpose'] == 'cleanup-after-observation'
+                order = [next(index for index, entry in enumerate(records) if entry['stage'] == stage)
+                         for stage in ['session-dispatch-ready', 'session-dispatch-sent',
+                                       'session-dispatch-observation-complete',
+                                       'session-dispatch-cleanup-repeated-terminate', 'session-dispatch-exit']]
+                assert order == sorted(set(order))
+                outcome = 'pending-session-event-not-delivered-within-window'
+                assert observation['outcome'] == outcome
+            else:
+                assert not cleanup
+                outcome = 'pending-quit-bypassed-delegate'
         else:
+            assert not observations and not cleanup
             assert len(session_requests) == 1 and len(delegates) == 2
             assert session_requests[0]['hasDeadline'] is True
             assert len(responses) == 1 and responses[0]['exit'] is True
@@ -46,4 +73,4 @@ def validate_dispatch(phase, records):
             outcome = 'pending-quit-session-upgrade-delivered'
     return {'scenario': scenario, 'outcome': outcome, 'route': 'self-targeted-apple-event',
             'actualOsLogoutExercised': False, 'ready': ready, 'exited': exited,
-            'requests': requests, 'responses': responses}
+            'requests': requests, 'responses': responses, 'observations': observations}

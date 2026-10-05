@@ -637,6 +637,7 @@ async fn upload_control_object(
     repository: &RepositoryHandle,
     cancel: &Cancellation,
 ) -> Result<RemoteObject> {
+    let _spool_execution = journal.begin_spool_execution();
     let plaintext_sha256 = hex::encode(hash(plaintext));
     let spool = journal.spool_path(&object_id);
     if journal.record(&object_id)?.is_none() {
@@ -666,9 +667,10 @@ async fn upload_control_object(
         let _room = if role == ObjectRole::InventoryPage {
             journal.charge_page(ciphertext.len() as u64)?
         } else {
-            match journal.reserve_spool(
+            match journal.reserve_spool_after_release(
                 (ciphertext.len() as u64).saturating_add(inventory_page_headroom(1)),
-            )? {
+                cancel,
+            ).await? {
                 SpoolAdmission::Admitted(room) => room,
                 SpoolAdmission::Full => return Err(ProviderError::new(ErrorKind::Transient)),
             }

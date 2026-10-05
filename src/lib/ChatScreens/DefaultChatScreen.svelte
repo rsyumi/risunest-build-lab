@@ -8,6 +8,7 @@
     import { CameraIcon, DatabaseIcon, GlobeIcon, ImagePlusIcon, LanguagesIcon, Laugh, MenuIcon, MicOffIcon, PackageIcon, Plus, RefreshCcwIcon, ReplyIcon, Send, StepForwardIcon, XIcon, BrainIcon, ArrowDown, SparkleIcon } from "@lucide/svelte";
     import { selectedCharID, PlaygroundStore, createSimpleCharacter, hypaV3ModalOpen, ScrollToMessageStore, additionalChatMenu, additionalFloatingActionButtons, easyPanelStore, chatPanelStore } from "../../ts/stores.svelte";
     import { onDestroy } from 'svelte';
+    import { ChatComposerState, chatScreenState, type SubmittedChatComposer } from '../../ts/ui/chatScreenState.svelte';
     import { isCompositionKey } from 'src/ts/hotkeyModifier';
     import { type Chat as ChatRecord, type Database, type character, type Message } from "../../ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
@@ -108,8 +109,8 @@
         customStyle?: string;
     }
 
-    let messageInput:string = $state('')
-    let messageInputTranslate:string = $state('')
+    const emptyComposer = new ChatComposerState()
+    let disposed = false
     let openMenu = $state(false)
     let rerollBusy = $state(false)
     let sending = $state(false)
@@ -143,6 +144,25 @@
         () => viewportBindingRevision += 1,
     )
     let currentCharacter = $derived(DBState.db.characters[$selectedCharID])
+    const composerOwner = $derived.by(() => {
+        const conversationId = currentCharacter?.chats[currentCharacter.chatPage]?.id
+        return currentCharacter?.chaId && conversationId
+            ? { characterId: currentCharacter.chaId, conversationId }
+            : null
+    })
+    const composer = $derived(composerOwner ? chatScreenState.getComposer(composerOwner) : emptyComposer)
+    function captureComposerInput(): SubmittedChatComposer {
+        return composerOwner
+            ? chatScreenState.captureComposer(composerOwner)
+            : { owner: null, composer, text: composer.text, translation: composer.translation }
+    }
+    $effect(() => {
+        chatScreenState.pruneCharacters(new Set(DBState.db.characters.map(character => character.chaId)))
+        if (currentCharacter) {
+            chatScreenState.pruneConversations(currentCharacter.chaId, new Set(currentCharacter.chats.flatMap(chat => chat.id ? [chat.id] : [])))
+        }
+    })
+
     let conversationViewportSource = $derived.by(() => {
         void viewportBindingRevision
         return selectedConversationViewport.source
@@ -329,13 +349,14 @@
             return
         }
         sending = true
-        const submittedInput = messageInput
+        const submittedComposer = captureComposerInput()
+        const submittedInput = submittedComposer.text
         const submittedFiles = [...fileInput]
         let windowed = false
         try {
             if (!submittedInput.startsWith('/') && historyLimitApplies()) {
                 windowed = true
-                return await sendMainWindowed(continueResponse, submittedInput, submittedFiles)
+                return await sendMainWindowed(continueResponse, submittedInput, submittedFiles, submittedComposer)
             }
             if (getSelectedBoundedGenerationFallbackReason() === null &&
                 !submittedInput.startsWith('/') && submittedFiles.length === 0 &&
@@ -353,7 +374,7 @@
                     try {
                         if (!controller.applyRange(0, 0, [{ role: 'user', data: submittedInput, time: Date.now(), name: null, chatId: v4() }], 'append')) return
                     } finally { controller.release() }
-                    if (messageInput === submittedInput) { messageInput = ''; messageInputTranslate = '' }
+                    chatScreenState.clearSubmittedComposer(submittedComposer)
                     await persistentRuntime.flushPendingData('generation-input')
                 }
                 const current = persistentRuntime.captureSelectedConversationTarget()
@@ -363,7 +384,7 @@
             }
             return await runSelectedConversationOperation(
                 continueResponse ? 'continue-response' : 'send-message',
-                (context) => sendMainComplete(context, continueResponse, submittedInput, submittedFiles),
+                (context) => sendMainComplete(context, continueResponse, submittedInput, submittedFiles, submittedComposer),
             )
         } catch (error) {
             // A lost history window has already been reported.
@@ -400,6 +421,7 @@
         continueResponse: boolean,
         submittedInput: string,
         submittedFiles: string[],
+        submittedComposer: SubmittedChatComposer,
     ) {
         const character = DBState.db.characters[$selectedCharID]
         const target = persistentRuntime.captureSelectedConversationTarget()
@@ -441,10 +463,7 @@
         } finally {
             window.release()
         }
-        if (messageInput === submittedInput) {
-            messageInput = ''
-            messageInputTranslate = ''
-        }
+        chatScreenState.clearSubmittedComposer(submittedComposer)
         for (const file of submittedFiles) {
             const index = fileInput.indexOf(file)
             if (index >= 0) fileInput.splice(index, 1)
@@ -463,6 +482,7 @@
         continueResponse: boolean,
         submittedInput: string,
         submittedFiles: string[],
+        submittedComposer: SubmittedChatComposer,
     ) {
         let input = submittedInput
         let mutationTarget = requireConversationMutationTarget(context)
@@ -473,7 +493,7 @@
             const commandProcessed = await processMultiCommand(input)
             context.requireCurrent()
             if(commandProcessed !== false){
-                if (messageInput === submittedInput) messageInput = ''
+                chatScreenState.clearSubmittedComposer(submittedComposer)
                 return
             }
             mutationTarget = requireConversationMutationTarget(context)
@@ -528,10 +548,7 @@
             if (!appended) return
             mutationTarget = requireConversationMutationTarget(context)
         }
-        if (messageInput === submittedInput) {
-            messageInput = ''
-            messageInputTranslate = ''
-        }
+        chatScreenState.clearSubmittedComposer(submittedComposer)
         for (const file of submittedFiles) {
             const index = fileInput.indexOf(file)
             if (index >= 0) fileInput.splice(index, 1)
@@ -847,49 +864,26 @@
     });
 
     async function updateInputTransateMessage(reverse: boolean) {
-        if(!DBState.db.useAutoTranslateInput){
+        if (!DBState.db.useAutoTranslateInput) return
+        const snapshot = captureComposerInput()
+        const experimental = isExpTranslator()
+        if (experimental && !reverse) {
+            snapshot.composer.translation = ''
             return
         }
-        if(isExpTranslator()){
-            if(!reverse){
-                messageInputTranslate = ''
-                return
-            }
-            if(messageInputTranslate === '') {
-                messageInput = ''
-                return
-            }
-            const lastMessageInputTranslate = messageInputTranslate
-            await sleep(1500)
-            if(lastMessageInputTranslate === messageInputTranslate){
-                translate(reverse ? messageInputTranslate : messageInput, reverse).then((translatedMessage) => {
-                    if(translatedMessage){
-                        if(reverse)
-                            messageInput = translatedMessage
-                        else
-                            messageInputTranslate = translatedMessage
-                    }
-                })
-            }
-            return
-
-        }
-        if(reverse && messageInputTranslate === '') {
-            messageInput = ''
+        const input = reverse ? snapshot.translation : snapshot.text
+        if (!input) {
+            if (reverse) snapshot.composer.text = ''
+            else snapshot.composer.translation = ''
             return
         }
-        if(!reverse && messageInput === '') {
-            messageInputTranslate = ''
-            return
+        if (experimental) await sleep(1500)
+        if (!chatScreenState.matchesComposer(snapshot)) return
+        const translatedMessage = await translate(input, reverse)
+        if (translatedMessage && chatScreenState.matchesComposer(snapshot)) {
+            if (reverse) snapshot.composer.text = translatedMessage
+            else snapshot.composer.translation = translatedMessage
         }
-        translate(reverse ? messageInputTranslate : messageInput, reverse).then((translatedMessage) => {
-            if(translatedMessage){
-                if(reverse)
-                    messageInput = translatedMessage
-                else
-                    messageInputTranslate = translatedMessage
-            }
-        })
     }
 
     /**
@@ -1263,6 +1257,7 @@
     }
 
     onDestroy(() => {
+        disposed = true
         selectedConversationViewport.dispose()
         screenshotOpenGeneration += 1
         cancelScreenshot()
@@ -1367,7 +1362,7 @@
                 {/if}
 
                 <textarea class="peer text-input-area focus:border-textcolor transition-colors outline-hidden text-textcolor p-2 min-w-0 border border-r-0 bg-transparent rounded-md rounded-r-none input-text text-xl grow ml-4 border-darkborderc resize-none overflow-y-hidden overflow-x-hidden max-w-full placeholder:text-sm"
-                          bind:value={messageInput}
+                          bind:value={composer.text}
                           bind:this={inputEle}
                           onkeydown={(e) => {
                         if (isCompositionKey(e)) return;
@@ -1386,6 +1381,7 @@
                         }
                     }}
                           onpaste={(e) => {
+                        const inputOwner = composer
                         const items = e.clipboardData?.items
                         if(!items){
                             return
@@ -1408,13 +1404,13 @@
                                             name: file.name,
                                             data: uint8
                                         })
-                                        if(!results) return
+                                        if (!results || disposed || composer !== inputOwner) return
                                         for(const res of results){
                                             if(res?.type === 'asset'){
                                                 fileInput.push(res.data)
                                             }
                                             if(res?.type === 'text'){
-                                                messageInput += `{{file::${res.name}::${res.data}}}`
+                                                composer.text += `{{file::${res.name}::${res.data}}}`
                                             }
                                         }
                                         updateInputSizeAll()
@@ -1424,7 +1420,7 @@
                             }
                         }
                     }}
-                          oninput={()=>{updateInputSizeAll();updateInputTransateMessage(false)}}
+                          oninput={(event)=>{composer.text = event.currentTarget.value; updateInputSizeAll();updateInputTransateMessage(false)}}
                           style:height={inputHeight}
                 ></textarea>
 
@@ -1473,7 +1469,7 @@
                         <LanguagesIcon />
                     </label>
                     <textarea id = 'messageInputTranslate' class="text-textcolor rounded-md p-2 min-w-0 bg-transparent input-text text-xl grow ml-4 mr-2 border-darkbutton resize-none focus:bg-selected overflow-y-hidden overflow-x-hidden max-w-full"
-                              bind:value={messageInputTranslate}
+                              bind:value={composer.translation}
                               bind:this={inputTranslateEle}
                               onkeydown={(e) => {
                             if (isCompositionKey(e)) return;
@@ -1488,7 +1484,7 @@
                                 e.preventDefault()
                             }
                         }}
-                              oninput={()=>{updateInputSizeAll();updateInputTransateMessage(true)}}
+                              oninput={(event)=>{composer.translation = event.currentTarget.value; updateInputSizeAll();updateInputTransateMessage(true)}}
                               placeholder={language.enterMessageForTranslateToEnglish}
                               style:height={inputTranslateHeight}
                     ></textarea>
@@ -1523,7 +1519,7 @@
                             else if(fileExtension === 'mp3' || fileExtension === 'wav')
                                 fileType = 'audio'
                         }
-                        messageInput += `<span class='notranslate' translate='no'>{{${fileType}::${additionalAsset[0]}}}</span> *${additionalAsset[0]} added*`
+                        composer.text += `<span class='notranslate' translate='no'>{{${fileType}::${additionalAsset[0]}}}</span> *${additionalAsset[0]} added*`
                         updateInputSizeAll()
                     }}/>
                 </div>
@@ -1532,7 +1528,7 @@
             {#if DBState.db.useAutoSuggestions}
                 <Suggestion
                     messageInput={(msg) =>
-                        (messageInput =
+                        (composer.text =
                             (DBState.db.subModel === 'textgen_webui' ||
                                 DBState.db.subModel === 'mancer') &&
                             DBState.db.autoSuggestClean
@@ -1697,14 +1693,15 @@
                     </div>
 
                     <div class="flex items-center cursor-pointer hover:text-green-500 transition-colors" onclick={async () => {
-                        const results = await postChatFile(messageInput)
-                        if(!results) return
+                        const inputOwner = composer
+                        const results = await postChatFile(inputOwner.text)
+                        if (!results || disposed || composer !== inputOwner) return
                         for(const res of results){
                             if(res?.type === 'asset'){
                                 fileInput.push(res.data)
                             }
                             if(res?.type === 'text'){
-                                messageInput += `{{file::${res.name}::${res.data}}}`
+                                composer.text += `{{file::${res.name}::${res.data}}}`
                             }
                         }
                         updateInputSizeAll()

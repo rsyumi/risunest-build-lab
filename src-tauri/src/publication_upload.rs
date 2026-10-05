@@ -99,6 +99,40 @@ impl std::fmt::Display for OfficialPublicationUploadError {
 
 impl std::error::Error for OfficialPublicationUploadError {}
 
+impl crate::native_log::CommandFailure for OfficialPublicationUploadError {
+    fn code(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(match self {
+            Self::InvalidRequest { .. } => "invalid-request",
+            Self::Source { .. } => "source",
+            Self::Transport { .. } => "transport",
+            Self::HttpStatus { .. } => "http-status",
+            Self::ResponseTooLarge => "response-too-large",
+            Self::InvalidResponse { .. } => "invalid-response",
+        })
+    }
+}
+
+#[track_caller]
+pub(crate) fn logged_upload_outcome(
+    command: &str,
+    result: Result<OfficialPublicationUploadResult, OfficialPublicationUploadError>,
+) -> Result<OfficialPublicationUploadResult, OfficialPublicationUploadError> {
+    struct AuthRefusal(&'static str);
+    impl crate::native_log::CommandFailure for AuthRefusal {
+        fn code(&self) -> std::borrow::Cow<'_, str> { self.0.into() }
+        fn expected(&self) -> bool { true }
+    }
+    let refusal = match &result {
+        Ok(OfficialPublicationUploadResult::AuthWarning { .. }) => Some("auth-warning"),
+        Ok(OfficialPublicationUploadResult::ReauthenticationNeeded { .. }) => Some("reauthentication-needed"),
+        _ => None,
+    };
+    if let Some(code) = refusal {
+        crate::native_log::record_command_failure(command, &AuthRefusal(code), std::panic::Location::caller());
+    }
+    crate::native_log::logged_without_detail(command, result)
+}
+
 fn endpoint(base_url: &str, path: &str) -> Result<String, OfficialPublicationUploadError> {
     let parsed = url::Url::parse(base_url).map_err(|error| {
         OfficialPublicationUploadError::InvalidRequest {
@@ -811,14 +845,15 @@ mod tests {
             let (base_url, _, server) = mock_server(vec![MockResponse {
                 status: 403,
                 headers,
-                body: br#"{"warning":"quota","reloadSession":true}"#,
+                body: br#"{"warning":"synthetic-private-warning","reloadSession":true}"#,
             }]);
             let mut input = request(base_url, &source);
             input.session = Some("existing".to_owned());
-            let result = tauri::async_runtime::block_on(upload_file_attempt(input)).unwrap();
+            let result = super::logged_upload_outcome("publication_auth_outcome_diagnostic",
+                tauri::async_runtime::block_on(upload_file_attempt(input))).unwrap();
             server.join().unwrap();
             let value = serde_json::to_value(result).unwrap();
-            assert_eq!(value["warning"], "quota");
+            assert_eq!(value["warning"], "synthetic-private-warning");
             assert_eq!(
                 value["kind"],
                 if warn {
@@ -829,5 +864,37 @@ mod tests {
             );
             assert!(value.get("reloadSession").is_none());
         }
+        let entries = crate::native_log::global_state().tail(None);
+        let failures: Vec<_> = entries.iter().filter(|entry| entry.message.starts_with("publication_auth_outcome_diagnostic failed: ")).collect();
+        assert_eq!(failures.len(), 2);
+        assert!(failures.iter().all(|entry| entry.level == "warn" && !entry.message.contains("synthetic-private-warning") && !entry.message.contains("existing")));
+        assert!(failures.iter().any(|entry| entry.message.contains("code=auth-warning at=")));
+        assert!(failures.iter().any(|entry| entry.message.contains("code=reauthentication-needed at=")));
+    }
+
+    #[test]
+    fn successful_publication_outcomes_stay_silent_and_errors_log_once() {
+        let results = [
+            OfficialPublicationUploadResult::Written {
+                replacement_key: "synthetic-key".into(), session: "synthetic-session".into(),
+                save_date: "1".into(), status: 200, bytes_uploaded: 1, warning: None, reload_session: false,
+            },
+            OfficialPublicationUploadResult::NotModified {
+                replacement_key: "synthetic-key".into(), session: "synthetic-session".into(),
+                save_date: "1".into(), status: 304, bytes_uploaded: 1,
+            },
+        ];
+        for result in results {
+            assert_eq!(super::logged_upload_outcome("publication_success_diagnostic", Ok(result.clone())).unwrap(), result);
+        }
+        let error = OfficialPublicationUploadError::Transport { message: "synthetic-private-url".into() };
+        assert_eq!(super::logged_upload_outcome("publication_error_diagnostic", Err(error.clone())).unwrap_err(), error);
+        let entries = crate::native_log::global_state().tail(None);
+        assert!(entries.iter().all(|entry| !entry.message.starts_with("publication_success_diagnostic")));
+        let failures: Vec<_> = entries.iter().filter(|entry| entry.message.starts_with("publication_error_diagnostic failed: ")).collect();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].level, "error");
+        assert!(failures[0].message.contains("code=transport at="));
+        assert!(!failures[0].message.contains("synthetic-private-url"));
     }
 }

@@ -13,6 +13,7 @@
         cancelNativeDataHealthScan,
         deepScanNativeDataHealth,
         discardNativeDataHealthIntent,
+        completeNativeDataHealthIntent,
         getNativeDataHealthResult,
         listNativeDataHealthJournals,
         planNativeDataHealthRepair,
@@ -68,6 +69,9 @@
             revision, (expected) => applyNativeDataHealthRepair(selection, snapshot, expected, scannedAt),
         ),
         discardIntent: discardNativeDataHealthIntent,
+        completeIntent: (finding, revision, scannedAt) => repair(
+            revision, (expected) => completeNativeDataHealthIntent(finding, expected, scannedAt),
+        ),
         listJournals: listNativeDataHealthJournals,
         undoRepair: (journalId, revision) => repair(
             revision, (expected) => undoNativeDataHealthRepair(journalId, expected),
@@ -304,6 +308,20 @@
         if (confirmed.confirmed && confirmed.checked) await run(() => model.discard(item, diagnosis))
     }
 
+    async function completeIntent(item: DataHealthFinding): Promise<void> {
+        const diagnosis = view.result
+        if (!diagnosis || view.activity) return
+        const confirmed = await alertCheckboxConfirm({
+            title: strings.completeIntentTitle,
+            description: strings.completeIntentDescription,
+            checkboxLabel: strings.completeIntentAcknowledge,
+            actionLabel: strings.completeIntent,
+            cancelLabel: language.cancel,
+            requireChecked: true,
+        })
+        if (confirmed.confirmed && confirmed.checked) await run(() => model.complete(item, diagnosis))
+    }
+
     async function undoRepair(id: string): Promise<void> {
         await run(() => model.undo(id))
     }
@@ -328,6 +346,7 @@
     }
     const failureMessages = {
         discard: strings.discardIntentFailed,
+        complete: strings.completeIntentFailed,
         load: strings.loadFailed, scan: strings.scanFailed, repair: strings.repairFailed,
         undo: strings.undoFailed, refresh: strings.refreshFailed, preview: strings.previewFailed,
     }
@@ -425,8 +444,10 @@
             {#each group.shown as item, index (index)}
                 <div data-data-health-item class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 border-t border-darkborderc/55 py-1.5 pr-4 pl-10 text-sm">
                     <span class="min-w-0 flex-1 break-all">{itemDescription(item) ?? itemLocation(item)}</span>
-                    {#if item.code === 'intent-quarantined' && item.owner.kind === 'intent' && item.locator}
+                    {#if item.code === 'intent-quarantined' && item.owner.kind === 'intent' && item.locator && item.intentAction === 'discard'}
                         <SettingButton variant="secondary" disabled={preparation !== 'ready' || Boolean(view.activity)} onclick={() => discardIntent(item)}>{strings.discardIntent}</SettingButton>
+                    {:else if item.code === 'intent-quarantined' && item.owner.kind === 'intent' && item.locator && item.intentAction === 'complete'}
+                        <SettingButton variant="secondary" disabled={preparation !== 'ready' || Boolean(view.activity)} onclick={() => completeIntent(item)}>{strings.completeIntent}</SettingButton>
                     {/if}
                     {#if !itemDescription(item) && itemTarget(item)}
                         <span class="min-w-0 break-all text-textcolor2">{itemTarget(item)}</span>

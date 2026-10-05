@@ -545,6 +545,13 @@ implements ConversationViewportSource {
         this.notifyListeners()
     }
 
+    advanceUnchangedRevision(revision: DataRevision): void {
+        this.assertUsable()
+        this.validateRevision(revision)
+        if (revision < this.currentRevision) throw new RangeError('Persistent conversation revision moved backwards')
+        this.currentRevision = revision
+    }
+
     acquireRangePin(
         startIndex: number,
         endIndex: number,

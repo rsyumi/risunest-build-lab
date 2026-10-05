@@ -46,6 +46,8 @@ export interface SyncBindingOptions {
 export type PreviousStorageFilesChoice = 'connect' | 'download-then-connect' | 'cancel'
 export interface PreviousStorageFilesContext extends BindingContext {
     target: Exclude<BindingTarget, { kind: 'none' }>
+    libraryId: string
+    targetId: string
 }
 export const PREVIOUS_FILES_DOWNLOAD_FAILED = 'previous-files-download-failed'
 export class PreviousStorageFilesDownloadError extends Error {
@@ -105,7 +107,7 @@ export interface SyncBindingDependencies {
     recovery?: BindingRecoveryRegistration
     // Asked once for a first binding to an empty target while its switch is still required.
     confirmPreviousStorageFiles?(context: PreviousStorageFilesContext): Promise<PreviousStorageFilesChoice>
-    downloadPreviousStorageFiles?(context: BindingContext): Promise<void>
+    downloadPreviousStorageFiles?(context: PreviousStorageFilesContext): Promise<void>
 }
 export type BindingOutcome = { kind: 'cancelled' } | { kind: 'bound'; action: 'initialized' | 'replaced' | 'resumed' | 'new-device'; state: SyncBindingState; newDevice?: NewDeviceBindingResult }
 
@@ -251,7 +253,7 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
                 }
                 let previousFiles: PreviousStorageFilesChoice = 'connect'
                 if (dependencies.confirmPreviousStorageFiles && inspected.empty && !replace && !inspected.previouslyBoundLibrary && switchRequired) {
-                    previousFiles = await dependencies.confirmPreviousStorageFiles({ ...context, target })
+                    previousFiles = await dependencies.confirmPreviousStorageFiles({ ...context, target, libraryId: inspected.libraryId, targetId: inspected.targetId })
                     if (previousFiles === 'cancel') return { kind: 'cancelled' }
                     if (previousFiles === 'download-then-connect' && !dependencies.downloadPreviousStorageFiles) throw new Error('Sync binding download is unavailable')
                     await check(context)
@@ -264,7 +266,7 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
                 jobsFenced = true
                 await fenceOld(transport, context)
                 if (previousFiles === 'download-then-connect') {
-                    try { await dependencies.downloadPreviousStorageFiles!(context) } catch (error) {
+                    try { await dependencies.downloadPreviousStorageFiles!({ ...context, target, libraryId: inspected.libraryId, targetId: inspected.targetId }) } catch (error) {
                         if (!isCancelled(error)) throw new PreviousStorageFilesDownloadError(error)
                         jobsFenced = false
                         await resumeOld(mode)

@@ -80,6 +80,8 @@ function mockPublicGeneration(
         getPersistentDataRuntime: () => runtime,
         invalidateActiveConversationSession: () => runtime.invalidateActiveConversationSession(),
         captureSelectedConversationAuthority: () => runtime.captureSelectedConversationAuthority(),
+        recordSelectedCharacterLastInteraction: (...args: Parameters<typeof runtime.recordSelectedCharacterLastInteraction>) =>
+            runtime.recordSelectedCharacterLastInteraction(...args),
         captureWindowedConversationMutationController: (target: never, chat: Chat, start: number) =>
             runtime.captureWindowedConversationMutationController(target, chat, start),
         flushPendingData: (reason: string) => runtime.flushPendingData(reason),
@@ -385,7 +387,10 @@ describe('independent windowed conversation interfaces', () => {
         expect(readConversation).not.toHaveBeenCalled()
         expect(runtime.getSelectedConversationMode()).toBe('windowed')
         expect(fixture.workingCopy.characters[0]).toMatchObject({ reloadKeys: 0 })
-        expect(fixture.workingCopy.characters[0].lastInteraction).toBeUndefined()
+        const lastInteraction = fixture.workingCopy.characters[0].lastInteraction
+        expect(lastInteraction).toEqual(expect.any(Number))
+        expect(lastInteraction).toBeGreaterThan(0)
+        expect((await store.readCharacter('char-a'))!.value.lastInteraction).toBe(lastInteraction)
         const persisted = await store.readConversation('char-a', 'chat-a')
         expect(persisted!.value.message.slice(0, -1)).toEqual(oracle.message)
         expect(persisted!.value.message.at(-1)!.data).toBe('Generation compatibility output')

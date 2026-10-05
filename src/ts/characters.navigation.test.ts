@@ -149,6 +149,7 @@ import {
     characterFormatUpdate,
     createBlankChar,
     createNewCharacter,
+    commitDetachedCharacter,
     duplicateChat,
     editSelectedChatList,
     exportAllChats,
@@ -929,6 +930,121 @@ describe('chat list operations', () => {
         expect(imported.message).toEqual(message)
         expect(bufferCalls).toBe(0)
     })
+
+    it('imports and immediately duplicates large Unicode chats through bounded capture and commit pages', async () => {
+        const { SaveCoordinator } = await import('./storage/saveCoordinator')
+        const { createPersistenceCanonicalCapture } = await import('./storage/reactivePersistenceCapture.svelte')
+        const { createPersistentSaveObserverHarness } = await import('./storage/tests/persistentSaveObserverHarness.svelte')
+        const { cloneConversationByMessage, CONVERSATION_INSERT_PAGE_BYTES } = await import('./storage/conversationInsertPages')
+        const { utf8ByteLength } = await import('./storage/nativePersistenceValue')
+        const { encodeNativeCommit } = await import('./storage/nativeCommitTransport')
+        let encodedRequests = 0
+        class EncodingWorker {
+            onmessage: ((event: { data: { bytes: Uint8Array } }) => void) | null = null
+            onerror: (() => void) | null = null
+            terminate() {}
+            postMessage(data: { pages: Uint8Array[]; byteLength: number }, transfer: ArrayBuffer[]) {
+                expect(Object.keys(data)).toEqual(['pages', 'byteLength'])
+                expect(data.byteLength).toBeLessThan(CONVERSATION_INSERT_PAGE_BYTES + 64 * 1024)
+                expect(data.pages.every((page) => page.byteLength <= 1024 * 1024)).toBe(true)
+                const received = structuredClone(data, { transfer })
+                expect(data.pages.every((page) => page.byteLength === 0)).toBe(true)
+                const bytes = new Uint8Array(received.byteLength)
+                let offset = 0
+                for (const page of received.pages) { bytes.set(page, offset); offset += page.byteLength }
+                encodedRequests++
+                Promise.resolve().then(() => this.onmessage?.({ data: { bytes } }))
+            }
+        }
+        vi.stubGlobal('Worker', EncodingWorker)
+        const initial = buildSelectedCharacter()
+        const reactive = createPersistentSaveObserverHarness({ ...mocks.database } as any)
+        mocks.database.characters = reactive.database.characters
+        const current = () => mocks.database.characters[0]
+        const stored = new Map(current().chats.map((chat: any) => [chat.id, cloneConversationByMessage(chat)]))
+        let revision = 1
+        const requests: any[] = []
+        const capture = createPersistenceCanonicalCapture({
+            root: () => reactive.database, presets: () => [], pluginStorage: () => null,
+            character: current, characters: () => mocks.database.characters,
+        })
+        const store = {
+            commit: vi.fn(async (input: any) => {
+                expect(input.expectedRevision).toBe(revision)
+                const encoded = await encodeNativeCommit({ commit: input, assetAliases: [] })
+                expect(JSON.parse(new TextDecoder().decode(encoded)).commit).toEqual(input)
+                requests.push(input)
+                for (const mutation of input.conversations ?? []) {
+                    if (mutation.type !== 'replace-range') continue
+                    const previous: any = stored.get(mutation.conversationId)
+                    const chat = previous ?? { ...mutation.conversation, message: [] }
+                    chat.message.splice(mutation.start, mutation.deleteCount, ...mutation.messages)
+                    stored.set(mutation.conversationId, chat)
+                }
+                return { revision: ++revision }
+            }),
+            readConversation: vi.fn(async (_characterId: string, id: string) => {
+                const chat = stored.get(id)
+                return chat ? { revision, value: cloneConversationByMessage(chat as any) } : null
+            }),
+        }
+        const coordinator = new SaveCoordinator({
+            store: store as any, canonicalCapture: capture,
+            captureRoot: () => ({}) as any, capturePresets: () => [], capturePluginStorage: () => null,
+            captureCharacters: () => mocks.database.characters, captureSelectedCharacter: current,
+            captureCharacter: (id) => mocks.database.characters.find((value: any) => value.chaId === id) ?? null, replaceDatabase: () => {},
+        })
+        coordinator.initialize(revision)
+        mocks.getSelectedConversationMode.mockReturnValue('complete')
+        mocks.captureSelectedConversationTarget.mockImplementation(() => ({
+            characterId: current().chaId, conversationId: current().chats[current().chatPage].id,
+        }))
+        mocks.acquireCompleteConversation.mockResolvedValue({ release: () => {} })
+        mocks.flushPendingData.mockImplementation((reason) => coordinator.flushPendingData(reason))
+        mocks.commitCharacterAddition.mockImplementation((request, reason) => coordinator.commitCharacterAddition(request, reason))
+        mocks.readPersistentConversation.mockImplementation((characterId, id, reason) => coordinator.readPersistentConversation(characterId, id, reason))
+        mocks.changeChatTo.mockImplementation(async (id) => {
+            const result = await selectChat(id)
+            await coordinator.flushPendingData('after-duplicate-selection')
+            return result
+        })
+        const data = '한글🐿️é'.repeat(550_000)
+        const messages = [0, 1, 2].map((index) => ({ role: 'user', data: `${index}:${data}`, chatId: `import-message-${index}` }))
+        mocks.selectSingleFile.mockResolvedValueOnce({ name: 'large-synthetic.json', data: new TextEncoder().encode(JSON.stringify({
+            type: 'risuChat', ver: 2, data: { id: 'input', name: 'Large import', note: '', localLore: [], message: messages }, folders: [],
+        })) })
+        const originalStringify = JSON.stringify
+        let largestEncoding = 0
+        const stringify = vi.spyOn(JSON, 'stringify').mockImplementation(((value: unknown, ...args: any[]) => {
+            const json = (originalStringify as any)(value, ...args)
+            if (typeof json === 'string') largestEncoding = Math.max(largestEncoding, utf8ByteLength(json))
+            return json
+        }) as typeof JSON.stringify)
+        try {
+            await importChat()
+            expect(mocks.alertError).not.toHaveBeenCalled()
+            const imported = current().chats[0].id
+            expect(await duplicateChat(initial.chaId, imported)).toBe(true)
+            const firstDuplicate = current().chats[0].id
+            expect(await duplicateChat(initial.chaId, firstDuplicate)).toBe(true)
+            const secondDuplicate = current().chats[0].id
+            for (const id of [imported, firstDuplicate, secondDuplicate]) {
+                expect((stored.get(id) as any).message.map((message: any) => message.data)).toEqual(messages.map((message) => message.data))
+            }
+            await commitDetachedCharacter({ type: 'character', chaId: 'new-character', name: 'New character',
+                chats: [{ id: 'new-character-chat', name: 'New chat', note: '', localLore: [], message: messages }] } as any, 'large-character-import')
+            expect((stored.get('new-character-chat') as any).message.map((message: any) => message.data)).toEqual(messages.map((message) => message.data))
+            expect(requests.find((request) => request.addCharacter)?.addCharacter.chats).toEqual([])
+            expect(largestEncoding).toBeLessThan(CONVERSATION_INSERT_PAGE_BYTES + 64 * 1024)
+            expect(requests.filter((request) => request.conversations?.some((mutation: any) => mutation.start > 0))).toHaveLength(4)
+            expect(encodedRequests).toBe(requests.length)
+            expect(coordinator.hasPendingPersistenceWork).toBe(false)
+        } finally {
+            stringify.mockRestore()
+            vi.unstubAllGlobals()
+            mocks.commitCharacterAddition.mockImplementation(async (request: any) => request.install())
+        }
+    }, 30_000)
 
     it('keeps the selected chat when another chat is removed', async () => {
         const character = buildSelectedCharacter()

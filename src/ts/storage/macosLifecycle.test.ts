@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createMacosExitHandler } from './macosLifecycle'
 import { SaveCoordinator } from './saveCoordinator'
 import { createSyncExitCoordinator } from './syncExitCoordinator'
-import { deferred, makeStore } from './saveCoordinator.testSupport'
+import { captureRoot, deferred, makeDatabase, makeStore } from './saveCoordinator.testSupport'
 
 function harness() {
     const dependencies = {
@@ -47,7 +47,7 @@ describe('macOS acknowledged quit', () => {
         const normalCheckpoint = deferred<void>()
         const sessionCheckpoint = deferred<void>()
         const commit = vi.fn(() => commitGate.promise)
-        let root = { username: 'before' }
+        let root = captureRoot(makeDatabase())
         const save = new SaveCoordinator({
             store: makeStore(commit),
             captureRoot: () => root,
@@ -56,7 +56,7 @@ describe('macOS acknowledged quit', () => {
             replaceDatabase: vi.fn(),
         })
         save.initialize(0)
-        root = { username: 'synthetic-after' }
+        root = { ...root, username: 'synthetic-after' }
         save.markPersistentDataDirty(32)
         const pendingFlushes: Promise<void>[] = []
         const flushLocal = () => {

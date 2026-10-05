@@ -1,9 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { mount, tick } from "svelte";
+import SyncExitDialog from "../../src/lib/Others/SyncExitDialog.svelte";
 import { createMacosExitHandler, type MacosExitRequest } from "../../src/ts/storage/macosLifecycle";
 import { SaveCoordinator } from "../../src/ts/storage/saveCoordinator";
 import { SqlitePersistentDataStore } from "../../src/ts/storage/sqlitePersistentDataStore";
 import { createSyncExitCoordinator, type SyncExitDrainResult } from "../../src/ts/storage/syncExitCoordinator";
+import { configureSyncExitCoordinator } from "../../src/ts/storage/syncExitProduction";
 import { check, pause } from "./contracts";
 
 const report = (stage: string, result: unknown) => invoke("macos_bench_report", { stage, result });
@@ -92,9 +95,15 @@ export async function terminationDispatch(phase: string) {
     }),
     softWaitMillis: scenario === "dialog" ? 50 : 30_000,
   });
+  configureSyncExitCoordinator(coordinator);
+  const dialogTarget = document.createElement("div");
+  document.body.append(dialogTarget);
+  mount(SyncExitDialog, { target: dialogTarget });
   coordinator.subscribe(state => note(`coordinator-${state.phase}`));
   const snapshot = () => ({
     scenario, route: "self-targeted-apple-event", coordinator: coordinator.snapshot().phase,
+    dialogOpen: !!dialogTarget.querySelector('[role="dialog"]'),
+    choiceButtons: dialogTarget.querySelectorAll("button").length,
     commits, activeCommits, maximumActiveCommits, checkpoints, flushCalls, coalesced,
     remoteStarts, remoteCancels, rendererRequests, sessionRequests, rendererReplies, timeline,
   });
@@ -102,6 +111,10 @@ export async function terminationDispatch(phase: string) {
     coordinator,
     saveLocally: async () => { await flushLocal(); await checkpointLocal(); },
     respond: async (token, exit) => {
+      const saved = await store.readRoot();
+      check(saved.value.username === root.username && saved.revision === save.revision,
+        "session response must follow the real local commit");
+      await tick();
       rendererReplies++;
       note(`renderer-response-${exit}`);
       await report("session-dispatch-renderer-response", { ...snapshot(), exit });
@@ -114,7 +127,8 @@ export async function terminationDispatch(phase: string) {
     if (payload.sessionEnd) sessionRequests++;
     note(payload.sessionEnd ? "renderer-session-request" : "renderer-normal-request");
     void report("session-dispatch-renderer-request", {
-      ...snapshot(), sessionEnd: payload.sessionEnd, hasDeadline: payload.deadlineUnixMillis !== undefined,
+      ...snapshot(), sessionEnd: payload.sessionEnd,
+      hasDeadline: typeof payload.deadlineUnixMillis === "number" && Number.isFinite(payload.deadlineUnixMillis),
     }).then(() => handler(payload)).catch(error => report("failure", { message: String(error) }));
   });
   await invoke("macos_bench_main_thread_settled");
@@ -127,18 +141,36 @@ export async function terminationDispatch(phase: string) {
       check(performance.now() < deadline, "native ordinary quit did not reach the requested coordinator stage");
       await pause(10);
     }
+    await tick();
+    check(!!dialogTarget.querySelector('[role="dialog"]'), "product exit dialog must be mounted");
+    check(dialogTarget.querySelectorAll("button").length === (scenario === "dialog" ? 3 : 0),
+      "the confirmation stage must expose the real product choices");
   }
   note("send-session-event");
   await report("session-dispatch-ready", { ...snapshot(), passed: true });
   await invoke("macos_bench_dispatch_session_event");
+  const sentAt = performance.now();
   await pause(250);
   note("release-local-save");
   releaseCommit();
   await pause(250);
   await report("session-dispatch-after-delivery", snapshot());
-  // A delivered upgrade may leave the original coordinator awaiting a decision.
-  if (scenario !== "initial") coordinator.decide("cancel-exit");
-  await pause(6_000);
+  while (performance.now() - sentAt < 6_000) {
+    await pause(Math.max(1, 6_000 - (performance.now() - sentAt)));
+  }
+  if (scenario !== "initial" && sessionRequests === 0 && rendererRequests === 1 && rendererReplies === 0) {
+    const saved = await store.readRoot();
+    check(saved.value.username === root.username && saved.revision === save.revision,
+      "the pending ordinary quit must complete the real local commit");
+    note("observation-complete");
+    await report("session-dispatch-observation-complete", {
+      ...snapshot(), observationMillis: Math.round(performance.now() - sentAt),
+      outcome: "pending-session-event-not-delivered-within-window",
+    });
+    await invoke("macos_bench_repeat_native_quit");
+    await pause(15_000);
+    throw new Error("Cleanup repeated terminate did not end the isolated app");
+  }
   await report("failure", { ...snapshot(), message: "Session event did not terminate the isolated app" });
   await invoke("macos_bench_quit");
 }

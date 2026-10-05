@@ -54,7 +54,7 @@
     import { safeStructuredClone } from 'src/ts/polyfill'
     import isEqual from 'lodash/isEqual'
     import type { ConversationViewportRow } from 'src/ts/conversationViewportSource'
-    import type { ChatDisplayRefresh } from 'src/ts/chatDisplayRefresh'
+    import type { ChatDisplayRefresh, ChatPresentationRefresh } from 'src/ts/chatDisplayRefresh'
     import type { BoundedLiveChatParserProjection } from 'src/ts/selectedConversationLiveParserProjection'
     import type {
         SelectedConversationMessageEditIntent,
@@ -81,9 +81,9 @@
     let bodyRoot:HTMLElement|null = $state(null)
     let editTarget: CapturedChatMessageTarget | null = null
     let editEvidence: Message | null = null
-    let partialEditTarget: CapturedChatMessageTarget | null = null
+    let partialEditTarget = $state.raw<CapturedChatMessageTarget | null>(null)
     let editIntent: SelectedConversationMessageEditIntent | null = null
-    let partialEditIntent: SelectedConversationMessageEditIntent | null = null
+    let partialEditIntent = $state.raw<SelectedConversationMessageEditIntent | null>(null)
     let partialEditController = $state<PartialEditController | undefined>()
     interface AcquiredChatMessageTarget {
         readonly target: CapturedChatMessageTarget
@@ -127,6 +127,7 @@
         parserAbortSignal?: AbortSignal
         restoredEditor?: ChatEditorDraft
         onEditorOpen?: () => void
+        onEditorClose?: () => void
         onBodyRendered?: () => void
     }
 
@@ -168,6 +169,7 @@
         parserAbortSignal,
         restoredEditor,
         onEditorOpen,
+        onEditorClose,
         onBodyRendered,
     }: Props = $props()
 
@@ -175,7 +177,15 @@
     let captureSettings = $derived(captureContext?.settings)
     let captureCharacter = $derived(captureContext?.parserContext.character)
     let captureChat = $derived(captureCharacter?.chats[captureCharacter.chatPage])
-    let captureTheme = $derived(captureSettings?.theme ?? DBState.db.theme)
+    let retainedLayout: { theme: string; gui: HTMLElement | null } | undefined
+    let presentedLayout = $derived.by(() => {
+        if (hasActiveEditor() && retainedLayout) return retainedLayout
+        const theme = captureSettings?.theme ?? DBState.db.theme
+        const gui = theme === 'customHTML' ? RenderGUIHtml(captureSettings?.guiHTML ?? DBState.db.guiHTML) : null
+        retainedLayout = { theme, gui }
+        return retainedLayout
+    })
+    let captureTheme = $derived(presentedLayout.theme)
     let captureIconSize = $derived(captureSettings?.iconSize ?? DBState.db.iconsize)
     let captureZoomSize = $derived(captureSettings?.zoomSize ?? DBState.db.zoomsize)
     let captureLineHeight = $derived(captureSettings?.lineHeight ?? DBState.db.lineHeight ?? 1.25)
@@ -313,6 +323,22 @@
         )
     }
 
+    let editorWasActive = false
+    $effect(() => {
+        const active = hasActiveEditor()
+        if (editorWasActive && !active) untrack(() => onEditorClose?.())
+        editorWasActive = active
+    })
+
+    export function updatePresentation(state: ChatPresentationRefresh): void {
+        img = state.img
+        name = state.name
+        largePortrait = state.largePortrait
+        bookmarked = state.bookmarked
+        role = state.role
+        messageGenerationInfo = state.messageGenerationInfo ?? null
+    }
+
     export function captureEditorDraft(): Omit<ChatEditorDraft, 'caret'> | null {
         if (editMode) {
             const evidence = editIntent?.messageEvidence ?? editEvidence
@@ -359,6 +385,8 @@
 
     export function refreshMessageDisplay(state: ChatDisplayRefresh): void {
         message = state.message
+        if (state.index !== undefined) idx = state.index
+        if (state.character !== undefined) character = state.character
         totalLength = state.totalMessages
         parserProjection = state.parserProjection
         parserAbortSignal = state.parserAbortSignal
@@ -474,6 +502,7 @@
     function beginPartialEdit() {
         partialEditIntent = captureViewportEditIntent()
         partialEditTarget = partialEditIntent ? null : captureCurrentMessage()
+        if (partialEditIntent || partialEditTarget) onEditorOpen?.()
     }
 
     function cancelPartialEdit() {
@@ -1845,7 +1874,7 @@
                 </div>
             </div>
         {:else if captureTheme === 'customHTML' && !blankMessage}
-            {@render renderGuiHtmlPart(RenderGUIHtml(captureSettings?.guiHTML ?? DBState.db.guiHTML))}
+            {@render renderGuiHtmlPart(presentedLayout.gui!)}
         {:else}
             {@render senderIcon({rounded: captureSettings?.roundIcons ?? DBState.db.roundIcons})}
             <span class="flex flex-col ml-4 w-full max-w-full min-w-0 text-black">

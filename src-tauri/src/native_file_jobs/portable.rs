@@ -158,13 +158,26 @@ fn storage_full(mut error: &(dyn std::error::Error + 'static)) -> bool {
 }
 fn error(error: impl std::fmt::Display + 'static) -> NativeJobError {
     let value = &error as &dyn std::any::Any;
-    if value.downcast_ref::<portable_backup::Error>().is_some_and(|error| matches!(error, portable_backup::Error::Cancelled)) {
+    if value.downcast_ref::<portable_backup::Error>().is_some_and(|error| matches!(error, portable_backup::Error::Cancelled))
+        || value.downcast_ref::<Box<portable_backup::Error>>().is_some_and(|error| matches!(error.as_ref(), portable_backup::Error::Cancelled)) {
         return NativeJobError::new("cancelled", "Portable backup was cancelled");
     }
     let full = value.downcast_ref::<std::io::Error>().is_some_and(|error| storage_full(error))
         || value.downcast_ref::<portable_backup::Error>().is_some_and(|error| storage_full(error))
+        || value.downcast_ref::<Box<portable_backup::Error>>().is_some_and(|error| storage_full(error.as_ref()))
         || value.downcast_ref::<rusqlite::Error>().is_some_and(|error| storage_full(error));
-    NativeJobError::new(if full { "local-storage-full" } else { "portable-backup-failed" }, error.to_string())
+    let message = if let Some(error) = value.downcast_ref::<std::io::Error>() {
+        format!("io failure ({:?})", error.kind())
+    } else if let Some(error) = value.downcast_ref::<rusqlite::Error>() {
+        match error {
+            rusqlite::Error::FromSqlConversionFailure(index, _, _) => format!("column {index} is not readable"),
+            rusqlite::Error::SqliteFailure(code, _) => format!("sqlite failure ({:?}, {})", code.code, code.extended_code),
+            _ => "sqlite failure".to_owned(),
+        }
+    } else {
+        crate::native_log::failure_text(&error)
+    };
+    NativeJobError::new(if full { "local-storage-full" } else { "portable-backup-failed" }, message)
 }
 fn device_error(failure: DeviceBackupError) -> NativeJobError {
     if failure.code == "device-cancelled" {
@@ -1185,7 +1198,53 @@ mod tests {
         let disk_full = || std::io::Error::from(std::io::ErrorKind::StorageFull);
         assert_eq!(error(disk_full()).code, "local-storage-full");
         assert_eq!(error(portable_backup::Error::Io(disk_full())).code, "local-storage-full");
+        assert_eq!(error(Box::new(portable_backup::Error::Io(disk_full()))).code, "local-storage-full");
         assert_eq!(portable_error(portable_backup::Error::Zip(zip::result::ZipError::Io(disk_full()))).code, "local-storage-full");
+        assert_eq!(error(Box::new(portable_backup::Error::Cancelled)).code, "cancelled");
+        assert_eq!(portable_error(portable_backup::Error::Store(crate::persistent_store::StoreError::RevisionConflict { expected: 1, actual: 2 })).code, "revision-conflict");
+    }
+
+    #[test]
+    fn portable_wrappers_keep_payloads_out_of_returned_jobs_and_log_sinks() {
+        const PRIVATE: &str = "synthetic-private-payload";
+        let shape = || serde_json::from_str::<u32>(&format!("\"{PRIVATE}\"")).unwrap_err();
+        let failures = [
+            portable_error(portable_backup::Error::Json(shape())),
+            portable_error(portable_backup::Error::Sql(rusqlite::Error::FromSqlConversionFailure(
+                3, rusqlite::types::Type::Text, Box::new(shape()),
+            ))),
+            error(Box::new(portable_backup::Error::Json(shape()))),
+            portable_error(portable_backup::Error::Io(std::io::Error::other(PRIVATE))),
+            portable_error(portable_backup::Error::Io(std::io::Error::other(shape()))),
+            portable_error(portable_backup::Error::Zip(zip::result::ZipError::Io(std::io::Error::other(PRIVATE)))),
+            portable_error(portable_backup::Error::Sql(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(1), Some(PRIVATE.to_owned()),
+            ))),
+        ];
+        let directory = tempfile::tempdir().unwrap();
+        let log = crate::native_log::NativeLogState::initialize(directory.path());
+        log.set_file_enabled(true).unwrap();
+        for failure in failures {
+            assert_eq!(failure.code, "portable-backup-failed");
+            assert!(!serde_json::to_string(&failure).unwrap().contains(PRIVATE));
+            let job = super::super::JobRegistry::default()
+                .create(super::super::JobKind::RestorePortableBackup).unwrap();
+            job.start(JobPhase::ReadingSource).unwrap();
+            super::super::finish_worker_outcome(&job, super::super::JobKind::RestorePortableBackup, Err(failure), vec![]);
+            let status = job.status();
+            let returned = status.error.as_ref().unwrap();
+            assert_eq!(returned.code, "portable-backup-failed");
+            assert!(!returned.message.contains(PRIVATE));
+            let entry = crate::native_log::global_state().tail(None).into_iter()
+                .find(|entry| entry.target == "native-file-job" && entry.message.contains(&job.id())).unwrap();
+            assert!(!entry.message.contains(PRIVATE));
+            log.record(&entry.level, &entry.target, &entry.message);
+        }
+        assert!(log.tail(None).iter().all(|entry| !entry.message.contains(PRIVATE)));
+        assert!(!fs::read_to_string(log.file_path()).unwrap().contains(PRIVATE));
+        let mut wrapped = portable_backup::Error::Json(shape());
+        assert!(!crate::native_log::failure_text(&&mut wrapped).contains(PRIVATE));
+        assert!(wrapped.to_string().contains("json-shape at line 1 column"));
     }
 
     #[test]
@@ -1908,7 +1967,8 @@ mod tests {
                 DurableCasJobState::default()
                     .sweep_after_page_start(&root, &CasJobOwnerProbe {
                         native_jobs: &native_jobs,
-                        device_session_active: false,
+                        device_job_owned: &|_| Ok(false),
+                        external_job_active: &|_| Ok(false),
                         open_store: &open_store,
                     })
                     .unwrap();

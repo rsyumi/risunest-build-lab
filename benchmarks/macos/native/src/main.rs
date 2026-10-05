@@ -180,14 +180,19 @@ fn macos_bench_session_quit(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn macos_bench_repeat_native_quit(app: tauri::AppHandle) -> Result<(), String> {
-    if macos_bench_phase() != "quit-escape" {
-        return Err("A repeated native quit belongs to the quit-escape phase".into());
+    let dispatch_cleanup = macos_bench_phase().starts_with("session-dispatch-");
+    if macos_bench_phase() != "quit-escape" && !dispatch_cleanup {
+        return Err("A repeated native quit belongs to the quit-escape or dispatch cleanup phase".into());
     }
     unsafe extern "C" {
         fn risunest_bench_queue_repeated_quit() -> i32;
     }
     let handle = app.clone();
     app.run_on_main_thread(move || {
+        if dispatch_cleanup {
+            let _ = macos_bench_report("session-dispatch-cleanup-repeated-terminate".into(),
+                serde_json::json!({ "purpose": "cleanup-after-observation" }));
+        }
         if unsafe { risunest_bench_queue_repeated_quit() } != 1 {
             let _ = macos_bench_report("failure".into(), serde_json::json!({
                 "passed": false, "message": "Unable to queue a repeated native quit",

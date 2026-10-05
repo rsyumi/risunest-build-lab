@@ -448,6 +448,12 @@ impl restore::ReplacementSink for LegacyReplacementSink {
         })
     }
 
+    fn put_legacy_root(&self, staging_id: &str, root: &crate::persistent_store::upstream_stream::RootSpool) -> StoreResult<()> {
+        crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
+            store.replace_put_upstream_stream(staging_id, root)
+        })
+    }
+
     fn prepare_character(&self, character: Value) -> StoreResult<Value> {
         let mut unavailable = Vec::new();
         let expanded = cold_expansion::expand_cold_payloads(std::slice::from_ref(&character), &self.payloads.cold_payloads, &mut unavailable)

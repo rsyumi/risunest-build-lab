@@ -15,16 +15,15 @@ const desktopCapability = JSON.parse(readFileSync('src-tauri/capabilities/deskto
 beforeEach(() => invoke.mockReset())
 
 describe('desktop notifications', () => {
-    it('invokes only commands the desktop capability allows in the main window', async () => {
+    it('sends content to the native activation owner and preserves permission behavior', async () => {
         invoke.mockResolvedValue('granted')
         await notifyDesktop('Synthetic reply')
         await requestDesktopNotifications()
-        const commands = invoke.mock.calls.map(([command]) => String(command))
-        expect(commands).toHaveLength(2)
-        for (const command of commands) {
-            const [, plugin, name] = /^plugin:([^|]+)\|(.+)$/.exec(command) ?? []
-            expect(desktopCapability.permissions, command).toContain(`${plugin}:allow-${name?.replaceAll('_', '-')}`)
-        }
+        expect(invoke.mock.calls).toEqual([
+            ['desktop_notify', { body: 'Synthetic reply' }],
+            ['plugin:notification|request_permission'],
+        ])
+        expect(desktopCapability.permissions).toContain('notification:allow-request-permission')
         expect(desktopCapability.windows).toContain('main')
         expect(desktopCapability.platforms).toEqual(expect.arrayContaining(['windows', 'macOS', 'linux']))
     })

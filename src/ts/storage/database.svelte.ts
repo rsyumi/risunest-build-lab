@@ -2138,6 +2138,7 @@ const presetWorkingSetController = createPresetWorkingSetController({
     getDatabase,
     captureCurrentPreset,
     getEffectivePresetId,
+    getEffectivePresetOverride: () => identity.getEffectivePresetOverride(getDatabase()),
     clearEffectivePresetOverride() {
         identity.adoptEffectivePresetSelection(getDatabase(), applyEffectivePreset)
     },

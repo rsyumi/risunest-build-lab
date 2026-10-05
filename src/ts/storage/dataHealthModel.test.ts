@@ -87,6 +87,7 @@ function harness(overrides: Partial<DataHealthDependencies> = {}) {
         previewRepair: vi.fn(async (selection: string[]) => preview(selection)),
         applyRepair: vi.fn().mockResolvedValue({ result: result() }),
         discardIntent: vi.fn().mockResolvedValue({ result: result() }),
+        completeIntent: vi.fn().mockResolvedValue({ result: result() }),
         listJournals: vi.fn().mockResolvedValue([]),
         undoRepair: vi.fn().mockResolvedValue({ result: result(), skipped: [] }),
         ...overrides,
@@ -365,7 +366,7 @@ describe('repairing from the model', () => {
 describe('quarantined intent discard', () => {
     const item: import('./dataHealth').DataHealthFinding = {
         code: 'intent-quarantined', severity: 'degraded', owner: { kind: 'intent', id: 'intent-a' },
-        locator: { sourcePath: 'token', occurrence: 0 }, target: null, detail: 'synthetic',
+        locator: { sourcePath: 'token', occurrence: 0 }, target: null, detail: 'synthetic', intentAction: 'discard',
     }
     it('rejects confirmation against a diagnosis replaced while the dialog was open', async () => {
         const diagnosis = result({ items: [item] })
@@ -391,5 +392,36 @@ describe('quarantined intent discard', () => {
         await expect(model.discard(item, diagnosis)).rejects.toThrow('stale token')
         expect(model.snapshot()).toMatchObject({ result: diagnosis, failure: 'discard', activity: null })
         expect(deps.applyRepair).not.toHaveBeenCalled()
+    })
+})
+
+describe('quarantined intent completion', () => {
+    const item: import('./dataHealth').DataHealthFinding = {
+        code: 'intent-quarantined', severity: 'degraded', owner: { kind: 'intent', id: 'partial' },
+        locator: { sourcePath: 'frozen-token', occurrence: 0 }, target: null, detail: 'interrupted', intentAction: 'complete',
+    }
+    it('completes only a diagnosed eligible intent and publishes the refreshed result', async () => {
+        const diagnosis = result({ items: [item] })
+        const refreshed = result({ scannedAt: diagnosis.scannedAt + 1, items: [] })
+        const { model, deps } = harness({ getResult: vi.fn().mockResolvedValue(diagnosis), completeIntent: vi.fn().mockResolvedValue({ result: refreshed }) })
+        await model.load()
+        await model.complete({ ...item, intentAction: 'discard' }, diagnosis)
+        await model.complete({ ...item, locator: { sourcePath: 'wrong-token', occurrence: 0 } }, diagnosis)
+        await model.complete(item, { ...diagnosis, scannedAt: diagnosis.scannedAt - 1 })
+        expect(deps.completeIntent).not.toHaveBeenCalled()
+        await model.complete(item, diagnosis)
+        expect(deps.completeIntent).toHaveBeenCalledExactlyOnceWith(0, diagnosis.revision, diagnosis.scannedAt)
+        expect(model.snapshot()).toMatchObject({ result: refreshed, failure: null, activity: null })
+        expect(deps.discardIntent).not.toHaveBeenCalled()
+    })
+    it('retains a refused recovery and clears stale results when completion committed but refresh failed', async () => {
+        const diagnosis = result({ items: [item] })
+        const completeIntent = vi.fn().mockRejectedValueOnce(new Error('changed authority')).mockRejectedValueOnce({ code: 'committed' })
+        const { model } = harness({ getResult: vi.fn().mockResolvedValue(diagnosis), completeIntent })
+        await model.load()
+        await expect(model.complete(item, diagnosis)).rejects.toThrow('changed authority')
+        expect(model.snapshot()).toMatchObject({ result: diagnosis, failure: 'complete', activity: null })
+        await expect(model.complete(item, diagnosis)).rejects.toMatchObject({ code: 'committed' })
+        expect(model.snapshot()).toMatchObject({ result: null, failure: 'refresh', activity: null })
     })
 })

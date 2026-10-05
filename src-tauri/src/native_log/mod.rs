@@ -546,6 +546,20 @@ pub(crate) fn logged<T, E: CommandFailure>(command: &str, result: Result<T, E>) 
     result
 }
 
+/// Keeps a command's response intact without copying unaudited error text to diagnostics.
+#[track_caller]
+pub(crate) fn logged_without_detail<T, E: CommandFailure>(command: &str, result: Result<T, E>) -> Result<T, E> {
+    struct Summary<'a, E>(&'a E);
+    impl<E: CommandFailure> CommandFailure for Summary<'_, E> {
+        fn code(&self) -> std::borrow::Cow<'_, str> { self.0.code() }
+        fn expected(&self) -> bool { self.0.expected() }
+    }
+    if let Err(error) = &result {
+        record_command_failure(command, &Summary(error), std::panic::Location::caller());
+    }
+    result
+}
+
 pub(crate) fn record_command_failure(
     command: &str,
     error: &(impl CommandFailure + ?Sized),
@@ -612,7 +626,16 @@ pub(crate) fn sqlite_failure(error: &rusqlite::Error) -> String {
 /// signed URL. The type is matched by name so borrowed errors such as a
 /// poisoned lock are accepted too.
 pub(crate) fn failure_text<E: std::fmt::Display + ?Sized>(error: &E) -> String {
-    let name = std::any::type_name::<E>().trim_start_matches('&');
+    let mut name = std::any::type_name::<E>();
+    loop {
+        if let Some(inner) = name.strip_prefix('&') {
+            name = inner.strip_prefix("mut ").unwrap_or(inner);
+        } else if let Some(inner) = name.strip_prefix("alloc::boxed::Box<").and_then(|inner| inner.strip_suffix('>')) {
+            name = inner;
+        } else {
+            break;
+        }
+    }
     if name == std::any::type_name::<serde_json::Error>() {
         let text = error.to_string();
         match text.rfind(" at line ") {

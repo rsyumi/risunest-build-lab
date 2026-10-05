@@ -208,6 +208,7 @@ vi.mock('../storage/persistentDataRuntime.svelte', () => ({
     acknowledgeGenerationCompletion: harness.acknowledge,
     drainDeferredLwwReceives: harness.drainDeferredReceives,
     captureSelectedConversationTarget: () => null,
+    captureSelectedConversationAuthority: () => null,
     acquireCompleteConversation: vi.fn(),
     getActiveConversationSession: () => null,
     invalidateActiveConversationSession: vi.fn(),

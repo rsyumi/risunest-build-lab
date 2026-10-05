@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { writable } from 'svelte/store'
+import { fromStore, writable } from 'svelte/store'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { ReloadChatPointer, ReloadGUIPointer } from 'src/ts/stores.svelte'
@@ -13,9 +13,11 @@ import { SynchronousSessionConversationViewportSource } from 'src/ts/conversatio
 import type { SelectedConversationTarget } from 'src/ts/storage/activeWorkingSet.svelte'
 import { cancelTextEditorPopup, textEditorPopup } from 'src/ts/gui/textEditorPopup.svelte'
 import { discardEditorDraftsExcept, keepEditorDraft, pendingEditorDrafts, type ChatEditorDraft } from 'src/ts/chatEditorDrafts'
+import { chatScreenState } from 'src/ts/ui/chatScreenState.svelte'
 
 const live = vi.hoisted(() => ({
     db: {} as Record<string, any>,
+    reactive: false,
 }))
 const runtime = vi.hoisted(() => ({
     activeSession: null as unknown,
@@ -57,11 +59,23 @@ class TestIntersectionObserver {
     }
 }
 
+vi.mock('../SideBars/Scripts/RegexData.svelte', () => ({ default: () => {} }))
+vi.mock('src/ts/parser/parser.svelte', () => ({ ParseMarkdown: vi.fn(async (value: string) => value) }))
 vi.mock('./ChatBody.svelte', async () => ({
     default: (await import('./ChatBodyCaptureProbe.test.svelte')).default,
 }))
-vi.mock('src/ts/stores.svelte', () => ({
-    DBState: { get db() { return live.db } },
+vi.mock('src/ts/stores.svelte', () => {
+    let plainDatabase = live.db
+    const database = fromStore(writable(plainDatabase))
+    Object.defineProperty(live, 'db', {
+        get: () => plainDatabase,
+        set: value => {
+            plainDatabase = value
+            if (live.reactive) database.current = value
+        },
+    })
+    return {
+    DBState: { get db() { return live.reactive ? database.current : live.db } },
     ReloadChatPointer: writable([]),
     CurrentTriggerIdStore: writable(null),
     popupStore: writable(null),
@@ -71,7 +85,8 @@ vi.mock('src/ts/stores.svelte', () => ({
     ReloadGUIPointer: writable(0),
     selIdState: { selId: 0 },
     createSimpleCharacter: (char: character) => ({ ...char, type: 'simple' }),
-}))
+    }
+})
 vi.mock('src/ts/characters', () => ({ getCharImage: async () => '' }))
 vi.mock('src/ts/gui/colorscheme', () => ({ ColorSchemeTypeStore: writable('light') }))
 vi.mock('src/ts/globalApi.svelte', () => ({
@@ -346,6 +361,8 @@ describe('Chat frozen capture presentation', () => {
     let mounted: ReturnType<typeof mount> | undefined
 
     beforeEach(() => {
+        chatScreenState.clear()
+        live.reactive = false
         parserCalls.length = 0
         actionMocks.runTrigger.mockReset()
         actionMocks.runLuaButtonTrigger.mockReset()
@@ -1558,6 +1575,122 @@ describe('Chat frozen capture presentation', () => {
         return { editButton, request: request! }
     }
 
+    test('refreshes a retained row index and replacement character used by its parser', async () => {
+        const parser = await import('src/ts/parser/parser.svelte')
+        const markdown = vi.spyOn(parser, 'ParseMarkdown').mockImplementation(async value => value)
+        try {
+            const harness = makeWindowedEditHarness()
+            harness.completeConversation.message.unshift({ role: 'user', data: 'Inserted prefix', chatId: 'prefix' })
+            const replacement = { ...harness.completeCharacter, name: 'Replacement parser character' }
+            mountPopupEditHarness('', {
+                harness,
+                props: { character: harness.completeCharacter, viewportRow: undefined },
+                db: { characters: [replacement], translator: 'llm', translatorType: 'llm', translateBeforeHTMLFormatting: false },
+            })
+            const body = await vi.waitFor(() => {
+                const element = target.querySelector('[data-chat-body-probe]')
+                expect(element).not.toBeNull()
+                return element!
+            })
+            const row = target.querySelector('.risu-chat')
+            parserCalls.length = 0
+            ;(mounted as { refreshMessageDisplay(state: import('src/ts/chatDisplayRefresh').ChatDisplayRefresh): void })
+                .refreshMessageDisplay({ message: 'Refreshed parser input', totalMessages: 3, index: 2, character: replacement.chaId })
+            await tick()
+            expect(target.querySelector('.risu-chat')).toBe(row)
+            expect(target.querySelector('[data-chat-body-probe]')).toBe(body)
+            expect(row?.getAttribute('data-chat-index')).toBe('2')
+            expect(body.textContent).toBe('Refreshed parser input')
+            expect(parserCalls.at(-1)?.chatID).toBe(2)
+            target.querySelector<HTMLButtonElement>('.button-icon-translate')!.click()
+            ;(await vi.waitFor(() => {
+                const button = [...target.querySelectorAll<HTMLButtonElement>('button')]
+                    .find(element => element.textContent?.includes('Edit translation'))
+                expect(button).toBeDefined()
+                return button!
+            })).click()
+            await vi.waitFor(() => expect(markdown).toHaveBeenCalled())
+            expect(markdown.mock.calls.at(-1)?.slice(0, 4)).toEqual([
+                'Refreshed parser input', replacement.chaId, 'pretranslate', 2,
+            ])
+            expect(target.querySelector('.risu-chat')).toBe(row)
+        } finally {
+            markdown.mockRestore()
+        }
+    })
+
+    test.each(['presentation', 'size', 'theme', 'custom-stable', 'custom-structure'] as const)(
+        'keeps the actual inline editor, draft and caret through a same-row %s update',
+        async (change) => {
+            live.reactive = true
+            const custom = change.startsWith('custom')
+            const guiHTML = '<div class="before"><span>Before</span><RISUBUTTONS></RISUBUTTONS><RISUTEXTBOX></RISUTEXTBOX></div>'
+            const onEditorClose = vi.fn()
+            const harness = mountPopupEditHarness(custom ? 'customHTML' : 'cardboard', {
+                db: { risunestChatEditPopup: false, guiHTML },
+                props: { onEditorClose },
+            })
+            ;(await vi.waitFor(() => {
+                const button = target.querySelector<HTMLButtonElement>('.button-icon-edit')
+                expect(button).not.toBeNull()
+                return button!
+            })).click()
+            const editor = await vi.waitFor(() => {
+                const input = target.querySelector<HTMLTextAreaElement>('.message-edit-area')
+                expect(input).not.toBeNull()
+                return input!
+            })
+            const row = target.querySelector('.risu-chat')
+            editor.value = 'Uncommitted editor draft'
+            editor.dispatchEvent(new Event('input', { bubbles: true }))
+            editor.focus()
+            editor.setSelectionRange(4, 13, 'backward')
+            await tick()
+            const guiAfter = change === 'custom-structure'
+                ? '<p class="after"><RISUBUTTONS></RISUBUTTONS><span><RISUTEXTBOX></RISUTEXTBOX></span></p>'
+                : '<div class="after"><span>After</span><RISUBUTTONS></RISUBUTTONS><RISUTEXTBOX></RISUTEXTBOX></div>'
+            live.db = {
+                ...live.db,
+                ...(change === 'size' ? { iconsize: 80, zoomsize: 140, lineHeight: 1.75 } : {}),
+                ...(change === 'theme' ? { theme: '' } : {}),
+                ...(custom ? { guiHTML: guiAfter } : {}),
+            }
+            if (change === 'presentation') {
+                (mounted as unknown as { updatePresentation(state: import('src/ts/chatDisplayRefresh').ChatPresentationRefresh): void })
+                    .updatePresentation({ img: '', name: 'Updated sender', largePortrait: true, bookmarked: true, role: 'char', messageGenerationInfo: undefined })
+            }
+            await tick()
+            expect(target.querySelector('.risu-chat')).toBe(row)
+            expect(target.querySelector('.message-edit-area')).toBe(editor)
+            expect(editor.value).toBe('Uncommitted editor draft')
+            expect(document.activeElement).toBe(editor)
+            expect([editor.selectionStart, editor.selectionEnd, editor.selectionDirection]).toEqual([4, 13, 'backward'])
+            expect(onEditorClose).not.toHaveBeenCalled()
+            target.querySelector<HTMLButtonElement>('.button-icon-edit')!.click()
+            await vi.waitFor(() => expect(harness.completeConversation.message[1].data).toBe('Uncommitted editor draft'))
+            await vi.waitFor(() => expect(onEditorClose).toHaveBeenCalledOnce())
+            expect(target.querySelector('.message-edit-area')).toBeNull()
+            if (custom) expect(target.querySelector('.after')).not.toBeNull()
+            if (change === 'presentation') expect(target.textContent).toContain('Updated sender')
+            if (change === 'theme') expect(target.querySelector('.sm\\:h-96')).toBeNull()
+        },
+    )
+
+    test.each(['save', 'cancel'] as const)('notifies the row owner once when the original popup closes by %s', async (action) => {
+        const onEditorClose = vi.fn()
+        mountPopupEditHarness('', { props: { onEditorClose } })
+        const { request } = await openPopupEditor()
+        await tick()
+        expect(onEditorClose).not.toHaveBeenCalled()
+        if (action === 'save') await expect(request.save('Saved popup draft')).resolves.toBe(true)
+        else cancelTextEditorPopup(request)
+        await tick()
+        expect(onEditorClose).toHaveBeenCalledOnce()
+        ReloadGUIPointer.update(value => value + 1)
+        await tick()
+        expect(onEditorClose).toHaveBeenCalledOnce()
+    })
+
     test.each(['', 'cardboard'])(
         'edits the message in the popup editor by default and saves against the original row target (theme "%s")',
         async (theme) => {
@@ -1705,7 +1838,8 @@ describe('Chat frozen capture presentation', () => {
             await unmount(mounted!)
             mounted = undefined
 
-            mountPopupEditHarness('', { harness, db, props: { restoredEditor: captured } })
+            const onEditorClose = vi.fn()
+            mountPopupEditHarness('', { harness, db, props: { restoredEditor: captured, onEditorClose } })
             await tick()
             expect(translationEditor()?.value).toBe('Restored translation')
             if (source === 'changed') {
@@ -1717,11 +1851,13 @@ describe('Chat frozen capture presentation', () => {
             if (source === 'unchanged') {
                 await vi.waitFor(() => expect(setLLMCache).toHaveBeenCalledWith(key, 'Restored translation'))
                 await vi.waitFor(() => expect(translationEditor()).toBeNull())
+                expect(onEditorClose).toHaveBeenCalledOnce()
                 expect(alertToast).not.toHaveBeenCalled()
             } else {
                 await vi.waitFor(() => expect(alertToast).toHaveBeenCalledWith('Message action failed'))
                 expect(setLLMCache).not.toHaveBeenCalled()
                 expect(translationEditor()?.value).toBe('Restored translation')
+                expect(onEditorClose).not.toHaveBeenCalled()
             }
         },
     )

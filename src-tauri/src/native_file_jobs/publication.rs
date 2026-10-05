@@ -1,4 +1,5 @@
 use super::error::{self, cancelled, invalid_input};
+use super::transfer_retry::{retry_delay, wait_for_retry};
 use super::{
     JobControl, JobPhase, JobProgress, JobResultSummary, NativeJobError,
     OfficialPublicationAttemptResult, OfficialPublicationCredential, OfficialPublicationJobRequest,
@@ -819,21 +820,6 @@ fn transport_error(error: reqwest::Error) -> NativeJobError {
         "official publication network request failed"
     };
     NativeJobError::new(if error.is_connect() { "transport-connect" } else { "transport-failed" }, message)
-}
-
-pub(super) fn retry_delay(headers: &HeaderMap, retries: u32) -> Duration {
-    Duration::from_secs(headers.get("retry-after").and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok()).unwrap_or(1 << retries).min(30))
-}
-
-pub(super) async fn wait_for_retry(job: &JobControl, delay: Duration) -> Result<(), NativeJobError> {
-    let deadline = tokio::time::Instant::now() + delay;
-    loop {
-        if job.is_cancel_requested() { return Err(cancelled("official transfer retry was cancelled")); }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() { return Ok(()); }
-        tokio::time::sleep(remaining.min(CONTROL_POLL_INTERVAL)).await;
-    }
 }
 
 fn now_millis() -> i64 {

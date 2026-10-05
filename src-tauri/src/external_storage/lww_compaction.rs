@@ -32,6 +32,20 @@ pub(crate) struct PublishedState {
 
 pub(crate) const COMPACTION_TAKEOVER: std::time::Duration=std::time::Duration::from_secs(60);
 
+struct CompactionPins(crate::asset_repository::job_pins::DurableCasJob);
+impl CompactionPins {
+    fn release(&mut self)->Result<()> {
+        self.0.release(crate::asset_repository::job_pins::CasReleaseOutcome::Aborted).map_err(error)
+    }
+}
+impl Drop for CompactionPins {
+    fn drop(&mut self) {
+        if !self.0.is_released() && self.release().is_err() {
+            crate::nlog!("warn", "Compaction asset journals await cleanup");
+        }
+    }
+}
+
 /// Which device compacts. The device that published last starts at once; any
 /// other foreground device takes over once compaction has stayed due for the
 /// takeover delay without a new retained checkpoint.
@@ -242,7 +256,7 @@ impl ExternalLwwEngine {
     async fn compact_asset_catalogs(&self,mut roots:Vec<wire::StoredObject>,live:&BTreeSet<String>,conservative:bool,
         directory:&Path,limits:super::packaging::PackageLimits,journal:&mut super::journal::TransferJournal,
         cancel:&Cancellation,protection:Option<(&super::leases::LeaseOwner,&super::leases::LeaseContext<'_>)>)
-        ->Result<(Vec<wire::StoredObject>,Option<crate::asset_repository::job_pins::DurableCasJob>)> {
+        ->Result<(Vec<wire::StoredObject>,Option<CompactionPins>)> {
         use super::packaging::{EntryPlan,AssetCatalogSource};
         use crate::asset_repository::job_pins::{DurableCasJob,CasJobKind,CasObjectRole};
         if conservative {return Ok((roots,None))}
@@ -300,13 +314,15 @@ impl ExternalLwwEngine {
         let mut pins=None;
         if !repack.is_empty() {
             let id=journal.job_id();
-            let mut job=match DurableCasJob::open(&self.connection_root,id) {
+            let mut job=CompactionPins(match DurableCasJob::open(&self.connection_root,id) {
                 Ok(job)=>job,Err(failure) if failure.kind()==std::io::ErrorKind::NotFound=>DurableCasJob::begin(&self.connection_root,id,
                     CasJobKind::OfficialPublicationOrExportPreparation,crate::asset_repository::job_pins::CasJobOwner::external_compaction(id),self.admitted_upper()? as i64).map_err(error)?,
                 Err(failure)=>return Err(error(failure)),
-            };
-            job.pin_existing_batch(&cas,&repack.iter().map(|source|(source.hash.clone(),source.byte_length,CasObjectRole::DirectObject)).collect::<Vec<_>>()).map_err(error)?;
+            });
+            #[cfg(test)] tests::run_pin_hook(id,false);
+            job.0.pin_existing_batch(&cas,&repack.iter().map(|source|(source.hash.clone(),source.byte_length,CasObjectRole::DirectObject)).collect::<Vec<_>>()).map_err(error)?;
             pins=Some(job);
+            #[cfg(test)] tests::run_pin_hook(id,true);
         }
         let mut catalogs=Vec::new();
         if !repack.is_empty() {
@@ -541,7 +557,7 @@ impl ExternalLwwEngine {
             completed.compaction_capture_rows=Some(u64::try_from(count).map_err(error)?);
             completed
         };
-        if let Some(pins)=pins.as_mut() {pins.release(crate::asset_repository::job_pins::CasReleaseOutcome::Aborted).map_err(error)?;}
+        if let Some(pins)=pins.as_mut() {pins.release()?;}
         Ok(completed)
     }
 }
@@ -550,6 +566,45 @@ impl ExternalLwwEngine {
 mod tests {
     use super::*;
     use super::super::{fake,lww_tests::{CycleFixture,small_asset}};
+
+    type PinHook=Box<dyn FnOnce()+Send>;
+    static PIN_HOOKS:std::sync::LazyLock<std::sync::Mutex<BTreeMap<(String,bool),PinHook>>>=
+        std::sync::LazyLock::new(||std::sync::Mutex::new(BTreeMap::new()));
+    pub(super) fn run_pin_hook(id:&str,after:bool) {
+        let hook=PIN_HOOKS.lock().unwrap().remove(&(id.to_owned(),after));
+        if let Some(hook)=hook {hook();}
+    }
+
+    #[test]
+    fn compaction_settles_pins_after_pin_repack_upload_and_cancel_failures() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            for failure in 0..5 {
+                let mut f=CycleFixture::new();
+                let mut hashes=Vec::new();
+                for n in 0..4 {hashes.push(small_asset(&mut f.a,&format!("asset-{n}"),format!("synthetic failure body {n}").as_bytes()));}
+                f.publish_a().await;
+                for n in 1..4 {f.a.delete_asset_alias("asset",&format!("asset-{n}"),f.a.revision().unwrap()).unwrap();}
+                f.publish_a().await;
+                let id=uuid::Uuid::new_v4().to_string();
+                let cancel=Cancellation::default();
+                if failure==0 {
+                    let path=crate::asset_repository::PayloadCas::new(f.directory_a.path()).unwrap().object_path(&hashes[0]).unwrap().unwrap();
+                    PIN_HOOKS.lock().unwrap().insert((id.clone(),false),Box::new(move || std::fs::remove_file(path).unwrap()));
+                } else if failure==1 {
+                    let cancel=cancel.clone();
+                    PIN_HOOKS.lock().unwrap().insert((id.clone(),true),Box::new(move || cancel.cancel()));
+                } else {
+                    f.provider.fail_upload_number(f.provider.upload_count()+failure-1,ErrorKind::LocalPermissionDenied);
+                }
+                let writer=f.a.lww_clock_state().unwrap().writer_id;
+                let work=tempfile::tempdir().unwrap();
+                let result=f.sender.compact_published(&mut f.a,work.path(),&id,&writer,&fake::capabilities(true),&cancel,None).await;
+                assert!(result.is_err(),"failure {failure} must interrupt actual compaction");
+                assert!(!PIN_HOOKS.lock().unwrap().keys().any(|(job,_)|job==&id));
+                assert!(crate::asset_repository::job_pins::durable_cas_job_ids(f.directory_a.path()).unwrap().is_empty(),"failure {failure} left an ended journal");
+            }
+        });
+    }
 
     #[test]
     fn the_last_publisher_compacts_first_and_another_device_takes_over_after_sixty_seconds() {

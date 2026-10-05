@@ -296,7 +296,10 @@ fn a_kept_failure_never_quotes_json_input_or_network_text() {
     assert!(text.starts_with("json failure at line 1 column"), "{text}");
     assert!(!text.contains("private-payload-value"));
     assert_eq!(failure_text(&&shape), text);
-    assert_eq!(json_failure(&shape), format!("json-shape{}", &text["json failure".len()..]));
+    assert_eq!(failure_text(&Box::new(shape)), text);
+    let mut mutable_shape = serde_json::from_str::<u32>("\"private-payload-value\"").unwrap_err();
+    assert_eq!(failure_text(&&mut mutable_shape), text);
+    assert_eq!(json_failure(&mutable_shape), format!("json-shape{}", &text["json failure".len()..]));
     let network = reqwest::Client::new()
         .get("http://[private-signature")
         .build()
@@ -305,6 +308,22 @@ fn a_kept_failure_never_quotes_json_input_or_network_text() {
     assert_eq!(failure_text(&&network), "network failure");
     let io = std::io::Error::other("disk refused");
     assert_eq!(failure_text(&io), "disk refused");
+}
+
+#[test]
+fn command_summaries_preserve_the_response_and_never_copy_private_detail() {
+    let private = "synthetic private credential contents".to_owned();
+    let returned = logged_without_detail::<(), _>("synthetic_private_command", Err(private.clone()));
+    assert_eq!(returned.unwrap_err(), private);
+    let entries = global_state().tail(None);
+    let failures: Vec<_> = entries.iter().filter(|entry| entry.message.starts_with("synthetic_private_command failed: ")).collect();
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].message.contains("code=error at="));
+    assert!(!failures[0].message.contains(&private));
+    let _ = logged_without_detail::<(), _>("synthetic_private_refusal", Err("cancelled".to_owned()));
+    assert_eq!(command_line("synthetic_private_refusal").level, "warn");
+    assert_eq!(logged_without_detail::<_, String>("synthetic_private_success", Ok(7)).unwrap(), 7);
+    assert!(global_state().tail(None).iter().all(|entry| !entry.message.starts_with("synthetic_private_success")));
 }
 
 #[test]

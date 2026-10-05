@@ -37,6 +37,9 @@ mod final_matrix;
 #[path = "../../../benchmarks/lww-native/src/ladder.rs"]
 mod ladder;
 
+#[path = "../../../benchmarks/lww-native/src/receive_traffic.rs"]
+mod receive_traffic;
+
 use super::{lww::{self, MessageLocator, UnitMutation}, sync_selection::{SwitchBindingRequest, SyncTarget},
     ConversationMutation, PersistentStore, WorkingSetCommit};
 use crate::{external_storage::{contract::Cancellation, lww_tests::CycleFixture, lww_segment},

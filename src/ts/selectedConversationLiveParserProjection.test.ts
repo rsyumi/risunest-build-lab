@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
-import type { ConversationViewportRow } from './conversationViewportSource'
+import { PersistentConversationViewportSource, type ConversationViewportRow } from './conversationViewportSource'
 import type { ProcessScriptCaptureContext } from './process/scripts'
 import {
     bindCompleteLiveParserContextAuthority,
@@ -8,6 +8,7 @@ import {
     type SelectedConversationLiveParserProjectionDependencies,
 } from './selectedConversationLiveParserProjection'
 import type { Chat, character, Database, Message } from './storage/database.svelte'
+import { createConversationSessionToken } from './storage/activeConversationSession'
 
 const CHARACTER_ID = 'character-id'
 const CONVERSATION_ID = 'conversation-id'
@@ -79,6 +80,7 @@ function harness(options: {
     metadataOnly?: boolean
     advanceRevisionDuringAcquire?: boolean
     navigateDuringAcquire?: boolean
+    maxProjectionMessages?: number
 } = {}) {
     const messages = options.messages ?? Array.from({ length: 8 }, (_, index) => message(index))
     let currentChat = conversation([])
@@ -171,10 +173,12 @@ function harness(options: {
         },
         parserSource: () => ({ guiHTML: '' }),
         unsafeDependencies: options.unsafeDependencies ?? (() => []),
-        maxProjectionMessages: 6,
+        maxProjectionMessages: options.maxProjectionMessages ?? 6,
     }
     return {
         resolver: createSelectedConversationLiveParserProjectionResolver(dependencies),
+        dependencies,
+        messages,
         acquire: dependencies.runtime.acquireCompleteConversation,
         releases: () => releases,
         boundedContextMessageCounts,
@@ -183,7 +187,187 @@ function harness(options: {
     }
 }
 
+async function cachedHarness(options: Parameters<typeof harness>[0] = {}, startIndex = 2, limit = 6) {
+    const result = harness(options)
+    const source = new PersistentConversationViewportSource({
+        reader: result.dependencies.runtime.store,
+        characterId: CHARACTER_ID,
+        conversationId: CONVERSATION_ID,
+        revision: 4,
+        totalMessages: result.messages.length,
+        rowBudget: 64,
+    })
+    result.dependencies.runtime.getActiveConversationViewportSource = () => source
+    await source.ensureRange({ startIndex, limit, reason: 'viewport' })
+    const readWindow = result.dependencies.runtime.store.readConversationWindow.bind(result.dependencies.runtime.store)
+    const reads = vi.spyOn(result.dependencies.runtime.store, 'readConversationWindow')
+    const releases = vi.fn()
+    const acquirePin = source.acquireRangePin.bind(source)
+    vi.spyOn(source, 'acquireRangePin').mockImplementation((...args) => {
+        const pin = acquirePin(...args)
+        return { release: () => { releases(); pin.release() } }
+    })
+    return { ...result, source, reads, readWindow, pinReleases: releases }
+}
+
 describe('selected conversation live parser projection', () => {
+    test('reuses leased persisted viewport rows without store reads and isolates parser mutations', async () => {
+        const testHarness = await cachedHarness()
+        const result = await testHarness.resolver.resolve({
+            row: testHarness.source.snapshot().rowAt(7)!,
+            totalMessages: 8,
+        })
+        expect(result.kind).toBe('bounded')
+        if (result.kind !== 'bounded') throw new Error('Expected bounded projection')
+        expect(result.messages).toEqual(testHarness.messages.slice(3))
+        expect(testHarness.reads).not.toHaveBeenCalled()
+        expect(testHarness.pinReleases).toHaveBeenCalledOnce()
+        result.context.parserContext.character.chats[0].message[0].data = 'parser side effect'
+        expect(testHarness.source.snapshot().rowAt(3)!.message.data).toBe('message-3')
+    })
+
+    test('reads only gaps around reusable rows and preserves literal dependencies outside the viewport', async () => {
+        const messages = Array.from({ length: 8 }, (_, index) => message(index))
+        messages[7].data = '{{previouschatlog::0}}'
+        const testHarness = await cachedHarness({ messages, maxProjectionMessages: 8 }, 5, 3)
+        const result = await testHarness.resolver.resolve({
+            row: testHarness.source.snapshot().rowAt(7)!, totalMessages: 8,
+        })
+        expect(result).toMatchObject({ kind: 'bounded', historyOffset: 0 })
+        if (result.kind !== 'bounded') throw new Error('Expected bounded projection')
+        expect(result.messages).toEqual(messages)
+        expect(testHarness.reads).toHaveBeenCalledExactlyOnceWith({
+            characterId: CHARACTER_ID, conversationId: CONVERSATION_ID, startIndex: 0, limit: 5,
+        })
+        expect(testHarness.pinReleases).toHaveBeenCalledOnce()
+    })
+
+    test('does not reuse optimistic viewport rows whose session has pending persistence', async () => {
+        const testHarness = await cachedHarness()
+        const capture = testHarness.dependencies.runtime.captureSelectedConversationAuthority
+        testHarness.dependencies.runtime.captureSelectedConversationAuthority = () => ({
+            ...capture()!, sessionVersion: 1,
+        })
+        testHarness.source.applyOptimisticRange(3, 1, [message(3, 'pending edit')])
+        const result = await testHarness.resolver.resolve({
+            row: testHarness.source.snapshot().rowAt(7)!, totalMessages: 8,
+        })
+        expect(result.kind).toBe('bounded')
+        if (result.kind !== 'bounded') throw new Error('Expected bounded projection')
+        expect(result.messages[0].data).toBe('message-3')
+        expect(testHarness.reads).toHaveBeenCalledTimes(2)
+        expect(testHarness.pinReleases).not.toHaveBeenCalled()
+    })
+
+    test('does not reuse rows from a replaced viewport revision', async () => {
+        const testHarness = await cachedHarness()
+        const selectedRow = testHarness.source.snapshot().rowAt(7)!
+        testHarness.source.advanceRevision(5, 8)
+        const result = await testHarness.resolver.resolve({ row: selectedRow, totalMessages: 8 })
+        expect(result.kind).toBe('bounded')
+        expect(testHarness.reads).toHaveBeenCalledTimes(2)
+        expect(testHarness.pinReleases).not.toHaveBeenCalled()
+    })
+
+    test('retains completed projections and captures a new revision when unchanged viewport rows advance', async () => {
+        const testHarness = await cachedHarness()
+        const runtime = testHarness.dependencies.runtime
+        const captureTarget = runtime.captureSelectedConversationTarget
+        const captureAuthority = runtime.captureSelectedConversationAuthority
+        const snapshot = testHarness.source.snapshot.bind(testHarness.source)
+        let revision = 4
+        runtime.captureSelectedConversationTarget = () => ({ ...captureTarget()!, storeRevision: revision })
+        runtime.captureSelectedConversationAuthority = () => ({ ...captureAuthority()!, storeRevision: revision })
+        // Model the storage-only seam, which preserves the source, rows, keys and render version.
+        vi.spyOn(testHarness.source, 'snapshot').mockImplementation(() => ({ ...snapshot(), storeRevision: revision }))
+        const selectedRow = testHarness.source.snapshot().rowAt(7)!
+        const retained = await testHarness.resolver.resolve({ row: selectedRow, totalMessages: 8 })
+        revision = 5
+        const fresh = await testHarness.resolver.resolve({ row: selectedRow, totalMessages: 8 })
+
+        expect(retained).toMatchObject({ kind: 'bounded', revision: 4 })
+        expect(fresh).toMatchObject({ kind: 'bounded', revision: 5 })
+        if (retained.kind !== 'bounded' || fresh.kind !== 'bounded') throw new Error('Expected bounded projections')
+        expect(fresh.messages).toEqual(retained.messages)
+        expect(testHarness.reads).not.toHaveBeenCalled()
+        expect(testHarness.pinReleases).toHaveBeenCalledTimes(2)
+    })
+
+    test('fences an in-flight gap read after an unchanged revision advance and renews at the new revision', async () => {
+        const testHarness = await cachedHarness({}, 7, 1)
+        const runtime = testHarness.dependencies.runtime
+        const captureTarget = runtime.captureSelectedConversationTarget
+        const captureAuthority = runtime.captureSelectedConversationAuthority
+        const snapshot = testHarness.source.snapshot.bind(testHarness.source)
+        let revision = 4
+        runtime.captureSelectedConversationTarget = () => ({ ...captureTarget()!, storeRevision: revision })
+        runtime.captureSelectedConversationAuthority = () => ({ ...captureAuthority()!, storeRevision: revision })
+        vi.spyOn(testHarness.source, 'snapshot').mockImplementation(() => ({ ...snapshot(), storeRevision: revision }))
+        testHarness.reads.mockImplementation(async (query) => {
+            const result = await testHarness.readWindow(query)
+            revision = 5
+            return result && { ...result, revision }
+        })
+        const selectedRow = testHarness.source.snapshot().rowAt(7)!
+
+        await expect(testHarness.resolver.resolve({ row: selectedRow, totalMessages: 8 }))
+            .rejects.toMatchObject({ name: 'ChatParserHistoryProjectionStaleError' })
+        const fresh = await testHarness.resolver.resolve({ row: selectedRow, totalMessages: 8 })
+        expect(fresh).toMatchObject({ kind: 'bounded', revision: 5 })
+        if (fresh.kind !== 'bounded') throw new Error('Expected bounded projection')
+        expect(fresh.messages).toEqual(testHarness.messages.slice(3))
+        expect(testHarness.pinReleases).toHaveBeenCalledTimes(2)
+    })
+
+    test.each(['navigation', 'mutation', 'abort', 'source', 'revision', 'session'])(
+        'rejects cached projections after %s during a missing-range read and releases the pin',
+        async (change) => {
+            const testHarness = await cachedHarness({}, 7, 1)
+            const controller = new AbortController()
+            let current = true
+            testHarness.reads.mockImplementation(async (query) => {
+                const result = await testHarness.readWindow(query)
+                if (change === 'navigation') current = false
+                if (change === 'abort') controller.abort()
+                if (change === 'source') testHarness.dependencies.runtime.getActiveConversationViewportSource = () => null
+                if (change === 'revision') testHarness.source.advanceRevision(5, 8)
+                if (change === 'session') {
+                    const capture = testHarness.dependencies.runtime.captureSelectedConversationAuthority
+                    testHarness.dependencies.runtime.captureSelectedConversationAuthority = () => ({
+                        ...capture()!, sessionToken: createConversationSessionToken(),
+                    })
+                }
+                if (change === 'mutation') {
+                    const capture = testHarness.dependencies.runtime.captureSelectedConversationAuthority
+                    testHarness.dependencies.runtime.captureSelectedConversationAuthority = () => ({
+                        ...capture()!, sessionVersion: 1,
+                    })
+                }
+                return result
+            })
+            await expect(testHarness.resolver.resolve({
+                row: testHarness.source.snapshot().rowAt(7)!, totalMessages: 8,
+                signal: controller.signal, isCurrent: () => current,
+            })).rejects.toMatchObject({ name: change === 'abort' ? 'AbortError' : 'ChatParserHistoryProjectionStaleError' })
+            expect(testHarness.pinReleases).toHaveBeenCalledOnce()
+        },
+    )
+
+    test.each(['lua', 'plugin-v2', 'display-trigger'] as const)(
+        'still supplies complete history to %s and releases the viewport pin before promotion',
+        async (dependency) => {
+            const testHarness = await cachedHarness({ unsafeDependencies: () => [dependency] })
+            const result = await testHarness.resolver.resolve({
+                row: testHarness.source.snapshot().rowAt(7)!, totalMessages: 8,
+            })
+            expect(result.kind).toBe('complete')
+            expect(testHarness.completeContextMessageCounts).toEqual([8])
+            expect(testHarness.pinReleases).toHaveBeenCalledOnce()
+            expect(testHarness.releases()).toBe(0)
+            if (result.kind === 'complete') result.release()
+            expect(testHarness.releases()).toBe(1)
+        },
+    )
     test('keeps a plain greeting windowed without reading metadata-only history', async () => {
         const testHarness = harness({ metadataOnly: true })
         const lease = await testHarness.resolver.acquireConversationStart!({

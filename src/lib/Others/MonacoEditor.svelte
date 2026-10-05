@@ -2,33 +2,13 @@
     import { onMount, onDestroy } from 'svelte';
     import * as monaco from 'monaco-editor';
     import { registerCBSMonaco } from 'src/ts/gui/codearea/cbsMonaco';
-    import JsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
-    import CssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
-    import HtmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker';
-    import TypeScriptWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker';
     import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 
     // Set up workers once globally
     if (!('MonacoEnvironment' in self)) {
         (self as any).MonacoEnvironment = {
-            getWorker(_: string, label: string) {
-                switch (label) {
-                    case 'json':
-                        return new JsonWorker();
-                    case 'css':
-                    case 'scss':
-                    case 'less':
-                        return new CssWorker();
-                    case 'html':
-                    case 'handlebars':
-                    case 'razor':
-                        return new HtmlWorker();
-                    case 'typescript':
-                    case 'javascript':
-                        return new TypeScriptWorker();
-                    default:
-                        return new EditorWorker();
-                }
+            getWorker() {
+                return new EditorWorker();
             }
         };
     }
@@ -65,6 +45,7 @@
             language,
             theme,
             readOnly: readonly,
+            editContext: false,
             automaticLayout: true,
             minimap: { enabled: false },
             wordWrap: 'on',

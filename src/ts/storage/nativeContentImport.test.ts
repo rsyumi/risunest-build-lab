@@ -76,29 +76,71 @@ const preparedRisumContent = {
     },
 } as const
 
+const fixtureContent = new WeakMap<NativeFileJobStatus, PreparedNativeContent | undefined>()
+
 function contentStatus(
     state: NativeFileJobStatus['state'],
     phase: NativeFileJobStatus['phase'],
     content?: PreparedNativeContent,
 ): NativeFileJobStatus {
-    return {
+    const status: NativeFileJobStatus = {
         jobId: 'content-1',
         kind: 'prepare-content-import',
         state,
         phase,
         progress: { completedBytes: 12, totalBytes: 12, completedItems: 1, totalItems: 1 },
-        preparedContent: content,
     }
+    fixtureContent.set(status, content)
+    return status
 }
 
 function nativeDependencies(
     invoke: NativeFileJobDependencies['invoke'],
     wait: NativeFileJobDependencies['wait'] = async () => undefined,
 ): NativeFileJobDependencies {
-    return { isTauri: () => true, invoke, wait }
+    let content: PreparedNativeContent | undefined
+    return { isTauri: () => true, wait, invoke: async (command, args) => {
+        if (command === 'native_file_job_prepared_content') return content
+        const result = await invoke(command, args)
+        if (command === 'native_file_job_status') content = fixtureContent.get(result as NativeFileJobStatus)
+        return result
+    } }
 }
 
 describe('native prepared content import', () => {
+    it('retrieves content explicitly after metadata-only terminal status', async () => {
+        const commands: string[] = []
+        const receipt = await prepareNativeContentImport({ type: 'androidSpool', token: 'synthetic-token' }, 'card.json', {}, {
+            isTauri: () => true, wait: async () => undefined,
+            invoke: async command => {
+                commands.push(command)
+                if (command === 'native_file_job_start') return { jobId: 'content-1' }
+                if (command === 'native_file_job_status') return contentStatus('succeeded', 'complete')
+                if (command === 'native_file_job_prepared_content') return preparedContent
+                return true
+            },
+        })
+        expect(commands).toEqual(['native_file_job_start', 'native_file_job_status', 'native_file_job_prepared_content'])
+        expect(receipt.content).toEqual(preparedContent)
+        await receipt.cancel()
+        expect(commands.slice(-2)).toEqual(['asset_cas_job_release', 'native_file_job_forget'])
+    })
+
+    it('aborts custody if cancelled while explicit content delivery is pending', async () => {
+        const controller = new AbortController()
+        const commands: string[] = []
+        await expect(prepareNativeContentImport({ type: 'androidSpool', token: 'synthetic-token' }, 'card.json', { signal: controller.signal }, {
+            isTauri: () => true, wait: async () => undefined,
+            invoke: async command => {
+                commands.push(command)
+                if (command === 'native_file_job_start') return { jobId: 'content-1' }
+                if (command === 'native_file_job_status') return contentStatus('succeeded', 'complete')
+                if (command === 'native_file_job_prepared_content') { controller.abort(); return preparedContent }
+                return true
+            },
+        })).rejects.toMatchObject({ name: 'AbortError' })
+        expect(commands.slice(-2)).toEqual(['asset_cas_job_release', 'native_file_job_forget'])
+    })
     it('stages inline assets in bounded chunks and blocks writes after finalization', async () => {
         const staged = { referenceKey: 'inline-1', token: 'inline-1', logicalId: `assets/${'cd'.repeat(32)}.png`,
             objectHash: 'cd'.repeat(32), byteSize: 64 * 1024 + 3, mime: '', name: 'inline.png', ext: 'png' }

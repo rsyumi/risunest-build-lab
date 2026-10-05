@@ -100,6 +100,8 @@ static SHARED_FAMILIES: std::sync::LazyLock<Arc<PackFamilies>> =
 struct FamilyState {
     active: usize,
     waiting: usize,
+    spool_waiting: std::collections::BTreeMap<String, usize>,
+    executing: std::collections::BTreeMap<String, usize>,
 }
 
 pub(crate) struct PackFamilies {
@@ -125,6 +127,18 @@ impl Drop for FamilyPermit {
 /// Counts a producer as waiting for as long as it does, including a wait
 /// that is abandoned.
 struct FamilyWaiter<'a>(&'a PackFamilies);
+struct SpoolWaiter<'a> { families: &'a PackFamilies, job_id: &'a str }
+impl Drop for SpoolWaiter<'_> {
+    fn drop(&mut self) {
+        let mut state = self.families.state();
+        if let Some(count) = state.spool_waiting.get_mut(self.job_id) {
+            *count -= 1;
+            if *count == 0 { state.spool_waiting.remove(self.job_id); }
+        }
+        drop(state);
+        self.families.changed.notify_waiters();
+    }
+}
 
 impl Drop for FamilyWaiter<'_> {
     fn drop(&mut self) {
@@ -219,7 +233,8 @@ impl PackFamilies {
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if self.state().waiting > 0 {
+            let contended = { let state = self.state(); state.waiting > 0 || !state.spool_waiting.is_empty() };
+            if contended {
                 return;
             }
             changed.await;
@@ -243,12 +258,28 @@ pub(crate) struct SpoolBudget {
     limit: u64,
     families: Arc<PackFamilies>,
 }
+pub(crate) struct SpoolExecution {
+    job_id: String,
+    families: Arc<PackFamilies>,
+}
+impl Drop for SpoolExecution {
+    fn drop(&mut self) {
+        let mut state = self.families.state();
+        if let Some(count) = state.executing.get_mut(&self.job_id) {
+            *count -= 1;
+            if *count == 0 { state.executing.remove(&self.job_id); }
+        }
+        drop(state);
+        self.families.changed.notify_waiters();
+    }
+}
 
 /// One admitted write. Dropping it hands the bytes back to the directory that
 /// now holds them, or to nobody if the write failed.
 pub(crate) struct SpoolReservation {
     job_id: String,
     bytes: u64,
+    families: Arc<PackFamilies>,
 }
 
 impl Drop for SpoolReservation {
@@ -262,6 +293,8 @@ impl Drop for SpoolReservation {
                 writes.remove(&self.job_id);
             }
         }
+        drop(writes);
+        self.families.changed.notify_waiters();
     }
 }
 
@@ -302,6 +335,45 @@ impl SpoolBudget {
     pub(crate) fn try_reserve(&self, bytes: u64) -> Result<Option<SpoolReservation>> {
         self.admit(bytes, false)
     }
+    fn begin_execution(&self) -> SpoolExecution {
+        *self.families.state().executing.entry(self.job_id.clone()).or_default() += 1;
+        SpoolExecution { job_id: self.job_id.clone(), families: self.families.clone() }
+    }
+    fn executing_peer_holds_spool(&self) -> Result<bool> {
+        let executing = {
+            let state = self.families.state();
+            state.executing.keys().filter(|job| !state.spool_waiting.contains_key(*job)).cloned().collect::<std::collections::BTreeSet<_>>()
+        };
+        let writes = SPOOL_WRITES.lock().map_err(storage)?;
+        for (job, directory) in (self.retaining)()? {
+            if job != self.job_id && executing.contains(&job)
+                && (writes.get(&job).copied().unwrap_or(0) > 0 || held_spool_bytes(&directory)? > 0) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    async fn reserve_after_release(&self, bytes: u64, cancel: &Cancellation) -> Result<Option<SpoolReservation>> {
+        let mut waiter = None;
+        loop {
+            let changed = self.families.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            cancel.check()?;
+            if let Some(reservation) = self.try_reserve(bytes)? { return Ok(Some(reservation)); }
+            // An ended, paused, or likewise waiting owner cannot release room for this wave.
+            if !self.executing_peer_holds_spool()? { return Ok(None); }
+            if waiter.is_none() {
+                *self.families.state().spool_waiting.entry(self.job_id.clone()).or_default() += 1;
+                waiter = Some(SpoolWaiter { families: &self.families, job_id: &self.job_id });
+                self.families.changed.notify_waiters();
+            }
+            tokio::select! {
+                _ = &mut changed => {},
+                _ = cancel.cancelled() => return Err(ProviderError::new(ErrorKind::Cancelled)),
+            }
+        }
+    }
     /// Charges a write that cannot wait for room because it is what lets
     /// room be released: the page registering a wave that is already sealed.
     fn charge(&self, bytes: u64) -> Result<SpoolReservation> {
@@ -337,6 +409,7 @@ impl SpoolBudget {
         Ok(Some(SpoolReservation {
             job_id: self.job_id.clone(),
             bytes,
+            families: self.families.clone(),
         }))
     }
 }
@@ -426,6 +499,9 @@ impl TransferJournal {
         self.families = budget.families.clone();
         self.spool_budget = Some(budget);
     }
+    pub(crate) fn begin_spool_execution(&self) -> Option<SpoolExecution> {
+        self.spool_budget.as_ref().map(SpoolBudget::begin_execution)
+    }
     /// The pack families this journal's packs are admitted among. A journal
     /// without a budget still keeps its own packs to that many.
     pub(crate) fn families(&self) -> Arc<PackFamilies> {
@@ -440,6 +516,16 @@ impl TransferJournal {
             Some(reservation) => SpoolAdmission::Admitted(Some(reservation)),
             None => SpoolAdmission::Full,
         })
+    }
+    pub(crate) fn reserve_spool_after_release<'a>(&'a self, bytes: u64, cancel: &'a Cancellation) -> impl std::future::Future<Output = Result<SpoolAdmission>> + Send + 'a {
+        let budget = self.spool_budget.as_ref();
+        async move {
+            let Some(budget) = budget else { return Ok(SpoolAdmission::Admitted(None)); };
+            Ok(match budget.reserve_after_release(bytes, cancel).await? {
+                Some(reservation) => SpoolAdmission::Admitted(Some(reservation)),
+                None => SpoolAdmission::Full,
+            })
+        }
     }
     /// Charges a page registering an already sealed wave. It is admitted even
     /// past the budget, because sending that wave is what releases its room;
@@ -971,6 +1057,7 @@ impl TransferJournal {
         }
         std::fs::remove_file(&path).map_err(storage)?;
         crate::trust_boundary::sync_directory(&self.directory).map_err(storage)?;
+        self.families.changed.notify_waiters();
         Ok(())
     }
 
@@ -1171,6 +1258,98 @@ mod tests {
             Some(ErrorKind::Transient)
         );
         assert!(held_spool_bytes(&root.path().join("absent")).unwrap() == 0);
+    }
+
+    fn three_budgeted_journals() -> (tempfile::TempDir, PersistentStore, Vec<TransferJournal>, Arc<PackFamilies>) {
+        let (root, store, identity, _) = fixture();
+        let families = PackFamilies::new(ACTIVE_PACK_FAMILIES);
+        let holders = (0..3).map(|index| (uuid::Uuid::new_v4().to_string(), root.path().join(format!("pressure-{index}")))).collect::<Vec<_>>();
+        let journals = holders.iter().enumerate().map(|(index, (id, directory))| {
+            let mut identity = identity.clone();
+            identity.job_id = id.clone();
+            identity.connection_id = format!("connection-{index}");
+            let mut journal = TransferJournal::open(directory, identity).unwrap();
+            let retained = holders.clone();
+            journal.set_spool_budget(SpoolBudget::new(id.clone(), move || Ok(retained.clone())).with_limit(1000).with_families(families.clone()));
+            journal
+        }).collect();
+        (root, store, journals, families)
+    }
+
+    #[test]
+    fn later_wave_pressure_wakes_an_executing_peer_without_a_family_waiter() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let (_root, _store, journals, families) = three_budgeted_journals();
+            let _executing = journals.iter().map(TransferJournal::begin_spool_execution).collect::<Vec<_>>();
+            std::fs::write(journals[0].spool_path("wave"), vec![1; 400]).unwrap();
+            std::fs::write(journals[1].spool_path("wave"), vec![2; 400]).unwrap();
+            let first = journals[2].reserve_spool(100).unwrap();
+            assert!(matches!(&first, SpoolAdmission::Admitted(_)));
+            drop(first);
+            let cancel = Cancellation::default();
+            let (next, ()) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                tokio::join!(journals[2].reserve_spool_after_release(300, &cancel), async {
+                    families.contended().await;
+                    assert_eq!(families.counts(), (0, 0));
+                    journals[0].discard_spool("wave").unwrap();
+                })
+            }).await.expect("spool release did not wake the later wave");
+            assert!(matches!(next.unwrap(), SpoolAdmission::Admitted(_)));
+            assert_eq!(held_spool_bytes(journals[1].directory()).unwrap(), 400);
+            assert!(families.state().spool_waiting.is_empty());
+        });
+    }
+
+    #[test]
+    fn spool_waiting_cancels_and_does_not_resume_an_ended_or_paused_holder() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let (_root, _store, journals, families) = three_budgeted_journals();
+            std::fs::write(journals[0].spool_path("failed-wave"), vec![1; 900]).unwrap();
+            let executing = journals[0].begin_spool_execution();
+            let cancel = Cancellation::default();
+            let (cancelled, ()) = tokio::join!(journals[1].reserve_spool_after_release(200, &cancel), async {
+                families.contended().await;
+                cancel.cancel();
+            });
+            assert_eq!(cancelled.err().unwrap().kind, ErrorKind::Cancelled);
+            assert!(families.state().spool_waiting.is_empty());
+            let fresh = Cancellation::default();
+            let (stopped, ()) = tokio::join!(journals[2].reserve_spool_after_release(200, &fresh), async {
+                families.contended().await;
+                drop(executing);
+            });
+            assert!(matches!(stopped.unwrap(), SpoolAdmission::Full));
+            assert!(matches!(journals[1].reserve_spool_after_release(200, &fresh).await.unwrap(), SpoolAdmission::Full));
+            assert_eq!(held_spool_bytes(journals[0].directory()).unwrap(), 900);
+            assert!(families.state().spool_waiting.is_empty());
+        });
+    }
+
+    #[test]
+    fn resumed_jobs_waiting_for_each_others_retained_spool_do_not_deadlock() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let (_root, _store, journals, families) = three_budgeted_journals();
+            for journal in &journals { std::fs::write(journal.spool_path("old-wave"), vec![1; 300]).unwrap(); }
+            let execution0 = journals[0].begin_spool_execution();
+            let execution1 = journals[1].begin_spool_execution();
+            let execution2 = journals[2].begin_spool_execution();
+            let cancel = Cancellation::default();
+            let results = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                tokio::join!(async {
+                    let _execution = execution0;
+                    journals[0].reserve_spool_after_release(200, &cancel).await
+                }, async {
+                    let _execution = execution1;
+                    journals[1].reserve_spool_after_release(200, &cancel).await
+                }, async {
+                    let _execution = execution2;
+                    journals[2].reserve_spool_after_release(200, &cancel).await
+                })
+            }).await.expect("mutual spool waiting did not settle");
+            for result in [results.0, results.1, results.2] { assert!(matches!(result.unwrap(), SpoolAdmission::Full)); }
+            assert!(families.state().spool_waiting.is_empty());
+            for journal in &journals { assert_eq!(held_spool_bytes(journal.directory()).unwrap(), 300); }
+        });
     }
 
     /// Families past the limit wait rather than fail. A waiter is what

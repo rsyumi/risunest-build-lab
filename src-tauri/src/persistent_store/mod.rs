@@ -12,6 +12,7 @@ pub(crate) mod hash_work;
 pub(crate) mod content_change_index;
 pub(crate) mod lww;
 mod upstream_identity;
+pub(crate) mod upstream_stream;
 pub(crate) mod lww_commands;
 mod content_locators;
 pub(crate) mod device_store;
@@ -1036,9 +1037,14 @@ impl DataHealthReader {
     fn note_quarantined_intents(&self, findings: &mut crate::data_health::Findings) {
         use crate::data_health::{codes, FindingSink, Finding};
         for intent in &self.quarantined {
-            let finding = Finding::new(codes::INTENT_QUARANTINED, "intent", intent.request_id.clone(), intent.error.clone())
+            let mut finding = Finding::new(codes::INTENT_QUARANTINED, "intent", intent.request_id.clone(), intent.error.clone())
                 .targeting("intent", intent.kind.clone());
-            findings.record(if intent.discardable {
+            finding.intent_action = if intent.discardable {
+                Some(crate::data_health::IntentAction::Discard)
+            } else if intent.recoverable {
+                Some(crate::data_health::IntentAction::Complete)
+            } else { None };
+            findings.record(if finding.intent_action.is_some() {
                 finding.at(intent.token.clone(), 0)
             } else {
                 finding
@@ -2575,7 +2581,7 @@ impl PersistentStore {
     pub(crate) fn storage_stats(&self) -> StoreResult<PersistentStorageStats> {
         let transaction = self.connection.unchecked_transaction()?;
         let active = active_generation(&transaction)?;
-        let database_bytes = snapshot::logical_database_bytes(&transaction)?;
+        let database_bytes = snapshot::allocated_database_bytes(&self.database_path)?;
         let asset_objects = query_count_bytes(
             &transaction,
             "SELECT COUNT(*), COALESCE(SUM(byte_size), 0) FROM asset_objects",

@@ -31,6 +31,14 @@ export function canonicalClone<T>(value: T): T {
     return JSON.parse(canonicalJson(value)) as T
 }
 
+export function requiresWholeObjectCapture(value: object, omit: ReadonlySet<string> = new Set()): boolean {
+    return Object.keys(value).some((key) => {
+        if (omit.has(key)) return false
+        const descriptor = Object.getOwnPropertyDescriptor(value, key)
+        return Boolean(descriptor?.get) || (key === 'toJSON' && typeof descriptor?.value === 'function')
+    })
+}
+
 export function clonePersistentRootFields(root: PersistentRoot): PersistentRoot {
     const result: Record<string, unknown> = {}
     for (const key of Object.keys(root)) {

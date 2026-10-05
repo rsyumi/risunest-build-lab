@@ -715,9 +715,13 @@ describe('files held only by the previous storage', () => {
     })
     it('downloads the files after fencing the previous binding and before the switch', async () => {
         const s = await boundElsewhere()
-        ask(s, 'download-then-connect')
+        const confirm = ask(s, 'download-then-connect')
+        const download = vi.fn<NonNullable<SyncBindingDependencies['downloadPreviousStorageFiles']>>(async () => { s.events.push('download') })
+        s.deps.downloadPreviousStorageFiles = download
         expect(await s.flow.bind(next, s.transport)).toMatchObject({ kind: 'bound', action: 'initialized' })
         expect(s.events).toEqual(['inspect', 'previous-files', 'jobs-fence', 'download', 'pause-flush', 'gate', 'switch', 'refresh', 'publish', 'resume'])
+        expect(download).toHaveBeenCalledExactlyOnceWith(confirm.mock.calls[0][0])
+        expect(download.mock.calls[0][0]).toMatchObject({ target: next, libraryId: 'library', targetId: 'target' })
     })
     it('does not switch and resumes the previous binding when the download fails', async () => {
         const s = await boundElsewhere()

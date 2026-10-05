@@ -629,11 +629,13 @@ describe('selected conversation eviction correctness corpus', () => {
         vi.doMock('./persistentDataRuntime.svelte', () => ({
             acquireDestructiveReplacementFence: vi.fn(),
             acknowledgeGenerationCompletion: (epoch?: number) => runtime.acknowledgeGenerationCompletion(epoch),
+            drainDeferredLwwReceives: (epoch?: number) => runtime.drainLwwDeferred(epoch),
             assertPersistentMutationAllowed: (epoch?: number) => runtime.assertPersistentMutationAllowed(epoch),
             getPersistentStorageAuthorityEpoch: () => runtime.getStorageAuthorityEpoch(),
             getPersistentNavigationGeneration: () => runtime.getNavigationGeneration(),
             capturePersistentMutationToken: vi.fn(),
             captureSelectedConversationTarget: () => runtime.captureSelectedConversationTarget(),
+            captureSelectedConversationAuthority: () => runtime.captureSelectedConversationAuthority(),
             acquireCompleteConversation: (reason: string, target: never) =>
                 runtime.acquireCompleteConversation(reason, target),
             getActiveConversationSession: () => runtime.getActiveConversationSession(),

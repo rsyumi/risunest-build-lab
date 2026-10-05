@@ -91,9 +91,10 @@ async function consumeAndroidContentSpool(
             const data = response instanceof ArrayBuffer
                 ? new Uint8Array(response)
                 : Uint8Array.from(response)
-            const parsed = destination === 'auto'
-                ? JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data))
-                : null
+            const parsedJson = destination === 'auto'
+                ? { value: JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data)) }
+                : undefined
+            const parsed = parsedJson?.value
             const moduleJson = parsed && typeof parsed === 'object' && (
                 parsed.type === 'risuModule'
                 || (parsed.type === 'risu' && Array.isArray(parsed.data))
@@ -102,7 +103,7 @@ async function consumeAndroidContentSpool(
             )
             if (destination === 'module' || moduleJson) {
                 const { importModuleData } = await import('../process/modules')
-                await importModuleData({ name: displayName, data })
+                await importModuleData({ name: displayName, data, ...(parsedJson && { parsedJson }) })
                 return 'module'
             }
             const { importCharacterProcess } = await import('../characterCards')
@@ -110,6 +111,7 @@ async function consumeAndroidContentSpool(
             const index = await importCharacterProcess({
                 name: displayName,
                 data,
+                ...(parsedJson && { parsedJson }),
             })
             return typeof index === 'number'
                 ? (getDatabase().characters[index]?.chaId ?? null)

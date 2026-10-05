@@ -50,6 +50,7 @@ import { SelectedConversationPromotionStaleError } from './storage/activeWorking
 import { PersistentMutationFencedError } from './storage/saveCoordinator'
 import { beginNavigationActivity } from './ui/navigationActivity'
 import { yieldToUi } from './ui/yieldToUi'
+import { estimateCharacterBytes } from './storage/conversationInsertPages'
 
 export async function commitDetachedCharacter(
     character: character,
@@ -58,7 +59,7 @@ export async function commitDetachedCharacter(
     const characterId = character.chaId
     await commitCharacterAddition({
         characterId,
-        estimatedBytes: new TextEncoder().encode(JSON.stringify(character)).byteLength,
+        estimatedBytes: estimateCharacterBytes(character),
         install() {
             DBState.db.characters.push(character)
             checkCharOrder()
@@ -1124,7 +1125,8 @@ export async function duplicateChat(characterId: string, chatId: string): Promis
     if (!source) return false
     return editSelectedChatList(characterId, 'duplicate-chat', (character) => {
         if (!character.chats.some((conversation) => conversation.id === chatId)) return false
-        const duplicate = safeStructuredClone(source)
+        // The persistent reader returns an owned copy, including its message pages.
+        const duplicate = { ...source }
         duplicate.name = createChatCopyName(duplicate.name, 'Copy')
         duplicate.id = v4()
         character.chats.unshift(duplicate)

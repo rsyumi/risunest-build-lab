@@ -25,20 +25,23 @@ it('describes a restored server instead of an ordinary replacement and keeps the
 
 describe('files held only by the previous storage', () => {
     const context = (target: PreviousStorageFilesContext['target']): PreviousStorageFilesContext => ({
-        target, signal: new AbortController().signal,
+        target, libraryId: 'candidate-library', targetId: 'candidate-target', signal: new AbortController().signal,
         state: { target: { kind: 'none' }, targetAuthority: '0', selectionEpoch: '0', libraryId: null, progress: null },
     })
-    const status = (serverObjects: number, externalObjects: { connectionId: string, objects: number }[]) => ({ policy: 'remote', localBytes: 0, remoteBytes: 1,
+    const status = (serverObjects: number, externalObjects: { connectionId: string, objects: number }[], previousStorageObjects = serverObjects + externalObjects.reduce((sum, entry) => sum + entry.objects, 0)) => ({ policy: 'remote', localBytes: 0, remoteBytes: 1, previousStorageObjects,
         remoteObjects: serverObjects + externalObjects.reduce((sum, entry) => sum + entry.objects, 0), serverBytes: 0, serverObjects, externalObjects, unavailableObjects: 0, evictedBytes: 0 })
     const server = { kind: 'server', connectionId: 'server' } as const
     const external = { kind: 'external', connectionId: 'next' } as const
     it.each([
         { name: 'no storage holds files', target: server, held: status(0, []) },
-        { name: 'only the new external storage holds files', target: external, held: status(0, [{ connectionId: 'next', objects: 3 }]) },
+        { name: 'only the new external storage holds files', target: external, held: status(0, [{ connectionId: 'next', objects: 3 }], 0) },
+        { name: 'the target shares every file with another storage', target: external, held: { ...status(0, [], 0), remoteObjects: 3 } },
+        { name: 'the target server already retains every file', target: server, held: status(3, [], 0) },
     ])('connects without asking when $name', async ({ target, held }) => {
         residency.status.mockResolvedValue(held)
         expect(await confirmPreviousStorageFiles(context(target))).toBe('connect')
         expect(dialog).not.toHaveBeenCalled()
+        expect(residency.status).toHaveBeenCalledExactlyOnceWith(target.kind === 'server' ? { kind: 'server', libraryId: 'candidate-library', targetId: 'candidate-target' } : target)
     })
     it.each([
         { result: { confirmed: true, checked: false }, choice: 'connect' },
@@ -69,7 +72,7 @@ describe('files held only by the previous storage', () => {
         })
     })
     it('asks when other storages share files that count for none of them', async () => {
-        residency.status.mockResolvedValue({ ...status(0, [{ connectionId: 'next', objects: 1 }]), remoteObjects: 3 })
+        residency.status.mockResolvedValue({ ...status(0, [{ connectionId: 'next', objects: 1 }], 2), remoteObjects: 3 })
         dialog.mockResolvedValue({ confirmed: true, checked: false })
         expect(await confirmPreviousStorageFiles(context(external))).toBe('connect')
         expect(dialog).toHaveBeenCalledOnce()
@@ -83,9 +86,10 @@ describe('files held only by the previous storage', () => {
         dialog.mockResolvedValue(result)
         expect(await confirmPreviousStorageFiles(context(server))).toBe(choice)
     })
-    it('downloads from every holder without a connection filter', async () => {
+    it('downloads only files the inspected target lacks and forwards binding cancellation', async () => {
         residency.download.mockResolvedValue(status(0, []))
-        await downloadPreviousStorageFiles()
-        expect(residency.download).toHaveBeenCalledExactlyOnceWith()
+        const binding = context(external)
+        await downloadPreviousStorageFiles(binding)
+        expect(residency.download).toHaveBeenCalledExactlyOnceWith(undefined, { target: external, signal: binding.signal })
     })
 })

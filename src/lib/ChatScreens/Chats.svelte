@@ -3,7 +3,8 @@
     import { mount, onDestroy, onMount, tick, unmount, untrack } from 'svelte'
     import { get } from 'svelte/store'
     import Chat from './Chat.svelte'
-    import type { ChatDisplayRefresh } from 'src/ts/chatDisplayRefresh'
+    import { chatScreenState } from 'src/ts/ui/chatScreenState.svelte'
+    import type { ChatDisplayRefresh, ChatPresentationRefresh } from 'src/ts/chatDisplayRefresh'
     import ChatConversationStart from './ChatConversationStart.svelte'
     import { getCharImage } from 'src/ts/characters'
     import { createSimpleCharacter, DBState, selectedCharID, ReloadChatPointer, ReloadGUIPointer } from 'src/ts/stores.svelte'
@@ -110,6 +111,7 @@
     type ChatInstance = {
         updateCandidatePosition?: (page: number, total: number) => void
         hasStreamingPreview?: () => boolean
+        updatePresentation?: (state: ChatPresentationRefresh) => void
         refreshMessageDisplay?: (state: ChatDisplayRefresh) => void
         hasActiveEditor?: () => boolean
         captureEditorDraft?: () => Omit<ChatEditorDraft, 'caret'> | null
@@ -202,6 +204,8 @@
     let pendingSourceHandoffAnchor: ChatViewportAnchor | null = null
     let pendingMissingRowsAnchor: ChatViewportAnchor | null = null
     let renderedConversationIdentity: string | null = null
+    const renderedMessageIds = new Map<string, string | undefined>()
+    let renderedStartOffset = 0
     let renderedOwnerId: string | null = null
     let renderedConversationId: string | null = null
     let viewportAnchor: ChatViewportAnchor | null = null
@@ -379,6 +383,8 @@
     }
 
     function resetViewport(scope: string, resetScroll: boolean): void {
+        if (resetScroll) retainScreenAnchor()
+        renderedMessageIds.clear()
         if (activeScope !== null) {
             navigationGeneration += 1
             cancelStaleRowMountWaiters()
@@ -813,9 +819,10 @@
             resetViewport(scope, resetScroll)
             // Drafts of a conversation that was left or removed are dropped without asking.
             discardEditorDraftsExcept(currentCharacter.chaId ?? null, currentChat?.id ?? null)
-            if (resetScroll) scheduleEditorDraftJump()
+            if (resetScroll) scheduleScreenRestore()
         }
         renderedConversationIdentity = conversationIdentity
+        renderedStartOffset = hasConversationStart() ? 1 : 0
         renderedOwnerId = currentCharacter.chaId
         renderedConversationId = currentCharacter.chats[currentCharacter.chatPage]?.id ?? null
         if (!currentChat) {
@@ -1031,6 +1038,15 @@
                     parserProjection = parserProjectionState.projection
                 }
             }
+            untrack(() => mountInstances.get(key)?.updatePresentation?.({
+                img: (message.role === 'user' ? resolvedUserImage : resolvedCharacterImage) ?? '',
+                name: message.role === 'user' ? currentUsername : currentCharacter.name,
+                largePortrait: messageLargePortrait,
+                bookmarked,
+                role: message.role,
+                messageGenerationInfo: message.generationInfo,
+            }))
+            renderedMessageIds.set(key, message.chatId)
             const sourceHandoff = sourceHandoffRuntimeKeys.has(key)
             const requiresRemount =
                 sourceHandoff ||
@@ -1126,6 +1142,8 @@
                             untrack(() =>
                                 instance?.refreshMessageDisplay?.({
                                     message: message.data,
+                                    index,
+                                    character: simpleChar,
                                     totalMessages,
                                     parserProjection,
                                     parserAbortSignal: parserProjectionState?.controller.signal,
@@ -1158,6 +1176,7 @@
                             props: {
                                 restoredEditor: restoredEditor ?? undefined,
                                 onEditorOpen: () => holdOpenedEditor(instance),
+                                onEditorClose: () => queueProjectionReconcile(),
                                 onBodyRendered: () => reportBodyRendered(instance),
                                 message: message.data,
                                 viewportRow,
@@ -1251,6 +1270,8 @@
                     untrack(() =>
                         instance?.refreshMessageDisplay?.({
                             message: message.data,
+                            index,
+                            character: simpleChar,
                             totalMessages,
                             parserProjection,
                             parserAbortSignal: parserProjectionState.controller.signal,
@@ -1266,6 +1287,8 @@
                     untrack(() =>
                         instance?.refreshMessageDisplay?.({
                             message: message.data,
+                            index,
+                            character: simpleChar,
                             totalMessages,
                             parserProjection,
                             parserAbortSignal: parserProjectionState.controller.signal,
@@ -1722,8 +1745,64 @@
         void lookup.then(settle, () => settle(null))
     }
 
-    // Coming back to the chat starts at the latest messages; an older message
-    // with a kept draft is brought into view instead.
+    function retainScreenAnchor(): void {
+        if (!renderedOwnerId || !renderedConversationId || mountedElements.size === 0) return
+        if (currentCharacter.chaId === renderedOwnerId &&
+            !currentCharacter.chats?.some((chat) => chat.id === renderedConversationId)) {
+            chatScreenState.remove({ characterId: renderedOwnerId, conversationId: renderedConversationId })
+            return
+        }
+        const anchor = captureDomAnchor()
+        if (!anchor) return
+        chatScreenState.writeAnchor({ characterId: renderedOwnerId, conversationId: renderedConversationId }, {
+            index: Math.max(0, anchor.indexHint - renderedStartOffset),
+            messageId: renderedMessageIds.get(anchor.key),
+            relativeOffset: anchor.relativeOffset,
+            latest: initialLatestFollow || (scrollContainer !== null &&
+                scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 24),
+        })
+    }
+
+    function scheduleScreenRestore(): void {
+        if (pendingConversationDrafts().length > 0) {
+            scheduleEditorDraftJump()
+            return
+        }
+        const characterId = currentCharacter.chaId
+        const conversationId = currentCharacter.chats[currentCharacter.chatPage]?.id
+        if (!characterId || !conversationId) return
+        const anchor = chatScreenState.readAnchor({ characterId, conversationId })
+        if (!anchor || anchor.latest) return
+        const generation = navigationGeneration
+        void tick().then(async () => {
+            const current = () => !destroyed && generation === navigationGeneration &&
+                currentCharacter.chaId === characterId &&
+                currentCharacter.chats[currentCharacter.chatPage]?.id === conversationId
+            if (!current()) return
+            let index = anchor.index
+            if (anchor.messageId) {
+                if (activeViewportSource && selectedConversationOperations) {
+                    const found = await selectedConversationOperations.findUniqueMessage(anchor.messageId).catch(() => null)
+                    if (!current()) return
+                    if (found) index = found.absoluteIndex
+                } else if (!activeViewportSource) {
+                    const matches = (messages ?? []).flatMap((message, index) => message.chatId === anchor.messageId ? [index] : [])
+                    if (matches.length === 1) index = matches[0]
+                }
+            }
+            index = Math.min(index, currentMessageCount() - 1)
+            if (index < 0 || !current()) return
+            if (!await jumpTo(index)) return
+            if (destroyed || currentCharacter.chaId !== characterId ||
+                currentCharacter.chats[currentCharacter.chatPage]?.id !== conversationId) return
+            const key = currentMessageKey(index)
+            if (!key) return
+            viewportAnchor = { key, indexHint: index + (hasConversationStart() ? 1 : 0), relativeOffset: anchor.relativeOffset }
+            correctDomAnchor(viewportAnchor)
+        })
+    }
+
+    // An older message with a kept draft takes precedence over its saved viewport.
     function scheduleEditorDraftJump(): void {
         const draft = pendingConversationDrafts()[0]
         if (!draft) return
@@ -1748,6 +1827,7 @@
             mountedElements.delete(key)
         }
         renderSignatures.delete(key)
+        renderedMessageIds.delete(key)
         sourceHandoffRuntimeKeys.delete(key)
         chatView.removed(key)
     }
@@ -2575,11 +2655,13 @@
             scrollContainer?.removeEventListener('keydown', handleUserScrollIntent)
             resizeObserver?.disconnect()
             resizeObserver = null
+            retainScreenAnchor()
             scrollContainer = null
         }
     })
 
     onDestroy(() => {
+        retainScreenAnchor()
         destroyed = true
         navigationGeneration += 1
         cancelStaleRowMountWaiters()

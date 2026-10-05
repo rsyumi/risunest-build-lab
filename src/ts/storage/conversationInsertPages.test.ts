@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Message } from './database.svelte'
+import type { Message, character } from './database.svelte'
 import type { ConversationMutation, WorkingSetCommit } from './persistentDataStore'
 import { planConversationInsertPages } from './conversationInsertPages'
 
@@ -76,5 +76,17 @@ describe('planConversationInsertPages', () => {
             conversations: [create('one', [a], 0), create('two', [b], 1)],
         }, bytes(a))!
         expect(plan.steps.map((step) => step.conversations.map((mutation) => 'conversationId' in mutation ? mutation.conversationId : ''))).toEqual([['one'], ['two']])
+    })
+
+    it('creates an added character with its first bounded page and keeps later pages out of the character envelope', () => {
+        const messages = [message('a'.repeat(40)), message('b'.repeat(40))]
+        const added = { type: 'character', chaId: 'char', name: 'Synthetic', chatPage: 0,
+            chats: [{ id: 'new', name: 'New', message: messages }] } as unknown as character
+        const plan = planConversationInsertPages({ expectedRevision: 1, addCharacter: added }, bytes(messages[0]))!
+        expect(plan.addedCharacterId).toBe('char')
+        expect(plan.steps).toEqual([
+            { addCharacter: { ...added, chats: [] }, conversations: [{ ...create('new', [messages[0]], 0), conversation: { id: 'new', name: 'New' } }] },
+            { conversations: [{ type: 'replace-range', characterId: 'char', conversationId: 'new', start: 1, deleteCount: 0, messages: [messages[1]] }] },
+        ])
     })
 })

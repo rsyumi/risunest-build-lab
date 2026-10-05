@@ -266,7 +266,7 @@ impl PersistentStore {
     }
     pub(crate) fn portable_export_lower_bound(&self) -> StoreResult<u64> {
         let objects: i64 = self.connection.query_row("SELECT coalesce(sum(byte_size),0) FROM asset_objects", [], |row| row.get(0))?;
-        let database = super::snapshot::logical_database_bytes(&self.connection)?;
+        let database = super::snapshot::active_database_bytes(&self.connection)?;
         u64::try_from(objects).ok().and_then(|objects| database.checked_add(objects))
             .ok_or_else(|| invalid("portable export size overflow"))
     }

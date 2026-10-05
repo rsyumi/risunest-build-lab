@@ -309,55 +309,124 @@ fn a_snapshot_taken_during_the_purge_restores_the_active_library() {
     assert_eq!(state(&store, &stage.staging_id).as_deref(), Some("staging"));
 }
 
-/// A retired library only waits for the purge, so the size estimates leave its
-/// values out while its rows are still in the file.
-#[test]
-fn size_estimates_leave_out_a_retired_library() {
-    const FILLER: usize = 1024 * 1024;
+fn assert_storage_file_bytes(store: &PersistentStore) -> u64 {
+    let path = &store.database_path;
+    let mut expected = std::fs::metadata(path).unwrap().len();
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        expected += match std::fs::metadata(std::path::Path::new(&sidecar)) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => panic!("fixture sidecar metadata failed: {error}"),
+        };
+    }
+    assert_eq!(store.storage_stats().unwrap().database_bytes, expected);
+    expected
+}
+
+fn assert_retirement_accounting(index_heavy: bool) {
     let directory = tempfile::tempdir().unwrap();
     let mut store = PersistentStore::open(directory.path()).unwrap();
-    let replace = |store: &mut PersistentStore, fill: &str| {
-        let staging = store.replace_begin().unwrap().staging_id;
-        store
-            .replace_put_root(&staging, &json!({ "username": "Synthetic", "filler": fill.repeat(FILLER) }))
-            .unwrap();
-        let revision = store.revision().unwrap();
-        store.replace_commit(&staging, Some(revision)).unwrap();
-        staging
-    };
-    let page_bytes = |store: &PersistentStore| -> u64 {
-        store
-            .connection
-            .query_row(
-                "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap() as u64
-    };
-    let estimates = |store: &mut PersistentStore| -> [u64; 3] {
-        // The storage figures take the archive lock, so it is released first.
-        let snapshot = {
-            let archive = super::super::snapshot_archive::Archive::open(&store.snapshots_dir).unwrap();
-            snapshot::capture_scratch(store, &archive).unwrap().1
-        };
-        let objects = store.storage_stats().unwrap().asset_objects.bytes;
-        [
-            store.storage_stats().unwrap().database_bytes,
-            store.portable_export_lower_bound().unwrap() - objects,
-            snapshot,
-        ]
-    };
-    let first = replace(&mut store, "a");
+    let old = activated(&mut store, "Synthetic");
     purge_all(&mut store);
-    replace(&mut store, "b");
-    assert_eq!(state(&store, &first).as_deref(), Some("retired"));
-    assert!(rows(&store, &first) > 0);
-    let pages = page_bytes(&store);
-    for estimate in estimates(&mut store) {
-        assert!(estimate >= FILLER as u64, "{estimate}");
-        assert!(estimate + FILLER as u64 <= pages, "{estimate} of {pages}");
+    let (count, key, value): (usize, String, String) = if index_heavy {
+        (2048, "k".repeat(256), "1".to_owned())
+    } else {
+        (16, "k".to_owned(), serde_json::to_string(&"가".repeat(32 * 1024)).unwrap())
+    };
+    let baseline = snapshot::active_database_bytes(&store.connection).unwrap();
+    let mut expected_values = 0u64;
+    let tx = store.connection.transaction().unwrap();
+    for index in 0..count {
+        expected_values += ("synthetic".len() + format!("{key}-{index:04}").len()
+            + value.len().to_string().len() + index.to_string().len() + value.len()) as u64;
+        tx.execute(
+            "INSERT INTO plugin_storage(generation,owner,storage_key,byte_size,ordinal,value)
+             VALUES(?1,'synthetic',?2,?3,?4,?5)",
+            rusqlite::params![old, format!("{key}-{index:04}"), i64::try_from(value.len()).unwrap(), i64::try_from(index).unwrap(), value],
+        ).unwrap();
     }
+    tx.commit().unwrap();
+    let before_active = snapshot::active_database_bytes(&store.connection).unwrap();
+    let before_disk = assert_storage_file_bytes(&store);
+    assert_eq!(before_active, baseline + expected_values);
+    assert!(before_disk > before_active);
+    activated(&mut store, "Replacement");
+    assert_eq!(state(&store, &old).as_deref(), Some("retired"));
+    let active = snapshot::active_database_bytes(&store.connection).unwrap();
+    assert!(active < before_active);
+    let check_active = |store: &PersistentStore| {
+        assert_eq!(snapshot::active_database_bytes(&store.connection).unwrap(), active);
+        let objects = store.storage_stats().unwrap().asset_objects.bytes;
+        assert_eq!(store.portable_export_lower_bound().unwrap(), active + objects);
+        assert_storage_file_bytes(store);
+    };
+    check_active(&store);
+    assert!(store.purge_retired_batch(7).unwrap());
+    assert!(rows(&store, &old) > 0);
+    check_active(&store);
+    let allocated_before_purge: i64 = store.connection.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap();
+    purge_all(&mut store);
+    assert_eq!(state(&store, &old), None);
+    check_active(&store);
+    let (pages, free, size): (i64, i64, i64) = store.connection.query_row(
+        "SELECT page_count, freelist_count, page_size FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size()",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+    assert_eq!(pages, allocated_before_purge, "purging does not shrink the file");
+    assert!(free > 0, "retired rows leave reusable pages");
+    store.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    assert_eq!(std::fs::metadata(&store.database_path).unwrap().len(), (pages * size) as u64);
+    assert_storage_file_bytes(&store);
+    assert_eq!(snapshot::active_database_bytes(&store.connection).unwrap(), active);
+}
+
+#[test]
+fn accounting_keeps_index_heavy_retirement_separate_from_file_bytes() {
+    assert_retirement_accounting(true);
+}
+
+#[test]
+fn accounting_keeps_payload_heavy_retirement_separate_from_file_bytes() {
+    assert_retirement_accounting(false);
+}
+
+#[test]
+fn accounting_preserves_snapshot_retention_basis() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let old = activated(&mut store, "Synthetic");
+    purge_all(&mut store);
+    store.connection.execute(
+        "INSERT INTO plugin_storage(generation,owner,storage_key,byte_size,ordinal,value)
+         VALUES(?1,'synthetic','retired',?2,0,?3)",
+        rusqlite::params![old, 1024 * 1024 + 2, serde_json::to_string(&"a".repeat(1024 * 1024)).unwrap()],
+    ).unwrap();
+    activated(&mut store, "Replacement");
+    let pages = u64::try_from(store.connection.query_row::<i64, _, _>(
+        "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()", [], |row| row.get(0),
+    ).unwrap()).unwrap();
+    let mut retired = 0u64;
+    for (table, columns) in GENERATION_TABLES {
+        let sum = columns.split(',').map(|column| format!("coalesce(octet_length({}),0)", column.trim())).collect::<Vec<_>>().join("+");
+        retired += u64::try_from(store.connection.query_row::<i64, _, _>(
+            &format!("SELECT coalesce(sum({sum}),0) FROM {table} WHERE generation=?1"), [&old], |row| row.get(0),
+        ).unwrap()).unwrap();
+    }
+    let expected = pages.saturating_sub(retired);
+    let captured = {
+        let archive = super::super::snapshot_archive::Archive::open(&store.snapshots_dir).unwrap();
+        snapshot::capture_scratch(&mut store, &archive).unwrap().1
+    };
+    assert_eq!(captured, expected);
+    assert_eq!(snapshot::byte_budget(captured), expected.saturating_mul(4).max(512 * 1024 * 1024));
+    assert_eq!(snapshot::byte_budget(200 * 1024 * 1024), 800 * 1024 * 1024);
+    purge_all(&mut store);
+    let remaining_pages = u64::try_from(store.connection.query_row::<i64, _, _>(
+        "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()", [], |row| row.get(0),
+    ).unwrap()).unwrap();
+    assert_eq!(snapshot::snapshot_retention_basis_bytes(&store.connection).unwrap(), remaining_pages);
 }
 
 /// Root collection finds generations through the tables that can reference a

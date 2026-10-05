@@ -1,4 +1,5 @@
 import { assertModuleMCPImportAllowed } from './process/mcp/moduleImport'
+import { decodeImportUtf8, parseImportJson, type ParsedImportJson } from './importUtf8'
 import { runContentImport } from './storage/contentImportOperation'
 import { writable, type Writable } from 'svelte/store'
 import { alertCardExport, alertClear, alertConfirm, alertError, alertInput, alertMd, alertNormal, alertRisuServiceTOS, alertStore, alertWait } from "./alert"
@@ -182,6 +183,7 @@ export async function importCharacter() {
 export async function importCharacterProcess<T extends boolean = false>(f: {
     name: string
     data: Uint8Array | File | ReadableStream<Uint8Array>
+    parsedJson?: ParsedImportJson
     lightningRealmImport?: boolean
     returnCharacter?: T //note That this option only works with v3 charx
 }): Promise<T extends true ? character | number | null : number | null> {
@@ -216,7 +218,7 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
             f.data instanceof Uint8Array
                 ? f.data
                 : new Uint8Array(await f.data.arrayBuffer())
-        const da = JSON.parse(Buffer.from(data).toString('utf-8'))
+        const da = (f.parsedJson ?? parseImportJson(data)).value
         const importedId = await importCharacterCardSpec(da)
         if (importedId) {
             return getDatabase().characters.findIndex(
@@ -455,7 +457,7 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
                 return
             }
             const metaData: RccCardMetaData = JSON.parse(
-                Buffer.from(parts[4], 'base64').toString('utf-8'),
+                decodeImportUtf8(Buffer.from(parts[4], 'base64')),
             )
             if (metaData.usePassword) {
                 const password = await alertInput(language.inputCardPassword)
@@ -468,7 +470,7 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
                             password,
                         )
                         const charaData: CharacterCardV2Risu = JSON.parse(
-                            Buffer.from(decrypted).toString('utf-8'),
+                            decodeImportUtf8(new Uint8Array(decrypted)),
                         )
                         const importedId = await importCharacterCardSpec(
                             charaData,
@@ -492,7 +494,7 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
                 const decrypted = await decryptBuffer(encrypted, 'RISU_NONE')
                 try {
                     const charaData: CharacterCardV2Risu = JSON.parse(
-                        Buffer.from(decrypted).toString('utf-8'),
+                        decodeImportUtf8(new Uint8Array(decrypted)),
                     )
                     const importedId = await importCharacterCardSpec(
                         charaData,
@@ -513,7 +515,7 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
         }
     }
     const parsed = JSON.parse(
-        Buffer.from(readedChara, 'base64').toString('utf-8'),
+        decodeImportUtf8(Buffer.from(readedChara, 'base64')),
     )
     //fix readedChara version pointing number instead of string because of previous version
     if (
@@ -526,9 +528,7 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
     }
 
     if (parsed.spec !== 'chara_card_v2' && parsed.spec !== 'chara_card_v3') {
-        const charaData: OldTavernChar = JSON.parse(
-            Buffer.from(readedChara, 'base64').toString('utf-8'),
-        )
+        const charaData: OldTavernChar = parsed
         const imgp = await saveAsset(img)
         const importedId = await commitDetachedCharacter(
             convertOffSpecCards(charaData, imgp),
@@ -626,7 +626,7 @@ export async function characterURLImport() {
     if (hash.startsWith('#import_module=')) {
         const data = hash.replace('#import_module=', '')
         const importData = JSON.parse(
-            Buffer.from(decodeURIComponent(data), 'base64').toString('utf-8'),
+            decodeImportUtf8(Buffer.from(decodeURIComponent(data), 'base64')),
         )
         try { assertModuleMCPImportAllowed(importData) }
         catch (error) { alertError(error); return false }

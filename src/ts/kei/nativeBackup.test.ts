@@ -101,7 +101,7 @@ describe('tryNativeKeiBackup', () => {
         expect(invoke).not.toHaveBeenCalled()
     })
 
-    it('falls back after releasing a non-native revision lease', async () => {
+    it('rejects after releasing a non-native revision lease', async () => {
         const harness = nativeRuntime()
         const release = vi.fn(async () => undefined)
         harness.acquireRevision.mockResolvedValueOnce({
@@ -140,7 +140,7 @@ describe('tryNativeKeiBackup', () => {
                     invoke,
                 },
             ),
-        ).resolves.toBe(false)
+        ).rejects.toMatchObject({ code: 'native-lease-unavailable' })
 
         expect(release).toHaveBeenCalledOnce()
         expect(invoke).not.toHaveBeenCalled()
@@ -173,6 +173,57 @@ describe('tryNativeKeiBackup', () => {
 })
 
 describe('runNativeKeiBackupJob', () => {
+    it('releases a missing native lease once without submitting a job', async () => {
+        const harness = nativeRuntime()
+        const lease = await harness.acquireRevision(7)
+        delete (lease as any)[nativePersistentRevisionLease]
+        harness.acquireRevision.mockResolvedValueOnce(lease)
+        const invoke = vi.fn()
+        await expect(runNativeKeiBackupJob({
+            runtime: harness.runtime, url: 'https://kei.example/autobackup/save',
+            accountId: 'account-1', token: 'synthetic-token',
+        }, { isTauri: () => true, invoke })).rejects.toMatchObject({ code: 'native-lease-unavailable' })
+        expect(harness.release).toHaveBeenCalledOnce()
+        expect(invoke).not.toHaveBeenCalled()
+    })
+
+    it('does not acquire a revision for pre-admission cancellation', async () => {
+        const harness = nativeRuntime()
+        const controller = new AbortController()
+        controller.abort()
+        const invoke = vi.fn()
+        await expect(runNativeKeiBackupJob({
+            runtime: harness.runtime, url: 'https://kei.example/autobackup/save',
+            accountId: 'account-1', token: 'synthetic-token',
+        }, { isTauri: () => true, invoke }, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+        expect(harness.acquireRevision).not.toHaveBeenCalled()
+        expect(harness.release).not.toHaveBeenCalled()
+        expect(invoke).not.toHaveBeenCalled()
+    })
+
+    it('retains accepted-job custody through cancellation until terminal status and forget', async () => {
+        const harness = nativeRuntime()
+        const controller = new AbortController()
+        const invoke = vi.fn(async (command: string) => {
+            if (command === 'native_file_job_start') {
+                controller.abort()
+                return { jobId: 'cancelled-kei-job' }
+            }
+            if (command === 'native_file_job_status') return {
+                state: 'cancelled', progress: { completedBytes: 0 },
+            }
+            return true
+        })
+        await expect(runNativeKeiBackupJob({
+            runtime: harness.runtime, url: 'https://kei.example/autobackup/save',
+            accountId: 'account-1', token: 'synthetic-token',
+        }, { isTauri: () => true, invoke }, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+        expect(harness.release).toHaveBeenCalledOnce()
+        expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+            'native_file_job_start', 'native_file_job_cancel', 'native_file_job_status', 'native_file_job_forget',
+        ])
+    })
+
     it('starts a lease-owned job, releases the handoff lease, and waits for success', async () => {
         const harness = nativeRuntime()
         const warn = vi.fn()
@@ -242,7 +293,7 @@ describe('runNativeKeiBackupJob', () => {
         expect(warn).toHaveBeenCalledWith('cleanup-failed')
     })
 
-    it('falls back only when native capability is unavailable before a job is accepted', async () => {
+    it('preserves native capability failure before a job is accepted', async () => {
         const harness = nativeRuntime()
         const invoke = vi.fn().mockRejectedValueOnce({
             code: 'capability-unavailable',
@@ -257,7 +308,7 @@ describe('runNativeKeiBackupJob', () => {
                 token: 'secret-token',
             },
             { isTauri: () => true, invoke, wait: vi.fn() },
-        )).resolves.toBe(false)
+        )).rejects.toMatchObject({ code: 'capability-unavailable', message: 'native jobs disabled' })
 
         expect(harness.release).toHaveBeenCalledOnce()
     })

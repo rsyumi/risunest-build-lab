@@ -18,6 +18,7 @@
     import StreamingThoughtPreviewView from './StreamingThoughtPreview.svelte'
     import type { StreamingThoughtPreview } from '../../ts/parser/streamingThoughtPreview'
     import type { StreamingThoughtMode } from '../../ts/storage/database.svelte'
+    import { mountBoundedThoughtExpansion, type BoundedThoughtExpansion } from './boundedThoughtExpansion'
 
     interface Props {
         character?: simpleCharacterArgument|string|null
@@ -97,6 +98,7 @@
         errorNotified: boolean
         transitional: boolean
         releaseObjectUrls: () => void
+        thoughtExpansion: BoundedThoughtExpansion | null
     }
 
     let activeParseJob: ChatBodyParseJob|null = null
@@ -562,6 +564,7 @@
             errorNotified: false,
             transitional: false,
             releaseObjectUrls: () => {},
+            thoughtExpansion: null,
         }
         job.promise = markParsing(msgDisplay, character, idx, job)
         return job
@@ -574,6 +577,8 @@
         job.removeExternalAbortListener()
         job.releaseObjectUrls()
         job.releaseObjectUrls = () => {}
+        job.thoughtExpansion?.dispose()
+        job.thoughtExpansion = null
         job.deferredInlays.clear()
     }
 
@@ -612,6 +617,8 @@
             if (retainMarkup) {
                 job.releaseObjectUrls = previousDisplay.releaseObjectUrls
                 previousDisplay.releaseObjectUrls = () => {}
+                job.thoughtExpansion = previousDisplay.thoughtExpansion
+                previousDisplay.thoughtExpansion = null
                 job.deferredInlays.clear()
             } else if (html === displayedHtml) {
                 displayEpoch += 1
@@ -626,6 +633,9 @@
                 return
             }
             lastRenderedRevision = job.requestedRevision
+            if (!captureContext && renderRoot && !job.thoughtExpansion) {
+                job.thoughtExpansion = mountBoundedThoughtExpansion(renderRoot)
+            }
             const settledThoughts = renderRoot?.querySelectorAll<HTMLDetailsElement>(
                 'details[data-risu-thought]',
             )
@@ -633,7 +643,7 @@
                 const open = previewThoughtOpen !== undefined && index === settledThoughts.length - 1
                     ? previewThoughtOpen
                     : thoughtOpenStates[index]
-                if (open !== undefined) element.open = open
+                if (open !== undefined && !job.thoughtExpansion?.managed.has(element)) element.open = open
             })
             thoughtOpenStates = Array.from(settledThoughts ?? [], (element) => element.open)
             previewThoughtOpen = undefined

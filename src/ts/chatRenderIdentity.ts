@@ -298,7 +298,7 @@ export function createChatParserDependencyStamp(character: ChatParserCharacterDe
             second = Math.imul(second ^ code, 0x85ebca6b)
         }
     }
-    const visit = (value: unknown): void => {
+    const visit = (value: unknown, omitScriptComment = false): void => {
         if (value === null) {
             write('null;')
             return
@@ -326,10 +326,11 @@ export function createChatParserDependencyStamp(character: ChatParserCharacterDe
         seen.add(value as object)
         if (Array.isArray(value)) {
             write(`array:${value.length};`)
-            for (const item of value) visit(item)
+            for (const item of value) visit(item, omitScriptComment)
             return
         }
-        const keys = Object.keys(value as Record<string, unknown>).sort()
+        const keys = Object.keys(value as Record<string, unknown>)
+            .filter((key) => !omitScriptComment || key !== 'comment').sort()
         write(`object:${keys.length};`)
         for (const key of keys) {
             write(`key:${key.length}:${key};`)
@@ -337,7 +338,7 @@ export function createChatParserDependencyStamp(character: ChatParserCharacterDe
         }
     }
 
-    visit(character.customscript)
+    visit(character.customscript, true)
     visit(character.additionalAssets)
     visit(character.emotionImages)
     visit(character.triggerscript)
@@ -398,7 +399,6 @@ export function areChatRenderSignaturesEqual(
         && left.role === right.role
         && left.isComment === right.isComment
         && left.disabled === right.disabled
-        && left.bookmarked === right.bookmarked
         && left.generationModel === right.generationModel
         && left.generationId === right.generationId
         && left.inputTokens === right.inputTokens
@@ -410,10 +410,8 @@ export function areChatRenderSignaturesEqual(
         && left.stage4 === right.stage4
         && left.index === right.index
         && left.liveTailLengthRevision === right.liveTailLengthRevision
-        && left.largePortrait === right.largePortrait
         && left.reloadPointer === right.reloadPointer
         && left.globalReloadPointer === right.globalReloadPointer
-        && left.resolvedImage === right.resolvedImage
         && left.displayName === right.displayName
         && sameParserCharacter(left.parserCharacter, right.parserCharacter)
         && left.parserCharacterStamp === right.parserCharacterStamp
@@ -427,10 +425,15 @@ export function canRefreshChatRenderInPlace(
     return (
         left !== undefined &&
         (left.content === null) === (right.content === null) &&
+        left.parserCharacter?.chaId === right.parserCharacter?.chaId &&
         areChatRenderSignaturesEqual(
             {
                 ...left,
                 content: right.content,
+                index: right.index,
+                displayName: right.displayName,
+                parserCharacter: right.parserCharacter,
+                parserCharacterStamp: right.parserCharacterStamp,
                 liveTailLengthRevision: right.liveTailLengthRevision,
                 reloadPointer: right.reloadPointer,
                 globalReloadPointer: right.globalReloadPointer,

@@ -44,6 +44,7 @@ export interface PresetWorkingSetControllerDependencies {
     captureCurrentPreset(database: Database): botPreset | null
     applyPreset(root: PersistentRoot, preset: botPreset): void
     getEffectivePresetId?(): string | undefined
+    getEffectivePresetOverride?(): string | null
     clearEffectivePresetOverride?(): void
     mutatePersistentPresets(
         reason: string,
@@ -138,7 +139,15 @@ export function createPresetWorkingSetController(
             },
         ),
         async changeToPreset(id = 0, saveCurrent = true, expectedNames = capturePresetNames(dependencies.getDatabase().botPresets)) {
-            const before = capturePresetNames(dependencies.getDatabase().botPresets)
+            const database = dependencies.getDatabase()
+            assertPresetNames(database.botPresets, expectedNames)
+            assertPresetIndex(database.botPresets, id)
+            const effectiveId = dependencies.getEffectivePresetId?.()
+            const sameSelection = effectiveId !== undefined
+                ? database.botPresets[id].id === effectiveId
+                : database.botPresetsId === id
+            if (sameSelection && !dependencies.getEffectivePresetOverride?.()) return
+            const before = capturePresetNames(database.botPresets)
             await dependencies.mutatePersistentPresets('change-preset', (state) => {
                 assertPresetNames(dependencies.getDatabase().botPresets, before)
                 assertPresetNames(dependencies.getDatabase().botPresets, expectedNames)

@@ -112,7 +112,7 @@ describe('server sync routine bar', () => {
         expect(view).toBeUndefined()
     })
     it('turns into an asset bar while the assets that followed download', () => {
-        const lanes = [lane('receive', { backlogDone: 100 }), lane('hydrate', { active: true, step: 'downloading', backlogDone: 1, backlogLeft: 3 })]
+        const lanes = [lane('receive', { backlogDone: 100 }), lane('hydrate', { active: true, step: 'downloading', assetScope: { id: 1, done: 1, total: 4, settled: false } })]
         const view = serverSyncRoutineView(routine({ stages: ['downloading', 'applying', 'assets'], active: ['assets'], current: 'assets', lanes }), text, false)
         expect(view).toEqual({ label: text.progress.assets, fraction: 0.25, complete: false })
     })
@@ -125,6 +125,41 @@ describe('server sync routine bar', () => {
         expect(routinePeak(state)).toEqual({ changes: 0.75 })
         state = { ...state, lanes: [lane('send', { active: true, step: 'confirming', itemsDone: 11, itemsTotal: 12 })] }
         expect(routinePeak(state)?.changes).toBeCloseTo(11 / 12)
+    })
+    it('uses one item scope across transfer groups and keeps bytes separate', () => {
+        const current = lane('hydrate', { active: true, step: 'downloading', filesDone: 64, filesTotal: 64, bytesDone: 1000, bytesTotal: 1000, receivedBytes: 1050, assetScope: { id: 1, done: 65, total: 130, settled: false } })
+        const state = routine({ active: ['assets'], current: 'assets', lanes: [current] })
+        expect(serverSyncRoutineView(state, text, false)?.fraction).toBe(0.5)
+        const full = serverSyncProgressView(state, text, 0)
+        expect(full.fraction).toBe(0.5)
+        expect(full.detail).toBe('65 / 130')
+        expect(full.counters.find(counter => counter.key === 'bytes')?.value).toBe('↑ 0 bytes · ↓ 1.0 KiB')
+    })
+    it('does not carry a completed asset peak into a later hydration or its discovery', () => {
+        const scope = { id: 2, done: 1, total: 8, settled: false }
+        let state = routine({ active: ['assets'], current: 'assets', peak: { assets: 1 }, lanes: [lane('hydrate', { active: true, step: 'downloading', assetScope: scope })] })
+        expect(serverSyncRoutineView(state, text, false)?.fraction).toBe(0.125)
+        expect(routinePeak(state)?.assets).toBe(0.125)
+        state = { ...state, lanes: [lane('hydrate', { active: true, step: 'downloading', bytesTotal: 100, bytesDone: 100, assetScope: { ...scope, total: null } })] }
+        expect(serverSyncRoutineView(state, text, false)?.fraction).toBeNull()
+        expect(serverSyncProgressView(state, text, 0).fraction).toBeNull()
+    })
+    it('reads scoped counts without subtracting an earlier attempt baseline', () => {
+        const current = lane('hydrate', { assetScope: { id: 2, done: 2, total: 5, settled: false }, receivedBytes: 120 })
+        const baseline = lane('hydrate', { assetScope: { id: 1, done: 100, total: 100, settled: true }, receivedBytes: 100 })
+        expect(laneDeltas([current], [baseline])[0]).toEqual({ ...current, receivedBytes: 20 })
+    })
+    it('does not show an unchanged completed scope from before this attempt', () => {
+        const prior = lane('hydrate', { assetScope: { id: 1, done: 20, total: 20, settled: true } })
+        const lanes = laneDeltas([prior], [prior])
+        expect(lanes[0].assetScope).toBeNull()
+        expect(serverSyncRoutineView(routine({ lanes }), text, false)).toBeUndefined()
+    })
+    it('requires settlement after the last item and never marks failed scopes complete', () => {
+        const scope = { id: 1, done: 4, total: 4, settled: false }
+        const state = routine({ active: [], lanes: [lane('hydrate', { assetScope: scope })] })
+        expect(serverSyncRoutineView(state, text, true)?.complete).toBe(false)
+        expect(serverSyncRoutineView({ ...state, lanes: [lane('hydrate', { assetScope: { ...scope, settled: true } })] }, text, true)?.complete).toBe(true)
     })
     it('shows a finished attempt as a full, completed bar', () => {
         const view = serverSyncRoutineView(routine({ active: [], lanes: [lane('send', { itemsDone: 2, itemsTotal: 2 })] }), text, true)

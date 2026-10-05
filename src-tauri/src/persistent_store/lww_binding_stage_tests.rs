@@ -250,7 +250,7 @@ fn uncertain_target_activation_replays_device_intent_without_replacing_later_edi
     let activation=Header{binding_authority:state.target_authority,request_id:header.request_id.clone()};
     let source=sorted_source(&incoming).unwrap().into_iter().cloned().collect::<Vec<_>>();
     let rows=super::super::intent_rows::write(&mut store.device_store_mut().unwrap().connection,&activation.request_id,"target",source.iter().map(super::super::intent_rows::target_row)).unwrap();
-    let intent=super::super::Intent::Target{staging_id:stage.staging_id.clone(),changes:rows};
+    let intent=super::super::Intent::Target{device_revision: super::super::device_revision(store.device_store().unwrap().connection()).unwrap(),staging_id:stage.staging_id.clone(),changes:rows};
     let (stamp,digest)=store.reserve_intent(&activation,&intent).unwrap();
     let result=commit::replace_commit_lww(&mut store.connection,&stage.staging_id,&activation,&stamp,&digest,&[],true,&source,None,None,None).unwrap();
     drop(store); let mut store=PersistentStore::open(dir.path()).unwrap();

@@ -52,6 +52,7 @@ import {
     getPersistentNavigationGeneration,
     acquireCompleteConversation,
     captureSelectedConversationAuthority,
+    recordSelectedCharacterLastInteraction,
     captureWindowedConversationMutationController,
     captureSelectedConversationTarget,
     flushPendingData,
@@ -293,6 +294,53 @@ function sameConversationTarget(
  * conversation is windowed or complete. With `tailStart`, the window holds
  * the messages from the absolute index it returns instead of the token window.
  */
+function createGenerationHistoryController(
+    target: NonNullable<ReturnType<typeof captureSelectedConversationTarget>>,
+    chat: Chat,
+    start: number,
+    initial: WindowedConversationMutationController,
+    isTargetCurrent: () => boolean,
+    signal: AbortSignal,
+    requireUnchangedContent = false,
+): HistoryWindowController {
+    const currentConversation = () => {
+        const currentOwner = DBState.db.characters[get(selectedCharID)]
+        const current = currentOwner?.chats[currentOwner.chatPage]
+        return currentOwner?.chaId === target.characterId && current?.id === target.conversationId
+            ? { owner: currentOwner, conversation: current }
+            : null
+    }
+    const environment: HistoryWindowControllerEnvironment = {
+        captureWindowed: (windowChat, absoluteStartIndex) => {
+            const current = captureSelectedConversationTarget()
+            if (!isTargetCurrent() || !current || !sameConversationTarget(current, target)) return null
+            return captureWindowedConversationMutationController(current, windowChat, absoluteStartIndex)
+        },
+        captureSession: () => {
+            const current = isTargetCurrent() ? currentConversation() : null
+            const session = getActiveConversationSession()
+            if (requireUnchangedContent && current && session?.matchesConversation(current.owner.chaId, current.conversation)) {
+                const fields = ['role', 'data', 'saying', 'chatId', 'name', 'disabled', 'isComment'] as const
+                if (current.conversation.message.length !== start + chat.message.length
+                    || chat.message.some((message, index) => fields.some((field) =>
+                        !Object.is(message[field], current.conversation.message[start + index]?.[field])))) return null
+            }
+            return current && session?.matchesConversation(current.owner.chaId, current.conversation)
+                ? { session, conversation: current.conversation }
+                : null
+        },
+        getCurrentSession: getActiveConversationSession,
+        readLiveMetadata: () => {
+            const current = currentConversation()
+            return current ? conversationFieldsOf(current.conversation) : null
+        },
+        onLost: () => {
+            if (isTargetCurrent() && !signal.aborted) alertError(language.generationConversationChanged)
+        },
+    }
+    return createHistoryWindowController(environment, chat, start, initial)
+}
+
 async function prepareGenerationHistoryWindow(
     initialTarget: NonNullable<ReturnType<typeof captureSelectedConversationTarget>>,
     memory: HistoryWindowMemoryMode,
@@ -399,36 +447,7 @@ async function prepareGenerationHistoryWindow(
     if (!initial) return null
     const start = prepared.selection.start
 
-    const currentConversation = () => {
-        const currentOwner = DBState.db.characters[get(selectedCharID)]
-        const current = currentOwner?.chats[currentOwner.chatPage]
-        return currentOwner?.chaId === target.characterId && current?.id === target.conversationId
-            ? { owner: currentOwner, conversation: current }
-            : null
-    }
-    const environment: HistoryWindowControllerEnvironment = {
-        captureWindowed: (windowChat, absoluteStartIndex) => {
-            const current = captureSelectedConversationTarget()
-            if (!isTargetCurrent() || !current || !sameConversationTarget(current, target)) return null
-            return captureWindowedConversationMutationController(current, windowChat, absoluteStartIndex)
-        },
-        captureSession: () => {
-            const current = isTargetCurrent() ? currentConversation() : null
-            const session = getActiveConversationSession()
-            return current && session?.matchesConversation(current.owner.chaId, current.conversation)
-                ? { session, conversation: current.conversation }
-                : null
-        },
-        getCurrentSession: getActiveConversationSession,
-        readLiveMetadata: () => {
-            const current = currentConversation()
-            return current ? conversationFieldsOf(current.conversation) : null
-        },
-        onLost: () => {
-            if (isTargetCurrent() && !signal.aborted) alertError(language.generationConversationChanged)
-        },
-    }
-    const controller = createHistoryWindowController(environment, chat, start, initial)
+    const controller = createGenerationHistoryController(target, chat, start, initial, isTargetCurrent, signal)
     // Prompt history and scripts find messages by id, so missing ids are stored
     // first, one write per run of messages without one.
     for (let index = 0; index < chat.message.length;) {
@@ -979,15 +998,19 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 if (arg.continue && decision.preparation.chat.message.length === 0) {
                     await decision.preparation.release()
                 } else {
-                const controller = captureWindowedConversationMutationController(
+                const initial = captureWindowedConversationMutationController(
                     target,
                     decision.preparation.chat,
                     decision.preparation.plan.bodyStartIndex,
                 )
-                if (!controller) {
+                if (!initial) {
                     await decision.preparation.release()
                     return false
                 }
+                const controller = createGenerationHistoryController(
+                    target, decision.preparation.chat, decision.preparation.plan.bodyStartIndex,
+                    initial, lifecycle.isTargetCurrent, abortSignal, true,
+                )
                 conversationResources.preparation = decision.preparation
                 conversationResources.windowedController = controller
                 conversationResources.unbindWindowedController =
@@ -1022,15 +1045,22 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
 
     DBState.db.statics.messages += 1
     selectedChar = get(selectedCharID)
-    const nowChatroom = DBState.db.characters[selectedChar]
-    // A metadata-only conversation saves only its own messages and metadata,
-    // so the character detail is left as it was opened.
+    let nowChatroom = DBState.db.characters[selectedChar]
     const characterDetailWritable = () => {
         const owner = DBState.db.characters[selectedChar]
         const conversation = owner?.chats[owner.chatPage]
         return !conversation || !isMetadataOnlySelectedConversation(conversation)
     }
-    if (characterDetailWritable()) nowChatroom.lastInteraction = Date.now()
+    const interactionTime = Date.now()
+    const interactionAuthority = captureSelectedConversationAuthority()
+    if (interactionAuthority) {
+        if (interactionAuthority.characterId !== nowChatroom.chaId
+            || interactionAuthority.conversationId !== nowChatroom.chats[nowChatroom.chatPage]?.id
+            || !recordSelectedCharacterLastInteraction(interactionAuthority, nowChatroom.lastInteraction, interactionTime)) return false
+        nowChatroom.lastInteraction = interactionTime
+    } else if (characterDetailWritable()) {
+        nowChatroom.lastInteraction = interactionTime
+    }
     selectedChat = nowChatroom.chatPage
     const selectedConversation = boundedChat ?? nowChatroom.chats[selectedChat]
     const activeSession = getActiveConversationSession()
@@ -2444,20 +2474,22 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     const requestSourceCharacter = nowChatroom
     const requestSourceCharacterId = requestSourceCharacter.chaId
     const requestSourceChatPage = selectedChat
-    const requestSourceConversation = boundedChat
+    let requestSourceConversation = boundedChat
         ?? requestSourceCharacter.chats[requestSourceChatPage]
-    const requestSourceShell = requestSourceCharacter.chats[requestSourceChatPage]
-    const requestSourceMessages = requestSourceConversation.message
-    const requestSourceSession = getActiveConversationSession()
-    const requestSourceSessionVersion = requestSourceSession?.version
+    let requestSourceShell = requestSourceCharacter.chats[requestSourceChatPage]
+    let requestSourceMessages = requestSourceConversation.message
+    let requestSourceSession = getActiveConversationSession()
+    let requestSourceSessionVersion = requestSourceSession?.version
+    let requestSourceLost = false
     const isRequestSourceCurrent = () =>
+        !requestSourceLost &&
         lifecycle.isTargetCurrent() &&
         get(selectedCharID) === requestSourceCharacterIndex &&
         DBState.db.characters[requestSourceCharacterIndex]?.chaId === requestSourceCharacterId &&
         DBState.db.characters[requestSourceCharacterIndex]?.chatPage === requestSourceChatPage &&
-        (historyWindow
+        (boundedChat && conversationResources.windowedController
             // The window controller follows a promotion and checks the window's message ids.
-            ? historyWindow.controller.isCurrent()
+            ? conversationResources.windowedController.isCurrent()
             : DBState.db.characters[requestSourceCharacterIndex]?.chats[requestSourceChatPage] ===
                 requestSourceShell &&
             (conversationResources.windowedController?.isCurrent() ?? true) &&
@@ -2471,6 +2503,87 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     const closeRequestPhase = openGenerationRequestPhase({
         characterId: requestSourceCharacterId,
         conversationId: requestSourceConversation.id ?? '',
+    }, {
+        prepare() {
+            if (!isRequestSourceCurrent()) return null
+            const session = getActiveConversationSession()
+            if (!session) return null
+            const version = session.version
+            const invalidationVersion = session.generationInvalidationVersion
+            return () => lifecycle.isTargetCurrent() && !abortSignal.aborted
+                && getActiveConversationSession() === session
+                && session.canContinueGenerationFrom(version)
+                && session.generationInvalidationVersion === invalidationVersion
+        },
+        invalidate: () => { requestSourceLost = true },
+        async adopt(receipt) {
+            const target = captureSelectedConversationTarget()
+            const expectedSession = receipt.session
+            const expectedVersion = receipt.sessionVersion
+            const receiptIsCurrent = () => expectedSession?.isActive
+                && getActiveConversationSession() === expectedSession
+                && expectedVersion !== null
+                && expectedSession.canContinueGenerationFrom(expectedVersion)
+                && expectedSession.generationInvalidationVersion === receipt.generationInvalidationVersion
+                && getPersistentStorageAuthorityEpoch() === receipt.authorityEpoch
+                && receipt.target && sameConversationTarget(captureSelectedConversationTarget(), receipt.target)
+            if (!lifecycle.isTargetCurrent() || abortSignal.aborted || !target
+                || !receiptIsCurrent()
+                || target.characterId !== requestSourceCharacterId
+                || target.conversationId !== requestSourceConversation.id) {
+                requestSourceLost = true
+                return
+            }
+            let lease: CompleteConversationLease
+            try {
+                lease = await acquireCompleteConversation('generation-public-write', target)
+            } catch (error) {
+                if (error instanceof SelectedConversationPromotionStaleError) { requestSourceLost = true; return }
+                throw error
+            }
+            if (!lifecycle.isTargetCurrent() || abortSignal.aborted
+                || lease.session !== expectedSession
+                || !receiptIsCurrent()) {
+                requestSourceLost = true
+                lease.release()
+                return
+            }
+            conversationResources.unbindWindowedController?.()
+            conversationResources.unbindWindowedController = null
+            conversationResources.windowedController?.release()
+            conversationResources.windowedController = null
+            conversationResources.completeLease?.release()
+            conversationResources.completeLease = lease
+            nowChatroom = DBState.db.characters[selectedChar]
+            currentChar = nowChatroom
+            currentChat = nowChatroom.chats[selectedChat]
+            if (historyWindow) {
+                // The public write promotes storage, but output scripts keep the admitted absolute window.
+                const start = Math.min(historyWindow.start, currentChat.message.length)
+                const chat = { ...cloneConversationMetadata(currentChat), message: safeStructuredClone(currentChat.message.slice(start)) } as Chat
+                attachHistoryWindow(chat, start)
+                const initial = captureSessionHistoryWindowController(
+                    { session: lease.session, conversation: currentChat }, getActiveConversationSession, chat, start,
+                )
+                if (!initial) return
+                const controller = createGenerationHistoryController(target, chat, start, initial, lifecycle.isTargetCurrent, abortSignal)
+                historyWindow = { ...historyWindow, start, chat, controller, shell: null }
+                boundedChat = chat
+                conversationResources.windowedController = controller
+                const unbind = bindWindowedGenerationController(chat, controller)
+                const unregister = registerActiveHistoryWindow({
+                    characterId: target.characterId, conversationId: target.conversationId, shell: null, controller,
+                })
+                conversationResources.unbindWindowedController = () => { unregister(); unbind() }
+            } else {
+                boundedChat = null
+            }
+            requestSourceConversation = boundedChat ?? currentChat
+            requestSourceShell = currentChat
+            requestSourceMessages = currentChat.message
+            requestSourceSession = lease.session
+            requestSourceSessionVersion = lease.session.version
+        },
     })
     let req: Awaited<ReturnType<typeof requestChatData>>
     try {

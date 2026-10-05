@@ -387,7 +387,11 @@ def main():
     for fixture in fixtures:
         fixture.write_text('synthetic file association fixture')
     configured_phases = os.environ.get('RISUNEST_MACOS_PHASES')
-    phases = configured_phases.split(',') if configured_phases else ['contracts', 'restart', 'app', 'app-restart', 'streaming', 'quit-escape', 'session-deadline', 'session-upgrade']
+    phases = configured_phases.split(',') if configured_phases else [
+        'contracts', 'restart', 'app', 'app-restart', 'streaming',
+        'session-dispatch-initial', 'session-dispatch-local', 'session-dispatch-drain', 'session-dispatch-dialog',
+        'quit-escape', 'session-deadline', 'session-upgrade',
+    ]
     allowed_phases = {'session-upgrade', 'session-deadline', 'termination-probe', 'contracts', 'restart', 'app', 'app-restart', 'streaming', 'quit-escape',
                       'session-dispatch-initial', 'session-dispatch-local', 'session-dispatch-drain', 'session-dispatch-dialog',
                       'appearance-seed-light', 'appearance-app-light', 'appearance-seed-dark', 'appearance-app-dark'}

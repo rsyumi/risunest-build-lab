@@ -1267,13 +1267,15 @@ pub(crate) async fn official_publication_upload_file(
     state: State<'_, PersistentStoreState>,
     request: OfficialPublicationUploadRequest,
 ) -> Result<OfficialPublicationUploadResult, OfficialPublicationUploadError> {
-    let (source, bytes) = with_store(state, |store| {
-        store.open_risu_save_export_for_upload(Path::new(&request.path))
-    })
-    .map_err(|error| OfficialPublicationUploadError::Source {
-        message: error.to_string(),
-    })?;
-    upload_open_file_attempt(request, source, bytes).await
+    crate::publication_upload::logged_upload_outcome("official_publication_upload_file", async {
+        let (source, bytes) = with_store(state, |store| {
+            store.open_risu_save_export_for_upload(Path::new(&request.path))
+        })
+        .map_err(|error| OfficialPublicationUploadError::Source {
+            message: error.to_string(),
+        })?;
+        upload_open_file_attempt(request, source, bytes).await
+    }.await)
 }
 
 #[cfg(feature = "native-kei-upload-pilot")]

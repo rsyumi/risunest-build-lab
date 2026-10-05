@@ -35,6 +35,7 @@ pub(crate) fn native_portable_source_cleanup_orphans(app:AppHandle)->Result<port
 pub(crate) mod raw_recovery;
 pub(crate) use backup_source::*;
 mod official_snapshot;
+mod transfer_retry;
 mod risum_export;
 mod verified_read;
 #[cfg(windows)]
@@ -2494,6 +2495,14 @@ impl NativeFileJobState {
             .map_err(|error| NativeJobError::new("store-error", error))
     }
 
+    fn status_summary(&self, job_id: &str) -> Result<JobStatus, NativeJobError> {
+        self.registry.prune().map_err(|error| NativeJobError::new("store-error", error))?;
+        self.registry.lookup(job_id)
+            .map_err(|error| NativeJobError::new("store-error", error))?
+            .map(|job| job.status_summary())
+            .ok_or_else(|| NativeJobError::new("store-error", "native job not found"))
+    }
+
     pub(crate) fn content_asset_receipt(
         &self,
         job_id: &str,
@@ -2634,7 +2643,7 @@ impl NativeFileJobState {
             let Some(job) = job else {
                 return Ok(false);
             };
-            let status = job.status();
+            let status = job.status_summary();
             if status.kind == JobKind::OfficialPublicationUpload && status.state.is_terminal() {
                 use crate::asset_repository::job_pins::{CasReleaseOutcome, DurableCasJob};
 
@@ -3100,6 +3109,16 @@ impl restore::ReplacementSink for PersistentReplacementSink {
         })
     }
 
+    fn put_legacy_root(
+        &self,
+        staging_id: &str,
+        root: &crate::persistent_store::upstream_stream::RootSpool,
+    ) -> crate::persistent_store::StoreResult<()> {
+        crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
+            store.replace_put_upstream_stream(staging_id, root)
+        })
+    }
+
     fn staged_plugin_preview(
         &self,
         staging_id: &str,
@@ -3230,7 +3249,23 @@ pub(crate) fn native_file_job_status(
     state: State<'_, NativeFileJobState>,
     job_id: String,
 ) -> Result<JobStatus, NativeJobError> {
-    state.status(&job_id)
+    state.status_summary(&job_id)
+}
+
+#[tauri::command(async)]
+pub(crate) async fn native_file_job_prepared_content(
+    app: AppHandle,
+    job_id: String,
+) -> Result<PreparedContent, NativeJobError> {
+    logged("native_file_job_prepared_content", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app.state::<crate::persistent_store::PersistentStoreState>()
+                .admit_renderer_operation().map_err(|error| NativeJobError::new("store-error", error.to_string()))?;
+            crate::asset_repository::commands::with_content_session(&app, &job_id, |_| {
+                app.state::<NativeFileJobState>().prepared_content_receipt(&job_id)
+            })
+        }).await.map_err(|error| NativeJobError::new("store-error", error.to_string()))?
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -3848,7 +3883,7 @@ pub(crate) struct JobStatus {
     pub(crate) result: Option<JobResultSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<JobFailure>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub(crate) prepared_content: Option<PreparedContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) publication_attempt: Option<OfficialPublicationAttemptResult>,
@@ -3868,6 +3903,39 @@ pub(crate) struct JobStatus {
     pub(crate) plugin_value_preview: Option<crate::persistent_store::commit::StagedPluginPreview>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) incomplete_restore_preview: Option<IncompleteRestorePreview>,
+}
+
+impl JobStatus {
+    fn summary(&self) -> Self {
+        Self {
+            portable_body_retry: self.portable_body_retry.clone(),
+            snapshot_staging_id: self.snapshot_staging_id.clone(),
+            snapshot_bodies: self.snapshot_bodies.clone(),
+            job_id: self.job_id.clone(),
+            kind: self.kind,
+            state: self.state,
+            phase: self.phase,
+            progress: self.progress.clone(),
+            detail: self.detail.clone(),
+            expected_revision: self.expected_revision,
+            export_capture_revision: self.export_capture_revision,
+            activation_revision: self.activation_revision,
+            activation_authority: self.activation_authority.clone(),
+            restore_adoption_confirmed: self.restore_adoption_confirmed,
+            warning_codes: self.warning_codes.clone(),
+            result: self.result.clone(),
+            error: self.error.clone(),
+            prepared_content: None,
+            publication_attempt: self.publication_attempt.clone(),
+            compatibility_report: self.compatibility_report.clone(),
+            preservation_report: self.preservation_report.clone(),
+            device_session_id: self.device_session_id.clone(),
+            replaces_library: self.replaces_library,
+            restore_preview: self.restore_preview.clone(),
+            plugin_value_preview: self.plugin_value_preview.clone(),
+            incomplete_restore_preview: self.incomplete_restore_preview.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -4078,7 +4146,7 @@ impl JobRegistry {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        let mut statuses = jobs.into_iter().map(|job| job.status()).collect::<Vec<_>>();
+        let mut statuses = jobs.into_iter().map(|job| job.status_summary()).collect::<Vec<_>>();
         statuses.sort_by(|left, right| left.job_id.cmp(&right.job_id));
         Ok(statuses)
     }
@@ -4131,10 +4199,11 @@ impl JobRegistry {
         let Some(job) = jobs.get(id) else {
             return Ok(false);
         };
-        if !job.status().state.is_terminal() {
+        let status = job.status_summary();
+        if !status.state.is_terminal() {
             return Err("native job cannot be forgotten before it is terminal".to_owned());
         }
-        if job.status().portable_body_retry.is_some_and(|receipt|receipt.pending) {
+        if status.portable_body_retry.is_some_and(|receipt|receipt.pending) {
             return Err("portable body retry ownership is still retained".into());
         }
         jobs.remove(id);
@@ -4511,7 +4580,11 @@ impl JobControl {
         Ok(())
     }
     pub(crate) fn id(&self) -> String {
-        self.status().job_id
+        self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).job_id.clone()
+    }
+
+    fn status_summary(&self) -> JobStatus {
+        self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).summary()
     }
 
     pub(crate) fn status(&self) -> JobStatus {
@@ -8410,6 +8483,31 @@ mod tests {
         let receipt = state.content_asset_receipt(&job_id).unwrap();
 
         assert_eq!(receipt, vec![("1".repeat(64), 4), ("2".repeat(64), 7)]);
+    }
+
+    #[test]
+    fn content_status_and_list_are_small_while_explicit_receipts_remain_retryable() {
+        let directory = TempDir::new().unwrap();
+        let state = NativeFileJobState::initialize(directory.path().join("native-file-jobs"));
+        let job = state.registry.create(JobKind::PrepareContentImport).unwrap();
+        let job_id = job.id();
+        let mut content = retained_content_fixture(job_id.clone());
+        content.metadata = serde_json::json!({"synthetic": "x".repeat(2 * 1024 * 1024)});
+        job.start(JobPhase::ReadingSource).unwrap();
+        job.finish_content_job(Ok(content.clone()), Ok(())).unwrap();
+
+        for summary in [state.status_summary(&job_id).unwrap(), state.list().unwrap().remove(0)] {
+            assert!(summary.prepared_content.is_none());
+            let wire = serde_json::to_vec(&summary).unwrap();
+            assert!(wire.len() < 4096);
+            assert!(!String::from_utf8(wire).unwrap().contains("preparedContent"));
+        }
+        assert_eq!(state.prepared_content_receipt(&job_id).unwrap(), content);
+        assert_eq!(state.prepared_content_receipt(&job_id).unwrap(), content);
+        assert_eq!(job.request_cancel().unwrap(), CancelOutcome::Terminal);
+        assert_eq!(state.prepared_content_receipt(&job_id).unwrap(), content);
+        assert!(state.forget(&job_id).unwrap());
+        assert!(state.prepared_content_receipt(&job_id).is_err());
     }
 
     #[test]

@@ -56,6 +56,7 @@ vi.mock('../storage/persistentDataRuntime.svelte', () => ({
     acquireCompleteConversation: testState.unexpectedNativeRuntimeAccess,
     acquireDestructiveReplacementFence: testState.unexpectedNativeRuntimeAccess,
     captureSelectedConversationTarget: () => null,
+    captureSelectedConversationAuthority: () => null,
     capturePersistentMutationToken: testState.unexpectedNativeRuntimeAccess,
     getActiveConversationSession: () => testState.activeSession,
     getPersistentDataRuntime: testState.unexpectedNativeRuntimeAccess,

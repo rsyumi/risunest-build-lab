@@ -614,7 +614,7 @@ fn clients_made_inside_a_lane_count_what_they_publish_receive_and_download() {
     let hydrated = hydrate.snapshot("hydrate");
     assert_eq!((hydrated.files_done, hydrated.files_total), (1, 1));
     assert_eq!((hydrated.bytes_done, hydrated.bytes_total), (body.len() as u64, body.len() as u64));
-    assert_eq!((hydrated.backlog_done, hydrated.backlog_left), (1, 0));
+    assert_eq!(hydrated.asset_scope.map(|scope| (scope.done, scope.total, scope.settled)), Some((1, Some(1), true)));
     assert!(hydrated.received_bytes >= body.len() as u64);
     assert_eq!(hydrated.step, "idle");
 
@@ -628,7 +628,7 @@ fn clients_made_inside_a_lane_count_what_they_publish_receive_and_download() {
     assert!(unavailable.is_empty());
     let before_plan = before_plan.snapshot("hydrate");
     assert_eq!(before_plan.files_done, 1);
-    assert_eq!((before_plan.backlog_done, before_plan.backlog_left), (0, 0));
+    assert!(before_plan.asset_scope.is_none());
 }
 #[test]
 fn no_edit_push_does_not_make_a_request() {

@@ -12,6 +12,7 @@ use std::{collections::BTreeMap, sync::{Arc, Mutex}, time::Duration};
 pub(super) enum CrashPoint {
     AfterRegistration,
     AfterPublish,
+    AfterPublishedRegistration,
 }
 
 static CRASHES: Mutex<BTreeMap<PathBuf, CrashPoint>> = Mutex::new(BTreeMap::new());
@@ -237,6 +238,64 @@ fn assert_resident(root: &Path, bodies: &[(String, u64)]) {
         assert_eq!(cas.stat_object(hash).unwrap(), Some(*size));
         assert_eq!(row(root, hash), Some(*size), "every published body ends with its catalog row");
     }
+}
+
+#[test]
+fn a_source_deletion_and_publish_crash_is_recovered_by_page_start_without_hydration() {
+    let received = received(&[3]);
+    let root = received.f.directory_b.path();
+    let bodies = &received.publications[0];
+    let (repository, target) = (root.to_owned(), bodies[1].0.clone());
+    on_before_publish(root, move || {
+        let _guard = crate::asset_repository::coordinator::lock_repository_mutation().unwrap();
+        let db = database(&repository, false).unwrap().unwrap();
+        db.execute("DELETE FROM sources WHERE hash=?1", [&target]).unwrap();
+        db.execute("DELETE FROM packed_sources WHERE hash=?1", [&target]).unwrap();
+        catalog(&repository).execute("DELETE FROM asset_objects WHERE object_hash=?1", [&target]).unwrap();
+    });
+    {
+        let _crash = crash_at(root, CrashPoint::AfterPublish);
+        assert_eq!(hydrate(root, bodies).unwrap_err().code, "synthetic-crash");
+    }
+    assert!(packed_source(root, &bodies[1].0).unwrap().is_none());
+    assert_eq!(row(root, &bodies[1].0), None);
+    assert_eq!(crate::asset_repository::PayloadCas::new(root).unwrap().stat_object(&bodies[1].0).unwrap(), Some(bodies[1].1));
+    let native_jobs = || Ok(Vec::new());
+    let open_store = || crate::persistent_store::PersistentStore::open(root).map_err(|error| error.to_string());
+    let probe = crate::asset_repository::commands::CasJobOwnerProbe {native_jobs:&native_jobs,
+        device_job_owned:&|_|Ok(false), external_job_active:&|_|Ok(false), open_store:&open_store};
+    let state = crate::asset_repository::commands::DurableCasJobState::default();
+    let journals = crate::asset_repository::job_pins::durable_cas_job_ids(root).unwrap();
+    assert!(!journals.is_empty());
+    catalog(root).execute_batch("CREATE TRIGGER fail_hydration_recovery BEFORE INSERT ON asset_objects
+        BEGIN SELECT RAISE(ABORT, 'synthetic'); END;").unwrap();
+    assert!(state.sweep_after_page_start(root, &probe).is_err());
+    assert_eq!(crate::asset_repository::job_pins::durable_cas_job_ids(root).unwrap(), journals);
+    assert_eq!(row(root, &bodies[1].0), None);
+    catalog(root).execute_batch("DROP TRIGGER fail_hydration_recovery").unwrap();
+    state.sweep_after_page_start(root, &probe).unwrap();
+    assert!(crate::asset_repository::job_pins::durable_cas_job_ids(root).unwrap().is_empty());
+    assert_resident(root, bodies);
+}
+
+#[test]
+fn a_crash_after_published_registration_keeps_its_journal_until_recovery() {
+    let received = received(&[1]);
+    let root = received.f.directory_b.path();
+    let bodies = &received.publications[0];
+    {
+        let _crash = crash_at(root, CrashPoint::AfterPublishedRegistration);
+        assert_eq!(hydrate(root, bodies).unwrap_err().code, "synthetic-crash");
+    }
+    assert_resident(root, bodies);
+    assert!(!crate::asset_repository::job_pins::durable_cas_job_ids(root).unwrap().is_empty());
+    let native_jobs = || Ok(Vec::new());
+    let open_store = || crate::persistent_store::PersistentStore::open(root).map_err(|error| error.to_string());
+    crate::asset_repository::commands::DurableCasJobState::default().sweep_after_page_start(root,
+        &crate::asset_repository::commands::CasJobOwnerProbe {native_jobs:&native_jobs,
+            device_job_owned:&|_|Ok(false), external_job_active:&|_|Ok(false), open_store:&open_store}).unwrap();
+    assert!(crate::asset_repository::job_pins::durable_cas_job_ids(root).unwrap().is_empty());
+    assert_resident(root, bodies);
 }
 
 #[test]

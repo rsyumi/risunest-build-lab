@@ -40,7 +40,7 @@ export function installSyncBindingFlow(dependencies: {
         hasNonDefaultSharedData: hasLocalSharedBindingData,
         confirmReplacement: confirmSyncBindingReplacement,
         confirmPreviousStorageFiles,
-        downloadPreviousStorageFiles: () => downloadPreviousStorageFiles(),
+        downloadPreviousStorageFiles,
     })
     return { flow, dispose: registerSyncBindingFlow(flow) }
 }

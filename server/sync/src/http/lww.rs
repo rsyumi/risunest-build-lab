@@ -38,6 +38,12 @@ pub(super) async fn claim_writer(
     )
     .await
 }
+pub(super) async fn writer_claim(
+    State(app): State<App>,
+    Extension(device): Extension<Device>,
+) -> Result<Response> {
+    blocking(move || Ok(Json(app.store.new_device_writer_claim(&device)?).into_response())).await
+}
 pub(super) async fn push(
     State(app): State<App>,
     Extension(device): Extension<Device>,

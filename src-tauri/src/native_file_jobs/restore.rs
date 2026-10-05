@@ -7,6 +7,7 @@ use super::{
     NativeJobError, OpenedJobSource, StageUnit,
 };
 use crate::persistent_store::{RevisionResult, StagingResult, StoreError, StoreResult};
+use crate::persistent_store::upstream_stream::{FieldKind, RootSpool};
 use flate2::bufread::GzDecoder;
 use rmpv::Value as MessagePackValue;
 use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -48,6 +49,9 @@ pub(crate) trait ReplacementSink: Send + Sync {
     fn begin(&self) -> StoreResult<StagingResult>;
     fn put_root(&self, staging_id: &str, root: &Value) -> StoreResult<()>;
     fn put_presets(&self, staging_id: &str, presets: &[Value]) -> StoreResult<()>;
+    fn put_legacy_root(&self, _staging_id: &str, _root: &RootSpool) -> StoreResult<()> {
+        Err(StoreError::Store { message: "streamed legacy root staging is unavailable".into() })
+    }
     fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()>;
     fn prepare_character(&self, character: Value) -> StoreResult<Value> {
         Ok(character)
@@ -499,6 +503,7 @@ fn parse_and_stage_legacy<R: Read>(
         return Err(invalid("decoded legacy RisuSave limit exceeded"));
     }
     reader.set_stage(JobStage::DecodingDatabase)?;
+    let spool_directory=reader.scale.spool_directory.clone();
     let source = RemainingSourceReader { reader, remaining };
     let decoded = DecodedLimitReader::new(
         source,
@@ -507,7 +512,7 @@ fn parse_and_stage_legacy<R: Read>(
         "legacy RisuSave",
     );
     let mut input = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
-    let database = stream_legacy_database(&mut input, staging_id, job, sink)?;
+    let database = stream_legacy_database(&mut input, staging_id, job, sink, spool_directory.as_deref())?;
     reader.complete_item()?;
     finish_legacy_database(database, staging_id, job, reader, sink)
 }
@@ -524,6 +529,7 @@ fn parse_and_stage_compressed_legacy<R: Read>(
         return Err(invalid("encoded legacy RisuSave limit exceeded"));
     }
     reader.set_stage(JobStage::DecodingDatabase)?;
+    let spool_directory=reader.scale.spool_directory.clone();
     let source = RemainingSourceReader { reader, remaining };
     let buffered = BufReader::with_capacity(READ_CHUNK_BYTES, source);
     let decoder = GzDecoder::new(buffered);
@@ -534,7 +540,7 @@ fn parse_and_stage_compressed_legacy<R: Read>(
         "legacy RisuSave",
     );
     let mut input = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
-    let database = stream_legacy_database(&mut input, staging_id, job, sink)?;
+    let database = stream_legacy_database(&mut input, staging_id, job, sink, spool_directory.as_deref())?;
     let compressed = input.get_ref().inner.get_ref();
     if !compressed.buffer().is_empty() || compressed.get_ref().remaining != 0 {
         return Err(corrupt("trailing data in legacy RisuSave gzip stream"));
@@ -550,21 +556,21 @@ const LEGACY_CHARACTER_DEPTH: usize = rmpv::decode::MAX_DEPTH - 4;
 
 enum LegacyDatabase {
     Root {
-        root: Map<String, Value>,
+        root: RootSpool,
         character_count: Option<u64>,
         excluded: HashSet<String>,
     },
     NotAnObject,
 }
 
-/// Reads the legacy root map one entry at a time. Each `characters` element is
-/// converted and staged as soon as it is read; the other entries are converted
-/// together afterwards so JavaScript map semantics stay the same.
+/// Characters go directly to the replacement sink. Root fields and collection
+/// members use disk-backed slots so duplicate keys never retain old bodies.
 fn stream_legacy_database<S: TrackedSource>(
     input: &mut BufReader<DecodedLimitReader<'_, S>>,
     staging_id: &str,
     job: &JobControl,
     sink: &dyn ReplacementSink,
+    spool_directory: Option<&Path>,
 ) -> Result<LegacyDatabase, NativeJobError> {
     let marker =
         rmp::decode::read_marker(input).map_err(|error| messagepack_error(error.into(), job))?;
@@ -574,7 +580,7 @@ fn stream_legacy_database<S: TrackedSource>(
         rmp::Marker::Map32 => u32::from_be_bytes(read_messagepack_length(input, job)?),
         marker => return decode_legacy_non_map(marker, input, job),
     };
-    let mut entries = Vec::new();
+    let root = RootSpool::new_in(spool_directory,job.cancellation_flag()).map_err(|error|legacy_staging_error(job,error))?;
     let mut character_count = None;
     let mut excluded = HashSet::new();
     for _ in 0..length {
@@ -591,21 +597,69 @@ fn stream_legacy_database<S: TrackedSource>(
                 character_count = Some(stream_legacy_characters(input, staging_id, job, sink, &mut excluded)?);
             }
             Some(false) => {
-                let value = rmpv::decode::read_value_with_max_depth(input, LEGACY_ROOT_ENTRY_DEPTH)
-                    .map_err(|error| messagepack_error(error, job))?;
-                entries.push((key, value));
+                let key = key.as_str().expect("string key checked above");
+                let key = if key == "__proto__" { "__proto_" } else { key };
+                stream_legacy_root_entry(input, &root, key, job)?;
             }
         }
     }
     require_legacy_end(input, job)?;
-    let JsonSlot::Value(Value::Object(root)) = messagepack_map_to_json(entries)? else {
-        return Err(invalid("legacy MessagePack database must be an object"));
-    };
+    root.finish_decode().map_err(|error|legacy_staging_error(job,error))?;
     Ok(LegacyDatabase::Root {
         root,
         character_count,
         excluded,
     })
+}
+
+fn stream_legacy_root_entry<S: TrackedSource>(
+    input: &mut BufReader<DecodedLimitReader<'_, S>>,
+    root: &RootSpool,
+    key: &str,
+    job: &JobControl,
+) -> Result<(), NativeJobError> {
+    let marker = rmp::decode::read_marker(input).map_err(|error|messagepack_error(error.into(),job))?;
+    let collection = match marker {
+        rmp::Marker::FixArray(length) => Some((FieldKind::Array,u32::from(length))),
+        rmp::Marker::Array16 => Some((FieldKind::Array,u32::from(u16::from_be_bytes(read_messagepack_length(input,job)?)))),
+        rmp::Marker::Array32 => Some((FieldKind::Array,u32::from_be_bytes(read_messagepack_length(input,job)?))),
+        rmp::Marker::FixMap(length) => Some((FieldKind::Object,u32::from(length))),
+        rmp::Marker::Map16 => Some((FieldKind::Object,u32::from(u16::from_be_bytes(read_messagepack_length(input,job)?)))),
+        rmp::Marker::Map32 => Some((FieldKind::Object,u32::from_be_bytes(read_messagepack_length(input,job)?))),
+        _ => None,
+    };
+    if let Some((kind,length)) = collection {
+        root.begin(key,kind).map_err(|error|legacy_staging_error(job,error))?;
+        for index in 0..length {
+            if job.is_cancel_requested() { return Err(cancelled("restore cancelled while staging legacy database")); }
+            let member = if kind == FieldKind::Object {
+                let packed = rmpv::decode::read_value_with_max_depth(input,LEGACY_ROOT_ENTRY_DEPTH-2)
+                    .map_err(|error|messagepack_error(error,job))?;
+                let key = packed.as_str().ok_or_else(||invalid("legacy MessagePack object keys must be strings"))?;
+                if key == "__proto__" { "__proto_".to_owned() } else { key.to_owned() }
+            } else { index.to_string() };
+            let packed = rmpv::decode::read_value_with_max_depth(input,LEGACY_ROOT_ENTRY_DEPTH-2)
+                .map_err(|error|messagepack_error(error,job))?;
+            let value = match messagepack_to_json(packed)? {
+                JsonSlot::Value(value) => Some(value),
+                JsonSlot::Undefined if kind == FieldKind::Array => Some(Value::Null),
+                JsonSlot::Undefined => None,
+            };
+            root.put_member(key,&member,value.as_ref()).map_err(|error|legacy_staging_error(job,error))?;
+        }
+    } else {
+        let prefix = [marker.to_u8()];
+        let packed = rmpv::decode::read_value_with_max_depth(&mut prefix.as_slice().chain(&mut *input),LEGACY_ROOT_ENTRY_DEPTH)
+            .map_err(|error|messagepack_error(error,job))?;
+        let value = match messagepack_to_json(packed)? { JsonSlot::Value(value)=>Some(value), JsonSlot::Undefined=>None };
+        root.put(key,value.as_ref()).map_err(|error|legacy_staging_error(job,error))?;
+    }
+    Ok(())
+}
+
+fn legacy_staging_error(job: &JobControl,error: StoreError) -> NativeJobError {
+    if job.is_cancel_requested() { cancelled("restore cancelled while staging legacy database") }
+    else { store_error(error) }
 }
 
 fn stream_legacy_characters<S: TrackedSource>(
@@ -724,7 +778,7 @@ fn finish_legacy_database<R: Read>(
     reader: &mut TrackedReader<'_, R>,
     sink: &dyn ReplacementSink,
 ) -> Result<ParsedCounts, NativeJobError> {
-    let (mut root, character_count, excluded) = match database {
+    let (root, character_count, excluded) = match database {
         LegacyDatabase::Root {
             root,
             character_count: Some(count),
@@ -737,47 +791,107 @@ fn finish_legacy_database<R: Read>(
             return Err(invalid("legacy MessagePack database must be an object"))
         }
     };
-    let mut presets = match root.shift_remove("botPresets") {
-        Some(Value::Array(presets)) => presets,
+    let preset_count = match root.kind("botPresets").map_err(store_error)? {
+        Some(FieldKind::Array) => root.count("botPresets").map_err(store_error)?,
         Some(_) => return Err(invalid("legacy MessagePack botPresets must be an array")),
-        None => Vec::new(),
+        None => 0,
     };
-    if let Some(storage) = root.get("pluginCustomStorage") {
-        if !storage.is_object() {
+    if let Some(kind) = root.kind("pluginCustomStorage").map_err(store_error)? {
+        if kind != FieldKind::Object {
             return Err(invalid(
                 "legacy MessagePack pluginCustomStorage must be an object",
             ));
         }
     }
     for key in ["modules", "loadouts", "plugins"] {
-        if root.get(key).is_some_and(|value| !value.is_array()) {
+        let kind = root.kind(key).map_err(store_error)?;
+        if kind.is_some_and(|kind| kind != FieldKind::Array) {
             return Err(invalid(format!(
                 "legacy MessagePack {key} must be an array"
             )));
         }
-        root.entry(key.to_owned())
-            .or_insert_with(|| Value::Array(Vec::new()));
+        if kind.is_none() { root.begin(key,FieldKind::Array).map_err(|error|legacy_staging_error(job,error))?; }
     }
-    root.entry("pluginCustomStorage".to_owned())
-        .or_insert_with(|| Value::Object(Map::new()));
-    reader.counts.presets = presets.len() as u64;
+    if root.kind("pluginCustomStorage").map_err(store_error)?.is_none() {
+        root.begin("pluginCustomStorage",FieldKind::Object).map_err(|error|legacy_staging_error(job,error))?;
+    }
+    reader.counts.presets = preset_count;
     reader.counts.characters_total = Some(character_count);
 
     job.set_phase(JobPhase::StagingDatabase)
         .map_err(|error| job_error(job, error))?;
     reader.report_stage_items(JobStage::FinalizingStaging, 0, None)?;
-    pocket_features::root(&root).map_err(invalid)?;
-    root.shift_remove("account");
-    upstream_import::prepare_root(&mut root, &excluded);
-    upstream_import::prepare_presets(&mut presets);
-    sink.put_root(staging_id, &Value::Object(root))
-        .map_err(store_error)?;
-    sink.put_presets(staging_id, &presets)
-        .map_err(store_error)?;
+    prepare_legacy_root(&root,&excluded).map_err(|error| {
+        if job.is_cancel_requested() { cancelled("restore cancelled while staging legacy database") }
+        else if let StoreError::Validation { message }=error { invalid(message) }
+        else { store_error(error) }
+    })?;
+    sink.put_legacy_root(staging_id, &root).map_err(|error| {
+        if job.is_cancel_requested() { cancelled("restore cancelled while staging legacy database") } else { store_error(error) }
+    })?;
     Ok(ParsedCounts {
         character_count,
-        preset_count: presets.len() as u64,
+        preset_count,
     })
+}
+
+fn prepare_legacy_root(root: &RootSpool, excluded: &HashSet<String>) -> StoreResult<()> {
+    let validation = |message: String| StoreError::Validation { message };
+    if root.kind("disableToggleBinding")?.is_some() {
+        if !root.scalar("disableToggleBinding")?.is_some_and(|value|value.is_boolean()) {
+            return Err(validation("PocketRisu disableToggleBinding must be boolean".into()));
+        }
+    }
+    if let Some(kind)=root.kind("defaultToggleValues")? {
+        if kind != FieldKind::Object { return Err(validation("PocketRisu toggle values must be a record".into())); }
+        root.visit("defaultToggleValues",|key,value| {
+            if !key.starts_with("toggle_") || !value.is_string() {
+                return Err(validation("PocketRisu toggle values must be toggle_ strings".into()));
+            }
+            Ok(())
+        })?;
+    }
+    if let Some(kind) = root.kind("togglePresets")? {
+        if kind != FieldKind::Array { return Err(validation("PocketRisu toggle presets must be an array".into())); }
+        root.visit("togglePresets",|_,value| {
+            let mut entry=Map::new(); entry.insert("togglePresets".into(),Value::Array(vec![value]));
+            pocket_features::root(&entry).map_err(&validation)
+        })?;
+    }
+    if root.kind("personas")? == Some(FieldKind::Array) {
+        root.visit("personas",|_,value| {
+            if let Some(id) = value.get("id") {
+                let id=id.as_str().ok_or_else(||validation("PocketRisu persona IDs must be strings".into()))?;
+                if !id.is_empty() && !root.remember_id("pocket-personas",id)? {
+                    return Err(validation("PocketRisu persona IDs must be unique".into()));
+                }
+            }
+            Ok(())
+        })?;
+    }
+    root.remove("account")?;
+    for field in ["characterOrder","loadouts"] {
+        if root.kind(field)? != Some(FieldKind::Array) { continue; }
+        root.visit(field,|key,value| {
+            let mut wrapper=Map::new(); wrapper.insert(field.to_owned(),Value::Array(vec![value]));
+            upstream_import::prepare_root(&mut wrapper,excluded);
+            let values=wrapper[field].as_array().expect("prepared array");
+            if let Some(value)=values.first() { root.put_member(field,key,Some(value)) } else { root.remove_member(field,key) }
+        })?;
+    }
+    for (from,to) in [("groupTemplate","messageNameTemplate"),("groupOtherBotRole","namedMessageRole")] {
+        root.rename(from,to)?;
+    }
+    if root.kind("protectedPresetValues")? == Some(FieldKind::Object) {
+        for (from,to) in [("groupTemplate","messageNameTemplate"),("groupOtherBotRole","namedMessageRole")] {
+            root.rename_member("protectedPresetValues",from,to)?;
+        }
+    }
+    root.visit("botPresets",|key,mut value| {
+        upstream_import::prepare_presets(std::slice::from_mut(&mut value));
+        root.put_member("botPresets",key,Some(&value))
+    })?;
+    Ok(())
 }
 
 enum JsonSlot {
@@ -2733,6 +2847,10 @@ mod tests {
                 .replace_put_upstream_presets(staging_id, presets)
         }
 
+        fn put_legacy_root(&self, staging_id: &str, root: &RootSpool) -> StoreResult<()> {
+            self.store.lock().unwrap().replace_put_upstream_stream(staging_id, root)
+        }
+
         fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()> {
             self.full_character_calls.fetch_add(1, Ordering::AcqRel);
             if self.fail_character_batches {
@@ -4681,6 +4799,10 @@ mod tests {
             self.inner.put_presets(staging_id, presets)
         }
 
+        fn put_legacy_root(&self, staging_id: &str, root: &RootSpool) -> StoreResult<()> {
+            self.inner.put_legacy_root(staging_id, root)
+        }
+
         fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()> {
             self.inner.add_characters(staging_id, characters)
         }
@@ -4990,6 +5112,10 @@ mod tests {
 
         fn put_presets(&self, staging_id: &str, presets: &[Value]) -> StoreResult<()> {
             self.inner.put_presets(staging_id, presets)
+        }
+
+        fn put_legacy_root(&self, staging_id: &str, root: &RootSpool) -> StoreResult<()> {
+            self.inner.put_legacy_root(staging_id, root)
         }
 
         fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()> {

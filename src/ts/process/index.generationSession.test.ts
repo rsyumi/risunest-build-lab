@@ -166,8 +166,10 @@ vi.mock('../storage/persistentDataRuntime.svelte', () => ({
     getPersistentStorageAuthorityEpoch: () => mocks.authorityEpoch,
     getPersistentNavigationGeneration: () => 0,
     acknowledgeGenerationCompletion: mocks.acknowledge,
+    drainDeferredLwwReceives: vi.fn(async () => undefined),
     captureSelectedConversationTarget: () => mocks.selectedTarget,
     captureSelectedConversationAuthority: () => mocks.selectedAuthority,
+    recordSelectedCharacterLastInteraction: vi.fn(() => true),
     captureWindowedConversationMutationController: (...args: any[]) =>
         typeof mocks.windowedController === 'function'
             ? mocks.windowedController(...args)
@@ -384,6 +386,7 @@ describe('sendChat generation session integration', () => {
         mocks.acquireCompleteConversation.mockImplementation(async (_reason, target) => {
             const session = mocks.session
             const pin = session.acquirePin('compatibility')
+            mocks.selectedAuthority = null
             mocks.activeCompleteLeases += 1
             let released = false
             return {
@@ -428,7 +431,16 @@ describe('sendChat generation session integration', () => {
         installed.currentCharacter.supaMemory = true
         DBState.db.hypaV3 = true
         mocks.selectedTarget = { characterId: installed.currentCharacter.chaId, conversationId: installed.chat.id, storeRevision: 1 }
-        mocks.selectedAuthority = { sessionVersion: 0, persistedSessionVersion: 0 }
+        mocks.selectedAuthority = {
+            kind: 'windowed',
+            characterId: installed.currentCharacter.chaId,
+            conversationId: installed.chat.id,
+            sessionToken: 'windowed-session',
+            storeRevision: 1,
+            sessionVersion: 0,
+            persistedSessionVersion: 0,
+            totalMessages: installed.chat.message.length,
+        }
         const output = vi.fn(async () => undefined)
         if (consumer === 'plugin-editprocess') mocks.editHooks.add(() => undefined)
         if (consumer === 'plugin-output') mocks.listeners.add(output)

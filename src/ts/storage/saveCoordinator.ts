@@ -63,8 +63,8 @@ import {
     rebasePluginMutationPublication,
 } from './pluginMutationPublication'
 import { PENDING_SAVE_BYTE_LIMIT as PENDING_BYTE_LIMIT } from './pendingDataSize'
-import { PayloadTooLargeError } from './nativePersistenceValue'
-import { createsConversation, planConversationInsertPages, type ConversationInsertPlan } from './conversationInsertPages'
+import { jsonByteLength } from './nativePersistenceValue'
+import { captureMessagePages, cloneConversationByMessage, createsConversation, planConversationInsertPages, type ConversationInsertPlan } from './conversationInsertPages'
 
 export { canonicalJson }
 
@@ -126,7 +126,7 @@ export interface SaveCoordinatorDependencies {
     /** Advances revision-only working-set state synchronously and must not throw. */
     onStorageOnlyRevision?(revision: DataRevision): void
     /** Advances an adopted windowed selected-conversation authority synchronously, with its new message count when that changed. */
-    onWindowedSelectedConversationRevision?(revision: DataRevision, totalMessages?: number): void
+    onWindowedSelectedConversationRevision?(revision: DataRevision, totalMessages?: number, preserveRows?: boolean): void
     /**
      * Replaces the selected windowed conversation with the given complete messages synchronously,
      * keeping its live metadata, and returns the published character. Returns null without
@@ -229,6 +229,7 @@ interface CapturedState {
     presetsCanonical: string | null
     character: CompleteCharacter | null
     characterCanonical: string | null
+    characterSnapshot?: CompleteCharacter | null
     conversationStubIds: ReadonlySet<string>
     windowedCharacter: WindowedSelectedCharacterCapture | null
 }
@@ -248,7 +249,7 @@ interface PendingCharacterAddition {
     characterId: string
     token: object
     locallyAdded: boolean
-    baseline: string | null
+    baseline: string | CompleteCharacter | null
 }
 
 interface PendingConversationMutation {
@@ -258,6 +259,14 @@ interface PendingConversationMutation {
 interface PendingWindowedActivationChange {
     authority: WindowedConversationPersistenceAuthority
     change: WindowedConversationActivationChange
+}
+
+interface PendingCharacterRecency {
+    characterId: string
+    conversationId: string
+    sessionToken: ConversationSessionToken
+    before: number | undefined
+    after: number
 }
 
 interface PendingWindowedChatListChange {
@@ -280,6 +289,8 @@ interface ConversationMutationProjection {
     character?: CharacterDetail
     coveredActivation?: PendingWindowedActivationChange
     coveredChatList?: PendingWindowedChatListChange
+    unitMutations?: PersistentUnitMutation[]
+    coveredRecency?: PendingCharacterRecency
 }
 
 function cloneOwnPropertiesExcept(
@@ -631,6 +642,7 @@ export class SaveCoordinator {
     private windowedCharacterBaseline: WindowedSelectedCharacterCapture | null = null
     private pendingWindowedActivationChange: PendingWindowedActivationChange | null = null
     private pendingWindowedChatListChange: PendingWindowedChatListChange | null = null
+    private pendingCharacterRecency: PendingCharacterRecency | null = null
     private dirtyGeneration = 0
     private persistedDirtyGeneration = 0
     private backgroundRetryDelay = 2_000
@@ -805,7 +817,7 @@ export class SaveCoordinator {
         for (const value of this.dependencies.capturePresetRecords?.() ?? []) if (typeof value['id'] === 'string') this.presetRecordBaselines.set(value['id'], canonicalClone(value))
         this.setCharacterBaseline(captured)
         this.materializedCanonicalBaselines.clear()
-        for (const [id, json] of this.dependencies.canonicalCapture?.characters?.() ?? []) this.materializedCanonicalBaselines.set(id, json)
+        for (const [id, json] of (this.dependencies.canonicalCapture?.materializedCharacters ? [] : this.dependencies.canonicalCapture?.characters?.()) ?? []) this.materializedCanonicalBaselines.set(id, json)
         this.materializedBaselines.clear()
         for (const value of database?.characters ?? this.dependencies.captureCharacters?.() ?? []) {
             if (this.dependencies.captureCharacter(value.chaId)) this.materializedBaselines.set(value.chaId, this.dependencies.canonicalCapture?.materializedCharacters?.().get(value.chaId) ?? captureMaterializedCharacter(value))
@@ -833,6 +845,7 @@ export class SaveCoordinator {
         this.pendingConversationMutations = []
         this.pendingWindowedActivationChange = null
         this.pendingWindowedChatListChange = null
+        this.pendingCharacterRecency = null
         this.persistenceWasBusy = false
         this.lastBackgroundErrorMessage = null
         // A destructive fence compares against the baselines reset above, so a
@@ -888,11 +901,12 @@ export class SaveCoordinator {
         )
             return false
         this.materializedBaselines.set(character.chaId, captureMaterializedCharacter(character))
-        this.characterBaseline = canonicalJson(character)
+        this.characterBaseline = this.dependencies.canonicalCapture?.materializedCharacters ? null : canonicalJson(character)
         this.characterBaselineId = character.chaId
         this.windowedCharacterBaseline = null
         this.pendingWindowedActivationChange = null
         this.pendingWindowedChatListChange = null
+        this.pendingCharacterRecency = null
         return true
     }
 
@@ -926,8 +940,9 @@ export class SaveCoordinator {
         )
             return false
         if (this.dirtyGeneration !== this.persistedDirtyGeneration) return false
-        const shell = captureWindowedCharacterShell(character)
-        const currentShell = captureWindowedCharacterShell(currentCharacter)
+        const ownedShell = this.dependencies.canonicalCapture?.characterShell?.()
+        const shell = character === currentCharacter && ownedShell ? ownedShell.value : captureWindowedCharacterShell(character)
+        const currentShell = ownedShell?.value ?? captureWindowedCharacterShell(currentCharacter)
         const matchingConversations = shell.chats.filter(
             (conversation) => conversation.id === authority.conversationId,
         )
@@ -968,6 +983,7 @@ export class SaveCoordinator {
         this.characterBaselineId = null
         this.pendingWindowedActivationChange = null
         this.pendingWindowedChatListChange = null
+        this.pendingCharacterRecency = null
     }
 
     advanceWindowedSelectedConversationRevision(
@@ -1049,6 +1065,35 @@ export class SaveCoordinator {
             return
         }
         if (!this.flushPromise) this.armDebounce()
+    }
+
+    recordSelectedCharacterLastInteraction(
+        authority: WindowedConversationPersistenceAuthority,
+        before: number | undefined,
+        after: number,
+    ): boolean {
+        this.assertInitialized()
+        this.assertPersistentMutationAllowed()
+        const current = this.dependencies.captureSelectedConversationAuthority?.()
+        const character = this.dependencies.captureSelectedCharacter()
+        const baseline = this.windowedCharacterBaseline
+        const pending = this.pendingCharacterRecency
+        if (!current || !baseline || !character || !Number.isFinite(after) || after < 0 ||
+            !sameWindowedAuthority(current, authority) || authority.storeRevision !== this.revision ||
+            baseline.authority.sessionToken !== authority.sessionToken ||
+            baseline.authority.characterId !== authority.characterId || baseline.authority.conversationId !== authority.conversationId ||
+            character.chaId !== authority.characterId || character.lastInteraction !== before ||
+            (pending && (pending.sessionToken !== authority.sessionToken || pending.after !== before))) return false
+        const persisted = pending?.before ?? this.pendingWindowedActivationChange?.change.character?.after.lastInteraction ?? baseline.shell.lastInteraction
+        if (!pending && persisted !== before) return false
+        if (before === after) return true
+        this.markPersistentDataDirty(32)
+        this.pendingCharacterRecency = {
+            characterId: authority.characterId, conversationId: authority.conversationId,
+            sessionToken: authority.sessionToken, before: pending ? pending.before : before, after,
+        }
+        character.lastInteraction = after
+        return true
     }
 
     recordActiveConversationMutation(
@@ -1154,6 +1199,7 @@ export class SaveCoordinator {
         if (!afterIds.has(authority.conversationId)) return false
         const beforeIds = new Set(beforeShell.chats.map((conversation) => conversation.id))
         const insertedMessages = new Map<string, Message[]>()
+        let estimatedBytes = jsonByteLength(afterShell)
         for (const conversation of after.chats) {
             if (beforeIds.has(conversation.id)) continue
             if (
@@ -1162,15 +1208,10 @@ export class SaveCoordinator {
                 !Array.isArray(conversation.message)
             )
                 return false
-            insertedMessages.set(conversation.id!, safeStructuredClone(conversation.message))
+            const pages = captureMessagePages(conversation.message, undefined, true)
+            insertedMessages.set(conversation.id!, pages.flatMap((page) => page.messages))
+            for (const page of pages) estimatedBytes += page.bytes
         }
-
-        const estimatedBytes = Math.max(
-            1,
-            new TextEncoder().encode(
-                JSON.stringify([afterShell, ...insertedMessages.values()]),
-            ).byteLength,
-        )
         this.markPersistentDataDirty(estimatedBytes)
         this.pendingWindowedChatListChange = {
             characterId: authority.characterId,
@@ -2333,7 +2374,7 @@ export class SaveCoordinator {
             if (value.value.id !== conversationId) {
                 throw new Error(`Conversation ${conversationId} returned mismatched content`)
             }
-            return canonicalClone(value.value)
+            return cloneConversationByMessage(value.value)
         })
     }
 
@@ -2735,7 +2776,8 @@ export class SaveCoordinator {
                 continue
             }
             const recordedConversations = conversationProjection?.exactMutations ?? null
-            const commit: WorkingSetCommit = { expectedRevision: this.revision }
+            const commit: WorkingSetCommit = { expectedRevision: this.revision,
+                ...(conversationProjection?.unitMutations?.length ? { unitMutations: conversationProjection.unitMutations } : {}) }
             const materialized = await this.captureMaterializedChanges(commit, windowedCapture?.authority.characterId)
             const presetRecords = new Map<string, botPreset>()
             for (const value of this.dependencies.capturePresetRecords?.() ?? []) {
@@ -2976,6 +3018,11 @@ export class SaveCoordinator {
                         )
                     }
                     if (windowedCapture) {
+                        const recency = conversationProjection?.coveredRecency
+                        if (recency && this.pendingCharacterRecency) {
+                            this.pendingCharacterRecency = this.pendingCharacterRecency === recency ? null
+                                : { ...this.pendingCharacterRecency, before: recency.after }
+                        }
                         if (
                             conversationProjection?.coveredActivation &&
                             this.pendingWindowedActivationChange ===
@@ -3007,9 +3054,11 @@ export class SaveCoordinator {
                         addition.pending.baseline = addition.canonical
                     }
                     if (addition && (commit.addCharacter || replacementIsAddition)) {
-                        this.materializedBaselines.set(addition.pending.characterId, captureMaterializedCharacter(addition.character))
-                        const json = this.dependencies.canonicalCapture?.characters?.().get(addition.pending.characterId)
-                        if (json !== undefined && canonicalJson(captureMaterializedCharacter(this.dependencies.captureCharacter(addition.pending.characterId)!)) === canonicalJson(captureMaterializedCharacter(addition.character))) this.materializedCanonicalBaselines.set(addition.pending.characterId, json)
+                        this.materializedBaselines.set(addition.pending.characterId, addition.character)
+                        if (!this.dependencies.canonicalCapture?.materializedCharacters) {
+                            const json = this.dependencies.canonicalCapture?.characters?.().get(addition.pending.characterId)
+                            if (json !== undefined && canonicalJson(captureMaterializedCharacter(this.dependencies.captureCharacter(addition.pending.characterId)!)) === canonicalJson(addition.character)) this.materializedCanonicalBaselines.set(addition.pending.characterId, json)
+                        }
                     }
                     this.dependencies.onLocalRevision?.(committed.revision)
                     if (this.dependencies.officialPublisher) {
@@ -3028,7 +3077,7 @@ export class SaveCoordinator {
             }
 
             for (const [id, value] of materialized) this.materializedBaselines.set(id, value)
-            for (const [id, json] of this.dependencies.canonicalCapture?.characters?.() ?? []) {
+            for (const [id, json] of (this.dependencies.canonicalCapture?.materializedCharacters ? [] : this.dependencies.canonicalCapture?.characters?.()) ?? []) {
                 if (materialized.has(id) && (this.dependencies.canonicalCapture?.materializedCharacters?.().get(id) === materialized.get(id) || (!this.dependencies.canonicalCapture?.materializedCharacters && canonicalJson(captureMaterializedCharacter(this.dependencies.captureCharacter(id)!)) === canonicalJson(materialized.get(id))))) this.materializedCanonicalBaselines.set(id, json)
             }
             for (const [id, value] of presetRecords) this.presetRecordBaselines.set(id, value)
@@ -3523,11 +3572,12 @@ export class SaveCoordinator {
     }
 
     private setCharacterBaseline(captured: CapturedState): void {
-        this.characterBaseline = captured.characterCanonical
+        this.characterBaseline = captured.characterSnapshot ? null : captured.characterCanonical
         this.characterBaselineId = captured.characterId !== undefined ? captured.characterId : captured.character?.chaId ?? null
         this.windowedCharacterBaseline = null
         this.pendingWindowedActivationChange = null
         this.pendingWindowedChatListChange = null
+        this.pendingCharacterRecency = null
     }
 
     /**
@@ -3618,6 +3668,7 @@ export class SaveCoordinator {
         this.windowedCharacterBaseline = null
         this.pendingWindowedActivationChange = null
         this.pendingWindowedChatListChange = null
+        this.pendingCharacterRecency = null
         const covered = new Set(pending)
         this.pendingConversationMutations = this.pendingConversationMutations.filter(
             (value) => !covered.has(value),
@@ -3631,7 +3682,7 @@ export class SaveCoordinator {
         persistedSessionVersion: number,
     ): void {
         this.windowedCharacterBaseline = {
-            shell: safeStructuredClone(captured.shell),
+            shell: captured.shell,
             shellCanonical: captured.shellCanonical,
             authority: {
                 ...safeStructuredClone(captured.authority),
@@ -3695,7 +3746,7 @@ export class SaveCoordinator {
                 'pending evidence belongs to another conversation or session',
             )
         }
-        let projectedShell = safeStructuredClone(baseline.shell)
+        let projectedShell = { ...baseline.shell, chats: baseline.shell.chats.map((conversation) => ({ ...conversation })) }
         const mutations: ConversationMutation[] = []
         const activation = this.pendingWindowedActivationChange
         let activationCharacter: CharacterDetail | undefined
@@ -3768,6 +3819,17 @@ export class SaveCoordinator {
             mutations.push(...projected.mutations)
             if (projected.character) activationCharacter = projected.character
         }
+        const recency = this.pendingCharacterRecency
+        const unitMutations: PersistentUnitMutation[] = []
+        if (recency) {
+            if (recency.characterId !== authority.characterId || recency.conversationId !== authority.conversationId ||
+                recency.sessionToken !== authority.sessionToken || projectedShell.lastInteraction !== recency.before) {
+                throw new WindowedConversationRequiresCompatibilityError('character recency evidence does not match the selected baseline')
+            }
+            projectedShell.lastInteraction = recency.after
+            if (activationCharacter) activationCharacter.lastInteraction = recency.after
+            unitMutations.push({ key: JSON.stringify(['character', authority.characterId, 'lastInteraction']), type: 'set', value: recency.after })
+        }
         if (relevantPending.length === 0) {
             if (
                 authority.sessionVersion !== authority.persistedSessionVersion ||
@@ -3784,6 +3846,7 @@ export class SaveCoordinator {
                 character: activationCharacter,
                 coveredActivation: activation ?? undefined,
                 coveredChatList: chatList ?? undefined,
+                unitMutations, coveredRecency: recency ?? undefined,
             }
         }
 
@@ -3885,6 +3948,7 @@ export class SaveCoordinator {
             character: activationCharacter,
             coveredActivation: activation ?? undefined,
             coveredChatList: chatList ?? undefined,
+            unitMutations, coveredRecency: recency ?? undefined,
         }
     }
 
@@ -4002,7 +4066,7 @@ export class SaveCoordinator {
             'chats',
         ) as CharacterDetail
         return {
-            shell: safeStructuredClone(change.after),
+            shell: { ...change.after, chats: change.after.chats.map((conversation) => ({ ...conversation })) },
             mutations,
             character:
                 canonicalJson(beforeDetail) === canonicalJson(afterDetail)
@@ -4012,6 +4076,7 @@ export class SaveCoordinator {
     }
 
     private selectedCaptureMatchesBaseline(captured: CapturedState): boolean {
+        if (captured.characterSnapshot) return captured.characterSnapshot === this.materializedBaselines.get(captured.characterSnapshot.chaId)
         if (this.windowedCharacterBaseline) {
             return (
                 captured.windowedCharacter !== null &&
@@ -4033,15 +4098,19 @@ export class SaveCoordinator {
         captured: CapturedState,
         pending: readonly PendingConversationMutation[],
     ): ConversationMutationProjection | null {
+        const materializedBaseline = captured.characterSnapshot
+            ? this.materializedBaselines.get(captured.characterSnapshot.chaId) : undefined
         if (
             pending.length === 0 ||
             !captured.character ||
-            this.characterBaseline === null ||
+            (this.characterBaseline === null && !materializedBaseline) ||
             this.characterBaselineId !== captured.character.chaId
         )
             return null
 
-        const projected = JSON.parse(this.characterBaseline) as CompleteCharacter
+        const projected = materializedBaseline
+            ? { ...materializedBaseline, chats: [...materializedBaseline.chats] }
+            : JSON.parse(this.characterBaseline!) as CompleteCharacter
         const relevantPending = pending.filter(({ event }) => event.characterId === projected.chaId)
         if (relevantPending.length === 0) return null
         const pendingByConversation = new Map<string, PendingConversationMutation[]>()
@@ -4317,7 +4386,8 @@ export class SaveCoordinator {
                     'selected authority does not match the selected character',
                 )
             }
-            const shell = captureWindowedCharacterShell(characterValue)
+            const ownedShell = optimized?.characterShell?.()
+            const shell = ownedShell?.value ?? captureWindowedCharacterShell(characterValue)
             return {
                 get root() {
                     return readRoot()
@@ -4339,7 +4409,7 @@ export class SaveCoordinator {
                 conversationStubIds: new Set(),
                 windowedCharacter: {
                     shell,
-                    shellCanonical: canonicalJson(shell),
+                    shellCanonical: ownedShell?.json ?? canonicalJson(shell),
                     authority: safeStructuredClone(windowedAuthority),
                 },
             }
@@ -4350,7 +4420,8 @@ export class SaveCoordinator {
                 .map((conversation) => conversation.id)
                 .filter((id): id is string => Boolean(id)) ?? [],
         )
-        const characterCanonical = optimized
+        const characterSnapshot = optimized?.materializedCharacters?.().get(characterValue?.chaId ?? '')
+        const characterCanonical = characterSnapshot ? null : optimized
             ? optimized.character()
             : characterValue
               ? canonicalJson(characterValue)
@@ -4373,7 +4444,9 @@ export class SaveCoordinator {
             },
             presetsCanonical,
             characterId: characterValue?.chaId ?? null,
+            characterSnapshot,
             get character() {
+                if (characterSnapshot) return characterSnapshot
                 if (detachedCharacter === undefined)
                     detachedCharacter = characterCanonical
                         ? (JSON.parse(characterCanonical) as CompleteCharacter)
@@ -4511,7 +4584,7 @@ export class SaveCoordinator {
 
     private async captureMaterializedChanges(commit: WorkingSetCommit, windowedId?: string): Promise<Map<string, CompleteCharacter>> {
         const captured = new Map<string, CompleteCharacter>()
-        const canonicalCharacters = this.dependencies.canonicalCapture?.characters?.()
+        const canonicalCharacters = this.dependencies.canonicalCapture?.materializedCharacters ? undefined : this.dependencies.canonicalCapture?.characters?.()
         const immutableCharacters = this.dependencies.canonicalCapture?.materializedCharacters?.()
         for (const value of this.dependencies.captureCharacters?.() ?? []) {
             if (value.chaId === windowedId || value.chaId === this.pendingCharacterAddition?.characterId) continue
@@ -4519,6 +4592,7 @@ export class SaveCoordinator {
             if (json !== undefined && json === this.materializedCanonicalBaselines.get(value.chaId)) continue
             const current = immutableCharacters?.get(value.chaId) ?? captureMaterializedCharacter(value)
             let previous = this.materializedBaselines.get(value.chaId)
+            if (immutableCharacters && current === previous) continue
             if (!previous) {
                 const detail = await this.dependencies.store.readCharacter(value.chaId)
                 if (!detail) continue
@@ -4539,7 +4613,9 @@ export class SaveCoordinator {
     }
 
     private materializedCaptureMatchesBaseline(): boolean {
-        const canonicalCharacters = this.dependencies.canonicalCapture?.characters?.()
+        const immutable = this.dependencies.canonicalCapture?.materializedCharacters?.()
+        if (immutable) return [...immutable].every(([id, value]) => this.dependencies.captureSelectedConversationAuthority?.()?.characterId === id || value === this.materializedBaselines.get(id))
+        const canonicalCharacters = this.dependencies.canonicalCapture?.materializedCharacters ? undefined : this.dependencies.canonicalCapture?.characters?.()
         if (canonicalCharacters) return [...canonicalCharacters].every(([id, json]) => this.dependencies.captureSelectedConversationAuthority?.()?.characterId === id || json === this.materializedCanonicalBaselines.get(id))
         return (this.dependencies.captureCharacters?.() ?? []).every((value) =>
             this.dependencies.captureSelectedConversationAuthority?.()?.characterId === value.chaId ||
@@ -4609,14 +4685,8 @@ export class SaveCoordinator {
 
     /** Commits a flush, writing created conversations in pages when the whole save is too large. */
     private async commitFlush(commit: WorkingSetCommit): Promise<{ revision: DataRevision }> {
-        try {
-            return await this.commitRoutine(commit)
-        } catch (error) {
-            if (!(error instanceof PayloadTooLargeError)) throw error
-            const plan = planConversationInsertPages(commit)
-            if (!plan) throw error
-            return await this.commitInsertPages(commit.expectedRevision, plan)
-        }
+        const plan = planConversationInsertPages(commit)
+        return plan ? this.commitInsertPages(commit.expectedRevision, plan) : this.commitRoutine(commit)
     }
 
     private async commitInsertPages(expectedRevision: DataRevision, plan: ConversationInsertPlan): Promise<{ revision: DataRevision }> {
@@ -4634,11 +4704,13 @@ export class SaveCoordinator {
             if (revision === null) throw error
             // Earlier pages are already stored; remove the conversations this save
             // created so no partial chat stays, then reload what storage holds.
-            if (created.length > 0) {
+            if (created.length > 0 || plan.addedCharacterId) {
                 try {
                     revision = (await this.commitRoutine({
                         expectedRevision: revision,
-                        conversations: created.map(({ characterId, conversationId }) => ({ type: 'delete', characterId, conversationId })),
+                        ...(plan.addedCharacterId ? { deleteCharacterIds: [plan.addedCharacterId] } : {}),
+                        conversations: created.filter(({ characterId }) => characterId !== plan.addedCharacterId)
+                            .map(({ characterId, conversationId }) => ({ type: 'delete', characterId, conversationId })),
                     })).revision
                 } catch (cleanupError) {
                     this.reportBackgroundError(cleanupError)
@@ -4811,7 +4883,12 @@ export class SaveCoordinator {
     }
 
     captureMaterializedBaseline(): CompleteCharacter[] {
-        return [...this.materializedBaselines.values()].map((value) => ({...value, chats: value.chats.map((chat) => ({...chat}))} as CompleteCharacter))
+        const baselines = new Map(this.materializedBaselines)
+        if (this.windowedCharacterBaseline) {
+            const { shell, authority } = this.windowedCharacterBaseline
+            baselines.set(authority.characterId, shell as CompleteCharacter)
+        }
+        return [...baselines.values()].map((value) => ({...value, chats: value.chats.map((chat) => ({...chat}))} as CompleteCharacter))
     }
 
     capturePresetRecordBaseline(): botPreset[] {
@@ -4822,7 +4899,7 @@ export class SaveCoordinator {
     }
 
     adoptAppliedUnitState(revision: DataRevision, root: RootDatabase | null, presets: botPreset[] | null, characters: readonly CompleteCharacter[], presetRecords: readonly botPreset[] = presets ?? [],
-        windowedConversation?: { characterId: string; conversationId: string; totalMessages: number }): void {
+        windowedConversation?: { characterId: string; conversationId: string; totalMessages: number }, preserveSelectedRows = false): void {
         this.currentRevision = revision
         if (root) this.rootBaseline = canonicalJson(root)
         if (presets) this.presetsBaseline = canonicalJson(presets)
@@ -4838,11 +4915,16 @@ export class SaveCoordinator {
         }
         if (this.windowedCharacterBaseline) {
             const authority = this.windowedCharacterBaseline.authority
+            if (persisted?.chaId === authority.characterId) {
+                const shell = captureWindowedCharacterShell(persisted)
+                this.windowedCharacterBaseline.shell = shell
+                this.windowedCharacterBaseline.shellCanonical = canonicalJson(shell)
+            }
             authority.storeRevision = revision
             const totalMessages = windowedConversation?.characterId === authority.characterId &&
                 windowedConversation.conversationId === authority.conversationId ? windowedConversation.totalMessages : undefined
             if (totalMessages !== undefined) authority.totalMessages = totalMessages
-            this.dependencies.onWindowedSelectedConversationRevision?.(revision, totalMessages)
+            this.dependencies.onWindowedSelectedConversationRevision?.(revision, totalMessages, preserveSelectedRows)
         }
     }
 
@@ -4907,7 +4989,7 @@ export class SaveCoordinator {
     private capturePendingAddition(): {
         pending: PendingCharacterAddition
         character: CompleteCharacter
-        canonical: string
+        canonical: string | CompleteCharacter
     } | null {
         const pending = this.pendingCharacterAddition
         if (!pending) return null
@@ -4915,6 +4997,8 @@ export class SaveCoordinator {
         if (!value || value.chaId !== pending.characterId) {
             throw new Error(`Installed character ${pending.characterId} is not available`)
         }
+        const immutable = this.dependencies.canonicalCapture?.materializedCharacters?.().get(value.chaId)
+        if (immutable) return { pending, character: immutable, canonical: immutable }
         const canonical = canonicalJson(value)
         return { pending, character: JSON.parse(canonical) as CompleteCharacter, canonical }
     }
@@ -5246,6 +5330,8 @@ export class SaveCoordinator {
                 )
             )
         }
-        return captured.characterCanonical === expected.characterCanonical
+        return captured.characterSnapshot || expected.characterSnapshot
+            ? captured.characterSnapshot === expected.characterSnapshot
+            : captured.characterCanonical === expected.characterCanonical
     }
 }
