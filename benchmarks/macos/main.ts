@@ -129,8 +129,7 @@ async function tokenizer() {
   return { passed: true, ids, errors, samples };
 }
 
-async function verifyStored() {
-  const expected = JSON.parse(localStorage.getItem(expectedKey)!);
+async function verifyStored(expected = JSON.parse(localStorage.getItem(expectedKey)!)) {
   check(expected, "previous synthetic result exists");
   const actual = await reload();
   check(
@@ -393,7 +392,9 @@ async function main() {
     sessionStorage.setItem("macos-contract-reload", "true");
     location.reload();
   } else if (phase === "restart") {
-    await report("restart", { passed: true, ...(await verifyStored()) });
+    // The controller hands over the quit save; WebKit may drop storage written this close to the quit.
+    const stored = await invoke<string | null>("macos_bench_expected");
+    await report("restart", { passed: true, ...(await verifyStored(stored ? JSON.parse(stored) : null)) });
     await invoke("macos_bench_quit");
   } else if (phase === "app") {
     document.getElementById("benchmark")!.remove();

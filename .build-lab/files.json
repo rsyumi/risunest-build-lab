@@ -489,8 +489,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 26902,
-      "sha256": "b181cebe02f45423a7c4db00e40c6c0b57790c65027b11a687ef2b74f0992f49"
+      "bytes": 27102,
+      "sha256": "21f5d5b27b3c5547e2b7b13bac9bc838ee5d4180beb4d58a1c6117e565787b71"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -537,8 +537,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 26805,
-      "sha256": "c4fe46dfe4f67daf9fc69b51fe01a8f56e13378f4e452c30da05c8adb9ae818b"
+      "bytes": 26976,
+      "sha256": "c7a97186b91961dfc6d581de643cea3cf24aa1c6e863f58da3d48c337d3a8307"
     },
     {
       "path": "benchmarks/macos/vite.config.ts",
@@ -2775,8 +2775,8 @@
     {
       "path": "package.json",
       "mode": "100644",
-      "bytes": 10146,
-      "sha256": "e8fe77d60fc89f98a00f82f576bed5a28065cb0cb2df5c62cf5100a83f42288e"
+      "bytes": 10120,
+      "sha256": "b8c9fc13c5f5a5a12fc0923540cdb6a2aa3bb16735cd2e55bb381e816d3bfa71"
     },
     {
       "path": "patches/@tauri-apps__plugin-http@2.6.1.patch",
@@ -2799,8 +2799,8 @@
     {
       "path": "pnpm-lock.yaml",
       "mode": "100644",
-      "bytes": 157221,
-      "sha256": "07701c4d62ddeb56cbb4247e28cfafcc38f51e51d99e7328ee314c60f40dc538"
+      "bytes": 153079,
+      "sha256": "07aedcc511feacb5962ea7cdfc1523b113def0fb8909518fbffe4fe230e9b351"
     },
     {
       "path": "pnpm-workspace.yaml",
@@ -16895,8 +16895,8 @@
     {
       "path": ".gitattributes",
       "mode": "100644",
-      "bytes": 206,
-      "sha256": "69bcbf2712fd1cfa5a5422282914049b748c33a49ee8bb2f7be14adce8bb8fa5",
+      "bytes": 342,
+      "sha256": "0d58159c3621a993c4b356168098d4c42ef52857f4063cce7687458ea6b719de",
       "reason": "outside-build-inputs"
     },
     {

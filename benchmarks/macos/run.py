@@ -388,6 +388,8 @@ def main():
     results = {}
     for phase in phases:
         expected = None
+        if phase == 'restart' and 'contracts' in results:
+            expected = next(entry['result'] for entry in results['contracts'] if entry['stage'] == 'quit-saved')
         if phase == 'app-restart' and 'app' in results:
             expected = next(entry['result'] for entry in results['app'] if entry['stage'] == 'app-native-saved')
         results[phase] = run_phase(app, phase, artifacts, fixtures, expected)
