@@ -37,6 +37,7 @@ impl Write for HashWriter {
     }
 }
 
+#[cfg(test)]
 fn source_digest(changes: &[&Change]) -> StoreResult<String> {
     let mut writer = HashWriter(Sha256::new(), #[cfg(test)] "binding_source_proof");
     #[cfg(test)]
@@ -48,6 +49,7 @@ fn source_digest(changes: &[&Change]) -> StoreResult<String> {
     Ok(hex::encode(writer.0.finalize()))
 }
 
+#[cfg(test)]
 fn sorted_source(changes: &[Change]) -> StoreResult<Vec<&Change>> {
     let mut changes = changes.iter().collect::<Vec<_>>();
     changes.sort_by(|a, b| a.key.cmp(&b.key));
@@ -57,6 +59,7 @@ fn sorted_source(changes: &[Change]) -> StoreResult<Vec<&Change>> {
     Ok(changes)
 }
 
+#[cfg(test)]
 fn status_digest(statuses: &[(&str, &str)]) -> StoreResult<String> {
     let mut writer = HashWriter(Sha256::new(), #[cfg(test)] "binding_status_proof");
     #[cfg(test)]
@@ -155,15 +158,24 @@ fn validate_inspection(store: &PersistentStore, header: &Header, inspection_id: 
 impl PersistentStore {
     // A native transport supplies a complete verified winning map, never a renderer database.
     pub(crate) fn lww_stage_binding_units(
+        &mut self, header: &Header, inspection_id: &str, changes: &[Change], admitted_upper_ms: DecimalU64,
+    ) -> StoreResult<super::BindingUnitStage> {
+        self.lww_stage_binding_units_stream(header, inspection_id, admitted_upper_ms, |emit| {
+            for change in changes { emit(change.clone())?; }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn lww_stage_binding_units_stream(
         &mut self,
         header: &Header,
         inspection_id: &str,
-        changes: &[Change],
         admitted_upper_ms: DecimalU64,
+        produce: impl FnOnce(&mut dyn FnMut(Change) -> StoreResult<()>) -> StoreResult<()>,
     ) -> StoreResult<super::BindingUnitStage> {
         validate_inspection(self, header, inspection_id)?;
-        let changes = sorted_source(changes)?;
-        for change in &changes {
+        let changes = super::FrozenRows::new()?;
+        produce(&mut |change| {
             wire(change.stamp.validate())?;
             wire({
                 let result = change.value.validate();
@@ -171,27 +183,26 @@ impl PersistentStore {
                 crate::persistent_store::hash_work::validation(&change.value);
                 result
             })?;
-            if change.stamp.physical_ms > admitted_upper_ms {
-                return Err(error("incoming-clock-skew"));
+            if change.stamp.physical_ms > admitted_upper_ms { return Err(error("incoming-clock-skew")); }
+            if changes.db.query_row("SELECT EXISTS(SELECT 1 FROM rows WHERE key=?1)", [change.key.as_str()], |row| row.get::<_,bool>(0))? {
+                return Err(error("duplicate-unit-key"));
             }
-        }
-        let digest = source_digest(&changes)?;
-        let existing: Option<(String, String, String, String, String)> = self.connection.query_row(
+            changes.insert(super::intent_rows::target_row(&change)?)
+        })?;
+        let digest = source_digest_rows(&changes)?;
+        let existing: Option<(String,String,String,String,String)> = self.connection.query_row(
             "SELECT staging_id,authority,inspection_id,source_digest,admitted_upper_ms FROM lww_binding_sources WHERE request_id=?1",
             [&header.request_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
         ).optional()?;
-        if existing.is_none() && self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM lww_binding_stages WHERE receive_id=?1)",
-            [&header.request_id], |row| row.get::<_,bool>(0),
-        )? { return Err(error("binding-source-missing")); }
-        let retried = existing.is_some();
+        if existing.is_none() && self.connection.query_row("SELECT EXISTS(SELECT 1 FROM lww_binding_stages WHERE receive_id=?1)", [&header.request_id], |row| row.get::<_,bool>(0))? {
+            return Err(error("binding-source-missing"));
+        }
         let staging_id = if let Some((id, authority, inspection, old_digest, upper)) = existing {
-            if authority != header.binding_authority.0.to_string() || inspection != inspection_id
-                || old_digest != digest || upper != admitted_upper_ms.0.to_string()
-            {
+            if authority != header.binding_authority.0.to_string() || inspection != inspection_id || old_digest != digest || upper != admitted_upper_ms.0.to_string() {
                 return Err(error("request-id-integrity"));
             }
-            validate_binding_source(&self.connection, &id, header, &changes.iter().map(|c| (*c).clone()).collect::<Vec<_>>())?;
+            validate_binding_source_rows(&self.connection, &id, header, &changes)?;
+            crate::persistent_store::sync_selection::validate_binding_stage_content(&self.connection, &id)?;
             id
         } else {
             let temporary = tempfile::tempdir()?;
@@ -199,11 +210,13 @@ impl PersistentStore {
             let mut isolated = Connection::open(&path)?;
             schema::initialize(&mut isolated)?;
             isolated.execute_batch("INSERT INTO meta VALUES('activeGeneration','\"incoming\"'),('currentRevision','0'); INSERT INTO root VALUES('incoming','{}');")?;
-            for change in &changes {
-                copy_controls(&self.connection, &isolated, change)?;
-                projection::validate_received(&isolated, &change.key, &change.value)?;
-            }
-            let statuses = project_source(&mut isolated, &changes, &header.request_id)?;
+            changes.visit(false, |key, stamp, value, _| {
+                let change = Change { key, stamp: stamp.ok_or_else(|| error("request-id-integrity"))?, value };
+                copy_controls(&self.connection, &isolated, &change)?;
+                projection::validate_received(&isolated, &change.key, &change.value)
+            })?;
+            project_source(&mut isolated, &changes, &header.request_id)?;
+            let statuses = stored_status_digest(&isolated, "incoming")?;
             isolated.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
             drop(isolated);
             let id = format!("staging-{}", uuid::Uuid::new_v4());
@@ -211,16 +224,11 @@ impl PersistentStore {
             let copied = (|| -> StoreResult<()> {
                 let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 super::commit::begin_generation(&tx, &id)?;
-                for &(table, _) in GENERATION_TABLES {
-                    copy_binding_table(&tx, table, &id)?;
-                }
-                let status_digest = status_digest(&changes.iter().zip(&statuses).map(|(c,s)| (c.key.as_str(),*s)).collect::<Vec<_>>())?;
+                for &(table, _) in GENERATION_TABLES { copy_binding_table(&tx, table, &id)?; }
                 let catalog_digest = catalog_digest(&tx, &id)?;
-                tx.execute("INSERT INTO lww_binding_sources VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![header.request_id,id,header.binding_authority.0.to_string(),inspection_id,digest,admitted_upper_ms.0.to_string(),status_digest,catalog_digest])?;
-                for (change, status) in changes.iter().zip(statuses) {
-                    tx.execute("INSERT INTO lww_binding_source_units VALUES(?1,?2,?3,?4,?5)", params![id,change.key.as_str(),serde_json::to_string(&change.stamp)?,serde_json::to_string(&change.value)?,status])?;
-                }
-                tx.execute("INSERT INTO lww_binding_stages VALUES(?1,?2,?3,?4,NULL,?5)", params![id,inspection_id,header.request_id,serde_json::to_string(&changes)?,catalog_digest])?;
+                tx.execute("INSERT INTO lww_binding_sources VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![header.request_id,id,header.binding_authority.0.to_string(),inspection_id,digest,admitted_upper_ms.0.to_string(),statuses,catalog_digest])?;
+                tx.execute("INSERT INTO lww_binding_source_units SELECT ?1,key,stamp,value,status FROM binding_incoming.lww_binding_source_units WHERE staging_id='incoming'", [&id])?;
+                tx.execute("INSERT INTO lww_binding_stages VALUES(?1,?2,?3,?4,NULL,?5)", params![id,inspection_id,header.request_id,digest,catalog_digest])?;
                 tx.commit()?;
                 Ok(())
             })();
@@ -230,55 +238,39 @@ impl PersistentStore {
             id
         };
         #[cfg(test)]
-        if FAIL_AFTER_STAGE_COPY.with(|fail| fail.replace(false)) {
-            return Err(error("synthetic-after-binding-copy"));
-        }
-        let changes = changes.into_iter().cloned().collect::<Vec<_>>();
-        // A fresh copy recorded the stage digest in the transaction that wrote the stage.
-        self.register_lww_binding_stage_with(inspection_id, &staging_id, &header.request_id, &changes, retried)?;
+        if FAIL_AFTER_STAGE_COPY.with(|fail| fail.replace(false)) { return Err(error("synthetic-after-binding-copy")); }
+        self.prepare_replace_commit(&staging_id, None)?;
         Ok(BindingUnitStage { staging_id, source_digest: digest })
     }
 }
 
-fn projection_rank(change: &Change) -> u8 {
-    let parts = change.key.components();
-    match parts[0].as_str() {
-        "exists" if parts[1] != "conversation" => 0,
-        "archive" => 2,
-        "exists" => 3,
-        "conversation" | "messages" => 4,
-        _ => 1,
-    }
-}
-
-fn project_source(db: &mut Connection, changes: &[&Change], version: &str) -> StoreResult<Vec<&'static str>> {
+fn project_source(db: &mut Connection, changes: &super::FrozenRows, version: &str) -> StoreResult<()> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    for change in changes {
-        if !is_device(&change.key) {
-            put_unit(&tx, &change.key, &change.stamp, &change.value, version, None)?;
-        }
+    changes.visit(false, |key, stamp, value, _| {
+        if !is_device(&key) { put_unit(&tx, &key, &stamp.ok_or_else(|| error("request-id-integrity"))?, &value, version, None)?; }
+        Ok(())
+    })?;
+    let mut statement = changes.db.prepare("SELECT key,value FROM rows ORDER BY CASE WHEN json_extract(key,'$[0]')='exists' AND json_extract(key,'$[1]')<>'conversation' THEN 0 WHEN json_extract(key,'$[0]')='archive' THEN 2 WHEN json_extract(key,'$[0]')='exists' THEN 3 WHEN json_extract(key,'$[0]') IN ('conversation','messages') THEN 4 ELSE 1 END,key")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let key = wire(row.get::<_,String>(0)?.try_into())?;
+        let value: UnitValue = serde_json::from_str(&row.get::<_,String>(1)?)?;
+        if is_device(&key) { continue; }
+        let hard_delete = key.components()[0] == "exists" && matches!(value, UnitValue::Deleted);
+        if parent_status(&tx, &key)? == "ready" || hard_delete { projection::apply(&tx, "incoming", &key, &value)?; }
     }
-    let mut projection = changes.to_vec();
-    projection.sort_by_key(|change| projection_rank(change));
-    for change in projection {
-        if is_device(&change.key) { continue; }
-        let hard_delete = change.key.components()[0] == "exists" && matches!(change.value, UnitValue::Deleted);
-        if parent_status(&tx, &change.key)? == "ready" || hard_delete {
-            projection::apply(&tx, "incoming", &change.key, &change.value)?;
+    let affected = super::FrozenRows::new()?;
+    changes.visit(false, |key, stamp, value, _| {
+        let status = if is_device(&key) { "ready" } else { parent_status(&tx, &key)? };
+        if status == "ready" && projection::known(&key) && !is_device(&key) {
+            affected.insert(super::intent_rows::replacement_row(&key, &value, false)?)?;
         }
-    }
-    let mut statuses = Vec::with_capacity(changes.len());
-    let mut affected = Vec::new();
-    for change in changes {
-        let status = if is_device(&change.key) { "ready" } else { parent_status(&tx, &change.key)? };
-        if status == "ready" && projection::known(&change.key) && !is_device(&change.key) {
-            affected.push(change.key.clone());
-        }
-        statuses.push(status);
-    }
-    projection::refresh_orders(&tx, "incoming", &affected)?;
+        tx.execute("INSERT INTO lww_binding_source_units VALUES('incoming',?1,?2,?3,?4)", params![key.as_str(),serde_json::to_string(&stamp.ok_or_else(|| error("request-id-integrity"))?)?,serde_json::to_string(&value)?,status])?;
+        Ok(())
+    })?;
+    affected.refresh_orders(&tx, "incoming")?;
     tx.commit()?;
-    Ok(statuses)
+    Ok(())
 }
 
 fn copy_required_object(source: &Connection, target: &Connection, hash: &str) -> StoreResult<Vec<u8>> {
@@ -349,37 +341,72 @@ pub(in crate::persistent_store) fn is_binding_stage(db: &Connection, staging_id:
     )?)
 }
 
+pub(in crate::persistent_store) fn binding_source_rows(db: &Connection, staging_id: &str) -> StoreResult<super::FrozenRows> {
+    let frozen = super::FrozenRows::new()?;
+    let mut statement = db.prepare("SELECT key,stamp,value FROM lww_binding_source_units WHERE staging_id=?1 ORDER BY key")?;
+    let mut rows = statement.query([staging_id])?;
+    while let Some(row) = rows.next()? {
+        frozen.insert(super::intent_rows::RowText { key: row.get(0)?, stamp: Some(row.get(1)?), value: row.get(2)?, source_override: false })?;
+    }
+    Ok(frozen)
+}
+
+pub(in crate::persistent_store) fn source_digest_rows(changes: &super::FrozenRows) -> StoreResult<String> {
+    let mut writer = HashWriter(Sha256::new(), #[cfg(test)] "binding_source_proof");
+    #[cfg(test)]
+    crate::persistent_store::hash_work::begin("binding_source_proof");
+    writer.write_all(b"risunest.lww-binding-source/v1\0")?;
+    writer.write_all(b"[")?;
+    let mut first = true;
+    changes.visit(false, |key, stamp, value, _| {
+        if !first { writer.write_all(b",")?; }
+        first = false;
+        serde_json::to_writer(&mut writer, &Change { key, stamp: stamp.ok_or_else(|| error("request-id-integrity"))?, value })?;
+        Ok(())
+    })?;
+    writer.write_all(b"]")?;
+    Ok(hex::encode(writer.0.finalize()))
+}
+
+fn stored_status_digest(db: &Connection, staging_id: &str) -> StoreResult<String> {
+    let mut writer = HashWriter(Sha256::new(), #[cfg(test)] "binding_status_proof");
+    #[cfg(test)]
+    crate::persistent_store::hash_work::begin("binding_status_proof");
+    writer.write_all(b"risunest.lww-binding-status/v1\0")?;
+    writer.write_all(b"[")?;
+    let mut first = true;
+    let mut statement = db.prepare("SELECT key,status FROM lww_binding_source_units WHERE staging_id=?1 ORDER BY key")?;
+    let mut rows = statement.query([staging_id])?;
+    while let Some(row) = rows.next()? {
+        if !first { writer.write_all(b",")?; }
+        first = false;
+        serde_json::to_writer(&mut writer, &(row.get::<_,String>(0)?, row.get::<_,String>(1)?))?;
+    }
+    writer.write_all(b"]")?;
+    Ok(hex::encode(writer.0.finalize()))
+}
+
 pub(in crate::persistent_store) fn validate_binding_source(db: &Connection, staging_id: &str, header: &Header, received: &[Change]) -> StoreResult<()> {
-    let source: Option<(String, String, String, String, String, String)> = db.query_row("SELECT request_id,source_digest,status_digest,catalog_digest,authority,inspection_id FROM lww_binding_sources WHERE staging_id=?1", [staging_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).optional()?;
-    let (request_id, digest, expected_status, _, authority, inspection) = source.ok_or_else(|| error("binding-source-missing"))?;
+    let rows = super::FrozenRows::new()?;
+    for change in received { rows.insert(super::intent_rows::target_row(change)?)?; }
+    validate_binding_source_rows(db, staging_id, header, &rows)
+}
+
+pub(in crate::persistent_store) fn validate_binding_source_rows(db: &Connection, staging_id: &str, header: &Header, received: &super::FrozenRows) -> StoreResult<()> {
+    let source: Option<(String,String,String,String,String)> = db.query_row("SELECT request_id,source_digest,status_digest,authority,inspection_id FROM lww_binding_sources WHERE staging_id=?1", [staging_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?;
+    let (request_id,digest,expected_status,authority,inspection) = source.ok_or_else(|| error("binding-source-missing"))?;
     let receipt: Option<(String,String,String,String)> = db.query_row("SELECT s.receive_id,s.inspection_id,i.source_authority,s.changes FROM lww_binding_stages s JOIN lww_binding_inspections i USING(inspection_id) WHERE s.staging_id=?1", [staging_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
-    let (receive_id, receipt_inspection, source_authority, encoded) = receipt.ok_or_else(|| error("binding-source-association"))?;
+    let (receive_id,receipt_inspection,source_authority,encoded_digest) = receipt.ok_or_else(|| error("binding-source-association"))?;
     let original_authority: DecimalU64 = wire(authority.clone().try_into())?;
-    let received = sorted_source(received)?;
-    let received_matches = source_digest(&received)? == digest;
-    let encoded = serde_json::from_str::<Vec<Change>>(&encoded)?;
-    let encoded = sorted_source(&encoded)?;
-    let encoded_matches = if received_matches { encoded == received } else { source_digest(&encoded)? == digest };
-    if receive_id != request_id || receipt_inspection != inspection || source_authority != authority
-        || (header.binding_authority != original_authority && original_authority.0.checked_add(1) != Some(header.binding_authority.0))
-        || !encoded_matches
-    { return Err(error("binding-source-association")); }
-    if request_id != header.request_id || !received_matches {
+    if receive_id != request_id || receipt_inspection != inspection || source_authority != authority || encoded_digest != digest
+        || (header.binding_authority != original_authority && original_authority.0.checked_add(1) != Some(header.binding_authority.0)) {
+        return Err(error("binding-source-association"));
+    }
+    if request_id != header.request_id || source_digest_rows(received)? != digest
+        || source_digest_rows(&binding_source_rows(db, staging_id)?)? != digest
+        || stored_status_digest(db, staging_id)? != expected_status {
         return Err(error("binding-source-integrity"));
     }
-    let mut stmt = db.prepare("SELECT key,stamp,value,status FROM lww_binding_source_units WHERE staging_id=?1 ORDER BY key")?;
-    let rows = stmt.query_map([staging_id], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?)))?;
-    let mut frozen = Vec::new();
-    let mut statuses = Vec::new();
-    for row in rows {
-        let (key, stamp, value, status) = row?;
-        statuses.push((key.clone(),status));
-        frozen.push(Change { key: wire(key.try_into())?, stamp: serde_json::from_str(&stamp)?, value: serde_json::from_str(&value)? });
-    }
-    // The stage catalog is proved by `validate_binding_stage_content`.
-    if sorted_source(&frozen)? != received
-        || status_digest(&statuses.iter().map(|(key,status)| (key.as_str(),status.as_str())).collect::<Vec<_>>())? != expected_status
-    { return Err(error("binding-source-integrity")); }
     Ok(())
 }
 

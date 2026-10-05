@@ -15,7 +15,6 @@ const admission: HistoryWindowAdmissionInput = {
     requested: true,
     enabled: true,
     maxContext: 8000,
-    group: false,
     supaMemory: false,
     supaModelType: 'none',
     hanuraiEnable: false,
@@ -34,7 +33,6 @@ describe('admitHistoryWindow', () => {
     it('keeps today\'s path for the inactive cases', () => {
         expect(admitHistoryWindow({ ...admission, requested: false })).toBeNull()
         expect(admitHistoryWindow({ ...admission, enabled: false })).toBeNull()
-        expect(admitHistoryWindow({ ...admission, group: true })).toBeNull()
         expect(admitHistoryWindow({ ...admission, maxContext: 0 })).toBeNull()
         expect(admitHistoryWindow({ ...admission, supaMemory: true, hanuraiEnable: true, hypaV3: true })).toBeNull()
         expect(admitHistoryWindow({ ...admission, supaMemory: true, hypav2: true, hypaV3: true })).toBeNull()

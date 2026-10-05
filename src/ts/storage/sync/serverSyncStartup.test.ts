@@ -28,11 +28,11 @@ vi.mock('src/ts/plugins/apiV3/v3.svelte', () => ({ fencePluginExecutionForAuthor
 vi.mock('../persistentRevisionEvents', () => ({ subscribeLocalPersistentRevision: () => () => {} }))
 vi.mock('../generatingConversationRegistry', () => ({ generatingConversations: { snapshot: () => [] } }))
 vi.mock('src/ts/alert', () => ({ alertConfirm: async () => false }))
-vi.mock('@lucide/svelte', () => ({ LoaderCircleIcon: () => {} }))
+vi.mock('@lucide/svelte', () => ({ CheckIcon: () => {}, LoaderCircleIcon: () => {}, TriangleAlertIcon: () => {} }))
 vi.mock('./serverSyncRegistrationInbox', () => ({ serverRegistrationInbox: { changed: { subscribe: () => () => {} }, releaseConsumed() {}, take: () => undefined } }))
 vi.mock('./serverSyncQr', () => ({ canScanServerRegistration: false, createServerQrScanner: () => ({ cancel() {} }) }))
 vi.mock('./serverAssetResidency', () => ({ getAssetResidencyStatus: async () => undefined, setAssetResidencyPolicy: vi.fn(), evictLocalAssets: vi.fn(), cancelAssetResidencyOperation: vi.fn() }))
-vi.mock('src/lang', () => ({ language: { loading: 'Loading', lwwSync: { concurrentEditNotice: 'Concurrent edits', clockBlocked: 'Clock blocked', writerCollision: 'Writer blocked', bindingIncomplete: 'Binding incomplete', registrationRevoked: 'Registration revoked' }, risuNest: { serverSync: { title: 'Sync', description: 'Sync library', connect: 'Connect and sync', syncNow: 'Sync now', disconnect: 'Disconnect', disconnected: 'Stopped', ready: 'Ready', errorHelp: 'Connection failed', credentialUnavailable: 'Credential unavailable', registrationCode: 'Registration code', readRegistration: 'Read', management: {}, residency: {} } } } }))
+vi.mock('src/lang', () => ({ language: { loading: 'Loading', lwwSync: { concurrentEditNotice: 'Concurrent edits', clockBlocked: 'Clock blocked', writerCollision: 'Writer blocked', bindingIncomplete: 'Binding incomplete', registrationRevoked: 'Registration revoked' }, risuNest: { serverSync: { title: 'Sync', description: 'Sync library', connect: 'Connect and sync', syncNow: 'Sync now', disconnect: 'Disconnect', disconnected: 'Stopped', ready: 'Ready', errorHelp: 'Connection failed', credentialUnavailable: 'Credential unavailable', registrationCode: 'Registration code', readRegistration: 'Read', pendingChanges: 'Changes to upload', count: '{0}', lastSuccess: 'Last sync', management: {}, residency: {} } } } }))
 
 let production: typeof import('./serverSyncProduction')
 let ui: typeof import('svelte')
@@ -60,6 +60,7 @@ beforeEach(async () => {
         if (command === 'server_sync_lww_push') { if (!f.outbox) return null; f.outbox -= 1; f.pushed += 1; return { accepted: 1 } }
         if (command === 'server_sync_lww_pull') return { bindingAuthority: f.binding.targetAuthority, requestId: 'pull', changes: [] }
         if (command === 'server_sync_lww_pending_binding') return structuredClone(f.pending)
+        if (command === 'server_sync_lww_pending_count') return f.outbox
         if (command === 'server_sync_lww_inspect') {
             if (f.inspectError) throw f.inspectError
             return { inspectionId: 'inspection', targetId: 'target', libraryId: 'library', empty: true, previouslyBoundLibrary: false, registrationChanged: false, serverRestored: false }

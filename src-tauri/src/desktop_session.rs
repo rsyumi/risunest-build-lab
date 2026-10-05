@@ -3,41 +3,39 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::Manager;
 
-const SETTLE_LIMIT: Duration = Duration::from_secs(2);
+const SETTLE_LIMIT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub(crate) struct PendingFlush {
     token: Option<String>,
     deadline: Option<Instant>,
     exit_when_settled: bool,
+    acknowledged: bool,
 }
 
 impl PendingFlush {
     fn request(&mut self, now: Instant, exit_when_settled: bool) -> (String, Instant) {
-        // A wait that ended unanswered gives the next request a wait of its own.
-        if self.deadline.is_some_and(|deadline| now >= deadline) {
-            self.clear();
-        }
         self.exit_when_settled |= exit_when_settled;
         let deadline = *self.deadline.get_or_insert(now + SETTLE_LIMIT);
         let token = self.token.get_or_insert_with(|| uuid::Uuid::new_v4().to_string()).clone();
-        (token, deadline)
+        (token, if self.acknowledged { now.min(deadline) } else { deadline })
     }
     /// Whether the app exits now that the matching flush finished.
     fn acknowledge(&mut self, token: &str) -> bool {
-        if self.token.as_deref() != Some(token) { return false; }
+        if self.token.as_deref() != Some(token) || self.acknowledged { return false; }
         let exit = self.exit_when_settled;
-        self.clear();
+        self.acknowledged = true;
         exit
     }
     #[cfg(any(windows, test))]
     pub(crate) fn waiting(&self, now: Instant) -> bool {
-        self.token.is_some() && self.deadline.is_some_and(|deadline| now < deadline)
+        !self.acknowledged && self.token.is_some() && self.deadline.is_some_and(|deadline| now < deadline)
     }
     pub(crate) fn clear(&mut self) {
         self.token = None;
         self.deadline = None;
         self.exit_when_settled = false;
+        self.acknowledged = false;
     }
 }
 
@@ -80,7 +78,7 @@ mod tests {
         assert!(!state.waiting(now + SETTLE_LIMIT));
         assert!(!state.acknowledge(&token));
         assert!(!state.waiting(now), "the matching answer ends the wait");
-        assert_ne!(state.request(now, false).0, token);
+        assert_eq!(state.request(now, false).0, token);
         state.clear();
         assert!(!state.waiting(now));
     }
@@ -95,29 +93,23 @@ mod tests {
     }
 
     #[test]
-    fn a_request_after_an_unanswered_deadline_starts_a_new_wait() {
+    fn a_request_after_an_unanswered_deadline_keeps_the_original_wait() {
         let now = Instant::now();
         let later = now + Duration::from_secs(5);
         let mut state = PendingFlush::default();
         let (first, _) = state.request(now, false);
         let (second, deadline) = state.request(later, true);
-        assert_ne!(first, second);
-        assert_eq!(deadline, later + SETTLE_LIMIT);
-        assert!(state.waiting(later));
-        assert!(!state.acknowledge(&first));
-        assert!(state.waiting(later), "the earlier answer does not settle the new wait");
-        assert!(state.acknowledge(&second));
+        assert_eq!(first, second);
+        assert_eq!(deadline, now + SETTLE_LIMIT);
         assert!(!state.waiting(later));
-    }
-
-    #[test]
-    fn an_expired_request_does_not_carry_its_exit_into_the_next_one() {
-        let now = Instant::now();
-        let later = now + SETTLE_LIMIT;
-        let mut state = PendingFlush::default();
-        state.request(now, true);
-        let (token, _) = state.request(later, false);
-        assert!(!state.acknowledge(&token));
+        assert!(state.acknowledge(&second));
+        state.clear();
+        let (next, next_deadline) = state.request(later, false);
+        assert_ne!(next, first);
+        assert_eq!(next_deadline, later + SETTLE_LIMIT);
+        assert!(!state.acknowledge(&first));
+        assert!(state.waiting(later));
+        assert!(!state.acknowledge(&next));
     }
 
     #[test]
@@ -130,6 +122,7 @@ mod tests {
         assert!(state.waiting(now));
         assert!(state.acknowledge(&token));
         assert!(!state.waiting(now));
+        state.clear();
         let (token, _) = state.request(now, false);
         assert!(!state.acknowledge(&token));
     }

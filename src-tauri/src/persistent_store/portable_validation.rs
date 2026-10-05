@@ -368,7 +368,7 @@ const RELATIONSHIPS: &[(&str, &str, &str, &str)] = &[
         "portable conversation order is duplicated",
     ),
     (
-        "SELECT EXISTS(SELECT 1 FROM plugin_storage GROUP BY ordinal HAVING count(*)>1)",
+        "SELECT EXISTS(SELECT 1 FROM plugin_storage GROUP BY owner,ordinal HAVING count(*)>1)",
         codes::RECORD_INVALID,
         "plugin_storage",
         "portable plugin ordinal is duplicated",

@@ -43,9 +43,8 @@ impl Default for DurableCasJobState {
 /// What the journal sweep asks about the work that may still own a journal.
 pub(crate) struct CasJobOwnerProbe<'a> {
     pub(crate) native_jobs: &'a dyn Fn() -> Result<Vec<NativeJobStatus>, String>,
-    /// A device restore session owns the journal of its native restore until
-    /// its recovery completes.
-    pub(crate) device_session_active: bool,
+    pub(crate) device_job_owned: &'a dyn Fn(&str) -> Result<bool, String>,
+    pub(crate) external_job_active: &'a dyn Fn(&str) -> Result<bool, String>,
     pub(crate) open_store: &'a dyn Fn() -> Result<PersistentStore, String>,
 }
 
@@ -58,6 +57,14 @@ struct AbandonedCasJobs {
 }
 
 impl AbandonedCasJobs {
+    fn snapshot(root: &std::path::Path) -> Self {
+        let (journal_ids, listing_failure) = match durable_cas_job_ids(root) {
+            Ok(ids) => (ids, None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
+        Self { root: root.to_owned(), journal_ids, listing_failure }
+    }
+
     fn release(self, probe: &CasJobOwnerProbe) -> Result<(), String> {
         let mut failure = self.listing_failure;
         for id in &self.journal_ids {
@@ -118,7 +125,7 @@ fn owner_ended(
             !here || native_job(&owner.id)?.is_none_or(|job| native_job_finished(&job))
         }
         CasJobOwnerKind::NativeFileJob => {
-            !probe.device_session_active
+            !(probe.device_job_owned)(&owner.id)?
                 && (!here
                     || native_job(&owner.id)?.is_none_or(|job| {
                         native_job_finished(&job)
@@ -126,7 +133,7 @@ fn owner_ended(
                                 && job.state == NativeJobState::Succeeded)
                     }))
         }
-        CasJobOwnerKind::ExternalCompaction => !here,
+        CasJobOwnerKind::ExternalCompaction | CasJobOwnerKind::ExternalHydration => true,
         // A saved publication keeps its journal until it is sent and settled;
         // one that never reached its segment row has nothing to resume.
         CasJobOwnerKind::ExternalPublication => {
@@ -136,7 +143,7 @@ fn owner_ended(
             crate::external_storage::runtime_restore::restore_journal_owner_ended(
                 root,
                 &owner.id,
-                here,
+                (probe.external_job_active)(&owner.id)?,
                 probe.open_store,
             )?
         }
@@ -181,6 +188,16 @@ impl DurableCasJobState {
 
     pub(crate) fn reset_renderer_session(&self, app: &AppHandle) -> Result<(), String> {
         let abandoned = self.take_abandoned(&repository_root(app)?)?;
+        self.release_in_background(app, abandoned);
+        Ok(())
+    }
+
+    pub(crate) fn sweep_settled_jobs<R: tauri::Runtime>(&self, app: &AppHandle<R>) -> Result<(), String> {
+        self.release_in_background(app, AbandonedCasJobs::snapshot(&repository_root(app)?));
+        Ok(())
+    }
+
+    fn release_in_background<R: tauri::Runtime>(&self, app: &AppHandle<R>, abandoned: AbandonedCasJobs) {
         if !abandoned.journal_ids.is_empty() || abandoned.listing_failure.is_some() {
             let app = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
@@ -201,11 +218,18 @@ impl DurableCasJobState {
                             )
                             .map_err(|error| error.to_string())
                         };
+                        let device_job_owned = |id: &str| match app.try_state::<crate::device_backup::DeviceBackupState>() {
+                            Some(state) => state.owns_native_restore_job(id).map_err(|error| error.to_string()),
+                            None => Ok(false),
+                        };
+                        let external_job_active = |id: &str| match app.try_state::<crate::external_storage::job_store::JobCommandState>() {
+                            Some(state) => state.job_is_active(id).map_err(|error| error.to_string()),
+                            None => Ok(false),
+                        };
                         abandoned.release(&CasJobOwnerProbe {
                             native_jobs: &native_jobs,
-                            device_session_active: app
-                                .try_state::<crate::device_backup::DeviceBackupState>()
-                                .is_some_and(|state| !matches!(state.is_blocking(), Ok(false))),
+                            device_job_owned: &device_job_owned,
+                            external_job_active: &external_job_active,
                             open_store: &open_store,
                         })
                     });
@@ -214,7 +238,6 @@ impl DurableCasJobState {
                 }
             });
         }
-        Ok(())
     }
 
     fn take_abandoned(&self, root: &std::path::Path) -> Result<AbandonedCasJobs, String> {
@@ -226,15 +249,7 @@ impl DurableCasJobState {
             .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?
             .clear();
         // Journals are listed now, before the new page can begin its own.
-        let (journal_ids, listing_failure) = match durable_cas_job_ids(root) {
-            Ok(ids) => (ids, None),
-            Err(error) => (Vec::new(), Some(error.to_string())),
-        };
-        Ok(AbandonedCasJobs {
-            root: root.to_owned(),
-            journal_ids,
-            listing_failure,
-        })
+        Ok(AbandonedCasJobs::snapshot(root))
     }
 
     #[cfg(test)]
@@ -398,7 +413,7 @@ impl CasUploadPool {
     }
 }
 
-fn repository_root(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+fn repository_root<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, String> {
     crate::app_paths::data_root(app)
 }
 
@@ -749,13 +764,36 @@ pub(crate) fn with_unsealed_content_session<T>(
     session_id: &str,
     operation: impl FnOnce(&DurableCasJob) -> Result<T, crate::native_file_jobs::NativeJobError>,
 ) -> Result<T, crate::native_file_jobs::NativeJobError> {
+    with_content_session(app, session_id, |job| {
+        if job.is_sealed() || job.pin_count() != 0 {
+            return Err(crate::native_file_jobs::NativeJobError::new("invalid-input", "Native content is not awaiting asset mapping"));
+        }
+        operation(job)
+    })
+}
+
+pub(crate) fn with_content_session<T>(
+    app: &AppHandle,
+    session_id: &str,
+    operation: impl FnOnce(&DurableCasJob) -> Result<T, crate::native_file_jobs::NativeJobError>,
+) -> Result<T, crate::native_file_jobs::NativeJobError> {
     use crate::native_file_jobs::NativeJobError;
     let root = repository_root(app).map_err(|error| NativeJobError::new("store-error", error))?;
     let state = app.state::<DurableCasJobState>();
+    with_content_session_at_root(&state, &root, session_id, operation)
+}
+
+fn with_content_session_at_root<T>(
+    state: &DurableCasJobState,
+    root: &std::path::Path,
+    session_id: &str,
+    operation: impl FnOnce(&DurableCasJob) -> Result<T, crate::native_file_jobs::NativeJobError>,
+) -> Result<T, crate::native_file_jobs::NativeJobError> {
+    use crate::native_file_jobs::NativeJobError;
     let mut jobs = state.jobs.lock().map_err(|error| NativeJobError::new("store-error", error.to_string()))?;
-    let job = recover_job(&mut jobs, &root, session_id).map_err(|error| NativeJobError::new("invalid-input", error))?;
-    if job.kind() != CasJobKind::CardOrModuleContentImport || job.is_sealed() || job.is_released() || job.pin_count() != 0 {
-        return Err(NativeJobError::new("invalid-input", "Native content is not awaiting asset mapping"));
+    let job = recover_job(&mut jobs, root, session_id).map_err(|error| NativeJobError::new("invalid-input", error))?;
+    if job.kind() != CasJobKind::CardOrModuleContentImport || job.is_released() {
+        return Err(NativeJobError::new("invalid-input", "Native content custody is unavailable"));
     }
     operation(job)
 }
@@ -1185,18 +1223,83 @@ mod tests {
         status
     }
 
+    #[test]
+    fn prepared_content_custody_allows_repeated_reads_until_release() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        let mut store = PersistentStore::open(root).unwrap();
+        let state = DurableCasJobState::default();
+        let mut job = DurableCasJob::begin(root, "content-custody", CasJobKind::CardOrModuleContentImport,
+            CasJobOwner::content_import("content-custody"), 1).unwrap();
+        let read = || with_content_session_at_root(&state, root, "content-custody", |job| Ok(job.pin_count()));
+        drop(job);
+        assert_eq!(read().unwrap(), 0);
+        assert_eq!(read().unwrap(), 0);
+        {
+            let mut jobs = state.jobs.lock().unwrap();
+            let job = jobs.get_mut("content-custody").unwrap();
+            job.prepare_bytes(&PayloadCas::new(root).unwrap(), b"synthetic content", CasObjectRole::DirectObject).unwrap();
+            job.seal(&mut store, 1).unwrap();
+        }
+        assert_eq!(read().unwrap(), 1);
+        assert_eq!(read().unwrap(), 1);
+        release_job(&mut state.jobs.lock().unwrap(), root, "content-custody", CasReleaseOutcome::Committed).unwrap();
+        assert!(read().is_err());
+        job = DurableCasJob::begin(root, "content-custody", CasJobKind::DirectAssetOrInlayWrite,
+            CasJobOwner::page_write("content-custody"), 1).unwrap();
+        drop(job);
+        assert!(read().is_err());
+        with_content_session_at_root(&state, root, "missing", |_| Ok(())).unwrap_err();
+    }
+
+    #[test]
+    fn prepared_content_read_holds_custody_until_the_callback_finishes() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let directory = TempDir::new().unwrap();
+        let root = directory.path().to_owned();
+        let _store = PersistentStore::open(&root).unwrap();
+        drop(DurableCasJob::begin(&root, "content-read", CasJobKind::CardOrModuleContentImport,
+            CasJobOwner::content_import("content-read"), 1).unwrap());
+        let state = Arc::new(DurableCasJobState::default());
+        let (entered, wait_entered) = mpsc::channel();
+        let (resume, wait_resume) = mpsc::channel();
+        let reader = {
+            let state = state.clone(); let root = root.clone();
+            std::thread::spawn(move || with_content_session_at_root(&state, &root, "content-read", |_| {
+                entered.send(()).unwrap(); wait_resume.recv().unwrap(); Ok(())
+            }))
+        };
+        wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (released, wait_released) = mpsc::channel();
+        let releaser = {
+            let state = state.clone(); let root = root.clone();
+            std::thread::spawn(move || {
+                let result = release_job(&mut state.jobs.lock().unwrap(), &root, "content-read", CasReleaseOutcome::Aborted);
+                released.send(result).unwrap();
+            })
+        };
+        assert!(wait_released.recv_timeout(Duration::from_millis(100)).is_err());
+        resume.send(()).unwrap();
+        reader.join().unwrap().unwrap();
+        wait_released.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        releaser.join().unwrap();
+        assert!(with_content_session_at_root(&state, &root, "content-read", |_| Ok(())).is_err());
+    }
+
     fn sweep(
         state: &DurableCasJobState,
         store: &PersistentStore,
         native: &[NativeJobStatus],
-        device_session_active: bool,
+        device_job: Option<&str>,
     ) {
         let native_jobs = || -> Result<Vec<NativeJobStatus>, String> { Ok(native.to_vec()) };
         let open_store = || store.open_native_job_store().map_err(|error| error.to_string());
         state
             .sweep_after_page_start(store.repository_root(), &CasJobOwnerProbe {
                 native_jobs: &native_jobs,
-                device_session_active,
+                device_job_owned: &|id| Ok(device_job == Some(id)),
+                external_job_active: &|_| Ok(false),
                 open_store: &open_store,
             })
             .unwrap();
@@ -1326,7 +1429,7 @@ mod tests {
         save_publication_segment(root, "publication-saved");
         let (held, _) = journal(&mut store, "native-held", CasJobOwner::native_file_job("native-held"), false);
 
-        sweep(&state, &store, &native, false);
+        sweep(&state, &store, &native, None);
 
         assert!(state.jobs.lock().unwrap().is_empty());
         assert_eq!(
@@ -1336,7 +1439,6 @@ mod tests {
                 running_export.job_id.as_str(),
                 published.job_id.as_str(),
                 "publication-saved",
-                "compaction",
                 "native-held",
             ]
             .map(str::to_owned)
@@ -1347,18 +1449,77 @@ mod tests {
     }
 
     #[test]
-    fn a_device_restore_session_keeps_the_journals_of_finished_native_jobs() {
+    fn a_device_restore_session_keeps_only_its_own_finished_native_job() {
         let directory = TempDir::new().unwrap();
         let mut store = PersistentStore::open(directory.path()).unwrap();
         let finished = native_status(NativeJobKind::RestoreBlockRisuSave, NativeJobState::Failed);
         drop(journal(&mut store, &finished.job_id, CasJobOwner::native_file_job(&finished.job_id), false));
+        drop(journal(&mut store, "unrelated", CasJobOwner::native_file_job("unrelated"), false));
         let state = DurableCasJobState::default();
 
-        sweep(&state, &store, &[finished.clone()], true);
+        sweep(&state, &store, &[finished.clone()], Some(&finished.job_id));
         assert_eq!(journal_ids(directory.path()), [finished.job_id.clone()].into());
 
-        sweep(&state, &store, &[finished], false);
+        sweep(&state, &store, &[finished], None);
         assert!(journal_ids(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn a_compaction_worker_keeps_its_journal_only_until_its_actual_handle_settles() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        let mut store = PersistentStore::open(root).unwrap();
+        let (worker, _) = journal(&mut store, "compaction-worker", CasJobOwner::external_compaction("compaction-worker"), false);
+        let state = DurableCasJobState::default();
+        sweep(&state, &store, &[], None);
+        assert_eq!(journal_ids(root), ["compaction-worker".to_owned()].into());
+        drop(worker);
+        sweep(&state, &store, &[], None);
+        assert!(journal_ids(root).is_empty());
+    }
+
+    #[test]
+    fn a_device_restore_after_restart_keeps_only_its_exact_journal() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        let mut store = PersistentStore::open(root).unwrap();
+        for id in ["device-restore", "ended-native"] {
+            drop(journal(&mut store, id, CasJobOwner::from_another_process(CasJobOwnerKind::NativeFileJob, id), false));
+        }
+        let state = DurableCasJobState::default();
+        sweep(&state, &store, &[], Some("device-restore"));
+        assert_eq!(journal_ids(root), ["device-restore".to_owned()].into());
+        sweep(&state, &store, &[], None);
+        assert!(journal_ids(root).is_empty());
+    }
+
+    #[test]
+    fn unreadable_device_ownership_keeps_native_journals_for_retry() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        let mut store = PersistentStore::open(root).unwrap();
+        drop(journal(&mut store, "unknown-device", CasJobOwner::native_file_job("unknown-device"), false));
+        let open_store = || store.open_native_job_store().map_err(|error| error.to_string());
+        let probe = CasJobOwnerProbe { native_jobs:&|| Ok(Vec::new()),
+            device_job_owned:&|_| Err("synthetic unreadable session".into()),
+            external_job_active:&|_| Ok(false), open_store:&open_store };
+        assert!(DurableCasJobState::default().sweep_after_page_start(root, &probe).is_err());
+        assert_eq!(journal_ids(root), ["unknown-device".to_owned()].into());
+    }
+
+    #[test]
+    fn a_settlement_sweep_preserves_the_current_pages_open_sessions() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        let mut store = PersistentStore::open(root).unwrap();
+        let state = DurableCasJobState::default();
+        let (held, _) = journal(&mut store, "current-page", CasJobOwner::page_write("current-page"), false);
+        state.jobs.lock().unwrap().insert("current-page".into(), held);
+        let open_store = || store.open_native_job_store().map_err(|error| error.to_string());
+        AbandonedCasJobs::snapshot(root).release(&CasJobOwnerProbe {native_jobs:&||Ok(Vec::new()),
+            device_job_owned:&|_|Ok(false), external_job_active:&|_|Ok(false), open_store:&open_store}).unwrap();
+        assert_eq!(journal_ids(root), ["current-page".to_owned()].into());
+        assert_eq!(state.jobs.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -1387,7 +1548,7 @@ mod tests {
         let (held, _) = journal(&mut store, "held", earlier(CasJobOwnerKind::NativeFileJob, "held"), true);
         assert!(!collect_durable_cas_job_roots(root).blockers.is_empty());
 
-        sweep(&DurableCasJobState::default(), &store, &[running], false);
+        sweep(&DurableCasJobState::default(), &store, &[running], None);
 
         assert_eq!(
             journal_ids(root),

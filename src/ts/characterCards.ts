@@ -1,8 +1,9 @@
 import { assertModuleMCPImportAllowed } from './process/mcp/moduleImport'
+import { decodeImportUtf8, parseImportJson, type ParsedImportJson } from './importUtf8'
 import { runContentImport } from './storage/contentImportOperation'
 import { writable, type Writable } from 'svelte/store'
 import { alertCardExport, alertClear, alertConfirm, alertError, alertInput, alertMd, alertNormal, alertRisuServiceTOS, alertStore, alertWait } from "./alert"
-import { defaultSdDataFunc, type character, setDatabase, type customscript, type loreSettings, type loreBook, type triggerscript, importPreset, type groupChat, setCurrentCharacter, getCurrentCharacter, getDatabase, setDatabaseLite, appVer } from "./storage/database.svelte"
+import { defaultSdDataFunc, type character, setDatabase, type customscript, type loreSettings, type loreBook, type triggerscript, importPreset, setCurrentCharacter, getCurrentCharacter, getDatabase, setDatabaseLite, appVer } from "./storage/database.svelte"
 import { checkNullish, decryptBuffer, isKnownUri, selectFileByDom, sleep } from "./util"
 import { language } from "src/lang"
 import { v4 as uuidv4, v4 } from 'uuid';
@@ -182,6 +183,7 @@ export async function importCharacter() {
 export async function importCharacterProcess<T extends boolean = false>(f: {
     name: string
     data: Uint8Array | File | ReadableStream<Uint8Array>
+    parsedJson?: ParsedImportJson
     lightningRealmImport?: boolean
     returnCharacter?: T //note That this option only works with v3 charx
 }): Promise<T extends true ? character | number | null : number | null> {
@@ -216,7 +218,7 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
             f.data instanceof Uint8Array
                 ? f.data
                 : new Uint8Array(await f.data.arrayBuffer())
-        const da = JSON.parse(Buffer.from(data).toString('utf-8'))
+        const da = (f.parsedJson ?? parseImportJson(data)).value
         const importedId = await importCharacterCardSpec(da)
         if (importedId) {
             return getDatabase().characters.findIndex(
@@ -455,7 +457,7 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
                 return
             }
             const metaData: RccCardMetaData = JSON.parse(
-                Buffer.from(parts[4], 'base64').toString('utf-8'),
+                decodeImportUtf8(Buffer.from(parts[4], 'base64')),
             )
             if (metaData.usePassword) {
                 const password = await alertInput(language.inputCardPassword)
@@ -468,7 +470,7 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
                             password,
                         )
                         const charaData: CharacterCardV2Risu = JSON.parse(
-                            Buffer.from(decrypted).toString('utf-8'),
+                            decodeImportUtf8(new Uint8Array(decrypted)),
                         )
                         const importedId = await importCharacterCardSpec(
                             charaData,
@@ -492,7 +494,7 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
                 const decrypted = await decryptBuffer(encrypted, 'RISU_NONE')
                 try {
                     const charaData: CharacterCardV2Risu = JSON.parse(
-                        Buffer.from(decrypted).toString('utf-8'),
+                        decodeImportUtf8(new Uint8Array(decrypted)),
                     )
                     const importedId = await importCharacterCardSpec(
                         charaData,
@@ -513,7 +515,7 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
         }
     }
     const parsed = JSON.parse(
-        Buffer.from(readedChara, 'base64').toString('utf-8'),
+        decodeImportUtf8(Buffer.from(readedChara, 'base64')),
     )
     //fix readedChara version pointing number instead of string because of previous version
     if (
@@ -526,9 +528,7 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
     }
 
     if (parsed.spec !== 'chara_card_v2' && parsed.spec !== 'chara_card_v3') {
-        const charaData: OldTavernChar = JSON.parse(
-            Buffer.from(readedChara, 'base64').toString('utf-8'),
-        )
+        const charaData: OldTavernChar = parsed
         const imgp = await saveAsset(img)
         const importedId = await commitDetachedCharacter(
             convertOffSpecCards(charaData, imgp),
@@ -626,7 +626,7 @@ export async function characterURLImport() {
     if (hash.startsWith('#import_module=')) {
         const data = hash.replace('#import_module=', '')
         const importData = JSON.parse(
-            Buffer.from(decodeURIComponent(data), 'base64').toString('utf-8'),
+            decodeImportUtf8(Buffer.from(decodeURIComponent(data), 'base64')),
         )
         try { assertModuleMCPImportAllowed(importData) }
         catch (error) { alertError(error); return false }
@@ -876,9 +876,7 @@ export async function exportChar(charaID:number):Promise<string> {
     const db = getDatabase({snapshot: true})
     let char = safeStructuredClone(db.characters[charaID])
 
-    if(char.type === 'group'){
-        return ''
-    }
+
 
     const option = await alertCardExport()
     if(option.type === ''){
@@ -1490,7 +1488,6 @@ async function importCharacterCardSpecWithPolicy<T extends boolean = false>(
     }
 
     if (card.spec === 'chara_card_v3') {
-        char.group_only_greetings = card.data.group_only_greetings ?? []
         char.nickname = card.data.nickname ?? ''
         char.source =
             card.data.source ?? card.data?.extensions?.risuai?.source ?? []
@@ -2129,7 +2126,7 @@ export function createBaseV3(char:character){
                 },
                 depth_prompt: char.depth_prompt
             },
-            group_only_greetings: char.group_only_greetings ?? [],
+            group_only_greetings: [],
             nickname: char.nickname ?? '',
             source: char.source ?? [],
             creation_date: char.creation_date ?? 0,
@@ -2209,9 +2206,7 @@ export async function shareRisuHub2(char:character, arg:{
             const resJSON = await res.json()
             alertMd(resJSON.message)
             const currentChar = getCurrentCharacter()
-            if(currentChar.type === 'group'){
-                return
-            }
+
             currentChar.realmId = resJSON.id
             setCurrentCharacter(currentChar)
         }   
@@ -2354,10 +2349,8 @@ export async function getHubResources(id:string) {
     return Buffer.from(await (res).arrayBuffer())
 }
 
-export function isCharacterHasAssets(char:character|groupChat){
-    if(char.type === 'group'){
-        return false
-    }
+export function isCharacterHasAssets(char:character){
+
 
     if(char.additionalAssets && char.additionalAssets.length > 0){
         return true

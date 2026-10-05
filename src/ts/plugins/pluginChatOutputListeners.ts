@@ -1,3 +1,4 @@
+import type { PinnedConversationPosition } from './pinnedConversationPosition'
 import type {
     PluginChatOutputProjector,
     PluginCompleteCharacter,
@@ -19,8 +20,7 @@ export interface ChatOutputDispatchInput {
     listeners: Set<ChatOutputListener>
     char: PluginCompleteCharacter
     chat: PluginCompleteCharacter['chats'][number]
-    characterIndex: number
-    chatIndex: number
+    resolvePosition(characterId: string, conversationId: string): Promise<PinnedConversationPosition>
     messageIndex: number
     projectScalable: PluginChatOutputProjector
     onError(error: unknown): void
@@ -47,17 +47,23 @@ export async function dispatchChatOutputListeners(
     if (input.signal?.aborted) return
     if (input.listeners.size === 0) return
     const captured = [...input.listeners]
+    const characterId = input.char.chaId
+    const conversationId = input.chat.id!
+    const messageIndex = input.messageIndex
+    let position: PinnedConversationPosition
     let event: {
         char: PluginCompleteCharacter
         chat: PluginCompleteCharacter['chats'][number]
     }
     try {
         event = await input.projectScalable({
-            characterId: input.char.chaId,
-            conversationId: input.chat.id!,
+            characterId,
+            conversationId,
             liveCharacter: input.char,
             liveConversation: input.chat,
         })
+        if (input.signal?.aborted) return
+        position = await input.resolvePosition(characterId, conversationId)
     } catch (error) {
         if (input.signal?.aborted) return
         // All listeners of one output event share a single consistent event
@@ -73,9 +79,8 @@ export async function dispatchChatOutputListeners(
             await listener({
                 char: event.char,
                 chat: event.chat,
-                characterIndex: input.characterIndex,
-                chatIndex: input.chatIndex,
-                messageIndex: input.messageIndex,
+                ...position,
+                messageIndex,
             })
         } catch (error) {
             input.onError(error)

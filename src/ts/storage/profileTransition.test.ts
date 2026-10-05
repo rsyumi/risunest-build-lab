@@ -45,40 +45,37 @@ function fixtureDatabase(): Database {
         characters: [
             {
                 type: 'character',
-                chaId: 'member-a',
+                chaId: 'character-a',
                 name: 'Alpha',
                 personality: 'alpha detail',
                 chats: [{
-                    id: 'member-chat',
-                    name: 'Member chat',
-                    message: [{ role: 'assistant', data: 'member history' }],
+                    id: 'character-chat',
+                    name: 'Character chat',
+                    message: [{ role: 'assistant', data: 'character history' }],
                 }],
             },
             {
                 type: 'character',
-                chaId: 'member-b',
+                chaId: 'character-b',
                 name: 'Beta',
                 personality: 'beta detail',
                 chats: [],
             },
             {
-                type: 'group',
-                chaId: 'group-a',
-                name: 'Group',
-                characters: ['member-a', 'member-b'],
-                characterTalks: [1, 1],
-                characterActive: [true, true],
+                type: 'character',
+                chaId: 'selected-a',
+                name: 'Selected',
                 chatPage: 1,
                 chats: [
                     {
-                        id: 'group-old',
-                        name: 'Old group chat',
-                        message: [{ role: 'assistant', data: 'old group history' }],
+                        id: 'chat-old',
+                        name: 'Old chat',
+                        message: [{ role: 'assistant', data: 'old character history' }],
                     },
                     {
-                        id: 'group-selected',
-                        name: 'Selected group chat',
-                        message: [{ role: 'assistant', data: 'selected group history' }],
+                        id: 'chat-selected',
+                        name: 'Selected chat',
+                        message: [{ role: 'assistant', data: 'selected character history' }],
                     },
                 ],
             },
@@ -228,7 +225,7 @@ describe('paged profile projections', () => {
 
         expect(result).toEqual(fixture)
         expect(result).not.toBe(fixture)
-        expect(result.characters[2].chats[1].message[0].data).toBe('selected group history')
+        expect(result.characters[2].chats[1].message[0].data).toBe('selected character history')
         expect(Object.keys(result.pluginCustomStorage)).toEqual([
             '0',
             'zeta',
@@ -241,16 +238,16 @@ describe('paged profile projections', () => {
         expect(fullClone).not.toHaveBeenCalled()
     })
 
-    it('projects only the selected conversation and group member detail pins from pages', async () => {
+    it('projects only the selected conversation and explicit character detail pins from pages', async () => {
         const reader = createReader(fixtureDatabase())
         const fullClone = vi.spyOn(globalThis, 'structuredClone').mockImplementation(() => {
             throw new Error('full structured clone is forbidden')
         })
 
         const result = await projectPinnedScalableWorkingSet(reader, {
-            selectedCharacterId: 'group-a',
-            selectedConversationId: 'group-selected',
-            activeCharacterIds: new Set(['group-a', 'member-a', 'member-b']),
+            selectedCharacterId: 'selected-a',
+            selectedConversationId: 'chat-selected',
+            activeCharacterIds: new Set(['selected-a', 'character-a', 'character-b']),
         })
 
         expect(result.username).toBe('Pinned profile')
@@ -267,9 +264,8 @@ describe('paged profile projections', () => {
         })
         expect(result.characters[1].personality).toBe('beta detail')
         expect(result.characters[1].chats).toEqual([])
-        expect(result.characters[2].type).toBe('group')
         expect(result.characters[2].chats[0].message).toEqual([])
-        expect(result.characters[2].chats[1].message[0].data).toBe('selected group history')
+        expect(result.characters[2].chats[1].message[0].data).toBe('selected character history')
         expect(result.characters[2].chatPage).toBe(1)
         expect(isCatalogCharacterStub(result.characters[3])).toBe(true)
         expect(result.characters[3]).not.toHaveProperty('personality')
@@ -277,10 +273,10 @@ describe('paged profile projections', () => {
         expect(reader.readPreset).toHaveBeenCalledWith('preset-active')
         expect(reader.queryPluginStorage).not.toHaveBeenCalled()
         expect(vi.mocked(reader.queryConversations).mock.calls.filter(
-            ([query]) => query.characterId === 'member-a' || query.characterId === 'member-b',
+            ([query]) => query.characterId === 'character-a' || query.characterId === 'character-b',
         )).toEqual([])
         expect(reader.readConversation).toHaveBeenCalledOnce()
-        expect(reader.readConversation).toHaveBeenCalledWith('group-a', 'group-selected')
+        expect(reader.readConversation).toHaveBeenCalledWith('selected-a', 'chat-selected')
         expect(fullClone).not.toHaveBeenCalled()
     })
 
@@ -300,8 +296,8 @@ describe('paged profile projections', () => {
         }
 
         await expect(projectScalableWorkingSetAtRevision(successStore, 7, {
-            selectedCharacterId: 'group-a',
-            selectedConversationId: 'group-selected',
+            selectedCharacterId: 'selected-a',
+            selectedConversationId: 'chat-selected',
         })).resolves.toMatchObject({ pluginCustomStorage: {} })
 
         const primary = new Error('paged projection failed')
@@ -320,7 +316,7 @@ describe('paged profile projections', () => {
         }
 
         await expect(projectScalableWorkingSetAtRevision(failedStore, 7, {
-            selectedCharacterId: 'group-a',
+            selectedCharacterId: 'selected-a',
         })).rejects.toBe(primary)
         expect(successStore.materializeDatabase).not.toHaveBeenCalled()
         expect(failedStore.materializeDatabase).not.toHaveBeenCalled()
@@ -375,13 +371,13 @@ describe('scalable profile return', () => {
                 capturePluginStorage: () => database.pluginCustomStorage,
                 capturePresets: () => database.botPresets,
                 captureSelectedCharacter: () => database.characters.find(
-                    (character) => character.chaId === 'group-a',
+                    (character) => character.chaId === 'selected-a',
                 ) ?? null,
                 captureCharacter: (id) => database.characters.find(
                     (character) => character.chaId === id,
                 ) ?? null,
-                getSelectedCharacterId: () => 'group-a',
-                getSelectedConversationId: () => 'group-selected',
+                getSelectedCharacterId: () => 'selected-a',
+                getSelectedConversationId: () => 'chat-selected',
                 replaceDatabase,
                 restoreSelection,
                 publishCharacter: vi.fn(),
@@ -401,14 +397,14 @@ describe('scalable profile return', () => {
         expect(store.acquireRevision).toHaveBeenCalledWith(7)
         expect(release).toHaveBeenCalledTimes(2)
         expect(database.pluginCustomStorage).toEqual({})
-        expect(database.characters[0].personality).toBe('alpha detail')
-        expect(database.characters[1].personality).toBe('beta detail')
+        expect(isCatalogCharacterStub(database.characters[0])).toBe(true)
+        expect(isCatalogCharacterStub(database.characters[1])).toBe(true)
         expect(database.characters[2].chats[0].message).toEqual([])
         expect(database.characters[2].chats[1].message[0].data).toBe(
-            'selected group history',
+            'selected character history',
         )
         expect(isCatalogCharacterStub(database.characters[3])).toBe(true)
-        expect(restoreSelection).toHaveBeenCalledWith('group-a', 'group-selected')
+        expect(restoreSelection).toHaveBeenCalledWith('selected-a', 'chat-selected')
     })
 
     it('flushes a pending save before pinning the committed revision', async () => {
@@ -431,8 +427,8 @@ describe('scalable profile return', () => {
                 captureCharacter: (id) => database.characters.find(
                     (character) => character.chaId === id,
                 ) ?? null,
-                getSelectedCharacterId: () => 'group-a',
-                getSelectedConversationId: () => 'group-selected',
+                getSelectedCharacterId: () => 'selected-a',
+                getSelectedConversationId: () => 'chat-selected',
                 replaceDatabase,
                 publishCharacter: vi.fn(),
                 publishConversation: vi.fn(),
@@ -459,7 +455,7 @@ describe('scalable profile return', () => {
         async (change) => {
             const authoritative = fixtureDatabase()
             let database = clone(authoritative)
-            let selectedCharacterId = 'group-a'
+            let selectedCharacterId = 'selected-a'
             const page = deferred<CharacterPage>()
             const leaseRelease = vi.fn(async () => undefined)
             const lease = createReader(authoritative, 7, leaseRelease)
@@ -483,7 +479,7 @@ describe('scalable profile return', () => {
                         (character) => character.chaId === id,
                     ) ?? null,
                     getSelectedCharacterId: () => selectedCharacterId,
-                    getSelectedConversationId: () => 'group-selected',
+                    getSelectedConversationId: () => 'chat-selected',
                     replaceDatabase,
                     publishCharacter: vi.fn(),
                     publishConversation: vi.fn(),

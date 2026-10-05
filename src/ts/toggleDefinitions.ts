@@ -6,7 +6,7 @@ import { parseToggleSyntax } from './util'
 /** Toggle definitions shown in the sidebar: global prompt toggles, enabled modules, and the selected character's own toggles. */
 export function currentToggleDefinitions(): string {
     const character = DBState.db.characters[get(selectedCharID)]
-    const own = character?.type === 'character' ? (character.customModuleToggle ?? '') : ''
+    const own = !!character ? (character.customModuleToggle ?? '') : ''
     return `${DBState.db.customPromptTemplateToggle ?? ''}\n${getModuleToggles()}\n${own}`
 }
 

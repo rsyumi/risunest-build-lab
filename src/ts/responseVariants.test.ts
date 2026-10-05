@@ -3,11 +3,11 @@ import { createPinnedBackupReferenceAccumulator } from './drive/backupAssets'
 import { captureResponseVariants, projectResponseVariant, responseEditReplacement } from './responseVariants'
 import type { Message } from './storage/database.svelte'
 
-it('keeps group member edits and generation metadata with their selected candidate', () => {
+it('keeps message edits and generation metadata with their selected candidate', () => {
     let id = 0
     const messages: Message[] = [
         { role: 'char', saying: 'a', data: 'A', chatId: 'a' },
-        { role: 'char', saying: 'b', data: 'B', chatId: 'b', time: 42 },
+        { role: 'char', saying: 'a', data: 'B', chatId: 'b', time: 42 },
     ]
     const variants = captureResponseVariants(messages, () => `${++id}`)
     variants.candidates.push({ id: 'other', messages: [{ role: 'char', data: 'Other', time: 12 }] })

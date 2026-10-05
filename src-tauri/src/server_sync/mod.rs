@@ -7,6 +7,7 @@ pub(crate) mod management;
 pub(crate) mod media;
 pub(crate) mod residency;
 pub(crate) mod previous_storage;
+pub(crate) mod progress;
 #[cfg(test)]
 mod tests;
 pub(crate) mod transfer;

@@ -16,6 +16,11 @@
     import LoadingIndicator from '../UI/GUI/LoadingIndicator.svelte';
     import { language } from '../../lang';
     import { navigationActivity } from '../../ts/ui/navigationActivity';
+    import { derived } from 'svelte/store';
+    import { onDestroy } from 'svelte';
+    import { restoreFocusAfterInputBlock } from '../../ts/ui/restoreFocusAfterInputBlock';
+    const navigationBlocked = derived(navigationActivity, activity => activity !== null)
+    onDestroy(restoreFocusAfterInputBlock(navigationBlocked))
     let openChatList = $state(false)
     let openModuleList = $state(false)
 
@@ -37,8 +42,8 @@
     });
 </script>
 
-<div class="relative min-w-0 grow h-full" aria-busy={$navigationActivity !== null}>
-    <div class="relative z-0 min-w-0 h-full" inert={$navigationActivity !== null}>
+<div class="relative min-w-0 grow h-full" aria-busy={$navigationBlocked}>
+    <div class="relative z-0 min-w-0 h-full" inert={$navigationBlocked}>
     {#if DBState.db.theme === 'waifu'}
         <div class="grow h-full flex justify-center relative" style="{bgImg.length < 4 ? wallPaper : bgImg}">
             <SideBarArrow />
@@ -78,7 +83,7 @@
             <BackgroundDom />
             <div style={bgImg} class="h-full w-full" class:max-w-6xl={DBState.db.classicMaxWidth}>
                 {#if $selectedCharID >= 0}
-                    {#if DBState.db.characters[$selectedCharID].viewScreen !== 'none' && (DBState.db.characters[$selectedCharID].type === 'group' || (!DBState.db.characters[$selectedCharID].inlayViewScreen))}
+                    {#if DBState.db.characters[$selectedCharID].viewScreen !== 'none' && (!DBState.db.characters[$selectedCharID].inlayViewScreen)}
                         <ResizeBox />
                     {/if}
                 {/if}

@@ -797,7 +797,7 @@ fn a_plugin_value_rewritten_with_its_size_reaches_the_outbox() {
     check_repair_and_undo(
         &mut store,
         &numbered(vec![
-            drop_reference("plugin", "plugin-a/saved", "$.icon"),
+            drop_reference("plugin-storage", r#"{"owner":"plugin-a","key":"saved"}"#, "$.icon"),
             normalize("plugin_storage"),
         ]),
         &[unit(&["plugin", "plugin-a", "saved"])],
@@ -954,24 +954,77 @@ fn keeping_the_single_root_changes_and_queues_nothing() {
     check_step(&mut store, "undo", &before, &[]);
 }
 
+fn diagnosis(store: &mut PersistentStore) -> crate::data_health::ScanResult {
+    let revision = store.revision().unwrap();
+    let lease = store.acquire_revision(revision).unwrap().lease;
+    let reader = store.data_health_reader(&lease).unwrap();
+    let findings = reader.scan(2000, &crate::local_backup::NeverCancelled).unwrap();
+    drop(reader);
+    store.release_revision(&lease).unwrap();
+    crate::data_health::ScanResult::new(revision, 1, crate::data_health::ScanDepth::Quick, findings)
+}
+
+fn diagnosed_candidates(store: &mut PersistentStore, accept: impl Fn(&RepairAction) -> bool) -> Vec<RepairCandidate> {
+    let result = diagnosis(store);
+    let selected = crate::data_health::repair::plan(&result).into_iter().filter(|candidate| accept(&candidate.action)).collect::<Vec<_>>();
+    assert!(!selected.is_empty(), "diagnosis produced no matching repair: {:?}", result.items);
+    selected
+}
+
+fn json_record(store: &PersistentStore, table: &str, identity: &[&str]) -> Value {
+    let definition = TABLES.iter().find(|item| item.name == table).unwrap();
+    let identity = identity.iter().map(|part| (*part).to_owned()).collect::<Vec<_>>();
+    let row = stored_row(&store.connection, definition, &active_generation(&store.connection).unwrap(), &identity).unwrap().unwrap();
+    let column = match table { "bot_presets" | "plugin_storage" => "value", _ => "detail" };
+    let index = definition.columns.iter().position(|(name, _)| *name == column).unwrap();
+    serde_json::from_str(row[index].as_deref().unwrap()).unwrap()
+}
+
 #[test]
-fn orphan_recovery_is_refused_by_the_gate_and_changes_nothing() {
+fn diagnosed_orphan_recovery_preserves_payloads_and_survives_restart() {
     for (table, damage) in [
         ("conversations", "DELETE FROM characters WHERE generation=?1 AND character_id='char-b'"),
         ("messages", "DELETE FROM conversations WHERE generation=?1 AND character_id='char-b' AND conversation_id='conv-c'"),
     ] {
-        let (_directory, mut store) = library();
+        let (directory, mut store) = library();
         let generation = active_generation(&store.connection).unwrap();
+        let payload: String = store.connection.query_row("SELECT value FROM messages WHERE generation=?1 AND character_id='char-b' AND conversation_id='conv-c'", [&generation], |row| row.get(0)).unwrap();
         store.connection.execute(damage, [&generation]).unwrap();
-        let before = queued(&store);
+        let selected = diagnosed_candidates(&mut store, |action| matches!(action, RepairAction::RecoverOrphans { table: subject } if subject == table));
         let revision = store.revision().unwrap();
-        let error = store
-            .apply_repair(revision, &[candidate(RepairAction::RecoverOrphans { table: table.into() })], 10)
-            .unwrap_err();
-        assert!(matches!(error, StoreError::Validation { .. }), "{table}: {error:?}");
-        assert_eq!(store.revision().unwrap(), revision);
-        assert_eq!(queued(&store), before, "{table}: a refused repair queues nothing");
+        assert!(matches!(store.apply_repair(revision - 1, &selected, 10), Err(StoreError::RevisionConflict { .. })));
+        let (repaired, journal) = store.apply_repair(revision, &selected, 10).unwrap();
+        assert!(!diagnosis(&mut store).items.iter().any(|item| item.code == crate::data_health::codes::RECORD_ORPHAN));
+        assert!(json_record(&store, "characters", &["char-b"]).get("chats").is_none());
+        assert!(json_record(&store, "conversations", &["char-b", "conv-c"]).get("message").is_none());
+        if table == "conversations" { assert_eq!(json_record(&store, "characters", &["char-b"])["trashTime"], 10); }
+        assert_eq!(unpublished(&mut store), Vec::<UnitKey>::new());
+        drop(store);
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        assert_eq!(store.revision().unwrap(), repaired.revision);
+        let retained: String = store.connection.query_row("SELECT value FROM messages WHERE generation=?1 AND character_id='char-b' AND conversation_id='conv-c'", [&generation], |row| row.get(0)).unwrap();
+        assert_eq!(retained, payload);
+        let (_, skipped) = store.undo_repair(&journal, repaired.revision).unwrap();
+        assert!(skipped.is_empty());
+        assert!(diagnosis(&mut store).items.iter().any(|item| item.code == crate::data_health::codes::RECORD_ORPHAN));
+        assert_eq!(unpublished(&mut store), Vec::<UnitKey>::new());
+        let retained: String = store.connection.query_row("SELECT value FROM messages WHERE generation=?1 AND character_id='char-b' AND conversation_id='conv-c'", [&generation], |row| row.get(0)).unwrap();
+        assert_eq!(retained, payload);
     }
+}
+
+#[test]
+fn orphan_recovery_keeps_the_validation_gate_for_invalid_payloads() {
+    let (_directory, mut store) = library();
+    let generation = active_generation(&store.connection).unwrap();
+    store.connection.execute("DELETE FROM conversations WHERE generation=?1 AND character_id='char-b' AND conversation_id='conv-c'", [&generation]).unwrap();
+    store.connection.execute("UPDATE messages SET value='[]' WHERE generation=?1 AND character_id='char-b'", [&generation]).unwrap();
+    let selected = diagnosed_candidates(&mut store, |action| matches!(action, RepairAction::RecoverOrphans { .. }));
+    let revision = store.revision().unwrap();
+    let before = queued(&store);
+    assert!(matches!(store.apply_repair(revision, &selected, 10), Err(StoreError::Validation { .. })));
+    assert_eq!(store.revision().unwrap(), revision);
+    assert_eq!(queued(&store), before);
 }
 
 /// An undo journal that removes records and restores another, the shape an undo of an orphan
@@ -1079,4 +1132,87 @@ fn an_undo_that_removes_and_restores_records_publishes_both() {
         ])
     );
     assert!(matches!(after[&unit(&["exists", "character", "char-b"])].1, UnitValue::Deleted));
+}
+
+
+#[test]
+fn diagnosis_repairs_duplicate_preset_names_and_scoped_plugin_keys() {
+    for plugin in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let staging = store.replace_begin().unwrap().staging_id;
+        store.replace_put_root(&staging, &json!({})).unwrap();
+        store.replace_put_presets(&staging, &[
+            json!({"id":"preset-a", "name":"Duplicate", "image":"assets/missing.png"}),
+            json!({"id":"preset-b", "name":"Duplicate", "image":"assets/missing.png"}),
+        ]).unwrap();
+        store.replace_commit(&staging, Some(0)).unwrap();
+        let key = "saved/with:separators";
+        store.commit(&crate::persistent_store::WorkingSetCommit {
+            expected_revision: 1,
+            plugin_storage: Some(["plugin/a", "plugin/b"].into_iter().map(|owner| crate::persistent_store::PluginStorageMutation::Set {
+                owner: owner.into(), key: key.into(), value: json!({"icon":"{{inlay::missing}}", "kept":true}),
+            }).collect()), ..Default::default()
+        }).unwrap();
+        let owner_id = if plugin { r#"{"owner":"plugin/a","key":"saved/with:separators"}"#.to_owned() } else { "preset-a".into() };
+        let selected = diagnosed_candidates(&mut store, |action| matches!(action, RepairAction::DropReference { owner, .. } if owner.id == owner_id && owner.kind == if plugin { "plugin-storage" } else { "preset" }));
+        assert_eq!(selected.len(), 1);
+        let revision = store.revision().unwrap();
+        let before = queued(&store);
+        assert!(matches!(store.apply_repair(revision - 1, &selected, 10), Err(StoreError::RevisionConflict { .. })));
+        assert_eq!(queued(&store), before);
+        let (repaired, journal) = store.apply_repair(revision, &selected, 10).unwrap();
+        let changed = if plugin { unit(&["plugin", "plugin/a", key]) } else { unit(&["preset", "preset-a", "image"]) };
+        check_step(&mut store, "diagnosed repair", &before, &[changed.clone()]);
+        let (table, selected_id, other_id, field) = if plugin {
+            ("plugin_storage", vec!["plugin/a", key], vec!["plugin/b", key], "icon")
+        } else { ("bot_presets", vec!["preset-a"], vec!["preset-b"], "image") };
+        assert!(json_record(&store, table, &selected_id).get(field).is_none());
+        assert!(json_record(&store, table, &other_id).get(field).is_some());
+        drop(store);
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        assert!(json_record(&store, table, &selected_id).get(field).is_none());
+        let before = queued(&store);
+        let (_, skipped) = store.undo_repair(&journal, repaired.revision).unwrap();
+        assert!(skipped.is_empty());
+        assert!(json_record(&store, table, &selected_id).get(field).is_some());
+        check_step(&mut store, "diagnosed undo", &before, &[changed]);
+    }
+}
+
+#[test]
+fn diagnosis_normalizes_orders_within_each_parent() {
+    for table in ["conversations", "plugin_storage"] {
+        let (directory, mut store) = library();
+        let revision = store.revision().unwrap();
+        store.commit(&crate::persistent_store::WorkingSetCommit {
+            expected_revision: revision,
+            plugin_storage: Some([("plugin-a","other"), ("plugin-b","saved"), ("plugin-b","other")].into_iter().map(|(owner,key)| crate::persistent_store::PluginStorageMutation::Set {
+                owner: owner.into(), key: key.into(), value: json!({"kept":true}),
+            }).collect()), ..Default::default()
+        }).unwrap();
+        let generation = active_generation(&store.connection).unwrap();
+        let (damage, query) = if table == "conversations" {
+            ("UPDATE conversations SET configured_index=0 WHERE generation=?1", "SELECT character_id,conversation_id,configured_index FROM conversations WHERE generation=?1 ORDER BY 1,3,2")
+        } else {
+            ("UPDATE plugin_storage SET ordinal=0 WHERE generation=?1", "SELECT owner,storage_key,ordinal FROM plugin_storage WHERE generation=?1 ORDER BY 1,3,2")
+        };
+        store.connection.execute(damage, [&generation]).unwrap();
+        let selected = diagnosed_candidates(&mut store, |action| matches!(action, RepairAction::NormalizeRecords { table: subject } if subject == table));
+        let revision = store.revision().unwrap();
+        assert!(matches!(store.apply_repair(revision - 1, &selected, 10), Err(StoreError::RevisionConflict { .. })));
+        let (repaired, journal) = store.apply_repair(revision, &selected, 10).unwrap();
+        let rows = |store: &PersistentStore| store.connection.prepare(query).unwrap().query_map([&generation], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+        let expected = if table == "conversations" { vec![("char-a","conv-a",0),("char-a","conv-b",1),("char-b","conv-c",0)] }
+            else { vec![("plugin-a","other",0),("plugin-a","saved",1),("plugin-b","other",0),("plugin-b","saved",1)] };
+        let expected = expected.into_iter().map(|(owner,key,index)| (owner.to_owned(),key.to_owned(),index)).collect::<Vec<_>>();
+        assert_eq!(rows(&store), expected);
+        assert_eq!(unpublished(&mut store), Vec::<UnitKey>::new());
+        drop(store);
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        assert_eq!(rows(&store), expected);
+        store.undo_repair(&journal, repaired.revision).unwrap();
+        assert!(rows(&store).iter().all(|(_,_,index)| *index == 0));
+        assert_eq!(unpublished(&mut store), Vec::<UnitKey>::new());
+    }
 }

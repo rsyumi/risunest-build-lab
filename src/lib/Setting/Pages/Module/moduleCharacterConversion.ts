@@ -1,6 +1,6 @@
-import type { character, groupChat } from 'src/ts/storage/database.svelte'
+import type { character } from 'src/ts/storage/database.svelte'
 
-type CompleteCharacter = character | groupChat
+type CompleteCharacter = character
 
 interface ModuleCharacterConversionDependencies {
     commit(character: CompleteCharacter, reason: string): Promise<unknown>

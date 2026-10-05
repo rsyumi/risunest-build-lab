@@ -101,6 +101,23 @@ pub(crate) fn small_asset(store: &mut PersistentStore, key: &str, body: &[u8]) -
     store.commit_asset_alias(&alias, store.revision().unwrap()).unwrap();
     hash
 }
+pub(crate) async fn hydrate_receiver(f: &CycleFixture, hash: &str) -> std::fs::File {
+    let connected = super::previous_storage_tests::receiver_connection(f);
+    let mut connections=super::connection_store::ConnectionStore::open(f.directory_b.path()).unwrap();
+    match connections.read(&connected.stored.id) {
+        Ok(stored)=>assert_eq!(serde_json::to_value(stored).unwrap(),serde_json::to_value(&connected.stored).unwrap()),
+        Err(error) if error.kind==ErrorKind::NotFound=>connections.insert(&connected.stored).unwrap(),
+        Err(error)=>panic!("synthetic hydration connection: {error:?}"),
+    }
+    drop(connections);
+    let _source = super::lww_residency::install_test_source_connection(f.directory_b.path(), Arc::new(connected)).unwrap();
+    let root = f.directory_b.path().to_owned();
+    let hash = hash.to_owned();
+    super::worker_observation::spawn_blocking(move || {
+        super::lww_residency::hydrate(&root, &hash, &|| Ok(())).unwrap().unwrap()
+    }).await.unwrap()
+}
+
 pub(crate) struct CycleFixture {
     pub directory_a: tempfile::TempDir,
     pub directory_b: tempfile::TempDir,
@@ -279,7 +296,8 @@ fn a_saved_publication_keeps_its_asset_pins_across_a_page_reload_until_it_is_sen
         let open_store = || f.a.open_native_job_store().map_err(|error| error.to_string());
         DurableCasJobState::default().sweep_after_page_start(&root, &CasJobOwnerProbe {
             native_jobs: &native_jobs,
-            device_session_active: false,
+                device_job_owned: &|_| Ok(false),
+                external_job_active: &|_| Ok(false),
             open_store: &open_store,
         }).unwrap();
         assert_eq!(durable_cas_job_ids(&root).unwrap(), journals);
@@ -287,6 +305,26 @@ fn a_saved_publication_keeps_its_asset_pins_across_a_page_reload_until_it_is_sen
         assert_no_publication_pins_left(&f);
     })
 }
+#[test]
+fn publication_uses_inline_and_local_sources_without_opening_an_unused_server_registry() {
+    run(async {
+        let mut f=CycleFixture::new();
+        set(&mut f.a,&["root","language"],serde_json::json!("synthetic-language"));
+        let body=b"synthetic local publication body";
+        let hash=small_asset(&mut f.a,"synthetic-local-registry",body);
+        let registry=crate::server_sync::residency::Residency::path(f.directory_a.path());
+        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        std::fs::write(&registry,b"synthetic invalid unused SQLite registry").unwrap();
+        assert!(crate::server_sync::residency::Residency::open(f.directory_a.path()).is_err());
+        assert_eq!(f.publish_a().await.segments.0,1);
+        assert_eq!(f.receive_b().await,1);
+        let mut restored=hydrate_receiver(&f,&hash).await;
+        let mut bytes=Vec::new();
+        std::io::Read::read_to_end(&mut restored,&mut bytes).unwrap();
+        assert_eq!(bytes,body);
+    })
+}
+
 #[test]
 fn small_assets_use_authenticated_catalogs_and_present_bootstrap_reads_no_bodies() {
     run(async {
@@ -1170,34 +1208,14 @@ fn large_bodies_stay_remote_then_only_missing_body_hydrates() {
             super::lww_residency::stat(f.directory_b.path(), &hash).unwrap(),
             Some(body.len() as u64)
         );
-        let mut file = super::lww_residency::fulfill(
-            f.directory_b.path(),
-            &hash,
-            f.provider.as_ref(),
-            &f.receiver.repository,
-            &[7; 32],
-            &Cancellation::default(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let mut file = hydrate_receiver(&f, &hash).await;
         let mut restored = Vec::new();
         std::io::Read::read_to_end(&mut file, &mut restored).unwrap();
         assert_eq!(restored, body);
         let hydrated = f.provider.transferred_body_bytes();
         assert!(hydrated.1 > before.1 + body.len() as u64);
         lww_segment::reset_hash_bytes();
-        assert!(super::lww_residency::fulfill(
-            f.directory_b.path(),
-            &hash,
-            f.provider.as_ref(),
-            &f.receiver.repository,
-            &[7; 32],
-            &Cancellation::default()
-        )
-        .await
-        .unwrap()
-        .is_some());
+        drop(hydrate_receiver(&f, &hash).await);
         assert_eq!(f.provider.transferred_body_bytes(), hydrated);
         assert_eq!(lww_segment::take_hash_bytes(), 0);
     })
@@ -2113,6 +2131,87 @@ fn a_new_device_switch_drops_the_old_writers_segments_and_releases_their_files()
     })
 }
 #[test]
+fn fresh_writer_adoption_retries_retired_job_cleanup_and_preserves_other_writers() {
+    run(async {
+        use crate::persistent_store::sync_selection::SyncTarget;
+        let mut f = CycleFixture::new();
+        let authority = bind_external(&mut f.a, &f.sender, &SyncTarget::External("repository".into()));
+        let old_writer = f.a.lww_clock_state().unwrap().writer_id;
+        let other_writer = uuid::Uuid::new_v4().to_string();
+        let library = f.sender.library.clone();
+        // Seed another writer's real pending job without retiring its local work.
+        f.a.device_store().unwrap().connection().execute(
+            "UPDATE device_meta SET writer_id=?1 WHERE singleton=1", [&other_writer],
+        ).unwrap();
+        f.sender.library = "synthetic-other-library".into();
+        set(&mut f.a, &["root", "language"], serde_json::json!("other-sequence"));
+        f.sender.publish(&mut f.a, authority, &[], &Cancellation::default()).await.unwrap();
+        small_asset(&mut f.a, "synthetic-other-asset", b"synthetic unrelated writer asset");
+        let other = seal_unsent(&mut f, authority).await;
+        let other_job = other.asset_job.clone().unwrap();
+        let other_files = crate::persistent_store::external_lww::publication_directory(f.directory_a.path(), &other_job.job_id);
+        f.a.device_store().unwrap().connection().execute(
+            "UPDATE device_meta SET writer_id=?1 WHERE singleton=1", [&old_writer],
+        ).unwrap();
+        f.sender.library = library;
+        set(&mut f.a, &["root", "language"], serde_json::json!("retired-sequence"));
+        f.sender.publish(&mut f.a, authority, &[], &Cancellation::default()).await.unwrap();
+        small_asset(&mut f.a, "synthetic-retired-asset", b"synthetic retired writer asset");
+        let retired = send_unconfirmed(&mut f, authority, false).await;
+        let retired_job = retired.asset_job.clone().unwrap();
+        let retired_files = crate::persistent_store::external_lww::publication_directory(f.directory_a.path(), &retired_job.job_id);
+        let fresh = uuid::Uuid::new_v4().to_string();
+        let entries = |store: &PersistentStore| {
+            serde_json::to_value(store.lww_read_outbox(authority, 256).unwrap().entries).unwrap()
+        };
+        let original = entries(&f.a);
+        let other_metadata = serde_json::to_string(&f.a.external_lww_pending(&other.target, &other_writer).unwrap().unwrap().0).unwrap();
+        assert!(retired_files.exists() && other_files.exists());
+        for (offered_authority, offered_writer) in [
+            (DecimalU64(authority.0 + 1), old_writer.as_str()),
+            (authority, other_writer.as_str()),
+        ] {
+            assert!(f.a.lww_adopt_fresh_writer(offered_authority, offered_writer, &fresh).is_err());
+            assert!(!job_released(&f.a, &retired_job));
+            assert!(!job_released(&f.a, &other_job));
+            assert_eq!(entries(&f.a), original);
+        }
+        f.a.device_store().unwrap().connection().execute_batch(
+            "CREATE TRIGGER stop_fresh_writer BEFORE UPDATE OF writer_id ON device_meta
+             BEGIN SELECT RAISE(FAIL, 'synthetic-writer-adoption-stop'); END;",
+        ).unwrap();
+        assert!(f.a.lww_adopt_fresh_writer(authority, &old_writer, &fresh).is_err());
+        assert!(job_released(&f.a, &retired_job));
+        assert!(!retired_files.exists());
+        assert_eq!(f.a.lww_clock_state().unwrap().writer_id, old_writer);
+        assert_eq!(writer_rows(&f.a, "external_lww_segments", &old_writer), 1);
+        assert_eq!(writer_rows(&f.a, "external_lww_sequences", &old_writer), 1);
+        assert_eq!(entries(&f.a), original);
+        f.a.device_store().unwrap().connection().execute_batch("DROP TRIGGER stop_fresh_writer").unwrap();
+        f.restart_a();
+        set(&mut f.a, &["root", "askRemoval"], serde_json::json!(true));
+        let retained = entries(&f.a);
+        let before = f.a.lww_clock_state().unwrap();
+        let progress = f.a.lww_binding_state().unwrap().progress;
+        f.a.lww_adopt_fresh_writer(authority, &old_writer, &fresh).unwrap();
+        let revision = f.a.device_store().unwrap().revision().unwrap();
+        f.a.lww_adopt_fresh_writer(authority, &old_writer, &fresh).unwrap();
+        assert_eq!(f.a.device_store().unwrap().revision().unwrap(), revision);
+        let after = f.a.lww_clock_state().unwrap();
+        assert_eq!(after.writer_id, fresh);
+        assert_eq!((after.issued, after.accepted, after.binding_authority), (before.issued, before.accepted, authority));
+        assert_eq!(entries(&f.a), retained);
+        assert_eq!(f.a.lww_binding_state().unwrap().progress, progress);
+        assert_eq!(writer_rows(&f.a, "external_lww_segments", &old_writer), 0);
+        assert_eq!(writer_rows(&f.a, "external_lww_sequences", &old_writer), 0);
+        assert_eq!(writer_rows(&f.a, "external_lww_segments", &other_writer), 1);
+        assert_eq!(writer_rows(&f.a, "external_lww_sequences", &other_writer), 1);
+        assert_eq!(serde_json::to_string(&f.a.external_lww_pending(&other.target, &other_writer).unwrap().unwrap().0).unwrap(), other_metadata);
+        assert!(!job_released(&f.a, &other_job));
+        assert!(other_files.exists());
+    })
+}
+#[test]
 fn removing_a_connection_drops_its_settled_and_unsent_segments_and_keeps_a_sent_one_without_files() {
     run(async {
         use crate::persistent_store::sync_selection::SyncTarget;
@@ -2736,8 +2835,7 @@ fn a_large_body_waits_for_its_upload_in_a_file_rather_than_in_the_publication_ro
         assert!(!publication.exists(), "a finished publication leaves its files");
         assert_eq!(f.provider.upload_attempts(&pending.bodies[0].object_id), 1);
         assert_eq!(f.receive_b().await, 1);
-        let mut file = super::lww_residency::fulfill(f.directory_b.path(), &hash, f.provider.as_ref(),
-            &f.receiver.repository, &[7; 32], &Cancellation::default()).await.unwrap().unwrap();
+        let mut file = hydrate_receiver(&f, &hash).await;
         let mut restored = Vec::new();
         std::io::Read::read_to_end(&mut file, &mut restored).unwrap();
         assert!(restored == body);

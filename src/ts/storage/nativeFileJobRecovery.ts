@@ -15,6 +15,7 @@ export interface NativeFileJobRecoveryResult {
     pendingOfficialPublications: string[]
     interruptedRestores: string[]
     libraryRestoreCommitted: boolean
+    pendingSnapshotBodies: NativeFileJobStatus[]
 }
 
 export interface NativeFileJobRecoveryOptions {
@@ -188,6 +189,7 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
     const pendingRestoreAcknowledgements: string[] = []
     const pendingOfficialPublications: string[] = []
     const interruptedRestores: string[] = []
+    const pendingSnapshotBodies: NativeFileJobStatus[] = []
     let libraryRestoreCommitted = false
     for (const job of jobs) {
         const kind = job.kind
@@ -216,9 +218,11 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
                 break
             }
             case 'export-portable-backup':
-            case 'snapshot-bodies':
                 // The app-owned export intent resumes publication after the
                 // maintenance navigation. Never discard its SAF handoff here.
+                break
+            case 'snapshot-bodies':
+                pendingSnapshotBodies.push(job)
                 break
             case 'export-block-risu-save':
             case 'export-raw-recovery':
@@ -253,6 +257,7 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
         pendingOfficialPublications,
         interruptedRestores,
         libraryRestoreCommitted,
+        pendingSnapshotBodies,
     }
 }
 

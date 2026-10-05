@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { IDBFactory, IDBKeyRange, IDBObjectStore } from 'fake-indexeddb'
-import type { Database, groupChat } from './database.svelte'
+import type { Database } from './database.svelte'
 import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
 import { PersistentStorageQuotaError } from './persistentDataStore'
 import { prepareNativePersistenceValue } from './nativePersistenceValue'
@@ -143,16 +143,14 @@ describe('coordinator review regressions', () => {
         expect(coordinator.hasPendingPersistenceWork).toBe(false)
     })
 
-    it('expires 200 trashed characters in bounded batches and repairs live and trashed groups atomically', async () => {
+    it('expires 200 trashed characters in bounded batches', async () => {
         const now = 10 * 24 * 60 * 60 * 1000
         const database = makeDatabase()
         const expired = Array.from({ length: 200 }, (_, index) => ({
             ...structuredClone(database.characters[0]), chaId: `expired-${index}`, trashTime: 1,
         }))
-        const group = { type: 'group', chaId: 'group', name: 'Group', chats: [],
-            characters: ['char-a', 'expired-0', 'expired-199'], characterTalks: [1, 2, 3], characterActive: [true, false, false] } as unknown as groupChat
-        database.characters.push(...expired, group, { ...structuredClone(group), chaId: 'trashed-group', trashTime: now - 1 })
-        database.characterOrder = ['char-a', ...expired.map((value) => value.chaId), 'group', 'trashed-group']
+        database.characters.push(...expired)
+        database.characterOrder = ['char-a', ...expired.map(value => value.chaId)]
         const { coordinator, store } = await durableHarness(database)
         const commit = vi.spyOn(store, 'commit')
         expect(await coordinator.expirePersistentTrash(now)).toBe(200)
@@ -162,23 +160,15 @@ describe('coordinator review regressions', () => {
         expect(deletionBatches.map((batch) => batch?.length)).toEqual([128, 72])
         expect(deletionBatches.flat()).toEqual(expired.map((value) => ['exists', 'character', value.chaId]))
         const restored = await store.materializeDatabase(coordinator.revision)
-        expect(restored.characters.map((value) => value.chaId)).toEqual(['char-a', 'group', 'trashed-group'])
-        for (const id of ['group', 'trashed-group']) {
-            expect(restored.characters.find((value) => value.chaId === id)).toMatchObject({
-                characters: ['char-a'], characterTalks: [1], characterActive: [true],
-            })
-        }
-        expect(restored.characterOrder).toEqual(['char-a', 'group', 'trashed-group'])
+        expect(restored.characters.map((value) => value.chaId)).toEqual(['char-a'])
+        expect(restored.characterOrder).toEqual(['char-a'])
     })
 
-    it('leaves trash and group membership intact when an expiry batch fails', async () => {
+    it('leaves trash intact when an expiry batch fails', async () => {
         const database = makeDatabase()
         database.characters[0].trashTime = 1
         database.characters.push({ ...structuredClone(database.characters[0]), chaId: 'char-b' })
-        database.characters.push({ type: 'group', chaId: 'group', name: 'Group', chats: [],
-            characters: ['char-a', 'char-b'], characterTalks: [0.25, 0.75], characterActive: [true, false],
-        } as unknown as groupChat)
-        database.characterOrder = ['group', 'char-a', 'char-b']
+        database.characterOrder = ['char-a', 'char-b']
         const { coordinator, store } = await durableHarness(database)
         const before = await store.materializeDatabase(coordinator.revision)
         const commit = vi.spyOn(store, 'commit').mockRejectedValueOnce(new Error('synthetic expiry failure'))
@@ -188,10 +178,7 @@ describe('coordinator review regressions', () => {
                 ['exists', 'character', 'char-a'], ['exists', 'character', 'char-b'],
             ])
         expect(await store.materializeDatabase(coordinator.revision)).toEqual(before)
-        expect(database.characters).toHaveLength(3)
-        expect(database.characters.find((value) => value.chaId === 'group')).toMatchObject({
-            characters: ['char-a', 'char-b'], characterTalks: [0.25, 0.75], characterActive: [true, false],
-        })
+        expect(database.characters).toHaveLength(2)
     })
     it('mutates unrelated targets while windowed and obtains a complete lease for the selected target', async () => {
         let database = makeDatabase()
@@ -242,7 +229,7 @@ describe('coordinator review regressions', () => {
         await expect(runtime.upsertPersistentCompleteCharacter('new-id', 'new-character', () => ({
             ...makeDatabase().characters[0], chaId: 'new-id', name: 'New',
         }))).resolves.toBe(true)
-        await expect(runtime.deletePersistentCharacterWithGroupReferences('other', 'unrelated-delete')).resolves.toBe(true)
+        await expect(runtime.deletePersistentCharacter('other', 'unrelated-delete')).resolves.toBe(true)
         expect(runtime.getSelectedConversationMode()).toBe('windowed')
         expect(errors.mock.calls).toEqual([])
         await expect(runtime.mutatePersistentCharacterDetail('char-a', 'selected-detail', ({ character }) => {
@@ -257,7 +244,7 @@ describe('coordinator review regressions', () => {
         expect((await store.readCharacter('new-id'))?.value.name).toBe('New')
     })
 
-    it('preserves root and selected chat edits made while deletion waits on a catalog page', async () => {
+    it('preserves root and selected chat edits made while deletion waits on a character read', async () => {
         const database = makeDatabase()
         database.characters[0].chats = [{ id: 'chat', name: 'Chat', message: [{ role: 'user', data: 'Before' }] } as any]
         database.characters.push({ ...structuredClone(database.characters[0]), chaId: 'delete-me' })
@@ -269,8 +256,8 @@ describe('coordinator review regressions', () => {
         const acquire = store.acquireRevision.bind(store)
         vi.spyOn(store, 'acquireRevision').mockImplementation(async (revision) => {
             const lease = await acquire(revision)
-            const query = lease.queryCharacters.bind(lease)
-            vi.spyOn(lease, 'queryCharacters').mockImplementationOnce(async (input) => {
+            const query = lease.readCharacter.bind(lease)
+            vi.spyOn(lease, 'readCharacter').mockImplementationOnce(async (input) => {
                 const result = await query(input)
                 entered.resolve()
                 await resume.promise
@@ -278,7 +265,7 @@ describe('coordinator review regressions', () => {
             })
             return lease
         })
-        const deleting = coordinator.deletePersistentCharacterWithGroupReferences('delete-me', 'concurrent-delete')
+        const deleting = coordinator.deletePersistentCharacter('delete-me', 'concurrent-delete')
         await entered.promise
         database.username = 'Concurrent root edit'
         database.characters[0].chats[0].message[0].data = 'Concurrent chat edit'
@@ -293,38 +280,6 @@ describe('coordinator review regressions', () => {
         expect((await store.readRoot()).value.username).toBe('Concurrent root edit')
         expect((await store.readConversation('char-a', 'chat'))?.value.message[0].data).toBe('Concurrent chat edit')
         expect(await store.readCharacter('delete-me')).toBeNull()
-    })
-
-    it('rejects deletion when the selected referenced group changes during the catalog scan', async () => {
-        const database = makeDatabase()
-        const group = { type: 'group', chaId: 'group', name: 'Group', chats: [],
-            characters: ['char-a'], characterTalks: [1], characterActive: [true] } as unknown as groupChat
-        database.characters.push(group)
-        const { coordinator, store } = await durableHarness(database, 'group')
-        const entered = deferred<void>()
-        const resume = deferred<void>()
-        const acquire = store.acquireRevision.bind(store)
-        vi.spyOn(store, 'acquireRevision').mockImplementation(async (revision) => {
-            const lease = await acquire(revision)
-            const query = lease.queryCharacters.bind(lease)
-            vi.spyOn(lease, 'queryCharacters').mockImplementationOnce(async (input) => {
-                const result = await query(input)
-                entered.resolve()
-                await resume.promise
-                return result
-            })
-            return lease
-        })
-        const deleting = coordinator.deletePersistentCharacterWithGroupReferences('char-a', 'conflicting-delete')
-        const outcome = expect(deleting).rejects.toThrow()
-        await entered.promise
-        group.name = 'Concurrent group edit'
-        coordinator.markPersistentDataDirty(0)
-        resume.resolve()
-        await outcome
-        expect(await store.readCharacter('char-a')).not.toBeNull()
-        expect((await store.readCharacter('group'))?.value).toMatchObject({ characters: ['char-a'] })
-        await coordinator.flushPendingDataLocally('save-group-edit')
     })
 
     it('maps an IndexedDB quota failure to a typed save error without changing durable content', async () => {

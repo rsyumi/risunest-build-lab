@@ -7,6 +7,8 @@ export interface ServerSyncSchedulerDependencies {
     publishHidden?(): Promise<void>
     failed(error: unknown): void
     recovered?(): void
+    /** Called after a send, receive or clock check starts or settles. */
+    activity?(): void
 }
 
 export const integrityCodes = ['clock-skew', 'incoming-clock-skew', 'accepted-clock-correction-required', 'writer-collision', 'equal-stamp-integrity', 'server-epoch-changed', 'unauthorized', 'invalid-device-token']
@@ -79,7 +81,9 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         }).finally(() => {
             sending = undefined
             if (pushAgain && foreground) { pushAgain = false; void push().catch(() => {}) }
+            dependencies.activity?.()
         })
+        dependencies.activity?.()
         return sending
     }
     const pull = (completeAvailable = false): Promise<void> => {
@@ -90,7 +94,9 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
             receiving = undefined
             if (pullAgain && foreground) { pullAgain = false; void pull().catch(() => {}) }
             else schedulePull()
+            dependencies.activity?.()
         })
+        dependencies.activity?.()
         return receiving
     }
     const connect = () => {
@@ -117,7 +123,9 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         sending = dependencies.publishHidden!().then(() => { sendRetryAttempt = 0; succeeded('push') }, error => { fail(error, 'push') }).finally(() => {
             sending = undefined
             if (pushAgain && foreground) { pushAgain = false; void push().catch(() => {}) }
+            dependencies.activity?.()
         })
+        dependencies.activity?.()
         await sending
     }
     const recheckClock = (): Promise<boolean> => {
@@ -131,7 +139,8 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
             blocked = false; blockedCode = ''; sendRetryAttempt = 0
             connect(); void pull().catch(() => {}); void push().catch(() => {})
             return true
-        })().catch(error => { fail(error); return false }).finally(() => { checkingClock = undefined })
+        })().catch(error => { fail(error); return false }).finally(() => { checkingClock = undefined; dependencies.activity?.() })
+        dependencies.activity?.()
         return checkingClock
     }
     return {

@@ -5,6 +5,7 @@ import {
     isDataHealthCancellation,
     preferredRepairSelection,
     toggleRepairSelection,
+    type DataHealthFinding,
     type DataHealthGroup,
     type DataHealthResult,
     type RepairCandidate,
@@ -22,9 +23,9 @@ export interface DataHealthSnapshot {
     result: DataHealthResult | null
     groups: DataHealthGroup[]
     deepFraction: number | null
-    failure: 'load' | 'scan' | 'repair' | 'undo' | 'refresh' | 'preview' | null
+    failure: 'load' | 'scan' | 'repair' | 'undo' | 'refresh' | 'preview' | 'discard' | 'complete' | null
     applied: { remaining: number } | null
-    activity: 'quick' | 'deep' | 'repair' | 'undo' | 'preview' | 'load' | null
+    activity: 'quick' | 'deep' | 'repair' | 'undo' | 'preview' | 'load' | 'discard' | 'complete' | null
     failed: boolean
     /** What the diagnosis can be answered with, and what the reader has chosen. */
     candidates: RepairCandidate[]
@@ -50,6 +51,8 @@ export interface DataHealthDependencies {
         expectedRevision: number,
         expectedScannedAt: number,
     ): Promise<{ result: DataHealthResult }>
+    discardIntent(finding: number, expectedRevision: number, expectedScannedAt: number): Promise<{ result: DataHealthResult }>
+    completeIntent(finding: number, expectedRevision: number, expectedScannedAt: number): Promise<{ result: DataHealthResult }>
     listJournals(): Promise<RepairJournalSummary[]>
     undoRepair(
         journalId: string,
@@ -95,7 +98,7 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
         state = { ...state, ...next, ...("failure" in next ? { failed: next.failure !== null } : {}) }
         listeners.forEach((listener) => listener(state))
     }
-    const mutationFailed = (error: unknown, action: 'repair' | 'undo') => {
+    const mutationFailed = (error: unknown, action: 'repair' | 'undo' | 'complete') => {
         const code = error && typeof error === 'object' && 'code' in error ? error.code : null
         if (code === 'committed' || code === 'activation-committed-refresh-failed') {
             update({ failure: 'refresh', candidates: [], selection: [], preview: null, journals: [], ...derive(null) })
@@ -248,6 +251,31 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
                     await loadPlan()
                     update({ journals: await deps.listJournals() })
                 } catch { update({ failure: 'refresh' }) }
+            } finally { update({ repairing: false, activity: null }) }
+        },
+        async discard(item: DataHealthFinding, diagnosis: DataHealthResult): Promise<void> {
+            if (state.activity || state.loading || !state.result || state.result.revision !== diagnosis.revision || state.result.scannedAt !== diagnosis.scannedAt) return
+            const finding = state.result.items.findIndex(current => current.code === item.code && current.owner.kind === item.owner.kind && current.owner.id === item.owner.id && current.locator?.sourcePath === item.locator?.sourcePath && current.intentAction === 'discard')
+            if (finding < 0 || item.code !== 'intent-quarantined' || item.owner.kind !== 'intent' || !item.locator || item.intentAction !== 'discard') return
+            update({ repairing: true, activity: 'discard', failure: null, applied: null })
+            try {
+                const discarded = await deps.discardIntent(finding, diagnosis.revision, diagnosis.scannedAt)
+                await finishScan(discarded.result)
+            } catch (error) {
+                update({ failure: 'discard' })
+                throw error
+            } finally { update({ repairing: false, activity: null }) }
+        },
+        async complete(item: DataHealthFinding, diagnosis: DataHealthResult): Promise<void> {
+            if (state.activity || state.loading || !state.result || state.result.revision !== diagnosis.revision || state.result.scannedAt !== diagnosis.scannedAt) return
+            const finding = state.result.items.findIndex(current => current.code === item.code && current.owner.kind === item.owner.kind && current.owner.id === item.owner.id && current.locator?.sourcePath === item.locator?.sourcePath && current.intentAction === 'complete')
+            if (finding < 0 || item.code !== 'intent-quarantined' || item.owner.kind !== 'intent' || !item.locator || item.intentAction !== 'complete') return
+            update({ repairing: true, activity: 'complete', failure: null, applied: null })
+            try {
+                let completed: { result: DataHealthResult }
+                try { completed = await deps.completeIntent(finding, diagnosis.revision, diagnosis.scannedAt) }
+                catch (error) { mutationFailed(error, 'complete'); throw error }
+                await finishScan(completed.result)
             } finally { update({ repairing: false, activity: null }) }
         },
         async undo(journalId: string): Promise<void> {

@@ -30,16 +30,14 @@ export async function checkNewFormat(
             character.name ??= ''
             character.viewScreen ??= 'none'
             character.emotionImages ??= []
-            if (character.type === 'character') {
-                character.bias ??= []
-                character.characterVersion ??= ''
-                character.creator ??= ''
-                character.desc ??= ''
-                character.utilityBot ??= false
-                character.tags ??= []
-                character.systemPrompt ??= ''
-                character.scenario ??= ''
-            }
+            character.bias ??= []
+            character.characterVersion ??= ''
+            character.creator ??= ''
+            character.desc ??= ''
+            character.utilityBot ??= false
+            character.tags ??= []
+            character.systemPrompt ??= ''
+            character.scenario ??= ''
             return character
         })
         .filter((character) => character !== null)
@@ -122,7 +120,7 @@ export async function checkNewFormat(
     }
     if (database.formatversion < 3) {
         for (const character of database.characters) {
-            if (character.type === 'character' && character.sdData == null) {
+            if (character.sdData == null) {
                 character.sdData = defaultSdDataFunc()
             }
         }
@@ -183,7 +181,6 @@ export function checkCharOrder(database: Database): Database {
         if (!character.trashTime) characterIds.push(character.chaId)
         if (
             !character.trashTime &&
-            character.chaId !== '§temp' &&
             character.chaId !== '§playground' &&
             !ordered.includes(character.chaId)
         ) {

@@ -183,32 +183,6 @@ pub(crate) fn export_compatible_local_backup(
             attachments.preserved_bytes,
             None,
         ));
-        if target == CompatibilityTarget::PocketRisu {
-            let affected: Vec<_> = inventory
-                .assets
-                .iter()
-                .filter(|alias| {
-                    alias.kind == "inlay"
-                        && alias
-                            .metadata
-                            .get("pocketRisu")
-                            .and_then(|meta| meta.get("charId"))
-                            .and_then(Value::as_str)
-                            .is_some_and(|id| counts.3.contains(id))
-                })
-                .collect();
-            if !affected.is_empty() {
-                report.excluded.push(report_item(
-                    "group-provenance-owner-excluded",
-                    affected.len() as u64,
-                    affected
-                        .iter()
-                        .map(|alias| u64::try_from(alias.size).unwrap_or(0))
-                        .sum(),
-                    None,
-                ));
-            }
-        }
         for (code, count, bytes) in &attachments.losses {
             let item = report_item(
                 code,
@@ -387,7 +361,7 @@ fn write_database(
     inlays: &HashMap<String, String>,
     path: &Path,
     cancel: &dyn CancellationProbe,
-) -> Result<(u64, u64, u64, HashSet<String>), NativeJobError> {
+) -> Result<(u64, u64, u64), NativeJobError> {
     let generation = &read.generation;
     let orphans=count(connection,"SELECT count(*) FROM conversations c LEFT JOIN characters p ON p.generation=c.generation AND p.character_id=c.character_id WHERE c.generation=?1 AND p.character_id IS NULL",&[generation])?
         +count(connection,"SELECT count(*) FROM messages m LEFT JOIN conversations c ON c.generation=m.generation AND c.character_id=m.character_id AND c.conversation_id=m.conversation_id WHERE m.generation=?1 AND c.conversation_id IS NULL",&[generation])?;
@@ -395,9 +369,8 @@ fn write_database(
         return Err(NativeJobError::new("invalid-source","compatibility snapshot contains orphan conversation or message rows; use a native backup to preserve repair data"));
     }
     // COUNT and cursor share one leased, immutable snapshot. Parse all IDs before
-    // writing array headers so Pocket group removal cannot disagree with count.
+    // writing array headers to keep the emitted record count exact.
     let mut ids = Vec::new();
-    let mut groups = HashSet::new();
     let archived = count(connection,
         "SELECT count(*) FROM characters WHERE generation=?1 AND archived_object IS NOT NULL",
         &[generation])?;
@@ -407,30 +380,11 @@ fn write_database(
     while let Some(row) = rows.next().map_err(sql)? {
         check_cancelled(cancel).map_err(local_backup_error)?;
         let id: String = row.get(0).map_err(sql)?;
-        let value = parse(row.get(1).map_err(sql)?)?;
-        if projector.target == CompatibilityTarget::PocketRisu && value["type"] == "group" {
-            groups.insert(id);
-        } else {
-            ids.push(id);
-        }
+        ids.push(id);
     }
     owner
-        .validate_character_owners(&ids.iter().cloned().chain(groups.iter().cloned()).collect())
+        .validate_character_owners(&ids.iter().cloned().collect())
         .map_err(store_job_error)?;
-    projector
-        .losses
-        .add("unsupported-groups", groups.len() as u64);
-    let mut excluded_group_chats = 0;
-    for group in &groups {
-        excluded_group_chats += count(
-            connection,
-            "SELECT count(*) FROM conversations WHERE generation=?1 AND character_id=?2",
-            &[generation, group],
-        )?;
-    }
-    if !groups.is_empty() {
-        projector.known_conversation_scope("unsupported-groups", excluded_group_chats);
-    }
     let preset_count = count(
         connection,
         "SELECT count(*) FROM bot_presets WHERE generation=?1",
@@ -459,7 +413,6 @@ fn write_database(
     ] {
         object(&mut root)?.remove(key);
     }
-    clean_group_order(&mut root, &groups);
     rewrite_assets(&mut root, assets);
     let root = projector.project("DataBase", &root)?;
     let mut file = File::create(path).map_err(io_job_error)?;
@@ -487,12 +440,7 @@ fn write_database(
         object(&mut character)?.remove("chats");
         rewrite_assets(&mut character, assets);
         rewrite_references(&mut character, inlays, false);
-        let kind = if character["type"] == "group" {
-            "groupChat"
-        } else {
-            "character"
-        };
-        let character = projector.project(kind, &character)?;
+        let character = projector.project("character", &character)?;
         let chats = count(
             connection,
             "SELECT count(*) FROM conversations WHERE generation=?1 AND character_id=?2",
@@ -598,19 +546,9 @@ fn write_database(
             "target .bin database entry exceeds 4 GiB limit; use a RisuNest backup",
         ));
     }
-    Ok((ids.len() as u64, preset_count, conversations, groups))
+    Ok((ids.len() as u64, preset_count, conversations))
 }
 
-fn clean_group_order(root: &mut Value, groups: &HashSet<String>) {
-    if let Some(order) = root.get_mut("characterOrder").and_then(Value::as_array_mut) {
-        order.retain(|item| !item.as_str().is_some_and(|id| groups.contains(id)));
-        for item in order {
-            if let Some(children) = item.get_mut("data").and_then(Value::as_array_mut) {
-                children.retain(|child| !child.as_str().is_some_and(|id| groups.contains(id)));
-            }
-        }
-    }
-}
 
 fn each_message(
     connection: &Connection,
@@ -1047,7 +985,7 @@ mod tests {
                     ],
                 )
                 .unwrap();
-            let mut root = json!({"account":{"token":"synthetic-token"},"characterOrder":[{"name":"Empty","data":[],"id":"empty-folder"},{"name":"Folder","data":["synthetic","group"],"id":"folder","color":"red","img":"assets/nested/icon.webp"},"group"],"plugins":[],"modules":[],"personas":[{"id":"persona-first","name":"First persona"},{"id":"persona-selected","name":"Stale persona"}],"selectedPersona":1,"username":"Current persona","mainPrompt":"Current preset prompt","loadouts":[],"disableToggleBinding":true,"defaultToggleValues":{"test":"1"},"risunestInlayMode":"unsupported","streamingThoughtMode":"unsupported","unknownRoot":true});
+            let mut root = json!({"account":{"token":"synthetic-token"},"characterOrder":[{"name":"Empty","data":[],"id":"empty-folder"},{"name":"Folder","data":["synthetic","second"],"id":"folder","color":"red","img":"assets/nested/icon.webp"},"second"],"plugins":[],"modules":[],"personas":[{"id":"persona-first","name":"First persona"},{"id":"persona-selected","name":"Stale persona"}],"selectedPersona":1,"username":"Current persona","mainPrompt":"Current preset prompt","loadouts":[],"disableToggleBinding":true,"defaultToggleValues":{"test":"1"},"risunestInlayMode":"unsupported","streamingThoughtMode":"unsupported","unknownRoot":true});
             root["pluginCustomStorage"] = json!({"10":null,"2":true,"01":"leading zero","z":{"exact":"assets/nested/icon.webp","opaque":"prefix assets/nested/icon.webp suffix","large":"큰".repeat(65536)},"4294967295":9007199254740991u64});
             store.replace_put_upstream_root(&staging, &root).unwrap();
             store
@@ -1057,10 +995,10 @@ mod tests {
                 )
                 .unwrap();
             let message = json!({"role":"char","data":"현재 한국어 {{inlay::synthetic}}","chatId":"message","unknownMessage":true,"responseVariants":{"groupId":"message","selectedId":"selected","candidates":[{"id":"other","messages":[{"role":"char","data":"alternative"}]},{"id":"complex","messages":[{"role":"char","data":"one"},{"role":"char","data":"two"}]},{"id":"selected","messages":[{"role":"char","data":"stale selected"}]}]}});
-            store.replace_add_characters(&staging,&[json!({"chaId":"synthetic","type":"character","name":"Synthetic","additionalAssets":[["Synthetic owner image","assets/prior-owner.png","png"]],"chats":[{"id":"chat","name":"Chat","message":[message,{"role":"user","data":"followup"}],"savedToggleValues":{"test":"1"},"unknownChat":true}]}),json!({"chaId":"group","type":"group","name":"Synthetic Group","characters":["synthetic"],"chats":[]})]).unwrap();
+            store.replace_add_characters(&staging,&[json!({"chaId":"synthetic","type":"character","name":"Synthetic","additionalAssets":[["Synthetic owner image","assets/prior-owner.png","png"]],"chats":[{"id":"chat","name":"Chat","message":[message,{"role":"user","data":"followup"}],"savedToggleValues":{"test":"1"},"unknownChat":true}]}),json!({"chaId":"second","type":"character","name":"Synthetic Second","chats":[]})]).unwrap();
             store.replace_add_characters(&staging, &[
                 json!({"chaId":"archived-one","type":"character","name":"Archived","chats":[]}),
-                json!({"chaId":"archived-group","type":"group","name":"Archived group","characters":[],"chats":[]}),
+                json!({"chaId":"archived-two","type":"character","name":"Archived second","chats":[]}),
             ]).unwrap();
             store
                 .replace_put_asset_owner_heads(
@@ -1076,7 +1014,7 @@ mod tests {
                 .unwrap();
             let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
             store.archive_character("archived-one", revision, 10).unwrap();
-            store.archive_character("archived-group", store.revision().unwrap(), 11).unwrap();
+            store.archive_character("archived-two", store.revision().unwrap(), 11).unwrap();
             let revision = store.revision().unwrap();
 
             // A key two plugins both hold cannot go out without handing one of
@@ -1127,7 +1065,7 @@ mod tests {
             assert!(durable_root["botPresetsId"].is_string());
             assert_eq!(durable_root["selectedPersona"], "persona-selected");
             assert_eq!(durable_root["characterOrder"][0]["data"], json!([]));
-            assert_eq!(durable_root["characterOrder"][1]["data"], json!(["synthetic", "group"]));
+            assert_eq!(durable_root["characterOrder"][1]["data"], json!(["synthetic", "second"]));
             let durable_ids = durable_root["characterOrder"].as_array().unwrap().iter()
                 .flat_map(|entry| {
                     entry.as_str().into_iter().chain(
@@ -1153,7 +1091,7 @@ mod tests {
                     count.to_string());
             }
             assert_eq!(report.preserved.iter().find(|item| item.code == "characters").unwrap().items,
-                if target == CompatibilityTarget::PocketRisu { "1" } else { "2" });
+                "2");
 
             let code = if target == CompatibilityTarget::PocketRisu {
                 "converted-swipes"
@@ -1167,14 +1105,6 @@ mod tests {
                 .find(|item| item.code == code)
                 .unwrap();
             assert_eq!(scoped.affected_conversations.as_deref(), Some("1"));
-            if target == CompatibilityTarget::PocketRisu {
-                let group = report
-                    .excluded
-                    .iter()
-                    .find(|item| item.code == "unsupported-groups")
-                    .unwrap();
-                assert_eq!(group.affected_conversations.as_deref(), Some("0"));
-            }
             let db = decode(&output);
             assert_eq!(db["botPresetsId"], 0);
             assert_eq!(db["selectedPersona"], 1);
@@ -1219,8 +1149,8 @@ mod tests {
             assert!(message.get("responseVariants").is_none());
             assert!(message.get("unknownMessage").is_none());
             if target == CompatibilityTarget::PocketRisu {
-                assert_eq!(db["characters"].as_array().unwrap().len(), 1);
-                assert_eq!(db["characterOrder"][1]["data"], json!(["synthetic"]));
+                assert_eq!(db["characters"].as_array().unwrap().len(), 2);
+                assert_eq!(db["characterOrder"][1]["data"], json!(["synthetic", "second"]));
                 assert_eq!(
                     message["swipes"],
                     json!(["alternative", "현재 한국어 {{inlay::synthetic}}"])

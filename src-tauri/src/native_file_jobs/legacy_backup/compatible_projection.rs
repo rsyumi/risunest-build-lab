@@ -94,6 +94,16 @@ impl Projector {
         let node = self.schema["types"][name]
             .as_str()
             .ok_or_else(|| error("missing compatibility structural contract"))?;
+        let mut external;
+        let value = if matches!(name, "Database" | "DataBase" | "botPreset") {
+            external = value.clone();
+            if let Some(object) = external.as_object_mut() {
+                for (local, upstream) in [("messageNameTemplate", "groupTemplate"), ("namedMessageRole", "groupOtherBotRole")] {
+                    if let Some(setting) = object.shift_remove(local) { object.insert(upstream.to_owned(), setting); }
+                }
+            }
+            &external
+        } else { value };
         let (mut value, losses) = project_node(&self.schema, node, value, 0)?;
         self.losses.merge(losses);
         if name == "Chat" {
@@ -114,7 +124,7 @@ impl Projector {
             }
         }
         if let Some(inventory) = &self.inventory {
-            if matches!(name, "DataBase" | "character" | "groupChat" | "botPreset") {
+            if matches!(name, "DataBase" | "character" | "botPreset") {
                 validate_asset_fields(&value, inventory)?;
             }
             for key in ["coldstorage", "coldStoragedChats"] {
@@ -748,4 +758,17 @@ mod tests {
             assert_eq!(projector.losses.0["unsupported-tuple-elements"], 1);
         }
     }
+
+    #[test]
+    fn message_name_settings_use_the_upstream_preset_format() {
+        for target in [CompatibilityTarget::RisuAi, CompatibilityTarget::PocketRisu] {
+            let mut projector = Projector::new(target).unwrap();
+            let source = json!({"messageNameTemplate":"[{{char}}] {{slot}}","namedMessageRole":"system","promptSettings":{"sendName":true}});
+            let result = projector.project("botPreset", &source).unwrap();
+            assert_eq!(result["groupTemplate"], "[{{char}}] {{slot}}");
+            assert_eq!(result["groupOtherBotRole"], "system");
+            assert_eq!(result["promptSettings"]["sendName"], true);
+        }
+    }
+
 }

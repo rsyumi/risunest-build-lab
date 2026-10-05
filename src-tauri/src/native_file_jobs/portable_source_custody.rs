@@ -452,36 +452,43 @@ fn ios_probe(
     }
     Ok(guard)
 }
-/// Releases the sources an earlier page picked but never imported, and returns how many there were.
-pub(crate) fn cleanup_orphans(app: &tauri::AppHandle) -> Result<usize, NativeJobError> {
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InterruptedSources {
+    names: Vec<Option<String>>,
+    cleanup_failed: bool,
+}
+
+/// Releases retired source custody before consuming its display-name receipt.
+pub(crate) fn cleanup_orphans(app: &tauri::AppHandle) -> Result<InterruptedSources, NativeJobError> {
     #[cfg(target_os = "ios")]
     {
         use tauri_plugin_ios_native::IosNativeExt;
-        let retired = app
-            .ios_native()
-            .portable_source_orphans()
+        let retired = app.ios_native().portable_source_orphans()
             .map_err(|_| error("Source owner reset could not be confirmed"))?;
-        cleanup_orphan_tokens(&retired, |token| {
-            app.ios_native()
-                .acknowledge_portable_source_orphan(token)
+        Ok(cleanup_orphan_receipts(retired.into_iter().map(|source| (source.token, source.name)), |token| {
+            app.ios_native().acknowledge_portable_source_orphan(token)
                 .map_err(|_| error("Source orphan cleanup acknowledgement is unavailable"))
-        })
+        }))
     }
     #[cfg(not(target_os = "ios"))]
-    {
-        let _ = app;
-        Ok(0)
-    }
+    { let _ = app; Ok(InterruptedSources::default()) }
 }
 #[cfg(any(target_os = "ios", test))]
-fn cleanup_orphan_tokens(
-    tokens: &[String],
+fn cleanup_orphan_receipts(
+    receipts: impl IntoIterator<Item = (String, Option<String>)>,
     mut acknowledge: impl FnMut(&str) -> Result<bool, NativeJobError>,
-) -> Result<usize, NativeJobError> {
-    for token in tokens {
-        cleanup_orphan(token, &mut acknowledge)?;
+) -> InterruptedSources {
+    let mut result = InterruptedSources::default();
+    for (token, name) in receipts {
+        if cleanup_orphan(&token, &mut acknowledge).is_err() {
+            result.cleanup_failed = true;
+            break;
+        }
+        // A platform display name is a leaf, never a path or URL.
+        result.names.push(name.filter(|name| !name.is_empty() && !name.contains(['/', '\\', '\n', '\r'])));
     }
-    Ok(tokens.len())
+    result
 }
 #[cfg(any(target_os = "ios", test))]
 fn cleanup_orphan(
@@ -815,21 +822,20 @@ mod tests {
         .unwrap();
     }
     #[test]
-    fn orphan_cleanup_counts_every_interrupted_source_it_releases() {
+    fn orphan_cleanup_preserves_names_and_returns_partial_progress_before_retry() {
         let (_first_directory, first) = selected_on(Platform::Ios);
         let (_second_directory, second) = selected_on(Platform::Ios);
         let tokens = [parts(&first).unwrap().0.to_owned(), parts(&second).unwrap().0.to_owned()];
-        let mut acknowledged = Vec::new();
-        assert_eq!(
-            cleanup_orphan_tokens(&tokens, |token| {
-                acknowledged.push(token.to_owned());
-                Ok(true)
-            })
-            .unwrap(),
-            2
-        );
-        assert_eq!(acknowledged, tokens);
-        assert_eq!(cleanup_orphan_tokens(&[], |_| panic!("ACK without an orphan")).unwrap(), 0);
+        let receipts = vec![(tokens[0].clone(), Some("first.risunest".into())), (tokens[1].clone(), Some("second.risunest".into()))];
+        let result = cleanup_orphan_receipts(receipts.clone(), |token| Ok(token == tokens[0]));
+        assert_eq!(result.names, vec![Some("first.risunest".into())]);
+        assert!(result.cleanup_failed);
+        let retry = cleanup_orphan_receipts(receipts.into_iter().skip(1), |_| Ok(true));
+        assert_eq!(retry.names, vec![Some("second.risunest".into())]);
+        assert!(!retry.cleanup_failed);
+        assert!(cleanup_orphan_receipts([], |_| panic!("ACK without an orphan")).names.is_empty());
+        let unavailable = cleanup_orphan_receipts([(uuid::Uuid::new_v4().to_string(), None), (uuid::Uuid::new_v4().to_string(), Some("/private/source.risunest".into()))], |_| Ok(true));
+        assert_eq!(unavailable.names, vec![None, None]);
     }
     #[test]
     fn orphan_cleanup_does_not_acknowledge_foreign_or_claimed_native_owners() {

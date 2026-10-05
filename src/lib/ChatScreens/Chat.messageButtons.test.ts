@@ -42,7 +42,6 @@ vi.mock('src/ts/model/modellist', () => ({ getModelInfo: (model: string) => ({ s
 vi.mock('src/ts/process/scriptings', () => ({ runLuaButtonTrigger: vi.fn() }))
 vi.mock('src/ts/process/triggers', () => ({ runTrigger: vi.fn() }))
 vi.mock('src/ts/process/tts', () => ({ sayTTS: vi.fn() }))
-vi.mock('src/ts/sync/multiuser', () => ({ ConnectionOpenStore: writable(false) }))
 vi.mock('src/ts/util', () => ({
     capitalize: (value: string) => value,
     getUserIcon: () => '',

@@ -13,6 +13,12 @@ let persistentDatabase: Partial<Database>
 const materializePersistentDatabaseSnapshot = vi.fn()
 const getPersistentDataRuntime = vi.fn()
 const runNativeKeiBackupJob = vi.fn()
+const nativeInvoke = vi.fn()
+vi.mock('@tauri-apps/api/core', () => ({ invoke: nativeInvoke }))
+vi.mock('../mobileBackgroundTask', () => ({
+    runWithMobileBackgroundTask: async (_kind: string, operation: (background: unknown) => Promise<unknown>, signal?: AbortSignal) => operation({ signal, progress: vi.fn() }),
+    measuredTaskPercent: () => undefined,
+}))
 
 vi.mock('../storage/database.svelte', () => ({
     getDatabase: () => database,
@@ -81,40 +87,83 @@ describe('saveDbKei', () => {
         })
     })
 
-    it('injects the fake vault account into an account-free native fallback snapshot', async () => {
-        native = true
-        const account = database.account
-        vaultRead.mockResolvedValue(account)
-        delete persistentDatabase.account
-        const saveDbKei = await loadSaveDbKei()
-        await saveDbKei()
-        expect(vaultRead).toHaveBeenCalledOnce()
-        expect(fetchMock).toHaveBeenCalledOnce()
-        const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
-        expect(JSON.parse(init.body as string).database.account).toEqual(account)
-    })
+    it.each(['capability-unavailable', 'native-lease-unavailable', 'generic', 'job-capacity', 'cancelled', 'accepted-failure'])(
+        'ends the real native %s attempt without renderer fallback and keeps the cadence', async scenario => {
+            native = true
+            const { nativePersistentRevisionLease } = await import('../storage/nativePersistentExport')
+            const release = vi.fn(async () => undefined)
+            const lease = { revision: 7, release, ...(scenario === 'native-lease-unavailable' ? {} : {
+                [nativePersistentRevisionLease]: 'lease-7',
+            }) }
+            const runtime = {
+                revision: 7,
+                flushPendingData: vi.fn(async () => undefined),
+                store: { acquireRevision: vi.fn(async () => lease) },
+            }
+            getPersistentDataRuntime.mockReturnValue(runtime)
+            const actual = await vi.importActual<typeof import('./nativeBackup')>('./nativeBackup')
+            runNativeKeiBackupJob.mockImplementation(actual.runNativeKeiBackupJob)
+            const failure = scenario === 'generic' ? new Error('synthetic native failure') : {
+                code: scenario,
+                message: 'synthetic native refusal',
+            }
+            nativeInvoke.mockReset().mockImplementation(async command => {
+                if (command === 'native_file_job_start') {
+                    if (scenario === 'cancelled' || scenario === 'accepted-failure') return { jobId: 'kei-job' }
+                    throw failure
+                }
+                if (command === 'native_file_job_status') return {
+                    state: scenario === 'cancelled' ? 'cancelled' : 'failed',
+                    progress: { completedBytes: 0 },
+                    error: { code: 'transport-failed', message: 'synthetic upload failure' },
+                }
+                if (command === 'native_file_job_forget') return true
+                throw new Error('unexpected command')
+            })
+            const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+            try {
+                const saveDbKei = await loadSaveDbKei()
+                await saveDbKei()
+                await saveDbKei()
+                expect(runNativeKeiBackupJob).toHaveBeenCalledOnce()
+                expect(release).toHaveBeenCalledOnce()
+                expect(materializePersistentDatabaseSnapshot).not.toHaveBeenCalled()
+                expect(vaultRead).not.toHaveBeenCalled()
+                expect(fetchMock).not.toHaveBeenCalled()
+                expect(consoleError).toHaveBeenCalledExactlyOnceWith('Kei auto backup failed:',
+                    scenario === 'generic' ? failure : expect.objectContaining(
+                        scenario === 'cancelled' ? { name: 'AbortError' } : {
+                            code: scenario === 'accepted-failure' ? 'transport-failed' : scenario,
+                        },
+                    ))
+                if (scenario === 'cancelled' || scenario === 'accepted-failure') {
+                    expect(nativeInvoke).toHaveBeenLastCalledWith('native_file_job_forget', { jobId: 'kei-job' })
+                } else {
+                    expect(nativeInvoke.mock.calls.some(([command]) => command === 'native_file_job_forget')).toBe(false)
+                }
+                vi.advanceTimersByTime(5 * 60000)
+                await saveDbKei()
+                expect(runNativeKeiBackupJob).toHaveBeenCalledTimes(2)
+            } finally {
+                consoleError.mockRestore()
+            }
+        },
+    )
 
-    it.each(['missing', 'foreign', 'foreign-token', 'not-kei', 'changed-during-read', 'changed-during-materialization'])('rejects %s native fallback identity before upload', async scenario => {
+    it('refuses a false native result without reading the fallback vault or database', async () => {
         native = true
         const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-        const account = database.account
-        vaultRead.mockImplementation(async () => {
-            if (scenario === 'changed-during-read') database.account = undefined
-            if (scenario === 'missing') return null
-            if (scenario === 'foreign') return { ...account, id: 'foreign' }
-            if (scenario === 'foreign-token') return { ...account, token: 'foreign-token' }
-            if (scenario === 'not-kei') return { ...account, kei: false }
-            return account
-        })
-        materializePersistentDatabaseSnapshot.mockImplementation(async () => {
-            if (scenario === 'changed-during-materialization') database.account = undefined
-            return persistentDatabase
-        })
-        const saveDbKei = await loadSaveDbKei()
-        await saveDbKei()
-        expect(fetchMock).not.toHaveBeenCalled()
-        expect(consoleError).toHaveBeenCalled()
-        consoleError.mockRestore()
+        try {
+            const saveDbKei = await loadSaveDbKei()
+            await saveDbKei()
+            expect(vaultRead).not.toHaveBeenCalled()
+            expect(materializePersistentDatabaseSnapshot).not.toHaveBeenCalled()
+            expect(fetchMock).not.toHaveBeenCalled()
+            expect(consoleError).toHaveBeenCalledWith('Kei auto backup failed:',
+                expect.objectContaining({ message: 'Native KEI backup did not complete' }))
+        } finally {
+            consoleError.mockRestore()
+        }
     })
 
     it('uses the native job without materializing the database when it is available', async () => {
@@ -133,7 +182,9 @@ describe('saveDbKei', () => {
         expect(fetchMock).not.toHaveBeenCalled()
     })
 
-    it('keeps the JavaScript backup as the pre-request capability fallback', async () => {
+    it('keeps the JavaScript backup on the web', async () => {
+        const actual = await vi.importActual<typeof import('./nativeBackup')>('./nativeBackup')
+        runNativeKeiBackupJob.mockImplementation(actual.runNativeKeiBackupJob)
         const saveDbKei = await loadSaveDbKei()
 
         await saveDbKei()

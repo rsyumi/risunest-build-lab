@@ -482,3 +482,129 @@ describe('production server LWW composition', () => {
         expect(f.install).not.toHaveBeenCalled(); expect(f.register).not.toHaveBeenCalled(); expect(f.invoke).not.toHaveBeenCalled()
     })
 })
+describe('server sync progress', () => {
+    const lanes = (sent: number) => ['send', 'receive', 'hydrate', 'binding', 'assets'].map(lane => ({
+        lane, active: lane === 'send', step: lane === 'send' ? 'uploading' : 'idle', listed: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: lane === 'send' ? sent : 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0,
+    }))
+    const sendLanes = (send: Record<string, unknown>) => ['send', 'receive', 'hydrate', 'binding', 'assets'].map(lane => ({
+        lane, active: false, step: 'idle', listed: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...(lane === 'send' ? send : {}),
+    }))
+    const pendingReads = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_pending_count').length
+    /** A push that waits; each lanes read takes the next of `reads` and repeats the last. */
+    const countedPush = (reads: Record<string, unknown>[], pending: number | null = null) => {
+        let finish!: (failure?: unknown) => void
+        f.invoke.mockImplementation(async command => command === 'server_sync_lww_push' ? new Promise((resolve, reject) => { finish = failure => failure ? reject(failure) : resolve(null) })
+            : command === 'server_sync_lww_pull' ? emptyReceive()
+                : command === 'server_sync_progress' ? sendLanes((reads.length > 1 ? reads.shift() : reads[0])!)
+                    : command === 'server_sync_lww_pending_count' ? pending : null)
+        return (failure?: unknown) => finish(failure)
+    }
+    const progressReads = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_progress').length
+    const hangingPush = (sent: number[]) => {
+        let finish!: (failure?: unknown) => void
+        f.invoke.mockImplementation(async command => command === 'server_sync_lww_push' ? new Promise((resolve, reject) => { finish = failure => failure ? reject(failure) : resolve(null) })
+            : command === 'server_sync_lww_pull' ? emptyReceive() : command === 'server_sync_progress' ? lanes(sent.shift() ?? 0) : null)
+        return (failure?: unknown) => finish(failure)
+    }
+    it('records running stages without reading native counts while no view watches', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const finish = hangingPush([])
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        const controller = production.getServerSyncController()
+        expect(controller.snapshot().progress?.stages).toEqual(expect.arrayContaining(['downloading', 'applying', 'publishing']))
+        expect(controller.snapshot().progress?.active).toEqual(['publishing'])
+        expect(progressReads()).toBe(0)
+        finish(); await settle()
+        expect(controller.snapshot().progress).toBeUndefined()
+        expect(controller.snapshot().lastSuccessAt).toBe(Date.now())
+        expect(progressReads()).toBe(0)
+    })
+    it('counts native transfers from the first read while a view watches, and stops reading after the attempt', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const finish = hangingPush([1000, 5000])
+        const controller = production.getServerSyncController()
+        const stop = controller.watchProgress()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        expect(progressReads()).toBe(1)
+        expect(controller.snapshot().progress?.lanes?.find(lane => lane.lane === 'send')?.sentBytes).toBe(0)
+        await vi.advanceTimersByTimeAsync(500); await settle()
+        expect(controller.snapshot().progress?.lanes?.find(lane => lane.lane === 'send')).toMatchObject({ active: true, step: 'uploading', sentBytes: 4000 })
+        finish(); await settle()
+        const reads = progressReads()
+        await vi.advanceTimersByTimeAsync(2000); await settle()
+        expect(progressReads()).toBe(reads)
+        stop()
+    })
+    it('treats automatic sync as routine until an asset download joins it', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const finish = hangingPush([])
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        const controller = production.getServerSyncController()
+        expect(controller.snapshot().progress?.mode).toBe('routine')
+        let downloaded!: () => void
+        const download = controller.track('assets', () => new Promise<void>(resolve => { downloaded = resolve }))
+        await settle()
+        expect(controller.snapshot().progress?.mode).toBe('full')
+        finish(); downloaded(); await download; await settle()
+        expect(controller.snapshot().progress).toBeUndefined()
+        const alone = controller.track('assets', () => new Promise<void>(resolve => { downloaded = resolve }))
+        await settle()
+        expect(controller.snapshot().progress?.mode).toBe('full')
+        downloaded(); await alone
+    })
+    it('fixes the upload of a watched routine attempt once and shows it finished for a moment', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const finish = countedPush([{}, { active: true, step: 'confirming', itemsDone: 1, itemsTotal: 2 }, { itemsDone: 3, itemsTotal: 3 }], 2)
+        const controller = production.getServerSyncController()
+        const stop = controller.watchProgress()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        await vi.advanceTimersByTimeAsync(500); await settle()
+        expect(controller.snapshot().progress).toMatchObject({ mode: 'routine', plannedSend: 3, peak: { changes: 1 / 3 } })
+        await vi.advanceTimersByTimeAsync(1000); await settle()
+        expect(pendingReads()).toBe(1)
+        finish(); await settle()
+        expect(controller.snapshot().progress).toBeUndefined()
+        expect(controller.snapshot().finished).toMatchObject({ mode: 'routine', endedAt: Date.now() })
+        expect(controller.snapshot().finished?.lanes?.find(lane => lane.lane === 'send')).toMatchObject({ itemsDone: 3, itemsTotal: 3 })
+        expect(controller.snapshot().lastSuccessAt).toBe(Date.now())
+        await vi.advanceTimersByTimeAsync(1500); await settle()
+        expect(controller.snapshot().finished).toBeUndefined()
+        stop()
+    })
+    it.each([
+        { name: 'moved nothing', reads: [{}], watched: true, failure: undefined },
+        { name: 'failed', reads: [{}, { itemsDone: 1, itemsTotal: 2 }], watched: true, failure: { code: 'server-unreachable', retryable: true } },
+        { name: 'was not watched', reads: [{}, { itemsDone: 2, itemsTotal: 2 }], watched: false, failure: undefined },
+    ])('shows no finished bar for a routine attempt that $name', async ({ reads, watched, failure }) => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const finish = countedPush([...reads])
+        const controller = production.getServerSyncController()
+        const stop = watched ? controller.watchProgress() : () => {}
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        await vi.advanceTimersByTimeAsync(500); await settle()
+        finish(failure); await settle()
+        expect(controller.snapshot().progress).toBeUndefined()
+        expect(controller.snapshot().finished).toBeUndefined()
+        stop()
+    })
+    it('shows no finished bar after an asset download', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        countedPush([{}, { itemsDone: 2, itemsTotal: 2 }])
+        const controller = production.getServerSyncController()
+        const stop = controller.watchProgress()
+        await controller.track('assets', async () => { await vi.advanceTimersByTimeAsync(500) }); await settle()
+        expect(controller.snapshot().progress).toBeUndefined()
+        expect(controller.snapshot().finished).toBeUndefined()
+        stop()
+    })
+    it('keeps the last successful time when an attempt fails', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const finish = hangingPush([])
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        finish({ code: 'server-unreachable', retryable: true }); await settle()
+        const controller = production.getServerSyncController()
+        expect(controller.snapshot().progress).toBeUndefined()
+        expect(controller.snapshot().lastSuccessAt).toBeUndefined()
+        expect(controller.snapshot().error).toBe('server-unreachable')
+    })
+})

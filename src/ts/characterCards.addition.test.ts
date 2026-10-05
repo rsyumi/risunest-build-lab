@@ -222,6 +222,40 @@ describe('character card additions', () => {
         expect(index).toBe(0)
     })
 
+    it.each(['legacy', 'chara_card_v2', 'chara_card_v3'])('reuses parsed %s JSON through the same converter', async format => {
+        const card = format === 'legacy'
+            ? { char_name: '한글 😀', char_persona: 'Description', char_greeting: 'Hello' }
+            : {
+                spec: format,
+                spec_version: format === 'chara_card_v2' ? '2.0' : '3.0',
+                data: {
+                    name: '한글 😀', description: 'Description', first_mes: 'Hello',
+                    personality: '', scenario: '', mes_example: '', creator_notes: '',
+                    system_prompt: '', post_history_instructions: '', alternate_greetings: [],
+                    tags: [], creator: '', character_version: '', extensions: {}, assets: [],
+                },
+            }
+        await importCharacterProcess({ name: 'synthetic.json', data: new TextEncoder().encode(JSON.stringify(card)) })
+        const first = structuredClone(mocks.commitDetachedCharacter.mock.calls.at(-1)?.[0])
+        mocks.database.characters = []
+        mocks.nextId = 0
+        await expect(importCharacterProcess({
+            name: 'synthetic.json', data: Uint8Array.of(0xff), parsedJson: { value: card },
+        })).resolves.toBe(0)
+        const second = mocks.commitDetachedCharacter.mock.calls.at(-1)?.[0]
+        expect(first).toBeDefined()
+        expect(second).toEqual(first)
+    })
+
+    it('preserves browser malformed-byte replacement in JSON cards', async () => {
+        const prefix = new TextEncoder().encode('{"name":"')
+        const suffix = new TextEncoder().encode('","description":"Synthetic","first_mes":"Hello"}')
+        await importCharacterProcess({
+            name: 'synthetic.json', data: new Uint8Array([...prefix, 0xe2, 0x82, ...suffix]),
+        })
+        expect(mocks.commitDetachedCharacter.mock.calls[0][0].name).toBe('\uFFFD\uFFFD')
+    })
+
     it('uses the native desktop character path route once and returns its imported character ID', async () => {
         mocks.desktopPickerPaths = ['C:\\chosen\\card.charx']
         mocks.nativeDesktopResult = {

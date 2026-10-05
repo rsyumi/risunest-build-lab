@@ -631,6 +631,8 @@ impl ExternalLwwEngine {
                     let mut frozen_controls = BTreeMap::new();
                     let mut reused_controls = BTreeMap::new();
                     let mut reused_assets = BTreeMap::new();
+                    let mut remote_bodies = super::lww_residency::RemoteBodies::deferred(store.repository_root());
+                    let mut server_bodies = None;
                     for entry in entries {
                         let before = length;
                         let marks = (
@@ -646,9 +648,10 @@ impl ExternalLwwEngine {
                             &mut controls,
                             &mut reused_controls,
                             &mut reused_assets,
+                            &mut remote_bodies,
+                            &mut server_bodies,
                             cancel,
-                        )
-                        .await?;
+                        )?;
                         // Earlier entries are never encoded again: the entry's own
                         // items are encoded alone and joined to the running length.
                         let mut delta = Segment::new(&self.library, &writer, seq);
@@ -1608,7 +1611,7 @@ impl ExternalLwwEngine {
                 .is_some_and(|prefix| *prefix >= publication.seq)
         }))
     }
-    async fn include_objects(
+    fn include_objects(
         &self,
         store: &mut PersistentStore,
         value: &UnitValue,
@@ -1618,7 +1621,9 @@ impl ExternalLwwEngine {
         controls: &mut BTreeMap<String,String>,
         reused_controls: &mut BTreeMap<String,FrozenControlCatalog>,
         reused_assets: &mut BTreeMap<String,FrozenAssetReference>,
-        _cancel: &Cancellation,
+        remote_bodies: &mut super::lww_residency::RemoteBodies,
+        server_bodies: &mut Option<crate::server_sync::residency::Residency>,
+        cancel: &Cancellation,
     ) -> Result<Vec<String>> {
         let mut fresh = Vec::new();
         let mut hashes = BTreeSet::new();
@@ -1656,6 +1661,7 @@ impl ExternalLwwEngine {
             }
         }
         for hash in hashes {
+            cancel.check()?;
             if payload.message_pages.contains_key(&hash)
                 || controls.contains_key(&hash)
                 || assets.contains_key(&hash)
@@ -1699,12 +1705,15 @@ impl ExternalLwwEngine {
             let local_size = crate::asset_repository::PayloadCas::new(root).map_err(transient)?
                 .stat_object(&hash).map_err(transient)?;
             let remote_source = if local_size.is_none() {
-                super::lww_residency::freeze_remote_body(root, &hash)?
+                remote_bodies.frozen(&hash)?
             } else { None };
             let server_source = if local_size.is_none() && remote_source.is_none() {
-                if !crate::server_sync::residency::Residency::exists(root) { return Err(segment::corrupt()); }
-                Some(crate::server_sync::residency::Residency::open(root)
-                    .and_then(|residency| residency.object(&hash, None)).map_err(|_| ProviderError::new(ErrorKind::Transient))?
+                if server_bodies.is_none() {
+                    if !crate::server_sync::residency::Residency::exists(root) { return Err(segment::corrupt()); }
+                    *server_bodies = Some(crate::server_sync::residency::Residency::open(root).map_err(|error| transient(error.code))?);
+                }
+                Some(server_bodies.as_ref().ok_or_else(segment::corrupt)?
+                    .object(&hash, None).map_err(|_| ProviderError::new(ErrorKind::Transient))?
                     .ok_or_else(segment::corrupt)?)
             } else { None };
             let byte_length = match local_size {
@@ -1843,18 +1852,25 @@ impl ExternalLwwEngine {
         let mut published=self.published_state(store,directory.path(),cancel).await?;
         published.require_complete()?;
         self.stage_published_objects(store,&mut published,directory.path(),cancel).await?;
+        let mut source_failure = None;
         let stage = store
-            .lww_stage_binding_units(
+            .lww_stage_binding_units_stream(
                 header,
                 inspection,
-                &published.catalog.changes()?,
                 DecimalU64(
                     self.admitted_upper()?
                         .checked_add(300_000)
                         .ok_or_else(segment::corrupt)?,
                 ),
+                |emit| published.catalog.visit_changes(&mut |change| {
+                    cancel.check()?;
+                    emit(change).map_err(store_error)
+                }).map_err(|error| {
+                    source_failure = Some(error);
+                    crate::persistent_store::StoreError::Validation { message: "Published binding source is unavailable".into() }
+                }),
             )
-            .map_err(store_error)?;
+            .map_err(|error| source_failure.unwrap_or_else(|| store_error(error)))?;
         store
             .external_lww_record_stage(&self.target_scope(), header, &published.catalog.coverage, &published.covered())
             .map_err(store_error)?;

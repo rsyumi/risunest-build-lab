@@ -35,6 +35,7 @@
   let connected = $state(false);
   let busy = $state(false);
   let notice = $state("");
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
   let dialog = $state<"register" | "issued" | "revoke" | "forget" | "stop" | "leave" | "uninstall" | null>(null);
   let deleteServerData = $state(false);
   let name = $state("");
@@ -177,11 +178,19 @@
       document.removeEventListener("visibilitychange", onShow);
       stopped = true;
       clearTimeout(timer);
+      clearTimeout(noticeTimer);
       clearInterval(environmentTimer);
       uri = "";
       svg = "";
     };
   });
+  function showCompletionNotice(text: string) {
+    clearTimeout(noticeTimer);
+    notice = text;
+    noticeTimer = setTimeout(() => {
+      if (notice === text) notice = "";
+    }, 4000);
+  }
   async function mutate(
     path: string,
     body: Record<string, unknown> = {},
@@ -202,12 +211,13 @@
           ? result.revision
           : null;
       await refresh();
-      notice =
+      showCompletionNotice(
         {
           "tunnel/start": "임시 주소 연결을 시작했습니다.",
           "tunnel/stop": "임시 주소 연결을 중지했습니다.",
           "tunnel/restart": "임시 주소 연결을 다시 시작했습니다.",
-        }[path] ?? "변경 사항을 적용했습니다.";
+        }[path] ?? "변경 사항을 적용했습니다.",
+      );
       return resultRevision ?? status?.revision ?? null;
     } catch (error) {
       notice = message(error);

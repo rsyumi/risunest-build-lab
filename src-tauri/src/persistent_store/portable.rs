@@ -266,7 +266,7 @@ impl PersistentStore {
     }
     pub(crate) fn portable_export_lower_bound(&self) -> StoreResult<u64> {
         let objects: i64 = self.connection.query_row("SELECT coalesce(sum(byte_size),0) FROM asset_objects", [], |row| row.get(0))?;
-        let database = super::snapshot::logical_database_bytes(&self.connection)?;
+        let database = super::snapshot::active_database_bytes(&self.connection)?;
         u64::try_from(objects).ok().and_then(|objects| database.checked_add(objects))
             .ok_or_else(|| invalid("portable export size overflow"))
     }
@@ -458,6 +458,7 @@ impl PersistentStore {
                     table.name
                 ))?;
                 let mut rows = select.query([])?;
+                let mut message_owner: Option<(String, String)> = None;
                 while let Some(row) = rows.next()? {
                     cancelled(probe)?;
                     insert.raw_bind_parameter(1, &stage.staging_id)?;
@@ -468,18 +469,42 @@ impl PersistentStore {
                         )?;
                     }
                     insert.raw_execute()?;
+                    if table.name == "messages" {
+                        let owner = (row.get::<_, String>(0)?, row.get::<_, String>(1)?);
+                        if message_owner.as_ref().is_some_and(|previous| previous != &owner) {
+                            let (character, conversation) = message_owner.take().unwrap();
+                            super::message_pages::stage_conversation_pages(
+                                &transaction, &stage.staging_id, &character, &conversation, &|| cancelled(probe),
+                            )?;
+                        }
+                        let index: i64 = row.get(2)?;
+                        if index % 128 == 127 {
+                            super::message_pages::stage_conversation_pages(
+                                &transaction, &stage.staging_id, &owner.0, &owner.1, &|| cancelled(probe),
+                            )?;
+                        }
+                        message_owner = Some(owner);
+                    }
+                }
+                if let Some((character, conversation)) = message_owner {
+                    super::message_pages::stage_conversation_pages(
+                        &transaction, &stage.staging_id, &character, &conversation, &|| cancelled(probe),
+                    )?;
                 }
             }
             if digest_tables(&transaction, Some(&stage.staging_id), probe)? != expected {
                 return Err(invalid("portable staging changed raw SQL values"));
             }
-            let conversations = transaction
-                .prepare("SELECT character_id,conversation_id FROM conversations WHERE generation=?1")?
-                .query_map([&stage.staging_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            for (character, conversation) in conversations {
-                cancelled(probe)?;
-                super::commit::page_staged_conversation(&transaction, &stage.staging_id, &character, &conversation)?;
+            {
+                let mut conversations = transaction
+                    .prepare("SELECT character_id,conversation_id FROM conversations WHERE generation=?1 AND message_count=0")?;
+                let conversations = conversations.query_map([&stage.staging_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+                for conversation in conversations {
+                    let (character, conversation) = conversation?;
+                    super::message_pages::stage_conversation_pages(
+                        &transaction, &stage.staging_id, &character, &conversation, &|| cancelled(probe),
+                    )?;
+                }
             }
             cancelled(probe)?;
             transaction.commit()?;

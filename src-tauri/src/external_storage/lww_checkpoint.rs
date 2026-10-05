@@ -298,7 +298,7 @@ mod tests {
 fn parents(key: &UnitKey) -> Result<Vec<UnitKey>> {
     let p=key.components();
     let parts: Vec<Vec<&str>> = match p[0].as_str() {
-        "character" | "group-members" | "archive" if p.len()>=2 => vec![vec!["exists","character",&p[1]]],
+        "character" | "archive" if p.len()>=2 => vec![vec!["exists","character",&p[1]]],
         "conversation" | "messages" if p.len()>=3 => vec![vec!["exists","character",&p[1]],vec!["exists","conversation",&p[1],&p[2]]],
         "exists" if p.len()>=3 && p[1]=="conversation" => vec![vec!["exists","character",&p[2]]],
         "preset" | "persona" if p.len()>=2 => vec![vec!["exists",&p[0],&p[1]]],

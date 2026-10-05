@@ -65,12 +65,14 @@ where I: IntoIterator<Item = S>, S: AsRef<OsStr> {
 
 #[tauri::command]
 pub(crate) fn desktop_relaunch(window: tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() != "main" { return Err("Restart belongs to the main window".into()); }
-    let app = window.app_handle();
-    tauri::process::current_binary(&app.env()).map_err(|error| error.to_string())?;
-    app.state::<OpenedFilesState>().restarting.store(true, std::sync::atomic::Ordering::Release);
-    app.request_restart();
-    Ok(())
+    crate::native_log::logged_without_detail("desktop_relaunch", (|| {
+        if window.label() != "main" { return Err("Restart belongs to the main window".into()); }
+        let app = window.app_handle();
+        tauri::process::current_binary(&app.env()).map_err(|error| error.to_string())?;
+        app.state::<OpenedFilesState>().restarting.store(true, std::sync::atomic::Ordering::Release);
+        app.request_restart();
+        Ok(())
+    })())
 }
 
 pub(crate) fn restart_on_exit(app: &AppHandle) {

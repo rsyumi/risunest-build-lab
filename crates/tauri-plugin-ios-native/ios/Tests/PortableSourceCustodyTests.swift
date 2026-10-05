@@ -31,12 +31,12 @@ final class PortableSourceCustodyTests: XCTestCase {
         wait(for: [rejected], timeout: 5)
         custody.retireUnclaimed(owner: "another-owner")
         XCTAssertNoThrow(try custody.descriptor(token: token, jobId: nil))
-        XCTAssertTrue(custody.orphanTokens().isEmpty)
+        XCTAssertTrue(custody.orphanReceipts().map { $0.token }.isEmpty)
         let retired = expectation(description: "retired scope finished")
         custody.retireUnclaimed(owner: "active-owner") { retired.fulfill() }
         wait(for: [retired], timeout: 5)
         XCTAssertThrowsError(try custody.descriptor(token: token, jobId: nil))
-        XCTAssertEqual(custody.orphanTokens(), [token])
+        XCTAssertEqual(custody.orphanReceipts().map { $0.token }, [token])
         XCTAssertTrue(custody.release(token: token, jobId: nil))
     }
 
@@ -47,7 +47,7 @@ final class PortableSourceCustodyTests: XCTestCase {
         try custody.confirm(token: token, format: "portable")
         XCTAssertNoThrow(try custody.descriptor(token: token, jobId: job))
         custody.retireUnclaimed(owner: "old-owner")
-        XCTAssertTrue(custody.orphanTokens().isEmpty)
+        XCTAssertTrue(custody.orphanReceipts().map { $0.token }.isEmpty)
         XCTAssertFalse(custody.release(token: token, jobId: nil))
         XCTAssertFalse(custody.release(token: token, jobId: UUID().uuidString))
         XCTAssertNoThrow(try custody.descriptor(token: token, jobId: job))
@@ -80,8 +80,31 @@ final class PortableSourceCustodyTests: XCTestCase {
         XCTAssertFalse(custody.endProbe(token: token, probeId: UUID().uuidString))
         XCTAssertTrue(custody.endProbe(token: token, probeId: probe))
         wait(for: [retired], timeout: 5)
-        XCTAssertEqual(custody.orphanTokens(), [token])
+        XCTAssertEqual(custody.orphanReceipts().map { $0.token }, [token])
         XCTAssertThrowsError(try custody.descriptor(token: token, jobId: nil))
+    }
+
+    func testLateSelectionCompletionRetainsOnlyDisplayNameAndRetiresOnce() throws {
+        let custody = PortableSourceCustody()
+        let file = root.appendingPathComponent("late-synthetic.risunest")
+        try Data([1, 2, 3]).write(to: file)
+        let selected = expectation(description: "late selection callback")
+        var token: String?
+        custody.select(file, owner: "retiring-owner") { result in
+            token = try? result.get()["token"] as? String
+            custody.retireUnclaimed(owner: "retiring-owner")
+            custody.retireUnclaimed(owner: "retiring-owner")
+            selected.fulfill()
+        }
+        wait(for: [selected], timeout: 5)
+        let receipt = try XCTUnwrap(custody.orphanReceipts().first)
+        XCTAssertEqual(custody.orphanReceipts().count, 1)
+        XCTAssertEqual(receipt.token, token)
+        XCTAssertEqual(receipt.name, "late-synthetic.risunest")
+        XCTAssertFalse(receipt.name!.contains(root.path))
+        XCTAssertTrue(custody.acknowledgeOrphan(token: receipt.token))
+        XCTAssertTrue(custody.orphanReceipts().isEmpty)
+        XCTAssertFalse(custody.acknowledgeOrphan(token: receipt.token))
     }
 
     func testUnconsumedRegisteredOrphanSurvivesMoreThan32UnregisteredRetirements() throws {
@@ -92,26 +115,27 @@ final class PortableSourceCustodyTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(nativeDuplicate, 0)
         defer { if nativeDuplicate >= 0 { Darwin.close(nativeDuplicate) } }
         custody.retireUnclaimed(owner: "registered-owner")
-        XCTAssertEqual(custody.orphanTokens(), [old])
+        XCTAssertEqual(custody.orphanReceipts().map { $0.token }, [old])
         var expected = [old]
         for index in 0..<40 {
             let owner = "unregistered-owner-\(index)"
             let token = try select(custody, owner: owner, name: "synthetic-\(index).risunest")
             expected.append(token)
             custody.retireUnclaimed(owner: owner)
-            XCTAssertEqual(custody.orphanTokens(), expected)
+            XCTAssertEqual(custody.orphanReceipts().map { $0.token }, expected)
         }
         var info = stat()
         XCTAssertEqual(fstat(nativeDuplicate, &info), 0)
-        XCTAssertEqual(custody.orphanTokens(), expected)
+        XCTAssertEqual(custody.orphanReceipts().map { $0.token }, expected)
         XCTAssertTrue(custody.release(token: old, jobId: nil))
         XCTAssertFalse(custody.acknowledgeOrphan(token: UUID().uuidString))
-        XCTAssertEqual(custody.orphanTokens(), expected)
+        XCTAssertEqual(custody.orphanReceipts().map { $0.token }, expected)
         // Native calls ACK only after its duplicated descriptor is released.
         XCTAssertEqual(Darwin.close(nativeDuplicate), 0)
         nativeDuplicate = -1
         XCTAssertTrue(custody.acknowledgeOrphan(token: old))
-        XCTAssertEqual(custody.orphanTokens(), Array(expected.dropFirst()))
+        XCTAssertEqual(custody.orphanReceipts().map { $0.token }, Array(expected.dropFirst()))
+        XCTAssertEqual(custody.orphanReceipts().map { $0.name }, (0..<40).map { "synthetic-\($0).risunest" })
         XCTAssertFalse(custody.acknowledgeOrphan(token: old))
     }
 }

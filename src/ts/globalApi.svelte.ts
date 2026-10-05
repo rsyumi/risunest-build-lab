@@ -1,5 +1,7 @@
 import {
     writeFile,
+    open as openFile,
+    type FileHandle,
     BaseDirectory,
     readFile,
     exists,
@@ -16,7 +18,7 @@ import { get } from "svelte/store";
 import { open } from '@tauri-apps/plugin-shell'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import streamSaver from 'streamsaver';
-import { type Database, defaultSdDataFunc, getDatabase, getCurrentCharacter, type character, type groupChat, appSubVer } from "./storage/database.svelte";
+import { type Database, defaultSdDataFunc, getDatabase, getCurrentCharacter, type character, appSubVer } from "./storage/database.svelte";
 import versionData from "../../version.json";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, DBState, LoadingStatusState, selIdState, ReloadGUIPointer, bodyIntercepterStore } from "./stores.svelte";
@@ -833,7 +835,7 @@ export async function getUncleanables(db: Database, uptype: 'basename' | 'pure' 
  * @returns {Promise<string[]>} - An array of uncleanable resources.
  */
 export function getUncleanablesSync(db: Database, uptype: 'basename' | 'pure' = 'basename', options?:{
-    chars: (character|groupChat)[],
+    chars: (character)[],
 }) {
     const uncleanable = new Set<string>();
 
@@ -963,9 +965,15 @@ const TAURI_WRITER_FLUSH_BYTES = 4 * 1024 * 1024
 export class TauriWriter {
     path: string
     firstWrite: boolean = true
-    private pending: Uint8Array[] = []
+    private readonly pending = new Uint8Array(isTauriMobile && !isTauriIOS ? 64 * 1024 : TAURI_WRITER_FLUSH_BYTES)
     private pendingBytes = 0
+    private pendingWrite = false
     private aborted = false
+    private handle?: FileHandle
+    private tail: Promise<void> = Promise.resolve()
+    private closing?: Promise<void>
+    private aborting?: Promise<void>
+    private failure?: { error: unknown }
 
     /**
      * Creates an instance of TauriWriter.
@@ -976,15 +984,21 @@ export class TauriWriter {
         this.path = path
     }
 
-    /**
-     * Buffers data and appends it in large blocks, because every append reopens the destination
-     * and an Android content URI makes that round trip expensive.
-     */
-    async write(data: Uint8Array) {
-        if (this.aborted) throw new Error('Cannot write to an aborted Tauri writer')
-        this.pending.push(data.slice())
-        this.pendingBytes += data.byteLength
-        if (this.pendingBytes >= TAURI_WRITER_FLUSH_BYTES) await this.flush()
+    async write(data: Uint8Array): Promise<void> {
+        if (this.closing) throw new Error('Cannot write to a closed Tauri writer')
+        return this.enqueue(async () => {
+            if (data.byteLength === 0) this.pendingWrite = true
+            let offset = 0
+            while (offset < data.byteLength) {
+                this.assertWritable()
+                const length = Math.min(this.pending.byteLength - this.pendingBytes, data.byteLength - offset)
+                this.pending.set(data.subarray(offset, offset + length), this.pendingBytes)
+                this.pendingBytes += length
+                this.pendingWrite = true
+                offset += length
+                if (this.pendingBytes === this.pending.byteLength) await this.flush()
+            }
+        })
     }
 
     /**
@@ -992,27 +1006,74 @@ export class TauriWriter {
      */
     async close() {
         if (this.aborted) throw new Error('Cannot close an aborted Tauri writer')
-        await this.flush()
+        this.closing ??= this.enqueue(async () => {
+            await this.flush()
+            await this.closeHandle()
+        })
+        await this.closing
     }
 
     async abort() {
-        if (this.aborted) return
         this.aborted = true
-        this.pending = []
-        this.pendingBytes = 0
+        this.aborting ??= this.tail.then(async () => {
+            this.pendingBytes = 0
+            this.pendingWrite = false
+            await this.closeHandle()
+        })
+        await this.aborting
+    }
+
+    private assertWritable() {
+        if (this.aborted) throw new Error('Cannot write to an aborted Tauri writer')
+        if (this.failure) throw this.failure.error
+    }
+
+    private enqueue(operation: () => Promise<void>): Promise<void> {
+        const result = this.tail.then(async () => {
+            this.assertWritable()
+            try {
+                await operation()
+            } catch (error) {
+                this.failure = { error }
+                this.pendingBytes = 0
+                this.pendingWrite = false
+                try { await this.closeHandle() } catch {}
+                throw error
+            }
+        })
+        this.tail = result.catch(() => {})
+        return result
+    }
+
+    private async closeHandle() {
+        if (!this.handle) return
+        const handle = this.handle
+        this.handle = undefined
+        await handle.close()
     }
 
     private async flush() {
-        if (this.pending.length === 0) return
-        const block = new Uint8Array(this.pendingBytes)
+        if (!this.pendingWrite) return
+        this.assertWritable()
+        this.handle ??= await openFile(this.path, {
+            write: true,
+            create: true,
+            truncate: this.firstWrite,
+            append: !this.firstWrite,
+        })
         let offset = 0
-        for (const chunk of this.pending) {
-            block.set(chunk, offset)
-            offset += chunk.byteLength
+        while (offset < this.pendingBytes) {
+            this.assertWritable()
+            const remaining = this.pendingBytes - offset
+            const written = await this.handle.write(this.pending.subarray(offset, this.pendingBytes))
+            this.assertWritable()
+            if (!Number.isInteger(written) || written <= 0 || written > remaining) {
+                throw new Error('Tauri writer returned an invalid write length')
+            }
+            offset += written
         }
-        this.pending = []
         this.pendingBytes = 0
-        await writeFile(this.path, block, { append: !this.firstWrite })
+        this.pendingWrite = false
         this.firstWrite = false
     }
 }
@@ -1075,14 +1136,7 @@ export class LocalWriter {
      * @param {Uint8Array} data - The data to write.
      */
     async writeBackup(name: string, data: Uint8Array): Promise<void> {
-        const encodedName = new TextEncoder().encode(getBasename(name))
-        const record = new Uint8Array(8 + encodedName.byteLength + data.byteLength)
-        const header = new DataView(record.buffer)
-        header.setUint32(0, encodedName.byteLength, true)
-        record.set(encodedName, 4)
-        header.setUint32(4 + encodedName.byteLength, data.byteLength, true)
-        record.set(data, 8 + encodedName.byteLength)
-        await this.writer.write(record)
+        await this.writeBackupStream(name, data.byteLength, (async function* () { yield data })())
     }
 
     async writeBackupStream(

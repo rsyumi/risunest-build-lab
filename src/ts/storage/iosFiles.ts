@@ -10,17 +10,33 @@ export interface IOSPickedFile {
     bytes: number
 }
 export interface IOSPickedBackupSource { token: string; name: string; bytes: number }
-/** Releases the backup sources a reloaded page picked but never imported, and says so once. */
-export async function reportInterruptedIOSBackupSources(): Promise<void> {
-    const interrupted = await invoke<number>('native_portable_source_cleanup_orphans')
-    if (!Number.isSafeInteger(interrupted) || interrupted < 0) throw new Error('Interrupted backup source count is invalid')
-    if (interrupted === 0) return
-    const [{ alertError, waitAlert }, { failureReason }] = await Promise.all([
-        import('../alert'),
-        import('../gui/nativeFileJobDialogModel'),
-    ])
-    alertError(failureReason('import-interrupted'))
-    await waitAlert()
+interface InterruptedIOSBackupSources { names: (string | null)[]; cleanupFailed: boolean }
+let interruptedSourceNotice: Promise<void> | undefined
+/** Releases retired sources and finishes their notices before the next picker opens. */
+export function reportInterruptedIOSBackupSources(): Promise<void> {
+    if (interruptedSourceNotice) return interruptedSourceNotice
+    const task = reportInterruptedSources()
+    interruptedSourceNotice = task
+    void task.finally(() => { if (interruptedSourceNotice === task) interruptedSourceNotice = undefined }).catch(() => {})
+    return task
+}
+async function reportInterruptedSources(): Promise<void> {
+    const interrupted = await invoke<InterruptedIOSBackupSources>('native_portable_source_cleanup_orphans')
+    if (!interrupted || !Array.isArray(interrupted.names) || typeof interrupted.cleanupFailed !== 'boolean'
+        || interrupted.names.some(name => name !== null && (typeof name !== 'string' || !name || /[\\/\r\n]/.test(name)))) {
+        throw new Error('Interrupted backup source receipt is invalid')
+    }
+    if (interrupted.names.length) {
+        const [{ alertError, waitAlert }, { failureReason }] = await Promise.all([
+            import('../alert'), import('../gui/nativeFileJobDialogModel'),
+        ])
+        const reason = failureReason('import-interrupted')
+        for (const name of interrupted.names) {
+            alertError(name ? `${name}: ${reason}` : reason)
+            await waitAlert()
+        }
+    }
+    if (interrupted.cleanupFailed) throw new Error('Interrupted backup source cleanup failed')
 }
 /** On iOS, says at start when a reloaded page left a picked backup source unimported. */
 export async function reportInterruptedIOSBackupSourcesAtStart(): Promise<void> {

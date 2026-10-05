@@ -25,6 +25,7 @@ async function createHarness(officialPublisher?: OfficialRevisionPublisher, capt
     const replaceDatabase = vi.fn((replacement: Database) => { database = replacement })
     const onWorkingSetRefreshRequired = vi.fn()
     const onBackgroundError = vi.fn()
+    const afterRemoteRootChange = vi.fn()
     const publishPresetWorkingSet = vi.fn()
     const store = {
         open: vi.fn(async () => undefined),
@@ -91,6 +92,7 @@ async function createHarness(officialPublisher?: OfficialRevisionPublisher, capt
             getSelectedCharacterId: () => database.characters[0]?.chaId,
             getSelectedConversationId: () => null,
             replaceDatabase,
+            afterRemoteRootChange,
             publishCharacter: vi.fn(),
             publishConversation: vi.fn(),
             publishPresetWorkingSet,
@@ -105,7 +107,7 @@ async function createHarness(officialPublisher?: OfficialRevisionPublisher, capt
     await runtime.initializeActiveWorkingSet(database)
     return {
         runtime, store, replaceDatabase, publishPresetWorkingSet,
-        onWorkingSetRefreshRequired, onBackgroundError, leases,
+        onWorkingSetRefreshRequired, onBackgroundError, afterRemoteRootChange, leases,
         get database() { return database },
         get durable() { return durable },
         set generating(value: boolean) { generating = value },
@@ -115,6 +117,71 @@ async function createHarness(officialPublisher?: OfficialRevisionPublisher, capt
         },
     }
 }
+
+describe('received display settings after whole-library projection', () => {
+    it.each(['refresh', 'activation'] as const)('reports only the successfully installed settings after %s', async (mode) => {
+        const harness = await createHarness()
+        const replacement = structuredClone(harness.database)
+        replacement.animationSpeed = 0.4
+        replacement.heightMode = 'dvh'
+        replacement.sideBarSize = 2
+        replacement.textAreaSize = 3
+        replacement.textAreaTextSize = 4
+        harness.replaceDatabase.mockImplementationOnce((projected) => {
+            // Installation can normalize values; report the installed root instead of the projection.
+            projected.animationSpeed = 0.5
+            harness.replaceDatabase.getMockImplementation()!(projected)
+        })
+        harness.afterRemoteRootChange.mockImplementation((fields) => {
+            expect(harness.database.animationSpeed).toBe(0.5)
+            expect(fields).toEqual(new Set(['animationSpeed', 'heightMode', 'sideBarSize', 'textAreaSize', 'textAreaTextSize']))
+        })
+        if (mode === 'activation') {
+            await harness.runtime.withPausedPersistentWrites('binding-activation', async (token) => {
+                const guard = harness.runtime.beginActivatedLibraryGuard(token)
+                harness.nativeCommit(replacement)
+                await harness.runtime.refreshActivatedLibraryUnderPause(token)
+                guard.complete()
+            })
+        } else {
+            const token = await harness.runtime.capturePersistentMutationToken('restore')
+            const fence = await harness.runtime.acquireDestructiveReplacementFence(token)
+            await fence.refreshCommittedWorkingSet(harness.nativeCommit(replacement))
+            fence.release()
+        }
+        expect(harness.afterRemoteRootChange).toHaveBeenCalledOnce()
+        expect(harness.onBackgroundError).not.toHaveBeenCalled()
+    })
+
+    it('does not apply settings for an unchanged whole-library refresh', async () => {
+        const harness = await createHarness()
+        const token = await harness.runtime.capturePersistentMutationToken('restore')
+        const fence = await harness.runtime.acquireDestructiveReplacementFence(token)
+        await fence.refreshCommittedWorkingSet(harness.nativeCommit(harness.database))
+        fence.release()
+        expect(harness.afterRemoteRootChange).not.toHaveBeenCalled()
+    })
+
+    it.each(['refresh', 'activation'] as const)('does not apply settings when %s installation fails', async (mode) => {
+        const harness = await createHarness()
+        const replacement = { ...harness.database, animationSpeed: 0.7 }
+        harness.replaceDatabase.mockImplementationOnce(() => { throw new Error('projection failed') })
+        if (mode === 'activation') {
+            await expect(harness.runtime.withPausedPersistentWrites('binding-activation', async (token) => {
+                harness.runtime.beginActivatedLibraryGuard(token)
+                harness.nativeCommit(replacement)
+                await harness.runtime.refreshActivatedLibraryUnderPause(token)
+            })).rejects.toThrow('projection failed')
+        } else {
+            const token = await harness.runtime.capturePersistentMutationToken('restore')
+            const fence = await harness.runtime.acquireDestructiveReplacementFence(token)
+            expect((await fence.refreshCommittedWorkingSet(harness.nativeCommit(replacement))).projection).toBe('refresh-required')
+            fence.release()
+        }
+        expect(harness.afterRemoteRootChange).not.toHaveBeenCalled()
+        expect(harness.database.animationSpeed).not.toBe(0.7)
+    })
+})
 
 describe('upstream import activation pause', () => {
     it('holds writes through activation and installs current native baselines before release', async () => {

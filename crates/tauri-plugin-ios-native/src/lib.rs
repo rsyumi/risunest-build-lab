@@ -124,6 +124,10 @@ struct PortableSourceProbeRequest<'a> {token:&'a str,probe_id:&'a str}
 #[derive(Deserialize)]
 pub struct PortableSourceDescriptor { pub fd:i32, pub bytes:u64 }
 
+#[cfg(any(target_os = "ios", test))]
+#[derive(Deserialize, Debug, PartialEq)]
+pub struct RetiredPortableSource { pub token: String, pub name: Option<String> }
+
 #[cfg(target_os = "ios")]
 impl<R: Runtime> IosNative<R> {
     pub fn portable_source_descriptor(&self, token:&str, job_id:Option<&str>) -> Result<PortableSourceDescriptor,String> {
@@ -132,7 +136,7 @@ impl<R: Runtime> IosNative<R> {
     pub fn release_portable_source(&self, token:&str, job_id:Option<&str>) -> Result<bool,String> {
         self.0.handle.run_mobile_plugin("releasePortableSource",PortableSourceRequest {token,job_id}).map_err(|error|error.to_string())
     }
-    pub fn portable_source_orphans(&self)->Result<Vec<String>,String> {
+    pub fn portable_source_orphans(&self)->Result<Vec<RetiredPortableSource>,String> {
         self.0.handle.run_mobile_plugin("portableSourceOrphans",()).map_err(|error|error.to_string())
     }
     pub fn acknowledge_portable_source_orphan(&self,token:&str)->Result<bool,String> {

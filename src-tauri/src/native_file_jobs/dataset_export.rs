@@ -254,7 +254,7 @@ impl Dataset<'_> {
     }
 }
 
-// One entry per conversation of every character that is not a group, in
+// One entry per conversation of every character, in
 // library order, with the fields `exportAsDataset` reads.
 impl Serialize for Dataset<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -274,7 +274,7 @@ impl Serialize for Dataset<'_> {
                     message: "Character detail must be an object".to_owned(),
                 })));
             };
-            if detail.get("type").and_then(Value::as_str) != Some("group") {
+            {
                 let mut conversations = self.store(self.connection.prepare_cached(
                     "SELECT conversation_id FROM conversations
                      WHERE generation = ?1 AND character_id = ?2 ORDER BY configured_index ASC",
@@ -420,9 +420,6 @@ mod tests {
     fn renderer_dataset(database: &Value) -> Value {
         let mut dataset = Vec::new();
         for character in database["characters"].as_array().unwrap() {
-            if character["type"] == "group" {
-                continue;
-            }
             for chat in character["chats"].as_array().unwrap() {
                 let mut entry = Map::new();
                 for (from, to) in [("name", "name"), ("desc", "description")] {
@@ -456,7 +453,7 @@ mod tests {
         assert_eq!(renderer_dataset(&materialized), fixture.dataset);
         assert!(text.starts_with("[\n    {\n        \"name\": \"Alice\",\n"), "{text}");
         assert_eq!(result.revision, fixture.revision);
-        assert_eq!(result.character_count, 4);
+        assert_eq!(result.character_count, 3);
         assert_eq!(result.handoff_path, None);
         assert_eq!(result.source_bytes, text.len() as u64);
         assert_eq!(result.source_sha256, hex::encode(Sha256::digest(text.as_bytes())));

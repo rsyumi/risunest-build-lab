@@ -609,13 +609,25 @@ impl JobCommandState {
     }
 
     pub fn claim(&self, job: &DurableJob) -> Result<(Cancellation, JobClaim)> {
+        self.claim_inner(job, false)
+    }
+    pub(crate) fn job_is_active(&self, id: &str) -> Result<bool> {
+        Ok(self.active.lock().map_err(failure)?.contains_key(id))
+    }
+    pub(crate) fn claim_restore_settlement(&self, job: &DurableJob) -> Result<(Cancellation, JobClaim)> {
+        if !matches!(job.request.kind, JobKind::Restore) {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        self.claim_inner(job, true)
+    }
+    fn claim_inner(&self, job: &DurableJob, local_settlement: bool) -> Result<(Cancellation, JobClaim)> {
         let cancel = Cancellation::default();
         let mut active = self.active.lock().map_err(failure)?;
         if self.cleanup_closed.load(std::sync::atomic::Ordering::Acquire) {
             return Err(ProviderError::new(ErrorKind::Cancelled));
         }
         if active.contains_key(&job.id)
-            || active.values().any(|(connection, _)| connection == &job.request.connection_id)
+            || (!local_settlement && active.values().any(|(connection, _)| connection == &job.request.connection_id))
         {
             return Err(ProviderError::new(ErrorKind::PreconditionFailed));
         }
@@ -922,6 +934,32 @@ mod tests {
         assert_eq!(state.active.lock().unwrap().len(), 1);
         drop(cleanup);
         assert!(state.claim(&job).is_ok());
+    }
+
+    #[test]
+    fn local_restore_settlement_keeps_exact_job_and_removal_ownership_without_stopping_a_backup() {
+        let state = JobCommandState::default();
+        let backup = DurableJob::new(request(), 1, identity());
+        let (backup_cancel, backup_claim) = state.claim(&backup).unwrap();
+        let mut restore = DurableJob::new(request(), 2, identity());
+        restore.request.kind = JobKind::Restore;
+        let (_, settlement) = state.claim_restore_settlement(&restore).unwrap();
+        assert!(backup_cancel.check().is_ok());
+        assert!(state.job_is_active(&restore.id).unwrap());
+        assert_eq!(state.active.lock().unwrap().values().filter(|(connection, _)| connection == &restore.request.connection_id).count(), 2);
+        assert!(state.claim(&restore).is_err());
+        assert!(state.claim_restore_settlement(&restore).is_err());
+        assert!(state.claim_restore_settlement(&backup).is_err());
+        assert!(!state.cleanup_drained().unwrap());
+        drop(backup_claim);
+        assert!(state.claim(&backup).is_err());
+        drop(settlement);
+        assert!(!state.job_is_active(&restore.id).unwrap());
+        let (_, restarted) = state.claim(&restore).unwrap();
+        assert!(state.claim_restore_settlement(&restore).is_err());
+        drop(restarted);
+        state.begin_cleanup().unwrap();
+        assert!(state.claim_restore_settlement(&restore).is_err());
     }
 
     #[test]

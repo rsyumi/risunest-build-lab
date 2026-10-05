@@ -4,7 +4,7 @@
     import { mutatePersistentCharacterDetail } from "../../ts/storage/persistentDataRuntime.svelte";
     import { DBState } from 'src/ts/stores.svelte';
     import BarIcon from "../SideBars/BarIcon.svelte";
-    import { ArchiveIcon, ArchiveRestoreIcon, ArrowLeft, User, Users, SquareMousePointer, TrashIcon, Undo2Icon } from "@lucide/svelte";
+    import { ArchiveIcon, ArchiveRestoreIcon, ArrowLeft, User, SquareMousePointer, TrashIcon, Undo2Icon } from "@lucide/svelte";
     import { selectedCharID } from "../../ts/stores.svelte";
     import TextInput from "../UI/GUI/TextInput.svelte";
     import Button from "../UI/GUI/Button.svelte";
@@ -18,7 +18,6 @@
         archivedConversationCount,
         archiveIsAvailable,
         characterIsArchived,
-        countBlockedGroupMembers,
         formatArchivedAt,
         restoreArchivedCharacterWithConfirmation,
     } from "src/ts/storage/characterArchive";
@@ -46,7 +45,6 @@
             archived:boolean
             archivedConversations:number
             archivedAt?:number
-            blockedMembers:number
     }
 
     const archiveStrings = language.risuNest.archive
@@ -76,9 +74,6 @@
                 archived: characterIsArchived(character),
                 archivedConversations: archivedConversationCount(character),
                 archivedAt: archivedAt(character),
-                blockedMembers: character.type === 'group'
-                    ? countBlockedGroupMembers(character, DBState.db.characters)
-                    : 0,
             }
             if (character.trashTime) {
                 trashed.push(row)
@@ -207,11 +202,7 @@
                                 <BarIcon onClick={() => {openCharacter(char)}} additionalStyle={getCharImage(char.image, 'css')}></BarIcon>
                             {:else}
                                 <BarIcon onClick={() => {openCharacter(char)}} additionalStyle={char.index === $selectedCharID ? 'background:var(--risu-theme-selected)' : ''}>
-                                    {#if char.type === 'group'}
-                                        <Users />
-                                    {:else}
-                                        <User/>
-                                    {/if}
+                                    <User/>
                                 </BarIcon>
                             {/if}
                         </div>
@@ -227,10 +218,6 @@
                         <h4 class="text-textcolor font-bold text-lg mb-1">{char.name || "Unnamed"}</h4>
                         {#if char.archived}
                             <span class="text-textcolor2">{archiveStrings.listedAs}</span>
-                        {:else if char.blockedMembers > 0}
-                            <span class="text-textcolor2">
-                                {archiveStrings.groupMemberBlocked.replace('{0}', String(char.blockedMembers))}
-                            </span>
                         {:else}
                             <span class="text-textcolor2">{parsedDescription['en'] || parsedDescription['xx'] || 'No description'}</span>
                         {/if}
@@ -250,7 +237,7 @@
                                 }}>
                                     <SquareMousePointer />
                                 </button>
-                                {#if archiveIsAvailable() && char.type !== 'group'}
+                                {#if archiveIsAvailable()}
                                     <button class="hover:text-textcolor text-textcolor2" aria-label={archiveStrings.action} onclick={() => {
                                         archiveCharacterWithConfirmation(char.chaId)
                                     }}>

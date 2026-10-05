@@ -4,7 +4,7 @@
     import Chat from "../ChatScreens/Chat.svelte";
     import LiveDisplayParserBoundary from "../ChatScreens/LiveDisplayParserBoundary.svelte";
     import { getCharImage } from "src/ts/characters";
-    import { findCharacterbyId, getUserName, getUserIcon } from "src/ts/util";
+    import { getUserName, getUserIcon } from "src/ts/util";
     import { createSimpleCharacter, bookmarkListOpen, DBState, selectedCharID, ScrollToMessageStore } from "src/ts/stores.svelte";
     import { language } from "src/lang";
     import { alertError, alertInput } from "src/ts/alert";
@@ -74,9 +74,7 @@
             bookmarkedMessages = targets.map(target => {
                 const message = target.message;
                 let speaker = null;
-                if (currentCharacter.type === 'group' && message.saying) {
-                    speaker = findCharacterbyId(message.saying);
-                }
+
                 
                 return {
                     ...message,
@@ -231,25 +229,10 @@
                                 {#key selectedCharacterId + "/" + selectedConversationId + "/" + msg.chatId}
                                     <LiveDisplayParserBoundary
                                         source={msg.data}
-                                        character={chara.type === "group" ? (msg.speaker ?? msg.saying) : chara}
+                                        character={chara}
                                     >
                                         {#snippet children(signal)}
-                                            {#if chara.type === "group"}
-                                                <Chat
-                                                    parserAbortSignal={signal}
-                                                    idx={msg.originalIndex}
-                                                    message={msg.data}
-                                                    name={msg.speaker?.name}
-                                                    img={getCharImage(msg.speaker?.image, "css")}
-                                                    role={msg.role}
-                                                    messageGenerationInfo={msg.generationInfo}
-                                                    rerollIcon={false}
-                                                    largePortrait={msg.speaker?.largePortrait}
-                                                    character={msg.saying}
-                                                    isLastMemory={false}
-                                                />
-                                            {:else}
-                                                <Chat
+                                            <Chat
                                                     parserAbortSignal={signal}
                                                     idx={msg.originalIndex}
                                                     message={msg.data}
@@ -264,7 +247,6 @@
                                                     character={simpleChar}
                                                     isLastMemory={false}
                                                 />
-                                            {/if}
                                         {/snippet}
                                     </LiveDisplayParserBoundary>
                                 {/key}

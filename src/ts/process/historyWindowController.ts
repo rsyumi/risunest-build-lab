@@ -34,6 +34,8 @@ export interface HistoryWindowControllerEnvironment {
 }
 
 export interface HistoryWindowController extends WindowedConversationMutationController {
+    /** Changes whenever this controller accepts a write or adopts metadata. */
+    readonly mutationVersion?: number
     /**
      * Takes metadata changes made on the live conversation into the window and
      * publishes the window's own metadata changes.
@@ -200,12 +202,21 @@ export function createHistoryWindowController(
     let backend = initial
     let released = false
     let lost = false
+    let mutationVersion = 0
     const baseline = cloneMetadataFields(chat)
     const resolve = (): WindowedConversationMutationController | null => {
         if (released) return null
         if (backend?.isCurrent()) return backend
         backend?.release()
         const source = environment.captureSession()
+        if (source?.session.canAdoptPersistedMetadata && sessionHoldsWindow(source, chat, absoluteStartIndex)) {
+            const persisted = source.conversation.message.slice(absoluteStartIndex)
+            const contentKeys = ['role', 'data', 'saying', 'chatId', 'name', 'disabled', 'isComment'] as const
+            if (persisted.every((message, index) =>
+                contentKeys.every((key) => Object.is(message[key], chat.message[index][key])))) {
+                replaceArrayRange(chat.message, 0, persisted.length, safeStructuredClone(persisted))
+            }
+        }
         backend = source
             ? captureSessionHistoryWindowController(
                 source,
@@ -231,12 +242,14 @@ export function createHistoryWindowController(
         if (!current || !live) return false
         const changed = mergeLiveMetadata(chat, baseline, live)
         if (!current.applyRange(localStart, deleteCount, messages, command)) return false
+        mutationVersion += 1
         updateBaseline(baseline, chat, changed)
         return true
     }
     return {
         chat,
         absoluteStartIndex,
+        get mutationVersion() { return mutationVersion },
         isCurrent: () => resolve() !== null,
         applyRange,
         reconcileMetadata() {
@@ -247,6 +260,7 @@ export function createHistoryWindowController(
             const current = live as Record<string, unknown>
             if (changed.every((key) => isEqual(fields[key], current[key]))) {
                 updateBaseline(baseline, chat, changed)
+                if (changed.length) mutationVersion += 1
                 return true
             }
             return applyRange(0, 0, [], 'update-metadata')

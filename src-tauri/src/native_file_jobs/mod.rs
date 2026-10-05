@@ -29,12 +29,13 @@ pub(crate) fn native_portable_source_discard(app:AppHandle,source:JobSource)->Re
 }
 
 #[tauri::command(async)]
-pub(crate) fn native_portable_source_cleanup_orphans(app:AppHandle)->Result<usize,NativeJobError> {
+pub(crate) fn native_portable_source_cleanup_orphans(app:AppHandle)->Result<portable_source_custody::InterruptedSources,NativeJobError> {
     logged("native_portable_source_cleanup_orphans", portable_source_custody::cleanup_orphans(&app))
 }
 pub(crate) mod raw_recovery;
 pub(crate) use backup_source::*;
 mod official_snapshot;
+mod transfer_retry;
 mod risum_export;
 mod verified_read;
 #[cfg(windows)]
@@ -373,7 +374,7 @@ pub(crate) struct NativeFileJobStarted {
     pub(crate) warning_codes: Vec<String>,
 }
 
-#[derive(Clone,Debug,Serialize)]
+#[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(rename_all="camelCase")]
 pub(crate) struct NativeSnapshotBodiesStarted {
     pub(crate) job_id:String,
@@ -2494,6 +2495,14 @@ impl NativeFileJobState {
             .map_err(|error| NativeJobError::new("store-error", error))
     }
 
+    fn status_summary(&self, job_id: &str) -> Result<JobStatus, NativeJobError> {
+        self.registry.prune().map_err(|error| NativeJobError::new("store-error", error))?;
+        self.registry.lookup(job_id)
+            .map_err(|error| NativeJobError::new("store-error", error))?
+            .map(|job| job.status_summary())
+            .ok_or_else(|| NativeJobError::new("store-error", "native job not found"))
+    }
+
     pub(crate) fn content_asset_receipt(
         &self,
         job_id: &str,
@@ -2634,7 +2643,7 @@ impl NativeFileJobState {
             let Some(job) = job else {
                 return Ok(false);
             };
-            let status = job.status();
+            let status = job.status_summary();
             if status.kind == JobKind::OfficialPublicationUpload && status.state.is_terminal() {
                 use crate::asset_repository::job_pins::{CasReleaseOutcome, DurableCasJob};
 
@@ -3100,6 +3109,16 @@ impl restore::ReplacementSink for PersistentReplacementSink {
         })
     }
 
+    fn put_legacy_root(
+        &self,
+        staging_id: &str,
+        root: &crate::persistent_store::upstream_stream::RootSpool,
+    ) -> crate::persistent_store::StoreResult<()> {
+        crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
+            store.replace_put_upstream_stream(staging_id, root)
+        })
+    }
+
     fn staged_plugin_preview(
         &self,
         staging_id: &str,
@@ -3230,7 +3249,23 @@ pub(crate) fn native_file_job_status(
     state: State<'_, NativeFileJobState>,
     job_id: String,
 ) -> Result<JobStatus, NativeJobError> {
-    state.status(&job_id)
+    state.status_summary(&job_id)
+}
+
+#[tauri::command(async)]
+pub(crate) async fn native_file_job_prepared_content(
+    app: AppHandle,
+    job_id: String,
+) -> Result<PreparedContent, NativeJobError> {
+    logged("native_file_job_prepared_content", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app.state::<crate::persistent_store::PersistentStoreState>()
+                .admit_renderer_operation().map_err(|error| NativeJobError::new("store-error", error.to_string()))?;
+            crate::asset_repository::commands::with_content_session(&app, &job_id, |_| {
+                app.state::<NativeFileJobState>().prepared_content_receipt(&job_id)
+            })
+        }).await.map_err(|error| NativeJobError::new("store-error", error.to_string()))?
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -3263,6 +3298,31 @@ pub(crate) fn native_file_job_list(
     logged("native_file_job_list", state.list())
 }
 
+fn should_retry_snapshot_bodies(state: JobState, previous_job_id: Option<&str>) -> bool {
+    previous_job_id.is_some() && matches!(state, JobState::Failed | JobState::Cancelled)
+}
+
+fn validate_snapshot_body_status(status: &JobStatus, receipt: &NativeSnapshotBodiesStarted) -> Result<i64, NativeJobError> {
+    let revision: i64 = receipt.activation_revision.parse().map_err(|_| NativeJobError::new("invalid-activation-receipt", "Snapshot revision is invalid"))?;
+    if revision < 0 || revision.to_string() != receipt.activation_revision || receipt.kind != JobKind::SnapshotBodies
+        || status.kind != JobKind::SnapshotBodies || status.job_id != receipt.job_id
+        || status.snapshot_staging_id.as_deref() != Some(receipt.staging_id.as_str())
+        || status.activation_revision != Some(revision) || status.activation_authority.as_deref() != Some(receipt.binding_authority.as_str()) {
+        return Err(NativeJobError::new("invalid-activation-receipt", "Snapshot body operation identity differs"));
+    }
+    Ok(revision)
+}
+
+#[tauri::command(async)]
+pub(crate) fn native_snapshot_restore_bodies_status(app: AppHandle, state: State<'_, NativeFileJobState>, receipt: NativeSnapshotBodiesStarted) -> Result<JobStatus, NativeJobError> {
+    logged("native_snapshot_restore_bodies_status", (|| {
+        let status = state.status(&receipt.job_id)?;
+        let revision = validate_snapshot_body_status(&status, &receipt)?;
+        crate::persistent_store::commands::with_store_mut(app.state(), |store| store.validate_snapshot_body_receipt(&receipt.staging_id, revision, &receipt.binding_authority)).map_err(error::store_error)?;
+        Ok(status)
+    })())
+}
+
 #[tauri::command(async)]
 pub(crate) fn native_snapshot_restore_bodies_start(
     app: AppHandle,
@@ -3270,15 +3330,25 @@ pub(crate) fn native_snapshot_restore_bodies_start(
     staging_id: String,
     activation_revision: String,
     binding_authority: String,
+    previous_job_id: Option<String>,
 ) -> Result<NativeSnapshotBodiesStarted,NativeJobError> {
     logged("native_snapshot_restore_bodies_start", (|| {
         let _cleanup=state.admit_cleanup_operation()?;
         let _start=state.snapshot_body_start.lock().map_err(|_|NativeJobError::new("store-error","Snapshot body start is unavailable"))?;
         let revision:i64=activation_revision.parse().map_err(|_|NativeJobError::new("invalid-activation-receipt","Snapshot revision is invalid"))?;
         if revision<0 || revision.to_string()!=activation_revision {return Err(NativeJobError::new("invalid-activation-receipt","Snapshot revision is not canonical"));}
+        crate::persistent_store::commands::with_store_mut(app.state(), |store| store.validate_snapshot_body_receipt(&staging_id, revision, &binding_authority)).map_err(error::store_error)?;
+        if let Some(previous) = &previous_job_id {
+            let status = state.status(previous)?;
+            validate_snapshot_body_status(&status, &NativeSnapshotBodiesStarted {job_id: previous.clone(), kind: JobKind::SnapshotBodies, staging_id: staging_id.clone(), activation_revision: activation_revision.clone(), binding_authority: binding_authority.clone()})?;
+        }
+        let mut superseded = Vec::new();
         for status in state.registry.list().map_err(|error|NativeJobError::new("store-error",error))? {
+            if status.kind==JobKind::SnapshotBodies && status.snapshot_staging_id.as_deref()==Some(staging_id.as_str()) && status.state.is_terminal() {
+                superseded.push(status.job_id.clone());
+            }
             if status.kind==JobKind::SnapshotBodies && status.snapshot_staging_id.as_deref()==Some(staging_id.as_str())
-                && !status.state.is_terminal() {
+                && !should_retry_snapshot_bodies(status.state, previous_job_id.as_deref()) {
                 if status.activation_revision!=Some(revision) || status.activation_authority.as_deref()!=Some(binding_authority.as_str()) {
                     return Err(NativeJobError::new("invalid-activation-receipt","Snapshot body operation identity differs"));
                 }
@@ -3288,6 +3358,7 @@ pub(crate) fn native_snapshot_restore_bodies_start(
         let permit=WorkerPermit::acquire(Arc::clone(&state.active_workers),state.max_concurrent_jobs)?;
         let (mut store,plan,job)=crate::persistent_store::commands::with_store_mut(app.state(),|store|Ok(state.prepare_snapshot_bodies(store,&staging_id,revision,&binding_authority)))
             .map_err(error::store_error)??;
+        for id in superseded { state.registry.forget(&id).map_err(|error| NativeJobError::new("store-error", error))?; }
         let directory=snapshot_bodies::prepare_directory(&state.root.join("jobs"),&job)?;
         let started=NativeSnapshotBodiesStarted {job_id:job.id(),kind:JobKind::SnapshotBodies,staging_id,activation_revision,binding_authority};
         #[cfg(test)] let body_scope=crate::asset_repository::body_io::capture_body_io_scope();
@@ -3301,7 +3372,7 @@ pub(crate) fn native_snapshot_restore_bodies_start(
                 }
                 let _=snapshot_bodies::finish(&job,outcome);
             };
-            #[cfg(test)] crate::asset_repository::body_io::with_body_io_scope(body_scope,operation);
+            #[cfg(test)] crate::asset_repository::body_io::with_body_io_scope(body_scope,&mut operation);
             #[cfg(not(test))] operation();
         });
         Ok(started)
@@ -3812,7 +3883,7 @@ pub(crate) struct JobStatus {
     pub(crate) result: Option<JobResultSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<JobFailure>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub(crate) prepared_content: Option<PreparedContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) publication_attempt: Option<OfficialPublicationAttemptResult>,
@@ -3832,6 +3903,39 @@ pub(crate) struct JobStatus {
     pub(crate) plugin_value_preview: Option<crate::persistent_store::commit::StagedPluginPreview>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) incomplete_restore_preview: Option<IncompleteRestorePreview>,
+}
+
+impl JobStatus {
+    fn summary(&self) -> Self {
+        Self {
+            portable_body_retry: self.portable_body_retry.clone(),
+            snapshot_staging_id: self.snapshot_staging_id.clone(),
+            snapshot_bodies: self.snapshot_bodies.clone(),
+            job_id: self.job_id.clone(),
+            kind: self.kind,
+            state: self.state,
+            phase: self.phase,
+            progress: self.progress.clone(),
+            detail: self.detail.clone(),
+            expected_revision: self.expected_revision,
+            export_capture_revision: self.export_capture_revision,
+            activation_revision: self.activation_revision,
+            activation_authority: self.activation_authority.clone(),
+            restore_adoption_confirmed: self.restore_adoption_confirmed,
+            warning_codes: self.warning_codes.clone(),
+            result: self.result.clone(),
+            error: self.error.clone(),
+            prepared_content: None,
+            publication_attempt: self.publication_attempt.clone(),
+            compatibility_report: self.compatibility_report.clone(),
+            preservation_report: self.preservation_report.clone(),
+            device_session_id: self.device_session_id.clone(),
+            replaces_library: self.replaces_library,
+            restore_preview: self.restore_preview.clone(),
+            plugin_value_preview: self.plugin_value_preview.clone(),
+            incomplete_restore_preview: self.incomplete_restore_preview.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -4042,7 +4146,7 @@ impl JobRegistry {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        let mut statuses = jobs.into_iter().map(|job| job.status()).collect::<Vec<_>>();
+        let mut statuses = jobs.into_iter().map(|job| job.status_summary()).collect::<Vec<_>>();
         statuses.sort_by(|left, right| left.job_id.cmp(&right.job_id));
         Ok(statuses)
     }
@@ -4095,10 +4199,11 @@ impl JobRegistry {
         let Some(job) = jobs.get(id) else {
             return Ok(false);
         };
-        if !job.status().state.is_terminal() {
+        let status = job.status_summary();
+        if !status.state.is_terminal() {
             return Err("native job cannot be forgotten before it is terminal".to_owned());
         }
-        if job.status().portable_body_retry.is_some_and(|receipt|receipt.pending) {
+        if status.portable_body_retry.is_some_and(|receipt|receipt.pending) {
             return Err("portable body retry ownership is still retained".into());
         }
         jobs.remove(id);
@@ -4475,7 +4580,11 @@ impl JobControl {
         Ok(())
     }
     pub(crate) fn id(&self) -> String {
-        self.status().job_id
+        self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).job_id.clone()
+    }
+
+    fn status_summary(&self) -> JobStatus {
+        self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).summary()
     }
 
     pub(crate) fn status(&self) -> JobStatus {
@@ -4507,6 +4616,7 @@ impl JobControl {
             || (status.kind == JobKind::ExportRisuModule && status.state.is_terminal())
             || (status.kind == JobKind::ExportDataset && status.state.is_terminal())
             || (status.kind == JobKind::ExportPortableBackup && status.state.is_terminal())
+            || (status.kind == JobKind::SnapshotBodies && status.state.is_terminal())
             || (status.kind == JobKind::ExportCompatibleLocalBackup && status.state.is_terminal())
             || (status.device_session_id.is_some() && status.state.is_terminal())
             || (status.kind == JobKind::OfficialPublicationUpload && status.state.is_terminal())
@@ -8373,6 +8483,31 @@ mod tests {
         let receipt = state.content_asset_receipt(&job_id).unwrap();
 
         assert_eq!(receipt, vec![("1".repeat(64), 4), ("2".repeat(64), 7)]);
+    }
+
+    #[test]
+    fn content_status_and_list_are_small_while_explicit_receipts_remain_retryable() {
+        let directory = TempDir::new().unwrap();
+        let state = NativeFileJobState::initialize(directory.path().join("native-file-jobs"));
+        let job = state.registry.create(JobKind::PrepareContentImport).unwrap();
+        let job_id = job.id();
+        let mut content = retained_content_fixture(job_id.clone());
+        content.metadata = serde_json::json!({"synthetic": "x".repeat(2 * 1024 * 1024)});
+        job.start(JobPhase::ReadingSource).unwrap();
+        job.finish_content_job(Ok(content.clone()), Ok(())).unwrap();
+
+        for summary in [state.status_summary(&job_id).unwrap(), state.list().unwrap().remove(0)] {
+            assert!(summary.prepared_content.is_none());
+            let wire = serde_json::to_vec(&summary).unwrap();
+            assert!(wire.len() < 4096);
+            assert!(!String::from_utf8(wire).unwrap().contains("preparedContent"));
+        }
+        assert_eq!(state.prepared_content_receipt(&job_id).unwrap(), content);
+        assert_eq!(state.prepared_content_receipt(&job_id).unwrap(), content);
+        assert_eq!(job.request_cancel().unwrap(), CancelOutcome::Terminal);
+        assert_eq!(state.prepared_content_receipt(&job_id).unwrap(), content);
+        assert!(state.forget(&job_id).unwrap());
+        assert!(state.prepared_content_receipt(&job_id).is_err());
     }
 
     #[test]

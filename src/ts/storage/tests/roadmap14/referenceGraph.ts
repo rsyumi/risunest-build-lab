@@ -12,7 +12,6 @@ export type ReferenceOwnerKind =
     | 'preset'
     | 'plugin-storage'
     | 'character'
-    | 'group'
     | 'conversation'
     | 'module'
     | 'persona'
@@ -183,7 +182,7 @@ function classifyReference(
     if (kind === 'asset' && isExternalAssetKey(key)) return 'external'
     const characterId = typeof metadata.characterId === 'string'
         ? metadata.characterId
-        : owner.kind === 'character' || owner.kind === 'group'
+        : owner.kind === 'character'
             ? owner.id
             : undefined
     if (kind === 'conversation' && characterId) {
@@ -355,25 +354,23 @@ function scanCharacterAssets(
         `${basePath}.additionalAssets`,
         character.additionalAssets,
     )
-    if (character.type !== 'group') {
-        for (const [name, key] of Object.entries(character.vits?.files ?? {})) {
-            emitRequiredAsset(
-                collector,
-                owner,
-                propertyPath(`${basePath}.vits.files`, name),
-                key,
-                { name, field: 'vits.files' },
-            )
-        }
-        for (const [index, asset] of (character.ccAssets ?? []).entries()) {
-            emitRequiredAsset(
-                collector,
-                owner,
-                `${basePath}.ccAssets[${index}].uri`,
-                asset.uri,
-                { name: asset.name, ext: asset.ext, mediaType: asset.type },
-            )
-        }
+    for (const [name, key] of Object.entries(character.vits?.files ?? {})) {
+        emitRequiredAsset(
+            collector,
+            owner,
+            propertyPath(`${basePath}.vits.files`, name),
+            key,
+            { name, field: 'vits.files' },
+        )
+    }
+    for (const [index, asset] of (character.ccAssets ?? []).entries()) {
+        emitRequiredAsset(
+            collector,
+            owner,
+            `${basePath}.ccAssets[${index}].uri`,
+            asset.uri,
+            { name: asset.name, ext: asset.ext, mediaType: asset.type },
+        )
     }
 }
 
@@ -513,15 +510,10 @@ function scanDatabaseCollections(
 function scanCharacters(database: Database, collector: GraphCollector): void {
     for (const character of database.characters) {
         const owner: ReferenceOwner = {
-            kind: character.type === 'group' ? 'group' : 'character',
+            kind: 'character',
             id: character.chaId,
         }
         scanCharacterAssets(character, owner, '$', collector)
-        if (character.type === 'group') {
-            for (const [index, characterId] of character.characters.entries()) {
-                collector.emit(owner, `$.characters[${index}]`, 'character', characterId)
-            }
-        }
         for (const [index, moduleId] of (character.modules ?? []).entries()) {
             collector.emit(owner, `$.modules[${index}]`, 'module', moduleId)
         }

@@ -1,3 +1,4 @@
+use super::progress::{within, LANES};
 use super::{Result, SyncError};
 use crate::persistent_store::{commands::with_store_mut, PersistentStore};
 use std::collections::BTreeSet;
@@ -14,6 +15,24 @@ pub(crate) struct ServerSyncCommandState {
     notification_start: Mutex<Option<Arc<AtomicBool>>>,
     transports: Mutex<TransportJobs>,
     stage: Mutex<Option<Arc<AtomicBool>>>,
+    asset_operation: Arc<Mutex<Option<AssetOperationSlot>>>,
+}
+struct AssetOperationSlot {
+    id: String,
+    cancelled: Arc<AtomicBool>,
+    started: bool,
+}
+struct AssetOperation {
+    id: String,
+    cancelled: Arc<AtomicBool>,
+    slot: Arc<Mutex<Option<AssetOperationSlot>>>,
+}
+impl Drop for AssetOperation {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.slot.lock() {
+            if slot.as_ref().is_some_and(|operation| operation.id == self.id) { *slot = None; }
+        }
+    }
 }
 pub(crate) struct NotificationStart { epoch: u64, cancelled: Arc<AtomicBool> }
 #[derive(Default)]
@@ -36,10 +55,35 @@ impl Drop for StageJob<'_> {
 struct Running<'a>(&'a ServerSyncCommandState);
 impl Drop for Running<'_> { fn drop(&mut self) { self.0.running.store(false, Ordering::Release); } }
 impl ServerSyncCommandState {
+    fn prepare_asset_operation(&self, id: String) -> Result<()> {
+        uuid::Uuid::parse_str(&id).map_err(|_| SyncError::new("invalid-operation-id", 400))?;
+        let mut slot = self.asset_operation.lock().map_err(|_| SyncError::new("server-sync-state-unavailable", 503))?;
+        if slot.as_ref().is_some_and(|operation| operation.started) || self.cleanup_closed.load(Ordering::Acquire) { return Err(SyncError::new("server-sync-busy", 409)); }
+        // A new attempt may replace an abandoned preparation, but never a running worker.
+        *slot = Some(AssetOperationSlot { id, cancelled: Arc::new(AtomicBool::new(false)), started: false });
+        Ok(())
+    }
+    fn claim_asset_operation(&self, id: String) -> Result<AssetOperation> {
+        let mut slot = self.asset_operation.lock().map_err(|_| SyncError::new("server-sync-state-unavailable", 503))?;
+        if self.cleanup_closed.load(Ordering::Acquire) { return Err(SyncError::new("cancelled", 409)); }
+        let operation = slot.as_mut().filter(|operation| operation.id == id).ok_or_else(|| SyncError::new("cancelled", 409))?;
+        if operation.started { return Err(SyncError::new("server-sync-busy", 409)); }
+        operation.started = true;
+        let cancelled = operation.cancelled.clone();
+        Ok(AssetOperation { id, cancelled, slot: self.asset_operation.clone() })
+    }
+    fn cancel_asset_operation(&self, id: &str) -> Result<()> {
+        let mut slot = self.asset_operation.lock().map_err(|_| SyncError::new("server-sync-state-unavailable", 503))?;
+        if let Some(operation) = slot.as_ref().filter(|operation| operation.id == id) {
+            operation.cancelled.store(true, Ordering::Release);
+            if !operation.started { *slot = None; }
+        }
+        Ok(())
+    }
     pub(crate) fn begin_cleanup(&self) -> Result<()> { self.cleanup_closed.store(true, Ordering::Release);if let Some(job)=self.notification.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?.as_ref(){job.abort();}self.cancel() }
-    pub(crate) fn cleanup_drained(&self) -> Result<bool> { let jobs=self.transports.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?;Ok(!self.running.load(Ordering::Acquire)&&!self.notification_active.load(Ordering::Acquire)&&jobs.send.is_none()&&jobs.receive.is_none()&&jobs.hydrate.is_none()) }
+    pub(crate) fn cleanup_drained(&self) -> Result<bool> { let jobs=self.transports.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?;let asset=self.asset_operation.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?;Ok(!self.running.load(Ordering::Acquire)&&!self.notification_active.load(Ordering::Acquire)&&jobs.send.is_none()&&jobs.receive.is_none()&&jobs.hydrate.is_none()&&asset.is_none()) }
     pub(crate) fn finish_cleanup(&self) -> Result<()> { if !self.cleanup_drained()? { return Err(SyncError::new("server-sync-busy",409)); } self.cleanup_closed.store(false,Ordering::Release); Ok(()) }
-    pub(crate) fn cancel(&self) -> Result<()> { self.cancelled.lock().map_err(|_| SyncError::new("server-sync-state-unavailable",503))?.store(true,Ordering::Release);let jobs=self.transports.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?;for flag in [&jobs.send,&jobs.receive,&jobs.hydrate].into_iter().flatten(){flag.store(true,Ordering::Release);}Ok(()) }
+    pub(crate) fn cancel(&self) -> Result<()> { self.cancelled.lock().map_err(|_| SyncError::new("server-sync-state-unavailable",503))?.store(true,Ordering::Release);let jobs=self.transports.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?;for flag in [&jobs.send,&jobs.receive,&jobs.hydrate].into_iter().flatten(){flag.store(true,Ordering::Release);}let mut slot=self.asset_operation.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?;if let Some(operation)=slot.as_ref(){operation.cancelled.store(true,Ordering::Release);if !operation.started{*slot=None;}}Ok(()) }
     fn claim_transport(&self, admission: &Arc<crate::native_file_jobs::admission::Admission>, lane: &'static str)->Result<(TransportJob<'_>,Arc<AtomicBool>)> {
         let mut jobs=self.transports.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?;
         if self.cleanup_closed.load(Ordering::Acquire)||self.running.load(Ordering::Acquire){return Err(SyncError::new("server-sync-busy",409));}
@@ -162,8 +206,9 @@ fn recorded<T>(stage: &str, result: Result<T>) -> Result<T> {
 #[tauri::command]
 pub(crate) async fn server_sync_asset_status(
     app: AppHandle,
+    target: Option<crate::persistent_store::asset_residency::PreviousStorageTarget>,
 ) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
-    logged_blocking("asset-status", move || job_store(&app)?.asset_residency_status()).await
+    logged_blocking("asset-status", move || job_store(&app)?.asset_residency_status_for_target(target.as_ref())).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_asset_policy(
@@ -171,7 +216,7 @@ pub(crate) async fn server_sync_asset_policy(
     policy: super::residency::AssetPolicy,
     selected_character_id: Option<String>,
 ) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
-    logged_blocking("asset-policy", move || server_sync_asset_policy_operation(&app, policy, selected_character_id.as_deref())).await
+    logged_blocking("asset-policy", move || within(&LANES.assets, || server_sync_asset_policy_operation(&app, policy, selected_character_id.as_deref()))).await
 }
 
 fn server_sync_asset_policy_operation<R: tauri::Runtime>(app: &AppHandle<R>, policy: super::residency::AssetPolicy, selected_character_id: Option<&str>) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
@@ -187,29 +232,45 @@ fn server_sync_asset_policy_operation<R: tauri::Runtime>(app: &AppHandle<R>, pol
     })
 }
 #[tauri::command]
+pub(crate) fn asset_residency_prepare_download(app: AppHandle, operation_id: String) -> Result<()> {
+    recorded("asset-download", app.state::<ServerSyncCommandState>().prepare_asset_operation(operation_id))
+}
+#[tauri::command]
 pub(crate) async fn asset_residency_download_remote(
     app: AppHandle,
     connection_id: Option<String>,
     selected_character_id: Option<String>,
+    operation_id: String,
+    target: Option<crate::persistent_store::asset_residency::PreviousStorageTarget>,
 ) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
-    logged_blocking("asset-download", move || {
+    let operation = recorded("asset-download", app.state::<ServerSyncCommandState>().claim_asset_operation(operation_id))?;
+    logged_blocking("asset-download", move || within(&LANES.assets, || {
+        let _operation = operation;
         let _admission = claim_library(&app)?;
         let state = app.state::<ServerSyncCommandState>();
-        let (_running, cancelled) = state.claim_preparation()?;
-        job_store(&app)?.asset_residency_download_remote(connection_id.as_deref(), Some(cancelled.clone()), selected_character_id.as_deref(), || {
+        let _running = state.claim()?;
+        let cancelled = _operation.cancelled.clone();
+        *state.cancelled.lock().map_err(|_| SyncError::new("server-sync-state-unavailable", 503))? = cancelled.clone();
+        let check = || {
             if cancelled.load(Ordering::Acquire) {
                 Err(SyncError::new("cancelled", 409))
             } else {
                 Ok(())
             }
-        })
-    }).await
+        };
+        let store = job_store(&app)?;
+        match target {
+            Some(target) if connection_id.is_none() => store.asset_residency_download_previous(&target, Some(cancelled.clone()), selected_character_id.as_deref(), check),
+            Some(_) => Err(SyncError::new("invalid-asset-download-scope", 400)),
+            None => store.asset_residency_download_remote(connection_id.as_deref(), Some(cancelled.clone()), selected_character_id.as_deref(), check),
+        }
+    })).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_asset_evict(
     app: AppHandle,
 ) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
-    logged_blocking("asset-evict", move || server_sync_asset_evict_operation(&app)).await
+    logged_blocking("asset-evict", move || within(&LANES.assets, || server_sync_asset_evict_operation(&app))).await
 }
 
 fn server_sync_asset_evict_operation<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
@@ -264,18 +325,18 @@ pub(crate) async fn server_sync_configure(app:AppHandle,config:super::client::Se
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_push(app:AppHandle,request:crate::persistent_store::lww::Header,generating:Vec<crate::persistent_store::lww::MessageLocator>)->Result<Option<risunest_sync_wire::lww::PushReceipt>> {
-    logged_blocking("push",move|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.push(&mut store,&request,&generating)}).await
+    logged_blocking("push",move|| within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.push(&mut store,&request,&generating)})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_pull(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<crate::persistent_store::lww::StageReceive> {
-    logged_blocking("pull",move|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.receive_page(&mut store,&request)}).await
+    logged_blocking("pull",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.receive_page(&mut store,&request)})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_ack(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
-    logged_blocking("ack",move|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.finish_receive(&store,&request)}).await
+    logged_blocking("ack",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.finish_receive(&store,&request)})).await
 }
 #[tauri::command]
-pub(crate) async fn server_sync_cancel(app:AppHandle)->Result<()> {recorded("cancel",app.state::<ServerSyncCommandState>().cancel())}
+pub(crate) async fn server_sync_cancel(app:AppHandle,operation_id:Option<String>)->Result<()> {recorded("cancel",match operation_id {Some(id)=>app.state::<ServerSyncCommandState>().cancel_asset_operation(&id),None=>app.state::<ServerSyncCommandState>().cancel()})}
 #[tauri::command]
 pub(crate) async fn server_sync_lww_fence(app:AppHandle,new_device:bool)->Result<()> {
     logged_blocking("fence",move|| {let state=app.state::<ServerSyncCommandState>();if !state.cleanup_drained()?{return Err(SyncError::new("server-sync-busy",409));}let mut store=job_store(&app)?;super::binding::fence_stored(&mut store,new_device)}).await
@@ -283,30 +344,36 @@ pub(crate) async fn server_sync_lww_fence(app:AppHandle,new_device:bool)->Result
 
 #[tauri::command]
 pub(crate) async fn server_sync_lww_activate(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
-    logged_blocking("activate",move|| {super::binding::activate(&mut job_store(&app)?,&request,None)}).await
+    logged_blocking("activate",move|| within(&LANES.binding,|| {super::binding::activate(&mut job_store(&app)?,&request,None)})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_pending_binding(app:AppHandle)->Result<Option<super::binding::PendingBinding>> {logged_blocking("pending-binding",move||{super::binding::pending_binding(&job_store(&app)?)}).await}
 #[tauri::command]
-pub(crate) async fn server_sync_lww_inspect(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<super::binding::Inspection> {logged_blocking("inspect",move||{super::binding::inspect(&job_store(&app)?,&request)}).await}
+pub(crate) async fn server_sync_lww_inspect(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<super::binding::Inspection> {logged_blocking("inspect",move||within(&LANES.binding,|| {super::binding::inspect(&job_store(&app)?,&request)})).await}
 #[tauri::command]
-pub(crate) async fn server_sync_lww_stage_target(app:AppHandle,request:crate::persistent_store::lww::Header,inspection_id:String)->Result<super::binding::StagedTarget> {logged_blocking("stage-target",move||{let _permit=claim_library(&app)?;let state=app.state::<ServerSyncCommandState>();let (_stage,cancelled)=state.claim_stage()?;super::binding::stage(&mut job_store(&app)?,&request,&inspection_id,Some(cancelled))}).await}
+pub(crate) async fn server_sync_lww_stage_target(app:AppHandle,request:crate::persistent_store::lww::Header,inspection_id:String)->Result<super::binding::StagedTarget> {logged_blocking("stage-target",move||within(&LANES.binding,|| {let _permit=claim_library(&app)?;let state=app.state::<ServerSyncCommandState>();let (_stage,cancelled)=state.claim_stage()?;super::binding::stage(&mut job_store(&app)?,&request,&inspection_id,Some(cancelled))})).await}
 #[tauri::command]
-pub(crate) async fn server_sync_lww_prepare_new_device(app:AppHandle,request:crate::persistent_store::lww::Header,staging_id:String)->Result<crate::persistent_store::lww::NewDevicePreparation> {logged_blocking("prepare-new-device",move||{let _permit=claim_library(&app)?;super::binding::prepare_new_device(&mut job_store(&app)?,&request,&staging_id)}).await}
+pub(crate) async fn server_sync_lww_prepare_new_device(app:AppHandle,request:crate::persistent_store::lww::Header,staging_id:String)->Result<crate::persistent_store::lww::NewDevicePreparation> {logged_blocking("prepare-new-device",move||within(&LANES.binding,|| {let _permit=claim_library(&app)?;super::binding::prepare_new_device(&mut job_store(&app)?,&request,&staging_id)})).await}
 #[tauri::command]
-pub(crate) async fn server_sync_lww_prepare_fresh_writer(app:AppHandle,request:crate::persistent_store::lww::Header,inspection_id:String)->Result<crate::persistent_store::lww::NewDevicePreparation> {logged_blocking("prepare-fresh-writer",move||{let _permit=claim_library(&app)?;super::binding::prepare_fresh_writer(&mut job_store(&app)?,&request,&inspection_id)}).await}
+pub(crate) async fn server_sync_lww_prepare_fresh_writer(app:AppHandle,request:crate::persistent_store::lww::Header,inspection_id:String)->Result<crate::persistent_store::lww::NewDevicePreparation> {logged_blocking("prepare-fresh-writer",move||within(&LANES.binding,|| {let _permit=claim_library(&app)?;super::binding::prepare_fresh_writer(&mut job_store(&app)?,&request,&inspection_id)})).await}
 #[tauri::command]
-pub(crate) async fn server_sync_lww_activate_new_device(app:AppHandle,request:crate::persistent_store::lww::Header,authorization_id:String,writer_id:String)->Result<()> {logged_blocking("activate-new-device",move||{super::binding::activate(&mut job_store(&app)?,&request,Some((&authorization_id,&writer_id)))}).await}
+pub(crate) async fn server_sync_lww_activate_new_device(app:AppHandle,request:crate::persistent_store::lww::Header,authorization_id:String,writer_id:String)->Result<()> {logged_blocking("activate-new-device",move||within(&LANES.binding,|| {super::binding::activate(&mut job_store(&app)?,&request,Some((&authorization_id,&writer_id)))})).await}
 #[tauri::command]
-pub(crate) async fn server_sync_lww_retry(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<crate::persistent_store::lww::ApplyResult> {logged_blocking("retry",move||{let _permit=claim_library(&app)?;let mut store=job_store(&app)?;lww_client(&store)?.retry_unpublished(&mut store,&request)}).await}
+pub(crate) async fn server_sync_lww_retry(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<crate::persistent_store::lww::ApplyResult> {logged_blocking("retry",move||within(&LANES.send,|| {let _permit=claim_library(&app)?;let mut store=job_store(&app)?;lww_client(&store)?.retry_unpublished(&mut store,&request)})).await}
 #[tauri::command]
 pub(crate) async fn server_sync_lww_drain(app:AppHandle,request:crate::persistent_store::lww::Header,generating:Vec<crate::persistent_store::lww::MessageLocator>)->Result<()> {
-    logged_blocking("drain",move||{let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;let core=lww_client_cancelled(&store,Some(cancelled))?;let mut next=request;while core.push(&mut store,&next,&generating)?.is_some(){next.request_id=uuid::Uuid::new_v4().to_string();}if !store.lww_read_outbox(next.binding_authority,1)?.entries.is_empty(){return Err(SyncError::new("generation-active",409));}Ok(())}).await
+    logged_blocking("drain",move||within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;let core=lww_client_cancelled(&store,Some(cancelled))?;let mut next=request;while core.push(&mut store,&next,&generating)?.is_some(){next.request_id=uuid::Uuid::new_v4().to_string();}if !store.lww_read_outbox(next.binding_authority,1)?.entries.is_empty(){return Err(SyncError::new("generation-active",409));}Ok(())})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_hydrate(app:AppHandle,request:crate::persistent_store::lww::Header,selected_character_id:Option<String>)->Result<()> {
-    logged_blocking("hydrate",move|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"hydrate")?;let store=job_store(&app)?;hydrate_binding_assets(&store,&request,cancelled,selected_character_id.as_deref(),||{})}).await
+    logged_blocking("hydrate",move|| within(&LANES.hydrate,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"hydrate")?;let store=job_store(&app)?;hydrate_binding_assets(&store,&request,cancelled,selected_character_id.as_deref(),||{})})).await
 }
+#[tauri::command]
+pub(crate) async fn server_sync_lww_pending_count(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<u64> {
+    logged_blocking("pending-count",move||Ok(job_store(&app)?.lww_outbox_count(request.binding_authority)?)).await
+}
+#[tauri::command]
+pub(crate) async fn server_sync_progress()->Vec<super::progress::LaneSnapshot> {LANES.snapshot()}
 pub(crate) fn hydrate_binding_assets(store:&crate::persistent_store::PersistentStore,request:&crate::persistent_store::lww::Header,cancelled:Arc<AtomicBool>,selected_character_id:Option<&str>,on_object_done:impl Fn())->Result<()> {
     if store.server_asset_policy()?!=super::residency::AssetPolicy::Full{return Ok(());}
     let authority=request.binding_authority;
@@ -340,6 +407,80 @@ async fn start_notification_job<R: tauri::Runtime>(app:AppHandle<R>,request:crat
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scoped_download_cancellation_does_not_cancel_transport_or_a_later_retry() {
+        use super::*;
+        let state = ServerSyncCommandState::default();
+        let first_id = uuid::Uuid::new_v4().to_string();
+        state.prepare_asset_operation(first_id.clone()).unwrap();
+        let first = state.claim_asset_operation(first_id.clone()).unwrap();
+        let admission = Arc::new(crate::native_file_jobs::admission::Admission::default());
+        let (_transport, transport_cancel) = state.claim_transport(&admission, "send").unwrap();
+        state.cancel_asset_operation(&first_id).unwrap();
+        assert!(first.cancelled.load(Ordering::Acquire));
+        assert!(!transport_cancel.load(Ordering::Acquire));
+        assert!(state.claim_asset_operation(uuid::Uuid::new_v4().to_string()).is_err());
+        drop(first);
+        let retry_id = uuid::Uuid::new_v4().to_string();
+        state.prepare_asset_operation(retry_id.clone()).unwrap();
+        let retry = state.claim_asset_operation(retry_id).unwrap();
+        state.cancel_asset_operation(&first_id).unwrap();
+        assert!(!retry.cancelled.load(Ordering::Acquire));
+    }
+    #[test]
+    fn cleanup_tracks_and_cancels_a_download_before_its_blocking_worker_starts() {
+        use super::*;
+        let state = ServerSyncCommandState::default();
+        let id = uuid::Uuid::new_v4().to_string();
+        state.prepare_asset_operation(id.clone()).unwrap();
+        let operation = state.claim_asset_operation(id).unwrap();
+        state.begin_cleanup().unwrap();
+        assert!(operation.cancelled.load(Ordering::Acquire));
+        assert!(!state.cleanup_drained().unwrap());
+        assert!(state.claim_asset_operation(uuid::Uuid::new_v4().to_string()).is_err());
+        drop(operation);
+        assert!(state.cleanup_drained().unwrap());
+    }
+    #[test]
+    fn cancellation_before_the_download_command_is_polled_prevents_its_start() {
+        let state = ServerSyncCommandState::default();
+        let first = uuid::Uuid::new_v4().to_string();
+        state.prepare_asset_operation(first.clone()).unwrap();
+        state.cancel_asset_operation(&first).unwrap();
+        assert_eq!(state.claim_asset_operation(first.clone()).err().unwrap().code, "cancelled");
+        assert!(state.cleanup_drained().unwrap());
+        let retry = uuid::Uuid::new_v4().to_string();
+        state.prepare_asset_operation(retry.clone()).unwrap();
+        state.cancel_asset_operation(&first).unwrap();
+        let operation = state.claim_asset_operation(retry.clone()).unwrap();
+        assert!(!operation.cancelled.load(Ordering::Acquire));
+        assert!(state.claim_asset_operation(retry.clone()).is_err());
+        state.cancel_asset_operation(&retry).unwrap();
+        assert!(operation.cancelled.load(Ordering::Acquire));
+        assert!(!state.cleanup_drained().unwrap());
+        drop(operation);
+        assert!(state.cleanup_drained().unwrap());
+    }
+    #[test]
+    fn abandoned_preparations_are_bounded_and_never_supersede_an_active_worker() {
+        let state = ServerSyncCommandState::default();
+        let abandoned = uuid::Uuid::new_v4().to_string();
+        let next = uuid::Uuid::new_v4().to_string();
+        state.prepare_asset_operation(abandoned.clone()).unwrap();
+        state.prepare_asset_operation(next.clone()).unwrap();
+        assert_eq!(state.claim_asset_operation(abandoned.clone()).err().unwrap().code, "cancelled");
+        state.cancel_asset_operation(&abandoned).unwrap();
+        let running = state.claim_asset_operation(next).unwrap();
+        let fresh = uuid::Uuid::new_v4().to_string();
+        assert!(state.prepare_asset_operation(fresh.clone()).is_err());
+        assert!(!running.cancelled.load(Ordering::Acquire));
+        drop(running);
+        state.prepare_asset_operation(fresh.clone()).unwrap();
+        state.begin_cleanup().unwrap();
+        assert!(state.cleanup_drained().unwrap());
+        assert!(state.claim_asset_operation(fresh).is_err());
+        assert!(state.prepare_asset_operation(uuid::Uuid::new_v4().to_string()).is_err());
+    }
     use super::*;
     #[test]
     fn a_stalled_real_receive_does_not_delay_push_and_finished_jobs_release_admission() {

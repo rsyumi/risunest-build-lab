@@ -7,6 +7,9 @@ import { getCurrentChat } from '../storage/database.svelte'
 import type { Chat, character } from '../storage/database.svelte'
 import { registerActiveHistoryWindow } from './historyWindowIndex'
 import { openHistoryWindowCopy } from './historyWindowWrite'
+import { captureGenerationConversationOperation } from './generationConversationOperation'
+import * as polyfill from '../polyfill'
+import { alertConfirm } from '../alert'
 import { createStoreHistoryWindow, historyMessages } from './tests/historyWindowTestUtils'
 
 vi.mock('../storage/persistentDataRuntime.svelte', () => ({
@@ -102,6 +105,7 @@ describe('Lua chat APIs over a history window', () => {
     afterEach(() => {
         unregister?.()
         unregister = null
+        vi.restoreAllMocks()
     })
 
     it('reads by index in the whole conversation', async () => {
@@ -213,5 +217,103 @@ describe('Lua chat APIs over a history window', () => {
         expect(store.slice(0, 900)).toEqual(historyMessages(900))
         // Display listeners keep reading the selected conversation.
         await expect(scriptings.runLuaEditTrigger(char, 'editdisplay', 'shown')).resolves.toBe('shown 0')
+    })
+
+    it.each(['insert', 'remove'] as const)('follows an owned Lua %s before the output target', async (action) => {
+        const store = historyMessages(1000)
+        const { controller } = createStoreHistoryWindow(store, 900)
+        unregister = registerActiveHistoryWindow({
+            characterId: `lua-output-${action}`,
+            conversationId: 'conversation-1',
+            shell: null,
+            controller,
+        })
+        const output = captureGenerationConversationOperation({
+            session: null,
+            getCurrentSession: () => null,
+            chat: controller.chat,
+            getCurrentChat: () => controller.chat,
+            windowedController: controller,
+            continueLast: true,
+        })
+        const char = {
+            chaId: `lua-output-${action}`,
+            triggerscript: [{ effect: [{ type: 'triggerlua', code: `
+                listenEdit('editOutput', function(id, value, meta)
+                    ${action === 'insert' ? "insertChat(id, 950, 'user', 'inserted')" : 'removeChat(id, 950)'}
+                    return value .. ' edited'
+                end)
+            ` }] }],
+        } as unknown as character
+        const accepted: boolean[] = []
+        const result = await scriptings.runLuaEditTrigger(
+            char, 'editoutput', 'reply', undefined, undefined,
+            (commit) => accepted.push(output.acceptCommit(commit)),
+        )
+        expect(accepted).toEqual([true])
+        expect(output.absoluteIndex).toBe(action === 'insert' ? 1000 : 998)
+        expect(output.commitData(result)).toBe(true)
+        expect(store.at(-1)?.data).toBe('reply edited')
+        expect(store.slice(0, 900)).toEqual(historyMessages(900))
+        output.release()
+    })
+
+    it('does not clone the history or summaries for text-only output listeners', async () => {
+        const { controller } = createStoreHistoryWindow(historyMessages(1000), 900)
+        controller.chat.hypaV3Data = { summaries: Array.from({ length: 3000 }, (_, i) => ({
+            text: `summary ${i}`, chatMemos: [], isImportant: false,
+        })) } as never
+        unregister = registerActiveHistoryWindow({
+            characterId: 'lua-text-only', conversationId: 'conversation-1', shell: null, controller,
+        })
+        const clone = vi.spyOn(polyfill, 'safeStructuredClone')
+        const applyRange = vi.spyOn(controller, 'applyRange')
+        const char = {
+            chaId: 'lua-text-only',
+            triggerscript: [{ effect: [{ type: 'triggerlua', code: `
+                listenEdit('editOutput', function(id, value, meta)
+                    return value .. ' edited'
+                end)
+            ` }] }],
+        } as unknown as character
+        for (let i = 0; i < 5; i += 1) {
+            await expect(scriptings.runLuaEditTrigger(char, 'editoutput', 'reply')).resolves.toBe('reply edited')
+        }
+        expect(clone).not.toHaveBeenCalled()
+        expect(applyRange).not.toHaveBeenCalled()
+    })
+
+    it.each([false, true])('isolates a lazy history draft across an await (concurrent write %s)', async (concurrent) => {
+        const store = historyMessages(1000)
+        const { controller } = createStoreHistoryWindow(store, 900)
+        unregister = registerActiveHistoryWindow({
+            characterId: `lua-await-${concurrent}`, conversationId: 'conversation-1', shell: null, controller,
+        })
+        let resume!: (value: boolean) => void
+        vi.mocked(alertConfirm).mockReset()
+        vi.mocked(alertConfirm).mockReturnValueOnce(new Promise((resolve) => { resume = resolve }))
+        const char = {
+            chaId: `lua-await-${concurrent}`,
+            triggerscript: [{ effect: [{ type: 'triggerlua', code: `
+                listenEdit('editOutput', function(id, value, meta)
+                    setChat(id, 999, 'owned')
+                    alertConfirm(id, 'synthetic wait'):await()
+                    return getChatData(id, 999)
+                end)
+            ` }] }],
+        } as unknown as character
+        const pending = scriptings.runLuaEditTrigger(char, 'editoutput', 'reply')
+        const outcome = pending.then(value => ({ value }), error => ({ error }))
+        await vi.waitFor(() => expect(alertConfirm).toHaveBeenCalledOnce())
+        expect(store[999].data).toBe('m999')
+        if (concurrent) controller.applyRange(99, 1, [{ ...controller.chat.message[99], data: 'newer' }], 'edit')
+        resume(true)
+        if (concurrent) {
+            expect(await outcome).toHaveProperty('error')
+            expect(store[999].data).toBe('newer')
+        } else {
+            expect(await outcome).toEqual({ value: 'owned' })
+            expect(store[999].data).toBe('owned')
+        }
     })
 })

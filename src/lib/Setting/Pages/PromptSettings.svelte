@@ -189,7 +189,7 @@
     <TextInput bind:value={DBState.db.promptSettings.postEndInnerFormat}/>
 
     <Check bind:check={DBState.db.promptSettings.sendChatAsSystem} name={language.sendChatAsSystem} className="mt-4"/>
-    <Check bind:check={DBState.db.promptSettings.sendName} name={language.formatGroupInSingle} className="mt-4"/>
+    <Check bind:check={DBState.db.promptSettings.sendName} name={language.formatMessageWithName} className="mt-4"/>
     <Check bind:check={DBState.db.promptSettings.trimStartNewChat} name={language.trimStartNewChat} className="mt-4"/>
     <Check bind:check={DBState.db.promptSettings.utilOverride} name={language.utilOverride} className="mt-4"/>
     <Check bind:check={DBState.db.jsonSchemaEnabled} name={language.enableJsonSchema} className="mt-4"/>
@@ -204,8 +204,8 @@
     {/if}
     <span class="text-textcolor mt-4">{language.maxThoughtTagDepth}</span>
     <NumberInput bind:value={DBState.db.promptSettings.maxThoughtTagDepth}/>
-    <span class="text-textcolor mt-4">{language.groupOtherBotRole} <Help key="groupOtherBotRole"/></span>
-    <SelectInput bind:value={DBState.db.groupOtherBotRole}>
+    <span class="text-textcolor mt-4">{language.namedMessageRole} <Help key="namedMessageRole"/></span>
+    <SelectInput bind:value={DBState.db.namedMessageRole}>
         <OptionInput value="user">User</OptionInput>
         <OptionInput value="system">System</OptionInput>
         <OptionInput value="assistant">assistant</OptionInput>
@@ -218,8 +218,8 @@
     <TextAreaInput bind:value={DBState.db.OAIPrediction}/>
     <span class="text-textcolor mt-4">{language.autoSuggest} <Help key='autoSuggest' /></span>
     <TextAreaInput bind:value={DBState.db.autoSuggestPrompt} placeholder={defaultAutoSuggestPrompt}/>
-    <span class="text-textcolor mt-4">{language.groupInnerFormat} <Help key='groupInnerFormat' /></span>
-    <TextAreaInput placeholder={`<{{char}}\'s Message>\n{{slot}}\n</{{char}}\'s Message>`} bind:value={DBState.db.groupTemplate}/>
+    <span class="text-textcolor mt-4">{language.messageNameFormat} <Help key='messageNameFormat' /></span>
+    <TextAreaInput placeholder={`<{{char}}\'s Message>\n{{slot}}\n</{{char}}\'s Message>`} bind:value={DBState.db.messageNameTemplate}/>
     <span class="text-textcolor mt-4">{language.systemContentReplacement} <Help key="systemContentReplacement"/></span>
     <TextAreaInput bind:value={DBState.db.systemContentReplacement}/>
     <span class="text-textcolor mt-4">{language.systemRoleReplacement} <Help key="systemRoleReplacement"/></span>

@@ -139,10 +139,7 @@ async function processCommand(command:string, pipe:string, conversationOperation
                 await sayTTS(currentChar, arg)
                 return pipe
             }
-            if(currentChar.type === 'group'){
-                //NOT IMPLEMENTED
-                return pipe
-            }
+
             return pipe
         }
         case 'send': {
@@ -204,7 +201,7 @@ async function processCommand(command:string, pipe:string, conversationOperation
                 if(clearMode) resetConversationWithMessage(mutationTarget, message)
                 else appendConversationMessage(mutationTarget, message)
                 if (!refreshMutationTarget()) return false
-                await sendChat(-1)
+                await sendChat()
                 if (!refreshMutationTarget()) return false
             }
             return ''
@@ -254,9 +251,7 @@ async function processCommand(command:string, pipe:string, conversationOperation
         }
         case 'trigger':{
             const currentChar = getCurrentCharacter()
-            if(currentChar.type === 'group'){
-                return;
-            }
+
             if (conversationOperation && (
                 currentChar.chaId !== conversationOperation.characterId ||
                 getCurrentChat()?.id !== conversationOperation.conversationId

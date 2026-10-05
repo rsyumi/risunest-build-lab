@@ -1,6 +1,6 @@
 import DOMPurify from 'dompurify';
 import markdownit from 'markdown-it'
-import { appVer, getCurrentCharacter, getDatabase, type Database, type character, type customscript, type groupChat, type loreBook, type triggerscript } from '../storage/database.svelte';
+import { appVer, getCurrentCharacter, getDatabase, type Database, type character, type customscript, type loreBook, type triggerscript } from '../storage/database.svelte';
 import { DBState, selIdState } from '../stores.svelte';
 import { aiWatermarkingLawApplies, getFileSrc } from '../globalApi.svelte';
 import { isTauri } from "src/ts/platform"
@@ -737,7 +737,7 @@ function parseThoughtsAndTools(
 
 export async function ParseMarkdown(
     data:string,
-    charArg:(character|simpleCharacterArgument | groupChat | string) = null,
+    charArg:(character|simpleCharacterArgument | string) = null,
     mode:'normal'|'back'|'pretranslate'|'notrim' = 'normal',
     chatID=-1,
     cbsConditions:CbsConditions = {},
@@ -748,7 +748,7 @@ export async function ParseMarkdown(
     const additionalAssetMode = (mode === 'back') ? 'back' : 'normal'
     let char = (typeof(charArg) === 'string') ? (findCharacterbyId(charArg)) : (charArg)
 
-    if(char && char.type !== 'group'){
+    if(char){
         data = await parseAdditionalAssets(data, char, additionalAssetMode, {
             ch: chatID
         }, renderContext)
@@ -766,7 +766,7 @@ export async function ParseMarkdown(
     }
 
     renderContext.signal?.throwIfAborted()
-    if(firstParsed !== data && char && char.type !== 'group'){
+    if(firstParsed !== data && char){
         data = await parseAdditionalAssets(data, char, additionalAssetMode, {
             ch: chatID
         }, renderContext)
@@ -1665,7 +1665,7 @@ export function risuChatParser(da:string, arg:{
     projectedChatID?:number
     historyOffset?:number
     db?:Database
-    chara?:string|character|groupChat
+    chara?:string|character
     rmVar?:boolean,
     var?:{[key:string]:string}
     tokenizeAccurate?:boolean
@@ -1692,26 +1692,10 @@ export function risuChatParser(da:string, arg:{
     const chatID = arg.chatID ?? -1
     const db = arg.db ?? DBState.db
     const aChara = arg.chara
-    let chara:character|groupChat|string = null
+    let chara:character|string = null
 
     if(aChara){
-        if(typeof(aChara) !== 'string' && aChara.type === 'group'){
-            if(aChara.chats[aChara.chatPage].message.length > 0){
-                const memberId = aChara.chats[aChara.chatPage].message.at(-1).saying ?? ''
-                const gc = arg.db
-                    ? db.characters.find((candidate) => candidate.chaId === memberId)
-                    : findCharacterbyId(memberId)
-                if(gc && gc.name !== 'Unknown Character'){
-                    chara = gc
-                }
-            }
-            else{
-                chara = 'bot'
-            }
-        }
-        else{
-            chara = aChara
-        }
+        chara = aChara
     }
     if(arg.tokenizeAccurate){
         const db = arg.db ?? DBState.db

@@ -487,7 +487,7 @@ pub(crate) enum SnapshotPurpose {
     BackupBundle {
         source: wire_control::BundleSource,
         remote_generation: Option<Sequence>,
-        original_units: BTreeMap<risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue>,
+        original_units: super::capture::OriginalBackupUnits,
     },
 }
 
@@ -1245,13 +1245,14 @@ pub(super) struct OriginalBackupUnit {
 }
 
 fn original_unit_sources(
-    units: &BTreeMap<risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue>,
+    units: impl Iterator<Item = crate::persistent_store::StoreResult<(risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue)>>,
     directory: &Path,
 ) -> Result<Vec<SourceEntry>> {
     let mut spool = tempfile::NamedTempFile::new_in(directory).map_err(transient)?;
     let mut offset = 0u64;
-    let mut sources = Vec::with_capacity(units.len());
-    for (key, value) in units {
+    let mut sources = Vec::new();
+    for unit in units {
+        let (key,value) = unit.map_err(corrupt)?;
         value.validate().map_err(corrupt)?;
         let record = OriginalBackupUnit {
             schema: "risunest.backup-unit/v1".into(), key: key.clone(), value: value.clone(),
@@ -1276,6 +1277,88 @@ fn original_unit_sources(
     let (_file, path) = spool.keep().map_err(transient)?;
     for source in &mut sources { source.source = ObjectSource::File(path.clone()); }
     Ok(sources)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_original_catalog_node(
+    encoded: EncodedCatalog, format_repository_id:&str,build_root:&Path,root_key:&[u8;32],metadata_key:&[u8;32],limits:PackageLimits,
+    cache:&mut PackageCache,evidence:&mut ObjectEvidence,journal:&mut TransferJournal,provider:&dyn Provider,
+    repository:&RepositoryHandle,cancel:&Cancellation,referenced:&mut Vec<RemoteObject>,
+)->Result<wire::CatalogChild> {
+    let mut waiting=Vec::new();let mut uploaded=Vec::new();let mut bytes=0;
+    let sealed=seal_catalog_node(&encoded.bytes,&mut waiting,&mut bytes,&mut uploaded,format_repository_id,root_key,metadata_key,
+        limits,build_root,cache,evidence,journal,provider,repository,cancel).await?;
+    let remote=upload_sealed_wave(vec![sealed],format_repository_id,root_key,cache,journal,provider,repository,cancel).await?
+        .pop().ok_or_else(||corrupt("original unit catalog upload"))?;
+    referenced.push(remote.clone());
+    Ok(wire::CatalogChild{first_key:encoded.document.first_key,last_key:encoded.document.last_key,object:remote.stored(repository)?})
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_original_unit_catalog(
+    units:&super::capture::OriginalBackupUnits,external_root:&Path,format_repository_id:&str,build_root:&Path,
+    root_key:&[u8;32],limits:PackageLimits,cache:&mut PackageCache,evidence:&mut ObjectEvidence,journal:&mut TransferJournal,
+    provider:&dyn Provider,repository:&RepositoryHandle,prepared:&Arc<PhaseProgress>,maintenance:&mut MaintenanceReport,
+    hydration:&mut SourceHydration,cancel:&Cancellation,referenced:&mut Vec<RemoteObject>,
+)->Result<RemoteObject> {
+    let index=tempfile::NamedTempFile::new_in(build_root).map_err(transient)?;
+    let nodes=rusqlite::Connection::open(index.path()).map_err(transient)?;
+    nodes.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
+        CREATE TABLE nodes(level INTEGER NOT NULL,ordinal INTEGER NOT NULL,body TEXT NOT NULL,PRIMARY KEY(level,ordinal))").map_err(transient)?;
+    let size=StoredSize{limits,repository_id:format_repository_id};
+    let metadata_key=derive_key(root_key,format_repository_id,"metadata").map_err(corrupt)?;
+    let mut rows=units.units().map_err(corrupt)?.peekable();
+    let mut count=0i64;
+    loop {
+        cancel.check()?;
+        let sources=original_unit_sources(rows.by_ref().take(128),build_root)?;
+        if sources.is_empty() && count!=0 {break;}
+        let spool=sources.first().and_then(|source|source.source.file()).map(Path::to_owned);
+        let (entries,objects)=build_entries(wire::CatalogKind::Records,sources,external_root,format_repository_id,build_root,root_key,limits,
+            None,None,false,cache,evidence,journal,provider,repository,prepared,maintenance,hydration,cancel).await?;
+        referenced.extend(objects);
+        let packs=pack_locators(&entries,repository)?;
+        let fragments=catalog_fragments(&entries)?;
+        let leaves=catalog_leaves(wire::CatalogKind::Records,&fragments,&packs,&[],&size)?;
+        for leaf in leaves {
+            let child=upload_original_catalog_node(leaf,format_repository_id,build_root,root_key,&metadata_key,limits,
+                cache,evidence,journal,provider,repository,cancel,referenced).await?;
+            nodes.execute("INSERT INTO nodes VALUES(0,?1,?2)",rusqlite::params![count,serde_json::to_string(&child).map_err(corrupt)?]).map_err(transient)?;
+            count+=1;
+        }
+        if let Some(spool)=spool {fs::remove_file(spool).map_err(transient)?;}
+        if rows.peek().is_none() {break;}
+    }
+    let mut level=0u16;
+    while count>1 {
+        let next_level=level.checked_add(1).ok_or_else(||corrupt("original catalog depth"))?;
+        let previous=count;let mut after=-1i64;count=0;
+        loop {
+            let page={
+                let mut query=nodes.prepare("SELECT ordinal,body FROM nodes WHERE level=?1 AND ordinal>?2 ORDER BY ordinal LIMIT 128").map_err(transient)?;
+                let rows=query.query_map(rusqlite::params![level,after],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?))).map_err(transient)?;
+                rows.collect::<std::result::Result<Vec<_>,_>>().map_err(transient)?
+            };
+            if page.is_empty() {break;}
+            after=page.last().unwrap().0;
+            let children=page.into_iter().map(|(_,body)|serde_json::from_str::<wire::CatalogChild>(&body).map_err(corrupt)).collect::<Result<Vec<_>>>()?;
+            let batches=stable_batches(&children,&[],&size,|child|child.first_key.as_str(),
+                |children|wire::CatalogDocument::branch(wire::CatalogKind::Records,next_level,children.to_vec()).map_err(corrupt))?;
+            for batch in batches {
+                cancel.check()?;
+                let child=upload_original_catalog_node(batch,format_repository_id,build_root,root_key,&metadata_key,limits,
+                    cache,evidence,journal,provider,repository,cancel,referenced).await?;
+                nodes.execute("INSERT INTO nodes VALUES(?1,?2,?3)",rusqlite::params![next_level,count,serde_json::to_string(&child).map_err(corrupt)?]).map_err(transient)?;
+                count+=1;
+            }
+        }
+        if count>=previous {return Err(ProviderError::new(ErrorKind::FileTooLarge));}
+        nodes.execute("DELETE FROM nodes WHERE level=?1",[level]).map_err(transient)?;
+        level=next_level;
+    }
+    let body:String=nodes.query_row("SELECT body FROM nodes WHERE level=?1 AND ordinal=0",[level],|row|row.get(0)).map_err(corrupt)?;
+    let child:wire::CatalogChild=serde_json::from_str(&body).map_err(corrupt)?;
+    RemoteObject::from_stored(&child.object,repository)
 }
 
 fn capture_sources(capture: &CapturedSnapshot) -> Result<(Vec<SourceEntry>, Vec<SourceEntry>)> {
@@ -2323,7 +2406,10 @@ async fn seal_plain_object(
             validate_receipt(&record.intent, repository, receipt)?;
             // The copy read back to prove the object is charged to the spool
             // budget too, until the directory holding it is gone.
-            let room = match journal.reserve_spool(record.intent.byte_length)? {
+            let admission = if wave == 0 {
+                journal.reserve_spool_after_release(record.intent.byte_length, cancel).await?
+            } else { journal.reserve_spool(record.intent.byte_length)? };
+            let room = match admission {
                 SpoolAdmission::Admitted(reservation) => reservation,
                 SpoolAdmission::Full => return Ok(None),
             };
@@ -2412,9 +2498,11 @@ async fn seal_plain_object(
     // Held until the journal answers for the file, so another job always sees
     // either the reservation or the bytes. The room includes the page that
     // registers this object with the `wave` already waiting beside it.
-    let reservation = match journal.reserve_spool(
-        ciphertext_length.saturating_add(super::control::inventory_page_headroom(wave + 1)),
-    )? {
+    let bytes = ciphertext_length.saturating_add(super::control::inventory_page_headroom(wave + 1));
+    let admission = if wave == 0 {
+        journal.reserve_spool_after_release(bytes, cancel).await?
+    } else { journal.reserve_spool(bytes)? };
+    let reservation = match admission {
         SpoolAdmission::Admitted(reservation) => reservation,
         SpoolAdmission::Full => return Ok(None),
     };
@@ -3519,6 +3607,7 @@ pub(crate) async fn package_and_upload_protected(
     cancel: &Cancellation,
     protection:Option<(&super::leases::LeaseOwner,&super::leases::LeaseContext<'_>)>,
 ) -> Result<CompletedSnapshot> {
+    let _spool_execution = journal.begin_spool_execution();
     cancel.check()?;
     journal.verification = Default::default();
     if metadata.repository_id.is_empty()
@@ -3826,19 +3915,8 @@ pub(crate) async fn package_and_upload_protected(
         referenced.extend(objects);
     }
     let original_units_root = if let SnapshotPurpose::BackupBundle { original_units, .. } = &metadata.purpose {
-        let sources = original_unit_sources(original_units, &build_root)?;
-        let fingerprint = catalog_fingerprint(wire::CatalogKind::Records, &sources);
-        let (entries, objects) = build_entries(
-            wire::CatalogKind::Records, sources, &external_root, &metadata.repository_id,
-            &build_root, root_key, limits, None, None, false, &mut cache, &mut evidence,
-            journal, provider, repository, prepared, &mut maintenance, &mut hydration, cancel,
-        ).await?;
-        referenced.extend(objects);
-        Some(build_catalog(
-            wire::CatalogKind::Records, entries, &fingerprint, &metadata.repository_id,
-            &build_root, root_key, limits, None, None, false, &mut cache, &mut evidence,
-            journal, provider, repository, cancel, &mut referenced,
-        ).await?.stored(repository)?)
+        Some(build_original_unit_catalog(original_units,&external_root,&metadata.repository_id,&build_root,root_key,limits,
+            &mut cache,&mut evidence,journal,provider,repository,prepared,&mut maintenance,&mut hydration,cancel,&mut referenced).await?.stored(repository)?)
     } else { None };
     let (bytes, fingerprint, sections, role) = match metadata.purpose {
         SnapshotPurpose::LwwCheckpoint { covered_prefixes, state_identity, asset_catalogs, standalone_bodies } => {
@@ -5108,7 +5186,7 @@ mod tests {
             let provider=FakeProvider::new(false);
             let repository=fake::repository();let key=[21;32];
             let mut metadata=metadata("db-first",&capture);
-            metadata.purpose=SnapshotPurpose::BackupBundle{source:wire_control::BundleSource::Device{writer_id:"synthetic-writer".into()},remote_generation:None,original_units:BTreeMap::new()};
+            metadata.purpose=SnapshotPurpose::BackupBundle{source:wire_control::BundleSource::Device{writer_id:"synthetic-writer".into()},remote_generation:None,original_units:BTreeMap::new().into()};
             let mut transfer=journal(&root.path().join("db-first-upload"),"db-first",&capture);
             let completed=package_and_upload(capture,Vec::new(),root.path(),&root.path().join("db-first-cache"),metadata,&key,limits(256*1024),None,&mut transfer,&provider,&repository,&PhaseProgress::silent(),&Cancellation::default()).await.unwrap();
             let cache=PackageCache::open(&root.path().join("db-first-cache")).unwrap();
@@ -5163,7 +5241,7 @@ mod tests {
             let original_units=assets.iter().enumerate().map(|(index,asset)|(
                 risunest_sync_wire::unit::UnitKey::new(&["future-opaque",&format!("full-body-{index}")]).unwrap(),
                 risunest_sync_wire::unit::UnitValue::object(risunest_sync_wire::descriptor::RecordDescriptor::content(asset.content_hash.clone())).unwrap(),
-            )).collect();
+            )).collect::<BTreeMap<_,_>>().into();
             metadata.purpose=SnapshotPurpose::BackupBundle{source:wire_control::BundleSource::Device{writer_id:"synthetic-writer".into()},remote_generation:None,original_units};
             let mut transfer=journal(&root.path().join("full-phase-upload"),"full-phase",&capture);
             let completed=package_and_upload(capture,sections.clone(),root.path(),&root.path().join("full-phase-cache"),metadata,&key,limits(256*1024),None,&mut transfer,provider.as_ref(),&repository,&PhaseProgress::silent(),&Cancellation::default()).await.unwrap();
@@ -5204,7 +5282,7 @@ mod tests {
                         super::super::connection_store::ConnectionStore::open(mixed.path()).unwrap().insert(&connection.stored).unwrap();
                         let _connection=super::super::lww_residency::install_test_source_connection(mixed.path(),connection.clone()).unwrap();
                         let mut external_source=external_source;external_source.connection_root=mixed.path().to_owned();
-                        super::super::lww_residency::register_packed(mixed.path(),&external_source,&connection.handle).unwrap();
+                        super::super::lww_residency::register_packed_many(mixed.path(),std::slice::from_ref(&external_source),&connection.handle).unwrap();
                         let server=LocalServerFixture::new();let core=server.client(&mixed_store);
                         let server_hash=put_asset(&mut mixed_store,"assets/background-server.bin",&vec![71;100_000]).object_hash.unwrap();
                         drain_publications(&core,&mut mixed_store,&[]).unwrap();
@@ -5230,7 +5308,7 @@ mod tests {
                 if already_present {for bytes in &asset_bytes {bootstrap_cas.prepare_bytes(bytes).unwrap();}}
                 for source in &prepared.sources {
                     let mut source=source.clone();source.connection_root=bootstrap.path().to_owned();
-                    super::super::lww_residency::register_packed(bootstrap.path(),&source,&connected.handle).unwrap();
+                    super::super::lww_residency::register_packed_many(bootstrap.path(),std::slice::from_ref(&source),&connected.handle).unwrap();
                 }
                 crate::persistent_store::register_asset_objects_at_root(bootstrap.path(),&assets.iter().map(|asset|crate::persistent_store::asset_object_catalog::AssetObjectRegistration{object_hash:asset.content_hash.clone(),byte_size:asset.byte_size}).collect::<Vec<_>>(),1).unwrap();
                 let bootstrap_pack=prepared.sources[0].packs[0].locator.object.clone();
@@ -5449,7 +5527,7 @@ mod tests {
             for (index,id) in ["independent-first","independent-second"].into_iter().enumerate() {
                 let (capture,_)=captured(root.path(),id,index as i64,b"synthetic unchanged full record",b"synthetic unchanged managed asset");
                 let mut meta=metadata(id,&capture);
-                meta.purpose=SnapshotPurpose::BackupBundle{source:wire_control::BundleSource::Device{writer_id:"synthetic-writer".into()},remote_generation:None,original_units:BTreeMap::new()};
+                meta.purpose=SnapshotPurpose::BackupBundle{source:wire_control::BundleSource::Device{writer_id:"synthetic-writer".into()},remote_generation:None,original_units:BTreeMap::new().into()};
                 let asset_packs=previous.as_ref().map(|previous| {
                     let identity=ObjectEvidence::identity(&previous.asset_catalog,&repository).unwrap();
                     PackageCache::open(&cache).unwrap().graph_of(&previous.repository_id,&repository,&identity).unwrap().into_iter().filter(|object|object.role==ObjectRole::Pack).collect::<Vec<_>>()
@@ -5503,7 +5581,7 @@ mod tests {
                         original_units: BTreeMap::from([(
                             risunest_sync_wire::unit::UnitKey::new(&["future-backup", "synthetic"]).unwrap(),
                             risunest_sync_wire::unit::UnitValue::inline(&serde_json::to_vec(marker).unwrap()).unwrap(),
-                        )]),
+                        )]).into(),
                     };
                     let mut transfer = journal(&root.join(id), id, &capture);
                     package_and_upload(
@@ -7711,12 +7789,12 @@ mod tests {
     #[test]
     fn c_a_job_left_one_family_sends_each_pack_before_building_the_next() {
         runtime().block_on(async {
+            const RECORDS: usize = 8;
             let root = tempfile::tempdir().unwrap();
-            let provider = FakeProvider::new(false);
             let repository = fake::repository();
             let families = PackFamilies::new(ACTIVE_PACK_FAMILIES);
             let elsewhere = families.try_acquire().unwrap().unwrap();
-            let capture = captured_record_window(root.path(), "single", 1, 2000, 0, 0, 0);
+            let capture = captured_record_window(root.path(), "single", 1, RECORDS, 0, 0, 0);
             let meta = metadata("single", &capture);
             let directory = root.path().join("single-job");
             let job = format!("single-{}", uuid::Uuid::new_v4());
@@ -7727,26 +7805,36 @@ mod tests {
                     .with_limit(4 * 1024 * 1024)
                     .with_families(families.clone()),
             );
-            let (plaintexts, stop, sampler) =
-                peak_sampler(root.path().join("cache").join("build"), build_files);
+            let builds = root.path().join("cache").join("build");
+            let mut provider = GatedProvider::new(None);
+            provider.on_pack = Some(Box::new({
+                let families = families.clone();
+                let builds = builds.clone();
+                move |uploaded| {
+                    assert_eq!(families.counts(), (2, usize::from(uploaded < RECORDS)));
+                    assert_eq!(build_files(&builds), 0, "next plaintext built before pack upload");
+                }
+            }));
+            // A tiny target forces one distinct record per pack without thousands
+            // of durable body and catalog writes unrelated to family turnover.
+            let mut package_limits = limits(4096);
+            package_limits.target_plaintext_bytes = 1;
             let completed = tokio::time::timeout(
                 FAMILY_TEST_BOUND,
                 package_and_upload(
                     capture, vec![], root.path(), &root.path().join("cache"), meta, &[5; 32],
-                    limits(4096), None, &mut transfer, &provider, &repository,
+                    package_limits, None, &mut transfer, &provider, &repository,
                     &PhaseProgress::silent(), &Cancellation::default(),
                 ),
             )
             .await
-            .expect("a job left one family stopped making progress");
-            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            sampler.join().unwrap();
-            assert!(packs_of(&completed.unwrap()) > 2);
+            .expect("a job left one family stopped making progress")
+            .unwrap();
+            assert_eq!(packs_of(&completed), RECORDS);
+            assert_eq!(provider.packs.lock().unwrap().len(), RECORDS);
             assert_eq!(families.counts(), (1, 0));
-            // One pack plaintext, or one catalog node and the next one a
-            // listing can catch beside it.
-            let plaintexts = plaintexts.load(std::sync::atomic::Ordering::Relaxed);
-            assert!(plaintexts <= 2, "{plaintexts} plaintext files with one family");
+            assert_eq!(build_files(&builds), 0);
+            assert_eq!(held_spool(&directory), 0);
             drop(elsewhere);
             assert_eq!(families.counts(), (0, 0));
         });
@@ -7927,6 +8015,7 @@ mod tests {
             inner: FakeProvider,
             refuse_pack: Option<usize>,
             pub(super) packs: std::sync::Mutex<Vec<String>>,
+            pub(super) on_pack: Option<Box<dyn Fn(usize) + Send + Sync>>,
             pub(super) gate: std::sync::Mutex<Option<String>>,
             pub(super) arrived: tokio::sync::Semaphore,
             pub(super) release: tokio::sync::Semaphore,
@@ -7938,6 +8027,7 @@ mod tests {
                     inner: FakeProvider::new(false),
                     refuse_pack,
                     packs: Default::default(),
+                    on_pack: None,
                     gate: Default::default(),
                     arrived: tokio::sync::Semaphore::new(0),
                     release: tokio::sync::Semaphore::new(0),
@@ -7984,6 +8074,9 @@ mod tests {
                 if intent.role == ObjectRole::Pack {
                     let mut packs = self.packs.lock().unwrap();
                     packs.push(intent.object_id.clone());
+                    if let Some(observe) = &self.on_pack {
+                        observe(packs.len());
+                    }
                     if self.refuse_pack == Some(packs.len()) {
                         return Box::pin(async { Err(ProviderError::new(ErrorKind::RateLimited)) });
                     }

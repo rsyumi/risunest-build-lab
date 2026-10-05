@@ -597,20 +597,6 @@ impl SectionRow {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LocalSectionEntry {
-    pub version: SectionEntryVersion,
-    pub entry: SectionEntry,
-    pub object: Option<Vec<u8>>,
-    pub published: bool,
-}
-
-pub(crate) enum SectionWriteInput<'a> {
-    Apply { section: Section, entry: &'a SectionEntry, object: Option<&'a [u8]> },
-    Mark { section: Section, key: &'a str },
-    MarkVersion { section: Section, key: &'a str, version: &'a SectionEntryVersion },
-}
-
 /// An unfinished spool cannot be applied. It becomes a read-only input only
 /// after every received row and the transport fingerprint have been checked.
 pub(crate) struct SectionSpoolBuilder {
@@ -1255,103 +1241,6 @@ impl DeviceStore {
         let sections = capture_backup_sections_snapshot(&snapshot, kinds)?;
         snapshot.execute_batch("COMMIT;")?;
         Ok(sections)
-    }
-
-    pub(crate) fn read_section_entry(&self, section: Section, key: &str) -> StoreResult<Option<LocalSectionEntry>> {
-        let kind = kind_of_section(section);
-        let Some((mut row, published)) = read_row(&self.connection, section, &decode_entry_key(kind, key)?)? else { return Ok(None); };
-        let entry = row.to_entry(kind, true)?;
-        let object = row.value.take_object_body();
-        Ok(Some(LocalSectionEntry { version: row.version(), entry, object, published }))
-    }
-
-    pub(crate) fn stamp_section_removal(&self, section: Section, key: &str, generation: &Sequence, now_ms: u64) -> StoreResult<()> {
-        let at_ms = i64::try_from(now_ms).map_err(|_| invalid("Device removal marker time is out of range"))?;
-        let key = decode_entry_key(kind_of_section(section), key)?;
-        let Some((row, _)) = read_row(&self.connection, section, &key)? else { return Ok(()); };
-        if !row.value.is_tombstone() || row.value.first_published().is_some() { return Ok(()); }
-        match section {
-            Section::Hypa => self.connection.execute(
-                "UPDATE hypa_embeddings SET first_published_generation=?4,first_published_at_ms=?5
-                    WHERE cache_key=?1 AND write_clock=?2 AND writer_id=?3 AND tombstone=1 AND first_published_generation IS NULL",
-                params![key.0, row.write_clock.as_str(), row.writer_id, generation.as_str(), at_ms],
-            )?,
-            Section::LocalPlugins => self.connection.execute(
-                "UPDATE plugin_device_storage SET first_published_generation=?6,first_published_at_ms=?7
-                    WHERE owner=?1 AND space=?2 AND key=?3 AND write_clock=?4 AND writer_id=?5 AND tombstone=1
-                      AND first_published_generation IS NULL",
-                params![key.0, key.1, key.2, row.write_clock.as_str(), row.writer_id, generation.as_str(), at_ms],
-            )?,
-        };
-        Ok(())
-    }
-
-    pub(crate) fn has_pending_section_entries(&self, section: Section) -> StoreResult<bool> {
-        let table = match section {
-            Section::Hypa => "hypa_embeddings",
-            Section::LocalPlugins => "plugin_device_storage",
-        };
-        Ok(self.connection.query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE published_clock IS NULL OR published_clock<>write_clock)"),
-            [],
-            |row| row.get(0),
-        )?)
-    }
-
-    pub(crate) fn pending_section_entry_keys(&self, section: Section, after: &str, limit: usize) -> StoreResult<Vec<String>> {
-        let limit = limit.min(256);
-        match section {
-            Section::Hypa => {
-                let mut statement = self.connection.prepare(
-                    "SELECT cache_key FROM hypa_embeddings WHERE (published_clock IS NULL OR published_clock<>write_clock)
-                        AND cache_key>?1 ORDER BY cache_key LIMIT ?2",
-                )?;
-                let keys = statement.query_map(params![after, limit as i64], |row| row.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                keys.iter().map(|key| hypa_entry_key(key).map_err(section_format_error)).collect()
-            }
-            Section::LocalPlugins => {
-                let after_key = if after.is_empty() { None } else {
-                    Some(decode_local_plugin_entry_key(after).map_err(section_format_error)?)
-                };
-                let lower = after_key.as_ref().map(|(owner, space, key)| (owner.as_str(), space.as_str(), key.as_str()))
-                    .unwrap_or(("", "", ""));
-                let lower_bound = if after_key.is_some() { "AND (owner,space,key)>(?1,?2,?3)" } else { "" };
-                let mut statement = self.connection.prepare(&format!(
-                    "SELECT owner,space,key FROM plugin_device_storage
-                     WHERE (published_clock IS NULL OR published_clock<>write_clock)
-                       {lower_bound}
-                     ORDER BY owner,space,key LIMIT ?4",
-                ))?;
-                let keys = statement.query_map(params![lower.0, lower.1, lower.2, limit as i64],
-                    |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?)))?
-                    .collect::<Result<Vec<_>,_>>()?;
-                keys.iter().map(|key| local_plugin_entry_key(&key.0, &key.1, &key.2).map_err(section_format_error)).collect()
-            }
-        }
-    }
-
-    pub(crate) fn write_section_entry(tx: &Transaction<'_>, write: &SectionWriteInput<'_>) -> StoreResult<()> {
-        match write {
-            SectionWriteInput::Apply { section, entry, object } => {
-                if entry.kind != kind_of_section(*section) { return Err(invalid("Section entry belongs to another section")); }
-                let row = SectionRow::from_entry((*entry).clone(), true, |_| {
-                    object.map(|bytes| bytes.to_vec()).ok_or_else(|| invalid("Section object is missing"))
-                })?;
-                merge_row(tx, *section, &row)?;
-                observe_remote_clock(tx, *section, &row.write_clock)?;
-            }
-            SectionWriteInput::Mark { section, key } => {
-                let key = decode_entry_key(kind_of_section(*section), key)?;
-                if let Some((row, _)) = read_row(tx, *section, &key)? {
-                    mark_row_version(tx, *section, &key, &row.version(), true)?;
-                }
-            }
-            SectionWriteInput::MarkVersion { section, key, version } => {
-                mark_row_version(tx, *section, &decode_entry_key(kind_of_section(*section), key)?, version, true)?;
-            }
-        }
-        Ok(())
     }
 
     pub(crate) fn section_state(&self, section: Section) -> StoreResult<SectionState> {

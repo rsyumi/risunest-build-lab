@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
-import { afterEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { chatScreenState } from 'src/ts/ui/chatScreenState.svelte'
 import { mount, unmount } from 'svelte'
 import type { character, Message } from 'src/ts/storage/database.svelte'
 import { ActiveConversationSession } from 'src/ts/storage/activeConversationSession'
@@ -172,6 +173,7 @@ function makePersistentViewportSource(messages: readonly Message[]) {
 
 describe('Chats complete parser source handoff', () => {
     let mounted: ReturnType<typeof mount> | undefined
+    beforeEach(() => chatScreenState.clear())
     afterEach(async () => {
         if (mounted) await unmount(mounted)
         mounted = undefined

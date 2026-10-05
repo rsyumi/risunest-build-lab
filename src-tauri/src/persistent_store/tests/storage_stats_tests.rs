@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn storage_stats_reports_database_pages_and_zero_global_catalogs_for_a_new_store() {
+fn storage_stats_reports_database_file_bytes_and_zero_global_catalogs_for_a_new_store() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let store = PersistentStore::open(directory.path()).expect("open store");
 

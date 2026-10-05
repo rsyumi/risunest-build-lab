@@ -44,26 +44,6 @@
         }
       ],
       "trashTime": 1234
-    },
-    {
-      "type": "group",
-      "chaId": "synthetic-group",
-      "name": "Synthetic group",
-      "characters": [
-        "synthetic-active"
-      ],
-      "chats": [
-        {
-          "id": "synthetic-cold-chat",
-          "name": "Synthetic cold chat",
-          "message": [
-            {
-              "role": "user",
-              "data": "Synthetic cold message"
-            }
-          ]
-        }
-      ]
     }
   ],
   "botPresets": [
@@ -136,13 +116,7 @@
     }
   ],
   "characterOrder": [
-    "synthetic-active",
-    {
-      "name": "Synthetic folder",
-      "data": [
-        "synthetic-group"
-      ]
-    }
+    "synthetic-active"
   ],
   "unknownPocketField": {
     "nested": [

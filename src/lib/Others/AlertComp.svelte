@@ -435,8 +435,7 @@
             {:else if $alertStore.type === 'selectChar'}
                 <div class="flex w-full items-start flex-wrap gap-2 justify-start">
                     {#each DBState.db.characters as char, i}
-                        {#if char.type !== 'group'}
-                            {#if char.image}
+                        {#if char.image}
                                 {#await getCharImage(DBState.db.characters[i].image, 'css')}
                                     <BarIcon onClick={() => {
                                         alertStore.set({type: 'none',msg: char.chaId})
@@ -456,7 +455,6 @@
                                 <User/>
                                 </BarIcon>
                             {/if}
-                        {/if}
                     {/each}
                 </div>
             {:else if $alertStore.type === 'requestdata'}
@@ -684,21 +682,7 @@
                             <ChevronRightIcon />
                         </div>
                     </button>
-                    <button class="border-darkborderc border py-2 px-8 flex rounded-md hover:ring-2 items-center mt-2" onclick={(e) => {
-                        e.stopPropagation()
-                        e.preventDefault()
-                        alertStore.set({
-                            type: 'none',
-                            msg: 'createGroup'
-                        })
-                    }}>
-                        <div class="flex flex-col justify-start items-start">
-                            <span>{language.createGroup}</span>
-                        </div>
-                        <div class="ml-9 float-right flex-1 flex justify-end">
-                            <ChevronRightIcon />
-                        </div>
-                    </button>
+
                     <button class="border-darkborderc border py-2 px-8 flex rounded-md hover:ring-2 items-center mt-2" onclick={(e) => {
                         e.stopPropagation()
                         e.preventDefault()
@@ -743,21 +727,6 @@
                             <ChevronRightIcon />
                         </div>
                     </button>
-                    {#if DBState.db.useExperimental}
-                        <button class="border-darkborderc border py-2 px-8 flex rounded-md hover:ring-2 items-center mt-2" onclick={() => {
-                            alertStore.set({
-                                type: 'none',
-                                msg: '2'
-                            })
-                        }}>
-                            <div class="flex flex-col justify-start items-start">
-                                <span>{language.createMultiuserRoom} <Help key="experimental"/></span>
-                            </div>
-                            <div class="ml-9 float-right flex-1 flex justify-end">
-                                <ChevronRightIcon />
-                            </div>
-                        </button>
-                    {/if}
                     <button class="border-darkborderc border py-2 px-8 flex rounded-md hover:ring-2 items-center mt-2" onclick={() => {
                         alertStore.set({
                             type: 'none',

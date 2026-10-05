@@ -1,4 +1,5 @@
 import { runContentImport } from '../storage/contentImportOperation'
+import { decodeImportUtf8, parseImportJson, type ParsedImportJson } from '../importUtf8'
 import { language } from 'src/lang'
 import { alertClear, alertConfirm, alertError, alertModuleSelect, alertNormal, alertStore, alertWait } from "../alert"
 import { getCurrentCharacter, getCurrentChat, getDatabase, setCurrentCharacter, setDatabase, type customscript, type loreBook, type triggerscript } from "../storage/database.svelte"
@@ -214,7 +215,7 @@ export async function readModule(buf:Buffer):Promise<RisuModule> {
     const main:{
         type:'risuModule'
         module:RisuModule
-    } = JSON.parse(Buffer.from(await decodeRPack(mainData)).toString())
+    } = JSON.parse(decodeImportUtf8(await decodeRPack(mainData)))
 
     if(main.type !== 'risuModule'){
         console.error("Invalid module type")
@@ -363,7 +364,7 @@ export async function importModule() {
     return importModuleData(f)
 }
 
-export async function importModuleData(f: { name: string; data: Uint8Array }) {
+export async function importModuleData(f: { name: string; data: Uint8Array; parsedJson?: ParsedImportJson }) {
     let fileData = f.data
     if (f.name.endsWith('.charx')) {
         try {
@@ -399,7 +400,7 @@ export async function importModuleData(f: { name: string; data: Uint8Array }) {
         return
     }
     try {
-        const importData = JSON.parse(Buffer.from(fileData).toString())
+        const importData = (f.parsedJson ?? parseImportJson(fileData)).value
         if (importData.type === 'risuModule') {
             assertModuleMCPImportAllowed(importData)
             if (!importData.name || !importData.id) {
@@ -597,9 +598,7 @@ export async function applyModule() {
     if (!currentChar) {
         return
     }
-    if(currentChar.type === 'group'){
-        return
-    }
+
 
     if (module.lorebook) {
         for (const lore of module.lorebook) {

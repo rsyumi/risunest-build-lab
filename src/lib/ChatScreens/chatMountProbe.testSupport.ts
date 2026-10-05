@@ -31,6 +31,7 @@ export const chatMountProbe = {
     }[],
     throwNextMount: false,
     activeEditors: new Set<number>(),
+    closeEditors: new Map<number, () => void>(),
     editorDrafts: new Map<number, Omit<ChatEditorDraft, 'index' | 'caret'>>(),
     restored: [] as { instanceId: number; draft: ChatEditorDraft }[],
 }
@@ -43,6 +44,7 @@ export function resetChatMountProbe() {
     chatMountProbe.displayUpdates = []
     chatMountProbe.throwNextMount = false
     chatMountProbe.activeEditors = new Set()
+    chatMountProbe.closeEditors = new Map()
     chatMountProbe.editorDrafts = new Map()
     chatMountProbe.restored = []
 }

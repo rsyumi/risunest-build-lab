@@ -145,7 +145,7 @@ export function initHotkey(){
                     alertWait("Loading...")
                     ev.preventDefault()
                     ev.stopPropagation()
-                    await sendChat(-1, {
+                    await sendChat({
                         previewPrompt: true
                     })
 

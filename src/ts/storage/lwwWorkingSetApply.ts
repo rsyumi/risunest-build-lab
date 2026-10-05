@@ -1,13 +1,13 @@
 import { sharedRootFields } from './persistentRootFields'
 import { createCatalogCharacterStub, createPresetCatalogWorkingSetFromValues, isCatalogPresetWorkingSet } from './workingSetCatalog'
 import { createConversationSummaryStub, createConversationSummaryFromMetadata } from './conversationResidency'
-import type { Chat, Database, botPreset, character, groupChat } from './database.svelte'
+import type { Chat, Database, botPreset, character } from './database.svelte'
 import type { PersistentRevisionReader, PersistentRoot } from './persistentDataStore'
 import { canonicalClone, canonicalJson, clonePersistentRootFields } from './saveCoordinatorHelpers'
 import { captureMaterializedCharacter, CHARACTER_SHARED_FIELDS, CONVERSATION_SHARED_FIELDS } from './persistentUnitCapture'
 import { isWorkingSetCharacterStub } from './workingSetCatalog'
 
-type CompleteCharacter = character | groupChat
+type CompleteCharacter = character
 
 export interface LwwWorkingSetBaseline {
     root: PersistentRoot
@@ -44,7 +44,7 @@ export async function applyLwwWorkingSetUnits(
     const root = keys.some(([kind]) => ['root', 'variable', 'toggle', 'record', 'order', 'persona', 'preset-protected', 'exists'].includes(kind))
         ? (await store.readRoot()).value : null
     const details = new Map<string, CompleteCharacter | null>()
-    for (const [kind, id] of keys) if (kind === 'character' || kind === 'group-members') {
+    for (const [kind, id] of keys) if (kind === 'character') {
         if (!details.has(id)) {
             const value = await store.readCharacter(id)
             details.set(id, value ? { ...value.value, chats: [] } as CompleteCharacter : null)
@@ -121,12 +121,12 @@ export async function applyLwwWorkingSetUnits(
             patchField(database, before, remote, id)
             if (Object.hasOwn(root, id)) (baseline.root as unknown as Record<string, unknown>)[id] = canonicalClone((root as unknown as Record<string, unknown>)[id])
             else delete (baseline.root as unknown as Record<string, unknown>)[id]
-        } else if (kind === 'character' || kind === 'group-members') {
+        } else if (kind === 'character') {
             const live = charactersById.get(id)
             const before = baselineById.get(id)
             const remote = details.get(id)
             if (!live || !before || !remote) continue
-            for (const key of kind === 'group-members' ? ['characters', 'characterTalks', 'characterActive'] : [field]) {
+            for (const key of [field]) {
                 if (key !== 'statics' || allowLocalFields) { patchField(live, before, remote, key); continue }
                 const sharedStatics = (value: unknown) => value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'messages')) : value
                 const liveView = {statics:sharedStatics(live['statics'])}, beforeView = {statics:sharedStatics(before['statics'])}

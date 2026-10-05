@@ -1,11 +1,11 @@
 import { untrack } from 'svelte'
-import type { Database, character, groupChat } from './database.svelte'
+import type { Database, character } from './database.svelte'
 import { isWorkingSetCharacterStub } from './workingSetCatalog'
 import { PersistentMutationFencedError } from './saveCoordinator'
 
 interface PersistentSaveObserverDependencies {
     readDatabase(): Database
-    readSelectedCharacter(): character | groupChat | null
+    readSelectedCharacter(): character | null
     markDirty(estimatedChangedBytes: number): void
 }
 

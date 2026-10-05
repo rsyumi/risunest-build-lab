@@ -106,21 +106,10 @@ function syntheticCharacter(id: string, history: Message[]): character {
     } as unknown as character
 }
 
-function syntheticLibrary(type: 'character' | 'group'): Database {
+function syntheticLibrary(type: 'character'): Database {
     const history: Message[] = [{ role: 'char', data: 'Synthetic existing history' }]
     const characters: Database['characters'] = [syntheticCharacter('second-character', structuredClone(history))]
-    if (type === 'group') {
-        const member = syntheticCharacter('group-member', [])
-        characters.unshift({
-            ...syntheticCharacter('edited-owner', history.map((message) => ({ ...message, saying: member.chaId }))),
-            type: 'group',
-            characters: [member.chaId],
-            characterTalks: [1],
-            characterActive: [true],
-        } as unknown as Database['characters'][number], member)
-    } else {
-        characters.unshift(syntheticCharacter('edited-owner', history))
-    }
+    characters.unshift(syntheticCharacter('edited-owner', history))
     return { streamingDisplayOptimizationMode: 'balanced', characters } as unknown as Database
 }
 
@@ -280,10 +269,6 @@ describe('windowed navigation integration', () => {
         ['character', 'autosave'],
         ['character', 'failed-request'],
         ['character', 'failed-request-closed-editor'],
-        ['group', 'immediate'],
-        ['group', 'autosave'],
-        ['group', 'failed-request'],
-        ['group', 'failed-request-closed-editor'],
     ] as const)('keeps %s edits from the bound editor through %s production navigation and reboot', async (type, timing) => {
         const indexedDB = new IDBFactory()
         const previousGlobals = { indexedDB: globalThis.indexedDB, IDBKeyRange: globalThis.IDBKeyRange }
@@ -712,7 +697,7 @@ describe('windowed navigation integration', () => {
 })
 
 describe('selected chat list edits', () => {
-    it.each(['character', 'group'] as const)('adds, duplicates, reorders and removes %s chats beside the bound editor', async (type) => {
+    it.each(['character'] as const)('adds, duplicates, reorders and removes %s chats beside the bound editor', async (type) => {
         const indexedDB = new IDBFactory()
         const previousGlobals = { indexedDB: globalThis.indexedDB, IDBKeyRange: globalThis.IDBKeyRange }
         const ownerId = 'edited-owner'
@@ -782,7 +767,7 @@ describe('selected chat list edits', () => {
             const created = await reader.readConversation(ownerId, first)
             expect(created?.value.name).toBe('New Chat 2')
             expect(created?.value.message.map((message) => message.saying ?? null))
-                .toEqual(type === 'group' ? ['group-member'] : [])
+                .toEqual([])
             expect(await reader.readConversation(ownerId, duplicate)).toBeNull()
             expect(await reader.readConversation(ownerId, second)).toBeNull()
 
@@ -803,7 +788,7 @@ describe('selected chat list edits', () => {
         }
     })
 
-    it.each(['character', 'group'] as const)('edits the %s list around a windowed selection without loading the selected conversation', async (type) => {
+    it.each(['character'] as const)('edits the %s list around a windowed selection without loading the selected conversation', async (type) => {
         const indexedDB = new IDBFactory()
         const previousGlobals = { indexedDB: globalThis.indexedDB, IDBKeyRange: globalThis.IDBKeyRange }
         const ownerId = 'edited-owner'
@@ -815,7 +800,6 @@ describe('selected chat list edits', () => {
             role: index % 2 === 0 ? 'user' : 'char',
             data: `Synthetic windowed message ${index}`,
             chatId: `synthetic-windowed-${index}`,
-            ...(type === 'group' && index % 2 === 1 ? { saying: 'group-member' } : {}),
         })) as Message[]
         const library = syntheticLibrary(type)
         const owner = library.characters[0] as character
@@ -911,7 +895,7 @@ describe('selected chat list edits', () => {
             expect(await reader.readConversation(ownerId, otherId)).toBeNull()
             expect((await reader.readConversation(ownerId, added))?.value.message
                 .map((message) => message.saying ?? null))
-                .toEqual(type === 'group' ? ['group-member'] : [])
+                .toEqual([])
         } finally {
             consoleError.mockRestore()
             Object.assign(globalThis, previousGlobals)

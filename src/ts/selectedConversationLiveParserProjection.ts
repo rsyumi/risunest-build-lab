@@ -5,6 +5,7 @@ import {
     type BoundedChatParserHistoryProjection,
     type ChatParserCompleteProjectionLease,
     type ChatParserCompleteProjectionReason,
+    type ChatParserHistoryProjectionReader,
 } from './chatParserHistoryProjection'
 import {
     classifyChatParserHistory,
@@ -87,7 +88,7 @@ type LiveParserRuntime = Pick<
     | 'captureSelectedConversationTarget'
     | 'captureSelectedConversationAuthority'
     | 'acquireCompleteConversation'
->
+> & Partial<Pick<PersistentDataRuntime, 'getActiveConversationViewportSource'>>
 
 export interface SelectedConversationLiveParserProjectionDependencies {
     readonly runtime: LiveParserRuntime
@@ -187,52 +188,122 @@ export function createSelectedConversationLiveParserProjectionResolver(
                 || authority.totalMessages !== input.totalMessages
             ) throw new ChatParserHistoryProjectionStaleError()
 
-            const projection = await createChatParserHistoryProjection({
-                characterId: authority.characterId,
-                conversationId: authority.conversationId,
-                revision: authority.storeRevision,
-                totalMessages: authority.totalMessages,
-                currentAbsoluteIndex: input.row.absoluteIndex,
-                maxProjectionMessages: dependencies.maxProjectionMessages,
-                parserSource: dependencies.parserSource(current),
-                parserIndirections: dependencies.parserIndirections?.(current),
-                unsafeDependencies: dependencies.unsafeDependencies(current),
-                contextSeed: dependencies.createBoundedContextSeed(current),
-                reader: {
+            let resident = captureResidentParserRows(dependencies, target, input)
+            try {
+                const projection = await createChatParserHistoryProjection({
+                    characterId: authority.characterId,
+                    conversationId: authority.conversationId,
                     revision: authority.storeRevision,
-                    readConversationWindow: (query) => (
-                        dependencies.runtime.store.readConversationWindow(query)
-                    ),
-                },
-                signal: input.signal,
-                isCurrent: () => requestMatchesSelection(dependencies, target, input),
-                acquireCompleteProjection: async () => {
-                    const lease = await acquireExactCompleteLease(dependencies, target, input)
-                    let context: ProcessScriptCaptureContext
-                    try {
-                        context = dependencies.createCompleteContext(
-                            captureExactCurrent(dependencies, target, lease),
-                        )
-                    } catch (error) {
-                        lease.release()
-                        throw error
-                    }
-                    return completeProjectionLease(lease, context, input.totalMessages)
-                },
-            })
-            if (projection.kind === 'complete') {
-                return completeResultFromLease(
-                    projection.lease,
-                    input,
-                    projection.reasons,
-                )
+                    totalMessages: authority.totalMessages,
+                    currentAbsoluteIndex: input.row.absoluteIndex,
+                    maxProjectionMessages: dependencies.maxProjectionMessages,
+                    parserSource: dependencies.parserSource(current),
+                    parserIndirections: dependencies.parserIndirections?.(current),
+                    unsafeDependencies: dependencies.unsafeDependencies(current),
+                    contextSeed: dependencies.createBoundedContextSeed(current),
+                    reader: {
+                        revision: authority.storeRevision,
+                        readResidentMessage: resident ? (index) => resident?.readMessage(index) : undefined,
+                        readConversationWindow: (query) => (
+                            dependencies.runtime.store.readConversationWindow(query)
+                        ),
+                    },
+                    signal: input.signal,
+                    isCurrent: () => requestMatchesSelection(dependencies, target, input)
+                        && (resident?.isCurrent() ?? true),
+                    acquireCompleteProjection: async () => {
+                        resident?.release()
+                        resident = null
+                        const lease = await acquireExactCompleteLease(dependencies, target, input)
+                        let context: ProcessScriptCaptureContext
+                        try {
+                            context = dependencies.createCompleteContext(
+                                captureExactCurrent(dependencies, target, lease),
+                            )
+                        } catch (error) {
+                            lease.release()
+                            throw error
+                        }
+                        return completeProjectionLease(lease, context, input.totalMessages)
+                    },
+                })
+                if (projection.kind === 'complete') {
+                    return completeResultFromLease(
+                        projection.lease,
+                        input,
+                        projection.reasons,
+                    )
+                }
+                if (resident && !resident.isCurrent()) throw new ChatParserHistoryProjectionStaleError()
+                if (!isEqual(
+                    projection.messages[projection.projectedChatID],
+                    input.row.message,
+                )) throw new ChatParserHistoryProjectionStaleError()
+                return projection
+            } finally {
+                resident?.release()
             }
-            if (!isEqual(
-                projection.messages[projection.projectedChatID],
-                input.row.message,
-            )) throw new ChatParserHistoryProjectionStaleError()
-            return projection
         },
+    }
+}
+
+function captureResidentParserRows(
+    dependencies: SelectedConversationLiveParserProjectionDependencies,
+    target: SelectedConversationTarget,
+    input: LiveChatParserProjectionRequest,
+): {
+    readMessage: NonNullable<ChatParserHistoryProjectionReader['readResidentMessage']>
+    isCurrent(): boolean
+    release(): void
+} | null {
+    const source = dependencies.runtime.getActiveConversationViewportSource?.()
+    const authority = dependencies.runtime.captureSelectedConversationAuthority()
+    if (!source || !authority || authority.sessionVersion !== authority.persistedSessionVersion) return null
+    const snapshot = source.snapshot()
+    const currentRow = snapshot.rowAt(input.row.absoluteIndex)
+    if (
+        snapshot.storeRevision !== target.storeRevision
+        || snapshot.totalMessages !== input.totalMessages
+        || currentRow?.key !== input.row.key
+        || currentRow.sourceVersion !== input.row.sourceVersion
+        || !isEqual(currentRow.message, input.row.message)
+    ) return null
+
+    const isCurrent = () => {
+        const currentAuthority = dependencies.runtime.captureSelectedConversationAuthority()
+        const currentSource = dependencies.runtime.getActiveConversationViewportSource?.()
+        const currentSnapshot = currentSource?.snapshot()
+        return requestMatchesSelection(dependencies, target, input)
+            && currentAuthority?.characterId === authority.characterId
+            && currentAuthority?.conversationId === authority.conversationId
+            && currentAuthority?.sessionToken === authority.sessionToken
+            && currentAuthority?.sessionVersion === authority.sessionVersion
+            && currentAuthority?.persistedSessionVersion === authority.persistedSessionVersion
+            && currentAuthority?.storeRevision === authority.storeRevision
+            && currentAuthority?.totalMessages === authority.totalMessages
+            && currentSource === source
+            && currentSnapshot?.sourceToken === snapshot.sourceToken
+            && currentSnapshot?.version === snapshot.version
+            && currentSnapshot?.storeRevision === snapshot.storeRevision
+            && currentSnapshot?.totalMessages === snapshot.totalMessages
+    }
+    const pin = source.acquireRangePin(
+        Math.max(0, input.row.absoluteIndex - dependencies.maxProjectionMessages + 1),
+        Math.min(input.totalMessages, input.row.absoluteIndex + dependencies.maxProjectionMessages),
+        'viewport',
+    )
+    return {
+        isCurrent,
+        readMessage: (index) => {
+            if (!isCurrent()) throw new ChatParserHistoryProjectionStaleError()
+            const row = snapshot.rowAt(index)
+            if (
+                !row || row.absoluteIndex !== index || row.key !== snapshot.keyAt(index)
+                || row.sourceVersion !== snapshot.version
+            ) return undefined
+            return row.message
+        },
+        release: () => pin.release(),
     }
 }
 

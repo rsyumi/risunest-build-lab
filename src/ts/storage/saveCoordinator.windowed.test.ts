@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { Chat, character, groupChat } from './database.svelte'
+import type { Chat, character } from './database.svelte'
 import type {
     CharacterDetail,
     PersistentDataStore,
@@ -137,6 +137,46 @@ describe('SaveCoordinator', () => {
                 sessionToken,
             }
         }
+
+        it('persists owned send recency without any older message reads or character replacement', async () => {
+            const harness = makeWindowedHarness()
+            const authority = harness.authority()! as WindowedConversationPersistenceAuthority
+            expect(harness.coordinator.recordSelectedCharacterLastInteraction(authority, undefined, 42)).toBe(true)
+            expect(harness.selected().lastInteraction).toBe(42)
+            expect(harness.coordinator.recordSelectedCharacterLastInteraction(authority, undefined, 43)).toBe(false)
+            await harness.coordinator.flushPendingData('send-recency')
+            expect(harness.commit).toHaveBeenCalledExactlyOnceWith({ expectedRevision: 2,
+                unitMutations: [{ key: '["character","char-a","lastInteraction"]', type: 'set', value: 42 }] })
+            expect(harness.readConversationWindow).not.toHaveBeenCalled()
+            expect(harness.coordinator.hasPendingPersistenceWork).toBe(false)
+            expect(harness.coordinator.recordSelectedCharacterLastInteraction(authority, 42, 43)).toBe(false)
+            expect(harness.coordinator.recordSelectedCharacterLastInteraction(harness.authority()!, 42, 43)).toBe(true)
+            await harness.coordinator.flushPendingData('next-send-recency')
+            expect(harness.commit.mock.calls[1][0].unitMutations[0].value).toBe(43)
+        })
+
+        it('rebases a second send recency intent recorded while the first local commit is pending', async () => {
+            const first = deferred<{ revision: number }>()
+            const started = deferred<void>()
+            const commit = vi.fn(async ({ expectedRevision }: WorkingSetCommit) => {
+                if (commit.mock.calls.length === 1) { started.resolve(); return first.promise }
+                return { revision: expectedRevision + 1 }
+            })
+            const harness = makeWindowedHarness({ commit })
+            expect(harness.coordinator.recordSelectedCharacterLastInteraction(harness.authority()!, undefined, 42)).toBe(true)
+            const flushing = harness.coordinator.flushPendingDataLocally('overlapping-send-recency')
+            await started.promise
+            expect(harness.coordinator.recordSelectedCharacterLastInteraction(harness.authority()!, 42, 43)).toBe(true)
+            first.resolve({ revision: 3 })
+            await flushing
+            await harness.coordinator.flushPendingData('finish-overlapping-send-recency')
+            expect(commit.mock.calls.map(([request]) => {
+                const mutation = request.unitMutations![0]
+                return 'value' in mutation ? mutation.value : undefined
+            })).toEqual([42, 43])
+            expect(harness.readConversationWindow).not.toHaveBeenCalled()
+            expect(harness.coordinator.hasPendingPersistenceWork).toBe(false)
+        })
 
         it('retires flushed windowed ownership before deselection so root saves remain available', async () => {
             const harness = makeWindowedHarness()
@@ -795,7 +835,7 @@ describe('SaveCoordinator', () => {
         it('rechecks windowed authority after an awaited complete-character commit', async () => {
             const database = makeDatabase()
             const { character: projection } = makeWindowedProjection()
-            let selected: character | groupChat = database.characters[0]
+            let selected: character = database.characters[0]
             let authority: TestWindowedAuthority | null = null
             const committed = deferred<{ revision: number }>()
             const commit = vi.fn(() => committed.promise)
@@ -1112,7 +1152,7 @@ describe('SaveCoordinator', () => {
             expect(harness.coordinator.hasPendingPersistenceWork).toBe(false)
         })
 
-        it('copies a recorded added chat body once before the commit takes its own copy', async () => {
+        it('captures inserted messages without cloning the complete body array', async () => {
             const harness = makeWindowedHarness()
             const messages = [{ role: 'user', data: 'counted body' }]
             const clone = vi.mocked(safeStructuredClone)
@@ -1122,13 +1162,12 @@ describe('SaveCoordinator', () => {
             expect(harness.commit).toHaveBeenCalledTimes(1)
             expect(harness.commit.mock.calls[0][0].conversations[0].messages).toEqual(messages)
             const bodyCopies = clone.mock.calls.filter(([value]) => JSON.stringify(value) === JSON.stringify(messages))
-            expect(bodyCopies).toHaveLength(1)
+            expect(bodyCopies).toHaveLength(0)
         })
 
         function pagedSave(fail?: number) {
             const commit = vi.fn(async ({ expectedRevision }: WorkingSetCommit) => {
                 const call = commit.mock.calls.length
-                if (call === 1) throw new PayloadTooLargeError('commit', MAX_NATIVE_REQUEST_BYTES + 1)
                 if (call === fail) throw new Error('synthetic storage failure')
                 return { revision: expectedRevision + 1 }
             })
@@ -1142,13 +1181,13 @@ describe('SaveCoordinator', () => {
             return { harness, sent, firsts }
         }
 
-        it('writes a created chat in message pages when the whole save is too large', async () => {
+        it('plans created chat pages before any whole-save rejection', async () => {
             const { harness, sent, firsts } = pagedSave()
 
             await harness.coordinator.flushPendingData('chat-list')
 
-            const [, created, appended] = sent()
-            expect(sent()).toHaveLength(3)
+            const [created, appended] = sent()
+            expect(sent()).toHaveLength(2)
             expect(created.expectedRevision).toBe(2)
             expect(created.character).toBeUndefined()
             expect(firsts(created)).toEqual([{
@@ -1168,12 +1207,12 @@ describe('SaveCoordinator', () => {
         })
 
         it('removes a paged chat and reloads storage when a later page fails', async () => {
-            const { harness, sent } = pagedSave(3)
+            const { harness, sent } = pagedSave(2)
 
             await expect(harness.coordinator.flushPendingData('chat-list')).rejects.toThrow('synthetic storage failure')
 
-            expect(sent()).toHaveLength(4)
-            expect(sent()[3]).toEqual({
+            expect(sent()).toHaveLength(3)
+            expect(sent()[2]).toEqual({
                 expectedRevision: 3,
                 conversations: [{ type: 'delete', characterId: 'char-a', conversationId: 'added' }],
             })

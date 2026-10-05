@@ -98,6 +98,8 @@ let lastApplied = "";
 let updates = Promise.resolve();
 let macThemeUpdates = Promise.resolve();
 let lastMacTheme = "";
+let hintUpdates = Promise.resolve();
+let lastNativeHint = "";
 
 /** Run after both the palette and custom CSS have been applied in this turn. */
 export function scheduleWindowsAppearance(palette?: WindowPalette): void {
@@ -121,6 +123,17 @@ export function scheduleWindowsAppearance(palette?: WindowPalette): void {
         localStorage.setItem(WINDOWS_APPEARANCE_CACHE, serialized);
       } catch {
         console.warn("Could not cache the Windows startup colors");
+      }
+      if (isTauriDesktop && (osType() === "macos" || osType() === "linux")) {
+        hintUpdates = hintUpdates.then(async () => {
+          if (serialized === lastNativeHint) return;
+          try {
+            await invoke("desktop_cache_appearance", { appearance });
+            lastNativeHint = serialized;
+          } catch {
+            console.warn("Could not cache desktop startup colors");
+          }
+        });
       }
       if (isTauriDesktop && osType() === "macos") {
         const theme = appearance.dark ? "dark" : "light";

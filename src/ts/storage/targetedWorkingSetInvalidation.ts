@@ -1,5 +1,5 @@
 import { patchWorkingSetRoot } from './workingSetCatalog'
-import type { Chat, Database, character, groupChat } from './database.svelte'
+import type { Chat, Database, character } from './database.svelte'
 import type { ReplacementChangeSet } from './persistentDataRuntime'
 import {
     CONTENT_CHANGE_PAGE_LIMIT,
@@ -23,7 +23,7 @@ import {
     type PinnedScalableWorkingSetOptions,
 } from './workingSetCatalog'
 
-type CompleteCharacter = character | groupChat
+type CompleteCharacter = character
 
 /// Past this many locators a reprojection reads less than the targeted pass.
 export const TARGETED_INVALIDATION_KEY_LIMIT = 256
@@ -198,9 +198,7 @@ export async function applyTargetedWorkingSetInvalidation(
     )
     if (selectedCharacterId) {
         residentIds.add(selectedCharacterId)
-        if (!refreshSelected && previousSelected?.type === 'group') {
-            for (const member of previousSelected.characters) residentIds.add(member)
-        }
+
     }
     if (selectedCharacterId && refreshSelected) {
         plan.characterIds.add(selectedCharacterId)
@@ -214,9 +212,7 @@ export async function applyTargetedWorkingSetInvalidation(
                     `Character ${selectedCharacterId}`,
                 )
                 selectedDetail = value.value
-                if (value.value.type === 'group') {
-                    for (const member of value.value.characters) residentIds.add(member)
-                }
+
             }
         }
     }

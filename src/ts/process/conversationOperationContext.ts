@@ -12,6 +12,7 @@ import {
     type MessageLocator,
 } from '../storage/activeConversationSession'
 import type { Chat, Database, Message } from '../storage/database.svelte'
+import type { WindowedConversationMutationController } from '../storage/activeWorkingSet.svelte'
 import { CONVERSATION_RANGE_MAX_LIMIT } from '../storage/persistentDataStore'
 
 export type ConversationOperationMode = 'prefetched' | 'compatibility'
@@ -19,6 +20,7 @@ export type ConversationOperationMode = 'prefetched' | 'compatibility'
 /** Only a successfully committed operation can advance a caller's captured target. */
 export interface ConversationOperationCommit {
     follows(session: ActiveConversationSession | null, version: number | null, chat: Chat): boolean
+    remapWindowTarget?(controller: WindowedConversationMutationController, message: Message): number | null
 }
 
 export type ConversationCommitObserver = (commit: ConversationOperationCommit) => void

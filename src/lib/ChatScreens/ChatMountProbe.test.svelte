@@ -3,7 +3,7 @@
     import type { StreamingDisplayOptimizationMode } from 'src/ts/storage/database.svelte'
     import { chatMountProbe } from './chatMountProbe.testSupport'
     import type { BoundedLiveChatParserProjection } from 'src/ts/selectedConversationLiveParserProjection'
-    import type { ChatDisplayRefresh } from 'src/ts/chatDisplayRefresh'
+    import type { ChatDisplayRefresh, ChatPresentationRefresh } from 'src/ts/chatDisplayRefresh'
     import type { ChatEditorDraft } from 'src/ts/chatEditorDrafts'
 
     let {
@@ -16,6 +16,7 @@
         parserProjection,
         parserAbortSignal,
         restoredEditor,
+        onEditorClose,
     }: {
         message: string
         idx: number
@@ -26,6 +27,7 @@
         parserProjection?: BoundedLiveChatParserProjection
         parserAbortSignal?: AbortSignal
         restoredEditor?: ChatEditorDraft
+        onEditorClose?: () => void
     } = $props()
 
     const instanceId = chatMountProbe.nextInstanceId++
@@ -57,7 +59,13 @@
 
     let restored = $state<ChatEditorDraft | undefined>()
 
-    export function updateViewportBinding() {}
+    export function updateViewportBinding(state: { viewportRow: { absoluteIndex: number } }) {
+        idx = state.viewportRow.absoluteIndex
+    }
+    export function updatePresentation(state: ChatPresentationRefresh) {
+        img = state.img
+        bookmarked = state.bookmarked
+    }
     export function captureEditorDraft() {
         const open = chatMountProbe.editorDrafts.get(instanceId) ?? restored
         return open ? { ...open, index: idx, caret: undefined } : null
@@ -73,6 +81,8 @@
     if (initialEditor) restoreEditor(initialEditor)
     export function refreshMessageDisplay(state: ChatDisplayRefresh) {
         message = state.message
+        if (state.index !== undefined) idx = state.index
+        if (state.character !== undefined) character = state.character
         parserProjection = state.parserProjection
         parserAbortSignal = state.parserAbortSignal
         refreshCount = untrack(() => refreshCount) + 1
@@ -92,6 +102,11 @@
     }
 
     onMount(() => {
+        chatMountProbe.closeEditors.set(instanceId, () => {
+            chatMountProbe.activeEditors.delete(instanceId)
+            restored = undefined
+            onEditorClose?.()
+        })
         displayedStreamingText = rawStreamingText
         chatMountProbe.mounts.push({
             instanceId,
@@ -107,6 +122,7 @@
     })
 
     onDestroy(() => {
+        chatMountProbe.closeEditors.delete(instanceId)
         chatMountProbe.unmounts.push(instanceId)
     })
 </script>

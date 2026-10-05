@@ -448,22 +448,28 @@ impl restore::ReplacementSink for LegacyReplacementSink {
         })
     }
 
-    fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()> {
-        for character in characters {
-            let mut unavailable = Vec::new();
-            let expanded = cold_expansion::expand_cold_payloads(std::slice::from_ref(character), &self.payloads.cold_payloads, &mut unavailable)
-                .map_err(|message| crate::persistent_store::StoreError::Store { message })?;
-            if !unavailable.is_empty() {
-                let mut preview = self.incomplete.lock().map_err(|error| crate::persistent_store::StoreError::Store { message: error.to_string() })?;
-                preview.unavailable_cold_keys.extend(unavailable);
-                if let Some(name) = character.get("name").and_then(Value::as_str) { preview.character_names.push(name.to_owned()); }
-            }
-            let characters = expanded.as_deref().unwrap_or(std::slice::from_ref(character));
-            crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
-                store.replace_add_characters(staging_id, characters)
-            })?;
+    fn put_legacy_root(&self, staging_id: &str, root: &crate::persistent_store::upstream_stream::RootSpool) -> StoreResult<()> {
+        crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
+            store.replace_put_upstream_stream(staging_id, root)
+        })
+    }
+
+    fn prepare_character(&self, character: Value) -> StoreResult<Value> {
+        let mut unavailable = Vec::new();
+        let expanded = cold_expansion::expand_cold_payloads(std::slice::from_ref(&character), &self.payloads.cold_payloads, &mut unavailable)
+            .map_err(|message| crate::persistent_store::StoreError::Store { message })?;
+        if !unavailable.is_empty() {
+            let mut preview = self.incomplete.lock().map_err(|error| crate::persistent_store::StoreError::Store { message: error.to_string() })?;
+            preview.unavailable_cold_keys.extend(unavailable);
+            if let Some(name) = character.get("name").and_then(Value::as_str) { preview.character_names.push(name.to_owned()); }
         }
-        Ok(())
+        Ok(expanded.and_then(|mut values| values.pop()).unwrap_or(character))
+    }
+
+    fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()> {
+        crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
+            store.replace_add_characters(staging_id, characters)
+        })
     }
 
     fn supports_incremental_characters(&self) -> bool { true }

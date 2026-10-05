@@ -28,15 +28,6 @@
             ]
         },
         {
-            "type": "group",
-            "chaId": "dataset-group",
-            "name": "Group",
-            "characters": ["dataset-alice"],
-            "chats": [
-                { "id": "group-chat", "name": "Group chat", "message": [{ "role": "user", "data": "Not exported" }] }
-            ]
-        },
-        {
             "type": "character",
             "chaId": "dataset-bob",
             "name": "Bob",

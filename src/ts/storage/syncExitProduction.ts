@@ -46,7 +46,10 @@ export async function registerWindowCloseDrain(
         acknowledge().catch(() => {})
         if (closing) return
         event.preventDefault()
-        if (pending) return
+        if (pending) {
+            exitCoordinator.requestExitWithoutSync()
+            return
+        }
         pending = true
         try {
             if (await exitCoordinator.requestExit() !== 'exit') return

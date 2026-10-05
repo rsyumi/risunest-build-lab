@@ -33,6 +33,33 @@ fn metadata(root: &tempfile::TempDir) -> rusqlite::Connection {
 }
 
 #[test]
+fn claim_lookup_is_registration_scoped_and_rechecks_revocation_after_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::init(root.path()).unwrap();
+    let former = store.add_device().unwrap();
+    let candidate = store.add_device().unwrap();
+    let unrelated = store.add_device().unwrap();
+    let new = actor(&store, &candidate);
+    assert_eq!(store.new_device_writer_claim(&new).unwrap(), None);
+    let request = claim(Some(&former.token));
+    let receipt = store.claim_new_device_writer(&new, &request).unwrap();
+    assert_eq!(store.new_device_writer_claim(&actor(&store, &unrelated)).unwrap(), None);
+    drop(store);
+
+    let store = Store::open(root.path()).unwrap();
+    let new = actor(&store, &candidate);
+    let saved = store.new_device_writer_claim(&new).unwrap().unwrap();
+    assert_eq!(saved.request_digest, request.digest().unwrap());
+    assert_eq!(saved.receipt, receipt);
+    let serialized = serde_json::to_string(&saved).unwrap();
+    assert!(!serialized.contains(&former.token));
+    assert!(!serialized.contains(&candidate.token));
+    assert_eq!(store.new_device_writer_claim(&actor(&store, &unrelated)).unwrap(), None);
+    metadata(&root).execute("UPDATE devices SET revoked=1 WHERE id=?1", [&new.id]).unwrap();
+    assert_eq!(store.new_device_writer_claim(&new).unwrap_err().code, "unauthorized");
+}
+
+#[test]
 fn management_registration_can_inspect_then_claim_and_forward_original_stamps() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::init(root.path()).unwrap();

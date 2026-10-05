@@ -133,7 +133,6 @@ describe('selected conversation production publication identity', () => {
             getSelectedCharacterId: adapter.getSelectedCharacterId,
             getResidentCharacter: adapter.captureCharacter,
             publishCharacter: adapter.publishCharacter,
-            publishCharacterSet: adapter.publishCharacterSet!,
             publishConversation: adapter.publishConversation,
             captureActivationRollback: adapter.captureActivationRollback,
             canActivateWorkingSet: () => true,

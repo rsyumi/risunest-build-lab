@@ -10,7 +10,6 @@ import type {
     Database,
     Message,
     character,
-    groupChat,
 } from '../storage/database.svelte'
 import { getChatVarFromConversation, setChatVarOnConversation } from '../parser/chatVar.svelte'
 import { safeStructuredClone } from '../polyfill'
@@ -18,7 +17,7 @@ import { safeStructuredClone } from '../polyfill'
 const CURRENT_CHAT_PARSE_PAGE_SIZE = 128
 
 export interface CurrentChatParserContext {
-    chara: character | groupChat
+    chara: character
     runVar: true
     db?: Database
     selectedCharacterId?: string
@@ -35,7 +34,7 @@ export interface RunCurrentChatParserPassOptions {
     chat: Chat
     database: Database
     ownerCharacterId: string
-    parserCharacter: character | groupChat
+    parserCharacter: character
     session: ActiveConversationSession | null
     parser: CurrentChatParser
 }

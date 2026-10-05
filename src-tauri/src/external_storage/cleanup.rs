@@ -1367,7 +1367,7 @@ pub(super) mod tests {
             f.provider.seed(catalog_id,ObjectRole::Catalog,authentic);
             let frozen=super::super::lww_residency::FrozenBodySource::Packed(saved.clone());
             let spool=super::super::lww_residency::spool_frozen_remote_body(&frozen,&scratch.join("frozen-destination"),&cancel).await.unwrap();
-            assert_eq!(super::super::lww_residency::read_frozen_body_spool(&frozen,&spool,&cancel).unwrap(),b"synthetic retained pack entry 0");
+            assert_eq!(std::fs::read(spool.path()).unwrap(),b"synthetic retained pack entry 0");
             assert!(crate::asset_repository::PayloadCas::new(f.directory_b.path()).unwrap().stat_object(&small[0]).unwrap().is_none());
             assert_eq!(super::super::lww_residency::packed_source(f.directory_b.path(),&small[0]).unwrap().unwrap().packs,saved.packs,"frozen backup custody never switches its saved source identity");
             let root=f.directory_b.path().to_path_buf();let hash=small[0].clone();

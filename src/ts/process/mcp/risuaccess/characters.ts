@@ -12,10 +12,6 @@ const characterNotFound = (id: string): RPCToolCallContent[] => [{
   text: `Error: Character with ID ${id} not found.`,
 }]
 
-const groupChatError = (): RPCToolCallContent[] => [{
-  type: 'text',
-  text: 'Error: The id pointed to a group chat, not a character.',
-}]
 
 class CharacterMutationAbort extends Error {
   constructor(readonly response: RPCToolCallContent[]) {
@@ -37,7 +33,7 @@ export class CharacterHandler extends MCPToolHandler {
     let response: RPCToolCallContent[] | undefined
     try {
       const found = await mutatePersistentCharacterDetail(characterId, reason, ({ character }) => {
-        if (character.type === 'group') throw new CharacterMutationAbort(groupChatError())
+
         response = mutate(character)
       })
       if (!found) return characterNotFound(requestedId)
@@ -428,14 +424,7 @@ export class CharacterHandler extends MCPToolHandler {
         },
       ]
     }
-    if (char.type === 'group') {
-      return [
-        {
-          type: 'text',
-          text: `Error: The id pointed to a group chat, not a character.`,
-        },
-      ]
-    }
+
 
     let response: Record<string, any> = {}
 
@@ -481,14 +470,7 @@ export class CharacterHandler extends MCPToolHandler {
         },
       ]
     }
-    if (char.type === 'group') {
-      return [
-        {
-          type: 'text',
-          text: `Error: The id pointed to a group chat, not a character.`,
-        },
-      ]
-    }
+
 
     if (count > 100) count = 100
     if (count < 1) count = 1
@@ -521,14 +503,7 @@ export class CharacterHandler extends MCPToolHandler {
         },
       ]
     }
-    if (char.type === 'group') {
-      return [
-        {
-          type: 'text',
-          text: `Error: The id pointed to a group chat, not a character.`,
-        },
-      ]
-    }
+
 
     const entries = char.globalLore.filter((entry) => {
       const displayName = entry.comment || 'Unnamed ' + pickHashRand(5515, entry.content)
@@ -569,14 +544,7 @@ export class CharacterHandler extends MCPToolHandler {
         },
       ]
     }
-    if (char.type === 'group') {
-      return [
-        {
-          type: 'text',
-          text: `Error: The id pointed to a group chat, not a character.`,
-        },
-      ]
-    }
+
 
     if (!(await this.promptAccess('risu-set-character-info', `modify character (${char.name}) information`))) {
       return [
@@ -639,14 +607,7 @@ export class CharacterHandler extends MCPToolHandler {
         },
       ]
     }
-    if (char.type === 'group') {
-      return [
-        {
-          type: 'text',
-          text: `Error: The id pointed to a group chat, not a character.`,
-        },
-      ]
-    }
+
 
     if (
       !(await this.promptAccess(
@@ -672,7 +633,7 @@ export class CharacterHandler extends MCPToolHandler {
           key: alwaysActive ? '' : keys?.join(',') || '',
           content: content || '',
           comment: newName || name,
-          alwaysActive: alwaysActive || false,
+          alwaysActive: alwaysActive,
           secondkey: '',
           selective: false,
           insertorder: 100,
@@ -714,14 +675,7 @@ export class CharacterHandler extends MCPToolHandler {
         },
       ]
     }
-    if (char.type === 'group') {
-      return [
-        {
-          type: 'text',
-          text: `Error: The id pointed to a group chat, not a character.`,
-        },
-      ]
-    }
+
 
     if (
       !(await this.promptAccess(
@@ -770,14 +724,7 @@ export class CharacterHandler extends MCPToolHandler {
         },
       ]
     }
-    if (char.type === 'group') {
-      return [
-        {
-          type: 'text',
-          text: `Error: The id pointed to a group chat, not a character.`,
-        },
-      ]
-    }
+
 
     const organized = (char.customscript || []).map((script) => {
       return {
@@ -817,14 +764,7 @@ export class CharacterHandler extends MCPToolHandler {
         },
       ]
     }
-    if (char.type === 'group') {
-      return [
-        {
-          type: 'text',
-          text: `Error: The id pointed to a group chat, not a character.`,
-        },
-      ]
-    }
+
 
     if (
       !(await this.promptAccess(
@@ -889,14 +829,7 @@ export class CharacterHandler extends MCPToolHandler {
         },
       ]
     }
-    if (char.type === 'group') {
-      return [
-        {
-          type: 'text',
-          text: `Error: The id pointed to a group chat, not a character.`,
-        },
-      ]
-    }
+
 
     if (
       !(await this.promptAccess(
@@ -946,14 +879,7 @@ export class CharacterHandler extends MCPToolHandler {
         },
       ]
     }
-    if (char.type === 'group') {
-      return [
-        {
-          type: 'text',
-          text: `Error: The id pointed to a group chat, not a character.`,
-        },
-      ]
-    }
+
 
     const assets = (char.additionalAssets || []).map((asset) => ({
       name: asset[0] || 'Unnamed ' + pickHashRand(5515, asset[1] + asset[2]),
@@ -979,14 +905,7 @@ export class CharacterHandler extends MCPToolHandler {
         },
       ]
     }
-    if (char.type === 'group') {
-      return [
-        {
-          type: 'text',
-          text: `Error: The id pointed to a group chat, not a character.`,
-        },
-      ]
-    }
+
 
     if (
       !(await this.promptAccess(
@@ -1036,14 +955,7 @@ export class CharacterHandler extends MCPToolHandler {
         },
       ]
     }
-    if (char.type === 'group') {
-      return [
-        {
-          type: 'text',
-          text: `Error: The id pointed to a group chat, not a character.`,
-        },
-      ]
-    }
+
 
     const firstTrigger = char.triggerscript?.[0]
     if (firstTrigger?.effect?.[0]?.type === 'triggerlua' && firstTrigger.effect[0].code.trim().length > 0) {
@@ -1073,14 +985,7 @@ export class CharacterHandler extends MCPToolHandler {
         },
       ]
     }
-    if (char.type === 'group') {
-      return [
-        {
-          type: 'text',
-          text: `Error: The id pointed to a group chat, not a character.`,
-        },
-      ]
-    }
+
 
     if (!(await this.promptAccess('risu-set-character-lua-script', `modify character (${char.name}) lua script`))) {
       return [

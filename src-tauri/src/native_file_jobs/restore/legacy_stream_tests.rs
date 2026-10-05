@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 struct RecordingSink {
     characters: Mutex<Vec<Value>>,
     batches: Mutex<Vec<usize>>,
-    root: Mutex<Option<Value>>,
+    root: Mutex<Option<String>>,
     presets: Mutex<Option<Vec<Value>>>,
     source_read: Option<Arc<AtomicU64>>,
     read_at_batches: Mutex<Vec<u64>>,
@@ -29,12 +29,22 @@ impl ReplacementSink for RecordingSink {
     }
 
     fn put_root(&self, _staging_id: &str, root: &Value) -> StoreResult<()> {
-        *self.root.lock().unwrap() = Some(root.clone());
+        *self.root.lock().unwrap() = Some(serde_json::to_string(root)?);
         Ok(())
     }
 
     fn put_presets(&self, _staging_id: &str, presets: &[Value]) -> StoreResult<()> {
         *self.presets.lock().unwrap() = Some(presets.to_vec());
+        Ok(())
+    }
+
+    fn put_legacy_root(&self, _staging_id: &str, root: &RootSpool) -> StoreResult<()> {
+        let mut encoded=Vec::new();
+        root.write_root(&mut encoded,false)?;
+        *self.root.lock().unwrap()=Some(String::from_utf8(encoded).unwrap());
+        let mut presets=Vec::new();
+        root.visit("botPresets",|_,value| { presets.push(value); Ok(()) })?;
+        *self.presets.lock().unwrap()=Some(presets);
         Ok(())
     }
 
@@ -474,7 +484,7 @@ fn legacy_restore_matches_the_whole_value_decoder_wherever_characters_appear() {
                 let staged = actual.sink.characters.lock().unwrap().len();
                 assert_eq!(staged, count);
                 assert_eq!(expected.sink.characters.lock().unwrap().len(), count);
-                let root = actual.sink.root.lock().unwrap().clone().unwrap();
+                let root: Value = serde_json::from_str(&actual.sink.root.lock().unwrap().clone().unwrap()).unwrap();
                 assert_eq!(root["username"], "Last");
                 assert_eq!(root["later"], "defined later");
                 assert!(root.get("dropped").is_none());
@@ -553,6 +563,140 @@ fn legacy_restore_reads_long_length_markers_like_the_whole_value_decoder() {
     payload.extend([0xdc, 0, 1]);
     payload.extend(&character);
     assert_same_outcome_for_every_wire("map16 and array16", &payload);
+}
+
+#[derive(Default)]
+struct RootOnlySink {
+    observed: Mutex<Option<(String,u64,u64,u64)>>,
+}
+
+impl ReplacementSink for RootOnlySink {
+    fn begin(&self)->StoreResult<StagingResult> { Ok(StagingResult { staging_id:"root-only".into() }) }
+    fn put_root(&self,_:&str,_:&Value)->StoreResult<()> { panic!("legacy root must stay streamed") }
+    fn put_presets(&self,_:&str,_:&[Value])->StoreResult<()> { panic!("legacy presets must stay streamed") }
+    fn add_characters(&self,_:&str,characters:&[Value])->StoreResult<()> { assert!(characters.is_empty()); Ok(()) }
+    fn put_legacy_root(&self,_:&str,root:&RootSpool)->StoreResult<()> {
+        struct HashWriter(Sha256,u64);
+        impl Write for HashWriter {
+            fn write(&mut self,bytes:&[u8])->io::Result<usize> { self.0.update(bytes); self.1+=bytes.len() as u64; Ok(bytes.len()) }
+            fn flush(&mut self)->io::Result<()> { Ok(()) }
+        }
+        let mut writer=HashWriter(Sha256::new(),0);
+        root.write_root(&mut writer,false)?;
+        let (records,maximum)=root.member_storage_shape()?;
+        *self.observed.lock().unwrap()=Some((hex::encode(writer.0.finalize()),writer.1,records,maximum));
+        Ok(())
+    }
+    fn commit(&self,_:&str,_:i64)->StoreResult<RevisionResult> { panic!("decoder fixture never activates") }
+    fn abort(&self,_:&str)->StoreResult<()> { Ok(()) }
+}
+
+#[test]
+fn root_heavy_legacy_input_uses_disk_members_and_streamed_sink_for_every_wire() {
+    let records=(0..96).map(|index|messagepack_from_json(&json!({
+        "id":format!("synthetic-{index}"),"name":format!("Synthetic {index}"),"body":noise(index,32*1024)
+    }))).collect::<Vec<_>>();
+    let storage=(0..64).map(|index|entry(&format!("key-{index}"),text(&noise(index+200,16*1024)))).collect();
+    let payload=root_bytes(vec![
+        entry("modules",MessagePackValue::Array(records.clone())),
+        entry("unknownCollection",MessagePackValue::Array(records.clone())),
+        entry("pluginCustomStorage",MessagePackValue::Map(storage)),
+        entry("botPresets",MessagePackValue::Array(records)),
+        entry("characters",MessagePackValue::Array(Vec::new())),
+        entry("account",messagepack_from_json(&json!({"synthetic":"omitted"}))),
+    ]);
+    let reference=run_legacy(&legacy_wire(7,&payload),RestoreLimits::default(),Decoder::WholeValue);
+    assert_eq!(reference.outcome.unwrap(),(0,96));
+    let expected=reference.sink.root.lock().unwrap().clone().unwrap();
+    let hash=hex::encode(Sha256::digest(expected.as_bytes()));
+    for (kind,wire) in legacy_wires(&payload) {
+        let job=JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        job.start(JobPhase::ReadingSource).unwrap();
+        let sink=RootOnlySink::default();
+        let mut reader=TrackedReader::new(wire.as_slice(),wire.len() as u64,&*job);
+        let format=read_risu_save_format(&mut reader).unwrap();
+        let parsed=match format {
+            RisuSaveFormat::LegacyRaw|RisuSaveFormat::HistoricalPrefixed => parse_and_stage_legacy(&mut reader,"root-only",&job,&sink,RestoreLimits::default()),
+            _ => parse_and_stage_compressed_legacy(&mut reader,"root-only",&job,&sink,RestoreLimits::default()),
+        }.unwrap();
+        assert_eq!(parsed.preset_count,96,"{kind}");
+        let (actual,bytes,records,maximum)=sink.observed.lock().unwrap().clone().unwrap();
+        assert_eq!(actual,hash,"{kind}");
+        assert_eq!(bytes,expected.len() as u64,"{kind}");
+        assert!(bytes>6*1024*1024,"{kind}");
+        assert!(records>=352,"{kind}");
+        assert!(maximum<64*1024,"{kind}: largest independently staged record {maximum}");
+    }
+}
+
+#[test]
+fn root_slots_preserve_last_values_undefined_defaults_and_nested_key_order() {
+    let payload=root_bytes(vec![
+        entry("modules",MessagePackValue::Nil),
+        entry("botPresets",messagepack_from_json(&json!([{"name":"discarded"}]))),
+        entry("defaultToggleValues",text("overwritten")),
+        entry("personas",messagepack_from_json(&json!([{"id":"duplicate"},{"id":"duplicate"}]))),
+        entry("marker",text("kept")),
+        entry("modules",undefined()), entry("botPresets",undefined()),
+        entry("personas",MessagePackValue::Array(Vec::new())),
+        entry("defaultToggleValues",messagepack_from_json(&json!({"toggle_synthetic":"1"}))),
+        entry("pluginCustomStorage",MessagePackValue::Map(vec![
+            entry("later",undefined()),entry("10",text("ten")),entry("2",text("two")),
+            entry("__proto__",text("old")),entry("__proto_",text("last")),
+            entry("later",text("value")),entry("removed",text("gone")),entry("removed",undefined()),
+        ])),
+        entry("characters",MessagePackValue::Array(Vec::new())),
+    ]);
+    assert_same_outcome_for_every_wire("disk slot replacements",&payload);
+    for value in [MessagePackValue::Nil,MessagePackValue::Array(Vec::new()),text("invalid")] {
+        let payload=root_bytes(vec![entry("characters",MessagePackValue::Array(Vec::new())),entry("pluginCustomStorage",value)]);
+        for (reference,_) in assert_same_outcome_for_every_wire("invalid plugin root shape",&payload) {
+            assert_eq!(reference.outcome.unwrap_err().code,"invalid-input");
+        }
+    }
+}
+
+#[test]
+fn cancellation_during_root_sink_finalization_aborts_stage_and_owned_spool() {
+    struct CancelRootSink {
+        store:Mutex<crate::persistent_store::PersistentStore>,
+        job:Arc<JobControl>,
+        aborted:AtomicU64,
+    }
+    impl ReplacementSink for CancelRootSink {
+        fn begin(&self)->StoreResult<StagingResult> { self.store.lock().unwrap().replace_begin() }
+        fn put_root(&self,_:&str,_:&Value)->StoreResult<()> { panic!("aggregate legacy root") }
+        fn put_presets(&self,_:&str,_:&[Value])->StoreResult<()> { panic!("aggregate legacy presets") }
+        fn add_characters(&self,_:&str,values:&[Value])->StoreResult<()> { assert!(values.is_empty()); Ok(()) }
+        fn put_legacy_root(&self,id:&str,root:&RootSpool)->StoreResult<()> {
+            assert!(root.count("modules")?>0);
+            self.job.request_cancel().unwrap();
+            self.store.lock().unwrap().replace_put_upstream_stream(id,root)
+        }
+        fn commit(&self,_:&str,_:i64)->StoreResult<RevisionResult> { panic!("cancelled stage activated") }
+        fn abort(&self,id:&str)->StoreResult<()> {
+            self.aborted.fetch_add(1,Ordering::AcqRel);
+            self.store.lock().unwrap().replace_abort(id)
+        }
+    }
+    for (kind,wire) in legacy_wires(&root_bytes(vec![
+        entry("characters",MessagePackValue::Array(Vec::new())),
+        entry("modules",messagepack_from_json(&json!([{"id":"module","body":"synthetic"}]))),
+    ])) {
+        let directory=tempfile::tempdir().unwrap();
+        let owned=directory.path().join("job"); std::fs::create_dir(&owned).unwrap();
+        let job=JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        let sink=CancelRootSink { store:Mutex::new(crate::persistent_store::PersistentStore::open(directory.path()).unwrap()),job:job.clone(),aborted:AtomicU64::new(0) };
+        let before=sink.store.lock().unwrap().read_root(None).unwrap().value;
+        let error=restore_risu_save_reader_controlled(wire.as_slice(),wire.len() as u64,0,&job,&sink,RestoreLimits::default(),true,
+            RestoreProgressScale { spool_directory:Some(owned.clone()),..Default::default() }).unwrap_err();
+        assert_eq!(error.code,"cancelled","{kind}");
+        assert_eq!(sink.aborted.load(Ordering::Acquire),1,"{kind}");
+        let store=sink.store.lock().unwrap();
+        assert_eq!(store.revision().unwrap(),0,"{kind}");
+        assert_eq!(store.read_root(None).unwrap().value,before,"{kind}");
+        assert_eq!(std::fs::read_dir(&owned).unwrap().count(),0,"{kind}");
+    }
 }
 
 #[test]

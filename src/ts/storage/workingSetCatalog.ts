@@ -1,6 +1,6 @@
 import { isTauri } from '../platform'
 import isEqual from 'lodash/isEqual'
-import type { Chat, Database, character, groupChat } from './database.svelte'
+import type { Chat, Database, character } from './database.svelte'
 import {
     createConversationSummaryStub,
     createConversationSummaryStubFromChat,
@@ -25,7 +25,7 @@ import {
 import { defineOwnEnumerableProperty } from './ownEnumerableProperty'
 import type { WorkingSetResidencyRegistry } from './workingSetResidency'
 
-type CompleteCharacter = character | groupChat
+type CompleteCharacter = character
 
 export function patchWorkingSetRoot(target: Database, root: PersistentRoot): void {
     const targetRecord = target as unknown as Record<string, unknown>
@@ -506,9 +506,7 @@ export async function projectPinnedScalableWorkingSet(
                     `Character ${options.selectedCharacterId}`,
                 )
                 selectedDetail = value.value
-                if (value.value.type === 'group') {
-                    for (const id of value.value.characters) residentIds.add(id)
-                }
+
             }
         }
     }
