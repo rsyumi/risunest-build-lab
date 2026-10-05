@@ -231,8 +231,8 @@
     {
       "path": "benchmarks/ios/runtimeContracts.ts",
       "mode": "100644",
-      "bytes": 4448,
-      "sha256": "66a6d199caf5c5702676063b3ad1330161fdce0f82607a315fb3bed6d971cfa0"
+      "bytes": 5461,
+      "sha256": "183174ecf84de3bddfbb471a96f9662284d14ec5ce251a8ee7d1d1f87aa6cabc"
     },
     {
       "path": "benchmarks/ios/vite.config.ts",
@@ -489,8 +489,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 27128,
-      "sha256": "49526e73c654e6806cc5d63acf8f4c11837dff05e5b002df467cfe7873c37689"
+      "bytes": 27057,
+      "sha256": "cf4d425120f032c7ac9dd60bed9ecf657fd256c49bf530d01dfde4b52ca0f26d"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -513,8 +513,8 @@
     {
       "path": "benchmarks/macos/native/src/main.rs",
       "mode": "100644",
-      "bytes": 7982,
-      "sha256": "3cc56124efe09578b2ef3f1586a5e5da4178fbacfa4a92e2c27d812504a33642"
+      "bytes": 8129,
+      "sha256": "1aa584917f9b858525121cc9fa702efe47dc510fbfc6c1f43b176cde4bd68d0d"
     },
     {
       "path": "benchmarks/macos/native/src/termination_probe.m",
@@ -537,8 +537,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 26460,
-      "sha256": "1c240ba2b0b415115538f0e9d974660695bd52b1e0d7e6b88f7e9b7447b81b49"
+      "bytes": 26801,
+      "sha256": "43698a58508184f6518476fd711fcaf894cfe1a13760591b4909f9c49719d839"
     },
     {
       "path": "benchmarks/macos/vite.config.ts",
@@ -4023,8 +4023,8 @@
     {
       "path": "server/sync/src/http/lww.rs",
       "mode": "100644",
-      "bytes": 16019,
-      "sha256": "f0f1a1ec5d58ab1f71d7dfab376287d458a20b81505468abcc8c79d93baa2098"
+      "bytes": 16289,
+      "sha256": "1befa8c06069c8413700c4cca9b58f5542d9a575266dd983d606387a0e1deaf0"
     },
     {
       "path": "server/sync/src/http/mod.rs",

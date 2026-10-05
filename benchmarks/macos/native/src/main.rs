@@ -53,6 +53,11 @@ fn macos_bench_report(stage: String, result: serde_json::Value) -> Result<(), St
 }
 
 #[tauri::command]
+fn macos_bench_expected() -> Option<String> {
+    std::env::var("RISUNEST_MACOS_EXPECTED").ok()
+}
+
+#[tauri::command]
 fn macos_bench_events(state: tauri::State<'_, Events>) -> Vec<&'static str> {
     state.0.lock().unwrap().clone()
 }
@@ -107,6 +112,7 @@ fn benchmark_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send
     tauri::generate_handler![
         macos_bench_phase,
         macos_bench_report,
+        macos_bench_expected,
         macos_bench_events,
         macos_bench_quit,
         #[cfg(target_os = "macos")]
