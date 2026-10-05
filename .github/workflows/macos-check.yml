@@ -14,7 +14,7 @@ on:
       scope:
         type: choice
         default: full
-        options: [full, streaming, termination-probe, appearance-runtime, appearance-light, appearance-dark, appearance-codec-experiment, appearance-bgra-experiment]
+        options: [full, harness, streaming, termination-probe, appearance-runtime, appearance-light, appearance-dark, appearance-codec-experiment, appearance-bgra-experiment]
 permissions:
   contents: read
 concurrency:
@@ -44,7 +44,7 @@ jobs:
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
           case "$RUNNER_LABEL" in macos-15|macos-14|macos-15-intel|macos-26) ;; *) exit 1;; esac
-          case "$CHECK_SCOPE" in full|streaming|termination-probe|appearance-runtime|appearance-light|appearance-dark|appearance-codec-experiment|appearance-bgra-experiment) ;; *) exit 1;; esac
+          case "$CHECK_SCOPE" in full|harness|streaming|termination-probe|appearance-runtime|appearance-light|appearance-dark|appearance-codec-experiment|appearance-bgra-experiment) ;; *) exit 1;; esac
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
@@ -91,6 +91,7 @@ jobs:
           workspaces: source/src-tauri -> target
           cache-workspace-crates: true
           cache-on-failure: true
+          save-if: ${{ inputs.scope == 'full' }}
           key: macos-${{ inputs.runner }}-${{ runner.arch }}-${{ steps.environment.outputs.target }}-${{ steps.environment.outputs.sdk }}
       - name: Install locked frontend inputs
         run: pnpm install --frozen-lockfile
@@ -209,7 +210,7 @@ jobs:
           else
             python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview 2>&1 | tee artifacts/wkwebview.log
           fi
-          if [[ "$CHECK_SCOPE" == full ]]; then
+          if [[ "$CHECK_SCOPE" == full || "$CHECK_SCOPE" == harness ]]; then
             node ../control/scripts/verify-unicode-results.mjs macos artifacts/wkwebview
           fi
       - uses: actions/upload-artifact@v4
