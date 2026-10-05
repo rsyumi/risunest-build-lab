@@ -528,6 +528,44 @@ describe('ActiveWorkingSet', () => {
         expect(harness.readConversation).not.toHaveBeenCalled()
     })
 
+    it.each(['metadata', 'content', 'navigation'] as const)('adopts persisted window metadata with %s identity checks', async (change) => {
+        const full = makeChat('chat-a')
+        full.message = [
+            { role: 'user', data: 'outside', chatId: 'a' },
+            { role: 'user', data: 'tail', chatId: 'b' },
+        ] as Message[]
+        const harness = makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
+        await harness.workingSet.activateCharacter('a')
+        const target = harness.workingSet.captureSelectedConversationTarget()!
+        const local = { ...structuredClone(full), message: [structuredClone(full.message[1])] }
+        const controller = harness.workingSet.captureWindowedConversationMutationController(target, local, 1)!
+        const reader = makeLease({ characterId: 'a', revision: 2 })
+        reader.readConversationWindow = vi.fn(async () => ({
+            revision: 2,
+            value: {
+                characterId: 'a', conversationId: 'chat-a', startIndex: 1, endIndex: 2, totalMessages: 2,
+                hasMoreBefore: true, hasMoreAfter: false,
+                messages: [{ ...full.message[1], data: change === 'content' ? 'changed' : 'tail', __plugin: 'stored' }],
+            },
+        }))
+        const adopt = await harness.workingSet.prepareWindowedMetadataAdoption(reader)
+        if (change === 'navigation') harness.workingSet.fenceNavigation()
+        else harness.workingSet.advanceStoreRevision(2)
+        adopt()
+        expect(reader.readConversationWindow).toHaveBeenCalledExactlyOnceWith({
+            characterId: 'a', conversationId: 'chat-a', startIndex: 1, limit: 1,
+        })
+        expect(reader.readConversation).not.toHaveBeenCalled()
+        if (change === 'metadata') {
+            expect(local.message[0]).toMatchObject({ data: 'tail', __plugin: 'stored' })
+            expect(controller.applyRange(1, 0, [{ role: 'char', data: 'reply', chatId: 'c' }], 'append')).toBe(true)
+        } else {
+            expect(local.message[0]).not.toHaveProperty('__plugin')
+            expect(controller.isCurrent()).toBe(false)
+        }
+        controller.release()
+    })
+
     it('fences a tail controller after another controller makes a same-length edit', async () => {
         const full = makeChat('chat-a')
         full.message = [

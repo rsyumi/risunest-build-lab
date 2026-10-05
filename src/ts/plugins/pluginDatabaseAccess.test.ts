@@ -876,6 +876,21 @@ describe('plugin database access', () => {
         expect(harness.releasedLeases.every((release) => release.mock.calls.length === 1)).toBe(true)
     })
 
+    it('resolves reordered and trashed output targets using persisted character and conversation order', async () => {
+        const harness = createHarness()
+        harness.archivedCharacterIds.add('archived-a')
+        const target = makeCharacter('target', true)
+        target.chats.reverse()
+        harness.pinnedDatabases.push(makeFullObjectDatabase([
+            makeCharacter('archived-a'), makeCharacter('other'), target,
+        ]))
+        const resolvePosition = createPinnedConversationPositionResolver(() => ({
+            store: harness.store, flushPendingData: harness.flushPendingData,
+        }))
+        expect(await resolvePosition('target', 'target-chat-a')).toEqual({ characterIndex: 1, chatIndex: 1 })
+        expect(await resolvePosition('missing', 'missing-chat')).toEqual({ characterIndex: -1, chatIndex: -1 })
+    })
+
     it('returns exact detached current, indexed character, and indexed chat objects', async () => {
         const harness = createHarness()
         const database = makeFullObjectDatabase()

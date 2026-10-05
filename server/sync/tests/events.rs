@@ -131,7 +131,7 @@ async fn websocket_initial_changed_sequence_and_rfc_ping_echo() {
 }
 
 #[tokio::test]
-async fn idle_sockets_use_dedicated_slots_and_remain_drainable() {
+async fn notification_connections_have_no_count_cap_and_remain_drainable() {
     let server = Server::start().await;
     let mut sockets = Vec::new();
     for _ in 0..32 {
@@ -150,9 +150,10 @@ async fn idle_sockets_use_dedicated_slots_and_remain_drainable() {
     request
         .headers_mut()
         .insert("x-risu-library", server.device.library_id.parse().unwrap());
-    assert!(
-        matches!(connect_async(request).await.err().unwrap(), tokio_tungstenite::tungstenite::Error::Http(response) if response.status() == 429)
-    );
+    let (mut extra, _) = tokio::time::timeout(Duration::from_secs(5), connect_async(request))
+        .await.expect("notification connection waited behind existing sockets").unwrap();
+    assert!(next(&mut extra).await.is_text());
+    sockets.push(extra);
     let response = server
         .auth(
             server

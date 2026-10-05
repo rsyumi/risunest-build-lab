@@ -326,7 +326,7 @@ pub(crate) fn after_stage_batch(hook: Option<Box<dyn FnMut(usize, std::time::Dur
 }
 
 /// One write a stage batch holds: a record's own rows, declaring how many
-/// messages it has, or a run of those messages, `last` when it ends them.
+/// messages it has, or a run of those messages.
 enum StageWrite {
     Record {
         record: PreparedRecord,
@@ -337,7 +337,6 @@ enum StageWrite {
         conversation_id: String,
         first: usize,
         messages: Vec<rows::SerializedMessage>,
-        last: bool,
     },
 }
 
@@ -402,7 +401,6 @@ impl StageBatch {
                     conversation_id: conversation_id.clone(),
                     first,
                     messages: run,
-                    last: messages.peek().is_none(),
                 });
                 first += count;
             }
@@ -421,10 +419,9 @@ impl StageBatch {
 
     /// Writes the batch, provided the library is still at the revision the
     /// stage was prepared against: a local edit ends the stage at the next
-    /// batch rather than at activation. A conversation whose last messages the
-    /// batch writes is paged in it, so activation reads its manifest instead
-    /// of its messages. Cancellation is only asked before the transaction
-    /// begins, never while it commits.
+    /// batch rather than at activation. Each batch extends conversation pages,
+    /// so the final batch and activation never read the whole conversation.
+    /// Cancellation can roll back page construction, never a committed batch.
     fn write(
         &mut self,
         connection: &mut rusqlite::Connection,
@@ -475,7 +472,6 @@ impl StageBatch {
                     conversation_id,
                     first,
                     messages,
-                    last,
                 } => {
                     rows::insert_serialized_messages(
                         &transaction,
@@ -485,18 +481,17 @@ impl StageBatch {
                         first,
                         &messages,
                     )?;
-                    if last {
-                        complete.push((character_id, conversation_id));
-                    }
+                    complete.push((character_id, conversation_id));
                 }
             }
         }
         for (character_id, conversation_id) in complete {
-            super::commit::page_staged_conversation(
+            super::message_pages::stage_conversation_pages(
                 &transaction,
                 generation,
                 &character_id,
                 &conversation_id,
+                &|| check(probe),
             )?;
         }
         transaction.commit()?;

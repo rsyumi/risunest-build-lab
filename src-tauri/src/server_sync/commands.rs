@@ -1,3 +1,4 @@
+use super::progress::{within, LANES};
 use super::{Result, SyncError};
 use crate::persistent_store::{commands::with_store_mut, PersistentStore};
 use std::collections::BTreeSet;
@@ -171,7 +172,7 @@ pub(crate) async fn server_sync_asset_policy(
     policy: super::residency::AssetPolicy,
     selected_character_id: Option<String>,
 ) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
-    logged_blocking("asset-policy", move || server_sync_asset_policy_operation(&app, policy, selected_character_id.as_deref())).await
+    logged_blocking("asset-policy", move || within(&LANES.assets, || server_sync_asset_policy_operation(&app, policy, selected_character_id.as_deref()))).await
 }
 
 fn server_sync_asset_policy_operation<R: tauri::Runtime>(app: &AppHandle<R>, policy: super::residency::AssetPolicy, selected_character_id: Option<&str>) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
@@ -192,7 +193,7 @@ pub(crate) async fn asset_residency_download_remote(
     connection_id: Option<String>,
     selected_character_id: Option<String>,
 ) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
-    logged_blocking("asset-download", move || {
+    logged_blocking("asset-download", move || within(&LANES.assets, || {
         let _admission = claim_library(&app)?;
         let state = app.state::<ServerSyncCommandState>();
         let (_running, cancelled) = state.claim_preparation()?;
@@ -203,13 +204,13 @@ pub(crate) async fn asset_residency_download_remote(
                 Ok(())
             }
         })
-    }).await
+    })).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_asset_evict(
     app: AppHandle,
 ) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
-    logged_blocking("asset-evict", move || server_sync_asset_evict_operation(&app)).await
+    logged_blocking("asset-evict", move || within(&LANES.assets, || server_sync_asset_evict_operation(&app))).await
 }
 
 fn server_sync_asset_evict_operation<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
@@ -264,15 +265,15 @@ pub(crate) async fn server_sync_configure(app:AppHandle,config:super::client::Se
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_push(app:AppHandle,request:crate::persistent_store::lww::Header,generating:Vec<crate::persistent_store::lww::MessageLocator>)->Result<Option<risunest_sync_wire::lww::PushReceipt>> {
-    logged_blocking("push",move|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.push(&mut store,&request,&generating)}).await
+    logged_blocking("push",move|| within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.push(&mut store,&request,&generating)})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_pull(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<crate::persistent_store::lww::StageReceive> {
-    logged_blocking("pull",move|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.receive_page(&mut store,&request)}).await
+    logged_blocking("pull",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.receive_page(&mut store,&request)})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_ack(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
-    logged_blocking("ack",move|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.finish_receive(&store,&request)}).await
+    logged_blocking("ack",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.finish_receive(&store,&request)})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_cancel(app:AppHandle)->Result<()> {recorded("cancel",app.state::<ServerSyncCommandState>().cancel())}
@@ -283,30 +284,36 @@ pub(crate) async fn server_sync_lww_fence(app:AppHandle,new_device:bool)->Result
 
 #[tauri::command]
 pub(crate) async fn server_sync_lww_activate(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
-    logged_blocking("activate",move|| {super::binding::activate(&mut job_store(&app)?,&request,None)}).await
+    logged_blocking("activate",move|| within(&LANES.binding,|| {super::binding::activate(&mut job_store(&app)?,&request,None)})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_pending_binding(app:AppHandle)->Result<Option<super::binding::PendingBinding>> {logged_blocking("pending-binding",move||{super::binding::pending_binding(&job_store(&app)?)}).await}
 #[tauri::command]
-pub(crate) async fn server_sync_lww_inspect(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<super::binding::Inspection> {logged_blocking("inspect",move||{super::binding::inspect(&job_store(&app)?,&request)}).await}
+pub(crate) async fn server_sync_lww_inspect(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<super::binding::Inspection> {logged_blocking("inspect",move||within(&LANES.binding,|| {super::binding::inspect(&job_store(&app)?,&request)})).await}
 #[tauri::command]
-pub(crate) async fn server_sync_lww_stage_target(app:AppHandle,request:crate::persistent_store::lww::Header,inspection_id:String)->Result<super::binding::StagedTarget> {logged_blocking("stage-target",move||{let _permit=claim_library(&app)?;let state=app.state::<ServerSyncCommandState>();let (_stage,cancelled)=state.claim_stage()?;super::binding::stage(&mut job_store(&app)?,&request,&inspection_id,Some(cancelled))}).await}
+pub(crate) async fn server_sync_lww_stage_target(app:AppHandle,request:crate::persistent_store::lww::Header,inspection_id:String)->Result<super::binding::StagedTarget> {logged_blocking("stage-target",move||within(&LANES.binding,|| {let _permit=claim_library(&app)?;let state=app.state::<ServerSyncCommandState>();let (_stage,cancelled)=state.claim_stage()?;super::binding::stage(&mut job_store(&app)?,&request,&inspection_id,Some(cancelled))})).await}
 #[tauri::command]
-pub(crate) async fn server_sync_lww_prepare_new_device(app:AppHandle,request:crate::persistent_store::lww::Header,staging_id:String)->Result<crate::persistent_store::lww::NewDevicePreparation> {logged_blocking("prepare-new-device",move||{let _permit=claim_library(&app)?;super::binding::prepare_new_device(&mut job_store(&app)?,&request,&staging_id)}).await}
+pub(crate) async fn server_sync_lww_prepare_new_device(app:AppHandle,request:crate::persistent_store::lww::Header,staging_id:String)->Result<crate::persistent_store::lww::NewDevicePreparation> {logged_blocking("prepare-new-device",move||within(&LANES.binding,|| {let _permit=claim_library(&app)?;super::binding::prepare_new_device(&mut job_store(&app)?,&request,&staging_id)})).await}
 #[tauri::command]
-pub(crate) async fn server_sync_lww_prepare_fresh_writer(app:AppHandle,request:crate::persistent_store::lww::Header,inspection_id:String)->Result<crate::persistent_store::lww::NewDevicePreparation> {logged_blocking("prepare-fresh-writer",move||{let _permit=claim_library(&app)?;super::binding::prepare_fresh_writer(&mut job_store(&app)?,&request,&inspection_id)}).await}
+pub(crate) async fn server_sync_lww_prepare_fresh_writer(app:AppHandle,request:crate::persistent_store::lww::Header,inspection_id:String)->Result<crate::persistent_store::lww::NewDevicePreparation> {logged_blocking("prepare-fresh-writer",move||within(&LANES.binding,|| {let _permit=claim_library(&app)?;super::binding::prepare_fresh_writer(&mut job_store(&app)?,&request,&inspection_id)})).await}
 #[tauri::command]
-pub(crate) async fn server_sync_lww_activate_new_device(app:AppHandle,request:crate::persistent_store::lww::Header,authorization_id:String,writer_id:String)->Result<()> {logged_blocking("activate-new-device",move||{super::binding::activate(&mut job_store(&app)?,&request,Some((&authorization_id,&writer_id)))}).await}
+pub(crate) async fn server_sync_lww_activate_new_device(app:AppHandle,request:crate::persistent_store::lww::Header,authorization_id:String,writer_id:String)->Result<()> {logged_blocking("activate-new-device",move||within(&LANES.binding,|| {super::binding::activate(&mut job_store(&app)?,&request,Some((&authorization_id,&writer_id)))})).await}
 #[tauri::command]
-pub(crate) async fn server_sync_lww_retry(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<crate::persistent_store::lww::ApplyResult> {logged_blocking("retry",move||{let _permit=claim_library(&app)?;let mut store=job_store(&app)?;lww_client(&store)?.retry_unpublished(&mut store,&request)}).await}
+pub(crate) async fn server_sync_lww_retry(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<crate::persistent_store::lww::ApplyResult> {logged_blocking("retry",move||within(&LANES.send,|| {let _permit=claim_library(&app)?;let mut store=job_store(&app)?;lww_client(&store)?.retry_unpublished(&mut store,&request)})).await}
 #[tauri::command]
 pub(crate) async fn server_sync_lww_drain(app:AppHandle,request:crate::persistent_store::lww::Header,generating:Vec<crate::persistent_store::lww::MessageLocator>)->Result<()> {
-    logged_blocking("drain",move||{let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;let core=lww_client_cancelled(&store,Some(cancelled))?;let mut next=request;while core.push(&mut store,&next,&generating)?.is_some(){next.request_id=uuid::Uuid::new_v4().to_string();}if !store.lww_read_outbox(next.binding_authority,1)?.entries.is_empty(){return Err(SyncError::new("generation-active",409));}Ok(())}).await
+    logged_blocking("drain",move||within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;let core=lww_client_cancelled(&store,Some(cancelled))?;let mut next=request;while core.push(&mut store,&next,&generating)?.is_some(){next.request_id=uuid::Uuid::new_v4().to_string();}if !store.lww_read_outbox(next.binding_authority,1)?.entries.is_empty(){return Err(SyncError::new("generation-active",409));}Ok(())})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_hydrate(app:AppHandle,request:crate::persistent_store::lww::Header,selected_character_id:Option<String>)->Result<()> {
-    logged_blocking("hydrate",move|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"hydrate")?;let store=job_store(&app)?;hydrate_binding_assets(&store,&request,cancelled,selected_character_id.as_deref(),||{})}).await
+    logged_blocking("hydrate",move|| within(&LANES.hydrate,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"hydrate")?;let store=job_store(&app)?;hydrate_binding_assets(&store,&request,cancelled,selected_character_id.as_deref(),||{})})).await
 }
+#[tauri::command]
+pub(crate) async fn server_sync_lww_pending_count(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<u64> {
+    logged_blocking("pending-count",move||Ok(job_store(&app)?.lww_outbox_count(request.binding_authority)?)).await
+}
+#[tauri::command]
+pub(crate) async fn server_sync_progress()->Vec<super::progress::LaneSnapshot> {LANES.snapshot()}
 pub(crate) fn hydrate_binding_assets(store:&crate::persistent_store::PersistentStore,request:&crate::persistent_store::lww::Header,cancelled:Arc<AtomicBool>,selected_character_id:Option<&str>,on_object_done:impl Fn())->Result<()> {
     if store.server_asset_policy()?!=super::residency::AssetPolicy::Full{return Ok(());}
     let authority=request.binding_authority;

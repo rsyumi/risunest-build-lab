@@ -274,7 +274,9 @@ impl Cache {
                     return Err(SyncError::new("local-storage-full", 507))
                 }
             }
-            let tx = objects.transaction()?;
+            // Reserve the writer before reading existing identities. A deferred
+            // read cannot upgrade after another connection writes to the WAL.
+            let tx = objects.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let inserted = small_object_store::insert_batch(
                 &tx,
                 &group
@@ -291,7 +293,7 @@ impl Cache {
                 }
                 Err(_) => super::hash_metrics::incomplete(),
             }
-            inserted.map_err(|_| SyncError::new("cached-object-corrupt", 409))?;
+            inserted.map_err(cache_object_error)?;
             tx.commit()?;
             // Between groups, never inside one. A reader on another connection
             // can leave the log where it is; this group is already durable, so
@@ -324,7 +326,7 @@ impl Cache {
             return Ok(Some(bytes.len() as u64));
         }
         let size = small_object_store::size(&*self.objects()?, hash)
-            .map_err(|_| SyncError::new("cached-object-corrupt", 409))?;
+            .map_err(cache_object_error)?;
         if let Some(size) = size {
             return Ok(Some(size));
         }
@@ -351,7 +353,7 @@ impl Cache {
             Ok(None) => (),
             Err(_) => super::hash_metrics::incomplete(),
         }
-        let stored = stored.map_err(|_| SyncError::new("cached-object-corrupt", 409))?;
+        let stored = stored.map_err(cache_object_error)?;
         if let Some(bytes) = stored {
             return Ok(Some(Body::bytes(bytes)));
         }
@@ -812,6 +814,14 @@ impl Cache {
     }
 }
 
+#[track_caller]
+fn cache_object_error(error: small_object_store::StoreError) -> SyncError {
+    match error {
+        small_object_store::StoreError::Database(error) => error.into(),
+        _ => SyncError::new("cached-object-corrupt", 409),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1246,6 +1256,46 @@ mod tests {
                 })
                 .is_err());
         }
+    }
+
+    #[test]
+    fn an_independent_writer_waits_without_reporting_corruption() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let root = tempfile::tempdir().unwrap();
+        let blocker = Cache::open(root.path()).unwrap();
+        let cache = Cache::open(root.path()).unwrap();
+        let mut objects = blocker.objects().unwrap();
+        let tx = objects.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+        let (started, entered) = mpsc::channel();
+        let (finished, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let inserted = cache.put(b"synthetic independent writer");
+            finished.send(()).unwrap();
+            inserted
+        });
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        let early = result.recv_timeout(Duration::from_millis(200));
+        tx.commit().unwrap();
+        let inserted = worker.join().unwrap();
+        assert!(early.is_err(), "the competing writer must wait for the transaction");
+        let hash = inserted.unwrap();
+        drop(objects);
+        assert_eq!(blocker.read(&hash, 1024).unwrap(), b"synthetic independent writer");
+    }
+
+    #[test]
+    fn a_database_write_failure_keeps_its_retry_classification_and_cause() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::open(root.path()).unwrap();
+        cache.objects().unwrap().execute_batch(
+            "CREATE TRIGGER synthetic_failure BEFORE INSERT ON small_objects BEGIN SELECT RAISE(ABORT,'synthetic failure'); END"
+        ).unwrap();
+        let error = cache.put(b"synthetic body").unwrap_err();
+        assert_eq!(error.code, "local-metadata");
+        assert!(error.retryable);
+        assert!(error.cause.is_some());
     }
 
     #[test]

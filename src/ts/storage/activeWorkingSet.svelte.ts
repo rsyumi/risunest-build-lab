@@ -14,6 +14,7 @@ import type {
     DataRevision,
     PersistentConversationMetadata,
     PersistentDataStore,
+    PersistentRevisionReader,
 } from './persistentDataStore'
 import {
     createConversationSummaryFromMetadata,
@@ -291,6 +292,7 @@ export class ActiveWorkingSet {
     private activeSession: ActiveConversationSession | null = null
     private selectedConversationState: SelectedConversationState | null = null
     private promotionFlight: Promise<CompleteSelectedConversationState> | null = null
+    private readonly windowedControllers = new Set<WindowedConversationMutationController>()
     private demotionScheduled = false
     private readonly viewportSourceListeners = new Set<
         ActiveConversationViewportSourceListener
@@ -398,6 +400,54 @@ export class ActiveWorkingSet {
         }
     }
 
+    async prepareWindowedMetadataAdoption(reader: PersistentRevisionReader): Promise<() => void> {
+        const state = this.selectedConversationState
+        if (state?.kind !== 'windowed' ||
+            state.authority.sessionVersion !== state.authority.persistedSessionVersion ||
+            reader.revision < state.authority.storeRevision) return () => {}
+        const authority = state.authority
+        const adoptions: Array<{ controller: WindowedConversationMutationController; messages: Message[] }> = []
+        for (const controller of this.windowedControllers) {
+            if (!controller.isCurrent()) {
+                this.windowedControllers.delete(controller)
+                continue
+            }
+            const messages: Message[] = []
+            const length = controller.chat.message.length
+            for (let offset = 0; offset < length;) {
+                const startIndex = controller.absoluteStartIndex + offset
+                const page = await reader.readConversationWindow({
+                    characterId: state.characterId, conversationId: state.conversationId,
+                    startIndex, limit: Math.min(100, length - offset),
+                })
+                if (!page || page.revision !== reader.revision || page.value.startIndex !== startIndex ||
+                    page.value.characterId !== state.characterId || page.value.conversationId !== state.conversationId ||
+                    page.value.totalMessages !== authority.totalMessages || page.value.messages.length === 0) {
+                    controller.release()
+                    break
+                }
+                messages.push(...page.value.messages)
+                offset += page.value.messages.length
+            }
+            const contentKeys = ['role', 'data', 'saying', 'chatId', 'name', 'otherUser', 'disabled', 'isComment'] as const
+            if (messages.length !== length || !messages.every((message, index) =>
+                contentKeys.every((key) => Object.is(message[key], controller.chat.message[index]?.[key])))) {
+                controller.release()
+                continue
+            }
+            adoptions.push({ controller, messages })
+        }
+        return () => {
+            const current = this.selectedConversationState
+            if (current?.kind !== 'windowed' || current.authority.sessionToken !== authority.sessionToken ||
+                current.authority.sessionVersion !== authority.sessionVersion ||
+                current.authority.storeRevision !== reader.revision) return
+            for (const { controller, messages } of adoptions) {
+                if (controller.isCurrent()) replaceArrayRange(controller.chat.message, 0, messages.length, safeStructuredClone(messages))
+            }
+        }
+    }
+
     captureWindowedConversationMutationController(
         target: SelectedConversationTarget,
         chat: Chat,
@@ -415,12 +465,13 @@ export class ActiveWorkingSet {
                 : absoluteStartIndex + chat.message.length !== initialState.authority.totalMessages)
         ) return null
         let released = false
+        const navigationGeneration = initialState.navigationGeneration
         let expectedSessionVersion = initialState.authority.sessionVersion
         const requireState = (): WindowedSelectedConversationState | null => {
             const state = this.selectedConversationState
             return !released
                 && state?.kind === 'windowed'
-                && state.navigationGeneration === initialState.navigationGeneration
+                && state.navigationGeneration === navigationGeneration
                 && state.characterId === initialState.characterId
                 && state.conversationId === initialState.conversationId
                 && state.authority.sessionToken === initialState.authority.sessionToken
@@ -453,7 +504,7 @@ export class ActiveWorkingSet {
                 target[key] = safeStructuredClone(value)
             }
         }
-        return {
+        const controller: WindowedConversationMutationController = {
             chat,
             absoluteStartIndex,
             isCurrent: () => requireState() !== null,
@@ -535,8 +586,16 @@ export class ActiveWorkingSet {
                     throw error
                 }
             },
-            release() { released = true },
+            release: () => {
+                released = true
+                this.windowedControllers.delete(controller)
+            },
         }
+        for (const previous of this.windowedControllers) {
+            if (!previous.isCurrent()) this.windowedControllers.delete(previous)
+        }
+        this.windowedControllers.add(controller)
+        return controller
     }
 
     async captureWindowedMessageMutation(
@@ -2221,6 +2280,7 @@ export class ActiveWorkingSet {
     }
 
     private clearActiveConversationSession(notify = true): boolean {
+        for (const controller of this.windowedControllers) controller.release()
         const changed = this.selectedConversationState !== null || this.activeSession !== null
         this.selectedConversationState?.viewportSource.dispose()
         this.activeSession?.invalidate()

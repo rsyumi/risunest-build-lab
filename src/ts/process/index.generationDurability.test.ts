@@ -68,6 +68,10 @@ const harness = vi.hoisted(() => {
         char: structuredClone(input.liveCharacter),
         chat: structuredClone(input.liveConversation),
     }))
+    const resolvePosition = vi.fn(async (_characterId: string, _conversationId: string) => ({
+        characterIndex: 0,
+        chatIndex: 0,
+    }))
     const setChatToIndex = vi.fn(async (chat: any) => structuredClone(chat))
     const flushPendingData = vi.fn(async () => undefined)
     const generationKeepAliveBegin = vi.fn(() => true)
@@ -101,6 +105,7 @@ const harness = vi.hoisted(() => {
         chatOutput,
         chatOutputListenerProvenance,
         projectChatOutput,
+        resolvePosition,
         setChatToIndex,
         flushPendingData,
         generationKeepAliveBegin,
@@ -179,6 +184,9 @@ vi.mock('../plugins/plugins.svelte', () => ({
 }))
 vi.mock('../plugins/pluginDatabaseAccess', () => ({
     createProductionPluginChatOutputProjector: () => harness.projectChatOutput,
+}))
+vi.mock('../plugins/pinnedConversationPosition', () => ({
+    resolvePinnedConversationPosition: harness.resolvePosition,
 }))
 vi.mock('./presetChain', async () => (await import('./tests/sendChatTestHarness')).presetChainModule())
 vi.mock('./generationState', () => ({
@@ -440,6 +448,10 @@ describe('sendChat generation durability control flow', () => {
         expect(harness.events.indexOf('ack')).toBeGreaterThan(-1)
         expect(harness.flushPendingData).not.toHaveBeenCalled()
         expect(harness.projectChatOutput).toHaveBeenCalledOnce()
+        const character = harness.DBState.db.characters[0]
+        expect(harness.resolvePosition).toHaveBeenCalledExactlyOnceWith(character.chaId, character.chats[0].id)
+        expect(first).toHaveBeenCalledWith(expect.objectContaining({ characterIndex: 0, chatIndex: 0 }))
+        expect(second).toHaveBeenCalledWith(expect.objectContaining({ characterIndex: 0, chatIndex: 0 }))
     })
 
     it('acknowledges a non-streaming response before notification and peer publication', async () => {

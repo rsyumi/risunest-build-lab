@@ -864,6 +864,12 @@ export function createPersistentDataRuntime(
             }
         }
     }
+    const applyInstalledRootChanges = (before: RootDatabase): void => {
+        const changedFields = new Set(diffRootMutations(before, dependencies.state.captureRoot()).map((mutation) => mutation.key))
+        if (changedFields.size === 0) return
+        try { dependencies.state.afterRemoteRootChange?.(changedFields) }
+        catch (error) { dependencies.onBackgroundError?.(error) }
+    }
     const requireCommittedRefresh = (
         revision: DataRevision,
         error: unknown,
@@ -904,6 +910,7 @@ export function createPersistentDataRuntime(
             ) {
                 throw new PersistentMutationFencedError()
             }
+            const rootBefore = canonicalClone(dependencies.state.captureRoot())
             workingSet.invalidateNavigation()
             dependencies.state.replaceDatabase(
                 projected.database,
@@ -912,6 +919,7 @@ export function createPersistentDataRuntime(
             )
             if (activatedLibraryGuard) dependencies.state.afterRemoteApply?.()
             workingSet.installCommittedWorkingSet(projected.database, revision, projected.windowedMetadata)
+            applyInstalledRootChanges(rootBefore)
             deferredContentPending = projected.deferred
             if (!projected.deferred) await commitContentCursor(revision, activatedLibraryGuard !== null)
             if (activatedLibraryGuard) {
@@ -1015,7 +1023,7 @@ export function createPersistentDataRuntime(
         }
     }
     const generating = () => [...(dependencies.state.getGeneratingConversations?.() ?? generatingConversations.snapshot())]
-    const projectAppliedUnits = async (result: LwwApplyResult, baseline?: ReturnType<typeof captureLwwWorkingSetBaseline>, localIntent = false): Promise<void> => {
+    const projectAppliedUnits = async (result: LwwApplyResult, baseline?: ReturnType<typeof captureLwwWorkingSetBaseline>, localIntent = false, preserveWindowMetadata = false): Promise<void> => {
         if (!localIntent && result.affectedKeys.length === 0) {
             // Nothing reached the library, so the working set and its mirrors stay untouched.
             coordinator.adoptAppliedUnitState(result.revision, null, null, [])
@@ -1047,8 +1055,13 @@ export function createPersistentDataRuntime(
         const rootValue = (field: string) => canonicalJson({ value: (database as unknown as Record<string, unknown>)[field] })
         let rootBefore: string[] = []
         let applied: ReturnType<typeof captureLwwWorkingSetBaseline>
+        let adoptWindowedMetadata = () => {}
         let windowedConversation: { characterId: string; conversationId: string; totalMessages: number } | undefined
         try {
+            if (preserveWindowMetadata && selectedTarget && result.affectedKeys.some((key) => {
+                const [kind, characterId, conversationId] = JSON.parse(key) as string[]
+                return kind === 'messages' && characterId === selectedTarget.characterId && conversationId === selectedTarget.conversationId
+            })) adoptWindowedMetadata = await workingSet.prepareWindowedMetadataAdoption(lease)
             applied = await applyLwwWorkingSetUnits(database, projectionBaseline, lease, result.affectedKeys, dependencies.state.captureCharacterIndex?.(), localIntent, () => {
                 coordinator.assertPersistentMutationAllowed(authorityEpoch)
                 if (dependencies.state.captureWorkingSetDatabase?.() !== database) throw new Error('Persistent working set changed during unit projection')
@@ -1078,6 +1091,7 @@ export function createPersistentDataRuntime(
             }
         } finally { await releasePersistentRevisionLease(lease) }
         coordinator.adoptAppliedUnitState(result.revision, applied.root, applied.presets, applied.characters, applied.presetRecords, windowedConversation)
+        adoptWindowedMetadata()
         const changedRootFields = new Set(rootFields.filter((field, index) => rootValue(field) !== rootBefore[index]))
         if (changedRootFields.size > 0) {
             try { dependencies.state.afterRemoteRootChange?.(changedRootFields) }
@@ -1159,10 +1173,12 @@ export function createPersistentDataRuntime(
             const projected = await projectRefreshedWorkingSet(latest.revision, {selectedCharacterId:null, selectedConversationId:null, activeCharacterIds:new Set()}, {wholeLibrary:true, root:true, presets:true, pluginStorage:true, characterIds:[], conversations:[]})
             if (projected.deferred) throw new Error('Activated library projection is incomplete')
             coordinator.assertActivatedLibraryGuard(guard.owner, token)
+            const rootBefore = canonicalClone(dependencies.state.captureRoot())
             workingSet.invalidateNavigation()
             dependencies.state.replaceDatabase(projected.database, new Set(), true)
             dependencies.state.afterRemoteApply?.()
             workingSet.installCommittedWorkingSet(projected.database, latest.revision, projected.windowedMetadata)
+            applyInstalledRootChanges(rootBefore)
             await commitContentCursor(latest.revision, true)
             guard.ready = true
             return {kind:'committed', revision:latest.revision, projection:'applied'}
@@ -1210,7 +1226,7 @@ export function createPersistentDataRuntime(
                 affectedKeys = unitIntentAffectedKeys(translated, prepared.conversations)
                 return { unitMutations: translated, conversations: prepared.conversations }
             }, async (revision) => {
-                try { await projectAppliedUnits({ revision, affectedKeys, heldKeys: [], deferredKeys: [] }, undefined, true) }
+                try { await projectAppliedUnits({ revision, affectedKeys, heldKeys: [], deferredKeys: [] }, undefined, true, true) }
                 catch (error) { coordinator.markCommittedWorkingSetRefreshRequired(revision, error); throw error }
             })
         },

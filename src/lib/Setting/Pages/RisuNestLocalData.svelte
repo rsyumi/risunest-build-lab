@@ -118,7 +118,7 @@
         </SettingRow>
     {/if}
     {#if failure}
-        <div class="px-4 py-3" role="alert"><p>{failure === "load" ? strings.loadFailed : strings.applyFailed}</p><SettingButton onclick={() => { failure = null; void load() }}>{language.retry}</SettingButton></div>
+        <div class="px-4 py-3" role="alert"><p class="text-sm text-danger-400">{failure === "load" ? strings.loadFailed : strings.applyFailed}</p><SettingButton class="mt-2" onclick={() => { failure = null; void load() }}>{language.retry}</SettingButton></div>
     {/if}
     {#each rows as row (row.section)}
         <SettingRow label={row.label} help={row.help} labelFor={`local-data-${row.section}`}>

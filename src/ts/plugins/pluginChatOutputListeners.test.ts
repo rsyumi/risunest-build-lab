@@ -42,6 +42,47 @@ function projector() {
 }
 
 describe('plugin chat output listeners', () => {
+    it('resolves the captured event identity after projection and preserves the message index', async () => {
+        const listeners = new Set<ChatOutputListener>()
+        const listener = vi.fn()
+        listeners.add(listener)
+        const char = structuredClone(liveChar)
+        const chat = char.chats[0]
+        const projected = deferred()
+        const resolvePosition = vi.fn(async () => ({ characterIndex: 4, chatIndex: 2 }))
+        const dispatching = dispatchChatOutputListeners({
+            listeners, char, chat, messageIndex: 17, resolvePosition,
+            projectScalable: async () => {
+                await projected.promise
+                return { char: exactChar, chat: exactChat }
+            },
+            onError: (error) => { throw error },
+        })
+        char.chaId = 'new-selection'
+        chat.id = 'new-chat'
+        projected.resolve()
+        await dispatching
+        expect(resolvePosition).toHaveBeenCalledExactlyOnceWith('char-a', 'chat-a')
+        expect(listener).toHaveBeenCalledWith({ char: exactChar, chat: exactChat, characterIndex: 4, chatIndex: 2, messageIndex: 17 })
+    })
+
+    it('keeps missing positions and skips delivery when cancelled during position lookup', async () => {
+        const listener = vi.fn()
+        const controller = new AbortController()
+        const common = {
+            listeners: new Set([listener]), char: liveChar, chat: liveChat, messageIndex: 3,
+            projectScalable: projector(), onError: vi.fn(), signal: controller.signal,
+        }
+        await dispatchChatOutputListeners({ ...common, resolvePosition: async () => ({ characterIndex: -1, chatIndex: -1 }) })
+        expect(listener).toHaveBeenCalledWith(expect.objectContaining({ characterIndex: -1, chatIndex: -1, messageIndex: 3 }))
+        listener.mockClear()
+        await dispatchChatOutputListeners({ ...common, resolvePosition: async () => {
+            controller.abort()
+            return { characterIndex: 2, chatIndex: 1 }
+        } })
+        expect(listener).not.toHaveBeenCalled()
+    })
+
     it('projects once and shares char and chat references across one event', async () => {
         const { listeners } = registry()
         const first = vi.fn(({ char }) => { char.listenerMutation = 'visible' })
@@ -54,8 +95,7 @@ describe('plugin chat output listeners', () => {
             listeners,
             char: liveChar,
             chat: liveChat,
-            characterIndex: 0,
-            chatIndex: 0,
+            resolvePosition: async () => ({ characterIndex: 0, chatIndex: 0 }),
             messageIndex: 1,
             projectScalable,
             onError: vi.fn(),
@@ -77,8 +117,7 @@ describe('plugin chat output listeners', () => {
             listeners,
             char: liveChar,
             chat: liveChat,
-            characterIndex: 0,
-            chatIndex: 0,
+            resolvePosition: async () => ({ characterIndex: 0, chatIndex: 0 }),
             messageIndex: 1,
             projectScalable: vi.fn().mockRejectedValue(projectionError),
             onError,
@@ -110,8 +149,7 @@ describe('plugin chat output listeners', () => {
             listeners,
             char: liveChar,
             chat: liveChat,
-            characterIndex: 0,
-            chatIndex: 0,
+            resolvePosition: async () => ({ characterIndex: 0, chatIndex: 0 }),
             messageIndex: 1,
             projectScalable: projector(),
             onError: (error) => order.push((error as Error).message),
@@ -136,8 +174,7 @@ describe('plugin chat output listeners', () => {
             listeners,
             char: liveChar,
             chat: liveChat,
-            characterIndex: 0,
-            chatIndex: 0,
+            resolvePosition: async () => ({ characterIndex: 0, chatIndex: 0 }),
             messageIndex: 1,
             projectScalable: projector(),
             onError: vi.fn(),
@@ -170,8 +207,7 @@ describe('plugin chat output listeners', () => {
             listeners,
             char: liveChar,
             chat: liveChat,
-            characterIndex: 0,
-            chatIndex: 0,
+            resolvePosition: async () => ({ characterIndex: 0, chatIndex: 0 }),
             messageIndex: 1,
             projectScalable,
             onError: vi.fn(),
@@ -195,8 +231,7 @@ describe('plugin chat output listeners', () => {
             listeners,
             char: liveChar,
             chat: liveChat,
-            characterIndex: 0,
-            chatIndex: 0,
+            resolvePosition: async () => ({ characterIndex: 0, chatIndex: 0 }),
             messageIndex: 1,
             projectScalable,
             onError: vi.fn(),
@@ -225,8 +260,7 @@ describe('plugin chat output listeners', () => {
             listeners,
             char: liveChar,
             chat: liveChat,
-            characterIndex: 0,
-            chatIndex: 0,
+            resolvePosition: async () => ({ characterIndex: 0, chatIndex: 0 }),
             messageIndex: 1,
             projectScalable,
             onError: vi.fn(),
@@ -257,8 +291,7 @@ describe('plugin chat output listeners', () => {
             listeners,
             char: liveChar,
             chat: liveChat,
-            characterIndex: 0,
-            chatIndex: 0,
+            resolvePosition: async () => ({ characterIndex: 0, chatIndex: 0 }),
             messageIndex: 1,
             projectScalable: projector(),
             onError: vi.fn(),

@@ -1,6 +1,6 @@
 //! Main-document renderer exits and unanswered close requests, shared by the engine adapters.
 //! Each adapter reports an exit and reloads; this module decides what the reload means and
-//! when a desktop window has to be closed, or the app quit, without the document's consent.
+//! when a desktop window has to be closed without the document's consent.
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -9,7 +9,7 @@ use tauri::Manager;
 /// choice, so a document that keeps failing cannot reload forever.
 const RELOAD_LOOP_WINDOW: Duration = Duration::from_secs(60);
 /// How long a close request may go unacknowledged before a repeated close destroys the window.
-#[cfg(desktop)]
+#[cfg(any(windows, target_os = "linux"))]
 const CLOSE_ACK_LIMIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -26,7 +26,7 @@ struct Recovery {
     last_reload: Option<Instant>,
     /// The next document reports that it replaced one that stopped.
     recovered: bool,
-    #[cfg(desktop)]
+    #[cfg(any(windows, target_os = "linux"))]
     unacknowledged_close: Option<Instant>,
 }
 
@@ -38,9 +38,6 @@ impl Recovery {
         #[cfg(any(windows, target_os = "linux"))]
         {
             self.document_gone = true;
-        }
-        #[cfg(desktop)]
-        {
             self.unacknowledged_close = None;
         }
         self.recovered = true;
@@ -58,20 +55,19 @@ impl Recovery {
         self.document_gone = false;
     }
 
-    #[cfg(desktop)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn document_started(&mut self) {
         self.unacknowledged_close = None;
     }
 
-    #[cfg(desktop)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn acknowledge_close(&mut self) {
         self.unacknowledged_close = None;
     }
 
-    /// Whether this close or quit request must end the window or app natively.
-    #[cfg(desktop)]
+    /// Whether this close request must destroy the window natively.
+    #[cfg(any(windows, target_os = "linux"))]
     fn close_requested(&mut self, now: Instant) -> bool {
-        #[cfg(any(windows, target_os = "linux"))]
         if self.document_gone {
             return true;
         }
@@ -131,7 +127,7 @@ pub(crate) fn load_succeeded(app: &tauri::AppHandle) {
 }
 
 /// A new main document replaced any request the previous one left unanswered.
-#[cfg(desktop)]
+#[cfg(any(windows, target_os = "linux"))]
 pub(crate) fn document_started(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<RendererRecovery>() {
         state.with(Recovery::document_started);
@@ -152,15 +148,8 @@ pub(crate) fn on_main_close_requested(app: &tauri::AppHandle, api: &tauri::Close
     }
 }
 
-/// Whether a quit request must quit the app because the document left an earlier one unanswered.
-#[cfg(target_os = "macos")]
-pub(crate) fn quit_requested(app: &tauri::AppHandle) -> bool {
-    app.try_state::<RendererRecovery>()
-        .is_some_and(|state| state.with(|recovery| recovery.close_requested(Instant::now())))
-}
-
 // Blocking on purpose: it runs on the main thread, after the close request it answers was recorded.
-#[cfg(desktop)]
+#[cfg(any(windows, target_os = "linux"))]
 #[tauri::command]
 pub(crate) fn desktop_close_ack(
     window: tauri::WebviewWindow,
@@ -221,7 +210,7 @@ mod tests {
         assert!(!recovery.close_requested(now));
     }
 
-    #[cfg(desktop)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn a_repeated_close_without_acknowledgement_is_closed_natively() {
         let start = Instant::now();
@@ -231,7 +220,7 @@ mod tests {
         assert!(recovery.close_requested(start + CLOSE_ACK_LIMIT));
     }
 
-    #[cfg(desktop)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn an_acknowledged_or_replaced_document_starts_the_wait_again() {
         let start = Instant::now();
@@ -243,19 +232,5 @@ mod tests {
         recovery.document_started();
         assert!(!recovery.close_requested(late + CLOSE_ACK_LIMIT));
         assert!(recovery.close_requested(late + CLOSE_ACK_LIMIT * 2));
-    }
-
-    #[cfg(desktop)]
-    #[test]
-    fn a_renderer_exit_drops_the_unanswered_request_of_the_departed_document() {
-        let start = Instant::now();
-        let mut recovery = Recovery::default();
-        assert!(!recovery.close_requested(start));
-        recovery.renderer_exited(start);
-        #[cfg(any(windows, target_os = "linux"))]
-        recovery.load_succeeded();
-        let late = start + CLOSE_ACK_LIMIT * 2;
-        assert!(!recovery.close_requested(late));
-        assert!(recovery.close_requested(late + CLOSE_ACK_LIMIT));
     }
 }

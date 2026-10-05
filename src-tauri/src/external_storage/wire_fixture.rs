@@ -23,6 +23,11 @@ pub(crate) enum Reply {
     Lost,
     DelayedHeaders,
     DelayedBody,
+    Gated {
+        send_headers: bool,
+        ready: tokio::sync::oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    },
 }
 pub(crate) struct WireServer {
     pub url: url::Url,
@@ -75,6 +80,21 @@ impl WireServer {
                             b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n",
                         );
                         thread::sleep(Duration::from_millis(250));
+                    }
+                    Reply::Gated { send_headers, ready, release } => {
+                        if send_headers {
+                            stream.write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n",
+                            ).unwrap();
+                            stream.flush().unwrap();
+                        }
+                        let _ = ready.send(());
+                        while !stop.load(Ordering::Acquire) {
+                            match release.recv_timeout(Duration::from_millis(10)) {
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                                _ => break,
+                            }
+                        }
                     }
                     Reply::Http {
                         status,

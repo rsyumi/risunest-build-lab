@@ -201,11 +201,12 @@ fn a_replay_that_keeps_failing_with_a_store_error_is_set_aside_and_the_store_ope
     let root = store.read_root(None).unwrap().value;
     assert_eq!(root["username"], "saved");
     assert_ne!(root["language"], "ko");
-    assert_eq!(store.lww_quarantined_intents().unwrap(), vec![QuarantinedIntent {
-        request_id: "synthetic-stuck".into(),
-        kind: "commit".into(),
-        error: "synthetic store failure".into(),
-    }]);
+    let quarantined = store.lww_quarantined_intents().unwrap();
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(quarantined[0].request_id, "synthetic-stuck");
+    assert_eq!(quarantined[0].kind, "commit");
+    assert_eq!(quarantined[0].error, "synthetic store failure");
+    assert_eq!(quarantined[0].token.len(), 64);
     let (lease, _) = store.lww_acquire_backup_capture(store.revision().unwrap()).unwrap();
     store.release_revision(&lease.lease).unwrap();
     let lease = store.acquire_revision(store.revision().unwrap()).unwrap();
@@ -279,4 +280,204 @@ fn short_device_connections_leave_the_wal_files_of_the_open_store() {
     kept("the backup capture");
     drop(store);
     assert!(!wal.exists(), "closing the last connection removes the WAL file");
+}
+
+fn quarantine_fixture(store: &mut PersistentStore, id: &str, value: &UnitValue) -> QuarantinedIntent {
+    let db = store.device_store_mut().unwrap().connection();
+    db.execute("INSERT INTO lww_intents VALUES(?1,'0','{}','{}','synthetic-digest',0)", [id]).unwrap();
+    db.execute("INSERT INTO lww_intent_failures VALUES(?1,3,'synthetic-failure',1)", [id]).unwrap();
+    db.execute("INSERT INTO lww_intent_rows VALUES(?1,1,?2,NULL,?3,0)", params![id,unit_key(&["root","username"]).unwrap().as_str(),serde_json::to_string(value).unwrap()]).unwrap();
+    store.lww_quarantined_intents().unwrap().into_iter().find(|intent| intent.request_id == id).unwrap()
+}
+
+#[test]
+fn discarding_quarantine_is_atomic_identity_checked_and_preserves_committed_records() {
+    let (dir, mut store) = store();
+    let value = inline(&serde_json::json!("synthetic")).unwrap();
+    let selected = quarantine_fixture(&mut store, "discard-selected", &value);
+    let other = quarantine_fixture(&mut store, "discard-other", &value);
+    let revision = store.revision().unwrap();
+    assert!(store.lww_discard_quarantined_intent(&selected.request_id, &selected.token, revision + 1).is_err());
+    assert!(store.lww_discard_quarantined_intent(&selected.request_id, "stale-token", revision).is_err());
+    store.device_store_mut().unwrap().connection().execute("UPDATE lww_intent_failures SET quarantined=0 WHERE request_id=?1", [&selected.request_id]).unwrap();
+    assert!(store.lww_discard_quarantined_intent(&selected.request_id, &selected.token, revision).is_err());
+    store.device_store_mut().unwrap().connection().execute("UPDATE lww_intent_failures SET quarantined=1 WHERE request_id=?1", [&selected.request_id]).unwrap();
+    store.connection.execute("INSERT INTO lww_requests VALUES(?1,'synthetic-digest',0,NULL)", [&other.request_id]).unwrap();
+    assert!(store.lww_discard_quarantined_intent(&other.request_id, &other.token, revision).is_err());
+    store.device_store_mut().unwrap().connection().execute_batch("CREATE TRIGGER reject_discard BEFORE DELETE ON lww_intents BEGIN SELECT RAISE(ABORT,'synthetic discard failure'); END;").unwrap();
+    assert!(store.lww_discard_quarantined_intent(&selected.request_id, &selected.token, revision).is_err());
+    assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intent_rows"), 2);
+    assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intent_failures"), 2);
+    store.device_store_mut().unwrap().connection().execute_batch("DROP TRIGGER reject_discard").unwrap();
+    let root = store.read_root(None).unwrap().value;
+    assert!(store.lww_discard_quarantined_intent(&selected.request_id, &selected.token, revision).unwrap());
+    assert!(!store.lww_discard_quarantined_intent(&selected.request_id, &selected.token, revision).unwrap());
+    assert_eq!(store.revision().unwrap(), revision);
+    assert_eq!(store.read_root(None).unwrap().value, root);
+    let remaining = store.lww_quarantined_intents().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].request_id, other.request_id);
+    assert!(!remaining[0].discardable);
+    assert_eq!(library_count(&store, "SELECT count(*) FROM lww_requests WHERE request_id='discard-other'"), 1);
+    drop(store);
+    let store = PersistentStore::open(dir.path()).unwrap();
+    assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intents WHERE request_id='discard-selected'"), 0);
+    assert_eq!(store.revision().unwrap(), revision);
+}
+
+#[test]
+fn discarded_intent_roots_expire_only_after_grace_and_shared_bodies_remain() {
+    use crate::persistent_store::{message_pages, MessageObjectStore, ASSET_GC_PRODUCT_MINIMUM_GRACE_MS};
+    let (_dir, mut store) = store();
+    let unique = risunest_sync_wire::hash(b"synthetic-only-quarantine");
+    let shared = risunest_sync_wire::hash(b"synthetic-shared-quarantine");
+    for db in [&store.connection, store.device_store().unwrap().connection()] {
+        message_pages::put_object(db, &unique, b"synthetic-only-quarantine").unwrap();
+        message_pages::put_object(db, &shared, b"synthetic-shared-quarantine").unwrap();
+    }
+    let unique_value = UnitValue::object(risunest_sync_wire::descriptor::RecordDescriptor::content(unique.clone())).unwrap();
+    let shared_value = UnitValue::object(risunest_sync_wire::descriptor::RecordDescriptor::content(shared.clone())).unwrap();
+    let selected = quarantine_fixture(&mut store, "discard-root", &unique_value);
+    let retained = quarantine_fixture(&mut store, "keep-shared-root", &shared_value);
+    let now = 1_900_000_000_000i64;
+    for target in [MessageObjectStore::Library, MessageObjectStore::Device] {
+        store.sweep_message_page_objects(target, now, 256).unwrap();
+    }
+    let computed = store.message_object_roots_computed();
+    let revision = store.revision().unwrap();
+    store.lww_discard_quarantined_intent(&selected.request_id, &selected.token, revision).unwrap();
+    for target in [MessageObjectStore::Library, MessageObjectStore::Device] {
+        store.sweep_message_page_objects(target, now, 256).unwrap();
+    }
+    assert_eq!(store.message_object_roots_computed(), computed + 2);
+    for db in [&store.connection, store.device_store().unwrap().connection()] {
+        assert!(message_pages::object_body(db, &unique).unwrap().is_some());
+    }
+    for target in [MessageObjectStore::Library, MessageObjectStore::Device] {
+        store.sweep_message_page_objects(target, now + ASSET_GC_PRODUCT_MINIMUM_GRACE_MS, 256).unwrap();
+    }
+    for db in [&store.connection, store.device_store().unwrap().connection()] {
+        assert!(message_pages::object_body(db, &unique).unwrap().is_none());
+        assert!(message_pages::object_body(db, &shared).unwrap().is_some());
+    }
+    assert_eq!(store.lww_quarantined_intents().unwrap(), vec![retained]);
+}
+
+#[test]
+fn corrupt_replacement_tail_never_activates_a_prefix_and_exact_replay_keeps_its_stamp() {
+    let (_dir, mut store) = store();
+    let stage = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root(&stage, &serde_json::json!({"username":"synthetic-replacement"})).unwrap();
+    let header = Header { binding_authority: store.lww_binding_authority().unwrap(), request_id: "synthetic-replay-tail".into() };
+    let changes = intent_rows::write(&mut store.device_store_mut().unwrap().connection, &header.request_id, "changes", (0..1025).map(|index| {
+        intent_rows::replacement_row(&unit_key(&["root", &format!("synthetic-{index:04}")])?, &inline(&serde_json::json!(index))?, true)
+    })).unwrap();
+    let intent = Intent::Replacement {
+        staging_id: stage.clone(), base_revision: store.revision().unwrap(), staging_digest: binding_stage::catalog_digest(&store.connection, &stage).unwrap(),
+        changes, source_units: None, device_sections: None, device_changes: Cow::Owned(vec![]),
+    };
+    let (stamp, _) = store.reserve_intent(&header, &intent).unwrap();
+    let generation = active_generation(&store.connection).unwrap();
+    store.device_store_mut().unwrap().connection().execute("UPDATE lww_intent_rows SET source_override=0 WHERE request_id=?1 AND ordinal=1025", [&header.request_id]).unwrap();
+    assert!(store.lww_recover_intents().is_err());
+    assert_eq!(active_generation(&store.connection).unwrap(), generation);
+    assert_eq!(store.revision().unwrap(), 0);
+    assert_eq!(library_count(&store, "SELECT count(*) FROM lww_requests WHERE request_id='synthetic-replay-tail'"), 0);
+    store.device_store_mut().unwrap().connection().execute("UPDATE lww_intent_rows SET source_override=1 WHERE request_id=?1 AND ordinal=1025", [&header.request_id]).unwrap();
+    store.lww_recover_intents().unwrap();
+    assert_eq!(active_generation(&store.connection).unwrap(), stage);
+    assert_eq!(store.revision().unwrap(), 1);
+    assert_eq!(store.read_root(None).unwrap().value["username"], "synthetic-replacement");
+    let versions: (i64,i64) = store.connection.query_row("SELECT count(*),count(DISTINCT stamp) FROM lww_units WHERE version=?1", [&header.request_id], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+    assert_eq!(versions, (1025,1));
+    assert_eq!(read_unit(&store.connection, &unit_key(&["root","synthetic-1024"]).unwrap()).unwrap().unwrap().0, stamp);
+    assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intent_rows WHERE request_id='synthetic-replay-tail'"), 0);
+}
+
+fn quarantine_issued(store: &mut PersistentStore, request_id: &str) -> QuarantinedIntent {
+    for _ in 0..3 { store.record_intent_failure(request_id, &error("synthetic-cleanup-failure")).unwrap(); }
+    store.lww_quarantined_intents().unwrap().into_iter().find(|intent| intent.request_id == request_id).unwrap()
+}
+
+#[test]
+fn discarding_applied_commit_keeps_receipt_and_retry_result() {
+    let (_dir, mut store) = store();
+    store.device_store_mut().unwrap().connection().execute_batch("CREATE TRIGGER block_completion BEFORE DELETE ON lww_intents BEGIN SELECT RAISE(ABORT,'synthetic cleanup failure'); END;").unwrap();
+    let input = WorkingSetCommit {
+        request_id: Some("applied-commit".into()), expected_revision: 0,
+        unit_mutations: Some(vec![mutation(&["root","username"], serde_json::json!("committed"))]), ..Default::default()
+    };
+    assert!(store.commit(&input).is_err());
+    assert_eq!(store.revision().unwrap(), 1);
+    let selected = quarantine_issued(&mut store, "applied-commit");
+    assert!(selected.discardable);
+    store.device_store_mut().unwrap().connection().execute_batch("DROP TRIGGER block_completion").unwrap();
+    assert!(store.lww_discard_quarantined_intent(&selected.request_id, &selected.token, 1).unwrap());
+    assert_eq!(store.commit(&input).unwrap().revision, 1);
+    assert_eq!(store.read_root(None).unwrap().value["username"], "committed");
+}
+
+#[test]
+fn discarded_applied_replacement_retains_the_completed_receipt_body() {
+    let (_dir, mut store) = store();
+    let stage = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root(&stage, &serde_json::json!({"username":"replacement"})).unwrap();
+    let header = Header { binding_authority: store.lww_binding_authority().unwrap(), request_id: "applied-replacement".into() };
+    store.device_store_mut().unwrap().connection().execute_batch("CREATE TRIGGER block_completion BEFORE UPDATE OF complete ON lww_intents BEGIN SELECT RAISE(ABORT,'synthetic cleanup failure'); END;").unwrap();
+    assert!(store.lww_commit_replacement(&header, &stage).is_err());
+    assert_eq!(store.revision().unwrap(), 1);
+    let selected = quarantine_issued(&mut store, &header.request_id);
+    assert!(selected.discardable);
+    store.device_store_mut().unwrap().connection().execute_batch("DROP TRIGGER block_completion").unwrap();
+    assert!(store.lww_discard_quarantined_intent(&selected.request_id, &selected.token, 1).unwrap());
+    assert!(!store.lww_discard_quarantined_intent(&selected.request_id, &selected.token, 1).unwrap());
+    assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intents WHERE request_id='applied-replacement' AND complete=1"), 1);
+    assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intent_rows WHERE request_id='applied-replacement'"), 0);
+    assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intent_failures WHERE request_id='applied-replacement'"), 0);
+    assert_eq!(store.lww_commit_replacement(&header, &stage).unwrap().revision, 1);
+    assert_eq!(store.read_root(None).unwrap().value["username"], "replacement");
+}
+
+#[test]
+fn cross_store_quarantine_cannot_abandon_device_or_binding_completion() {
+    let (_dir, mut store) = store();
+    let change = crate::persistent_store::sync_selection::BindingSelectionChange {
+        expected_epoch: "before".into(), new_epoch: "after".into(),
+        target: crate::persistent_store::sync_selection::SyncTarget::None, library_id: None, target_id: None, inspection_id: None, initial_publication: false,
+    };
+    let rows = intent_rows::digest("target", std::iter::empty()).unwrap();
+    let sections = full_device_backup(Some("unapplied-device-restore"));
+    let cases = [
+        Intent::Target { staging_id: "stage".into(), changes: rows.clone() },
+        Intent::Replacement { staging_id: "stage".into(), base_revision: 0, staging_digest: "synthetic".into(), changes: rows, source_units: None,
+            device_sections: Some(Cow::Owned(device_store::sections::freeze_backup_sections(&sections.iter().collect::<Vec<_>>()).unwrap())), device_changes: Cow::Owned(vec![]) },
+        Intent::Switch { change: change.clone(), new_authority: 1.into() },
+        Intent::NewDevice { authorization_id: "authorized".into(), staging_id: "stage".into(), changes: vec![], old_writer_id: "old".into(), writer_id: "new".into(), new_authority: 1.into(), selection_change: change },
+    ];
+    for (index, intent) in cases.into_iter().enumerate() {
+        let header = Header { binding_authority: 0.into(), request_id: format!("partial-{index}") };
+        let (_, digest) = store.reserve_intent(&header, &intent).unwrap();
+        store.connection.execute("INSERT INTO lww_requests VALUES(?1,?2,1,'stage')", params![header.request_id,digest]).unwrap();
+        let selected = quarantine_issued(&mut store, &header.request_id);
+        assert!(!selected.discardable);
+        assert!(store.lww_discard_quarantined_intent(&selected.request_id, &selected.token, 0).is_err());
+    }
+    assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intents WHERE complete=0"), 4);
+    assert_eq!(library_count(&store, "SELECT count(*) FROM lww_requests"), 4);
+}
+
+#[test]
+fn quarantine_classification_checks_repair_versions_in_both_stores() {
+    let (_dir, mut store) = store();
+    for device in [false, true] {
+        let header = Header { binding_authority: 0.into(), request_id: format!("repair-{device}") };
+        let (stamp, _) = store.reserve_intent(&header, &Intent::Repair { entries: vec![] }).unwrap();
+        let selected = quarantine_issued(&mut store, &header.request_id);
+        assert!(selected.discardable);
+        let db = if device { store.device_store().unwrap().connection() } else { &store.connection };
+        put_unit(db, &unit_key(&["root", "synthetic-repair"]).unwrap(), &stamp, &inline(&serde_json::json!(true)).unwrap(), &header.request_id, Some(0.into())).unwrap();
+        let selected = store.lww_quarantined_intents().unwrap().into_iter().find(|intent| intent.request_id == header.request_id).unwrap();
+        assert!(!selected.discardable);
+        assert!(store.lww_discard_quarantined_intent(&selected.request_id, &selected.token, 0).is_err());
+    }
 }

@@ -459,7 +459,7 @@ fn builder_with_main_window(
                 ios_lifecycle::main_document_started(webview.app_handle());
                 #[cfg(target_os = "macos")]
                 macos_lifecycle::document_started(webview.app_handle());
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(target_os = "linux")]
                 renderer_recovery::document_started(webview.app_handle());
                 if let Some(state) = webview.try_state::<persistent_store::PersistentStoreState>() {
                     if let Err(error) = state.reset_renderer_session() {
@@ -736,7 +736,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         opened_files::desktop_relaunch,
         #[cfg(any(windows, target_os = "linux"))]
         desktop_session::desktop_flush_complete,
-        #[cfg(desktop)]
+        #[cfg(any(windows, target_os = "linux"))]
         renderer_recovery::desktop_close_ack,
         #[cfg(not(target_os = "android"))]
         renderer_recovery::renderer_recovery_take,
@@ -757,6 +757,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         server_sync::commands::server_sync_lww_fence,
         server_sync::commands::server_sync_lww_activate,
         server_sync::commands::server_sync_lww_hydrate,
+        server_sync::commands::server_sync_lww_pending_count,
+        server_sync::commands::server_sync_progress,
         server_sync::commands::server_sync_lww_inspect,
         server_sync::commands::server_sync_lww_pending_binding,
         server_sync::commands::server_sync_lww_stage_target,
@@ -794,6 +796,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::data_health::pds_data_health_repair_plan,
         persistent_store::commands::data_health::pds_data_health_repair_preview,
         persistent_store::commands::data_health::pds_data_health_repair_apply,
+        persistent_store::commands::data_health::pds_data_health_discard_intent,
         persistent_store::commands::data_health::pds_data_health_journals,
         persistent_store::commands::data_health::pds_data_health_undo,
         native_log::native_log_tail,
@@ -840,6 +843,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_file_jobs::native_portable_confirm_restore_adoption,
         native_file_jobs::native_portable_retry_restore_bodies,
         native_file_jobs::native_snapshot_restore_bodies_start,
+        native_file_jobs::native_snapshot_restore_bodies_status,
         native_file_jobs::native_plugin_values_assign,
         native_file_jobs::native_backup_source_format,
         native_file_jobs::native_portable_source_discard,

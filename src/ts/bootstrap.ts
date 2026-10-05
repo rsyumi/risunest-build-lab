@@ -26,6 +26,7 @@ import { updateAnimationSpeed } from "./gui/animation";
 import { updateColorScheme, updateTextThemeAndCSS } from "./gui/colorscheme";
 import { changeLanguage, language } from "src/lang";
 import { startObserveDom } from "./observer.svelte";
+import { updateHeightMode } from "./gui/heightMode";
 import { updateGuisize } from "./gui/guisize";
 import { initMobileGesture } from "./hotkey";
 import { moduleUpdate } from "./process/modules";
@@ -248,6 +249,7 @@ export async function loadData() {
                 pendingOfficialPublications: [],
                 interruptedRestores: [],
                 libraryRestoreCommitted: false,
+                pendingSnapshotBodies: [],
             }
         if (recoveredNativeFileJobs.pendingRestoreAcknowledgements.length > 0) {
             await refreshDeviceStateAfterRestore()
@@ -829,6 +831,11 @@ export async function loadData() {
         registerAndroidScreenshotPublicationRecovery()
         LoadingStatusState.startedAt = null
         loadedStore.set(true)
+        if (isTauri && recoveredNativeFileJobs.pendingSnapshotBodies?.length) {
+            void import('./storage/nativePersistentMaintenance').then(module =>
+                module.reattachNativeSnapshotRestoreBodies(recoveredNativeFileJobs.pendingSnapshotBodies),
+            ).catch(error => console.error('Snapshot body reattachment failed', error))
+        }
         setTimeout(() => {
             void runtime.expirePersistentTrash().catch((error) => console.error('Trash expiry failed', error))
         }, 0)
@@ -912,33 +919,6 @@ function updateErrorHandling() {
     )
 }
 
-/**
- * Updates the height mode of the document based on the value stored in the database.
- */
-function updateHeightMode() {
-    const db = getDatabase()
-    const root = document.querySelector(':root') as HTMLElement;
-    switch (db.heightMode) {
-        case 'auto':
-            root.style.setProperty('--risu-height-size', '100%');
-            break
-        case 'vh':
-            root.style.setProperty('--risu-height-size', '100vh');
-            break
-        case 'dvh':
-            root.style.setProperty('--risu-height-size', '100dvh');
-            break
-        case 'lvh':
-            root.style.setProperty('--risu-height-size', '100lvh');
-            break
-        case 'svh':
-            root.style.setProperty('--risu-height-size', '100svh');
-            break
-        case 'percent':
-            root.style.setProperty('--risu-height-size', '100%');
-            break
-    }
-}
 
 /**
  * Purges chunks of data that are not needed.

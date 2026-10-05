@@ -106,6 +106,8 @@ export function createSyncExitCoordinator(
     let state: SyncExitState = { phase: 'idle' }
     let pending: Promise<SyncExitDisposition> | undefined
     let decision: PendingDecision | undefined
+    let repeatedClose = false
+    let repeatedCloseSignal = deferredDecision()
     const listeners = new Set<(state: SyncExitState) => void>()
     const setTimer = dependencies.setTimer
         ?? ((callback: () => void, delay: number): unknown =>
@@ -120,10 +122,13 @@ export function createSyncExitCoordinator(
         state = next
         for (const listener of listeners) listener(state)
     }
-    const waitForDecision = (): Promise<SyncExitDecision> => {
+    const waitForDecision = (allowRepeatedClose = false): Promise<SyncExitDecision> => {
+        if (allowRepeatedClose && repeatedClose) return Promise.resolve('exit-unsynced')
         const pendingDecision = deferredDecision()
         decision = pendingDecision
-        return pendingDecision.promise.finally(() => {
+        return (allowRepeatedClose
+            ? Promise.race([pendingDecision.promise, repeatedCloseSignal.promise])
+            : pendingDecision.promise).finally(() => {
             if (decision === pendingDecision) decision = undefined
         })
     }
@@ -188,7 +193,7 @@ export function createSyncExitCoordinator(
                     destination: 'selection',
                     reason: blockedReason(error),
                 })
-                const choice = await waitForDecision()
+                const choice = await waitForDecision(true)
                 if (choice === 'exit-unsynced') return { kind: 'exit' }
                 if (choice === 'cancel-exit') return { kind: 'cancelled' }
             }
@@ -223,8 +228,14 @@ export function createSyncExitCoordinator(
                     const first = await Promise.race([
                         drainOutcome,
                         delayed.then(() => ({ kind: 'delayed' as const })),
+                        repeatedCloseSignal.promise.then(() => ({ kind: 'repeated' as const })),
                     ])
                     if (timer !== undefined) clearTimer(timer)
+                    if (first.kind === 'repeated') {
+                        abort.abort()
+                        await cancelDrain(adapter, 'exit-unsynced')
+                        return 'exit'
+                    }
                     if (first.kind !== 'delayed') {
                         outcome = first
                         break
@@ -237,7 +248,7 @@ export function createSyncExitCoordinator(
                     })
                     const next = await Promise.race([
                         drainOutcome,
-                        waitForDecision().then((choice) => ({
+                        waitForDecision(true).then((choice) => ({
                             kind: 'decision' as const,
                             choice,
                         })),
@@ -255,7 +266,7 @@ export function createSyncExitCoordinator(
                         })
                         const continued = await Promise.race([
                             drainOutcome,
-                            waitForDecision().then((choice) => ({
+                            waitForDecision(true).then((choice) => ({
                                 kind: 'decision' as const,
                                 choice,
                             })),
@@ -287,7 +298,7 @@ export function createSyncExitCoordinator(
                     })
                 }
 
-                const choice = await waitForDecision()
+                const choice = await waitForDecision(true)
                 if (choice === 'wait') continue
                 abort.abort()
                 await cancelDrain(adapter, choice)
@@ -301,7 +312,7 @@ export function createSyncExitCoordinator(
                 destination: adapter.id,
                 reason: blockedReason(error),
             })
-            const choice = await waitForDecision()
+            const choice = await waitForDecision(true)
             if (choice === 'wait') return drainRemote(target, adapter)
             abort.abort()
             await cancelDrain(adapter, choice)
@@ -337,7 +348,9 @@ export function createSyncExitCoordinator(
             if (capture.kind === 'cancelled') return settleCancelled(null)
             target = capture.target
             const adapter = await dependencies.selectedDrain()
-            if (adapter) {
+            if (adapter && repeatedClose) {
+                await cancelDrain(adapter, 'exit-unsynced')
+            } else if (adapter) {
                 const result = await drainRemote(target, adapter)
                 if (result === 'cancelled') {
                     cancelledAdapter = adapter
@@ -362,8 +375,16 @@ export function createSyncExitCoordinator(
             pending = run().finally(() => {
                 pending = undefined
                 decision = undefined
+                repeatedClose = false
+                repeatedCloseSignal = deferredDecision()
             })
             return pending
+        },
+        requestExitWithoutSync(): boolean {
+            if (!pending) return false
+            repeatedClose = true
+            repeatedCloseSignal.resolve('exit-unsynced')
+            return true
         },
         decide(choice: SyncExitDecision): boolean {
             if (!decision) return false

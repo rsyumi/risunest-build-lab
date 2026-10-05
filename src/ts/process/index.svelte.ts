@@ -1,3 +1,4 @@
+import { resolvePinnedConversationPosition } from '../plugins/pinnedConversationPosition'
 import { registerGeneratingConversation } from '../storage/generatingConversationRegistry'
 import { openGenerationRequestPhase } from './generationRequestPhase'
 import { boundedGenerationFallbackReason } from './boundedGenerationAdmission'
@@ -141,7 +142,7 @@ const projectPluginChatOutput = createProductionPluginChatOutputProjector(
     <T>(value: T) => $state.snapshot(value) as T,
 )
 
-export async function runChatOutputListeners(char: any, chat: any, characterIndex: number, chatIndex: number, messageIndex: number, signal?: AbortSignal){
+export async function runChatOutputListeners(char: any, chat: any, messageIndex: number, signal?: AbortSignal){
     if(pluginV2.chatOutput.size === 0){
         return
     }
@@ -149,8 +150,7 @@ export async function runChatOutputListeners(char: any, chat: any, characterInde
         listeners: pluginV2.chatOutput,
         char,
         chat,
-        characterIndex,
-        chatIndex,
+        resolvePosition: resolvePinnedConversationPosition,
         messageIndex,
         signal,
         projectScalable: projectPluginChatOutput,
@@ -2664,8 +2664,6 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 runChatOutputListeners(
                     currentChar,
                     chat,
-                    selectedChar,
-                    selectedChat,
                     historyWindow ? toWindowIndex(chat, messageIndex) : messageIndex,
                     abortSignal,
                 ),

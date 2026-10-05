@@ -261,7 +261,8 @@ async fn proxy(State(state): State<Arc<Faults>>, request: Request, next: Next) -
         let code = state.frame_code.swap(0, Ordering::Relaxed);
         if code > 0 {
             axum::body::to_bytes(request.into_body(), risunest_sync_wire::transfer::MAX_BATCH_BYTES).await.unwrap();
-            return Response::builder().status(code).header("retry-after", "0").body(Body::empty()).unwrap();
+            let body = if code == 408 { Body::from(r#"{"error":"request-timeout"}"#) } else { Body::empty() };
+            return Response::builder().status(code).header("retry-after", "0").body(body).unwrap();
         }
     }
     if path.starts_with("/objects/") && request.method().as_str() == "GET" {
@@ -587,10 +588,20 @@ fn frame_case(sizes: &[usize], depth: usize, rate: u64, failure: u16, mixed_base
             targets.push(crate::server_sync::transfer::UploadTarget { hash: hash.clone(), bases: vec![base].into(), base_lease: i == 0 });
         }
     }
+    let before = client.lane().snapshot("send");
     let started = Instant::now();
     if mixed_bases { transfer.upload_targets(&targets).unwrap(); }
     else { transfer.upload(&hashes, &[]).unwrap(); }
     let elapsed = started.elapsed().as_millis();
+    if failure > 0 {
+        let after = client.lane().snapshot("send");
+        let bytes = sizes.iter().sum::<usize>() as u64;
+        assert_eq!(after.files_total - before.files_total, sizes.len() as u64);
+        assert_eq!(after.files_done - before.files_done, sizes.len() as u64);
+        assert_eq!(after.bytes_total - before.bytes_total, bytes);
+        assert_eq!(after.bytes_done - before.bytes_done, bytes);
+        assert!(after.sent_bytes > before.sent_bytes);
+    }
     for (hash, size) in hashes.iter().zip(sizes) { assert_eq!(server.get_object(hash).unwrap(), cache.read(hash, *size).unwrap()); }
     let peak = faults.uploads_peak.load(Ordering::Relaxed);
     if rate > 0 { assert!(transfer.frame_byte_limit() < 2 * 1024 * 1024); }
@@ -608,6 +619,11 @@ fn frame_case(sizes: &[usize], depth: usize, rate: u64, failure: u16, mixed_base
 #[test]
 fn frame_batches_join_two_requests_and_shrink_after_transient_failure() {
     frame_case(&[1024 * 1024; 8], 2, 0, 503, false);
+}
+
+#[test]
+fn frame_batches_recover_after_server_request_timeout() {
+    frame_case(&[1024 * 1024; 8], 2, 0, 408, false);
 }
 
 #[test]

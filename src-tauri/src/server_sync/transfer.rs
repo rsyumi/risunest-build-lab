@@ -1,6 +1,7 @@
 use super::{
     cache::Cache,
     client::{response_error, ServerClient},
+    progress::Step,
     Result, SyncError,
 };
 use reqwest::Method;
@@ -397,6 +398,8 @@ impl<'a> Transfer<'a> {
             struct Missing {
                 missing: Vec<String>,
             }
+            let lane = self.client.lane();
+            lane.step(Step::Checking);
             let (_, missing): (_, Missing) = self.client.json(
                 Method::POST,
                 "objects/missing",
@@ -419,6 +422,9 @@ impl<'a> Transfer<'a> {
                 .missing
                 .into_iter()
                 .partition(|target| elsewhere.contains(target.as_str()));
+            // Fetched bodies are planned by the transfer that uploads them.
+            lane.plan_files(local.len(), local.iter().map(|target| sizes[target.as_str()]).sum());
+            lane.step(Step::Uploading);
             let mut candidates = BTreeSet::new();
             for target in local
                 .iter()
@@ -656,7 +662,7 @@ impl<'a> Transfer<'a> {
             self.frame_limit.set(measured_limit);
             for (result, group, elapsed) in failed {
                 match result {
-                    Ok(reply) if matches!(reply.status, 502 | 503 | 504) => {
+                    Ok(reply) if super::client::retryable_response(&reply) => {
                         let _ = client.resolve_identity();
                         client.wait_transient_response(
                             reply.retry_after,
@@ -887,25 +893,26 @@ impl<'a> Transfer<'a> {
     ) -> Result<()> {
         // Page the absent targets, not the full inventory. A few changed hashes
         // scattered among 100k cached objects still belong to one request.
-        let mut absent = hashes.iter().filter_map(|h| {
-            if let Err(error) = self.ensure_active() {
-                return Some(Err(error));
-            }
-            match self.cache.stat_object(h) {
-                Ok(Some(_)) => None,
-                Ok(None) => Some(Ok(h.clone())),
-                Err(e) => Some(Err(SyncError::from(e))),
-            }
-        });
-        loop {
-            let missing = absent
-                .by_ref()
-                .take(transfer::MAX_BATCH_OBJECTS)
-                .collect::<Result<Vec<_>>>()?;
-            if missing.is_empty() {
-                break;
-            }
-            let mut pending = self.transfer_batch(&missing, base_candidates, hints)?;
+        let absent = hashes
+            .iter()
+            .filter_map(|h| {
+                if let Err(error) = self.ensure_active() {
+                    return Some(Err(error));
+                }
+                match self.cache.stat_object(h) {
+                    Ok(Some(_)) => None,
+                    Ok(None) => Some(Ok(h.clone())),
+                    Err(e) => Some(Err(SyncError::from(e))),
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if !absent.is_empty() {
+            let lane = self.client.lane();
+            lane.plan_files(absent.len(), 0);
+            lane.step(Step::Downloading);
+        }
+        for missing in absent.chunks(transfer::MAX_BATCH_OBJECTS) {
+            let mut pending = self.transfer_batch(missing, base_candidates, hints)?;
             // A filled reply declines the remaining identities even when they
             // would fit one of their own. Re-request those as sized bins
             // instead of falling through to one request per object. The pass
@@ -1032,6 +1039,7 @@ impl<'a> Transfer<'a> {
         match reply.status {
             202 => Ok(true),
             404 => Ok(false),
+            429 if super::client::response_code(&reply).as_deref() == Some("delta-cache-quota") => Ok(false),
             _ => Err(response_error(reply)),
         }
     }

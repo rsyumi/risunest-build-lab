@@ -2,6 +2,7 @@
 //! save local data; neither blocks nor vetoes the session end.
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
+use tauri::Manager;
 use webkit2gtk::{gio, glib::{self, prelude::*}};
 
 const PORTAL: &str = "org.freedesktop.portal.Desktop";
@@ -63,10 +64,14 @@ fn request_path(unique_name: &str, handle_token: &str) -> String {
 }
 
 /// Whether an Inhibit `StateChanged` signal asks applications before the session ends.
-fn is_query_end(parameters: &glib::Variant) -> bool {
-    if parameters.type_().as_str() != "(oa{sv})" { return false; }
+fn session_state(parameters: &glib::Variant) -> Option<u32> {
+    if parameters.type_().as_str() != "(oa{sv})" { return None; }
     let state = glib::VariantDict::new(Some(&parameters.child_value(1)));
-    state.lookup::<u32>("session-state").ok().flatten() == Some(QUERY_END)
+    state.lookup::<u32>("session-state").ok().flatten()
+}
+
+fn is_query_end(parameters: &glib::Variant) -> bool {
+    session_state(parameters) == Some(QUERY_END)
 }
 
 fn monitor(app: tauri::AppHandle, bus: gio::DBusConnection) {
@@ -82,6 +87,12 @@ fn monitor(app: tauri::AppHandle, bus: gio::DBusConnection) {
         });
     bus.signal_subscribe(Some(PORTAL), Some(INHIBIT), Some("StateChanged"), Some(PORTAL_PATH), None,
         gio::DBusSignalFlags::NONE, move |bus, _, _, _, _, parameters| {
+            if session_state(parameters) == Some(1) {
+                // Returning to RUNNING ends a cancelled logout attempt.
+                if let Some(state) = app.try_state::<crate::desktop_session::SessionState>() {
+                    state.0.lock().unwrap_or_else(|error| error.into_inner()).clear();
+                }
+            }
             if !is_query_end(parameters) { return; }
             crate::desktop_session::request_flush(&app, false);
             // The portal expects an answer within a second, so the document saves while logout goes on.
@@ -144,7 +155,7 @@ mod tests {
     fn the_first_sigterm_waits_for_its_flush_and_a_second_exits_at_once() {
         let now = Instant::now();
         let mut termination = Termination::default();
-        assert_eq!(termination.signal(|| Some(now + Duration::from_secs(2)), now), Some(Duration::from_secs(2)));
+        assert_eq!(termination.signal(|| Some(now + Duration::from_secs(5)), now), Some(Duration::from_secs(5)));
         assert_eq!(termination.signal(|| unreachable!(), now), None);
     }
 

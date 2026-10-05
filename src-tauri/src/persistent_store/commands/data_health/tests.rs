@@ -443,3 +443,16 @@ fn journal_failure_after_activation_reports_the_committed_revision() {
     let guard = state.admit_renderer_operation().unwrap();
     assert_eq!(with_store_mutex_admitted(&state, &guard, |store| store.revision()).unwrap(), before + 1);
 }
+
+
+#[test]
+fn discard_admission_requires_the_same_diagnosis_and_an_intent_finding() {
+    let (_directory, state, _) = damaged_payload_fixture();
+    let health = DataHealthState::default();
+    let result = quick_scan(&state, &health).unwrap();
+    assert!(matches!(discard_intent(&state, &health, 0, result.revision, result.scanned_at - 1), Err(StoreError::Validation { .. })));
+    assert!(matches!(discard_intent(&state, &health, 0, result.revision - 1, result.scanned_at), Err(StoreError::RevisionConflict { .. })));
+    assert!(matches!(discard_intent(&state, &health, usize::MAX, result.revision, result.scanned_at), Err(StoreError::Validation { .. })));
+    assert!(matches!(discard_intent(&state, &health, 0, result.revision, result.scanned_at), Err(StoreError::Validation { .. })));
+    assert_eq!(last_result(&state).unwrap().unwrap(), result);
+}

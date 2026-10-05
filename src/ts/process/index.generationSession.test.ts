@@ -21,6 +21,10 @@ const mocks = vi.hoisted(() => ({
     moduleRegex: [] as any[],
     editHooks: new Set<unknown>(),
     listeners: new Set<(event: any) => Promise<void> | void>(),
+    resolvePosition: vi.fn(async (_characterId: string, _conversationId: string) => ({
+        characterIndex: 0,
+        chatIndex: 0,
+    })),
     selectedTarget: null as any,
     selectedAuthority: null as any,
     windowedController: null as any,
@@ -148,6 +152,9 @@ vi.mock('./modules', async () => (await import('./tests/sendChatTestHarness')).m
 vi.mock('../globalApi.svelte', async () => (await import('./tests/sendChatTestHarness')).globalApiModule())
 vi.mock('../plugins/plugins.svelte', () => ({ pluginV2: { chatOutput: mocks.listeners, editprocess: mocks.editHooks } }))
 vi.mock('../plugins/pluginDatabaseAccess', async (importOriginal) => (await import('./tests/sendChatTestHarness')).pluginDatabaseAccessModule(importOriginal as () => Promise<Record<string, unknown>>))
+vi.mock('../plugins/pinnedConversationPosition', () => ({
+    resolvePinnedConversationPosition: mocks.resolvePosition,
+}))
 vi.mock('./presetChain', () => ({
     activatePresetChainForRequest: vi.fn(async () => {
         mocks.presetActivationCount += 1
@@ -346,6 +353,7 @@ describe('sendChat generation session integration', () => {
         mocks.tokenizeResult = null
         mocks.inlay = null
         mocks.listeners.clear()
+        mocks.resolvePosition.mockClear()
         mocks.editHooks.clear()
         mocks.moduleTriggers = []
         mocks.moduleRegex = []
@@ -438,7 +446,20 @@ describe('sendChat generation session integration', () => {
         expect(mocks.processScriptFull.mock.calls.some((call) => call[1] === 'covered-a')).toBe(preservesEffects)
         expect(mocks.events).toContain('output-trigger')
         expect(mocks.events).toContain('output-script')
-        if (consumer === 'plugin-output') expect(output).toHaveBeenCalledOnce()
+        if (consumer === 'plugin-output') {
+            expect(mocks.resolvePosition).toHaveBeenCalledExactlyOnceWith(installed.currentCharacter.chaId, installed.chat.id)
+            expect(output).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+                characterIndex: 0,
+                chatIndex: 0,
+                chat: expect.objectContaining({
+                    message: [
+                        expect.objectContaining({ data: 'covered-a' }),
+                        expect.objectContaining({ data: 'tail' }),
+                        expect.objectContaining({ data: 'answer' }),
+                    ],
+                }),
+            }))
+        }
     })
 
     it('generates from a pinned unsummarized tail without complete promotion', async () => {

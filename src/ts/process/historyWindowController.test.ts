@@ -38,6 +38,30 @@ function windowFrom(source: HistoryWindowSessionSource, start: number): Chat {
 }
 
 describe('captureSessionHistoryWindowController', () => {
+    it('refreshes persisted plugin metadata when a complete backend is recaptured during generation', () => {
+        const { session, source } = completeConversation(4)
+        const chat = windowFrom(source, 2)
+        const controller = createHistoryWindowController({
+            captureWindowed: () => null,
+            captureSession: () => source,
+            getCurrentSession: () => session,
+            readLiveMetadata: () => conversationFieldsOf(source.conversation),
+        }, chat, 2, captureSessionHistoryWindowController(source, () => session, chat, 2))
+        const replacement = structuredClone(source.conversation)
+        Object.assign(replacement.message[0], { __outside: 'retained' })
+        Object.assign(replacement.message[3], { __plugin: 'retained' })
+        replacement.scriptstate = { $bridge: 'retained' }
+        expect(session.adoptPersistedMetadata(replacement, 24)).toBe(true)
+        expect(controller.isCurrent()).toBe(true)
+        expect(chat.message[1]).toMatchObject({ __plugin: 'retained' })
+        expect(controller.applyRange(2, 0, [message('reply')], 'append')).toBe(true)
+        expect(source.conversation.message[0]).toMatchObject({ __outside: 'retained' })
+        expect(source.conversation.message[3]).toMatchObject({ __plugin: 'retained' })
+        expect(source.conversation.message[4].data).toBe('reply')
+        expect(source.conversation.scriptstate).toEqual({ $bridge: 'retained' })
+        controller.release()
+    })
+
     it('writes by absolute index and leaves messages before the window untouched', () => {
         const { session, source } = completeConversation(10)
         const before = structuredClone(source.conversation.message.slice(0, 6))

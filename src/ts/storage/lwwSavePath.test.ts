@@ -252,15 +252,15 @@ describe('LWW renderer save path', () => {
     it('reports received root fields whose working-set value changed', async () => {
         const afterRemoteRootChange = vi.fn()
         const {database,store,runtime} = await runtimeHarness(undefined, {afterRemoteRootChange})
-        const receive = async (key: string, value: unknown) => {
-            store.lwwStageReceive = async()=>undefined
+        const receive = async (key: string, value: unknown, duringReceive?: () => void) => {
+            store.lwwStageReceive = async()=>{ duringReceive?.() }
             store.lwwApplyReceive = async()=>{
                 const revision=(await store.readRoot()).revision
                 const result=await store.commit({expectedRevision:revision,unitMutations:[{key:JSON.stringify(['root',key]),type:'set',value}]})
                 return {...result,affectedKeys:[JSON.stringify(['root',key])],heldKeys:[],deferredKeys:[]}
             }
             store.lwwFinishReceive=async()=>undefined
-            await runtime.applyLwwReceive({bindingAuthority:'a',requestId:crypto.randomUUID(),changes:[],progress:{kind:'server',cursor:'1'},admittedTimeUpperMs:'100'})
+            await runtime.applyLwwReceive({bindingAuthority:'a',requestId:crypto.randomUUID(),changes:[{key:JSON.stringify(['root',key]),stamp:{physicalMs:'1',logical:'0',writerId:'remote'},value:{kind:'deleted'}}],progress:{kind:'server',cursor:'1'},admittedTimeUpperMs:'100'})
         }
         const colorSchemeName = database.colorSchemeName === 'light' ? 'dark' : 'light'
 
@@ -270,6 +270,10 @@ describe('LWW renderer save path', () => {
 
         afterRemoteRootChange.mockClear()
         await receive('colorSchemeName', colorSchemeName)
+        expect(afterRemoteRootChange).not.toHaveBeenCalled()
+
+        await receive('colorSchemeName', 'remote-custom', () => { database.colorSchemeName = 'local-custom' })
+        expect(database.colorSchemeName).toBe('local-custom')
         expect(afterRemoteRootChange).not.toHaveBeenCalled()
     })
 

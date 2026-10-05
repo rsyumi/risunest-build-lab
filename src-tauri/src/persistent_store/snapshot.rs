@@ -1322,13 +1322,18 @@ pub(crate) enum SnapshotRestoreStep {
 }
 
 impl super::PersistentStore {
-    pub(crate) fn snapshot_restore_body_plan(&mut self, stage_id: &str, revision: i64, authority: &str) -> StoreResult<crate::native_file_jobs::snapshot_bodies::BodyPlan> {
+    pub(crate) fn validate_snapshot_body_receipt(&self, stage_id: &str, revision: i64, authority: &str) -> StoreResult<()> {
         let (request, stored_authority, state, committed):(String,String,String,Option<i64>) = self.connection.query_row("SELECT request_id,authority,state,revision FROM snapshot_restore_stages WHERE stage_id=?1",[stage_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
         let request_revision:Option<i64> = self.connection.query_row("SELECT revision FROM lww_requests WHERE request_id=?1",[request],|row|row.get(0)).optional()?;
         if state != "committed" || committed != Some(revision) || request_revision != Some(revision)
             || stored_authority != authority || self.lww_binding_authority()?.0.to_string() != authority {
             return Err(validation("snapshot body job activation receipt differs"));
         }
+        Ok(())
+    }
+
+    pub(crate) fn snapshot_restore_body_plan(&mut self, stage_id: &str, revision: i64, authority: &str) -> StoreResult<crate::native_file_jobs::snapshot_bodies::BodyPlan> {
+        self.validate_snapshot_body_receipt(stage_id, revision, authority)?;
         let protection:Option<String>=self.connection.query_row("SELECT protection_job_id FROM snapshot_restore_body_jobs WHERE stage_id=?1",[stage_id],|row|row.get(0)).optional()?;
         let protection_id=match protection {
             Some(id)=>id,

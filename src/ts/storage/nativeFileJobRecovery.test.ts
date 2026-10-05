@@ -60,6 +60,7 @@ describe('native file job bootstrap reconciliation', () => {
         expect(result.libraryRestoreCommitted).toBe(false)
         expect(result.pendingRestoreAcknowledgements).toEqual([])
         expect(result.interruptedRestores).toEqual([])
+        expect(result.pendingSnapshotBodies).toEqual([expect.objectContaining({jobId:'bodies',kind:'snapshot-bodies'})])
         expect(invoke.mock.calls).toEqual([['native_file_job_list']])
     })
     it('reconciles restore jobs on every Tauri target, including iOS', () => {
@@ -152,6 +153,7 @@ describe('native file job bootstrap reconciliation', () => {
         })
 
         expect(result).toEqual({
+            pendingSnapshotBodies: [],
             pendingRestoreAcknowledgements: [jobId],
             pendingOfficialPublications: [],
             interruptedRestores: [],
@@ -841,6 +843,7 @@ describe('native file job bootstrap reconciliation', () => {
         })
 
         expect(result).toEqual({
+            pendingSnapshotBodies: [],
             pendingRestoreAcknowledgements: [],
             interruptedRestores: [],
             libraryRestoreCommitted: false,
@@ -875,6 +878,7 @@ describe('native file job bootstrap reconciliation', () => {
         }, { reconcileRestores: false })
 
         expect(result).toEqual({
+            pendingSnapshotBodies: [],
             pendingRestoreAcknowledgements: [],
             pendingOfficialPublications: ['publication-android'],
             interruptedRestores: [],

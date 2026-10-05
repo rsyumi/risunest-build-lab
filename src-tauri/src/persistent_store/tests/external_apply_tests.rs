@@ -1037,8 +1037,13 @@ fn stage_long_conversation(
 fn one_long_conversation_is_staged_in_bounded_transactions() {
     const MESSAGES: usize = 20_000;
     let (directory, mut store) = open_store();
+    super::super::message_pages::reset_capture_work();
+    let page_work = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed_work = page_work.clone();
     let (staged, committed) =
-        stage_long_conversation(directory.path(), &mut store, MESSAGES, 0, &NeverCancelled, |_| {});
+        stage_long_conversation(directory.path(), &mut store, MESSAGES, 0, &NeverCancelled, move |_| {
+            observed_work.borrow_mut().push(super::super::message_pages::take_capture_work().work);
+        });
     let prepared = staged.unwrap();
     assert!(committed.len() >= 3, "{committed:?}");
     assert!(
@@ -1051,6 +1056,11 @@ fn one_long_conversation_is_staged_in_bounded_transactions() {
         committed.iter().map(|(rows, _)| rows).sum::<i64>(),
         MESSAGES as i64
     );
+    for (work, (rows, _)) in page_work.borrow().iter().zip(&committed) {
+        assert!(work.messages_read <= *rows as usize + 128, "a closing batch reread the conversation: {work:?}");
+        assert!(work.peak_page_messages <= 128, "{work:?}");
+    }
+    assert!(page_work.borrow().first().unwrap().pages_written > 0, "the first batch deferred its page work");
     // Nothing of the stage is in the library until it is activated.
     assert_eq!(store.materialize(None).unwrap()["marker"], "local");
     let library = store.materialize_staging(&prepared.staging_id).unwrap();

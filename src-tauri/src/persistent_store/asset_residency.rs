@@ -205,7 +205,7 @@ impl PersistentStore {
             // Ownership manifests must be available before their payload inventory is known.
             let registered=residency.as_ref().map(|residency|residency.object(&manifest,None)).transpose()?.flatten().is_some()
                 || remote.stat(&manifest)?.is_some();
-            if registered && !hydration.hydrate_many_observed(std::slice::from_ref(&manifest),&check,&on_object_done)?.is_empty() {
+            if registered && !hydration.hydrate_many_before_plan(std::slice::from_ref(&manifest),&check,&on_object_done)?.is_empty() {
                 return Err(SyncError::new("required-asset-unavailable",409));
             }
             // Missing or damaged local files remain for the backup's existing

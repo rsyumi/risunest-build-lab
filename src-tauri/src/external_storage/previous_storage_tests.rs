@@ -31,7 +31,7 @@ fn run<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 
 /// The connection the fixture's receiving store would hold for the repository.
-fn receiver_connection(f: &CycleFixture) -> ConnectedRepository {
+pub(super) fn receiver_connection(f: &CycleFixture) -> ConnectedRepository {
     ConnectedRepository {
         stored: StoredConnection {
             id: "receiver".into(),

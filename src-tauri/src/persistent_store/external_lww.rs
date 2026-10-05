@@ -1375,7 +1375,7 @@ mod asset_root_tests {
                 assert_eq!(f.b.list_asset_aliases(None).unwrap().value[0].object_hash.as_deref(),Some(hash.as_str()));
                 assert!(!f.b.external_lww_object_is_local(&hash).unwrap());
                 assert_eq!(crate::external_storage::lww_residency::stat(f.directory_b.path(),&hash).unwrap(),Some(size as u64));
-                let mut body=crate::external_storage::lww_residency::fulfill(f.directory_b.path(),&hash,f.provider.as_ref(),&f.receiver.repository,&[7;32],&cancel).await.unwrap().unwrap();
+                let mut body=crate::external_storage::lww_tests::hydrate_receiver(&f,&hash).await;
                 let mut actual=Vec::new();std::io::Read::read_to_end(&mut body,&mut actual).unwrap();assert_eq!(actual,bytes);
             }
         });

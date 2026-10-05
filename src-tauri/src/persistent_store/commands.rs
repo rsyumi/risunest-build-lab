@@ -2184,6 +2184,40 @@ mod tests {
         assert!(!batch(&mut store, Library));
         assert_eq!(store.message_object_roots_computed() - computed, 1);
         store.release_revision(&lease.lease).unwrap();
+
+        let computed = store.message_object_roots_computed();
+        for target in [Library, Device] { pass(&mut store, target); }
+        assert_eq!(store.message_object_roots_computed() - computed, 2, "lease release must invalidate both targets");
+
+        let value = risunest_sync_wire::unit::UnitValue::object(
+            risunest_sync_wire::descriptor::RecordDescriptor::content(hashes[0].clone()),
+        ).unwrap();
+        let device = store.device_store().unwrap().connection();
+        device.execute("INSERT INTO lww_intents VALUES('root-cache-device','0','{}',?1,'unused',0)",
+            [serde_json::json!({"pending": value}).to_string()]).unwrap();
+        let computed = store.message_object_roots_computed();
+        for target in [Library, Device] { pass(&mut store, target); }
+        assert_eq!(store.message_object_roots_computed() - computed, 2, "device references must invalidate both targets");
+        for db in [&store.connection, store.device_store().unwrap().connection()] {
+            assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM message_page_object_marks WHERE hash=?1)",
+                [&hashes[0]], |row| row.get::<_, bool>(0)).unwrap());
+        }
+        let other = rusqlite::Connection::open(store.device_store().unwrap().connection().path().unwrap()).unwrap();
+        other.execute("DELETE FROM lww_intents WHERE request_id='root-cache-device'", []).unwrap();
+        drop(other);
+        let computed = store.message_object_roots_computed();
+        for target in [Library, Device] { pass(&mut store, target); }
+        assert_eq!(store.message_object_roots_computed() - computed, 2, "another device connection must invalidate both targets");
+        for db in [&store.connection, store.device_store().unwrap().connection()] {
+            assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM message_page_object_marks WHERE hash=?1)",
+                [&hashes[0]], |row| row.get::<_, bool>(0)).unwrap());
+        }
+        let computed = store.message_object_roots_computed();
+        for target in [Library, Device] { pass(&mut store, target); }
+        assert_eq!(store.message_object_roots_computed(), computed);
+        store.invalidate_message_object_roots();
+        for target in [Library, Device] { pass(&mut store, target); }
+        assert_eq!(store.message_object_roots_computed() - computed, 2, "explicit invalidation must clear both targets");
     }
 
     #[test]
@@ -2202,6 +2236,38 @@ mod tests {
         assert!(!state
             .cancel_archive_operation("archive-operation")
             .expect("completed operation was released"));
+    }
+
+    #[test]
+    fn message_root_caches_spill_to_owned_files_and_remove_them_on_invalidation() {
+        let directory = tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let tx = store.connection.transaction().unwrap();
+        {
+            let mut insert = tx.prepare("INSERT INTO external_storage_capture_files(capture_id,catalog_path,file_hash) VALUES(?1,'synthetic-catalog',?2)").unwrap();
+            for index in 0..12_000 {
+                insert.execute(rusqlite::params![format!("scratch-roots-{index}"), format!("{index:064x}")]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        for target in [super::super::MessageObjectStore::Library, super::super::MessageObjectStore::Device] {
+            store.sweep_message_page_objects(target, 1_000, 1).unwrap();
+        }
+        let paths = [&store.message_object_roots.library, &store.message_object_roots.device]
+            .map(|cache| cache.as_ref().unwrap().2.path().to_path_buf());
+        for path in &paths {
+            let file = path.join("roots.sqlite");
+            assert!(std::fs::metadata(&file).unwrap().len() > 512 * 1024);
+            let db = rusqlite::Connection::open_with_flags(&file, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            assert!(db.query_row("SELECT count(*) FROM roots", [], |row| row.get::<_, i64>(0)).unwrap() >= 12_000);
+        }
+        let computed = store.message_object_roots_computed();
+        for target in [super::super::MessageObjectStore::Library, super::super::MessageObjectStore::Device] {
+            store.sweep_message_page_objects(target, 1_000, 1).unwrap();
+        }
+        assert_eq!(store.message_object_roots_computed(), computed);
+        store.invalidate_message_object_roots();
+        assert!(paths.iter().all(|path| !path.exists()));
     }
 
     #[test]

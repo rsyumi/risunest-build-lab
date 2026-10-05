@@ -29,7 +29,7 @@ pub(crate) fn native_portable_source_discard(app:AppHandle,source:JobSource)->Re
 }
 
 #[tauri::command(async)]
-pub(crate) fn native_portable_source_cleanup_orphans(app:AppHandle)->Result<usize,NativeJobError> {
+pub(crate) fn native_portable_source_cleanup_orphans(app:AppHandle)->Result<portable_source_custody::InterruptedSources,NativeJobError> {
     logged("native_portable_source_cleanup_orphans", portable_source_custody::cleanup_orphans(&app))
 }
 pub(crate) mod raw_recovery;
@@ -373,7 +373,7 @@ pub(crate) struct NativeFileJobStarted {
     pub(crate) warning_codes: Vec<String>,
 }
 
-#[derive(Clone,Debug,Serialize)]
+#[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(rename_all="camelCase")]
 pub(crate) struct NativeSnapshotBodiesStarted {
     pub(crate) job_id:String,
@@ -3263,6 +3263,31 @@ pub(crate) fn native_file_job_list(
     logged("native_file_job_list", state.list())
 }
 
+fn should_retry_snapshot_bodies(state: JobState, previous_job_id: Option<&str>) -> bool {
+    previous_job_id.is_some() && matches!(state, JobState::Failed | JobState::Cancelled)
+}
+
+fn validate_snapshot_body_status(status: &JobStatus, receipt: &NativeSnapshotBodiesStarted) -> Result<i64, NativeJobError> {
+    let revision: i64 = receipt.activation_revision.parse().map_err(|_| NativeJobError::new("invalid-activation-receipt", "Snapshot revision is invalid"))?;
+    if revision < 0 || revision.to_string() != receipt.activation_revision || receipt.kind != JobKind::SnapshotBodies
+        || status.kind != JobKind::SnapshotBodies || status.job_id != receipt.job_id
+        || status.snapshot_staging_id.as_deref() != Some(receipt.staging_id.as_str())
+        || status.activation_revision != Some(revision) || status.activation_authority.as_deref() != Some(receipt.binding_authority.as_str()) {
+        return Err(NativeJobError::new("invalid-activation-receipt", "Snapshot body operation identity differs"));
+    }
+    Ok(revision)
+}
+
+#[tauri::command(async)]
+pub(crate) fn native_snapshot_restore_bodies_status(app: AppHandle, state: State<'_, NativeFileJobState>, receipt: NativeSnapshotBodiesStarted) -> Result<JobStatus, NativeJobError> {
+    logged("native_snapshot_restore_bodies_status", (|| {
+        let status = state.status(&receipt.job_id)?;
+        let revision = validate_snapshot_body_status(&status, &receipt)?;
+        crate::persistent_store::commands::with_store_mut(app.state(), |store| store.validate_snapshot_body_receipt(&receipt.staging_id, revision, &receipt.binding_authority)).map_err(error::store_error)?;
+        Ok(status)
+    })())
+}
+
 #[tauri::command(async)]
 pub(crate) fn native_snapshot_restore_bodies_start(
     app: AppHandle,
@@ -3270,15 +3295,25 @@ pub(crate) fn native_snapshot_restore_bodies_start(
     staging_id: String,
     activation_revision: String,
     binding_authority: String,
+    previous_job_id: Option<String>,
 ) -> Result<NativeSnapshotBodiesStarted,NativeJobError> {
     logged("native_snapshot_restore_bodies_start", (|| {
         let _cleanup=state.admit_cleanup_operation()?;
         let _start=state.snapshot_body_start.lock().map_err(|_|NativeJobError::new("store-error","Snapshot body start is unavailable"))?;
         let revision:i64=activation_revision.parse().map_err(|_|NativeJobError::new("invalid-activation-receipt","Snapshot revision is invalid"))?;
         if revision<0 || revision.to_string()!=activation_revision {return Err(NativeJobError::new("invalid-activation-receipt","Snapshot revision is not canonical"));}
+        crate::persistent_store::commands::with_store_mut(app.state(), |store| store.validate_snapshot_body_receipt(&staging_id, revision, &binding_authority)).map_err(error::store_error)?;
+        if let Some(previous) = &previous_job_id {
+            let status = state.status(previous)?;
+            validate_snapshot_body_status(&status, &NativeSnapshotBodiesStarted {job_id: previous.clone(), kind: JobKind::SnapshotBodies, staging_id: staging_id.clone(), activation_revision: activation_revision.clone(), binding_authority: binding_authority.clone()})?;
+        }
+        let mut superseded = Vec::new();
         for status in state.registry.list().map_err(|error|NativeJobError::new("store-error",error))? {
+            if status.kind==JobKind::SnapshotBodies && status.snapshot_staging_id.as_deref()==Some(staging_id.as_str()) && status.state.is_terminal() {
+                superseded.push(status.job_id.clone());
+            }
             if status.kind==JobKind::SnapshotBodies && status.snapshot_staging_id.as_deref()==Some(staging_id.as_str())
-                && !status.state.is_terminal() {
+                && !should_retry_snapshot_bodies(status.state, previous_job_id.as_deref()) {
                 if status.activation_revision!=Some(revision) || status.activation_authority.as_deref()!=Some(binding_authority.as_str()) {
                     return Err(NativeJobError::new("invalid-activation-receipt","Snapshot body operation identity differs"));
                 }
@@ -3288,6 +3323,7 @@ pub(crate) fn native_snapshot_restore_bodies_start(
         let permit=WorkerPermit::acquire(Arc::clone(&state.active_workers),state.max_concurrent_jobs)?;
         let (mut store,plan,job)=crate::persistent_store::commands::with_store_mut(app.state(),|store|Ok(state.prepare_snapshot_bodies(store,&staging_id,revision,&binding_authority)))
             .map_err(error::store_error)??;
+        for id in superseded { state.registry.forget(&id).map_err(|error| NativeJobError::new("store-error", error))?; }
         let directory=snapshot_bodies::prepare_directory(&state.root.join("jobs"),&job)?;
         let started=NativeSnapshotBodiesStarted {job_id:job.id(),kind:JobKind::SnapshotBodies,staging_id,activation_revision,binding_authority};
         #[cfg(test)] let body_scope=crate::asset_repository::body_io::capture_body_io_scope();
@@ -3301,7 +3337,7 @@ pub(crate) fn native_snapshot_restore_bodies_start(
                 }
                 let _=snapshot_bodies::finish(&job,outcome);
             };
-            #[cfg(test)] crate::asset_repository::body_io::with_body_io_scope(body_scope,operation);
+            #[cfg(test)] crate::asset_repository::body_io::with_body_io_scope(body_scope,&mut operation);
             #[cfg(not(test))] operation();
         });
         Ok(started)
@@ -4507,6 +4543,7 @@ impl JobControl {
             || (status.kind == JobKind::ExportRisuModule && status.state.is_terminal())
             || (status.kind == JobKind::ExportDataset && status.state.is_terminal())
             || (status.kind == JobKind::ExportPortableBackup && status.state.is_terminal())
+            || (status.kind == JobKind::SnapshotBodies && status.state.is_terminal())
             || (status.kind == JobKind::ExportCompatibleLocalBackup && status.state.is_terminal())
             || (status.device_session_id.is_some() && status.state.is_terminal())
             || (status.kind == JobKind::OfficialPublicationUpload && status.state.is_terminal())

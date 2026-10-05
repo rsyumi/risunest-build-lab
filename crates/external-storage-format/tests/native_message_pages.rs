@@ -144,6 +144,38 @@ mod tests {
             .map(|i| json!({"chatId":format!("id-{i}"),"data":format!("synthetic-{i}")}))
             .collect()
     }
+
+    #[test]
+    fn incremental_staging_matches_fresh_native_and_format_pages() {
+        use risunest_external_storage_format::message_pages::{repage, PageIndex, MAX_PAGE_BYTES};
+        let mut messages = synthetic();
+        messages.extend((0..13).map(|index| json!({"chatId":format!("tail-{index}"),"data":"partial tail"})));
+        messages[300]["data"] = json!("x".repeat(MAX_PAGE_BYTES + 1));
+        let bodies = messages.iter().map(|value| payload_value::encode(value).unwrap()).collect::<Vec<_>>();
+        let format = repage::<StoreError>(&PageIndex { messages: vec![], pages: vec![] },
+            bodies.iter().map(|body| MessageHash::from_bytes(body)).collect(), 0..0, bodies.len(),
+            |index| Ok(bodies[index].clone())).unwrap();
+        for batch in [7, 129, 513] {
+            let mut db = fixture();
+            for (index, values) in messages.chunks(batch).enumerate() {
+                let tx = db.transaction().unwrap();
+                insert(&tx, index * batch, values);
+                tx.execute("UPDATE conversations SET message_count=?1", [messages.len() as i64]).unwrap();
+                reset_capture_work();
+                stage_conversation_pages(&tx, "g", "c", "chat", &|| Ok(())).unwrap();
+                let work = take_capture_work().work;
+                assert!(work.messages_read <= values.len() + 128, "batch {batch}: {work:?}");
+                assert!(work.peak_page_messages <= 128, "{work:?}");
+                tx.commit().unwrap();
+            }
+            assert_eq!(load_pages(&db, "g", "c", "chat").unwrap(), format.index.pages);
+            let tx = db.transaction().unwrap();
+            let staged = current_manifest(&tx, "g", "c", "chat").unwrap();
+            assert_eq!(manifest(&tx, &staged), format.index.manifest());
+            assert_eq!(staged, capture_manifest(&tx, "g", "c", "chat", None).unwrap());
+            tx.rollback().unwrap();
+        }
+    }
     fn manifest(db: &Connection, value: &UnitValue) -> MessageManifest {
         let UnitValue::Object { descriptor, .. } = value else {
             panic!("object expected")

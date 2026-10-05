@@ -1,5 +1,8 @@
 //! macOS window lifetime and an acknowledged, cancellable application quit.
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+const SESSION_END_LIMIT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExitOrigin {
@@ -13,20 +16,11 @@ enum ExitEffect {
     RuntimeExit(i32),
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum NativeQuit {
-    /// No document decides the quit, so AppKit quits now.
-    Now,
-    /// The document decides; a repeated delivery only asks it to acknowledge again.
-    Deliver { token: String, repeated: bool },
-    /// The document never acknowledged the pending quit, so AppKit quits without it.
-    Escape,
-}
-
 #[derive(Clone)]
 struct PendingExit {
     token: String,
     origin: ExitOrigin,
+    session_deadline: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -39,6 +33,9 @@ struct ExitDecision {
 impl ExitDecision {
     fn document_started(&mut self) -> Option<ExitEffect> {
         self.ready = false;
+        if self.pending.as_ref().is_some_and(|pending| pending.session_deadline.is_some()) {
+            return None;
+        }
         self.pending.take().and_then(|pending| {
             (pending.origin == ExitOrigin::Native).then_some(ExitEffect::NativeReply(false))
         })
@@ -62,35 +59,34 @@ impl ExitDecision {
         Some(self.begin(ExitOrigin::Native))
     }
 
-    /// Decides an AppKit quit request. `unanswered` records the request and reports whether the
-    /// document left an earlier one unacknowledged for too long.
-    fn native_quit(&mut self, unanswered: impl FnOnce() -> bool) -> NativeQuit {
-        if !self.ready || self.allowed {
-            return NativeQuit::Now;
-        }
-        if unanswered() {
-            self.pending = None;
-            self.allowed = true;
-            return NativeQuit::Escape;
-        }
-        match self.request_native() {
-            Some(token) => NativeQuit::Deliver { token, repeated: false },
-            None => NativeQuit::Deliver {
-                token: self.pending.as_ref().map(|pending| pending.token.clone()).unwrap_or_default(),
-                repeated: true,
-            },
-        }
-    }
-
     fn begin(&mut self, origin: ExitOrigin) -> String {
         let token = uuid::Uuid::new_v4().to_string();
-        self.pending = Some(PendingExit { token: token.clone(), origin });
+        self.pending = Some(PendingExit { token: token.clone(), origin, session_deadline: None });
         token
+    }
+
+    fn begin_session_end(&mut self, now: Instant) -> Option<(String, Instant)> {
+        let pending = self.pending.as_mut()?;
+        if pending.session_deadline.is_some() { return None; }
+        let deadline = now + SESSION_END_LIMIT;
+        pending.session_deadline = Some(deadline);
+        Some((pending.token.clone(), deadline))
+    }
+
+    fn expire_session_end(&mut self, token: &str, now: Instant) -> Option<ExitEffect> {
+        let pending = self.pending.as_ref()?;
+        if pending.token != token || !pending.session_deadline.is_some_and(|deadline| now >= deadline) {
+            return None;
+        }
+        self.respond(token, true).ok().flatten()
     }
 
     fn response_effect(&self, token: &str, exit: bool) -> Result<Option<ExitEffect>, String> {
         let pending = self.pending.as_ref().filter(|pending| pending.token == token)
             .ok_or("No matching macOS quit request")?;
+        if pending.session_deadline.is_some() && !exit {
+            return Err("Session-end termination cannot be cancelled".into());
+        }
         Ok(match pending.origin {
             ExitOrigin::Native => Some(ExitEffect::NativeReply(exit)),
             ExitOrigin::Runtime(code) => exit.then_some(ExitEffect::RuntimeExit(code)),
@@ -124,48 +120,84 @@ static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 unsafe extern "C" {
     fn risunest_reply_termination(approve: std::ffi::c_int) -> std::ffi::c_int;
     fn risunest_termination_pending() -> std::ffi::c_int;
+    fn risunest_queue_termination_deadline(
+        callback: extern "C" fn(*mut std::ffi::c_void),
+        context: *mut std::ffi::c_void,
+        seconds: f64,
+    ) -> std::ffi::c_int;
     fn risunest_queue_termination_response(
         callback: extern "C" fn(*mut std::ffi::c_void),
         context: *mut std::ffi::c_void,
     ) -> std::ffi::c_int;
 }
 
-/// Answers AppKit's quit request: 0 quits now, 1 waits for the document, -1 cancels. While a
-/// quit is pending, AppKit asks again for every repeated quit and quits only on 0.
 #[cfg(target_os = "macos")]
 extern "C" fn request_native_quit(session_ending: std::ffi::c_int) -> std::ffi::c_int {
     let Some(app) = APP.get() else { return -1; };
     let Some(state) = app.try_state::<ExitState>() else { return -1; };
-    let (previous, allowed) = {
-        let decision = state.0.lock().unwrap_or_else(|error| error.into_inner());
-        (decision.pending.clone(), decision.allowed)
-    };
+    let requested_at = Instant::now();
+    let previous = state.0.lock().unwrap_or_else(|error| error.into_inner()).pending.clone();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let action = state.0.lock().unwrap_or_else(|error| error.into_inner())
-            .native_quit(|| crate::renderer_recovery::quit_requested(app));
-        match action {
-            NativeQuit::Now => { crate::cancel_incomplete_boot(app); 0 }
-            NativeQuit::Escape => {
-                crate::nlog!("warn", "Quitting because the renderer cannot answer the quit request");
-                0
-            }
-            NativeQuit::Deliver { token, repeated } => {
-                if let Err(error) = notify_quit(app, &token, session_ending != 0, repeated) {
-                    crate::nlog!("warn", "macOS quit notification failed: {error}");
-                    if !repeated {
-                        state.0.lock().unwrap_or_else(|error| error.into_inner()).discard(&token);
-                        return -1;
+        let request = {
+            let mut decision = state.0.lock().unwrap_or_else(|error| error.into_inner());
+            if !decision.ready || decision.allowed { None }
+            else { Some(decision.request_native()) }
+        };
+        match request {
+            None => { crate::cancel_incomplete_boot(app); 0 }
+            Some(token) => {
+                let session = if session_ending != 0 {
+                    state.0.lock().unwrap_or_else(|error| error.into_inner()).begin_session_end(requested_at)
+                } else { None };
+                if let Some((token, deadline)) = session.as_ref() {
+                    if !queue_session_deadline(app, token, *deadline) {
+                        state.0.lock().unwrap_or_else(|error| error.into_inner()).discard(token);
+                        return 0;
+                    }
+                }
+                if let Some(token) = session.map(|(token, _)| token).or(token) {
+                    if let Err(error) = notify_quit(app, &token, session_ending != 0) {
+                        crate::nlog!("warn", "macOS quit notification failed: {error}");
+                        if session_ending == 0 {
+                            state.0.lock().unwrap_or_else(|error| error.into_inner()).discard(&token);
+                            return -1;
+                        }
                     }
                 }
                 1
             }
         }
     })).unwrap_or_else(|_| {
-        let mut decision = state.0.lock().unwrap_or_else(|error| error.into_inner());
-        decision.pending = previous;
-        decision.allowed = allowed;
+        state.0.lock().unwrap_or_else(|error| error.into_inner()).pending = previous;
         -1
     })
+}
+
+#[cfg(target_os = "macos")]
+struct SessionDeadline { app: tauri::AppHandle, token: String }
+
+#[cfg(target_os = "macos")]
+fn queue_session_deadline(app: &tauri::AppHandle, token: &str, deadline: Instant) -> bool {
+    let context = Box::into_raw(Box::new(SessionDeadline { app: app.clone(), token: token.to_owned() }));
+    if unsafe { risunest_queue_termination_deadline(expire_session_end, context.cast(),
+        deadline.saturating_duration_since(Instant::now()).as_secs_f64()) } == 1 { return true; }
+    unsafe { drop(Box::from_raw(context)); }
+    false
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn expire_session_end(context: *mut std::ffi::c_void) {
+    let SessionDeadline { app, token } = *unsafe { Box::from_raw(context.cast::<SessionDeadline>()) };
+    let state = app.state::<ExitState>();
+    let deadline = state.0.lock().unwrap_or_else(|error| error.into_inner()).pending.as_ref()
+        .filter(|pending| pending.token == token).and_then(|pending| pending.session_deadline);
+    let Some(deadline) = deadline else { return; };
+    if Instant::now() < deadline && queue_session_deadline(&app, &token, deadline) { return; }
+    let effect = state.0.lock().unwrap_or_else(|error| error.into_inner())
+        .expire_session_end(&token, deadline);
+    if let Some(ExitEffect::NativeReply(true)) = effect {
+        unsafe { risunest_reply_termination(1); }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -276,11 +308,16 @@ extern "C" fn settle_response(context: *mut std::ffi::c_void) {
 
 #[cfg(target_os = "macos")]
 /// A session-end quit asks the document to save locally and answer without sync or questions.
-fn notify_quit(app: &tauri::AppHandle, token: &str, session_end: bool, repeated: bool) -> Result<(), tauri::Error> {
-    show_main(app);
-    app.emit_to("main", "risu-macos-exit-requested", serde_json::json!({
-        "token": token, "sessionEnd": session_end, "repeated": repeated,
-    }))
+fn notify_quit(app: &tauri::AppHandle, token: &str, session_end: bool) -> Result<(), tauri::Error> {
+    if !session_end { show_main(app); }
+    let remaining = app.state::<ExitState>().0.lock().unwrap_or_else(|error| error.into_inner())
+        .pending.as_ref().and_then(|pending| pending.session_deadline)
+        .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+    let deadline_unix_millis = remaining.map(|remaining| {
+        (std::time::SystemTime::now() + remaining).duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_millis() as u64
+    });
+    app.emit_to("main", "risu-macos-exit-requested", serde_json::json!({ "token": token, "sessionEnd": session_end, "deadlineUnixMillis": deadline_unix_millis }))
 }
 
 #[cfg(target_os = "macos")]
@@ -323,7 +360,7 @@ pub(crate) fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 decision.request(code.unwrap_or(0))
             };
             if let Some(token) = token {
-                if let Err(error) = notify_quit(app, &token, false, false) {
+                if let Err(error) = notify_quit(app, &token, false) {
                     state.0.lock().unwrap_or_else(|error| error.into_inner()).discard(&token);
                     crate::nlog!("warn", "macOS quit notification failed: {error}");
                 }
@@ -336,6 +373,36 @@ pub(crate) fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_deadline_survives_repeats_reload_and_settles_only_its_token() {
+        let mut state = ExitDecision { ready: true, ..Default::default() };
+        let token = state.request_native().unwrap();
+        let now = Instant::now();
+        assert_eq!(state.begin_session_end(now), Some((token.clone(), now + Duration::from_secs(5))));
+        assert_eq!(state.begin_session_end(now + Duration::from_secs(4)), None);
+        assert_eq!(state.expire_session_end(&token, now + Duration::from_secs(4)), None);
+        assert_eq!(state.document_started(), None);
+        assert!(state.respond(&token, false).is_err());
+        assert_eq!(state.expire_session_end("stale", now + SESSION_END_LIMIT), None);
+        assert_eq!(state.expire_session_end(&token, now + SESSION_END_LIMIT), Some(ExitEffect::NativeReply(true)));
+        assert_eq!(state.expire_session_end(&token, now + SESSION_END_LIMIT), None);
+        assert!(state.respond(&token, true).is_err());
+    }
+
+    #[test]
+    fn ordinary_quit_has_no_deadline_and_a_completed_session_timer_cannot_approve_a_new_quit() {
+        let mut state = ExitDecision { ready: true, ..Default::default() };
+        let first = state.request_native().unwrap();
+        let now = Instant::now();
+        assert_eq!(state.expire_session_end(&first, now + SESSION_END_LIMIT), None);
+        state.respond(&first, false).unwrap();
+        let next = state.request_native().unwrap();
+        state.begin_session_end(now).unwrap();
+        assert_eq!(state.expire_session_end(&first, now + SESSION_END_LIMIT), None);
+        assert_eq!(state.respond(&next, true).unwrap(), Some(ExitEffect::NativeReply(true)));
+        assert_eq!(state.expire_session_end(&next, now + SESSION_END_LIMIT), None);
+    }
 
     #[test]
     fn quit_requires_readiness_and_a_matching_single_response() {
@@ -480,46 +547,5 @@ mod tests {
         assert!(!state.allowed);
         let retry = state.request(7).unwrap();
         assert_eq!(state.respond(&retry, true).unwrap(), Some(ExitEffect::RuntimeExit(7)));
-    }
-
-    #[test]
-    fn a_native_quit_before_the_document_is_ready_quits_without_asking_it() {
-        let mut state = ExitDecision::default();
-        assert_eq!(state.native_quit(|| unreachable!()), NativeQuit::Now);
-        state.ready = true;
-        state.allowed = true;
-        assert_eq!(state.native_quit(|| unreachable!()), NativeQuit::Now);
-    }
-
-    #[test]
-    fn a_repeated_native_quit_delivers_the_pending_request_again() {
-        let mut state = ExitDecision { ready: true, ..Default::default() };
-        let NativeQuit::Deliver { token, repeated: false } = state.native_quit(|| false) else {
-            panic!("the first quit asks the document");
-        };
-        assert_eq!(state.native_quit(|| false), NativeQuit::Deliver { token: token.clone(), repeated: true });
-        assert_eq!(state.respond(&token, false).unwrap(), Some(ExitEffect::NativeReply(false)));
-        assert!(matches!(state.native_quit(|| false), NativeQuit::Deliver { repeated: false, .. }));
-    }
-
-    #[test]
-    fn a_native_quit_repeats_a_pending_runtime_request_and_takes_its_reply() {
-        let mut state = ExitDecision { ready: true, ..Default::default() };
-        let token = state.request(7).unwrap();
-        assert_eq!(state.native_quit(|| false), NativeQuit::Deliver { token: token.clone(), repeated: true });
-        assert_eq!(state.respond(&token, true).unwrap(), Some(ExitEffect::NativeReply(true)));
-    }
-
-    #[test]
-    fn an_unanswered_native_quit_lets_a_repeated_quit_end_the_app() {
-        let mut state = ExitDecision { ready: true, ..Default::default() };
-        let NativeQuit::Deliver { token, .. } = state.native_quit(|| false) else {
-            panic!("the first quit asks the document");
-        };
-        assert_eq!(state.native_quit(|| true), NativeQuit::Escape);
-        assert!(state.allowed);
-        assert!(state.pending.is_none());
-        assert!(state.respond(&token, false).is_err());
-        assert_eq!(state.native_quit(|| unreachable!()), NativeQuit::Now);
     }
 }
