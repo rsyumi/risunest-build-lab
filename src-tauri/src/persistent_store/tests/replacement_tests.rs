@@ -117,7 +117,15 @@ fn unfinished_ordinary_replacement_rejects_changed_stage_before_recovery() {
     assert_eq!(store.read_root(None).unwrap().value["username"], "Original");
     assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(), before);
     drop(store);
-    assert!(PersistentStore::open(directory.path()).is_err());
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    assert_eq!(store.revision().unwrap(), 1);
+    assert_eq!(store.read_root(None).unwrap().value["username"], "Original");
+    assert_eq!(store.device_store().unwrap().connection().query_row(
+        "SELECT failures FROM lww_intent_failures WHERE request_id=?1", [&stage], |row| row.get::<_, i64>(0),
+    ).unwrap(), 1);
+    assert!(store.replace_commit(&stage, Some(1)).is_err());
+    assert_eq!(store.revision().unwrap(), 1);
+    assert_eq!(store.read_root(None).unwrap().value["username"], "Original");
 }
 
 #[test]

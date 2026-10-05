@@ -35,7 +35,7 @@
     "test:wasm": "pwsh -NoProfile -File scripts/testExternalStorageCore.ps1 -CoreOnly",
     "test:native": "node scripts/testNative.mjs host",
     "test:browser:agent": "playwright test --config tests/browser/playwright.config.ts",
-    "test:full:shared": "pnpm check:test-inventory && pnpm test && pnpm test:node && pnpm test:manager && pnpm test:registry && pnpm test:protocol && pnpm test:wasm && pnpm test:browser:agent",
+    "test:full:shared": "pnpm check:test-inventory && pnpm check && pnpm check:tests && pnpm check:plugin-dts && pnpm test && pnpm check:production-bundle && pnpm test:node && pnpm test:release && pnpm test:manager && pnpm test:registry && pnpm test:protocol && pnpm test:wasm && pnpm test:browser:agent",
     "test:full": "pnpm test:full:shared && pnpm test:native && pnpm desktop:test-boundary:agent",
     "check:test-inventory": "node tests/testInventory.mjs",
     "test:release": "node --test tests/release/*.node-test.mjs",

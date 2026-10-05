@@ -1590,19 +1590,6 @@ fn pds_asset_gc_execute_page(
     })
 }
 
-#[tauri::command(async)]
-pub(crate) fn pds_snapshot_restore_stage(state: State<'_, PersistentStoreState>, id:String, request_id:String) -> Result<super::StagingResult,StoreError> {
-    logged("pds_snapshot_restore_stage", with_store_mut(state,|store|store.snapshot_restore_stage(&id,&request_id)))
-}
-#[tauri::command(async)]
-pub(crate) fn pds_snapshot_restore_activate(state: State<'_, PersistentStoreState>, staging_id:String, expected_revision:i64, binding_authority:risunest_sync_wire::stamp::DecimalU64) -> Result<super::RevisionResult,StoreError> {
-    logged("pds_snapshot_restore_activate", with_store_mut(state,|store|store.snapshot_restore_activate(&staging_id,expected_revision,binding_authority)))
-}
-#[tauri::command(async)]
-pub(crate) fn pds_snapshot_restore_abort(state: State<'_, PersistentStoreState>, staging_id:String) -> Result<(),StoreError> {
-    logged("pds_snapshot_restore_abort", with_store_mut(state,|store|store.snapshot_restore_abort(&staging_id)))
-}
-
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PluginStorageSource {
@@ -2659,6 +2646,7 @@ mod tests {
             StoreError::CommitDecode { message: String::new() },
             StoreError::Committed { revision: 1, message: String::new() },
             StoreError::Validation { message: String::new() },
+            StoreError::SchemaMismatch { message: String::new() },
             StoreError::Store { message: String::new() },
         ] {
             assert_eq!(serde_json::to_value(&error).unwrap()["code"], error.code().as_ref());

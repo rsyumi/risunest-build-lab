@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
-import { embeddedCrateTests, hostManifests, nativeCommands, packageCrateTests, protocolManifests, sharedCargoTarget } from '../scripts/testNative.mjs'
+import { embeddedCrateTests, hostManifests, nativeCommands, packageCrateTests, protocolManifests, sharedCargoTarget, standaloneRustCommands, standaloneRustTests } from '../scripts/testNative.mjs'
 
 test('native groups explicitly own dependency packages and full app integration targets', () => {
   const protocol = nativeCommands('protocol', 'win32')
@@ -18,7 +18,7 @@ test('native groups explicitly own dependency packages and full app integration 
     assert(!command.includes('--ignored'))
   }
   assert(!host[0].includes('--lib'))
-  assert.deepEqual(packageCrateTests.map(entry => entry.package), ['tauri-plugin-window-state', 'wry', 'tauri-plugin-updater'])
+  assert.deepEqual(packageCrateTests.map(entry => entry.package), ['tauri-plugin-window-state', 'wry', 'tauri-plugin-http', 'tauri-plugin-updater'])
   for (const platform of ['win32', 'linux', 'darwin']) {
     assert.deepEqual(nativeCommands('host', platform).filter(command => command.includes('--package')), packageCrateTests.map(entry => [
       'cargo', 'test', '--manifest-path', entry.runnerManifest,
@@ -64,6 +64,24 @@ test('server singleton scopes run in three disjoint processes with normal target
       })
       assert.equal(selected.length, 1, `${platform}: ${target} ${name} must have exactly one runner`)
     }
+  }
+})
+
+test('host mode compiles and runs the std-only Android response body tests as their own test binary', () => {
+  assert.deepEqual(standaloneRustTests.map(entry => entry.source), ['crates/wry/src/android/response_bodies.rs'])
+  const directory = join(tmpdir(), 'risunest-standalone-rust')
+  for (const platform of ['win32', 'linux', 'darwin']) {
+    const binary = join(directory, `wry_android_response_bodies${platform === 'win32' ? '.exe' : ''}`)
+    assert.deepEqual(standaloneRustCommands(directory, platform), [
+      ['rustc', '--edition', '2021', '--test', 'crates/wry/src/android/response_bodies.rs', '-o', binary],
+      [binary],
+    ])
+  }
+  for (const entry of standaloneRustTests) {
+    const source = readFileSync(new URL(`../${entry.source}`, import.meta.url), 'utf8')
+    assert(source.includes('#[cfg(test)]'))
+    // Only std and the module itself resolve when the file is compiled as its own crate.
+    assert.doesNotMatch(source, /\bcrate::|^\s*use (?!std::|super::)/m)
   }
 })
 

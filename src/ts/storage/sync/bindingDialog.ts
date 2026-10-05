@@ -16,7 +16,7 @@ export async function confirmSyncBindingReplacement(reason?: ReplacementReason):
 }
 
 export async function confirmPreviousStorageFiles(context: PreviousStorageFilesContext): Promise<PreviousStorageFilesChoice> {
-    let held = 0
+    let held: number | undefined
     try {
         const status = await getAssetResidencyStatus()
         const target = context.target
@@ -26,12 +26,12 @@ export async function confirmPreviousStorageFiles(context: PreviousStorageFilesC
             ? status.externalObjects.find(entry => entry.connectionId === target.connectionId)?.objects ?? 0
             : 0)
     } catch {
-        return 'connect'
+        // An unreadable status still asks, since files may be held elsewhere.
     }
-    if (!held) return 'connect'
+    if (held === 0) return 'connect'
     const result = await alertCheckboxConfirm({
         title: language.lwwSync.previousFilesTitle,
-        description: language.lwwSync.previousFilesDescription,
+        description: held === undefined ? language.lwwSync.previousFilesUnknownDescription : language.lwwSync.previousFilesDescription,
         checkboxLabel: language.lwwSync.downloadThenConnect,
         actionLabel: language.risuNest.serverSync.connect,
         cancelLabel: language.lwwSync.cancelAction,

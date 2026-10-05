@@ -189,6 +189,14 @@ impl PublishedCatalog {
         }
         Ok(())
     }
+    /// Records a version a published segment carried without merging its
+    /// value, so later merges are checked against it.
+    pub(crate) fn add_version(&mut self, key: &str, stamp: &str, identity: &str) -> Result<()> {
+        let old: Option<String> = self.db.query_row("SELECT identity FROM versions WHERE key=?1 AND stamp=?2", params![key, stamp], |r| r.get(0)).optional().map_err(sql)?;
+        if old.as_ref().is_some_and(|old| old != identity) { return Err(segment::corrupt()); }
+        self.db.execute("INSERT OR IGNORE INTO versions VALUES(?1,?2,?3)", params![key, stamp, identity]).map_err(sql)?;
+        Ok(())
+    }
     pub(crate) fn changes(&self) -> Result<Vec<Change>> {
         let mut changes = Vec::new();
         self.visit_changes(&mut |change| {changes.push(change);Ok(())})?;

@@ -92,13 +92,14 @@ describe("Tauri IPC script fixtures", () => {
     expect(lock).toMatch(new RegExp(`name = "tauri"\\r?\\nversion = "${tauriVersion}"\\r?\\n`));
   });
 
-  it("match the registry copy when one is present", () => {
+  it("match the registry copy", (context) => {
     const registry = join(process.env.CARGO_HOME ?? join(homedir(), ".cargo"), "registry", "src");
     const sources = existsSync(registry)
       ? readdirSync(registry)
           .map((index) => join(registry, index, `tauri-${tauriVersion}`, "scripts"))
           .filter((dir) => existsSync(dir))
       : [];
+    context.skip(sources.length === 0, `No Cargo registry copy of tauri ${tauriVersion}; run cargo fetch in src-tauri`);
     for (const dir of sources) {
       for (const name of fixtureNames) {
         const normalize = (text: string) => text.replaceAll("\r\n", "\n");

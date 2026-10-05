@@ -13,7 +13,7 @@ pub(super) fn store_error(error: StoreError) -> NativeJobError {
             NativeJobError::new("revision-conflict", error.to_string())
         }
         StoreError::Validation { .. } | StoreError::CommitDecode { .. } => invalid_input(error.to_string()),
-        StoreError::Committed { .. } | StoreError::SnapshotReleased | StoreError::RawBodyUnavailable | StoreError::CommitBusy | StoreError::Store { .. } => {
+        StoreError::Committed { .. } | StoreError::SnapshotReleased | StoreError::RawBodyUnavailable | StoreError::CommitBusy | StoreError::SchemaMismatch { .. } | StoreError::Store { .. } => {
             NativeJobError::new("store-error", error.to_string())
         }
     }

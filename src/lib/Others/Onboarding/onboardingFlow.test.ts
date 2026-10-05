@@ -66,7 +66,7 @@ describe('onboarding flow', () => {
     it('names the closing sentence after the path that brought the data', () => {
         expect(onboardingSummary('fresh')).toBe('fresh')
         expect(onboardingSummary('import')).toBe('import')
-        for (const path of ['server', 'account', 'external'] as const) {
+        for (const path of ['server', 'account', 'external', 'existing'] as const) {
             expect(onboardingSummary(path)).toBe('data')
         }
     })

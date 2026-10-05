@@ -65,8 +65,8 @@ fn macos_bench_quit(app: tauri::AppHandle) {
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn macos_bench_native_quit(app: tauri::AppHandle) -> Result<(), String> {
-    if macos_bench_phase() != "app" {
-        return Err("Native product quit belongs to the app phase".into());
+    if !matches!(macos_bench_phase().as_str(), "app" | "quit-escape") {
+        return Err("Native product quit belongs to the app and quit-escape phases".into());
     }
     unsafe extern "C" {
         fn risunest_bench_queue_native_quit(observer: extern "C" fn(i32, i32, i32)) -> i32;
@@ -83,6 +83,26 @@ fn macos_bench_native_quit(app: tauri::AppHandle) -> Result<(), String> {
     }).map_err(|error| error.to_string())
 }
 
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn macos_bench_repeat_native_quit(app: tauri::AppHandle) -> Result<(), String> {
+    if macos_bench_phase() != "quit-escape" {
+        return Err("A repeated native quit belongs to the quit-escape phase".into());
+    }
+    unsafe extern "C" {
+        fn risunest_bench_queue_repeated_quit() -> i32;
+    }
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        if unsafe { risunest_bench_queue_repeated_quit() } != 1 {
+            let _ = macos_bench_report("failure".into(), serde_json::json!({
+                "passed": false, "message": "Unable to queue a repeated native quit",
+            }));
+            handle.exit(1);
+        }
+    }).map_err(|error| error.to_string())
+}
+
 fn benchmark_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         macos_bench_phase,
@@ -91,6 +111,8 @@ fn benchmark_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send
         macos_bench_quit,
         #[cfg(target_os = "macos")]
         macos_bench_native_quit,
+        #[cfg(target_os = "macos")]
+        macos_bench_repeat_native_quit,
         #[cfg(target_os = "macos")]
         termination_probe::macos_bench_modal_begin,
         #[cfg(target_os = "macos")]
@@ -120,6 +142,7 @@ fn main() {
     );
     app.run(|app, event| {
         let product_exit = matches!(&event, tauri::RunEvent::Exit) && macos_bench_phase() == "app";
+        let escape_exit = matches!(&event, tauri::RunEvent::Exit) && macos_bench_phase() == "quit-escape";
         let name = match &event {
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Opened { .. } => Some("opened"),
@@ -152,6 +175,21 @@ fn main() {
                 "nativeReplies": replies, "runtimeQuitRequests": runtime_quits,
                 "exitCount": exits, "productHandlerReturned": true,
             }));
+        }
+        if escape_exit {
+            let state = app.state::<Events>();
+            let (replies, runtime_quits, exits) = {
+                let events = state.0.lock().unwrap();
+                (events.iter().filter(|event| event.starts_with("native-reply-")).count(),
+                 events.iter().filter(|event| **event == "quit").count(),
+                 events.iter().filter(|event| **event == "exit").count())
+            };
+            let detail = serde_json::json!({
+                "passed": runtime_quits == 0 && exits == 1,
+                "nativeReplies": replies, "runtimeQuitRequests": runtime_quits, "exitCount": exits,
+            });
+            let stage = if runtime_quits == 0 && exits == 1 { "quit-escape-exit" } else { "failure" };
+            let _ = macos_bench_report(stage.into(), detail);
         }
     });
 }

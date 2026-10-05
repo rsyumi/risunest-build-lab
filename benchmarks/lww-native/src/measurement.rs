@@ -289,6 +289,7 @@ mod tests {
                 library_usable_ms: Some(2.0), all_bodies_local_ms: Some(3.0), elapsed_ms: 4.0 }, maintenance: None }
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn incomplete_or_inconsistent_evidence_is_rejected() {
         let mut s = sample(Scenario::SettingEdit);
         s.evidence.unit_visits_and_hash_bytes = false;
@@ -308,12 +309,14 @@ mod tests {
         assert!(s.validate().is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn percentiles_use_nearest_rank_and_reject_missing_values() {
         assert_eq!(percentiles((1..=100).map(f64::from)).unwrap(), Percentiles { count: 100, p50: 50.0, p95: 95.0, p99: 99.0 });
         assert!(percentiles([]).is_err());
         assert!(percentiles([f64::INFINITY]).is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn bounded_work_detects_library_scan() {
         let a = sample(Scenario::SettingEdit);
         let mut b = a.clone();
@@ -322,6 +325,7 @@ mod tests {
         assert_bounded_work(&a, &a, &WorkCounters::default()).unwrap();
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn runner_excludes_warmup_and_propagates_driver_failure() {
         struct Driver { calls: u32, fail: bool }
         impl MeasurementDriver for Driver {

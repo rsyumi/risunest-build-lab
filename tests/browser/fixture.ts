@@ -5,10 +5,11 @@ import type { BrowserDriver } from './main'
 import type { thoughtDriver } from './thoughtDriver'
 declare global { interface Window { boundary: BrowserDriver; thought: typeof thoughtDriver } }
 export const test = base.extend<{ guarded: void }>({
-    guarded: [async ({ context }, use) => {
+    guarded: [async ({ context, baseURL }, use) => {
         const rejected: string[] = []
+        const origins = new Set([new URL(baseURL!).origin])
         await context.route('**/*', async route => {
-            const reason = classifyTestRequest(route.request().url(), new Set(['http://127.0.0.1:4187']))
+            const reason = classifyTestRequest(route.request().url(), origins)
             // Serve our owned HTML directly so machine-level HTTP injectors cannot add scripts.
             const pathname = new URL(route.request().url()).pathname
             if (!reason && (pathname === '/' || pathname === '/dragDrop.html' || pathname === '/modalNavigation.html' || pathname === '/lazyApp.html')) {

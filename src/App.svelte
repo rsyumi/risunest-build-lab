@@ -1,7 +1,7 @@
 <script lang="ts">
     import LazyScreenError from "./lib/UI/LazyScreenError.svelte";
     import ChatBindingLifecycle from './lib/SideBars/ChatBindingLifecycle.svelte'
-    import { DynamicGUI, settingsOpen, sideBarStore, ShowRealmFrameStore, openPresetList, openPersonaList, MobileGUI, CustomGUISettingMenuStore, loadedStore, alertStore, LoadingStatusState, bookmarkListOpen, popupStore, easyPanelStore, popUpEditorStore, loadoutModalStore, irisStore, customSideBarConfigDialogStore, bootFailure, recoveryStart, type BootFailure } from './ts/stores.svelte';
+    import { DynamicGUI, settingsOpen, sideBarStore, ShowRealmFrameStore, openPresetList, openPersonaList, MobileGUI, CustomGUISettingMenuStore, loadedStore, alertStore, LoadingStatusState, bookmarkListOpen, popupStore, easyPanelStore, popUpEditorStore, loadoutModalStore, irisStore, customSideBarConfigDialogStore, bootFailure, recoveryStart } from './ts/stores.svelte';
     import Sidebar from './lib/SideBars/Sidebar.svelte';
     import { DBState } from './ts/stores.svelte';
     import ChatScreen from './lib/ChatScreens/ChatScreen.svelte';
@@ -13,7 +13,7 @@
     import { showRealmInfoStore, importCharacterProcess } from './ts/characterCards';
     import { importPreset, getDatabase, setDatabase } from './ts/storage/database.svelte';
     import { readModule } from './ts/process/modules';
-    import { alertConfirm, alertNormal, alertToast } from './ts/alert';
+    import { alertConfirm, alertNormal } from './ts/alert';
     import { language } from './lang';
     import RealmFrame from './lib/UI/Realm/RealmFrame.svelte';
     import SavePopupIconComp from './lib/Others/SavePopupIcon.svelte';
@@ -41,6 +41,7 @@
     import NativeFileJobDialog from './lib/Others/NativeFileJobDialog.svelte';
     import UpdatePopup from './lib/Others/UpdatePopup.svelte';
     import RecoveryShell from './lib/Others/RecoveryShell.svelte';
+    import BootFailurePanel from './lib/Others/BootFailurePanel.svelte';
     import {
         confirmRecoveryExclusions,
         isStartupExcluded,
@@ -54,7 +55,6 @@
     import PersistentWorkingSetRecovery from './lib/Others/PersistentWorkingSetRecovery.svelte';
     import { persistentWorkingSetInputBlocked } from './ts/storage/persistentDataRuntime.svelte';
     import { restoreFocusAfterInputBlock } from './ts/ui/restoreFocusAfterInputBlock';
-    import { exportOriginalData } from './ts/storage/rawRecoveryExport';
 
     import {
         serverSyncNavigation,
@@ -96,21 +96,6 @@
     })
 
     let recoveryExcluded: RecoveryExclusion[] = $state([])
-    let startupExportMessage = $state('')
-    const exportStartupOriginalData = async () => {
-        startupExportMessage = ''
-        try {
-            const result = await exportOriginalData()
-            if (!result) return
-            startupExportMessage = result.warningCodes.includes('source-problems')
-                ? language.risuNest.recovery.exportPartial
-                : language.risuNest.recovery.exportComplete
-        } catch (error) {
-            startupExportMessage = error instanceof DOMException && error.name === 'AbortError'
-                ? language.risuNest.recovery.exportCancelled
-                : language.risuNest.recovery.exportFailed
-        }
-    }
     const exclusionName = (exclusion: RecoveryExclusion): string =>
         ({
             plugins: language.risuNest.recovery.excludePlugins,
@@ -156,8 +141,6 @@
 
     $effect(() => {
         if (isTauri && $loadedStore) {
-            // Start only after storage, asset authority and the working set are ready.
-            if (!isStartupExcluded('sync', getStartupExclusions()))
             // The update check runs after the start finishes, so a start that left it off keeps it off.
             if (!isStartupExcluded('autoUpdate', getStartupExclusions()))
                 void import('./ts/update/controller').then(({ startAppUpdateChecks }) => startAppUpdateChecks())
@@ -205,38 +188,6 @@
 
     const markAppInternalDrag = (e:DragEvent) => {
         e.dataTransfer?.setData(RISU_APP_INTERNAL_DRAG_TYPE, 'true')
-    }
-
-    const bootFailureExplanation = (failure: BootFailure) => {
-        switch (failure.kind) {
-            case 'schema-unsupported': return language.risuNest.boot.schemaUnsupported
-            case 'store-open': return language.risuNest.boot.storeOpen
-            default: return language.risuNest.boot.unknown
-        }
-    }
-
-    const bootFailureDetails = (failure: BootFailure) => [
-        language.risuNest.boot.title,
-        failure.message,
-        failure.stage ? `${language.risuNest.boot.stage}: ${failure.stage}` : '',
-    ].filter((line) => line !== '').join('\n')
-
-    const copyBootFailure = async (failure: BootFailure) => {
-        const details = bootFailureDetails(failure)
-        try {
-            await navigator.clipboard.writeText(details)
-        } catch {
-            const textarea = document.createElement('textarea')
-            textarea.value = details
-            document.body.appendChild(textarea)
-            textarea.select()
-            try {
-                document.execCommand('copy')
-            } finally {
-                document.body.removeChild(textarea)
-            }
-        }
-        alertToast(language.risuNest.boot.copied)
     }
 
 </script>
@@ -389,46 +340,7 @@
                 }}
             />
         {:else if $bootFailure}
-            <div class="w-full h-full overflow-y-auto bg-darkbg text-textcolor flex justify-center items-start">
-                <div class="w-full max-w-xl flex flex-col p-4 sm:p-6 gap-3">
-                    <h1 class="text-xl font-bold">{language.risuNest.boot.title}</h1>
-                    <p class="text-sm text-textcolor2">{bootFailureExplanation($bootFailure)}</p>
-                    {#if $bootFailure.kind === 'schema-unsupported'}
-                        <div class="flex flex-col gap-1 text-xs text-textcolor2 border border-darkborderc rounded-md p-3">
-                            <span class="select-text break-all">{language.risuNest.boot.dataPathWindows}</span>
-                            <span class="select-text break-all">{language.risuNest.boot.dataPathAndroid}</span>
-                        </div>
-                    {/if}
-                    <code class="text-xs font-mono select-text break-all whitespace-pre-wrap border border-darkborderc rounded-md p-3 text-textcolor2">{$bootFailure.message}</code>
-                    {#if $bootFailure.stage}
-                        <span class="text-xs text-textcolor2 select-text">{language.risuNest.boot.stage}: {$bootFailure.stage}</span>
-                    {/if}
-                    {#if isTauri}
-                        <div class="rounded-md border border-darkborderc p-3">
-                            <p class="text-sm font-bold">{language.risuNest.recovery.exportTitle}</p>
-                            <p class="mt-1 text-xs text-textcolor2">{language.risuNest.recovery.exportHelp}</p>
-                            <button
-                                class="mt-2 bg-darkbutton border border-darkborderc rounded-md px-4 py-2 text-sm hover:bg-selected disabled:opacity-50"
-                                disabled={$bootFailure.stage === 'native-setup'}
-                                onclick={exportStartupOriginalData}
-                            >{language.risuNest.recovery.exportAction}</button>
-                            {#if $bootFailure.stage === 'native-setup'}
-                                <p class="mt-2 text-xs text-textcolor2">{language.risuNest.recovery.exportUnavailable}</p>
-                            {:else if startupExportMessage}
-                                <p class="mt-2 text-xs text-textcolor2" role="status">{startupExportMessage}</p>
-                            {/if}
-                        </div>
-                    {/if}
-                    <div class="flex flex-wrap gap-2 mt-1">
-                        <button class="bg-darkbutton border border-darkborderc rounded-md px-4 py-2 text-sm hover:bg-selected" onclick={() => location.reload()}>
-                            {language.risuNest.boot.restart}
-                        </button>
-                        <button class="bg-darkbutton border border-darkborderc rounded-md px-4 py-2 text-sm hover:bg-selected" onclick={() => copyBootFailure($bootFailure)}>
-                            {language.risuNest.boot.copyDetails}
-                        </button>
-                    </div>
-                </div>
-            </div>
+            <BootFailurePanel failure={$bootFailure} />
         {:else}
             <div
                 class="w-full h-full flex justify-center items-center text-textcolor text-xl bg-darkbg"

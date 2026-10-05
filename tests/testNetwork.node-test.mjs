@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 
 const root = resolve(import.meta.dirname, '..')
-test('real setup fails swallowed fetch, XHR and iframe requests, including restored mocks', () => {
+test('real setup fails swallowed fetch, XHR, iframe and WebSocket requests, including restored mocks', () => {
     const base = join(root, '.tmp/test-results')
     mkdirSync(base, { recursive: true })
     const directory = mkdtempSync(join(base, 'network-policy-'))
@@ -36,6 +36,15 @@ it('iframe', async () => {
         })
     } finally { frame.remove() }
 })
+it('WebSocket', async () => {
+    try {
+        await new Promise(resolve => {
+            const socket = new WebSocket('wss://unexpected.invalid/socket')
+            socket.onerror = () => resolve(undefined)
+            socket.onclose = () => resolve(undefined)
+        })
+    } catch {}
+})
 it('clean following test', () => { expect(true).toBe(true) })
 `)
         writeFileSync(join(directory, 'vitest.config.mjs'), `export default { test: {
@@ -51,12 +60,12 @@ reporters: ['json'], outputFile: ${path(join(directory, 'report.json'))}
         assert.equal(result.status, 1)
         const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'))
         const cases = report.testResults.flatMap(file => file.assertionResults)
-        assert.equal(cases.length, 6)
-        for (const entry of cases.slice(0, 5)) {
+        assert.equal(cases.length, 7)
+        for (const entry of cases.slice(0, 6)) {
             assert.equal(entry.status, 'failed', entry.title)
             assert.match(entry.failureMessages.join(' '), /Blocked test requests/, entry.title)
         }
-        assert.equal(cases[5].status, 'passed')
+        assert.equal(cases[6].status, 'passed')
     } finally {
         assert.ok(directory.startsWith(base + '/network-policy-') || directory.startsWith(base + '\\network-policy-'))
         rmSync(directory, { recursive: true, force: true })

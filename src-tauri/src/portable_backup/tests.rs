@@ -184,8 +184,11 @@ fn archived_payload_roots_are_installed_and_missing_payload_is_attributed_to_cha
     assert!(RestoreInventory::build(&archive, directory.path(), &Never).is_err());
     let mut findings = crate::data_health::Findings::new(100);
     archive.scan_library(&mut findings, &Never).unwrap();
-    let preview = archive_inventory(&archive.db, &findings.items).unwrap();
-    assert!(preview.characters[0].damaged > 0);
+    assert!(findings.items.iter().any(|finding| match finding.owner.kind.as_str() {
+        "character" => finding.owner.id == "archived",
+        "conversation" | "message" => finding.owner.id.split('/').next() == Some("archived"),
+        _ => false,
+    }));
 }
 
 fn fixture(directory: &std::path::Path) -> Catalog {

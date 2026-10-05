@@ -119,6 +119,7 @@ import {
     NativeFileJobActivationCommittedError,
     NativeFileJobError,
     runNativeOfficialAccountSnapshotRestore,
+    runNativeSnapshotRestore,
     runNativeBlockRisuSaveRestore,
     runNativeArchiveExport,
     runNativeArchiveRestore,
@@ -4772,4 +4773,128 @@ it.each(['both', 'cold', 'inlay'] as const)('cancels default incomplete restore 
     expect(restoreAlerts.checkbox).toHaveBeenCalledTimes(1)
     expect(restoreAlerts.confirm).not.toHaveBeenCalled()
     expect(restoreAlerts.checkbox).toHaveBeenCalledWith(expect.objectContaining({ requireChecked: true }))
+})
+
+describe('native snapshot restore', () => {
+    const awaiting = (): NativeFileJobStatus => ({...status('waitingForInput'), kind: 'restore-native-snapshot', phase: 'awaiting-activation', snapshotStagingId: 'stage'})
+    const activated = (revision: number): NativeFileJobStatus => ({
+        ...status('succeeded', {revision, sourceBytes: 4096, sourceFingerprintKind: 'whole-file-sha256', sourceSha256: 'd'.repeat(64), characterCount: 2, presetCount: 1, warningCodes: []}),
+        kind: 'restore-native-snapshot',
+        snapshotStagingId: 'stage',
+        activationRevision: revision,
+        activationAuthority: '1',
+    })
+
+    it('stages a local snapshot as a job and replaces the library only after the replacement is confirmed', async () => {
+        const events: string[] = []
+        const statuses = [awaiting(), activated(12)]
+        restoreAlerts.checkbox.mockImplementation(async () => { events.push('confirmed'); return {confirmed: true, checked: true} })
+        const activation = await runNativeSnapshotRestore(
+            restoreRuntime(11, {acquire: () => { events.push('fence-acquired') }, refresh: () => { events.push('refreshed') }}),
+            {snapshotId: 'synthetic-snapshot'},
+            {},
+            {
+                isTauri: () => true,
+                wait: async () => undefined,
+                invoke: async (command, args) => {
+                    events.push(command)
+                    if (command === 'native_file_job_start') {
+                        expect(args).toEqual({request: {kind: 'restore-native-snapshot', snapshotId: 'synthetic-snapshot', expectedRevision: 11}})
+                        return {jobId: 'job-1'}
+                    }
+                    if (command === 'native_file_job_status') return statuses.shift()
+                    if (command === 'native_file_job_finalize') {
+                        expect(args).toEqual({jobId: 'job-1', expectedRevision: 11})
+                        return 'requested'
+                    }
+                    if (command === 'native_file_job_forget') return true
+                    throw new Error(`Unexpected command: ${command}`)
+                },
+            },
+        )
+        expect(activation).toEqual({stagingId: 'stage', activationRevision: 12, bindingAuthority: '1'})
+        expect(events).toEqual([
+            'native_file_job_start',
+            'native_file_job_status',
+            'confirmed',
+            'fence-acquired',
+            'native_file_job_finalize',
+            'native_file_job_status',
+            'refreshed',
+            'native_file_job_forget',
+        ])
+        expect(restoreAlerts.checkbox).toHaveBeenCalledWith(expect.objectContaining({requireChecked: true}))
+    })
+
+    it('cancels the staged snapshot when the replacement is declined', async () => {
+        restoreAlerts.checkbox.mockResolvedValue({confirmed: false, checked: false})
+        const commands: string[] = []
+        const statuses = [awaiting(), {...status('cancelled'), kind: 'restore-native-snapshot' as const}]
+        const acquire = vi.fn()
+        await expect(runNativeSnapshotRestore(restoreRuntime(11, {acquire}), {snapshotId: 'synthetic-snapshot'}, {}, {
+            isTauri: () => true,
+            wait: async () => undefined,
+            invoke: async command => {
+                commands.push(command)
+                if (command === 'native_file_job_start') return {jobId: 'job-1'}
+                if (command === 'native_file_job_status') return statuses.shift()
+                if (command === 'native_file_job_cancel') return 'requested'
+                if (command === 'native_file_job_forget') return true
+                throw new Error(`Unexpected command: ${command}`)
+            },
+        })).rejects.toMatchObject({name: 'AbortError'})
+        expect(acquire).not.toHaveBeenCalled()
+        expect(commands).toEqual(['native_file_job_start', 'native_file_job_status', 'native_file_job_cancel', 'native_file_job_status', 'native_file_job_forget'])
+    })
+
+    it('copies the bodies of a committed snapshot restore when the app recovers its refresh, then forgets the job', async () => {
+        const events: string[] = []
+        const statuses = [awaiting(), activated(12)]
+        const runtime = restoreRuntime(11, {projection: 'refresh-required'})
+        await expect(runNativeSnapshotRestore(runtime, {snapshotId: 'synthetic-snapshot'}, {
+            afterRefresh: () => { events.push('plugins-reloaded') },
+            afterActivationRecovery: async activation => { events.push(`bodies:${activation.stagingId}:${activation.activationRevision}:${activation.bindingAuthority}`) },
+        }, {
+            isTauri: () => true,
+            wait: async () => undefined,
+            invoke: async command => {
+                if (command === 'native_file_job_start') return {jobId: 'job-1'}
+                if (command === 'native_file_job_status') return statuses.shift()
+                if (command === 'native_file_job_finalize') return 'requested'
+                if (command === 'native_file_job_forget') { events.push('forgotten'); return true }
+                throw new Error(`Unexpected command: ${command}`)
+            },
+        })).rejects.toBeInstanceOf(NativeFileJobActivationCommittedError)
+        expect(events).toEqual([])
+        await continueCommittedWorkingSetRefresh(12, runtime, 2)
+        expect(events).toEqual(['plugins-reloaded', 'bodies:stage:12:1', 'forgotten'])
+    })
+
+    it('reads the activation of a recovered snapshot restore from its job when the status response was lost', async () => {
+        const events: string[] = []
+        let polls = 0
+        const runtime = restoreRuntime(11)
+        await expect(runNativeSnapshotRestore(runtime, {snapshotId: 'synthetic-snapshot'}, {
+            afterActivationRecovery: async activation => { events.push(`bodies:${activation.stagingId}:${activation.activationRevision}:${activation.bindingAuthority}`) },
+        }, {
+            isTauri: () => true,
+            wait: async () => undefined,
+            invoke: async command => {
+                if (command === 'native_file_job_start') return {jobId: 'job-1'}
+                if (command === 'native_file_job_status') {
+                    polls++
+                    if (polls === 1) return awaiting()
+                    if (polls === 2) throw new Error('synthetic lost status response')
+                    events.push('status-read')
+                    return activated(12)
+                }
+                if (command === 'native_file_job_finalize') return 'requested'
+                if (command === 'native_file_job_forget') { events.push('forgotten'); return true }
+                throw new Error(`Unexpected command: ${command}`)
+            },
+        })).rejects.toThrow('synthetic lost status response')
+        expect(events).toEqual([])
+        await continueCommittedWorkingSetRefresh(12, runtime, 2)
+        expect(events).toEqual(['status-read', 'bodies:stage:12:1', 'forgotten'])
+    })
 })

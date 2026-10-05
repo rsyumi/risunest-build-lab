@@ -1,6 +1,9 @@
 use super::*;
 use crate::persistent_store::query;
 
+#[path = "lww_retention_tests.rs"]
+mod retention;
+
 /// Replacement changes as they were computed before the merge: both libraries
 /// captured into whole maps.
 pub(super) fn whole_library_changes(
@@ -397,15 +400,16 @@ fn commit_input_capture_conserves_actual_reserve_completed_and_rejected_retry_ha
     let changed_expected = serde_json::to_vec(&changed).unwrap();
     reset_hash_work(); reset_commit_intent_inputs();
     let result = store.commit(&input).unwrap();
-    assert_eq!(store.completed_intent(&header, &intent).unwrap().unwrap().revision, result.revision);
-    assert!(store.completed_intent(&header, &changed).is_err());
+    assert_eq!(store.commit(&input).unwrap().revision, result.revision);
+    let mut changed_input = input.clone(); changed_input.expected_revision += 1;
+    assert!(store.commit(&changed_input).is_err());
     let work = take_hash_work(); let inputs = take_commit_intent_inputs();
     assert_eq!(inputs, vec![expected.clone(), expected, changed_expected]);
     assert_eq!(work.domains["native_intent"], DomainWork { calls: inputs.len() as u64,
         bytes: inputs.iter().map(|input| input.len() as u64).sum() });
-    let persisted: String = store.device_store().unwrap().connection().query_row(
-        "SELECT body FROM lww_intents WHERE request_id=?1", [&header.request_id], |row| row.get(0)).unwrap();
-    assert_eq!(persisted.as_bytes(), inputs[0]);
+    let receipt: String = store.connection.query_row(
+        "SELECT digest FROM lww_requests WHERE request_id=?1", [&header.request_id], |row| row.get(0)).unwrap();
+    assert_eq!(receipt, risunest_sync_wire::hash(inputs[0].as_slice()));
     for bytes in inputs {
         let typed: CommitIntentInput = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(serde_json::to_vec(&typed).unwrap(), bytes);
@@ -1097,6 +1101,9 @@ fn commit_intent_replays_once_after_restart() {
     drop(store);
     let mut store = PersistentStore::open(dir.path()).unwrap();
     assert_eq!(store.read_root(None).unwrap().value["language"], "ko");
+    let intents: i64 = store.device_store().unwrap().connection()
+        .query_row("SELECT count(*) FROM lww_intents", [], |row| row.get(0)).unwrap();
+    assert_eq!(intents, 0, "a replayed write leaves no intent behind");
     let revision = store.revision().unwrap();
     store.lww_recover_intents().unwrap();
     assert_eq!(store.revision().unwrap(), revision);
@@ -1194,15 +1201,12 @@ fn echo_and_empty_receives_keep_the_revision_and_still_acknowledge() {
     assert_eq!(echo.revision, before);
     assert_eq!(store.revision().unwrap(), before);
     assert!(store.lww_read_outbox(0.into(), 10).unwrap().entries.is_empty());
-    let status: String = store
-        .connection
-        .query_row(
-            "SELECT status FROM lww_receive_rows WHERE request_id='echo'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(status, "done");
+    let count = |db: &Connection, sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
+    for db in [&store.connection, store.device_store().unwrap().connection()] {
+        assert_eq!(count(db, "SELECT count(*) FROM lww_receive_rows"), 0);
+    }
+    let device = store.device_store().unwrap().connection();
+    assert_eq!(count(device, "SELECT count(*) FROM lww_receive WHERE request_id='echo' AND finished=1"), 1);
     assert_eq!(
         store.lww_receive_progress(0.into()).unwrap()[0].cursor,
         1.into()
@@ -2893,10 +2897,10 @@ fn an_intent_that_can_no_longer_apply_is_closed_and_later_writes_proceed() {
     store.reserve_intent(&stale, &intent).unwrap();
     save(&mut store, vec![mutation(&["root", "language"], serde_json::json!("ja"))]);
     assert_eq!(store.read_root(None).unwrap().value["language"], "ja");
-    let complete: bool = store.device_store().unwrap().connection().query_row(
-        "SELECT complete FROM lww_intents WHERE request_id=?1", [&stale.request_id], |row| row.get(0),
+    let kept: bool = store.device_store().unwrap().connection().query_row(
+        "SELECT EXISTS(SELECT 1 FROM lww_intents WHERE request_id=?1)", [&stale.request_id], |row| row.get(0),
     ).unwrap();
-    assert!(complete);
+    assert!(!kept);
     let committed: bool = store.connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM lww_requests WHERE request_id=?1)", [&stale.request_id], |row| row.get(0),
     ).unwrap();

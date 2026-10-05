@@ -13,6 +13,7 @@ pub mod screenshot_output;
 mod backup_source;
 mod legacy_backup;
 pub(crate) mod snapshot_bodies;
+mod snapshot_restore;
 #[cfg(test)]
 pub(crate) mod portable;
 #[cfg(not(test))]
@@ -28,7 +29,7 @@ pub(crate) fn native_portable_source_discard(app:AppHandle,source:JobSource)->Re
 }
 
 #[tauri::command(async)]
-pub(crate) fn native_portable_source_cleanup_orphans(app:AppHandle)->Result<(),NativeJobError> {
+pub(crate) fn native_portable_source_cleanup_orphans(app:AppHandle)->Result<usize,NativeJobError> {
     logged("native_portable_source_cleanup_orphans", portable_source_custody::cleanup_orphans(&app))
 }
 pub(crate) mod raw_recovery;
@@ -293,6 +294,10 @@ pub(crate) enum NativeFileJobStartRequest {
         source: JobSource,
         expected_revision: i64,
         selection: Option<portable::PortableSelection>,
+    },
+    RestoreNativeSnapshot {
+        snapshot_id: String,
+        expected_revision: i64,
     },
     ExportCompatibleLocalBackup {
         target: legacy_backup::CompatibilityTarget,
@@ -1603,6 +1608,21 @@ impl NativeFileJobState {
                     app,
                 }
             }
+            NativeFileJobStartRequest::RestoreNativeSnapshot {
+                snapshot_id,
+                expected_revision,
+            } => {
+                let store =
+                    crate::persistent_store::commands::with_store_mut(app.state(), |store| {
+                        store.open_native_job_store()
+                    })
+                    .map_err(native_store_error)?;
+                NativeFileJobTask::RestoreNativeSnapshot {
+                    snapshot_id,
+                    expected_revision,
+                    store,
+                }
+            }
             NativeFileJobStartRequest::ExportCompatibleLocalBackup {
                 target,
                 destination,
@@ -2044,10 +2064,12 @@ impl NativeFileJobState {
                 | JobKind::RestoreBlockRisuSave
                 | JobKind::RestoreLegacyLocalBackup
                 | JobKind::RestoreOfficialAccountSnapshot
+                | JobKind::RestoreNativeSnapshot
         );
         let upstream_staging = require_restore_finalization
             && matches!(task.kind(), JobKind::RestorePortableBackup | JobKind::RestoreBlockRisuSave
-                | JobKind::RestoreLegacyLocalBackup | JobKind::RestoreOfficialAccountSnapshot);
+                | JobKind::RestoreLegacyLocalBackup | JobKind::RestoreOfficialAccountSnapshot
+                | JobKind::RestoreNativeSnapshot);
         let admission = if upstream_staging {
             self.admission.staging()
         } else {
@@ -2090,6 +2112,7 @@ impl NativeFileJobState {
                             | JobKind::RestorePortableBackup
                             | JobKind::RestoreOfficialAccountSnapshot
                             | JobKind::RestoreLegacyLocalBackup
+                            | JobKind::RestoreNativeSnapshot
                     ),
             )
             .map_err(|error| NativeJobError::new("store-error", error))?;
@@ -2288,6 +2311,16 @@ impl NativeFileJobState {
                         job.publish_export_capture(expected_revision).map_err(|message| NativeJobError::new("store-error", message))?;
                         export::export_block_risu_save(prepared, &destination, omit_account, account.as_ref(), &job)
                     }),
+                    NativeFileJobTask::RestoreNativeSnapshot {
+                        snapshot_id,
+                        expected_revision,
+                        store,
+                    } => snapshot_restore::restore_native_snapshot(
+                        &snapshot_id,
+                        expected_revision,
+                        store,
+                        &job,
+                    ),
                     NativeFileJobTask::RestoreOfficialSnapshot {
                         request,
                         expected_revision,
@@ -2744,6 +2777,11 @@ enum NativeFileJobTask {
         expected_revision: i64,
         app: AppHandle,
     },
+    RestoreNativeSnapshot {
+        snapshot_id: String,
+        expected_revision: i64,
+        store: crate::persistent_store::PersistentStore,
+    },
     RestoreLegacyLocalBackup {
         opened_source: Option<OpenedJobSource>,
         source: JobSource,
@@ -2809,6 +2847,7 @@ impl NativeFileJobTask {
             Self::Restore { .. } => JobKind::RestoreBlockRisuSave,
             Self::Export { .. } => JobKind::ExportBlockRisuSave,
             Self::RestoreOfficialSnapshot { .. } => JobKind::RestoreOfficialAccountSnapshot,
+            Self::RestoreNativeSnapshot { .. } => JobKind::RestoreNativeSnapshot,
             Self::RestoreLegacyLocalBackup { .. } => JobKind::RestoreLegacyLocalBackup,
             Self::ExportCompatibleLocalBackup { .. } => JobKind::ExportCompatibleLocalBackup,
             Self::ExportCharacterCharx { .. } => JobKind::ExportCharacterCharx,
@@ -2841,6 +2880,9 @@ impl NativeFileJobTask {
             | Self::RestoreOfficialSnapshot {
                 expected_revision, ..
             }
+            | Self::RestoreNativeSnapshot {
+                expected_revision, ..
+            }
             | Self::RestoreLegacyLocalBackup {
                 expected_revision, ..
             }
@@ -2867,7 +2909,7 @@ fn native_store_error(error: crate::persistent_store::StoreError) -> NativeJobEr
         crate::persistent_store::StoreError::RevisionConflict { .. } => "revision-conflict",
         crate::persistent_store::StoreError::CommitDecode { .. } | crate::persistent_store::StoreError::Validation { .. } => "invalid-input",
         crate::persistent_store::StoreError::Committed { .. } | crate::persistent_store::StoreError::RawBodyUnavailable | crate::persistent_store::StoreError::CommitBusy | crate::persistent_store::StoreError::SnapshotReleased
-        | crate::persistent_store::StoreError::Store { .. } => "store-error",
+        | crate::persistent_store::StoreError::SchemaMismatch { .. } | crate::persistent_store::StoreError::Store { .. } => "store-error",
     };
     NativeJobError::new(code, error.to_string())
 }
@@ -3476,6 +3518,7 @@ pub(crate) enum JobKind {
     RestorePortableBackup,
     RestoreBlockRisuSave,
     RestoreOfficialAccountSnapshot,
+    RestoreNativeSnapshot,
     RestoreLegacyLocalBackup,
     ExportBlockRisuSave,
     ExportCompatibleLocalBackup,
@@ -3932,6 +3975,7 @@ impl JobRegistry {
                     | JobKind::RestorePortableBackup
                     | JobKind::RestoreOfficialAccountSnapshot
                     | JobKind::RestoreLegacyLocalBackup
+                    | JobKind::RestoreNativeSnapshot
             ),
         )
     }
@@ -4531,6 +4575,7 @@ impl JobControl {
                 | JobKind::RestorePortableBackup
                 | JobKind::RestoreOfficialAccountSnapshot
                 | JobKind::RestoreLegacyLocalBackup
+                | JobKind::RestoreNativeSnapshot
         ) {
             return Ok(FinalizeOutcome::TooEarly);
         }
@@ -4598,6 +4643,7 @@ impl JobControl {
                     | JobKind::RestorePortableBackup
                     | JobKind::RestoreOfficialAccountSnapshot
                     | JobKind::RestoreLegacyLocalBackup
+                    | JobKind::RestoreNativeSnapshot
             ) || status.state != JobState::Running
                 || status.phase != JobPhase::StagingDatabase
             {
@@ -4778,6 +4824,7 @@ impl JobControl {
             JobKind::ExportRawRecovery => JobPhase::ReadingSource,
             JobKind::RestoreBlockRisuSave => JobPhase::ReadingSource,
             JobKind::RestoreOfficialAccountSnapshot => JobPhase::ReadingSource,
+            JobKind::RestoreNativeSnapshot => JobPhase::ReadingSource,
             JobKind::RestoreLegacyLocalBackup => JobPhase::ReadingSource,
             JobKind::ExportBlockRisuSave => JobPhase::WritingExport,
             JobKind::ExportCompatibleLocalBackup => JobPhase::WritingExport,

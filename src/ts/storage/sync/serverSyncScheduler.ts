@@ -4,11 +4,14 @@ export interface ServerSyncSchedulerDependencies {
     connect(): Promise<void>
     disconnect(): Promise<void>
     retryClock?(): Promise<void>
+    publishHidden?(): Promise<void>
     failed(error: unknown): void
     recovered?(): void
 }
 
-const integrityCodes = ['clock-skew', 'incoming-clock-skew', 'accepted-clock-correction-required', 'writer-collision', 'equal-stamp-integrity', 'server-epoch-changed', 'unauthorized', 'invalid-device-token']
+export const integrityCodes = ['clock-skew', 'incoming-clock-skew', 'accepted-clock-correction-required', 'writer-collision', 'equal-stamp-integrity', 'server-epoch-changed', 'unauthorized', 'invalid-device-token']
+// A new clock sample can clear these, so they are rechecked instead of waiting for a manual retry.
+const clockCodes = ['clock-skew', 'incoming-clock-skew']
 export function serverSyncErrorCode(error: unknown): string {
     if (typeof error !== 'object' || !error) return ''
     if ('message' in error && typeof error.message === 'string' && integrityCodes.includes(error.message)) return error.message
@@ -49,7 +52,7 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
     const succeeded = (lane: Lane) => { if (failedLanes.delete(lane) && failedLanes.size === 0 && !blocked) dependencies.recovered?.() }
     const fail = (error: unknown, lane?: Lane) => {
         if (isCancellation(error)) return
-        if (blocked && blockedCode !== 'clock-skew') return
+        if (blocked && !clockCodes.includes(blockedCode)) return
         if (lane) failedLanes.add(lane)
         if ((typeof error === 'object' && error && 'retryable' in error && error.retryable === false && code(error) !== 'server-unreachable') || integrityCodes.includes(code(error))) {
             blocked = true
@@ -106,14 +109,25 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         }
         schedulePull()
     }
+    // Pending work goes out before the app may be suspended. A foreground push started meanwhile waits for it.
+    const publishHidden = async () => {
+        await sending?.catch(() => {})
+        if (foreground || blocked || sending) return
+        pushAgain = false
+        sending = dependencies.publishHidden!().then(() => { sendRetryAttempt = 0; succeeded('push') }, error => { fail(error, 'push') }).finally(() => {
+            sending = undefined
+            if (pushAgain && foreground) { pushAgain = false; void push().catch(() => {}) }
+        })
+        await sending
+    }
     const recheckClock = (): Promise<boolean> => {
-        if (!foreground || !blocked || blockedCode !== 'clock-skew' || !dependencies.retryClock) return Promise.resolve(false)
+        if (!foreground || !blocked || !clockCodes.includes(blockedCode) || !dependencies.retryClock) return Promise.resolve(false)
         if (checkingClock) return checkingClock
         checkingClock = (async () => {
             await Promise.allSettled([sending, receiving, disconnecting])
-            if (!foreground || blockedCode !== 'clock-skew') return false
+            if (!foreground || !clockCodes.includes(blockedCode)) return false
             await dependencies.retryClock!()
-            if (!foreground || blockedCode !== 'clock-skew') return false
+            if (!foreground || !clockCodes.includes(blockedCode)) return false
             blocked = false; blockedCode = ''; sendRetryAttempt = 0
             connect(); void pull().catch(() => {}); void push().catch(() => {})
             return true
@@ -121,12 +135,16 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         return checkingClock
     }
     return {
-        async foreground(value: boolean) {
+        async foreground(value: boolean, publishPending = false) {
             if (foreground === value) { if (value) await recheckClock(); return }
             foreground = value
             clear()
             if (value) { reconnectAttempt = 0; if (!await recheckClock()) { connect(); void pull().catch(() => {}); void push().catch(() => {}) } }
-            else { connected = false; await disconnect() }
+            else {
+                connected = false
+                if (publishPending && !blocked && dependencies.publishHidden) await publishHidden()
+                if (!foreground) await disconnect()
+            }
         },
         localChange(immediate = false) {
             clearTimeout(pushTimer)

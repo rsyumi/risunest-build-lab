@@ -2618,7 +2618,7 @@ fn store_error(error: StoreError) -> NativeJobError {
             NativeJobError::new("store-error", "persistent snapshot was released")
         }
         StoreError::RawBodyUnavailable | StoreError::CommitBusy => NativeJobError::new("store-error", error.to_string()),
-        StoreError::Committed { message, .. } | StoreError::CommitDecode { message } | StoreError::Validation { message } | StoreError::Store { message } => {
+        StoreError::Committed { message, .. } | StoreError::CommitDecode { message } | StoreError::Validation { message } | StoreError::SchemaMismatch { message } | StoreError::Store { message } => {
             NativeJobError::new("store-error", message)
         }
     }

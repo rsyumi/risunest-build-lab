@@ -5561,8 +5561,10 @@ mod tests {
                 ).unwrap();
                 let original = RemoteObject::from_stored(view.original_units.as_ref().unwrap(),&repository).unwrap();
                 let units = snapshot_restore::download_original_backup_units(&original,&stage,&key,&provider,&repository,&Cancellation::default()).await.unwrap();
+                let content = crate::external_storage::content_store::ContentStore::open(&stage.join("external-storage")).unwrap();
+                let units = units.units(&content).map(|unit| unit.unwrap()).collect::<Vec<_>>();
                 assert_eq!(units.len(),1);
-                assert_eq!(units.values().next().unwrap(), &risunest_sync_wire::unit::UnitValue::inline(&serde_json::to_vec(marker).unwrap()).unwrap());
+                assert_eq!(units[0].1, risunest_sync_wire::unit::UnitValue::inline(&serde_json::to_vec(marker).unwrap()).unwrap());
                 let received = snapshot_restore::download_sections(
                     &completed.reference,
                     &BTreeSet::from(["local-plugins".to_owned()]),

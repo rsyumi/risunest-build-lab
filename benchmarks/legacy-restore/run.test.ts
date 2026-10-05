@@ -111,7 +111,6 @@ describe('isolated legacy restore measurement', () => {
         const progress: ReadbackProgress[] = []
         const result = await runLegacyRestoreMeasurement({ megabytes: 100, encoding,
             assertIsolatedHarness: async () => {}, report,
-            sampleMemory: async () => ({ peakRssBytes: 6_000_000, source: 'synthetic-test' }),
             onReadbackProgress: event => { progress.push(event) },
         })
         const frame = native.bytes.subarray(0, native.length)
@@ -125,13 +124,42 @@ describe('isolated legacy restore measurement', () => {
         expect(decoded.length).toBe(plan.decodedBytes)
         expect(unpack(decoded).characters).toHaveLength(plan.characterCount)
         expect(result).toMatchObject({ phase: 'verified', verifiedMessageCount: plan.messageCount,
-            verifiedCharacterCount: plan.characterCount, aboveTwiceDecoded: true })
+            verifiedCharacterCount: plan.characterCount })
         expect(native.activeIds[0]).toBe(`${result.runId}-000000`)
         expect(native.invoke.mock.calls.filter(([command]) => command === 'pds_read_conversation')).toHaveLength(plan.characterCount)
         expect(native.invoke).toHaveBeenCalledWith('native_file_job_finalize', { jobId: 'synthetic-job', expectedRevision: 7 })
         expect(native.remove).toHaveBeenCalledTimes(2)
         expect(progress.at(-1)).toEqual({ stage: 14, index: plan.characterCount,
             readReturned: plan.characterCount, hashVerified: plan.characterCount, messageCount: plan.messageCount })
+    })
+    it.each([
+        ['a rising resident size', [100_000_000, 90_000_000, 92_000_000, 96_000_000], {
+            restoreBaselineBytes: 90_000_000, restoreIncrementBytes: 6_000_000, aboveTwiceDecoded: true,
+            memoryScope: 'native-process-resident-increment-from-restore-start-excludes-separate-webcontent' }],
+        ['a flat resident size under a fixture-write peak', [100_000_000, 90_000_000, 90_000_000, 90_000_000], {
+            restoreBaselineBytes: 90_000_000, restoreIncrementBytes: 0, aboveTwiceDecoded: false,
+            memoryScope: 'native-process-resident-increment-from-restore-start-excludes-separate-webcontent' }],
+        ['a lifetime peak alone', null, {
+            restoreBaselineBytes: null, restoreIncrementBytes: null, aboveTwiceDecoded: null,
+            memoryScope: 'lifetime-high-water-only-cannot-separate-restore-from-fixture-write' }],
+    ] as const)('gates on the resident increment from the restore start with %s', async (_name, resident, expected) => {
+        installNative()
+        const taken: { fixtureBytes: number; jobStarted: boolean }[] = []
+        const sampleMemory = async () => {
+            const residentBytes = resident?.[Math.min(taken.length, resident.length - 1)]
+            taken.push({ fixtureBytes: native.length,
+                jobStarted: native.invoke.mock.calls.some(([command]) => command === 'native_file_job_start') })
+            return { source: 'synthetic-test', peakRssBytes: 700_000_000, ...(residentBytes === undefined ? {} : { residentBytes }) }
+        }
+        const result = await runLegacyRestoreMeasurement({ megabytes: 100, encoding: 'raw',
+            assertIsolatedHarness: async () => {}, report: async () => {}, sampleMemory })
+        expect(result).toMatchObject({ phase: 'verified', ...expected, peakRssBytes: 700_000_000,
+            peakScope: 'native-process-lifetime-high-water-includes-fixture-write' })
+        // Both samples before the restore see the whole fixture on disk.
+        expect(taken).toEqual([
+            { fixtureBytes: native.length, jobStarted: false }, { fixtureBytes: native.length, jobStarted: false },
+            { fixtureBytes: native.length, jobStarted: true }, { fixtureBytes: native.length, jobStarted: true },
+        ])
     })
     it('writes plain byte arrays when the encoder returns Buffer instances', async () => {
         installNative()

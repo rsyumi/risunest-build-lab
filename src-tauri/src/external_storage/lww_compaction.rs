@@ -24,7 +24,10 @@ pub(crate) struct PublishedState {
     pub standalone_roots:BTreeMap<String,String>,
     pub asset_catalogs: Vec<wire::StoredObject>,
     pub snapshots: Vec<(RemoteObject,Checkpoint)>,
+    /// The uncovered segments read, without their changes and pages.
     pub segments: Vec<(ObjectReceipt,segment::Segment)>,
+    /// Every listed segment name as writer, sequence and hash.
+    pub listed: Vec<(String,u64,String)>,
 }
 
 pub(crate) const COMPACTION_TAKEOVER: std::time::Duration=std::time::Duration::from_secs(60);
@@ -76,6 +79,10 @@ fn maintenance_due<C:lww_checkpoint::Covering>(checkpoints:&[C],segments:&[Objec
     Ok(count>=100 || bytes>=64*1024*1024)
 }
 impl PublishedState {
+    /// The listed segments the published state covers.
+    pub(crate) fn covered(&self)->Vec<(String,u64,String)> {
+        self.listed.iter().filter(|(writer,seq,_)|self.catalog.coverage.get(writer).is_some_and(|prefix|*seq<=prefix.0)).cloned().collect()
+    }
     pub(crate) fn require_complete(&self)->Result<()> {
         if self.segments.iter().any(|(_,segment)|self.catalog.coverage.get(&segment.writer_id).copied().unwrap_or(risunest_sync_wire::stamp::DecimalU64(0))<segment.seq) {
             return Err(ProviderError::new(ErrorKind::PreconditionFailed));
@@ -382,7 +389,7 @@ impl ExternalLwwEngine {
     pub(crate) async fn snapshot_receipts(&self,cancel:&Cancellation) -> Result<Vec<ObjectReceipt>> {
         let mut output=Vec::new(); let mut cursor=None; let mut visited=BTreeSet::new();
         loop {
-            let page=self.provider.list_objects(&self.repository,Collection::Snapshots,cursor.as_deref(),100,cancel).await?;
+            let page=self.provider.list_objects(&self.repository,Collection::Snapshots,cursor.as_deref(),super::lww_engine::LISTING_PAGE,cancel).await?;
             output.extend(page.objects);
             match page.next_cursor { Some(next) => { if !visited.insert(next.clone()) { return Err(segment::corrupt()); } cursor=Some(next); }, None=>break }
         }
@@ -415,7 +422,12 @@ impl ExternalLwwEngine {
             || receipt.byte_length!=bytes.len() as u64 || !receipt.complete { return Err(segment::corrupt()); }
         Ok(Some((RemoteObject { repository_id:header.repository_id,object_id:header.object_id,role:ObjectRole::Snapshot,receipt:receipt.clone(),ciphertext_sha256:segment::digest(&bytes),plaintext_length:plaintext.len() as u64,plaintext_sha256:segment::digest(&plaintext) },document)))
     }
-    pub(crate) async fn published_state(&self,directory:&Path,cancel:&Cancellation) -> Result<PublishedState> {
+    /// The published state from the retained checkpoints and the segments
+    /// above their coverage. Covered segments are never read: their versions
+    /// were checked when they were published or received, and the versions
+    /// this device recorded join the checkpoint winners as the history the
+    /// uncovered segments are checked against.
+    pub(crate) async fn published_state(&self,store:&mut crate::persistent_store::PersistentStore,directory:&Path,cancel:&Cancellation) -> Result<PublishedState> {
         std::fs::create_dir_all(directory).map_err(error)?;
         let mut catalog=PublishedCatalog::create(&directory.join("published.sqlite"))?;
         let snapshots=self.checkpoints(cancel).await?;
@@ -449,52 +461,51 @@ impl ExternalLwwEngine {
             asset_catalogs.extend(snapshot.asset_catalogs.clone());
             for (hash,source) in &snapshot.standalone_bodies { standalone.insert(hash.clone(),source.clone()); standalone_roots.insert(hash.clone(),root.object_id.clone()); }
         }
-        let mut groups:BTreeMap<(String,u64),Vec<ObjectReceipt>>=BTreeMap::new();
-        for receipt in self.listing(cancel).await? {
-            let name=receipt.locator.object.rsplit('/').next().ok_or_else(segment::corrupt)?;
-            let (writer,seq,_)=parse_segment_object_id(name)?;
-            groups.entry((writer.into(),seq)).or_default().push(receipt);
-        }
+        let checkpoint_coverage=catalog.coverage.clone();
+        let groups=super::lww_engine::segment_groups(self.listing(cancel).await?)?;
+        let listed=groups.iter().map(|((writer,seq),(hash,_))|(writer.clone(),*seq,hash.clone())).collect::<Vec<_>>();
         let mut segments=Vec::new();
         let mut history=PublishedCatalog::create(&directory.join("history.sqlite"))?;
         catalog.visit_changes(&mut |change|history.merge(&change))?;
+        let mut conflict=false;
+        store.external_lww_visit_versions(&self.target_scope(),&mut |key,stamp,identity| {
+            if history.add_version(key,stamp,identity).is_err() {conflict=true;}
+            Ok(())
+        }).map_err(super::lww_engine::store_error)?;
+        if conflict {return Err(segment::corrupt());}
         let upper=self.admitted_upper()?.checked_add(300_000).ok_or_else(segment::corrupt)?;
-        for (index,((writer,seq),variants)) in groups.into_iter().enumerate() {
-            let mut identity=None; let mut winner=None;
-            for receipt in variants {
-                let name=receipt.locator.object.rsplit('/').next().ok_or_else(segment::corrupt)?;
-                let (_,_,hash)=parse_segment_object_id(name)?;
-                if identity.as_deref().is_some_and(|old|old!=hash) { return Err(segment::corrupt()); }
-                let bytes=read_bytes(self.provider.as_ref(),&self.repository,&receipt.locator,cancel).await?;
-                if segment::digest(&bytes)!=hash { return Err(segment::corrupt()); }
-                let payload=segment::open(&bytes,&self.library,&writer,seq,&self.root_key)?;
-                for change in &payload.changes { if change.stamp.physical_ms.0>upper { return Err(ProviderError::new(ErrorKind::ClockSkew)); } history.merge(change)?; }
-                identity=Some(hash.to_owned()); winner=Some((receipt,payload));
-            }
-            if let Some((receipt,mut payload))=winner {
-                if catalog.include_segment(&payload)? {
-                    for (hash,bytes) in &payload.message_pages { body_spool.push(hash,&URL_SAFE_NO_PAD.decode(bytes).map_err(error)?,crate::persistent_store::external_capture::BackupBodyRole::Control).map_err(error)?; }
-                    let controls=super::snapshot_restore::download_control_catalogs(&payload.data_catalogs,
-                        &directory.join(format!("s{index}")),&self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
-                    for control in controls {
-                        let super::content_store::ObjectSource::File(path)=control.source else {return Err(segment::corrupt());};
-                        let bytes=std::fs::read(path).map_err(error)?;
-                        if bytes.len() as u64!=control.byte_length {return Err(segment::corrupt());}
-                        body_spool.push(&control.content_hash,&bytes,crate::persistent_store::external_capture::BackupBodyRole::Control).map_err(error)?;
-                    }
-                    asset_catalogs.extend(payload.asset_catalogs.clone());
-                    for (hash,source) in &payload.large_bodies { standalone.insert(hash.clone(),source.clone()); standalone_roots.insert(hash.clone(),super::contract::segment_object_id(&payload.writer_id,payload.seq.0,&identity.clone().ok_or_else(segment::corrupt)?)?); }
+        for (index,((writer,seq),(hash,receipt))) in groups.into_iter().enumerate() {
+            if seq<=checkpoint_coverage.get(&writer).map_or(0,|prefix|prefix.0) {continue;}
+            let bytes=read_bytes(self.provider.as_ref(),&self.repository,&receipt.locator,cancel).await?;
+            if segment::digest(&bytes)!=hash { return Err(segment::corrupt()); }
+            let mut payload=segment::open(&bytes,&self.library,&writer,seq,&self.root_key)?;
+            drop(bytes);
+            for change in &payload.changes { if change.stamp.physical_ms.0>upper { return Err(ProviderError::new(ErrorKind::ClockSkew)); } history.merge(change)?; }
+            if catalog.include_segment(&payload)? {
+                for (hash,bytes) in &payload.message_pages { body_spool.push(hash,&URL_SAFE_NO_PAD.decode(bytes).map_err(error)?,crate::persistent_store::external_capture::BackupBodyRole::Control).map_err(error)?; }
+                let controls=super::snapshot_restore::download_control_catalogs(&payload.data_catalogs,
+                    &directory.join(format!("s{index}")),&self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
+                for control in controls {
+                    let super::content_store::ObjectSource::File(path)=control.source else {return Err(segment::corrupt());};
+                    let bytes=std::fs::read(path).map_err(error)?;
+                    if bytes.len() as u64!=control.byte_length {return Err(segment::corrupt());}
+                    body_spool.push(&control.content_hash,&bytes,crate::persistent_store::external_capture::BackupBodyRole::Control).map_err(error)?;
                 }
-                payload.message_pages.clear();
-                payload.changes.clear();
-                segments.push((receipt,payload));
+                asset_catalogs.extend(payload.asset_catalogs.clone());
+                for (body_hash,source) in &payload.large_bodies { standalone.insert(body_hash.clone(),source.clone()); standalone_roots.insert(body_hash.clone(),super::contract::segment_object_id(&payload.writer_id,payload.seq.0,&hash)?); }
             }
+            payload.message_pages.clear();
+            payload.changes.clear();
+            segments.push((receipt,payload));
         }
         body_spool.seal().map_err(error)?;
-        Ok(PublishedState {catalog,body_spool,standalone,standalone_roots,asset_catalogs,snapshots,segments})
+        Ok(PublishedState {catalog,body_spool,standalone,standalone_roots,asset_catalogs,snapshots,segments,listed})
     }
-    pub(crate) async fn compact_published(&self,directory:&Path,job_id:&str,writer:&str,capabilities:&super::capabilities::Capabilities,cancel:&Cancellation,protection:Option<(&super::leases::LeaseOwner,&super::leases::LeaseContext<'_>)>) -> Result<super::packaging::CompletedSnapshot> {
-        let mut state=self.published_state(&directory.join("inputs"),cancel).await?;
+    /// Publishes a checkpoint of the published state. `store` supplies only
+    /// the versions the uncovered segments are checked against.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn compact_published(&self,store:&mut crate::persistent_store::PersistentStore,directory:&Path,job_id:&str,writer:&str,capabilities:&super::capabilities::Capabilities,cancel:&Cancellation,protection:Option<(&super::leases::LeaseOwner,&super::leases::LeaseContext<'_>)>) -> Result<super::packaging::CompletedSnapshot> {
+        let mut state=self.published_state(store,&directory.join("inputs"),cancel).await?;
         if let Some((owner,context))=protection {if let Some(reason)=owner.recheck(context,cancel).await? {return Err(super::leases::yield_error(reason));}}
         #[cfg(test)] pause_compaction(job_id).await;
         cancel.check()?;
@@ -580,7 +591,7 @@ mod tests {
         }
         body_spool.seal().unwrap();
         let state=PublishedState{catalog,body_spool,standalone:Default::default(),standalone_roots:Default::default(),
-            asset_catalogs:vec![],snapshots:vec![],segments:vec![]};
+            asset_catalogs:vec![],snapshots:vec![],segments:vec![],listed:vec![]};
         let mut capture=super::super::capture::CaptureCatalog::create(&directory.path().join("external-storage/captures/current-payload"),&directory.path().join("external-storage"),None).unwrap();
         let identity=CaptureIdentity{store_id:"synthetic".into(),library_epoch:"synthetic".into(),generation:"synthetic".into(),selection_epoch:"synthetic".into(),revision:0};
         capture.begin(&identity,None).unwrap();capture.record("current",b"synthetic record").unwrap();
@@ -631,7 +642,7 @@ mod tests {
             assert_eq!(root.as_os_str().len(),66);
             let first="00000000-0000-4000-8000-000000000084";
             let directory=root.join("external-storage").join("maintenance").join(first);
-            let completed=f.sender.compact_published(&directory,first,&writer,&fake::capabilities(true),&cancel,None).await.unwrap();
+            let completed=f.sender.compact_published(&mut f.a,&directory,first,&writer,&fake::capabilities(true),&cancel,None).await.unwrap();
             let (_,checkpoint)=f.sender.checkpoint(&completed.reference.receipt,&cancel).await.unwrap();
             assert_eq!(checkpoint.covered_prefixes.get(&writer).unwrap().0,seq);
             f.a.commit(&WorkingSetCommit{expected_revision:f.a.revision().unwrap(),unit_mutations:Some(vec![
@@ -640,7 +651,7 @@ mod tests {
             f.publish_a().await;
             let second="00000000-0000-4000-8000-000000000083";
             let again=root.join("external-storage").join("maintenance").join(second);
-            let completed=f.sender.compact_published(&again,second,&writer,&fake::capabilities(true),&cancel,None).await.unwrap();
+            let completed=f.sender.compact_published(&mut f.a,&again,second,&writer,&fake::capabilities(true),&cancel,None).await.unwrap();
             let (_,checkpoint)=f.sender.checkpoint(&completed.reference.receipt,&cancel).await.unwrap();
             assert_eq!(checkpoint.covered_prefixes.get(&writer).unwrap().0,seq+1);
             let deepest=deepest_path(&root);
@@ -667,7 +678,7 @@ mod tests {
                 }]),..Default::default()}).unwrap();
                 f.publish_a().await;
                 let input=tempfile::tempdir().unwrap();
-                let state=f.sender.published_state(input.path(),&cancel).await.unwrap();
+                let state=f.sender.published_state(&mut f.a,input.path(),&cancel).await.unwrap();
                 assert_eq!(state.asset_catalogs.len(),1);
                 let root=RemoteObject::from_stored(&state.asset_catalogs[0],&f.sender.repository).unwrap();
                 let (_,old_packs,_)=super::super::snapshot_restore::read_catalog(&root,wire::CatalogKind::Assets,&[7;32],
@@ -677,17 +688,18 @@ mod tests {
                 f.publish_a().await;
                 let unpublished=small_asset(&mut f.a,"unpublished",b"unpublished native asset");
                 let before=old_packs.keys().map(|id|(id.clone(),f.provider.read_attempts(id))).collect::<BTreeMap<_,_>>();
-                let engine=if local {&f.sender}else{&f.receiver};
+                let compactor_writer=f.a.lww_clock_state().unwrap().writer_id;
+                let (engine,store)=if local {(&f.sender,&mut f.a)}else{(&f.receiver,&mut f.b)};
                 let work=tempfile::tempdir().unwrap();
-                let completed=engine.compact_published(work.path(),"00000000-0000-4000-8000-000000000087",
-                    &f.a.lww_clock_state().unwrap().writer_id,&fake::capabilities(true),&cancel,None).await.unwrap();
+                let completed=engine.compact_published(store,work.path(),"00000000-0000-4000-8000-000000000087",
+                    &compactor_writer,&fake::capabilities(true),&cancel,None).await.unwrap();
                 assert!(completed.compaction_capture_rows.unwrap()>0);
                 assert!(completed.compaction_catalog_merge_visits.unwrap()>=completed.compaction_capture_rows.unwrap());
                 let (_,checkpoint)=engine.checkpoint(&completed.reference.receipt,&cancel).await.unwrap();
                 assert!(engine.maintenance_needed(&cancel).await.unwrap().is_none());
                 if local {
-                    engine.compact_published(&work.path().join("equivalent"),"00000000-0000-4000-8000-000000000086",
-                        &f.a.lww_clock_state().unwrap().writer_id,&fake::capabilities(true),&cancel,None).await.unwrap();
+                    engine.compact_published(store,&work.path().join("equivalent"),"00000000-0000-4000-8000-000000000086",
+                        &compactor_writer,&fake::capabilities(true),&cancel,None).await.unwrap();
                     assert!(engine.maintenance_needed(&cancel).await.unwrap().is_none(),"equal-coverage checkpoints awaiting grace do not trigger compaction");
                     let writer=f.a.lww_clock_state().unwrap().writer_id;
                     let mut covered=checkpoint.clone();covered.covered_prefixes.insert(writer.clone(),risunest_sync_wire::stamp::DecimalU64(100));

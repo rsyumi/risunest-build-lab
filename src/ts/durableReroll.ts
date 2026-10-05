@@ -1,9 +1,12 @@
 import { writable, get } from 'svelte/store'
 export const activeRerollConversations = writable<string[]>([])
 import type { ActiveConversationSession } from './storage/activeConversationSession'
+import type { WindowedConversationMutationController } from './storage/activeWorkingSet.svelte'
 import { cloneConversationMetadata } from './storage/selectedConversationLifecycle'
 import type { Chat, Message } from './storage/database.svelte'
+import { PersistentMutationFencedError } from './storage/saveCoordinator'
 import { safeStructuredClone } from './polyfill'
+import { toAbsoluteIndex, toWindowIndex } from './process/historyWindowIndex'
 import {
     captureResponseVariants,
     projectResponseVariant,
@@ -13,13 +16,41 @@ import {
     type RerollRecovery,
 } from './responseVariants'
 
+/**
+ * What a response tail is written through: the active session of a complete
+ * conversation, the controller of a history window, or nothing for a plain chat.
+ */
+export type ResponseTailWriter = ActiveConversationSession | WindowedConversationMutationController | null
+
+function isWindowWriter(writer: ResponseTailWriter): writer is WindowedConversationMutationController {
+    return writer !== null && 'applyRange' in writer
+}
+
 export function replaceResponseTail(
     chat: Chat,
-    session: ActiveConversationSession | null,
+    session: ResponseTailWriter,
     start: number,
     messages: Message[],
     recovery: RerollRecovery | null | undefined = chat.rerollRecovery,
 ): void {
+    if (isWindowWriter(session)) {
+        const previous = chat.rerollRecovery
+        if (recovery) chat.rerollRecovery = recovery
+        else delete chat.rerollRecovery
+        const deleteCount = chat.message.length - start
+        const written = session.applyRange(
+            start,
+            deleteCount,
+            messages,
+            deleteCount === 0 && messages.length === 0 ? 'update-metadata' : 'replace-range',
+        )
+        if (!written) {
+            if (previous) chat.rerollRecovery = previous
+            else delete chat.rerollRecovery
+            throw new PersistentMutationFencedError()
+        }
+        return
+    }
     const expectedMetadata = cloneConversationMetadata(chat)
     const metadata = { ...expectedMetadata }
     if (recovery) metadata.rerollRecovery = recovery
@@ -42,7 +73,7 @@ export function replaceResponseTail(
     }
 }
 
-export function recoverInterruptedReroll(chat: Chat, session: ActiveConversationSession | null): boolean {
+export function recoverInterruptedReroll(chat: Chat, session: ResponseTailWriter): boolean {
     if (!chat.rerollRecovery) return false
     const messages = recoverRerollMessages(chat)
     // Keep the unchanged prefix outside the mutation and copy budget.
@@ -54,7 +85,7 @@ export function recoverInterruptedReroll(chat: Chat, session: ActiveConversation
 
 export function moveResponseCandidate(
     chat: Chat,
-    session: ActiveConversationSession | null,
+    session: ResponseTailWriter,
     direction: -1 | 1,
     createId: () => string,
 ): boolean {
@@ -74,8 +105,8 @@ export function moveResponseCandidate(
 
 interface GenerateResponseCandidateOptions {
     chat: Chat
-    currentChat?(): Chat | undefined
-    session(): ActiveConversationSession | null
+    currentChat?(): Chat | undefined | Promise<Chat | undefined>
+    session(): ResponseTailWriter
     isCurrent(): boolean
     createId(): string
     flush(): Promise<void>
@@ -107,7 +138,8 @@ async function runResponseCandidate(options: GenerateResponseCandidateOptions): 
     const recovery: RerollRecovery = {
         attemptId: options.createId(),
         phase: 'prepared',
-        startIndex: range.start,
+        // Absolute, so recovery on the complete conversation finds the same position.
+        startIndex: toAbsoluteIndex(chat, range.start),
         anchorId: chat.message[range.start - 1]?.chatId,
         original,
         responseCount: range.end - range.start,
@@ -117,16 +149,17 @@ async function runResponseCandidate(options: GenerateResponseCandidateOptions): 
     // A failed checkpoint leaves the original projection and candidates intact.
     await options.flush()
     if (!options.isCurrent()) return false
-    chat = options.currentChat?.() ?? chat
+    chat = (await options.currentChat?.()) ?? chat
+    const start = () => toWindowIndex(chat, recovery.startIndex)
     const prepared = chat.rerollRecovery!
-    if (JSON.stringify(chat.message.slice(range.start)) !== JSON.stringify(prepared.original)) return false
-    replaceResponseTail(chat, options.session(), range.start, [], { ...prepared, phase: 'generating' })
+    if (JSON.stringify(chat.message.slice(start())) !== JSON.stringify(prepared.original)) return false
+    replaceResponseTail(chat, options.session(), start(), [], { ...prepared, phase: 'generating' })
     let success = false
     try {
         success = await options.generate()
-        chat = options.currentChat?.() ?? chat
+        chat = (await options.currentChat?.()) ?? chat
         if (!success || options.aborted() || !options.isCurrent()) return false
-        const generated = chat.message.slice(range.start)
+        const generated = chat.message.slice(start())
         if (
             !generated.some(
                 (message) =>
@@ -159,22 +192,150 @@ async function runResponseCandidate(options: GenerateResponseCandidateOptions): 
         replaceResponseTail(
             chat,
             options.session(),
-            range.start,
+            start(),
             [...projectResponseVariant(variants, variants.selectedId), ...trailing],
             null,
         )
         try {
             await options.flush()
         } catch (error) {
-            replaceResponseTail(chat, options.session(), range.start, original, null)
+            replaceResponseTail(chat, options.session(), start(), original, null)
             throw error
         }
         return true
     } finally {
-        chat = options.currentChat?.() ?? chat
+        chat = (await options.currentChat?.()) ?? chat
         if (chat.rerollRecovery?.attemptId === recovery.attemptId) {
             recoverInterruptedReroll(chat, options.session())
             await options.flush()
         }
+    }
+}
+
+/** A window over the newest messages of the selected conversation. */
+export interface ResponseTailWindow {
+    readonly chat: Chat
+    readonly controller: WindowedConversationMutationController
+    release(): void
+}
+
+/** Opens the selected conversation from the absolute index `start` returns for its message count. */
+export type OpenResponseTail = (
+    start: (totalMessages: number) => number,
+) => Promise<ResponseTailWindow | null>
+
+const RESPONSE_TAIL_MESSAGES = 8
+
+/**
+ * Opens a tail window that holds the last response and the message before it.
+ * When the newest shown message is not a response, the first window is returned
+ * as it is, since no response exists to widen to.
+ */
+export async function openResponseTail(open: OpenResponseTail): Promise<ResponseTailWindow | null> {
+    let count = RESPONSE_TAIL_MESSAGES
+    for (;;) {
+        const window = await open((total) => Math.max(total - count, 0))
+        if (!window) return null
+        const messages = window.chat.message
+        const range = responseRange(messages)
+        if (
+            window.controller.absoluteStartIndex === 0
+            || (range && range.start > 0)
+            || (!range && messages.some((message) => !message.isComment && !message.disabled))
+        ) return window
+        count = Math.max(count, messages.length) * 2
+        window.release()
+    }
+}
+
+export interface WindowedResponseCandidateMove {
+    moved: boolean
+    /** The serialized last message when nothing moved but a response exists to generate a new candidate for. */
+    lastMessage: string | null
+}
+
+export async function moveWindowedResponseCandidate(
+    open: OpenResponseTail,
+    direction: -1 | 1,
+    createId: () => string,
+    flush: () => Promise<void>,
+): Promise<WindowedResponseCandidateMove | null> {
+    const window = await openResponseTail(open)
+    if (!window) return null
+    try {
+        if (moveResponseCandidate(window.chat, window.controller, direction, createId)) {
+            await flush()
+            return { moved: true, lastMessage: null }
+        }
+        return {
+            moved: false,
+            lastMessage: responseRange(window.chat.message)
+                ? JSON.stringify(window.chat.message.at(-1))
+                : null,
+        }
+    } finally {
+        window.release()
+    }
+}
+
+interface GenerateWindowedResponseCandidateOptions
+    extends Omit<GenerateResponseCandidateOptions, 'chat' | 'currentChat' | 'session'> {
+    open: OpenResponseTail
+    /** The serialized last message the candidate replaces; a different one cancels it. */
+    expectedLastMessage?: string
+}
+
+export interface WindowedResponseCandidateResult {
+    completed: boolean
+    lastMessage?: string
+    /**
+     * The generation succeeded but the tail could not be opened again to store
+     * the candidate. The stored recovery restores the previous response.
+     */
+    reopenFailed?: boolean
+}
+
+/**
+ * Generates a candidate over tail windows. The window is closed while the
+ * generation writes the conversation and reopened from the same absolute
+ * start afterwards. Returns null when no tail window opens.
+ */
+export async function generateWindowedResponseCandidate(
+    options: GenerateWindowedResponseCandidateOptions,
+): Promise<WindowedResponseCandidateResult | null> {
+    let window = await openResponseTail(options.open)
+    if (!window) return null
+    const start = window.controller.absoluteStartIndex
+    let generated = false
+    let reopenFailed = false
+    try {
+        if (
+            options.expectedLastMessage !== undefined &&
+            JSON.stringify(window.chat.message.at(-1)) !== options.expectedLastMessage
+        )
+            return { completed: false }
+        const completed = await generateResponseCandidate({
+            ...options,
+            chat: window.chat,
+            currentChat: async () => {
+                if (window) return window.chat
+                // A failed reopen is not retried, so the recovery stays stored as it is.
+                if (reopenFailed || !options.isCurrent()) return undefined
+                window = await options.open(() => start)
+                if (!window) reopenFailed = true
+                return window?.chat
+            },
+            session: () => window?.controller ?? null,
+            generate: async () => {
+                window?.release()
+                window = null
+                generated = await options.generate()
+                return generated
+            },
+        })
+        if (reopenFailed && generated) return { completed: false, reopenFailed: true }
+        return { completed, lastMessage: window?.chat.message.at(-1)?.data }
+    } finally {
+        window?.release()
     }
 }

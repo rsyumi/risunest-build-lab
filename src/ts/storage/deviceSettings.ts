@@ -13,7 +13,8 @@ export interface RisuNestDeviceSettings {
     performanceProfile: RuntimePerformanceProfile
     androidKeepAliveDuringGeneration: boolean
     nativeFileLogEnabled: boolean
-
+    generationHistoryLimitEnabled: boolean
+    generationHistoryLimitMultiplier: number
 }
 
 const storageKey = 'risuNestDeviceSettings'
@@ -24,6 +25,8 @@ const defaults: RisuNestDeviceSettings = {
     performanceProfile: 'normal',
     androidKeepAliveDuringGeneration: true,
     nativeFileLogEnabled: true,
+    generationHistoryLimitEnabled: false,
+    generationHistoryLimitMultiplier: 2,
 }
 
 function snapshot(settings: RisuNestDeviceSettings): RisuNestDeviceSettings {
@@ -43,12 +46,16 @@ function isValidSettings(value: unknown): value is RisuNestDeviceSettings {
     if (!value || typeof value !== 'object') return false
     const settings = value as Record<string, unknown>
     return (
-        Object.keys(settings).length === 4 &&
+        Object.keys(settings).length === 6 &&
         settings.schema === defaults.schema &&
         (settings.performanceProfile === 'normal' ||
             settings.performanceProfile === 'low-spec') &&
         typeof settings.androidKeepAliveDuringGeneration === 'boolean' &&
-        typeof settings.nativeFileLogEnabled === 'boolean'
+        typeof settings.nativeFileLogEnabled === 'boolean' &&
+        typeof settings.generationHistoryLimitEnabled === 'boolean' &&
+        typeof settings.generationHistoryLimitMultiplier === 'number' &&
+        Number.isFinite(settings.generationHistoryLimitMultiplier) &&
+        settings.generationHistoryLimitMultiplier >= 1
     )
 }
 
@@ -110,8 +117,9 @@ export function updateDeviceSettings(
     const { schema: _schema, ...updates } = partial as Partial<RisuNestDeviceSettings>
     const currentSettings = initializeSettings()
     const next = { ...currentSettings, ...updates }
+    if (!isValidSettings(next)) throw new Error('Invalid device settings')
     const previousPerformanceProfile = currentSettings.performanceProfile
-    settings = isValidSettings(next) ? next : snapshot(defaults)
+    settings = next
     if (settings.performanceProfile !== previousPerformanceProfile) {
         setRuntimePerformanceProfile(settings.performanceProfile)
     }

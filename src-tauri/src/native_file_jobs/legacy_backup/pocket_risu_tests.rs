@@ -475,11 +475,10 @@ fn cancels_before_preparing_pocket_payloads() {
 }
 
 #[test]
-#[ignore = "streams more than 1 GiB through staging and CAS; run explicitly for large-import validation"]
-fn pocket_backup_over_one_gib_restores_without_archive_sized_buffers() {
+fn pocket_backup_payload_restores_through_source_reads_of_at_most_64_kib() {
     let directory = tempfile::tempdir().unwrap();
     seed(directory.path());
-    let length = 1024_u64 * 1024 * 1024 + 65536;
+    let length = 4_u64 * 1024 * 1024 + 65537;
     let path = directory.path().join("large-source.bin");
     let mut file = File::create(&path).unwrap();
     let name = b"inlay/large.mp4";
@@ -538,8 +537,5 @@ fn pocket_backup_over_one_gib_restores_without_archive_sized_buffers() {
             .unwrap(),
         Some(length)
     );
-    println!(
-        "Restored {} archive bytes; largest source read = {} bytes",
-        report.source_bytes, source.largest_read
-    );
+    assert!(source.largest_read > 0);
 }

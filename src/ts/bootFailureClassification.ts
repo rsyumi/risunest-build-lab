@@ -45,7 +45,7 @@ function describeBootFailureError(error: unknown): string {
  */
 export function classifyBootFailure(error: unknown, stage?: BootStage): BootFailure {
     const message = describeBootFailureError(error)
-    if (message.includes('unsupported persistent schema version')) {
+    if (error && typeof error === 'object' && (error as { code?: unknown }).code === 'schema-mismatch') {
         return { kind: 'schema-unsupported', message, stage }
     }
     if (stage !== undefined && persistentStoreOpenStages.has(stage)) {

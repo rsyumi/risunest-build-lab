@@ -596,6 +596,24 @@ async function main() {
       "native quit saved revision survives restart exactly", { stored, actual });
     await report("app-restart", { passed: true, revision: saved.revision });
     await invoke("macos_bench_quit");
+  } else if (phase === "quit-escape") {
+    // The document never acknowledges, as a hung renderer would not.
+    const requests: { repeated?: boolean }[] = [];
+    await listen<{ repeated?: boolean }>("risu-macos-exit-requested", ({ payload }) => {
+      requests.push(payload);
+    });
+    await invoke("macos_lifecycle_ready");
+    await invoke("macos_bench_native_quit");
+    await until(async () => requests.length === 1, "native quit did not reach the document");
+    check(requests[0].repeated !== true, "the first native quit is not a repeat");
+    await invoke("macos_bench_repeat_native_quit");
+    await until(async () => requests.length === 2, "a repeated native quit did not ask the app again");
+    check(requests[1].repeated === true, "a quit repeated within the acknowledgement limit is delivered again");
+    await pause(5_500);
+    await report("quit-escape-armed", { passed: true, requests: requests.length });
+    await invoke("macos_bench_repeat_native_quit");
+    await pause(15_000);
+    throw new Error("a repeated native quit after the acknowledgement limit did not end the app");
   } else if (phase === "streaming") {
     document.getElementById("benchmark")!.remove();
     await import("../streaming/main");

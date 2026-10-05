@@ -52,23 +52,26 @@ final class NativeUITests: XCTestCase {
         if phase == "prepared" {
             guard legacyRestoreBoolean(payload["resetVerified"]) == true,
                   let memory = payload["memoryBefore"] as? [String: Any],
-                  memory["source"] as? String == "darwin-getrusage-process-lifetime-bytes",
-                  let beforePeak = legacyRestoreNumber(memory["peakRssBytes"]), beforePeak > 0 else {
+                  memory["source"] as? String == "darwin-task-resident-and-getrusage-lifetime-bytes",
+                  let beforePeak = legacyRestoreNumber(memory["peakRssBytes"]), beforePeak > 0,
+                  let beforeResident = legacyRestoreNumber(memory["residentBytes"]), beforeResident > 0 else {
                 print("RISUNEST_CR228_METRIC valid=0")
                 return
             }
-            print("RISUNEST_CR228_METRIC valid=1 \(fields) reset_verified=1 before_lifetime_peak_bytes=\(beforePeak)")
+            print("RISUNEST_CR228_METRIC valid=1 \(fields) reset_verified=1 before_lifetime_peak_bytes=\(beforePeak) before_resident_bytes=\(beforeResident)")
         } else {
-            guard payload["memorySource"] as? String == "darwin-getrusage-process-lifetime-bytes",
+            guard payload["memorySource"] as? String == "darwin-task-resident-and-getrusage-lifetime-bytes",
                   payload["outcome"] as? String == "succeeded",
                   let peak = legacyRestoreNumber(payload["peakRssBytes"]), peak > 0,
                   let samples = legacyRestoreNumber(payload["memorySamples"]), samples > 0,
+                  let baseline = legacyRestoreNumber(payload["restoreBaselineBytes"]), baseline > 0,
+                  let increment = legacyRestoreNumber(payload["restoreIncrementBytes"]),
                   let elapsed = legacyRestoreNumber(payload["elapsedMs"]),
                   let aboveTwice = legacyRestoreBoolean(payload["aboveTwiceDecoded"]) else {
                 print("RISUNEST_CR228_METRIC valid=0")
                 return
             }
-            let terminal = "succeeded=1 lifetime_peak_bytes=\(peak) memory_samples=\(samples) elapsed_ms=\(elapsed) above_twice_decoded=\(aboveTwice ? 1 : 0)"
+            let terminal = "succeeded=1 restore_baseline_bytes=\(baseline) restore_increment_bytes=\(increment) lifetime_peak_bytes=\(peak) memory_samples=\(samples) elapsed_ms=\(elapsed) above_twice_decoded=\(aboveTwice ? 1 : 0)"
             if phase == "verified" {
                 guard let verifiedCharacters = legacyRestoreNumber(payload["verifiedCharacterCount"]),
                       let verifiedMessages = legacyRestoreNumber(payload["verifiedMessageCount"]) else {

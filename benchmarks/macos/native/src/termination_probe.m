@@ -98,3 +98,16 @@ int risunest_bench_queue_native_quit(void (*observer)(int, int, int)) {
     CFRunLoopWakeUp(loop);
     return 1;
 }
+
+int risunest_bench_queue_repeated_quit(void) {
+    if (![NSThread isMainThread] || !productReplyOriginal) return 0;
+    CFRunLoopRef loop = CFRunLoopGetMain();
+    if (!loop) return 0;
+    // The first quit is still waiting in AppKit's modal loop, as a repeated Command-Q would find it.
+    NSArray *modes = @[(__bridge NSString *)kCFRunLoopCommonModes, NSModalPanelRunLoopMode];
+    CFRunLoopPerformBlock(loop, (__bridge CFTypeRef)modes, ^{
+        [NSApp terminate:nil];
+    });
+    CFRunLoopWakeUp(loop);
+    return 1;
+}

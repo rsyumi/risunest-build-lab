@@ -18,8 +18,7 @@ export const languageVietnamese = {
         "hypaDeletion": "Xóa các bản tóm tắt tiếp theo",
         "pluginDataDeletion": "Xóa dữ liệu plugin",
         "lorebookDeletion": "Xóa thư mục và mục lorebook",
-        "partialBackup": "Sao lưu không gồm tài nguyên khác",
-        "onlySelectedMessage": "Chỉ xóa tin nhắn này"
+        "partialBackup": "Sao lưu không gồm tài nguyên khác"
     },
 
     "formating": {

@@ -54,6 +54,7 @@ import {
 } from './persistentDataStore'
 import type { PluginStorageMeta } from '../plugins/pluginOwner'
 import { readPluginStorageMetaOwner } from '../plugins/pluginOwner'
+import { replaceArrayRange } from '../arrayRange'
 
 const DATABASE_VERSION = 1
 const DATABASE_SCHEMA_ID = 'risunest-persistent-data-v1'
@@ -2483,8 +2484,12 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         if (kind === 'conversation') {
             const record = await requestResult<StoredRecord<StoredConversation> | undefined>(transaction.objectStore('conversations').get(this.conversationKey(generation, id, field)))
             if (!record) throw new TypeError('Missing conversation parent')
-            patch(record.value.detail, conversationField)
-            this.putConversationRecord(transaction, generation, record.value.summary, record.value.detail)
+            const detail = record.value.detail
+            patch(detail, conversationField)
+            // The chat list reads the summary, so it follows the patched name and date.
+            const summary = { ...record.value.summary, name: typeof detail.name === 'string' ? detail.name : '' }
+            if (conversationField === 'lastDate') summary.recentAt = typeof detail.lastDate === 'number' ? detail.lastDate : 0
+            this.putConversationRecord(transaction, generation, summary, detail)
             return
         }
         if (kind === 'order' && id === 'conversations') {
@@ -2679,7 +2684,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             )
             const firstPageStart = startPage * MESSAGE_PAGE_SIZE
             const messages = pages.flatMap((page) => page.value)
-            messages.splice(start - firstPageStart, deleteCount, ...mutation.messages)
+            replaceArrayRange(messages, start - firstPageStart, deleteCount, mutation.messages)
 
             if (delta !== 0) {
                 await this.deleteConversationPages(

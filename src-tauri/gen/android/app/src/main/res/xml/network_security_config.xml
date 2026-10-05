@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Applies to the WebView and to native connections, which verify servers
+     through Android. User-configured endpoints and plugin resources may use
+     HTTP on a LAN or a certificate from a CA the user installed. -->
+<network-security-config>
+  <base-config cleartextTrafficPermitted="true">
+    <trust-anchors>
+      <certificates src="system" />
+      <certificates src="user" />
+    </trust-anchors>
+  </base-config>
+</network-security-config>

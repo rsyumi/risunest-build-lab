@@ -134,7 +134,15 @@ export function createHostToolBridge(dependencies: HostToolBridgeDependencies) {
         return { scope, tools }
     }
 
+    function assertScope(request: HostToolCallRequest): void {
+        if (request.scope !== scopeOf()) {
+            throw new Error('The selected conversation changed after the host tools were listed')
+        }
+    }
+
     async function callTool(caller: string, request: HostToolCallRequest, signal?: AbortSignal): Promise<RPCToolCallContent[]> {
+        throwIfAborted(signal)
+        assertScope(request)
         const entry = (await resolveSources(caller)).get(request.source)
         if (!entry) throw new Error(`Host tool source ${request.source} is not available`)
         if (entry.builtIn) await handshake(request.source, entry.source)
@@ -142,9 +150,8 @@ export function createHostToolBridge(dependencies: HostToolBridgeDependencies) {
             throw new Error(`Host tool source ${request.source} has no tool ${request.name}`)
         }
         throwIfAborted(signal)
-        if (request.scope !== scopeOf()) {
-            throw new Error('The selected conversation changed after the host tools were listed')
-        }
+        // The selection can change while a built-in asks the user for a folder or a key.
+        assertScope(request)
         const result = await entry.source.callTool(request.name, request.arguments)
         throwIfAborted(signal)
         return result

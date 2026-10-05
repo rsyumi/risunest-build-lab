@@ -164,7 +164,10 @@ export async function applyLwwWorkingSetUnits(
             if (canonicalJson(previous ?? null) === canonicalJson(current ?? null)) {
                 const selectedId = live[database.selectedPersona]?.id
                 database.personas = replace(live)
-                database.selectedPersona = Math.max(0, database.personas.findIndex((value) => value.id === selectedId))
+                const index = database.personas.findIndex((value) => value.id === selectedId)
+                database.selectedPersona = Math.max(0, index)
+                // The fallback after a remote deletion is not a local selection to save.
+                if (index < 0) (baseline.root as unknown as Record<string, unknown>).selectedPersona = database.personas[database.selectedPersona]?.id ?? database.selectedPersona
             }
             baseline.root.personas = replace(before)
         } else if (root && kind === 'persona') {
@@ -226,7 +229,14 @@ export async function applyLwwWorkingSetUnits(
             database.botPresets = isCatalogPresetWorkingSet(database.botPresets)
                 ? createPresetCatalogWorkingSetFromValues(next, catalog.revision, selectedId) : next
             if (isCatalogPresetWorkingSet(database.botPresets)) for (let index = 0; index < next.length; index++) database.botPresets[index] = next[index]
-            database.botPresetsId = Math.max(0, database.botPresets.findIndex((value) => value['id'] === selectedId))
+            const selectedIndex = database.botPresets.findIndex((value) => value['id'] === selectedId)
+            database.botPresetsId = Math.max(0, selectedIndex)
+            // The fallback after a remote deletion is not a local selection to save.
+            if (selectedIndex < 0) {
+                const fallbackId = database.botPresets[database.botPresetsId]?.['id']
+                const baselineRoot = baseline.root as unknown as Record<string, unknown>
+                baselineRoot.botPresetsId = typeof fallbackId === 'string' ? fallbackId : database.botPresetsId
+            }
             if (baseline.presets) baseline.presets = catalog.items.map((summary, index) => baseline.presets!.find((value) => value['id'] === summary.id) ?? canonicalClone(presets.get(summary.id)?.value ?? byId.get(summary.id) ?? next[index]))
         } else if (kind === 'exists' && id === 'character') {
             const summary = summaries.get(field)

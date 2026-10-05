@@ -335,6 +335,29 @@ describe('RisuNestDataHealth', () => {
         expect(onOpenUnusedImages).toHaveBeenCalledOnce()
     })
 
+    it('lists a change that was not applied with its own help and the error it stopped on', async () => {
+        const target = await setup({
+            ...damaged,
+            counts: { blocking: 0, degraded: 1, informational: 0 },
+            omitted: 0,
+            items: [
+                {
+                    code: 'intent-quarantined',
+                    severity: 'degraded',
+                    owner: { kind: 'intent', id: 'synthetic-request' },
+                    locator: null,
+                    target: { kind: 'intent', key: 'commit' },
+                    detail: 'synthetic store failure',
+                },
+            ],
+        })
+        const group = target.querySelector('[data-data-health-group]')
+        expect(group?.querySelector('summary')?.textContent).toContain(strings.codeIntentQuarantined)
+        expect(group?.textContent).toContain(strings.codeIntentQuarantinedHelp)
+        expect(group?.textContent).not.toContain(strings.severityDegradedHelp)
+        expect(group?.querySelector('[data-data-health-item]')?.textContent?.trim()).toBe('synthetic store failure')
+    })
+
     it.each([true, false, 'failure'])('waits for report save settlement (%s) before reporting the outcome', async (result) => {
         let resolve!: (value: boolean) => void
         let reject!: (error: unknown) => void

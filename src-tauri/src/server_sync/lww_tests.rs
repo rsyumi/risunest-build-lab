@@ -1430,3 +1430,232 @@ fn clock_retry_does_not_decode_publications_of_another_authority() {
     assert!(result.affected_keys.is_empty());
     assert_eq!(publication_ids(&client), ["other"]);
 }
+
+impl ServerWriter {
+    /// Publishes `count` units that the receiving store keeps without projecting them.
+    fn push_units(&self, operation: &str, prefix: &str, count: usize) {
+        self.server
+            .push(
+                &self.device,
+                &PushRequest {
+                    library_id: self.library_id.clone(),
+                    writer_id: Self::WRITER.into(),
+                    operation_id: operation.into(),
+                    changes: (0..count)
+                        .map(|index| UnitChange {
+                            key: UnitKey::new(&["synthetic-bootstrap", &format!("{prefix}-{index:04}")]).unwrap(),
+                            stamp: Stamp { physical_ms: 100.into(), logical: 0, writer_id: Self::WRITER.into() },
+                            value: UnitValue::inline(br#""synthetic""#).unwrap(),
+                        })
+                        .collect(),
+                },
+            )
+            .unwrap();
+    }
+}
+
+fn received_bootstrap_units(store: &PersistentStore) -> usize {
+    let authority = store.lww_binding_authority().unwrap();
+    store
+        .lww_read_unit_state(authority, None, 4096)
+        .unwrap()
+        .entries
+        .iter()
+        .filter(|entry| entry.key.components()[0] == "synthetic-bootstrap")
+        .count()
+}
+
+fn raise_journal_floor(server: &LocalServerFixture) -> String {
+    let db = rusqlite::Connection::open(server._root.path().join("metadata.sqlite")).unwrap();
+    // Old journal rows and acknowledgements no longer hold the floor.
+    db.execute("UPDATE journal SET created=0", []).unwrap();
+    db.execute("UPDATE devices SET last_ack=0", []).unwrap();
+    drop(db);
+    server.server.maintain().unwrap().min_retained_seq.as_str().to_owned()
+}
+
+fn server_cursor(store: &PersistentStore) -> Option<String> {
+    store
+        .lww_receive_progress(store.lww_binding_authority().unwrap())
+        .unwrap()
+        .into_iter()
+        .find(|progress| progress.kind == "server")
+        .map(|progress| progress.cursor.0.to_string())
+}
+
+#[test]
+fn a_multi_page_bootstrap_from_cursor_zero_finishes_every_page() {
+    let server = LocalServerFixture::new();
+    let writer = ServerWriter::new(&server.server);
+    writer.push_units("first-library", "unit", 257);
+    let floor = raise_journal_floor(&server);
+    assert_ne!(floor, "0");
+    let (_root, mut target) = local();
+    let client = server.client(&target);
+    assert_eq!(server_cursor(&target), None);
+    receive(&client, &mut target);
+    assert_eq!(received_bootstrap_units(&target), 257);
+    assert_eq!(server_cursor(&target).as_deref(), Some(floor.as_str()));
+    let pending: i64 = client
+        .log
+        .0
+        .query_row("SELECT (SELECT count(*) FROM bootstrap)+(SELECT count(*) FROM receive_pages)", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(pending, 0);
+}
+
+#[test]
+fn a_multi_page_bootstrap_from_a_received_cursor_keeps_it_until_the_last_page() {
+    let server = LocalServerFixture::new();
+    let writer = ServerWriter::new(&server.server);
+    writer.push_units("first-unit", "early", 1);
+    let (_root, mut target) = local();
+    let client = server.client(&target);
+    receive(&client, &mut target);
+    let received = server_cursor(&target).unwrap();
+    assert_ne!(received, "0");
+    writer.push_units("later-units", "later", 300);
+    let floor = raise_journal_floor(&server);
+    assert!(floor.parse::<u64>().unwrap() > received.parse::<u64>().unwrap());
+    let first = receive_cycle(&client, &mut target, &[]).unwrap();
+    assert_eq!(first.received_units, 256);
+    assert_eq!(server_cursor(&target).as_deref(), Some(received.as_str()));
+    receive(&client, &mut target);
+    assert_eq!(received_bootstrap_units(&target), 301);
+    assert_eq!(server_cursor(&target).as_deref(), Some(floor.as_str()));
+}
+
+#[test]
+fn an_empty_poll_reuses_the_admitted_clock_sample() {
+    let server = LocalServerFixture::new();
+    ServerWriter::new(&server.server).push_units("received", "received", 1);
+    let (_root, mut store) = local();
+    let client = server.client(&store);
+    receive(&client, &mut store);
+    assert!(server_cursor(&store).is_some());
+    let counters = client.client.test_io.clone().unwrap();
+    counters.reset();
+    assert_eq!(receive_cycle(&client, &mut store, &[]).unwrap().received_units, 0);
+    // One page read and one acknowledgement; the clock sample is still valid.
+    assert_eq!(counters.snapshot()[0], 2);
+}
+
+/// A server whose state pins expire before their first page is read.
+fn pins_expire_at_once(counted: Arc<std::sync::atomic::AtomicUsize>) -> LocalServerFixture {
+    LocalServerFixture::with_router(move |router| {
+        router.layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let pins = counted.clone();
+                async move {
+                    let path = request.uri().path().to_owned();
+                    if request.method() == axum::http::Method::POST && path == "/state/pins" {
+                        // A read that never stops is ended by refusing the tenth pin.
+                        if pins.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 9 {
+                            return axum::response::IntoResponse::into_response((
+                                axum::http::StatusCode::FORBIDDEN,
+                                axum::Json(serde_json::json!({"error":"forbidden"})),
+                            ));
+                        }
+                    }
+                    if request.method() == axum::http::Method::GET && path == "/state" {
+                        return axum::response::IntoResponse::into_response((
+                            axum::http::StatusCode::GONE,
+                            axum::Json(serde_json::json!({"error":"state-pin-expired"})),
+                        ));
+                    }
+                    next.run(request).await
+                }
+            },
+        ))
+    })
+}
+
+#[test]
+fn a_state_read_whose_pin_keeps_expiring_stops_with_a_retryable_error() {
+    let pins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let server = pins_expire_at_once(pins.clone());
+    let (_root, mut store) = local();
+    let client = server.client(&store);
+    let upper = client.admission().unwrap();
+    let error = client.state(&mut store, upper).unwrap_err();
+    assert_eq!((error.code.as_str(), error.retryable), ("state-pin-expired", true));
+    assert_eq!(pins.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[test]
+fn a_bootstrap_pin_that_expires_at_once_stops_with_a_retryable_error() {
+    let pins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let server = pins_expire_at_once(pins.clone());
+    ServerWriter::new(&server.server).push_units("pinned", "pinned", 1);
+    raise_journal_floor(&server);
+    let (_root, mut store) = local();
+    let client = server.client(&store);
+    let error = receive_cycle(&client, &mut store, &[]).err().unwrap();
+    assert_eq!((error.code.as_str(), error.retryable), ("state-pin-expired", true));
+    assert_eq!(pins.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let kept: i64 = client.log.0.query_row("SELECT count(*) FROM bootstrap", [], |r| r.get(0)).unwrap();
+    assert_eq!(kept, 0);
+}
+
+/// A server whose `/time` answers `behind` milliseconds before its own clock.
+fn server_clock_behind(behind: Arc<std::sync::atomic::AtomicU64>) -> LocalServerFixture {
+    LocalServerFixture::with_router(move |router| {
+        router.layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let behind = behind.clone();
+                async move {
+                    if request.method() == axum::http::Method::GET && request.uri().path() == "/time" {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64;
+                        let sample = risunest_sync_wire::lww::TimeSample {
+                            server_time_ms: (now - behind.load(std::sync::atomic::Ordering::SeqCst)).into(),
+                            precision_ms: 1.into(),
+                        };
+                        return axum::response::IntoResponse::into_response(axum::Json(sample));
+                    }
+                    next.run(request).await
+                }
+            },
+        ))
+    })
+}
+
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+#[test]
+fn a_stamp_beyond_an_earlier_clock_sample_is_received_after_one_new_sample() {
+    let behind = Arc::new(std::sync::atomic::AtomicU64::new(60_000));
+    let server = server_clock_behind(behind.clone());
+    let writer = ServerWriter::new(&server.server);
+    let (_root, mut store) = local();
+    let client = server.client(&store);
+    // Sampled while the server answered a minute behind its own clock.
+    client.admission().unwrap();
+    behind.store(0, std::sync::atomic::Ordering::SeqCst);
+    let key = UnitKey::new(&["root", "language"]).unwrap();
+    writer.push("ahead", &key, wall_ms() + 290_000, UnitValue::inline(br#""ja""#).unwrap());
+    receive(&client, &mut store);
+    assert_eq!(store.read_root(None).unwrap().value["language"], "ja");
+}
+
+#[test]
+fn a_stamp_beyond_a_new_clock_sample_stops_receiving_without_advancing() {
+    let behind = Arc::new(std::sync::atomic::AtomicU64::new(60_000));
+    let server = server_clock_behind(behind);
+    let writer = ServerWriter::new(&server.server);
+    let (_root, mut store) = local();
+    let client = server.client(&store);
+    let key = UnitKey::new(&["root", "language"]).unwrap();
+    writer.push("ahead", &key, wall_ms() + 290_000, UnitValue::inline(br#""ja""#).unwrap());
+    let error = receive_cycle(&client, &mut store, &[]).err().unwrap();
+    assert_eq!(error.code, "incoming-clock-skew");
+    assert_eq!(server_cursor(&store), None);
+    assert_ne!(store.read_root(None).unwrap().value["language"], "ja");
+}

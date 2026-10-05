@@ -433,6 +433,19 @@ test("ordinary main changes schedule existing shared, native and Android verific
   ]);
 });
 
+test("pull requests and the full local gate run the type, declaration and production bundle checks", () => {
+  const pullRequest = readFileSync(new URL('../../.github/workflows/pr-check.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const typecheck = pullRequest.slice(pullRequest.indexOf('\n  typecheck:\n'), pullRequest.indexOf('\n  independent-frontends:\n'));
+  const runs = [...typecheck.matchAll(/^\s+(?:- )?run: (.+)$/gm)].map((match) => match[1]);
+  for (const command of ['pnpm check', 'pnpm check:tests', 'pnpm check:plugin-dts', 'pnpm build', 'pnpm check:production-bundle', 'pnpm test:node'])
+    assert(runs.includes(command), command);
+  const scripts = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).scripts;
+  const shared = scripts['test:full:shared'].split(' && ');
+  for (const command of ['pnpm check', 'pnpm check:tests', 'pnpm check:plugin-dts', 'pnpm check:production-bundle', 'pnpm test:release'])
+    assert(shared.includes(command), command);
+  assert(scripts['test:full'].startsWith('pnpm test:full:shared && '));
+});
+
 test("Windows packaging executes the required app uninstall harness after bundling", () => {
   const desktop = workflow.slice(workflow.indexOf('  app-desktop:'), workflow.indexOf('  app-android:'));
   assert(desktop.indexOf('app-nsis-uninstall.node-test.mjs') > desktop.indexOf('Bundle app desktop assets'));

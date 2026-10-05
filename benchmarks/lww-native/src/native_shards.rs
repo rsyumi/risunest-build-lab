@@ -109,6 +109,7 @@ impl Iterator for NativeShards {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn shards_are_lazy_bounded_deterministic_and_continue_after_asset_assignment() {
         let plan = ShardPlan {ordinary_messages:2, assets_per_owner:2, ..ShardPlan::new(7,3)};
         let mut a = NativeShards::new(plan.clone()).unwrap();
@@ -143,6 +144,7 @@ mod tests {
         assert_eq!(a.assigned_assets(),3);
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn unbounded_plan_is_rejected_before_generation() {
         let mut plan = ShardPlan::new(1,100001);
         plan.ordinary_messages = 513;
@@ -150,6 +152,7 @@ mod tests {
         assert!(NativeShards::new(ShardPlan {assets_per_owner:0, ..ShardPlan::new(1,1)}).is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn one_owner_can_hold_ten_thousand_assets_within_shard_bytes() {
         let plan = ShardPlan {assets_per_owner:10_000, ..ShardPlan::new(3,10_000)};
         let shard = NativeShards::new(plan).unwrap().next().unwrap().unwrap();

@@ -724,7 +724,7 @@ export async function handlePluginInstallViaPlugin(plugins: RisuPlugin[]){
     const { additions } = reconcilePluginListUpdate(DBState.db.plugins, plugins)
     const approved: RisuPlugin[] = []
     for (const plugin of additions) {
-        if (plugin.version !== '3.0') continue
+        if (plugin.version !== '3.0' || plugin.name === '*') continue
         const confirmation = await alertConfirm(language.confirmInstallPluginViaPlugin.replace('{plugin}', plugin.name))
         if (confirmation) approved.push(plugin)
     }

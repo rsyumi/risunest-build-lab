@@ -59,26 +59,35 @@ describe('plugin removal option', () => {
         expect(mocks.deleteData).toHaveBeenCalledWith('synthetic')
         expect(DBState.db.currentPluginProvider).toBe('')
     })
-    it('keeps the plugin and provider until deletion finishes', async () => {
-        let finish!: () => void
+    it('deletes the data only after the reload has stopped the plugin', async () => {
+        let finishReload!: () => void
         mocks.confirm.mockResolvedValue({ confirmed: true, checked: true })
-        mocks.deleteData.mockImplementation(() => new Promise<void>(resolve => { finish = resolve }))
+        mocks.reload.mockImplementation(() => new Promise<void>(resolve => { finishReload = resolve }))
         await remove()
-        await vi.waitFor(() => expect(mocks.deleteData).toHaveBeenCalled())
-        expect(DBState.db.plugins).toHaveLength(1)
-        expect(DBState.db.currentPluginProvider).toBe('synthetic')
-        finish()
-        await vi.waitFor(() => expect(DBState.db.plugins).toHaveLength(0))
+        await vi.waitFor(() => expect(mocks.reload).toHaveBeenCalledOnce())
+        expect(DBState.db.plugins).toHaveLength(0)
+        expect(DBState.db.currentPluginProvider).toBe('')
+        await new Promise(resolve => setTimeout(resolve, 0))
+        expect(mocks.deleteData).not.toHaveBeenCalled()
+        finishReload()
+        await vi.waitFor(() => expect(mocks.deleteData).toHaveBeenCalledExactlyOnceWith('synthetic'))
     })
-    it('keeps the plugin and permissions and shows deletion failure', async () => {
+    it('removes the plugin, keeps its permissions and shows a deletion failure', async () => {
         mocks.confirm.mockResolvedValue({ confirmed: true, checked: true })
         mocks.deleteData.mockRejectedValue(new Error('deletion failed'))
         await remove()
         await vi.waitFor(() => expect(mocks.error).toHaveBeenCalled())
-        expect(DBState.db.plugins).toHaveLength(1)
-        expect(DBState.db.currentPluginProvider).toBe('synthetic')
+        expect(DBState.db.plugins).toHaveLength(0)
+        expect(DBState.db.currentPluginProvider).toBe('')
         expect((DBState.db as any).pluginPermissions).toEqual({ synthetic: true })
-        expect(mocks.reload).not.toHaveBeenCalled()
+        expect(mocks.reload).toHaveBeenCalledOnce()
+    })
+    it('keeps the data when the reload fails', async () => {
+        mocks.confirm.mockResolvedValue({ confirmed: true, checked: true })
+        mocks.reload.mockRejectedValue(new Error('unload failed'))
+        await remove()
+        await vi.waitFor(() => expect(mocks.error).toHaveBeenCalled())
+        expect(mocks.deleteData).not.toHaveBeenCalled()
     })
     it('cancels without removing the plugin or its data', async () => {
         mocks.confirm.mockResolvedValue({ confirmed: false, checked: true })

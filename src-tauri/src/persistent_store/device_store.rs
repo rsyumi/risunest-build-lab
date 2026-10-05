@@ -296,7 +296,7 @@ impl DeviceStore {
             0 => create_schema(&mut connection)?,
             DEVICE_SCHEMA_VERSION => validate_schema(&connection)?,
             _ => {
-                return Err(StoreError::Store {
+                return Err(StoreError::SchemaMismatch {
                     message: format!("unsupported device schema version {version}"),
                 })
             }
@@ -518,7 +518,7 @@ fn validate_schema(db: &Connection) -> StoreResult<()> {
     reference.execute_batch(super::message_pages::SCHEMA)?;
     create_triggers(&reference)?;
     if definitions(db)? != definitions(&reference)? {
-        return Err(invalid("Device schema is incompatible"));
+        return Err(StoreError::SchemaMismatch { message: "Device schema is incompatible".into() });
     }
     let meta: i64 = db.query_row(
         "SELECT count(*) FROM device_meta WHERE singleton=1 AND length(writer_id)>0",

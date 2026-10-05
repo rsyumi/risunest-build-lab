@@ -1,5 +1,6 @@
 import { IDBFactory, IDBKeyRange, IDBObjectStore } from 'fake-indexeddb'
 import { describe, expect, it, vi } from 'vitest'
+import { writeHistoryWindow } from '../../process/historyWindowWrite'
 import { ActiveWorkingSet } from '../activeWorkingSet.svelte'
 import type { Chat, Database, Message, character, groupChat } from '../database.svelte'
 import { IndexedDbPersistentDataStore } from '../indexedDbPersistentDataStore'
@@ -602,6 +603,30 @@ describe('ActiveWorkingSet', () => {
             persistedSessionVersion: 2,
         })
         expect(harness.readConversation).not.toHaveBeenCalled()
+    })
+
+    it('writes a script removal inside a generation window through the windowed tail', async () => {
+        const full = makeChat('chat-a')
+        full.message = [
+            { role: 'user', data: 'covered', chatId: 'a' },
+            { role: 'char', data: 'removed', chatId: 'b' },
+            { role: 'user', data: 'kept', chatId: 'c' },
+            { role: 'char', data: 'tail', chatId: 'd' },
+        ] as Message[]
+        const harness = makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
+        await expect(harness.workingSet.activateCharacter('a')).resolves.toBe(true)
+        const target = harness.workingSet.captureSelectedConversationTarget()!
+        const local = { ...structuredClone(full), message: structuredClone(full.message.slice(1)) }
+        const controller = harness.workingSet.captureWindowedConversationMutationController(target, local, 1)!
+
+        expect(writeHistoryWindow(controller, [local.message[1], local.message[2]])).toBe(true)
+
+        expect(local.message.map((message) => message.data)).toEqual(['kept', 'tail'])
+        expect(harness.workingSet.captureSelectedConversationAuthority()).toMatchObject({ totalMessages: 3 })
+        expect(harness.workingSet.activeConversationViewportSource!.snapshot().totalMessages).toBe(3)
+        expect(harness.coordinator.recordActiveConversationMutation.mock.calls[0][0].mutations[0])
+            .toMatchObject({ start: 1, deleteCount: 3, messages: [{ data: 'kept' }, { data: 'tail' }] })
+        controller.release()
     })
 
     it('rolls back a bounded tail mutation when persistence rejects its evidence', async () => {

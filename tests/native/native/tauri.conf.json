@@ -7,7 +7,8 @@
   "bundle": {
     "active": false,
     "icon": [
-      "../../../src-tauri/icons/icon.ico"
+      "../../../src-tauri/icons/icon.ico",
+      "../../../src-tauri/icons/icon.png"
     ]
   },
   "plugins": {
@@ -36,7 +37,8 @@
             "main"
           ],
           "permissions": [
-            "core:default"
+            "core:default",
+            "notification:allow-is-permission-granted"
           ]
         }
       ],

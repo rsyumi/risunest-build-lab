@@ -36,7 +36,7 @@ fn portable_adoption_requires_completed_exact_native_session_before_release() {
     let job="coordinated-adoption";
     let id=coordinator.create_native_portable_session(job,true,&selected,0,Some(stage)).unwrap();
     let header=crate::persistent_store::lww::Header {binding_authority:store.lww_binding_authority().unwrap(),request_id:job.into()};
-    coordinator.set_library_replacement(&id,&header,&std::collections::BTreeMap::new()).unwrap();
+    coordinator.set_library_replacement(&id,&header,std::collections::BTreeMap::new().into_iter().map(Ok)).unwrap();
     journal_prepared_native_sections(&coordinator,&id,Spool::Source,&source).unwrap();
     coordinator.source_ready(&id).unwrap();
     journal_prepared_native_sections(&coordinator,&id,Spool::Rollback,&rollback).unwrap();
@@ -104,7 +104,7 @@ fn journaled_restore_carries_large_device_values_in_source_and_rollback_spools()
     let header = crate::persistent_store::lww::Header {
         binding_authority: store.lww_binding_authority().unwrap(), request_id: job.into(),
     };
-    coordinator.set_library_replacement(&id, &header, &std::collections::BTreeMap::new()).unwrap();
+    coordinator.set_library_replacement(&id, &header, std::collections::BTreeMap::new().into_iter().map(Ok)).unwrap();
     journal_prepared_native_sections(&coordinator, &id, Spool::Source, &source).unwrap();
     coordinator.source_ready(&id).unwrap();
     journal_prepared_native_sections(&coordinator, &id, Spool::Rollback, &rollback).unwrap();
@@ -697,7 +697,7 @@ fn native_journal_resumes_before_intent_and_around_an_inflight_section_commit() 
         let id = coordinator
             .create_native_portable_session("synthetic-job", true, &selected, 0, Some(stage.clone()))
             .unwrap();
-        coordinator.set_library_replacement(&id, &header, &units).unwrap();
+        coordinator.set_library_replacement(&id, &header, units.clone().into_iter().map(Ok)).unwrap();
         let source_manifests = journal_prepared_native_sections(
             &coordinator,
             &id,
@@ -786,8 +786,12 @@ fn native_library_stage_survives_reopen_and_marker_prevents_second_activation() 
     original.replace_put_root(&original_stage, &serde_json::json!({"username":"restored"})).unwrap();
     original.replace_commit(&original_stage, Some(0)).unwrap();
     let lease = original.lww_acquire_library_backup_capture(original.revision().unwrap()).unwrap().lease;
-    let units = original.lww_backup_unit_values(&lease).unwrap();
+    let mut units = original.lww_backup_unit_values(&lease).unwrap();
     original.release_revision(&lease).unwrap();
+    units.insert(
+        risunest_sync_wire::unit::UnitKey::new(&["future-unit", "synthetic"]).unwrap(),
+        risunest_sync_wire::unit::UnitValue::inline(br#""synthetic opaque unit""#).unwrap(),
+    );
     let source = capture_prepared_native_sections(&mut original, &selected, &NeverCancelled).unwrap();
     let rollback =
         capture_prepared_native_sections(&mut store, &selected, &NeverCancelled).unwrap();
@@ -815,7 +819,7 @@ fn native_library_stage_survives_reopen_and_marker_prevents_second_activation() 
         binding_authority: store.lww_binding_authority().unwrap(),
         request_id: "library-recovery-job".into(),
     };
-    coordinator.set_library_replacement(&id, &header, &units).unwrap();
+    coordinator.set_library_replacement(&id, &header, units.clone().into_iter().map(Ok)).unwrap();
     journal_prepared_native_sections(
         &coordinator,
         &id,
@@ -849,6 +853,7 @@ fn native_library_stage_survives_reopen_and_marker_prevents_second_activation() 
         resume_journaled_native_restore(&recovered, &id, &mut reopened).unwrap(),
         1
     );
+    assert_eq!(reopened.replacement_source_rows(&stage).unwrap(), 0);
     assert_eq!(reopened.revision().unwrap(), 1);
     assert_eq!(
         reopened.read_root(None).unwrap().value["username"],

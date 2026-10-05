@@ -7,8 +7,8 @@ import { get } from 'svelte/store'
 const platform = vi.hoisted(() => ({ isMobile: true }))
 vi.mock('src/ts/platform', () => ({ get isMobile() { return platform.isMobile } }))
 vi.mock('src/ts/stores.svelte', async () => {
-    const { writable } = await import('svelte/store')
-    return { alertStore: writable({ type: 'none', msg: '' }) }
+    const { createAlertQueue } = await import('src/ts/alertQueue')
+    return { alertStore: createAlertQueue({ type: 'none', msg: '' }, { gapMs: 0 }) }
 })
 vi.mock('./TextEditorMonaco.svelte', async () => ({ default: (await import('./TextEditorMonacoStub.test.svelte')).default }))
 vi.mock('./TextEditorPreview.svelte', async () => ({ default: (await import('./TextEditorPreviewStub.test.svelte')).default }))
@@ -83,8 +83,17 @@ describe('text editor popup', () => {
         expect(target.querySelector('h2')?.textContent).toBe('Description')
         expect(textarea.value).toBe('Original text')
         await vi.waitFor(() => expect(document.activeElement).toBe(close))
-        await new Promise((resolve) => setTimeout(resolve, 20))
+        await vi.dynamicImportSettled()
+        await tick()
         expect(target.querySelector('[data-monaco-stub]')).toBeNull()
+    })
+
+    it('has the code editor once its import settles on other devices', async () => {
+        platform.isMobile = false
+        const { target } = await open()
+        await vi.dynamicImportSettled()
+        await tick()
+        expect(target.querySelector('[data-monaco-stub]')).not.toBeNull()
     })
 
     it('saves the edited text and closes', async () => {
@@ -162,9 +171,10 @@ describe('text editor popup', () => {
 
     it('closes an alert shown over it on Escape before closing itself', async () => {
         const { request, textarea } = await open()
-        alertStore.set({ type: 'normal', msg: 'Synthetic notice' })
+        const notice = alertStore.open({ type: 'normal', msg: 'Synthetic notice' })
         textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
         expect(get(alertStore).type).toBe('none')
+        await expect(notice).resolves.toBe('')
         expect(request.cancel).not.toHaveBeenCalled()
         expect(textEditorPopup.request).toBe(request)
 
@@ -257,9 +267,10 @@ describe('text editor popup on desktop', () => {
     it('closes an alert shown over it before the code editor sees Escape', async () => {
         const { request, editor, editorInput } = await openOnDesktop()
         editor.dataset.widget = 'open'
-        alertStore.set({ type: 'normal', msg: 'Synthetic notice' })
+        const notice = alertStore.open({ type: 'normal', msg: 'Synthetic notice' })
         editorInput.dispatchEvent(escape())
         expect(get(alertStore).type).toBe('none')
+        await expect(notice).resolves.toBe('')
         expect(editor.dataset.widget).toBe('open')
         expect(request.cancel).not.toHaveBeenCalled()
         expect(textEditorPopup.request).toBe(request)

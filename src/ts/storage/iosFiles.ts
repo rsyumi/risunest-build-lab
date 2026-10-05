@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { join } from '@tauri-apps/api/path'
 import { iosStagingPath } from './nativePaths'
 import { mkdir, remove, writeFile } from '@tauri-apps/plugin-fs'
+import { isTauriIOS } from '../platform'
 
 export interface IOSPickedFile {
     path: string
@@ -9,9 +10,30 @@ export interface IOSPickedFile {
     bytes: number
 }
 export interface IOSPickedBackupSource { token: string; name: string; bytes: number }
+/** Releases the backup sources a reloaded page picked but never imported, and says so once. */
+export async function reportInterruptedIOSBackupSources(): Promise<void> {
+    const interrupted = await invoke<number>('native_portable_source_cleanup_orphans')
+    if (!Number.isSafeInteger(interrupted) || interrupted < 0) throw new Error('Interrupted backup source count is invalid')
+    if (interrupted === 0) return
+    const [{ alertError, waitAlert }, { failureReason }] = await Promise.all([
+        import('../alert'),
+        import('../gui/nativeFileJobDialogModel'),
+    ])
+    alertError(failureReason('import-interrupted'))
+    await waitAlert()
+}
+/** On iOS, says at start when a reloaded page left a picked backup source unimported. */
+export async function reportInterruptedIOSBackupSourcesAtStart(): Promise<void> {
+    if (!isTauriIOS) return
+    try {
+        await reportInterruptedIOSBackupSources()
+    } catch (error) {
+        console.error('Interrupted iOS backup sources could not be released', error)
+    }
+}
 export async function pickIOSBackupSource(signal?: AbortSignal): Promise<IOSPickedBackupSource | null> {
     if (signal?.aborted) throw cancelled()
-    await invoke('native_portable_source_cleanup_orphans')
+    await reportInterruptedIOSBackupSources()
     if (signal?.aborted) throw cancelled()
     const selected = await invoke<IOSPickedBackupSource & { cancelled: boolean }>('plugin:ios-native|pick_backup_source')
     if (selected.cancelled) return null

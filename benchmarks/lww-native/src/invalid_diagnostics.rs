@@ -166,6 +166,7 @@ pub fn byte_deltas(a:&JsonByteStructure,b:&JsonByteStructure) -> Vec<JsonByteDel
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn missing_input_and_count_or_byte_mismatch_are_incomplete() {
         let mut evidence=ReceiveIntentEvidence {observed_calls:1,observed_bytes:2,..Default::default()};
         evidence.finish();
@@ -178,6 +179,7 @@ mod tests {
         assert!(evidence.complete);
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn original_spans_preserve_field_order_escapes_numbers_and_partition_every_byte() {
         let input=br#" {"z":[1.0,"a\\\"b"],"progress":{"cursor":"99"},"a":true} "#;
         let structure=exact_json_structure(input,input).unwrap();
@@ -187,6 +189,7 @@ mod tests {
         assert!(exact_json_structure(input,reordered).is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn cursor_digit_growth_is_separate_from_protected_value_growth() {
         let a=br#"{"changes":[{"value":"same"}],"progress":{"cursor":"99"}}"#;
         let b=br#"{"changes":[{"value":"same"}],"progress":{"cursor":"100"}}"#;
@@ -199,6 +202,7 @@ mod tests {
             .iter().any(|delta|delta.category=="protected-change-input"));
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn commit_revision_and_alias_changes_remain_protected_pending_evidence() {
         let a=br#"{"kind":"commit","commit":{"expectedRevision":9},"aliases":[]}"#;
         let b=br#"{"kind":"commit","commit":{"expectedRevision":10},"aliases":[]}"#;

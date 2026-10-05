@@ -54,7 +54,8 @@ export interface ChatViewListenerAccess {
 }
 
 export interface ChatViewEventDependencies {
-    readConversation(): ChatViewConversation
+    /** Null while the selected conversation is still being resolved; nothing is reported until it is. */
+    readConversation(): ChatViewConversation | null
     /** Calls `onChange` whenever `readConversation` may return something else; returns a stop function. */
     watchConversation(onChange: () => void): () => void
     requestFrame(callback: () => void): void
@@ -113,6 +114,7 @@ export function createChatViewEvents(dependencies: ChatViewEventDependencies) {
             return
         }
         const conversation = dependencies.readConversation()
+        if (!conversation) return
         const identity = JSON.stringify([
             conversation.characterId,
             conversation.conversationId,
@@ -262,6 +264,66 @@ export function createChatViewEvents(dependencies: ChatViewEventDependencies) {
                         if (listener.owner === owner) unregister(id)
                     }
                 },
+            }
+        },
+    }
+}
+
+const unselected: ChatViewConversation = { characterId: null, conversationId: null, characterIndex: -1, chatIndex: -1 }
+
+export interface PinnedChatViewConversationDependencies {
+    /** The selection in the working set; its indices only tell when it moved. */
+    readSelection(): ChatViewConversation
+    watchSelection(onChange: () => void): () => void
+    resolvePosition(characterId: string, conversationId: string | null): Promise<{ characterIndex: number; chatIndex: number }>
+}
+
+/** Reports the selected conversation at the position the index APIs use for it. */
+export function createPinnedChatViewConversation(
+    dependencies: PinnedChatViewConversationDependencies,
+): Pick<ChatViewEventDependencies, 'readConversation' | 'watchConversation'> {
+    let current: ChatViewConversation | null = null
+    let requested: string | undefined
+    let request = 0
+
+    function refresh(onChange: () => void): void {
+        const selection = dependencies.readSelection()
+        const key = JSON.stringify([selection.characterId, selection.conversationId, selection.characterIndex, selection.chatIndex])
+        if (key === requested) return
+        requested = key
+        const token = ++request
+        const { characterId, conversationId } = selection
+        if (characterId === null) {
+            current = unselected
+            onChange()
+            return
+        }
+        current = null
+        void dependencies.resolvePosition(characterId, conversationId).catch((error) => {
+            console.error(error)
+            return { characterIndex: -1, chatIndex: -1 }
+        }).then((position) => {
+            if (token !== request) return
+            current = {
+                characterId,
+                conversationId,
+                characterIndex: position.characterIndex,
+                chatIndex: conversationId === null ? -1 : position.chatIndex,
+            }
+            onChange()
+        })
+    }
+
+    return {
+        readConversation: () => current,
+        watchConversation(onChange) {
+            const stop = dependencies.watchSelection(() => refresh(onChange))
+            refresh(onChange)
+            return () => {
+                stop()
+                current = null
+                requested = undefined
+                request++
             }
         },
     }

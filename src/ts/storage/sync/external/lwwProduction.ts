@@ -86,6 +86,10 @@ function createAdapter(connectionId: string): Adapter {
             ...header(connectionId, binding), inspectionId: target.inspectionId, targetId: target.targetId, libraryId: target.libraryId,
         } }),
         replaceFromTarget: replaceNativeSyncBinding,
+        reportStopped(error) {
+            const cause = error instanceof AggregateError ? error.errors[0] : error
+            if ((cause as { name?: unknown } | null)?.name !== 'AbortError') reportFailure(connectionId, cause)
+        },
         publishInitialSharedState: binding => publish(binding, false),
         async resumeBinding(binding) {
             binding.signal.throwIfAborted()

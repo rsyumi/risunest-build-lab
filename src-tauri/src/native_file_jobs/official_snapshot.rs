@@ -124,7 +124,7 @@ async fn download_snapshot_attempt(
     retry_after: &mut Duration,
 ) -> Result<DownloadOutcome, NativeJobError> {
     let endpoint = snapshot_endpoint(&request.base_url)?;
-    let client = reqwest::Client::builder()
+    let client = crate::platform_tls::client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(30))
         .build()

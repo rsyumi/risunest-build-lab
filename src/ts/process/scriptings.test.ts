@@ -913,7 +913,8 @@ test('gives Lua-created messages IDs that keep plugin fields through a later ful
   const ids = messages.map((message) => message.chatId)
   expect(ids.every((id) => typeof id === 'string' && id.length > 0)).toBe(true)
   expect(new Set(ids).size).toBe(ids.length)
-  expect(ids).not.toContain('original')
+  // The stored message keeps its id; the copy of it becomes a new message.
+  expect(ids[1]).toBe('original')
 
   const written = {
     message: messages.map((message, index) => ({ ...message, __plugin: `record-${index}` })),
@@ -932,6 +933,30 @@ test('gives Lua-created messages IDs that keep plugin fields through a later ful
   expect(roundTrip.chat.message.map((message) => message.chatId)).toEqual(ids)
   expect(roundTrip.chat.message.map((message) => (message as unknown as Record<string, unknown>).__plugin)).toEqual([
     'record-0', 'record-1', 'record-2', 'record-3', 'record-4',
+  ])
+})
+
+test('keeps repeated stored IDs through a full-chat round trip and drops only their plugin fields', async () => {
+  const result = await runScripted(`
+    listenEdit('editInput', function(id, value, meta)
+      setFullChat(id, getFullChat(id))
+      return value
+    end)
+  `, {
+    char: { chaId: 'lua-repeated-ids' } as never,
+    chat: {
+      message: [
+        { role: 'user', data: 'first', chatId: 'repeated', __plugin: 'a' },
+        { role: 'char', data: 'second', chatId: 'repeated', __plugin: 'b' },
+        { role: 'user', data: 'third', chatId: 'single', __plugin: 'c' },
+      ],
+    } as never,
+    mode: 'editInput',
+  }) as { chat: Chat }
+
+  expect(result.chat.message.map((message) => message.chatId)).toEqual(['repeated', 'repeated', 'single'])
+  expect(result.chat.message.map((message) => (message as unknown as Record<string, unknown>).__plugin)).toEqual([
+    undefined, undefined, 'c',
   ])
 })
 

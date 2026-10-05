@@ -86,8 +86,8 @@ function restoreStoreError(error: unknown): unknown {
         return new RevisionConflictError(expected, actual)
     }
     if (code === 'snapshot-released') return new SnapshotReleasedError()
-    if ((code === 'validation' || code === 'store-error' || code === 'commit-decode') && message !== undefined) {
-        return new Error(message)
+    if ((code === 'validation' || code === 'store-error' || code === 'commit-decode' || code === 'schema-mismatch') && message !== undefined) {
+        return Object.assign(new Error(message), { code })
     }
     return error
 }

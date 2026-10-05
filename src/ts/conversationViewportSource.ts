@@ -17,6 +17,7 @@ import type {
     Versioned,
 } from './storage/persistentDataStore'
 import { validateConversationWindowQuery } from './storage/persistentDataStore'
+import { replaceArrayRange } from './arrayRange'
 
 declare const conversationViewportKeyBrand: unique symbol
 
@@ -319,7 +320,7 @@ implements ConversationViewportSource {
             while (replacements.length < mutation.messages.length) {
                 replacements.push(this.createInsertedKey())
             }
-            nextKeys.splice(mutation.start, mutation.deleteCount, ...replacements)
+            replaceArrayRange(nextKeys, mutation.start, mutation.deleteCount, replacements)
         }
         this.keys = nextKeys.length === this.session.totalMessages
             ? nextKeys
@@ -486,8 +487,9 @@ implements ConversationViewportSource {
             || !Number.isSafeInteger(deleteCount)
             || deleteCount < 0
             || startIndex + deleteCount > this.totalMessages
-            || (messages.length !== deleteCount
-                && !(startIndex === this.totalMessages && deleteCount === 0))
+            // Keys follow the absolute index, so a range may change the message
+            // count only at the end of the conversation.
+            || (messages.length !== deleteCount && startIndex + deleteCount !== this.totalMessages)
         ) throw new RangeError('Optimistic conversation range is unsupported')
         const previousRows = new Map(this.rows)
         const previousOptimisticRows = new Set(this.optimisticRows)
@@ -638,20 +640,18 @@ implements ConversationViewportSource {
     }
 
     private evictUnpinnedRows(): boolean {
-        let evicted = false
-        while (this.rows.size > this.rowBudget) {
-            let oldestIndex: number | undefined
-            let oldestAccess = Number.POSITIVE_INFINITY
-            for (const [absoluteIndex, cached] of this.rows) {
-                if (this.isPinned(absoluteIndex) || cached.lastUsed >= oldestAccess) continue
-                oldestIndex = absoluteIndex
-                oldestAccess = cached.lastUsed
-            }
-            if (oldestIndex === undefined) return evicted
-            this.rows.delete(oldestIndex)
-            evicted = true
+        const excess = this.rows.size - this.rowBudget
+        if (excess <= 0) return false
+        const unpinned: [absoluteIndex: number, lastUsed: number][] = []
+        for (const [absoluteIndex, cached] of this.rows) {
+            if (!this.isPinned(absoluteIndex)) unpinned.push([absoluteIndex, cached.lastUsed])
         }
-        return evicted
+        if (unpinned.length === 0) return false
+        unpinned.sort((left, right) => left[1] - right[1])
+        for (let index = 0; index < Math.min(excess, unpinned.length); index += 1) {
+            this.rows.delete(unpinned[index][0])
+        }
+        return true
     }
 
     private isPinned(absoluteIndex: number): boolean {

@@ -439,7 +439,7 @@ pub(crate) struct RawCompaction {
 /// Snapshot creation is excluded setup for listing/restore cases, and background work for overlap.
 pub(crate) async fn compact_native_raw(
     engine:&crate::external_storage::lww_engine::ExternalLwwEngine,
-    provider:&Arc<crate::external_storage::fake::FakeProvider>,
+    provider:&Arc<crate::external_storage::fake::FakeProvider>,store:&mut PersistentStore,
     directory:&Path,job_id:&str,writer:&str,
     capabilities:&crate::external_storage::capabilities::Capabilities,
     protection:Option<(&crate::external_storage::leases::LeaseOwner,&crate::external_storage::leases::LeaseContext<'_>)>,
@@ -463,10 +463,10 @@ pub(crate) async fn compact_native_raw(
             if let Some(reason)=owner.recheck(context,&cancel).await? {
                 return Err(crate::external_storage::leases::yield_error(reason));
             }
-            engine.compact_published(directory,job_id,writer,capabilities,&cancel,Some((owner,context))).await
+            engine.compact_published(store,directory,job_id,writer,capabilities,&cancel,Some((owner,context))).await
         }).await
     } else {
-        engine.compact_published(directory,job_id,writer,capabilities,&cancel,None).await
+        engine.compact_published(store,directory,job_id,writer,capabilities,&cancel,None).await
     };
     let elapsed_ms=started.elapsed().as_secs_f64()*1000.0;
     let mut observation=take_work(true);
@@ -538,7 +538,7 @@ fn retained_compaction_costs(directory:&Path)->Result<Value,String> {
 /// Both stale views contain actual published receipts, and freeze before either checkpoint exists.
 pub(crate) async fn produce_incomparable_native(
     engine:&crate::external_storage::lww_engine::ExternalLwwEngine,
-    provider:&Arc<crate::external_storage::fake::FakeProvider>,directories:[&Path;2],jobs:[&str;2],writers:[&str;2],
+    provider:&Arc<crate::external_storage::fake::FakeProvider>,stores:[&mut PersistentStore;2],directories:[&Path;2],jobs:[&str;2],writers:[&str;2],
     capabilities:&crate::external_storage::capabilities::Capabilities)->Result<Value,String> {
     use crate::external_storage::contract::{Provider,Collection,ObjectPage,parse_segment_object_id};
     use crate::external_storage::lww_compaction::{CompactionBarrier,install_compaction_barrier};
@@ -586,7 +586,8 @@ pub(crate) async fn produce_incomparable_native(
         let more=(page+1)*100<views[0].len();
         provider.script_page(Collection::Segments,Ok(ObjectPage {objects:objects.to_vec(),next_cursor:more.then(||format!("frozen-a-{}",page+1))}));
     }
-    let first=engine.compact_published(directories[0],jobs[0],writers[0],capabilities,&cancel,None);
+    let [first_store,second_store]=stores;
+    let first=engine.compact_published(first_store,directories[0],jobs[0],writers[0],capabilities,&cancel,None);
     let second=async {
         barriers[0].reached.notified().await;
         provider.script_page(Collection::Snapshots,Ok(snapshots));
@@ -594,7 +595,7 @@ pub(crate) async fn produce_incomparable_native(
             let more=(page+1)*100<views[1].len();
             provider.script_page(Collection::Segments,Ok(ObjectPage {objects:objects.to_vec(),next_cursor:more.then(||format!("frozen-b-{}",page+1))}));
         }
-        let capture=engine.compact_published(directories[1],jobs[1],writers[1],capabilities,&cancel,None);
+        let capture=engine.compact_published(second_store,directories[1],jobs[1],writers[1],capabilities,&cancel,None);
         let release=async {
             barriers[1].reached.notified().await;
             barriers[0].resume.notify_one();barriers[1].resume.notify_one();

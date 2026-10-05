@@ -100,7 +100,7 @@ describe('removeChatMessage', () => {
             confirmInstantRemoval: () => confirmation.promise,
         })
         current = replacement
-        confirmation.resolve({ confirmed: true, checked: false })
+        confirmation.resolve({ confirmed: true, checked: true })
 
         await expect(removing).resolves.toBe('stale')
         expect(original.conversation.message.map((message) => message.data)).toEqual([
@@ -112,7 +112,7 @@ describe('removeChatMessage', () => {
             'replacement-one',
         ])
     })
-    it.each([true, false])('uses one option dialog and deletes selected only: %s', async checked => {
+    it.each([true, false])('uses one option dialog and deletes the later messages only when checked: %s', async checked => {
         const current = currentTarget('current')
         const confirmRemoval = vi.fn(async () => true)
         const confirmInstantRemoval = vi.fn(async () => ({ confirmed: true, checked }))
@@ -120,7 +120,7 @@ describe('removeChatMessage', () => {
             captureCurrent: () => current, getCurrentSession: () => null, confirmRemoval, confirmInstantRemoval })).toBe('removed')
         expect(confirmRemoval).not.toHaveBeenCalled()
         expect(confirmInstantRemoval).toHaveBeenCalledOnce()
-        expect(current.conversation.message.map(message => message.chatId)).toEqual(checked ? ['current-one'] : [])
+        expect(current.conversation.message.map(message => message.chatId)).toEqual(checked ? [] : ['current-one'])
     })
     it('cancels the option dialog without deleting or truncating', async () => {
         const current = currentTarget('current')

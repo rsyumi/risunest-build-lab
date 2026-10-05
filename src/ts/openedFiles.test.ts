@@ -118,9 +118,9 @@ describe('opened file delivery', () => {
         expect(acknowledgeOpenedFile).toHaveBeenCalledWith('/cache/opened_files/card.charx')
     })
 
-    it('retains failed Android deliveries and acknowledges completed native imports', async () => {
+    it('acknowledges every Android delivery once its outcome has been reported', async () => {
         mocks.android = true
-        const acknowledgeOpenedFile = vi.fn(async () => {})
+        const acknowledgeOpenedFile = vi.fn((_path: string) => {})
         window.RisuLifecycleBridge = { acknowledgeOpenedFile }
         const importFile = vi.fn(async (path: string): Promise<void | 'failed'> => {
             if (path === 'reported.charx') return 'failed'
@@ -132,7 +132,8 @@ describe('opened file delivery', () => {
         await consumeOpenedFiles(['failed.charx', 'legacy.charx', 'reported.charx', 'complete.charx'])
         expect(mocks.readFile.mock.calls.map(([path]) => path)).toEqual(['legacy.charx', 'reported.charx'])
         expect(mocks.alertError).toHaveBeenCalledOnce()
-        expect(acknowledgeOpenedFile).toHaveBeenCalledExactlyOnceWith('complete.charx')
+        expect(acknowledgeOpenedFile.mock.calls.map(([path]) => path))
+            .toEqual(['failed.charx', 'legacy.charx', 'reported.charx', 'complete.charx'])
     })
 
     it('reads and imports every file in order', async () => {

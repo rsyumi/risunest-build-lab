@@ -14,6 +14,10 @@ pub(crate) struct PendingFlush {
 
 impl PendingFlush {
     fn request(&mut self, now: Instant, exit_when_settled: bool) -> (String, Instant) {
+        // A wait that ended unanswered gives the next request a wait of its own.
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
+            self.clear();
+        }
         self.exit_when_settled |= exit_when_settled;
         let deadline = *self.deadline.get_or_insert(now + SETTLE_LIMIT);
         let token = self.token.get_or_insert_with(|| uuid::Uuid::new_v4().to_string()).clone();
@@ -26,7 +30,7 @@ impl PendingFlush {
         self.clear();
         exit
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     pub(crate) fn waiting(&self, now: Instant) -> bool {
         self.token.is_some() && self.deadline.is_some_and(|deadline| now < deadline)
     }
@@ -65,7 +69,6 @@ pub(crate) fn desktop_flush_complete(window: tauri::WebviewWindow, token: String
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
     #[test]
     fn shutdown_wait_is_bounded_and_only_matching_acknowledgement_settles_it() {
         let now = Instant::now();
@@ -73,10 +76,10 @@ mod tests {
         let (token, _) = state.request(now, false);
         assert_eq!(state.request(now + Duration::from_secs(1), false).0, token);
         assert!(!state.acknowledge("stale"));
-        assert!(state.waiting(now + Duration::from_secs(1)));
+        assert!(state.waiting(now + Duration::from_secs(1)), "a stale answer leaves the wait in place");
         assert!(!state.waiting(now + SETTLE_LIMIT));
         assert!(!state.acknowledge(&token));
-        assert!(!state.waiting(now));
+        assert!(!state.waiting(now), "the matching answer ends the wait");
         assert_ne!(state.request(now, false).0, token);
         state.clear();
         assert!(!state.waiting(now));
@@ -92,13 +95,41 @@ mod tests {
     }
 
     #[test]
+    fn a_request_after_an_unanswered_deadline_starts_a_new_wait() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(5);
+        let mut state = PendingFlush::default();
+        let (first, _) = state.request(now, false);
+        let (second, deadline) = state.request(later, true);
+        assert_ne!(first, second);
+        assert_eq!(deadline, later + SETTLE_LIMIT);
+        assert!(state.waiting(later));
+        assert!(!state.acknowledge(&first));
+        assert!(state.waiting(later), "the earlier answer does not settle the new wait");
+        assert!(state.acknowledge(&second));
+        assert!(!state.waiting(later));
+    }
+
+    #[test]
+    fn an_expired_request_does_not_carry_its_exit_into_the_next_one() {
+        let now = Instant::now();
+        let later = now + SETTLE_LIMIT;
+        let mut state = PendingFlush::default();
+        state.request(now, true);
+        let (token, _) = state.request(later, false);
+        assert!(!state.acknowledge(&token));
+    }
+
+    #[test]
     fn only_the_matching_answer_to_an_exiting_flush_exits() {
         let now = Instant::now();
         let mut state = PendingFlush::default();
         let (token, _) = state.request(now, false);
         state.request(now, true);
         assert!(!state.acknowledge("stale"));
+        assert!(state.waiting(now));
         assert!(state.acknowledge(&token));
+        assert!(!state.waiting(now));
         let (token, _) = state.request(now, false);
         assert!(!state.acknowledge(&token));
     }

@@ -9,11 +9,15 @@ use serde::{Deserialize, Serialize};
 pub(super) const SCHEMA: &str = r#"
 CREATE TABLE external_lww_sequences(target TEXT NOT NULL,writer TEXT NOT NULL,next_seq TEXT NOT NULL,PRIMARY KEY(target,writer));
 CREATE TABLE external_lww_segments(target TEXT NOT NULL,writer TEXT NOT NULL,seq TEXT NOT NULL,authority TEXT NOT NULL,metadata TEXT NOT NULL,sealed BLOB NOT NULL,complete INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(target,writer,seq));
-CREATE TABLE external_lww_seen(target TEXT NOT NULL,writer TEXT NOT NULL,seq TEXT NOT NULL,sha256 TEXT NOT NULL,PRIMARY KEY(target,writer,seq));
+CREATE TABLE external_lww_seen(target TEXT NOT NULL,writer TEXT NOT NULL,seq TEXT NOT NULL,sha256 TEXT NOT NULL,refs TEXT,absent INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(target,writer,seq));
 CREATE TABLE external_lww_objects(target TEXT NOT NULL,hash TEXT NOT NULL,body BLOB,PRIMARY KEY(target,hash));
-CREATE TABLE external_lww_receives(request_id TEXT PRIMARY KEY,body TEXT NOT NULL);
-CREATE TABLE external_lww_versions(target TEXT NOT NULL,key TEXT NOT NULL,stamp TEXT NOT NULL,identity TEXT NOT NULL,PRIMARY KEY(target,key,stamp));
+CREATE TABLE external_lww_receives(request_id TEXT PRIMARY KEY,target TEXT NOT NULL,body TEXT NOT NULL);
+CREATE TABLE external_lww_versions(target TEXT NOT NULL,key TEXT NOT NULL,stamp TEXT NOT NULL,identity TEXT NOT NULL,writer TEXT NOT NULL,seq TEXT NOT NULL,PRIMARY KEY(target,key,stamp,writer,seq));
+CREATE INDEX external_lww_versions_segment ON external_lww_versions(target,writer,seq);
 "#;
+/// Key prefix in `external_lww_objects` of the coverage a binding stage
+/// applied, kept until the first receive after its activation.
+const STAGE_PREFIX: &str = "stage/";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -27,9 +31,9 @@ pub(crate) struct UploadState {
 pub(crate) struct SealedBody {
     pub object_id: String,
     pub content_hash: String,
+    /// Length and digest of the sealed body file; empty until it is sealed.
     pub byte_length: u64,
     pub sha256: String,
-    pub bytes: String,
     pub resume: Option<UploadState>,
     pub complete: bool,
     pub locator: Option<crate::external_storage::contract::RemoteLocator>,
@@ -142,6 +146,35 @@ pub(crate) struct SealedPublication {
 }
 fn required_capture_time<'de,D:serde::Deserializer<'de>>(deserializer:D) -> std::result::Result<Option<u64>,D::Error> {
     Option::<u64>::deserialize(deserializer)
+}
+/// What cleanup needs from a published segment without reading it again. The
+/// segment name carries its hash, so an entry never goes stale.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SegmentReferences {
+    pub byte_length: u64,
+    pub plaintext_length: u64,
+    pub plaintext_sha256: String,
+    pub newest_physical_ms: u64,
+    pub data_catalogs: Vec<risunest_external_storage_format::snapshot::StoredObject>,
+    pub asset_catalogs: Vec<risunest_external_storage_format::snapshot::StoredObject>,
+    pub large_bodies: std::collections::BTreeMap<String, crate::external_storage::lww_segment::LargeBody>,
+}
+/// The files a publication keeps until it lands: frozen controls and sealed
+/// large bodies.
+pub(crate) fn publication_directory(root: &std::path::Path, job_id: &str) -> std::path::PathBuf {
+    root.join("external-storage").join("lww-publications").join(job_id)
+}
+pub(crate) fn sealed_body_path(root: &std::path::Path, job_id: &str, object_id: &str) -> std::path::PathBuf {
+    publication_directory(root, job_id).join("bodies").join(object_id)
+}
+/// Removes what a publication kept on disk once nothing reads it again.
+pub(crate) fn remove_publication_files(root: &std::path::Path, job_id: &str) -> StoreResult<()> {
+    match std::fs::remove_dir_all(publication_directory(root, job_id)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 impl SealedPublication {
     pub(crate) fn acknowledgements(&self) -> StoreResult<Vec<AckEntry>> {
@@ -285,6 +318,9 @@ impl PersistentStore {
                 "DELETE FROM external_lww_segments WHERE target=?1 AND writer=?2 AND seq=?3",
                 params![target, writer, pending.seq.0.to_string()],
             )?;
+            if let Some(job) = &pending.asset_job {
+                remove_publication_files(&self.repository_root, &job.job_id)?;
+            }
         }
         Ok(())
     }
@@ -294,7 +330,7 @@ impl PersistentStore {
     pub(crate) fn external_lww_settle_detached(
         &mut self,
         publication: &SealedPublication,
-        landed: bool,
+        landed: Option<&SegmentReferences>,
     ) -> StoreResult<()> {
         let seq = publication.seq.0.to_string();
         let tx = self.device_store_mut()?.transaction()?;
@@ -313,7 +349,7 @@ impl PersistentStore {
         let Some((stored_authority, metadata)) = stored else {
             return Err(super::lww::error("detached-publication-integrity"));
         };
-        let mut stored: SealedPublication = serde_json::from_str(&metadata)?;
+        let stored: SealedPublication = serde_json::from_str(&metadata)?;
         if stored_authority == authority
             || stored_authority != publication.authority.0.to_string()
             || stored.object_id != publication.object_id
@@ -343,28 +379,25 @@ impl PersistentStore {
                 |r| r.get(0),
             )
             .optional()?;
-        if landed {
+        if let Some(references) = landed {
             if seen.as_deref().is_some_and(|hash| hash != publication.sha256) {
                 return Err(super::lww::error("writer-sequence-integrity"));
             }
-            stored.complete = true;
             let following = publication
                 .seq
                 .0
                 .checked_add(1)
                 .ok_or_else(|| super::lww::error("sequence-overflow"))?;
-            tx.execute(
-                "UPDATE external_lww_segments SET metadata=?4,complete=1 WHERE target=?1 AND writer=?2 AND seq=?3",
-                params![publication.target, publication.writer, seq, serde_json::to_string(&stored)?],
-            )?;
-            tx.execute(
-                "INSERT OR IGNORE INTO external_lww_seen(target,writer,seq,sha256) VALUES(?1,?2,?3,?4)",
-                params![publication.target, publication.writer, seq, publication.sha256],
-            )?;
+            insert_seen(&tx, &publication.target, &publication.writer, publication.seq.0, &publication.sha256, Some(references))?;
             tx.execute(
                 "INSERT INTO external_lww_sequences(target,writer,next_seq) VALUES(?1,?2,?3)
                 ON CONFLICT(target,writer) DO UPDATE SET next_seq=excluded.next_seq",
                 params![publication.target, publication.writer, following.to_string()],
+            )?;
+            // The sequence and seen rows now hold what this row carried.
+            tx.execute(
+                "DELETE FROM external_lww_segments WHERE target=?1 AND writer=?2 AND seq=?3",
+                params![publication.target, publication.writer, seq],
             )?;
         } else {
             // A sequence some segment already used is never given to another.
@@ -377,6 +410,9 @@ impl PersistentStore {
             )?;
         }
         tx.commit()?;
+        if let Some(job) = &stored.asset_job {
+            remove_publication_files(&self.repository_root, &job.job_id)?;
+        }
         Ok(())
     }
     /// Forgets what this device was sending to a removed connection's
@@ -396,8 +432,10 @@ impl PersistentStore {
         };
         let mut kept = Vec::new();
         let mut dropped = Vec::new();
+        let mut jobs = Vec::new();
         for (writer, seq, metadata) in rows {
             let mut publication: SealedPublication = serde_json::from_str(&metadata)?;
+            jobs.extend(publication.asset_job.as_ref().map(|job| job.job_id.clone()));
             if !publication.complete {
                 if let Some(job) = publication.asset_job.take() {
                     release_cas_job(&self.repository_root, &job.job_id, crate::asset_repository::job_pins::CasReleaseOutcome::Aborted)?;
@@ -424,23 +462,32 @@ impl PersistentStore {
                 params![target, writer, seq, metadata],
             )?;
         }
+        tx.execute("DELETE FROM external_lww_receives WHERE target=?1", [target])?;
         tx.commit()?;
+        // A kept segment was sent whole, so none of these files is read again.
+        for job in jobs {
+            remove_publication_files(&self.repository_root, &job)?;
+        }
         Ok(())
     }
     /// Releases the file protection of every unfinished segment a retired
-    /// writer captured. The rows go with the writer change that retires it.
+    /// writer captured and removes the files its segments kept. The rows go
+    /// with the writer change that retires it.
     pub(super) fn external_lww_release_writer_jobs(&self, writer: &str) -> StoreResult<()> {
         let mut statement = self
             .device_store()?
             .connection()
-            .prepare("SELECT metadata FROM external_lww_segments WHERE writer=?1 AND complete=0")?;
+            .prepare("SELECT metadata,complete FROM external_lww_segments WHERE writer=?1")?;
         let rows = statement
-            .query_map([writer], |r| r.get::<_, String>(0))?
+            .query_map([writer], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        for metadata in rows {
+        for (metadata, complete) in rows {
             let publication: SealedPublication = serde_json::from_str(&metadata)?;
             if let Some(job) = &publication.asset_job {
-                release_cas_job(&self.repository_root, &job.job_id, crate::asset_repository::job_pins::CasReleaseOutcome::Aborted)?;
+                if !complete {
+                    release_cas_job(&self.repository_root, &job.job_id, crate::asset_repository::job_pins::CasReleaseOutcome::Aborted)?;
+                }
+                remove_publication_files(&self.repository_root, &job.job_id)?;
             }
         }
         Ok(())
@@ -463,29 +510,27 @@ impl PersistentStore {
         }
         Ok(false)
     }
+    /// Stores a receive page unless it is finished. A page stored before is
+    /// kept as it was, so a page already staged is offered unchanged. Returns
+    /// the id of an unfinished page.
     pub(crate) fn external_lww_stable_receive(
         &self,
-        request: super::lww::StageReceive,
-    ) -> StoreResult<super::lww::StageReceive> {
-        let body: Option<String> = self
-            .device_store()?
-            .connection()
-            .query_row(
-                "SELECT body FROM external_lww_receives WHERE request_id=?1",
-                [&request.header.request_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(body) = body {
-            return Ok(serde_json::from_str(&body)?);
+        target: &str,
+        request: &super::lww::StageReceive,
+    ) -> StoreResult<Option<String>> {
+        let id = &request.header.request_id;
+        if self.external_lww_receive_finished(id)? {
+            self.device_store()?.connection().execute("DELETE FROM external_lww_receives WHERE request_id=?1", [id])?;
+            return Ok(None);
         }
         self.device_store()?.connection().execute(
-            "INSERT INTO external_lww_receives VALUES(?1,?2)",
-            params![request.header.request_id, serde_json::to_string(&request)?],
+            "INSERT OR IGNORE INTO external_lww_receives(request_id,target,body) VALUES(?1,?2,?3)",
+            params![id, target, serde_json::to_string(request)?],
         )?;
-        Ok(request)
+        Ok(Some(id.clone()))
     }
     /// The stored receive page with this id, unless it is missing or finished.
+    /// A finished page is removed.
     pub(crate) fn external_lww_unfinished_receive(
         &self,
         request_id: &str,
@@ -494,15 +539,35 @@ impl PersistentStore {
             .device_store()?
             .connection()
             .query_row(
-                "SELECT body FROM external_lww_receives page WHERE request_id=?1 AND NOT EXISTS(SELECT 1 FROM lww_receive receive WHERE receive.request_id=page.request_id AND receive.finished=1)",
+                "SELECT body FROM external_lww_receives WHERE request_id=?1",
                 [request_id],
                 |r| r.get(0),
             )
             .optional()?;
-        Ok(match body {
-            Some(body) => Some(serde_json::from_str(&body)?),
-            None => None,
-        })
+        let Some(body) = body else { return Ok(None) };
+        if self.external_lww_receive_finished(request_id)? {
+            self.device_store()?.connection().execute("DELETE FROM external_lww_receives WHERE request_id=?1", [request_id])?;
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_str(&body)?))
+    }
+    /// Removes the pages of `target` that the latest listing no longer offers:
+    /// finished ones and those of segments another receive already covered.
+    pub(crate) fn external_lww_retain_receives(
+        &self,
+        target: &str,
+        offered: &std::collections::BTreeSet<String>,
+    ) -> StoreResult<()> {
+        let db = self.device_store()?.connection();
+        let stored = {
+            let mut statement = db.prepare("SELECT request_id FROM external_lww_receives WHERE target=?1")?;
+            let rows = statement.query_map([target], |r| r.get::<_, String>(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        for id in stored.iter().filter(|id| !offered.contains(*id)) {
+            db.execute("DELETE FROM external_lww_receives WHERE request_id=?1", [id])?;
+        }
+        Ok(())
     }
     pub(crate) fn external_lww_receive_finished(&self, request_id: &str) -> StoreResult<bool> {
         Ok(self.device_store()?.connection().query_row(
@@ -511,12 +576,17 @@ impl PersistentStore {
             |r| r.get(0),
         )?)
     }
+    /// Records the versions a segment carries and refuses one whose stamp
+    /// another value already holds.
     pub(crate) fn external_lww_verify_versions(
         &mut self,
         target: &str,
+        writer: &str,
+        seq: u64,
         changes: &[super::lww::Change],
     ) -> StoreResult<()> {
         let tx = self.device_store_mut()?.transaction()?;
+        let seq = seq.to_string();
         for change in changes {
             let stamp = serde_json::to_string(&change.stamp)?;
             let identity = change.value.identity();
@@ -528,16 +598,35 @@ impl PersistentStore {
                 identity.is_ok(),
             );
             let identity = identity.map_err(super::lww::error)?;
-            let old:Option<String>=tx.query_row("SELECT identity FROM external_lww_versions WHERE target=?1 AND key=?2 AND stamp=?3",params![target,change.key.as_str(),stamp],|r|r.get(0)).optional()?;
-            if old.as_ref().is_some_and(|old| old != &identity) {
+            let conflict: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_lww_versions WHERE target=?1 AND key=?2 AND stamp=?3 AND identity<>?4)",
+                params![target, change.key.as_str(), stamp, identity],
+                |r| r.get(0),
+            )?;
+            if conflict {
                 return Err(super::lww::error("equal-stamp-integrity"));
             }
             tx.execute(
-                "INSERT OR IGNORE INTO external_lww_versions VALUES(?1,?2,?3,?4)",
-                params![target, change.key.as_str(), stamp, identity],
+                "INSERT OR IGNORE INTO external_lww_versions(target,key,stamp,identity,writer,seq) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![target, change.key.as_str(), stamp, identity, writer, seq],
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+    /// Every version this device recorded for `target`, as key, stamp and
+    /// value identity.
+    pub(crate) fn external_lww_visit_versions(
+        &self,
+        target: &str,
+        visit: &mut dyn FnMut(&str, &str, &str) -> StoreResult<()>,
+    ) -> StoreResult<()> {
+        let db = self.device_store()?.connection();
+        let mut statement = db.prepare("SELECT key,stamp,identity FROM external_lww_versions WHERE target=?1")?;
+        let mut rows = statement.query([target])?;
+        while let Some(row) = rows.next()? {
+            visit(&row.get::<_, String>(0)?, &row.get::<_, String>(1)?, &row.get::<_, String>(2)?)?;
+        }
         Ok(())
     }
     pub(crate) fn external_lww_register_source(
@@ -853,11 +942,11 @@ impl PersistentStore {
             }
         }
         if publication.bodies.iter().any(|body| {
-            if body.bytes.is_empty() {
-                !body.sha256.is_empty() || body.byte_length != 0 || body.resume.is_some()
+            if body.sha256.is_empty() {
+                body.byte_length != 0 || body.resume.is_some()
                     || body.complete || body.locator.is_some() || publication.sealed
             } else {
-                body.sha256.is_empty() || body.byte_length == 0
+                risunest_sync_wire::validate_hash(&body.sha256).is_err() || body.byte_length == 0
                     || (body.complete && body.locator.is_none())
             }
         }) {
@@ -911,8 +1000,7 @@ impl PersistentStore {
                     .any(|(old, new)| {
                         old.object_id != new.object_id
                             || old.content_hash != new.content_hash
-                            || (!old.bytes.is_empty() && (old.sha256 != new.sha256 || old.bytes != new.bytes || old.byte_length != new.byte_length))
-                            || (old.bytes.is_empty() && (!old.sha256.is_empty() || old.byte_length != 0))
+                            || (!old.sha256.is_empty() && (old.sha256 != new.sha256 || old.byte_length != new.byte_length))
                             || (old.complete && (!new.complete || old.locator != new.locator))
                     })
             {
@@ -941,10 +1029,14 @@ impl PersistentStore {
         tx.commit()?;
         Ok(())
     }
+    /// Completes a landed publication. The versions were recorded when it
+    /// landed; the seen row takes its references here, and the row goes in
+    /// the same transaction, so nothing it carried is lost before then.
     pub(crate) fn external_lww_finish_publication(
         &mut self,
         publication: &SealedPublication,
         bytes: &[u8],
+        references: &SegmentReferences,
     ) -> StoreResult<()> {
         self.external_lww_persist(publication, bytes)?;
         self.lww_ack_outbox(
@@ -974,13 +1066,21 @@ impl PersistentStore {
         if authority != publication.authority.0.to_string() {
             return Err(super::lww::error("stale-binding-authority"));
         }
+        insert_seen(&tx, &publication.target, &publication.writer, publication.seq.0, &publication.sha256, Some(references))?;
         tx.execute(
             "INSERT INTO external_lww_sequences(target,writer,next_seq) VALUES(?1,?2,?3)
             ON CONFLICT(target,writer) DO UPDATE SET next_seq=excluded.next_seq",
             params![publication.target, publication.writer, next.to_string()],
         )?;
         tx.execute("INSERT INTO lww_progress(authority,kind,writer_id,cursor) VALUES(?1,'external',?2,?3) ON CONFLICT(kind,writer_id) DO UPDATE SET cursor=excluded.cursor,authority=excluded.authority",params![authority,publication.writer,publication.seq.0.to_string()])?;
+        tx.execute(
+            "DELETE FROM external_lww_segments WHERE target=?1 AND writer=?2 AND seq=?3",
+            params![publication.target, publication.writer, publication.seq.0.to_string()],
+        )?;
         tx.commit()?;
+        if let Some(job) = &publication.asset_job {
+            remove_publication_files(&self.repository_root, &job.job_id)?;
+        }
         Ok(())
     }
     pub(crate) fn external_lww_verify_seen(
@@ -990,28 +1090,7 @@ impl PersistentStore {
         seq: u64,
         hash: &str,
     ) -> StoreResult<bool> {
-        let previous: Option<String> = self
-            .device_store()?
-            .connection()
-            .query_row(
-                "SELECT sha256 FROM external_lww_seen WHERE target=?1 AND writer=?2 AND seq=?3",
-                params![target, writer, seq.to_string()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if previous.as_deref().is_some_and(|value| value != hash) {
-            return Err(super::lww::error("writer-sequence-integrity"));
-        }
-        Ok(previous.is_some())
-    }
-    pub(crate) fn external_lww_matches_seen(
-        &self,
-        target: &str,
-        writer: &str,
-        seq: u64,
-        hash: &str,
-    ) -> StoreResult<bool> {
-        Ok(self.device_store()?.connection().query_row("SELECT EXISTS(SELECT 1 FROM external_lww_seen WHERE target=?1 AND writer=?2 AND seq=?3 AND sha256=?4)",params![target,writer,seq.to_string(),hash],|r|r.get(0))?)
+        verify_seen(self.device_store()?.connection(), target, writer, seq, hash)
     }
     pub(crate) fn external_lww_record_seen(
         &self,
@@ -1019,14 +1098,200 @@ impl PersistentStore {
         writer: &str,
         seq: u64,
         hash: &str,
+        references: Option<&SegmentReferences>,
     ) -> StoreResult<()> {
-        self.external_lww_verify_seen(target, writer, seq, hash)?;
-        self.device_store()?.connection().execute(
-            "INSERT OR IGNORE INTO external_lww_seen(target,writer,seq,sha256) VALUES(?1,?2,?3,?4)",
+        insert_seen(self.device_store()?.connection(), target, writer, seq, hash, references)
+    }
+    /// The references this device recorded for the segment with this name.
+    pub(crate) fn external_lww_segment_references(
+        &self,
+        target: &str,
+        writer: &str,
+        seq: u64,
+        hash: &str,
+    ) -> StoreResult<Option<SegmentReferences>> {
+        let refs: Option<Option<String>> = self.device_store()?.connection().query_row(
+            "SELECT refs FROM external_lww_seen WHERE target=?1 AND writer=?2 AND seq=?3 AND sha256=?4",
             params![target, writer, seq.to_string(), hash],
+            |r| r.get(0),
+        ).optional()?;
+        Ok(match refs.flatten() {
+            Some(refs) => Some(serde_json::from_str(&refs)?),
+            None => None,
+        })
+    }
+    /// Keeps the coverage a binding stage applied and the segments it covers,
+    /// so the first receive after activating that stage starts after them.
+    pub(crate) fn external_lww_record_stage(
+        &mut self,
+        target: &str,
+        header: &Header,
+        coverage: &std::collections::BTreeMap<String, DecimalU64>,
+        covered: &[(String, u64, String)],
+    ) -> StoreResult<()> {
+        let tx = self.device_store_mut()?.transaction()?;
+        for (writer, seq, hash) in covered {
+            insert_seen(&tx, target, writer, *seq, hash, None)?;
+        }
+        tx.execute(
+            "DELETE FROM external_lww_objects WHERE target=?1 AND substr(hash,1,length(?2))=?2",
+            params![target, STAGE_PREFIX],
         )?;
+        let stage = StageCoverage { authority: header.binding_authority, coverage: coverage.clone() };
+        tx.execute(
+            "INSERT INTO external_lww_objects(target,hash,body) VALUES(?1,?2,?3)",
+            params![target, format!("{STAGE_PREFIX}{}", header.request_id), serde_json::to_vec(&stage)?],
+        )?;
+        tx.commit()?;
         Ok(())
     }
+    /// Starts receive progress at the coverage of the stage the current
+    /// binding activated. A stage waits while its switch or replacement is
+    /// still to come; one whose activation this store cannot prove is dropped
+    /// without seeding, and the receive starts from the beginning.
+    pub(crate) fn external_lww_seed_activation(&mut self, target: &str, authority: DecimalU64) -> StoreResult<()> {
+        let stages: Vec<(String, Vec<u8>)> = {
+            let mut statement = self.device_store()?.connection().prepare(
+                "SELECT hash,body FROM external_lww_objects WHERE target=?1 AND substr(hash,1,length(?2))=?2",
+            )?;
+            let rows = statement
+                .query_map(params![target, STAGE_PREFIX], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        for (key, body) in stages {
+            let stage: StageCoverage = serde_json::from_slice(&body)?;
+            if stage.authority == authority {
+                continue;
+            }
+            let receive_id = key.strip_prefix(STAGE_PREFIX).ok_or_else(|| super::lww::error("stage-coverage-integrity"))?;
+            // The activation replaces the library in one commit under the stage's
+            // receive id, with the authority the switch before it issued.
+            let switched = stage.authority.0.checked_add(1) == Some(authority.0);
+            let replaced: bool = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM lww_requests WHERE request_id=?1)",
+                [receive_id],
+                |r| r.get(0),
+            )?;
+            if switched && !replaced {
+                continue;
+            }
+            let activated = switched && replaced;
+            let tx = self.device_store_mut()?.transaction()?;
+            if activated {
+                let current: std::collections::BTreeMap<String, u64> = {
+                    let mut statement = tx.prepare("SELECT writer_id,cursor FROM lww_progress WHERE kind='external' AND authority=?1")?;
+                    let rows = statement
+                        .query_map([authority.0.to_string()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    rows.into_iter()
+                        .map(|(writer, cursor)| Ok((writer, cursor.parse::<u64>().map_err(super::lww::error)?)))
+                        .collect::<StoreResult<_>>()?
+                };
+                for (writer, prefix) in &stage.coverage {
+                    if current.get(writer).is_some_and(|cursor| *cursor >= prefix.0) {
+                        continue;
+                    }
+                    tx.execute(
+                        "INSERT INTO lww_progress(authority,kind,writer_id,cursor) VALUES(?1,'external',?2,?3) ON CONFLICT(kind,writer_id) DO UPDATE SET cursor=excluded.cursor,authority=excluded.authority",
+                        params![authority.0.to_string(), writer, prefix.0.to_string()],
+                    )?;
+                }
+            }
+            tx.execute("DELETE FROM external_lww_objects WHERE target=?1 AND hash=?2", params![target, key])?;
+            tx.commit()?;
+        }
+        Ok(())
+    }
+    /// Counts the listings a seen segment was missing from and forgets the
+    /// versions and references of a covered segment once it was missing from
+    /// two in a row.
+    pub(crate) fn external_lww_observe_listing(
+        &mut self,
+        target: &str,
+        listed: &std::collections::BTreeSet<(String, u64)>,
+        coverage: &std::collections::BTreeMap<String, DecimalU64>,
+    ) -> StoreResult<()> {
+        let tx = self.device_store_mut()?.transaction()?;
+        let rows: Vec<(String, String, i64)> = {
+            let mut statement = tx.prepare("SELECT writer,seq,absent FROM external_lww_seen WHERE target=?1")?;
+            let rows = statement
+                .query_map([target], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        for (writer, seq_text, absent) in rows {
+            let seq = seq_text.parse::<u64>().map_err(super::lww::error)?;
+            if listed.contains(&(writer.clone(), seq)) {
+                if absent != 0 {
+                    tx.execute("UPDATE external_lww_seen SET absent=0 WHERE target=?1 AND writer=?2 AND seq=?3", params![target, writer, seq_text])?;
+                }
+            } else if absent >= 1 && coverage.get(&writer).is_some_and(|prefix| seq <= prefix.0) {
+                forget_segment(&tx, target, &writer, &seq_text)?;
+            } else {
+                tx.execute("UPDATE external_lww_seen SET absent=absent+1 WHERE target=?1 AND writer=?2 AND seq=?3", params![target, writer, seq_text])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    /// Forgets the versions and references of a covered segment this device's
+    /// cleanup removed.
+    pub(crate) fn external_lww_forget_removed_segment(&mut self, target: &str, writer: &str, seq: u64, hash: &str) -> StoreResult<()> {
+        let tx = self.device_store_mut()?.transaction()?;
+        let seq = seq.to_string();
+        let seen: Option<String> = tx.query_row(
+            "SELECT sha256 FROM external_lww_seen WHERE target=?1 AND writer=?2 AND seq=?3",
+            params![target, writer, seq],
+            |r| r.get(0),
+        ).optional()?;
+        if seen.is_none_or(|seen| seen == hash) {
+            forget_segment(&tx, target, writer, &seq)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StageCoverage {
+    authority: DecimalU64,
+    coverage: std::collections::BTreeMap<String, DecimalU64>,
+}
+fn verify_seen(db: &rusqlite::Connection, target: &str, writer: &str, seq: u64, hash: &str) -> StoreResult<bool> {
+    let previous: Option<String> = db
+        .query_row(
+            "SELECT sha256 FROM external_lww_seen WHERE target=?1 AND writer=?2 AND seq=?3",
+            params![target, writer, seq.to_string()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if previous.as_deref().is_some_and(|value| value != hash) {
+        return Err(super::lww::error("writer-sequence-integrity"));
+    }
+    Ok(previous.is_some())
+}
+fn insert_seen(
+    db: &rusqlite::Connection,
+    target: &str,
+    writer: &str,
+    seq: u64,
+    hash: &str,
+    references: Option<&SegmentReferences>,
+) -> StoreResult<()> {
+    verify_seen(db, target, writer, seq, hash)?;
+    let references = references.map(serde_json::to_string).transpose()?;
+    db.execute(
+        "INSERT INTO external_lww_seen(target,writer,seq,sha256,refs,absent) VALUES(?1,?2,?3,?4,?5,0)
+        ON CONFLICT(target,writer,seq) DO UPDATE SET refs=COALESCE(excluded.refs,refs),absent=0",
+        params![target, writer, seq.to_string(), hash, references],
+    )?;
+    Ok(())
+}
+fn forget_segment(db: &rusqlite::Connection, target: &str, writer: &str, seq: &str) -> StoreResult<()> {
+    db.execute("DELETE FROM external_lww_versions WHERE target=?1 AND writer=?2 AND seq=?3", params![target, writer, seq])?;
+    db.execute("DELETE FROM external_lww_seen WHERE target=?1 AND writer=?2 AND seq=?3", params![target, writer, seq])?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1078,8 +1343,9 @@ mod asset_root_tests {
                 }
                 f.a.delete_asset_alias("asset",&alias.key,f.a.revision().unwrap()).unwrap();f.publish_a().await;
                 let work=tempfile::tempdir().unwrap();
-                let completed=f.sender.compact_published(work.path(),"00000000-0000-4000-8000-000000000085",
-                    &f.a.lww_clock_state().unwrap().writer_id,&f.sender.capabilities,&cancel,None).await.unwrap();
+                let writer=f.a.lww_clock_state().unwrap().writer_id;
+                let completed=f.sender.compact_published(&mut f.a,work.path(),"00000000-0000-4000-8000-000000000085",
+                    &writer,&f.sender.capabilities,&cancel,None).await.unwrap();
                 let (_,checkpoint)=f.sender.checkpoint(&completed.reference.receipt,&cancel).await.unwrap();
                 assert!(checkpoint.asset_catalogs.is_empty());assert!(checkpoint.standalone_bodies.is_empty());
                 assert_eq!(checkpoint.covered_prefixes.values().next().unwrap().0,4);

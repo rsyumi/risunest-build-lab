@@ -1,5 +1,6 @@
 import type { Chat, Message } from './storage/database.svelte'
 import { safeStructuredClone } from './polyfill'
+import { toWindowIndex } from './process/historyWindowIndex'
 
 export type MessageSnapshot = Omit<Message, 'responseVariants'>
 export interface ResponseVariantSet {
@@ -100,7 +101,9 @@ export function recoverRerollMessages(chat: Chat): Message[] {
     const anchor = recovery.anchorId
         ? chat.message.findIndex((message) => message.chatId === recovery.anchorId)
         : -1
-    const start = anchor >= 0 ? anchor + 1 : Math.min(recovery.startIndex, chat.message.length)
+    const start = anchor >= 0
+        ? anchor + 1
+        : Math.min(Math.max(toWindowIndex(chat, recovery.startIndex), 0), chat.message.length)
     const retained = chat.message.slice(start).filter((message) => {
         const owned = message.chatId ? recovery.outputs[message.chatId] : undefined
         return !owned || JSON.stringify(message) !== JSON.stringify(owned)

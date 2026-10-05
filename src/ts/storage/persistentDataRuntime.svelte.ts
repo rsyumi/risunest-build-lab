@@ -1,6 +1,7 @@
 import { generatingConversations } from './generatingConversationRegistry'
 import type { LwwStageReceive, LwwApplyResult, PersistentUnitMutation, ConversationMutation, WholeMessageIntent } from './persistentDataStore'
 import { flushPersistentIdentityEdits, derivePersistentIdentityMirrors } from './persistentIdentityHooks'
+import { applyReceivedDisplaySettings } from '../gui/receivedDisplaySettings'
 import { isConversationStreaming } from './streamingConversationRegistry'
 import { createPersistenceCanonicalCapture } from './reactivePersistenceCapture.svelte'
 import { isTauri } from '../platform'
@@ -160,6 +161,9 @@ export function createProductionStateAdapter(options: {
         canonicalCapture,
         beforeCapture: flushPersistentIdentityEdits,
         afterRemoteApply: derivePersistentIdentityMirrors,
+        afterRemoteRootChange(fields) {
+            void applyReceivedDisplaySettings(fields).catch((error) => console.error(error))
+        },
         captureCharacterIndex: () => characterIndex,
         captureCharacters() {
             return residentCharacters()

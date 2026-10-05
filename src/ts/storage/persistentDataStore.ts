@@ -409,6 +409,8 @@ export interface ConversationWindowQuery {
     anchorOccurrence?: 'first' | 'last'
     before?: number
     after?: number
+    /** A metadata window read may then report every message as not parser-inert instead of scanning bodies. */
+    skipParserWork?: boolean
 }
 
 export const CONVERSATION_RANGE_MAX_LIMIT = 4_096

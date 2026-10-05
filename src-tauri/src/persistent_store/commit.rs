@@ -87,6 +87,40 @@ pub(super) fn commit_lww(
     commit_inner(connection, input, asset_aliases, Some((header, stamp, digest)))
 }
 
+/// The units a local edit can change, captured before the edit so that `record` queues exactly
+/// the ones the edit changed, under the edit's stamp.
+pub(super) struct LocalCapture<'a> {
+    targets: &'a WorkingSetCommit,
+    asset_aliases: &'a [AssetAlias],
+    conversation_orders: BTreeSet<String>,
+    before: std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue>,
+}
+
+impl<'a> LocalCapture<'a> {
+    pub(super) fn begin(
+        transaction: &Transaction<'_>,
+        generation: &str,
+        targets: &'a WorkingSetCommit,
+        asset_aliases: &'a [AssetAlias],
+        conversation_orders: BTreeSet<String>,
+    ) -> StoreResult<Self> {
+        let before = super::lww::capture_targets(transaction, generation, targets, asset_aliases, true, &conversation_orders)?;
+        Ok(Self { targets, asset_aliases, conversation_orders, before })
+    }
+
+    pub(super) fn record(
+        self,
+        transaction: &Transaction<'_>,
+        generation: &str,
+        header: &super::lww::Header,
+        stamp: &risunest_sync_wire::stamp::Stamp,
+    ) -> StoreResult<()> {
+        let after = super::lww::capture_targets(transaction, generation, self.targets, self.asset_aliases, false, &self.conversation_orders)?;
+        let changed = super::lww::record_changes(transaction, self.before, after, stamp, header.binding_authority, &header.request_id)?;
+        super::lww::refresh_orders(transaction, generation, &changed)
+    }
+}
+
 fn commit_inner(
     connection: &mut Connection,
     input: &WorkingSetCommit,
@@ -157,10 +191,10 @@ fn commit_inner(
                     }
                 }
             }
-            let before = super::lww::capture_targets(transaction, active, input, asset_aliases, true, &conversation_orders)?;
-            Ok((retained, before, conversation_orders))
+            let capture = LocalCapture::begin(transaction, active, input, asset_aliases, conversation_orders)?;
+            Ok((retained, capture))
         },
-        |transaction, generation, (retained, before, conversation_orders)| {
+        |transaction, generation, (retained, capture)| {
             if let Some(root) = &input.root {
                 put_root(transaction, generation, root)?;
             }
@@ -202,9 +236,7 @@ fn commit_inner(
             }
             replace_changed_owner_heads(transaction, generation, input, &retained)?;
             if let Some((header, stamp, digest)) = lww {
-                let after = super::lww::capture_targets(transaction, generation, input, asset_aliases, false, &conversation_orders)?;
-                let changed = super::lww::record_changes(transaction, before, after, stamp, header.binding_authority, &header.request_id)?;
-                super::lww::refresh_orders(transaction, generation,&changed)?;
+                capture.record(transaction, generation, header, stamp)?;
                 transaction.execute("INSERT INTO lww_requests(request_id,digest,revision) VALUES(?1,?2,?3)", params![header.request_id, digest, current_revision(transaction)?+1])?;
             }
             Ok(())
@@ -2401,6 +2433,7 @@ pub(super) fn delete_generation(
     for (table, _) in GENERATION_TABLES.iter().rev() {
         while delete_generation_rows(transaction, table, generation, 256)? != 0 {}
     }
+    while delete_generation_rows(transaction, "replacement_source_units", generation, 256)? != 0 {}
     transaction.execute(
         "DELETE FROM snapshot_leases WHERE generation = ?1",
         [generation],
@@ -2493,7 +2526,7 @@ pub(super) fn purge_retired_batch(connection: &mut Connection, limit: usize) -> 
         .collect::<Result<Vec<_>, _>>()?;
     let mut budget = limit.max(1);
     for generation in &retired {
-        for (table, _) in GENERATION_TABLES.iter().rev() {
+        for table in GENERATION_TABLES.iter().rev().map(|(table, _)| *table).chain(["replacement_source_units"]) {
             if budget == 0 {
                 break;
             }

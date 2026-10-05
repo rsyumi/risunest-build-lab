@@ -14,13 +14,14 @@ foreach ($key in 'RUSTUP_TOOLCHAIN', 'RUSTC', 'CARGO_TARGET_DIR') {
     $savedEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
 }
 try {
-    $env:RUSTUP_TOOLCHAIN = 'stable'
-    $env:RUSTC = 'C:/Users/hyung/.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin/rustc.exe'
+    $env:RUSTUP_TOOLCHAIN = '1.97.1'
+    $env:RUSTC = $null
     $env:CARGO_TARGET_DIR = Join-Path $mainCheckout 'src-tauri/target'
-    $cargo = 'C:/Users/hyung/.rustup/toolchains/1.97.1-x86_64-pc-windows-msvc/bin/cargo.exe'
+    $cargo = 'cargo'
     $manifest = Join-Path $PSScriptRoot 'Cargo.toml'
     switch ($Action) {
-        'test' { & $cargo test --locked --manifest-path $manifest }
+        # The self-tests are ignored so the app's test run, which compiles the same modules, skips them.
+        'test' { & $cargo test --locked --manifest-path $manifest -- --include-ignored }
         'compile' { & $cargo test --locked --no-run --manifest-path $manifest }
         'plan' { & $cargo run --locked --manifest-path $manifest -- plan }
         'generate' {

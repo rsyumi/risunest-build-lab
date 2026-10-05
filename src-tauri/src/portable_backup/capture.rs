@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     asset_repository::{job_pins::DurableCasJob, PayloadCas},
-    persistent_store::PersistentStore,
+    persistent_store::{device_store::sections::PreparedSectionRows, PersistentStore},
 };
 use std::path::Path;
 
@@ -32,10 +32,11 @@ pub(crate) fn capture_library_with_ready(
     source_build: &str,
     ready: &dyn Fn() -> Result<()>,
 ) -> Result<CapturedLibrary> {
-    capture_library_inner(store, revision, job_directory, pins, preservation, probe, source_build, true, ready)
+    capture_library_inner(store, revision, job_directory, pins, preservation, probe, source_build, None, ready)
 }
 
-pub(crate) fn capture_library_only(
+/// Captures the library with `sections` as its device sections instead of this device's own.
+pub(crate) fn capture_library_with_sections(
     store: &mut PersistentStore,
     revision: i64,
     job_directory: &Path,
@@ -43,8 +44,9 @@ pub(crate) fn capture_library_only(
     preservation: bool,
     probe: &dyn CancellationProbe,
     source_build: &str,
+    sections: &[PreparedSectionRows],
 ) -> Result<CapturedLibrary> {
-    capture_library_inner(store, revision, job_directory, pins, preservation, probe, source_build, false, &|| Ok(()))
+    capture_library_inner(store, revision, job_directory, pins, preservation, probe, source_build, Some(sections), &|| Ok(()))
 }
 
 fn capture_library_inner(
@@ -55,15 +57,15 @@ fn capture_library_inner(
     preservation: bool,
     probe: &dyn CancellationProbe,
     source_build: &str,
-    include_device: bool,
+    given_sections: Option<&[PreparedSectionRows]>,
     ready: &dyn Fn() -> Result<()>,
 ) -> Result<CapturedLibrary> {
     check(probe)?;
-    let (capture,device_sections)=if include_device {
-        store.lww_acquire_backup_capture(revision)?
-    } else {
-        (store.lww_acquire_library_backup_capture(revision)?, Vec::new())
+    let (capture,local_sections)=match given_sections {
+        None => store.lww_acquire_backup_capture(revision)?,
+        Some(_) => (store.lww_acquire_library_backup_capture(revision)?, Vec::new()),
     };
+    let device_sections=given_sections.unwrap_or(&local_sections);
     let lease = capture.lease;
     let outcome = (|| {
         ready()?;
@@ -111,7 +113,7 @@ fn capture_library_inner(
         drop(rows);
         drop(payloads);
         catalog.db.execute_batch("DROP TABLE backup_payload_spool")?;
-        for section in &device_sections {
+        for section in device_sections {
             crate::device_backup::write_native_section(&catalog,section,probe)
                 .map_err(|error| Error::Io(std::io::Error::other(error.to_string())))?;
         }

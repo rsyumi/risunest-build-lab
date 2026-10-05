@@ -7,7 +7,16 @@ export const languageKorean = {
         "pluginDataDeletion": "플러그인 데이터 삭제",
         "lorebookDeletion": "로어북 폴더와 항목 삭제",
         "partialBackup": "다른 에셋을 제외한 백업",
-        "onlySelectedMessage": "이 메시지만 삭제"
+        "laterMessageDeletion": "이후 메시지도 함께 삭제",
+        "messageDeletionDescription": "이 메시지만 삭제되며, 이후 메시지도 함께 삭제할 경우 이 메시지 뒤의 모든 메시지가 함께 삭제됩니다.",
+        "hypaResetDescription": "이 채팅의 HypaV3 데이터가 모두 초기화되며, 되돌릴 수 없습니다.",
+        "hypaDeletionDescription": "이 요약 뒤의 모든 요약이 삭제되며, 되돌릴 수 없습니다.",
+        "characterTrashDescription": "이 캐릭터가 휴지통으로 이동하며, 휴지통에서 복구할 수 있습니다.",
+        "characterDeletionDescription": "이 캐릭터와 모든 채팅이 영구적으로 삭제되며, 되돌릴 수 없습니다.",
+        "lorebookDeletionDescription": "이 폴더와 폴더 안의 모든 로어북이 삭제됩니다.",
+        "dataReplacementDescription": "현재 데이터가 백업의 데이터로 교체되며, 자동 백업은 만들지 않습니다. 기존 데이터를 보관하려면 취소 후 직접 백업하세요.",
+        "partialBackupTitle": "부분 로컬 백업을 저장하시겠습니까?",
+        "partialBackupDescription": "이 백업에는 데이터베이스와 캐릭터 프로필 이미지, 사용자 아이콘, 커스텀 배경, 페르소나 아이콘, 폴더 이미지, 봇 프리셋 이미지만 포함되며, 감정 이미지, 추가 캐릭터 에셋, VITS 음성 파일 등 그 밖의 에셋은 포함되지 않습니다."
     },
 
     close: "닫기",
@@ -1743,6 +1752,7 @@ export const languageKorean = {
             invalid: '{0} 데이터를 저장하지 못했습니다. 해당 데이터를 확인한 후 저장을 다시 시도해주세요.',
             storage: '변경 사항을 저장하지 못했습니다. 저장 공간을 확보한 후 저장을 다시 시도해주세요.',
             tooLarge: '변경 사항이 너무 커서 저장할 수 없습니다. 방금 추가한 큰 대화나 데이터를 삭제한 후 저장을 다시 시도해주세요.',
+            currentChat: '현재 대화의 변경 사항을 저장하지 못했습니다. 저장을 다시 시도해주세요. 계속 실패할 경우 앱을 다시 시작해야 하며, 저장하지 못한 변경 사항은 사라집니다.',
             settings: '설정', conversation: '대화', presets: '프리셋', plugins: '플러그인', assets: '에셋', data: '앱',
         },
         account: {
@@ -1845,9 +1855,9 @@ export const languageKorean = {
             deleteConfirmOne: '이 값을 삭제하시겠습니까? 삭제한 값은 복원할 수 없습니다.',
             deleteConfirmSelected: '선택한 {0}개의 값을 삭제하시겠습니까? 삭제한 값은 복원할 수 없습니다.',
             deleteAllConfirm: '플러그인 데이터 {0}개를 모두 삭제하시겠습니까?',
-            deleteAllConfirmFinal: '모든 플러그인 데이터가 사라집니다. 정말 삭제하시겠습니까?',
+            deleteAllConfirmFinal: '목록의 모든 값이 삭제되며, 삭제한 값은 복원할 수 없습니다.',
             deleteVisibleConfirm: '보이는 {0}개의 값을 삭제하시겠습니까?',
-            deleteVisibleConfirmFinal: '선택한 플러그인 데이터가 사라집니다. 정말 삭제하시겠습니까?',
+            deleteVisibleConfirmFinal: '보이는 값이 모두 삭제되며, 삭제한 값은 복원할 수 없습니다.',
             assignSelected: '선택 항목 할당',
             reassign: '다른 플러그인으로 바꾸기',
             prefixGroup: '{0}로 시작하는 {1}개 · {2}',
@@ -2017,7 +2027,7 @@ export const languageKorean = {
             serviceWorker: '오프라인 기능 준비 중',
             ui: '화면 준비 중',
             elapsed: (seconds: number) => `${seconds}초 경과`,
-            rendererRecovered: 'WebView 렌더러가 중단되어 화면을 다시 불러왔습니다.',
+            rendererRecovered: '저장된 데이터로 화면을 다시 불러왔습니다.',
         },
         serverSync: {
             registrationCode: '등록 코드',
@@ -2058,7 +2068,8 @@ export const languageKorean = {
                 remote: '필요할 때 서버에서 불러오기',
                 local: '이 기기에 있는 파일',
                 remoteOnly: '서버에만 있는 파일',
-                unavailable: '이 기기에도 서버에도 없는 파일',
+                externalOnly: '외부 저장소에만 있는 파일',
+                unavailable: '찾을 수 없는 파일',
                 cleanupNote:
                     '이미 다운로드한 파일은 유지됩니다. 정리하면 서버에 있는 파일의 기기 사본만 삭제되며, 스냅샷에 필요한 파일은 스냅샷을 삭제할 때까지 유지됩니다.',
                 clean: '이 기기의 사본 정리',
@@ -2123,6 +2134,8 @@ export const languageKorean = {
             credentialsHelp:
                 '서버 관리 화면에서 만든 주소와 이 기기의 인증 정보를 입력하세요. 기기마다 따로 만들어야 합니다.',
             credentialUnavailable:
+                '운영체제에서 이 기기의 인증 정보를 열 수 없습니다. 키 저장소 잠금을 해제하거나, 서버에서 이 기기를 새로 등록한 뒤 새 등록 코드를 입력하세요.',
+            credentialUnavailableLinux:
                 '운영체제에서 이 기기의 인증 정보를 열 수 없습니다. 키 저장소 잠금을 해제하거나, 서버에서 이 기기를 새로 등록한 뒤 새 등록 코드를 입력하세요. Linux에서는 잠금 해제된 Secret Service가 필요합니다.',
             connect: '연결하고 동기화',
             disconnect: '연결 해제',
@@ -2225,6 +2238,12 @@ export const languageKorean = {
             overflowScopeAll: '전체',
             overflowScopeHelp:
                 '채팅 메시지 영역을 벗어나는 UI 요소(설정 버튼, 오버레이 등)의 렌더링을 최신 메시지 1개에만 허용할지, 전체 메시지에서 허용할지 선택할 수 있습니다. 사용하는 캐릭터와 호환되지 않는 경우 전체를 선택해주세요. 전체는 긴 대화에서 스크롤이 조금 느려질 수 있습니다.',
+            historyLimit: '이전 메시지 로딩 생략',
+            historyLimitHelp:
+                '메시지 전송 시 정해진 최대 컨텍스트 크기를 넘는 과거 메시지를 로딩하지 않도록 해 속도와 메모리 사용량을 개선합니다. 과거 메시지에 의존하는 로어북 탐색 기능이나 트리거, 모듈, 정규식, 플러그인 등이 제대로 동작하지 않을 수 있습니다. 전체 메시지를 조작하는 모듈이나 플러그인과는 함께 쓰지 마세요.',
+            historyLimitMultiplier: '로딩 생략 기준',
+            historyLimitMultiplierHelp:
+                '설정된 최대 컨텍스트 크기의 지정된 배수 만큼의 메시지를 로딩하게 됩니다. 하이파를 사용하는 경우 요약되지 않은 메시지는 생략되지 않으며, 사용하는 모듈이나 플러그인 등이 더 많은 과거 메시지를 요구하는 경우 이 값을 늘리면 됩니다.',
         },
         ui: {
             title: 'UI',
@@ -2486,6 +2505,9 @@ export const languageKorean = {
             codeRecordOrphan: '주인이 없는 기록',
             codeObjectUnreferenced: '아무 데서도 쓰지 않는 파일',
             codeUnclassified: '분류하지 못한 문제',
+            codeIntentQuarantined: '적용되지 않은 변경 사항',
+            codeIntentQuarantinedHelp:
+                '데이터에 적용되지 않은 변경 사항입니다. 필요한 경우 같은 변경을 다시 해주세요.',
             rootFieldCharacters: '캐릭터',
             rootFieldPresets: '프리셋',
             rootFieldPluginStorage: '플러그인 저장소',
@@ -2563,6 +2585,7 @@ export const languageKorean = {
             titleRisuSave: 'RisuSave 가져오기',
             titleLocalBackup: '로컬 백업 가져오기',
             titleBackup: 'RisuNest 백업 가져오기',
+            titleSnapshot: '스냅샷 복원',
             formatPocketRisu: 'PocketRisu 백업',
             formatRisuAi: 'RisuAI 백업',
             elapsed: '경과 {0}',
@@ -2656,6 +2679,7 @@ export const languageKorean = {
             "reasonCompatibilityImport": '이 형식의 백업을 가져오려면 백업 파일을 다시 선택하세요.',
             "reasonIo": '파일을 읽거나 쓰지 못했습니다. 파일 접근 권한을 확인한 후 다시 시도해주세요.',
             "reasonReselectSource": '가져오기를 다시 시도하려면 파일을 다시 선택해주세요.',
+            "reasonImportInterrupted": '가져오기를 완료하지 못했습니다. 다시 가져오려면 파일을 다시 선택해주세요.',
             "reasonCapability": '이 기기에서는 이 파일 작업을 사용할 수 없습니다.',
             "reasonRescueFormat": '이 복구 파일은 직접 복원할 수 없습니다. 복원할 수 있는 백업을 선택해주세요.',
             "reasonNoRecoverySource": '복구 파일로 내보낼 데이터를 찾지 못했습니다.',
@@ -2715,7 +2739,7 @@ export const languageKorean = {
         boot: {
             title: 'RisuNest를 시작하지 못했습니다',
             schemaUnsupported:
-                '데이터 폴더에 호환되지 않는 사전 배포 빌드의 저장소가 남아 있습니다. RisuNest는 이 저장소를 열 수 없고 자동으로 변환하지도 않습니다. 데이터 폴더에서 저장소를 직접 삭제한 뒤 RisuNest를 다시 시작하세요.',
+                '데이터 폴더의 저장소가 다른 버전의 RisuNest에서 저장되어 이 버전에서 열 수 없으며, 다시 시작해도 열리지 않습니다. 저장소의 데이터를 보관하려는 경우 먼저 사본 저장으로 원본 데이터를 저장하세요. 그다음 데이터 폴더를 삭제하고 RisuNest를 다시 시작해주세요.',
             storeOpen:
                 '로컬 데이터 저장소를 열지 못했습니다. 다른 RisuNest 창이 저장소를 사용 중이거나 데이터 폴더를 읽을 수 없는 상태일 수 있습니다. 실행 중인 다른 창을 닫고 다시 시작하세요.',
             unknown:
@@ -2723,8 +2747,9 @@ export const languageKorean = {
             restart: '다시 시작',
             copyDetails: '오류 내용 복사',
             copied: '오류 내용을 복사했습니다.',
-            dataPathWindows: 'Windows: %APPDATA%\\RisuNest\\',
+            dataFolder: '데이터 폴더',
             dataPathAndroid: 'Android: 앱 정보 > 저장공간에서 데이터 삭제',
+            dataPathIos: 'iOS: 앱 삭제 후 다시 설치',
             stage: '단계',
         },
         diag: {
@@ -2881,9 +2906,11 @@ export const languageKorean = {
 
     "syncConflictBackupUnreadable": '이 백업을 읽을 수 없습니다. 다른 백업을 선택하세요.',
     "chatMessageActionFailed": "작업 중 메시지가 변경되었습니다. 다시 시도하세요.",
+    "chatConversationActionFailed": "작업 중 대화가 변경되었습니다. 다시 시도하세요.",
     "groupCharactersChangeFailed": "그룹의 캐릭터를 변경하지 못했습니다. 다시 시도하세요.",
     "regexScriptTimeout": "정규식 스크립트 실행 시간이 초과되었습니다.",
     "generationInterruptedInBackground": "백그라운드에서 응답 생성이 중단되었습니다.",
+    "generationConversationChanged": "응답 생성 중 대화가 변경되어 응답을 반영하지 못했습니다. 다시 시도하세요.",
     "mcpDesktopOnly": "로컬 MCP는 데스크톱 앱에서 사용할 수 있습니다.",
     "screenshotPreparationFailed": "스크린샷을 준비하지 못했습니다. 범위를 줄여 다시 시도하세요.",
     lwwSync: {
@@ -2905,6 +2932,7 @@ export const languageKorean = {
         restoreAction: "복원",
         previousFilesTitle: "연결하시겠습니까?",
         previousFilesDescription: "이전에 연결한 서버나 외부 저장소에만 있는 파일이 있습니다. 연결하면 이 파일을 새 연결 대상에도 저장하며, 이 기기에도 보관하려면 다운로드 후 연결을 선택하세요.",
+        previousFilesUnknownDescription: "이전에 연결한 서버나 외부 저장소에만 있는 파일이 있는지 확인하지 못했습니다. 이런 파일이 있는 경우 연결하면 새 연결 대상에도 저장하며, 이 기기에도 보관하려면 다운로드 후 연결을 선택하세요.",
         downloadThenConnect: "다운로드 후 연결",
         downloadFailedNotConnected: "파일을 다운로드하지 못해 연결하지 않았습니다. 다시 시도하거나 다운로드하지 않고 연결하세요.",
         previousStorageUnavailable: "이전에 연결한 서버나 외부 저장소에만 있는 파일을 가져오지 못해 동기화하지 못했습니다. 연결할 수 있을 때 다시 시도하세요.",

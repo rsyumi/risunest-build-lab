@@ -253,7 +253,9 @@ interface UIPartResponse {
  * (RisuNest addition).
  */
 interface MessageButtonTarget {
+    /** The index `getCharacterFromIndex` and `getChatFromIndex` take for this character, or -1 */
     characterIndex: number;
+    /** The index `getChatFromIndex` takes for this chat, or -1 */
     chatIndex: number;
     /** Absolute stored index of the message, also in a windowed conversation */
     messageIndex: number;

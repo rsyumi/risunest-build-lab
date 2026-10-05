@@ -1,15 +1,40 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
+const { invoke, alertError, waitAlert } = vi.hoisted(() => ({ invoke: vi.fn(), alertError: vi.fn(), waitAlert: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
-import { exportIOSFile, pickIOSFile, getIOSPublication, pickIOSBackupSource, materializeIOSBackupSource } from './iosFiles'
+vi.mock('../alert', () => ({ alertError, waitAlert }))
+vi.mock('../gui/nativeFileJobDialogModel', () => ({ failureReason: (code: string) => `reason:${code}` }))
+import { exportIOSFile, pickIOSFile, getIOSPublication, pickIOSBackupSource, materializeIOSBackupSource, reportInterruptedIOSBackupSources } from './iosFiles'
 beforeEach(() => {
     invoke.mockReset()
+    alertError.mockReset()
+    waitAlert.mockReset().mockResolvedValue(undefined)
 })
 describe('iOS file publication', () => {
     it('returns native custody without an app-owned copy or a descriptor in JavaScript', async () => {
-        invoke.mockResolvedValue({cancelled:false, token:'selected-token', name:'synthetic.risunest', bytes:4_294_967_296})
+        invoke.mockImplementation(async command => command === 'native_portable_source_cleanup_orphans' ? 0
+            : {cancelled:false, token:'selected-token', name:'synthetic.risunest', bytes:4_294_967_296})
         await expect(pickIOSBackupSource()).resolves.toEqual({token:'selected-token', name:'synthetic.risunest', bytes:4_294_967_296})
         expect(invoke.mock.calls.map(call => call[0])).toEqual(['native_portable_source_cleanup_orphans','plugin:ios-native|pick_backup_source'])
+        expect(alertError).not.toHaveBeenCalled()
+    })
+    it('says an earlier import did not finish before the picker opens', async () => {
+        const order: string[] = []
+        invoke.mockImplementation(async command => {
+            order.push(command)
+            return command === 'native_portable_source_cleanup_orphans' ? 1
+                : {cancelled:false, token:'selected-token', name:'synthetic.risunest', bytes:42}
+        })
+        alertError.mockImplementation(message => order.push(`alert:${message}`))
+        waitAlert.mockImplementation(async () => { order.push('dismissed') })
+        await pickIOSBackupSource()
+        expect(order).toEqual(['native_portable_source_cleanup_orphans','alert:reason:import-interrupted','dismissed','plugin:ios-native|pick_backup_source'])
+    })
+    it('reports sources a reloaded page left unimported once', async () => {
+        invoke.mockResolvedValueOnce(2).mockResolvedValueOnce(0)
+        await reportInterruptedIOSBackupSources()
+        await reportInterruptedIOSBackupSources()
+        expect(invoke.mock.calls).toEqual([['native_portable_source_cleanup_orphans'],['native_portable_source_cleanup_orphans']])
+        expect(alertError).toHaveBeenCalledExactlyOnceWith('reason:import-interrupted')
     })
     it('releases native and scoped custody after cancellation during selection', async () => {
         const controller = new AbortController()
@@ -18,6 +43,7 @@ describe('iOS file publication', () => {
                 controller.abort()
                 return {cancelled:false, token:'selected-token', name:'synthetic.risunest', bytes:42}
             }
+            if (command === 'native_portable_source_cleanup_orphans') return 0
             return true
         })
         await expect(pickIOSBackupSource(controller.signal)).rejects.toMatchObject({name:'AbortError'})

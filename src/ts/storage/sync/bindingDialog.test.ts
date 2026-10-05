@@ -40,10 +40,19 @@ describe('files held only by the previous storage', () => {
         expect(await confirmPreviousStorageFiles(context(target))).toBe('connect')
         expect(dialog).not.toHaveBeenCalled()
     })
-    it('connects without asking when the status cannot be read', async () => {
+    it.each([
+        { result: { confirmed: true, checked: false }, choice: 'connect' },
+        { result: { confirmed: true, checked: true }, choice: 'download-then-connect' },
+        { result: { confirmed: false, checked: false }, choice: 'cancel' },
+    ])('still asks, saying the files could not be checked, when the status cannot be read ($choice)', async ({ result, choice }) => {
         residency.status.mockRejectedValue({ code: 'local-storage' })
-        expect(await confirmPreviousStorageFiles(context(server))).toBe('connect')
-        expect(dialog).not.toHaveBeenCalled()
+        dialog.mockResolvedValue(result)
+        expect(await confirmPreviousStorageFiles(context(server))).toBe(choice)
+        expect(dialog).toHaveBeenCalledExactlyOnceWith({
+            title: language.lwwSync.previousFilesTitle, description: language.lwwSync.previousFilesUnknownDescription,
+            checkboxLabel: language.lwwSync.downloadThenConnect, actionLabel: language.risuNest.serverSync.connect,
+            cancelLabel: language.lwwSync.cancelAction, requireChecked: false,
+        })
     })
     it.each([
         { name: 'an external storage', target: server, held: status(0, [{ connectionId: 'previous', objects: 1 }]) },

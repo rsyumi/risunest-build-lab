@@ -454,6 +454,7 @@ pub fn assert_frozen_growth(a:&NativeObservation,b:&NativeObservation) -> Result
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn costly_native_sha_needs_every_actual_worker_receipt_without_double_counting() {
         let mut sample=NativeObservation {body_scope_complete:Some(true),native_caller_hashes:Some(BTreeMap::new()),
             body_worker_scopes_started:1,body_worker_scopes_settled:1,body_worker_threads:vec!["ThreadId(7)".into()],..Default::default()};
@@ -469,6 +470,7 @@ mod tests {
         sample=valid;sample.native_caller_hashes=None;assert!(sample.validate_costly_native_coverage().is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn control_stage_and_publication_are_distinct_conserved_sha_subset_evidence() {
         let owned=BodyDomain {open_attempts:2,opens:2,identity_metadata_open_attempts:2,identity_metadata_opens:2,
             verified_identity_metadata_opens:2,staging_write_attempts:2,staging_writes:2,staging_requested_bytes:7,staging_written_bytes:7,
@@ -498,6 +500,7 @@ mod tests {
         grown.validate_routine_invariants().unwrap();assert!(assert_frozen_growth(&valid,&grown).is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn incomplete_and_unobserved_inputs_cannot_pass() {
         let mut sample = NativeObservation::default();
         assert!(sample.validate_routine_invariants().is_err());
@@ -513,6 +516,7 @@ mod tests {
         assert!(sample.hash_totals().is_err());
     }
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn role_coverage_and_reader_lifecycle_remain_fail_closed() {
         let mut sample = NativeObservation {asset_body_opens:Some(0), asset_body_bytes_read:Some(0),
             shared_head_reads:Some(0), body_scope_complete:Some(true), ..Default::default()};
@@ -536,6 +540,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn owned_control_identity_proof_is_exact_and_conserves_all_contributions() {
         let mut sample=NativeObservation {asset_body_opens:Some(0),asset_body_bytes_read:Some(0),
             shared_head_reads:Some(0),body_scope_complete:Some(true),..Default::default()};
@@ -591,6 +596,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn growth_requires_precise_control_attribution_and_never_more_calls() {
         let mut a = NativeObservation { asset_body_opens:Some(0), asset_body_bytes_read:Some(0),
             shared_head_reads:Some(0), body_scope_complete:Some(true), ..Default::default() };
@@ -628,6 +634,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn approved_exact_leaves_produce_conserved_per_input_attribution() {
         for (a,b) in proof_pairs() {
             let proof=assert_frozen_growth(&a,&b).unwrap();
@@ -639,6 +646,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn incomplete_missing_unpaired_and_extra_call_inputs_cannot_bypass_proof() {
         for (a,b) in proof_pairs() {
             let mut invalid=b.clone();collection(&mut invalid).complete=false;
@@ -664,6 +672,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn node_set_kind_children_and_partition_tampering_cannot_bypass_proof() {
         for (a,b) in proof_pairs() {
             let mut invalid=b.clone();collection(&mut invalid).inputs[0].nodes.remove("");
@@ -680,6 +689,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn protected_payload_negative_cancellation_unknown_fields_and_domains_reject() {
         for (domain,a,b) in [
             ("native/native_receive_intent",br#"{"progress":{"cursor":"9"},"changes":[{"value":"same"}]}"#.as_slice(),
@@ -714,6 +724,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "measurement harness self-test; benchmarks/lww-native/run.ps1 runs it"]
     fn original_8192_byte_cap_is_aggregate_across_both_precise_domains() {
         fn repeat(sample:&mut NativeObservation,count:u64) {
             for domain in sample.hashes.values_mut() {domain.calls*=count;domain.bytes*=count;}

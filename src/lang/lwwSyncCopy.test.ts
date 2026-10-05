@@ -7,9 +7,10 @@ import { languageGerman } from './de'
 import { languageSpanish } from './es'
 import { languageVietnamese } from './vi'
 
-it('provides all binding, restore and status copy in every language', () => {
-    for (const language of [languageKorean, languageChinese, languageChineseTraditional, languageGerman, languageSpanish, languageVietnamese]) {
-        expect(Object.keys(language.lwwSync).sort()).toEqual(Object.keys(languageEnglish.lwwSync).sort())
+it('provides all binding, restore and status copy in Korean and English, and no unknown key elsewhere', () => {
+    expect(Object.keys(languageKorean.lwwSync).sort()).toEqual(Object.keys(languageEnglish.lwwSync).sort())
+    for (const language of [languageChinese, languageChineseTraditional, languageGerman, languageSpanish, languageVietnamese]) {
+        for (const key of Object.keys(language.lwwSync)) expect(languageEnglish.lwwSync).toHaveProperty(key)
         for (const text of Object.values(language.lwwSync)) expect(text.length).toBeGreaterThan(0)
     }
 })
@@ -30,6 +31,7 @@ it('preserves the exact approved Korean replacement and restore copy', () => {
         restoreAcknowledge: '현재 데이터 초기화', restoreAction: '복원',
         previousFilesTitle: '연결하시겠습니까?',
         previousFilesDescription: '이전에 연결한 서버나 외부 저장소에만 있는 파일이 있습니다. 연결하면 이 파일을 새 연결 대상에도 저장하며, 이 기기에도 보관하려면 다운로드 후 연결을 선택하세요.',
+        previousFilesUnknownDescription: '이전에 연결한 서버나 외부 저장소에만 있는 파일이 있는지 확인하지 못했습니다. 이런 파일이 있는 경우 연결하면 새 연결 대상에도 저장하며, 이 기기에도 보관하려면 다운로드 후 연결을 선택하세요.',
         downloadThenConnect: '다운로드 후 연결',
         downloadFailedNotConnected: '파일을 다운로드하지 못해 연결하지 않았습니다. 다시 시도하거나 다운로드하지 않고 연결하세요.',
         previousStorageUnavailable: '이전에 연결한 서버나 외부 저장소에만 있는 파일을 가져오지 못해 동기화하지 못했습니다. 연결할 수 있을 때 다시 시도하세요.',
