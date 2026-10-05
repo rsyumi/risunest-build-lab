@@ -1,0 +1,74 @@
+name: Cargo cache experiment
+run-name: Cargo cache / ${{ inputs.source_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full Linux snapshot commit SHA
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: cargo-cache-experiment
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      CARGO_INCREMENTAL: "0"
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Validate inputs
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Verify snapshot
+        run: node ../control/scripts/verify-snapshot.mjs . linux
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          targets: x86_64-unknown-linux-gnu
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libwebkit2gtk-4.1-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source/src-tauri -> target
+          prefix-key: build-time-20261006
+          cache-workspace-crates: false
+          cache-on-failure: false
+      - name: Check native library
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          rustc -Vv > artifacts/environment.txt
+          /usr/bin/time -p cargo check --manifest-path src-tauri/Cargo.toml --release --locked --target x86_64-unknown-linux-gnu --lib --timings 2>&1 | tee artifacts/cargo-check.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cargo-cache-experiment
+          path: source/artifacts
+          retention-days: 7
