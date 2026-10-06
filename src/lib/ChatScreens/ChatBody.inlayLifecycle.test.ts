@@ -65,6 +65,7 @@ import {
     type DeferredInlayMarkerRegistry,
 } from 'src/ts/process/files/inlayRenderSource'
 import ChatBodyInlayHarness from './ChatBodyInlayHarness.test.svelte'
+import { maxTextUnitLength } from 'src/ts/parser/boundedTextUnits'
 
 const imageSource = {
     url: '',
@@ -244,6 +245,55 @@ describe('ChatBody deferred inlay lifecycle', () => {
             ),
         )
         expect(target.querySelector('details')?.open).toBe(true)
+    })
+
+    test('keeps a large expanded live block open and refills it in bounded units after parsed replacements', async () => {
+        const body = 'synthetic '.repeat(maxTextUnitLength / 2)
+        parserMocks.ParseMarkdown.mockImplementation(async (value) =>
+            `<details data-risu-thought data-risu-streaming-thought><summary>Thought</summary>${value}</details>`)
+        mounted = mount(ChatBodyInlayHarness, {
+            target,
+            props: { initialMessage: `${body}FIRST`, streamingThoughtMode: 'collapsed' },
+        })
+        await vi.waitFor(() => expect(target.querySelector('details')).not.toBeNull())
+        const first = target.querySelector('details')!
+        first.open = true
+        first.dispatchEvent(new Event('toggle'))
+        await vi.waitFor(() => expect(first.textContent).toContain('FIRST'))
+        ;(mounted as { setMessage(value: string): void }).setMessage(`${body}UPDATED`)
+        await vi.waitFor(() => expect(target.querySelector('details')).not.toBe(first))
+        const updated = target.querySelector<HTMLDetailsElement>('details')!
+        expect(updated.open).toBe(true)
+        await vi.waitFor(() => expect(updated.textContent).toContain(`${body}UPDATED`))
+        expect(updated.open).toBe(true)
+        for (const unit of updated.querySelectorAll('[data-risu-thought-unit]')) {
+            expect(unit.textContent!.length).toBeLessThanOrEqual(maxTextUnitLength)
+        }
+    })
+
+    test('settles an expanded preview of a large thought collapsed', async () => {
+        const body = 'synthetic '.repeat(maxTextUnitLength / 2)
+        parserMocks.ParseMarkdown.mockResolvedValue(`<details data-risu-thought><summary>Thought</summary>${body}</details>`)
+        mounted = mount(ChatBodyInlayHarness, {
+            target,
+            props: { initialMessage: `<Thoughts>${body}</Thoughts>`, initialThoughtPreview: true, streamingThoughtMode: 'collapsed' },
+        })
+        await tick()
+        const preview = target.querySelector('details')!
+        preview.open = true
+        preview.dispatchEvent(new Event('toggle'))
+        await tick()
+        ;(mounted as { setThoughtPreview(value: boolean): void }).setThoughtPreview(false)
+        ;(mounted as { setThoughtMode(value: string): void }).setThoughtMode('off')
+        await vi.waitFor(() => {
+            const element = target.querySelector('details[data-risu-thought]')
+            expect(element?.textContent).toBe('Thought')
+            expect(element).not.toBe(preview)
+        })
+        await tick()
+        const settled = target.querySelector<HTMLDetailsElement>('details[data-risu-thought]')!
+        expect(settled.open).toBe(false)
+        expect(settled.querySelectorAll('[data-risu-thought-unit]')).toHaveLength(0)
     })
 
     test.each([true, false])('retains expanded thoughts when preview=%s settles to canonical markup', async (preview) => {

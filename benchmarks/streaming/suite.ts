@@ -65,11 +65,26 @@ export async function runStreamingSuite(api: FixtureApi, profile = "smoke") {
           () =>
             mode === "collapsed"
               ? !!root().querySelector("details")
-              : !!root().textContent?.includes("LATEST-SYNTHETIC"),
+              : !!root().textContent?.includes("LATEST-SYNTHETIC") ||
+                (mode === "off" && !!root().querySelector("details")),
           "first-visible",
         );
         const firstVisibleMs = performance.now() - started;
         check(api.sourceMatches(source), "source-preserved");
+        const settledThought = root().querySelector("details");
+        if (mode === "off" && settledThought) {
+          // A large settled thought lays out its body only while expanded.
+          check(!settledThought.open, "off-initially-collapsed");
+          settledThought.querySelector("summary")!.click();
+          await until(
+            () =>
+              settledThought.open &&
+              !!settledThought.textContent?.includes("LATEST-SYNTHETIC"),
+            "off-expanded-body",
+          );
+          settledThought.querySelector("summary")!.click();
+          await until(() => !settledThought.open, "off-collapsed");
+        }
         if (mode === "recent") {
           const text = root().querySelector<HTMLElement>(
             ".x-risu-streaming-thought-text",

@@ -373,7 +373,11 @@ async fn bounded_bulk_buffers_leave_head_available_and_release_after_completion(
         .body(frame.clone())
         .send();
     tokio::pin!(pending);
-    assert!(tokio::time::timeout(Duration::from_millis(200), &mut pending).await.is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut pending)
+            .await
+            .is_err()
+    );
     assert_eq!(
         server
             .auth(server.client.get(format!("{}/head", server.base)), &third)
@@ -391,7 +395,14 @@ async fn bounded_bulk_buffers_leave_head_available_and_release_after_completion(
         .unwrap()
         .unwrap();
     assert!(completed.starts_with(b"HTTP/1.1 204 No Content"));
-    assert_eq!(tokio::time::timeout(BOUND, pending).await.unwrap().unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        tokio::time::timeout(BOUND, pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
     assert_eq!(
         server
             .auth(
