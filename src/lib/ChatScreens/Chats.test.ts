@@ -138,8 +138,11 @@ interface HarnessInstance {
     setImage(image: string): void
     switchCharacter(character: character, messages: Message[]): void
     switchCharacterAndSource(character: character, source: ConversationViewportSource): void
-    jumpTo(index: number, options?: { align?: 'start' | 'center'; highlight?: boolean }): Promise<boolean>
+    jumpTo(index: number, options?: { align?: 'start' | 'center' | 'end'; bottomInset?: number; highlight?: boolean }): Promise<boolean>
     jumpToLatestMessage(): Promise<void>
+    jumpToTop(): Promise<boolean>
+    jumpToBottom(): Promise<boolean>
+    navigateMessage(direction: 'previous' | 'next', bottomInset?: number): Promise<boolean>
     setViewportSource(source: ConversationViewportSource | null): void
     setViewportNavigationGeneration(generation: number): void
     hasUnreadMessage(): boolean
@@ -2442,6 +2445,99 @@ describe('Chats imperative mount lifecycle', () => {
         expect(target.querySelectorAll('[data-chat-probe]')).toHaveLength(64)
         for (const [options] of corrections.mock.calls) {
             expect(Math.abs((options as ScrollToOptions).top ?? 0)).toBeLessThanOrEqual(256)
+        }
+    })
+
+    test('steps to message edges from the rows crossing the visible edges', async () => {
+        const messages = Array.from({ length: 20 }, (_, index) => makeMessage(index))
+        mounted = mount(ChatsHarness, { target, props: { initialMessages: messages, initialCharacter: makeCharacter(messages) } })
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(20))
+        const scrollParent = target.querySelector<HTMLElement>('.scroll-parent')!
+        scrollParent.getBoundingClientRect = () => ({ top: 0, bottom: 500, height: 500 } as DOMRect)
+        const scrollBy = vi.fn()
+        scrollParent.scrollBy = scrollBy
+        // Viewport row 10 (message 9) crosses the top edge and row 12 (message 11) the bottom edge.
+        for (const row of target.querySelectorAll<HTMLElement>('[data-chat-render-key]')) {
+            const top = Number(row.dataset.chatViewportIndex) * 200 - 2_050
+            row.getBoundingClientRect = () => ({ top, bottom: top + 200, height: 200 } as DOMRect)
+        }
+        const align = vi.spyOn(HTMLElement.prototype, 'scrollIntoView')
+        try {
+            await expect((mounted as HarnessInstance).navigateMessage('previous')).resolves.toBe(true)
+            expect(align).toHaveBeenLastCalledWith({ behavior: 'instant', block: 'start' })
+            expect(align.mock.contexts.at(-1)).toBe(target.querySelector('[data-chat-viewport-index="10"]'))
+
+            await expect((mounted as HarnessInstance).navigateMessage('next')).resolves.toBe(true)
+            expect(scrollBy).toHaveBeenLastCalledWith({ top: 50, behavior: 'instant' })
+            await expect((mounted as HarnessInstance).navigateMessage('next', 100)).resolves.toBe(true)
+            expect(scrollBy).toHaveBeenLastCalledWith({ top: 150, behavior: 'instant' })
+        } finally {
+            align.mockRestore()
+        }
+    })
+
+    test('jumps to the conversation start and back to the bottom of a windowed history', async () => {
+        const messages = Array.from({ length: 200 }, (_, index) => makeMessage(index))
+        mounted = mount(ChatsHarness, { target, props: { initialCharacter: makeMetadataOnlyCharacter(), initialViewportSource: makePersistentViewportSource(messages) } })
+        await vi.waitFor(() => expect(probeElements(target).some((node) => node.dataset.message === 'message-199')).toBe(true))
+        expect(conversationStartProbe(target)).toBeNull()
+        const scrollParent = target.querySelector<HTMLElement>('.scroll-parent')!
+        const align = vi.spyOn(HTMLElement.prototype, 'scrollIntoView')
+        try {
+            await expect((mounted as HarnessInstance).jumpToTop()).resolves.toBe(true)
+            expect(conversationStartProbe(target)).not.toBeNull()
+            expect(align.mock.contexts.at(-1)).toBe(target.querySelector('[data-chat-viewport-index="0"]'))
+            expect(align).toHaveBeenLastCalledWith({ behavior: 'instant', block: 'start' })
+        } finally {
+            align.mockRestore()
+        }
+        expect(probeElements(target).some((node) => node.dataset.message === 'message-199')).toBe(false)
+
+        scrollParent.scrollTop = -4_000
+        await expect((mounted as HarnessInstance).jumpToBottom()).resolves.toBe(true)
+        expect(probeElements(target).some((node) => node.dataset.message === 'message-199')).toBe(true)
+        expect(scrollParent.scrollTop).toBe(0)
+    })
+
+    test('reports scrolling by the user but not its own position changes', async () => {
+        const messages = Array.from({ length: 200 }, (_, index) => makeMessage(index))
+        const onScrollMove = vi.fn()
+        mounted = mount(ChatsHarness, { target, props: { initialMessages: messages, initialCharacter: makeCharacter(messages), onScrollMove } })
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(64))
+        const scrollParent = target.querySelector<HTMLElement>('.scroll-parent')!
+        await expect((mounted as HarnessInstance).jumpTo(150)).resolves.toBe(true)
+        scrollParent.dispatchEvent(new Event('scroll'))
+        expect(onScrollMove).not.toHaveBeenCalled()
+
+        // Scroll anchoring moves the position without input while rows grow.
+        scrollParent.scrollTop -= 100
+        scrollParent.dispatchEvent(new Event('scroll'))
+        expect(onScrollMove).not.toHaveBeenCalled()
+
+        scrollParent.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }))
+        scrollParent.scrollTop -= 100
+        scrollParent.dispatchEvent(new Event('scroll'))
+        expect(onScrollMove).toHaveBeenCalledTimes(1)
+
+        const now = performance.now()
+        const clock = vi.spyOn(performance, 'now').mockReturnValue(now + 2_000)
+        try {
+            scrollParent.scrollTop -= 100
+            scrollParent.dispatchEvent(new Event('scroll'))
+            expect(onScrollMove).toHaveBeenCalledTimes(1)
+
+            scrollParent.dispatchEvent(new PointerEvent('pointerdown'))
+            clock.mockReturnValue(now + 10_000)
+            scrollParent.scrollTop -= 100
+            scrollParent.dispatchEvent(new Event('scroll'))
+            expect(onScrollMove).toHaveBeenCalledTimes(2)
+
+            window.dispatchEvent(new PointerEvent('pointerup'))
+            scrollParent.scrollTop -= 100
+            scrollParent.dispatchEvent(new Event('scroll'))
+            expect(onScrollMove).toHaveBeenCalledTimes(2)
+        } finally {
+            clock.mockRestore()
         }
     })
 

@@ -5,7 +5,7 @@
 
     import Suggestion from './Suggestion.svelte';
     import { createLiveChatParserIndirections, createLiveChatParserSource } from 'src/ts/liveDisplayParserLease';
-    import { CameraIcon, DatabaseIcon, GlobeIcon, ImagePlusIcon, LanguagesIcon, Laugh, MenuIcon, MicOffIcon, PackageIcon, Plus, RefreshCcwIcon, ReplyIcon, Send, StepForwardIcon, XIcon, BrainIcon, ArrowDown, SparkleIcon } from "@lucide/svelte";
+    import { CameraIcon, ChevronDownIcon, ChevronUpIcon, ChevronsDownIcon, ChevronsUpIcon, DatabaseIcon, GlobeIcon, ImagePlusIcon, LanguagesIcon, Laugh, MenuIcon, MicOffIcon, PackageIcon, Plus, RefreshCcwIcon, ReplyIcon, Send, StepForwardIcon, XIcon, BrainIcon, ArrowDown, SparkleIcon } from "@lucide/svelte";
     import { selectedCharID, PlaygroundStore, createSimpleCharacter, hypaV3ModalOpen, ScrollToMessageStore, additionalChatMenu, additionalFloatingActionButtons, easyPanelStore, chatPanelStore } from "../../ts/stores.svelte";
     import { onDestroy } from 'svelte';
     import { ChatComposerState, chatScreenState, type SubmittedChatComposer } from '../../ts/ui/chatScreenState.svelte';
@@ -268,6 +268,38 @@
     function scrollToBottom() {
         chatsInstance?.scrollToLatestMessage();
     }
+
+    const SCROLL_NAV_VISIBLE_MS = 1500
+    let scrollNavVisible = $state(false)
+    let scrollNavHovered = false
+    let scrollNavTimer: ReturnType<typeof setTimeout> | null = null
+    let composerHeight = $state(0)
+    // Stays clear of the composer and of the new message buttons placed at the right.
+    const scrollNavBottom = $derived.by(() => {
+        const bottom = composerHeight + 20
+        if (!showNewMessageButton) return bottom
+        if (DBState.db.newMessageButtonStyle === 'bottom-right') return Math.max(bottom, 132)
+        if (DBState.db.newMessageButtonStyle === 'floating-circle') return Math.max(bottom, 204)
+        return bottom
+    })
+
+    function scheduleScrollNavHide() {
+        if (scrollNavTimer) clearTimeout(scrollNavTimer)
+        scrollNavTimer = scrollNavHovered ? null : setTimeout(() => {
+            scrollNavTimer = null
+            scrollNavVisible = false
+        }, SCROLL_NAV_VISIBLE_MS)
+    }
+
+    function showScrollNav() {
+        scrollNavVisible = true
+        scheduleScrollNavHide()
+    }
+
+    function chatBottomInset() {
+        return DBState.db.fixedChatTextarea ? composerHeight : 0
+    }
+
     const scrollTargetContext = {
         captureCurrent: () => {
             const character = DBState.db.characters[$selectedCharID]
@@ -1258,6 +1290,7 @@
 
     onDestroy(() => {
         disposed = true
+        if (scrollNavTimer) clearTimeout(scrollNavTimer)
         selectedConversationViewport.dispose()
         screenshotOpenGeneration += 1
         cancelScreenshot()
@@ -1344,6 +1377,54 @@
             {/await}
         {/if}
     {:else}
+        <div
+            class="absolute right-3 z-40 flex flex-col divide-y divide-darkborderc/60 overflow-hidden rounded-lg border border-darkborderc/60 bg-bgcolor/80 shadow-lg backdrop-blur-sm transition-[opacity,visibility] duration-300"
+            class:opacity-0={!scrollNavVisible || openMenu}
+            class:invisible={!scrollNavVisible || openMenu}
+            style:bottom="{scrollNavBottom}px"
+            data-chat-scroll-nav
+            onpointerenter={() => {
+                scrollNavHovered = true
+                showScrollNav()
+            }}
+            onpointerleave={() => {
+                scrollNavHovered = false
+                scheduleScrollNavHide()
+            }}
+        >
+            <button class="flex h-9 w-9 items-center justify-center text-textcolor2 transition-colors hover:bg-darkbg/60 hover:text-textcolor"
+                    title={language.chatScrollToTop} aria-label={language.chatScrollToTop}
+                    onclick={() => {
+                        showScrollNav()
+                        void chatsInstance?.jumpToTop()
+                    }}>
+                <ChevronsUpIcon size={18} />
+            </button>
+            <button class="flex h-9 w-9 items-center justify-center text-textcolor2 transition-colors hover:bg-darkbg/60 hover:text-textcolor"
+                    title={language.chatScrollUp} aria-label={language.chatScrollUp}
+                    onclick={() => {
+                        showScrollNav()
+                        void chatsInstance?.navigateMessage('previous', chatBottomInset())
+                    }}>
+                <ChevronUpIcon size={18} />
+            </button>
+            <button class="flex h-9 w-9 items-center justify-center text-textcolor2 transition-colors hover:bg-darkbg/60 hover:text-textcolor"
+                    title={language.chatScrollDown} aria-label={language.chatScrollDown}
+                    onclick={() => {
+                        showScrollNav()
+                        void chatsInstance?.navigateMessage('next', chatBottomInset())
+                    }}>
+                <ChevronDownIcon size={18} />
+            </button>
+            <button class="flex h-9 w-9 items-center justify-center text-textcolor2 transition-colors hover:bg-darkbg/60 hover:text-textcolor"
+                    title={language.chatScrollToBottom} aria-label={language.chatScrollToBottom}
+                    onclick={() => {
+                        showScrollNav()
+                        void chatsInstance?.jumpToBottom()
+                    }}>
+                <ChevronsDownIcon size={18} />
+            </button>
+        </div>
         <div class="h-full w-full flex flex-col-reverse overflow-y-auto relative default-chat-screen" onscroll={(e) => {
             const isAtBottom = chatsInstance?.isAtBottom() ?? true;
             if(isAtBottom){
@@ -1353,6 +1434,7 @@
             <div
                     class="{DBState.db.fixedChatTextarea ? 'sticky pt-2 pb-2 right-0 bottom-0 bg-bgcolor' : 'mt-2 mb-2'} flex items-stretch w-full"
                     style="{DBState.db.fixedChatTextarea ? 'z-index:29;' : ''}"
+                    bind:offsetHeight={composerHeight}
             >
                 {#if DBState.db.useChatSticker}
                     <div onclick={()=>{toggleStickers = !toggleStickers}}
@@ -1590,6 +1672,7 @@
                 userIcon={userIcon}
                 userIconPortrait={userIconPortrait}
                 bind:hasNewUnreadMessage={showNewMessageButton}
+                onScrollMove={showScrollNav}
             />
 
             {#if openMenu}

@@ -1,7 +1,11 @@
 <script lang="ts">
     import type { character, Message } from 'src/ts/storage/database.svelte'
     import Chats from './Chats.svelte'
-    import type { ChatViewportHandle, ChatViewportJumpOptions } from 'src/ts/chatViewport'
+    import type {
+        ChatViewportHandle,
+        ChatViewportJumpOptions,
+        ChatViewportStepDirection,
+    } from 'src/ts/chatViewport'
     import type { ConversationViewportSource } from 'src/ts/conversationViewportSource'
     import type { SelectedConversationOperations } from 'src/ts/selectedConversationOperations'
     import type {
@@ -17,6 +21,7 @@
         parserProjectionResolver,
         acquireConversationStartParserLease,
         selectedConversationOperations,
+        onScrollMove,
     }: {
         initialMessages?: Message[]
         initialCharacter: character
@@ -27,6 +32,7 @@
             request: LiveChatParserConversationStartRequest,
         ) => Promise<{ release(): void } | null>
         selectedConversationOperations?: SelectedConversationOperations
+        onScrollMove?: () => void
     } = $props()
 
     let messages = $state<Message[] | undefined>()
@@ -102,6 +108,18 @@
         return chats?.jumpToLatestMessage() ?? Promise.resolve()
     }
 
+    export function jumpToTop() {
+        return chats?.jumpToTop() ?? Promise.resolve(false)
+    }
+
+    export function jumpToBottom() {
+        return chats?.jumpToBottom() ?? Promise.resolve(false)
+    }
+
+    export function navigateMessage(direction: ChatViewportStepDirection, bottomInset?: number) {
+        return chats?.navigateMessage(direction, bottomInset) ?? Promise.resolve(false)
+    }
+
     export function hasUnreadMessage() {
         return hasNewUnreadMessage
     }
@@ -127,5 +145,6 @@
         currentUsername="User"
         userIcon="user.png"
         bind:hasNewUnreadMessage
+        {onScrollMove}
     />
 </div>

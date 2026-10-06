@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildChatViewport } from './chatViewport'
+import { buildChatViewport, resolveChatViewportStep } from './chatViewport'
 
 function keys(count: number): string[] {
     return Array.from({ length: count }, (_, index) => `message-${index}`)
@@ -207,5 +207,66 @@ describe('buildChatViewport', () => {
         expect(inserted.anchor).toEqual({ key: 'c', indexHint: 3, relativeOffset: 11 })
         expect(rerolled.anchor).toEqual(inserted.anchor)
         expect(deleted.anchor).toEqual({ key: 'd', indexHint: 3, relativeOffset: 11 })
+    })
+})
+
+describe('resolveChatViewportStep', () => {
+    // Rows 3..6 with the visible area spanning 100..500.
+    const rows = [
+        { index: 3, top: -250, bottom: 150 },
+        { index: 4, top: 160, bottom: 300 },
+        { index: 5, top: 310, bottom: 640 },
+        { index: 6, top: 650, bottom: 900 },
+    ]
+
+    it('aligns the start of the row crossing the top edge, then the start of the row above', () => {
+        expect(resolveChatViewportStep(rows, 100, 500, 10, 'previous')).toEqual({ kind: 'row', index: 3, align: 'start' })
+        const aligned = rows.map((row) => ({ ...row, top: row.top + 350, bottom: row.bottom + 350 }))
+        expect(resolveChatViewportStep(aligned, 100, 500, 10, 'previous')).toEqual({ kind: 'row', index: 2, align: 'start' })
+    })
+
+    it('aligns the end of the row crossing the bottom edge, then the end of the row below', () => {
+        expect(resolveChatViewportStep(rows, 100, 500, 10, 'next')).toEqual({ kind: 'row', index: 5, align: 'end' })
+        const aligned = rows.map((row) => ({ ...row, top: row.top - 140, bottom: row.bottom - 140 }))
+        expect(resolveChatViewportStep(aligned, 100, 500, 10, 'next')).toEqual({ kind: 'row', index: 6, align: 'end' })
+    })
+
+    it('moves down past rows that are already fully visible', () => {
+        const short = [
+            { index: 0, top: 120, bottom: 180 },
+            { index: 1, top: 190, bottom: 260 },
+            { index: 2, top: 270, bottom: 340 },
+        ]
+        expect(resolveChatViewportStep(short, 100, 500, 5, 'next')).toEqual({ kind: 'row', index: 3, align: 'end' })
+    })
+
+    it('treats an edge within the tolerance as reached', () => {
+        const nearlyAligned = [{ index: 4, top: 94, bottom: 300 }, { index: 5, top: 310, bottom: 506 }]
+        expect(resolveChatViewportStep(nearlyAligned, 100, 500, 10, 'previous')).toEqual({ kind: 'row', index: 3, align: 'start' })
+        expect(resolveChatViewportStep(nearlyAligned, 100, 500, 10, 'next')).toEqual({ kind: 'row', index: 6, align: 'end' })
+        const partlyHidden = [{ index: 4, top: 70, bottom: 300 }, { index: 5, top: 310, bottom: 530 }]
+        expect(resolveChatViewportStep(partlyHidden, 100, 500, 10, 'previous')).toEqual({ kind: 'row', index: 4, align: 'start' })
+        expect(resolveChatViewportStep(partlyHidden, 100, 500, 10, 'next')).toEqual({ kind: 'row', index: 5, align: 'end' })
+    })
+
+    it('goes to the conversation edges past the first and last rows', () => {
+        const whole = [{ index: 0, top: 100, bottom: 250 }, { index: 1, top: 260, bottom: 480 }]
+        expect(resolveChatViewportStep(whole, 100, 500, 2, 'previous')).toEqual({ kind: 'top' })
+        expect(resolveChatViewportStep(whole, 100, 500, 2, 'next')).toEqual({ kind: 'bottom' })
+        expect(resolveChatViewportStep([], 100, 500, 2, 'previous')).toEqual({ kind: 'top' })
+        expect(resolveChatViewportStep([], 100, 500, 2, 'next')).toEqual({ kind: 'bottom' })
+    })
+
+    it('steps from the nearest mounted row when the edge falls in an unmounted gap', () => {
+        const below = [{ index: 40, top: 600, bottom: 700 }]
+        expect(resolveChatViewportStep(below, 100, 500, 80, 'previous')).toEqual({ kind: 'row', index: 39, align: 'start' })
+        const above = [{ index: 10, top: -300, bottom: -200 }]
+        expect(resolveChatViewportStep(above, 100, 500, 80, 'next')).toEqual({ kind: 'row', index: 11, align: 'end' })
+    })
+
+    it('ignores rows without height and accepts rows in any order', () => {
+        const unordered = [rows[2], { index: 9, top: 0, bottom: 0 }, rows[0], rows[3], rows[1]]
+        expect(resolveChatViewportStep(unordered, 100, 500, 10, 'next')).toEqual({ kind: 'row', index: 5, align: 'end' })
+        expect(resolveChatViewportStep(unordered, 100, 500, 10, 'previous')).toEqual({ kind: 'row', index: 3, align: 'start' })
     })
 })

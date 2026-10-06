@@ -43,7 +43,12 @@ fn claim_lookup_is_registration_scoped_and_rechecks_revocation_after_reopen() {
     assert_eq!(store.new_device_writer_claim(&new).unwrap(), None);
     let request = claim(Some(&former.token));
     let receipt = store.claim_new_device_writer(&new, &request).unwrap();
-    assert_eq!(store.new_device_writer_claim(&actor(&store, &unrelated)).unwrap(), None);
+    assert_eq!(
+        store
+            .new_device_writer_claim(&actor(&store, &unrelated))
+            .unwrap(),
+        None
+    );
     drop(store);
 
     let store = Store::open(root.path()).unwrap();
@@ -54,9 +59,19 @@ fn claim_lookup_is_registration_scoped_and_rechecks_revocation_after_reopen() {
     let serialized = serde_json::to_string(&saved).unwrap();
     assert!(!serialized.contains(&former.token));
     assert!(!serialized.contains(&candidate.token));
-    assert_eq!(store.new_device_writer_claim(&actor(&store, &unrelated)).unwrap(), None);
-    metadata(&root).execute("UPDATE devices SET revoked=1 WHERE id=?1", [&new.id]).unwrap();
-    assert_eq!(store.new_device_writer_claim(&new).unwrap_err().code, "unauthorized");
+    assert_eq!(
+        store
+            .new_device_writer_claim(&actor(&store, &unrelated))
+            .unwrap(),
+        None
+    );
+    metadata(&root)
+        .execute("UPDATE devices SET revoked=1 WHERE id=?1", [&new.id])
+        .unwrap();
+    assert_eq!(
+        store.new_device_writer_claim(&new).unwrap_err().code,
+        "unauthorized"
+    );
 }
 
 #[test]

@@ -166,11 +166,7 @@ pub(super) async fn notify(
     Ok(response)
 }
 
-async fn notify_socket(
-    mut app: App,
-    device: Device,
-    mut socket: WebSocket,
-) {
+async fn notify_socket(mut app: App, device: Device, mut socket: WebSocket) {
     let mut announced = app.store.head_announcements();
     let mut last = None;
     // Head moves and revocations are announced, so the database is read only
@@ -422,7 +418,10 @@ pub(super) mod tests {
         for _ in 0..31 {
             silent.push(connect(address, &credential).await.unwrap());
         }
-        let mut late = tokio::time::timeout(bound, connect(address, &credential)).await.unwrap().unwrap();
+        let mut late = tokio::time::timeout(bound, connect(address, &credential))
+            .await
+            .unwrap()
+            .unwrap();
         tokio::time::timeout(bound, async {
             for socket in &mut silent {
                 closed(socket).await;

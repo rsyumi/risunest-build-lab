@@ -640,10 +640,10 @@
                 'details[data-risu-thought]',
             )
             settledThoughts?.forEach((element, index) => {
-                const open = previewThoughtOpen !== undefined && index === settledThoughts.length - 1
-                    ? previewThoughtOpen
-                    : thoughtOpenStates[index]
-                if (open !== undefined && !job.thoughtExpansion?.managed.has(element)) element.open = open
+                const fromPreview = previewThoughtOpen !== undefined && index === settledThoughts.length - 1
+                const open = fromPreview ? previewThoughtOpen : thoughtOpenStates[index]
+                // A large thought expanded only in the preview settles collapsed.
+                if (open !== undefined && !(fromPreview && job.thoughtExpansion?.managed.has(element))) element.open = open
             })
             thoughtOpenStates = Array.from(settledThoughts ?? [], (element) => element.open)
             previewThoughtOpen = undefined
