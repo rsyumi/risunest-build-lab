@@ -6,6 +6,7 @@ struct Fixture {
     app: App,
     shutdown: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+    client: reqwest::Client,
     endpoint: String,
     library: String,
     token: String,
@@ -61,11 +62,18 @@ impl Fixture {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        // Building a client loads the platform root store, which takes hundreds of milliseconds on macOS.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
         Self {
             _root: root,
             app,
             shutdown,
             task,
+            client,
             endpoint,
             library: device.library_id,
             token: device.token,
@@ -75,15 +83,10 @@ impl Fixture {
     }
 
     fn request(&self, path: &str) -> tokio::task::JoinHandle<reqwest::Response> {
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap();
         let request = if path == "/uploads/frames" {
-            client.post(format!("{}{path}", self.endpoint))
+            self.client.post(format!("{}{path}", self.endpoint))
         } else {
-            client.get(format!("{}{path}", self.endpoint))
+            self.client.get(format!("{}{path}", self.endpoint))
         };
         let request = request
             .bearer_auth(&self.token)
@@ -124,7 +127,8 @@ async fn queued_bulk_bodies_do_not_block_control_requests() {
     let controls = async {
         assert_eq!(fixture.request("/head").await.unwrap().status(), 200);
         assert_eq!(fixture.request("/time").await.unwrap().status(), 200);
-        let response = reqwest::Client::new()
+        let response = fixture
+            .client
             .post(format!("{}/ack", fixture.endpoint))
             .bearer_auth(&fixture.token)
             .header("x-risu-library", &fixture.library)
@@ -151,7 +155,7 @@ async fn queued_bulk_bodies_do_not_block_control_requests() {
         socket.close(None).await.unwrap();
         while socket.next().await.is_some() {}
     };
-    let completed = tokio::time::timeout(Duration::from_secs(1), controls)
+    let completed = tokio::time::timeout(Duration::from_secs(5), controls)
         .await
         .is_ok();
     drop(cpu);

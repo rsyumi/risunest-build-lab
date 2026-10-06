@@ -2,7 +2,7 @@
     import { onMount, onDestroy } from 'svelte';
     import * as monaco from 'monaco-editor';
     import { registerCBSMonaco } from 'src/ts/gui/codearea/cbsMonaco';
-    import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+    import EditorWorker from 'monaco-editor/editor/editor.worker?worker';
 
     // Set up workers once globally
     if (!('MonacoEnvironment' in self)) {
