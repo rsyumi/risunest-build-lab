@@ -132,6 +132,94 @@ it.each(["caller", "consumer"])(
   },
 );
 
+it("closes the stream at EOF and releases the native request", async () => {
+  let transportSignal!: AbortSignal;
+  const encoder = new TextEncoder();
+  mocks.fetch.mockImplementation(async (_url, options) => {
+    transportSignal = options.signal;
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              JSON.stringify({
+                message: { role: "assistant", content: "합성" },
+                done: false,
+              }) + "\n",
+            ),
+          );
+          controller.enqueue(
+            encoder.encode(
+              JSON.stringify({
+                message: { role: "assistant", content: "🐿️" },
+                done: true,
+              }) + "\n",
+            ),
+          );
+          controller.close();
+        },
+      }),
+      { headers: { "Content-Type": "application/x-ndjson" } },
+    );
+  });
+  const response = await requestChatDataMain(
+    {
+      formated: [{ role: "user", content: "synthetic" }],
+      bias: {},
+      useStreaming: true,
+    },
+    "model",
+    new AbortController().signal,
+  );
+  if (response.type !== "streaming")
+    throw Error("Expected streaming response");
+  const reader = response.result.getReader();
+  expect((await reader.read()).value).toEqual({ "0": "합성" });
+  expect((await reader.read()).value).toEqual({ "0": "합성🐿️" });
+  expect(await reader.read()).toEqual({ done: true, value: undefined });
+  expect(transportSignal.aborted).toBe(true);
+});
+
+it("propagates a body error mid-stream and releases the native request", async () => {
+  let transportSignal!: AbortSignal;
+  let source!: ReadableStreamDefaultController<Uint8Array>;
+  mocks.fetch.mockImplementation(async (_url, options) => {
+    transportSignal = options.signal;
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          source = controller;
+          controller.enqueue(
+            new TextEncoder().encode(
+              JSON.stringify({
+                message: { role: "assistant", content: "합성" },
+                done: false,
+              }) + "\n",
+            ),
+          );
+        },
+      }),
+      { headers: { "Content-Type": "application/x-ndjson" } },
+    );
+  });
+  const response = await requestChatDataMain(
+    {
+      formated: [{ role: "user", content: "synthetic" }],
+      bias: {},
+      useStreaming: true,
+    },
+    "model",
+    new AbortController().signal,
+  );
+  if (response.type !== "streaming")
+    throw Error("Expected streaming response");
+  const reader = response.result.getReader();
+  expect((await reader.read()).value).toEqual({ "0": "합성" });
+  source.error(new TypeError("synthetic network failure"));
+  await expect(reader.read()).rejects.toThrow("synthetic network failure");
+  expect(transportSignal.aborted).toBe(true);
+});
+
 it("cancels while the Ollama request is still waiting for response headers", async () => {
   let transportSignal!: AbortSignal;
   mocks.fetch.mockImplementation((_url, options) => {

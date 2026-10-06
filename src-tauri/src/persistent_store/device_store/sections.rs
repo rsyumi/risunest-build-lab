@@ -11,6 +11,7 @@ use risunest_external_storage_format::section::{
 };
 use risunest_sync_wire::Sequence;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
@@ -653,6 +654,26 @@ pub(crate) fn capture_replacement_device_rows(db: &Connection) -> StoreResult<Fr
         local_plugins: read_rows(db, Section::LocalPlugins)?,
         local_settings: vec![],
     })
+}
+
+pub(crate) fn replacement_local_settings_digest(db: &Connection) -> StoreResult<String> {
+    let mut digest = Sha256::new();
+    digest.update(b"risunest.replacement-local-settings/v1\0");
+    let mut frame = |bytes: &[u8]| {
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    };
+    for key in LOCAL_SETTING_KEYS {
+        let value: Option<String> = db.query_row("SELECT value FROM device_settings WHERE key=?1", [key], |row| row.get(0)).optional()?;
+        frame(&serde_json::to_vec(&(key, value))?);
+    }
+    let mut statement = db.prepare("SELECT code_hash,permission,granted FROM plugin_permissions ORDER BY code_hash,permission")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let permission: (String, String, i64) = (row.get(0)?, row.get(1)?, row.get(2)?);
+        frame(&serde_json::to_vec(&permission)?);
+    }
+    Ok(hex::encode(digest.finalize()))
 }
 
 pub(crate) fn restore_frozen_backup_sections(

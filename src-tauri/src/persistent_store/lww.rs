@@ -298,6 +298,8 @@ enum Intent<'a> {
         /// Recognizes a retry with the same source units; nothing replays them.
         source_units: Option<intent_rows::IntentRows>,
         device_sections: Option<Cow<'a, device_store::sections::FrozenBackupSections>>,
+        /// Fixed settings and permissions do not advance device_revision.
+        device_settings_digest: Option<String>,
         device_changes: Cow<'a, [(UnitKey, UnitValue)]>,
     },
     Target {
@@ -426,8 +428,25 @@ fn record_intent_identity(db: &Connection, request_id: &str) -> StoreResult<()> 
 fn verify_device_intent_revision(db: &Connection, request_id: &str) -> StoreResult<()> {
     let (body, digest): (String, String) = db.query_row("SELECT body,digest FROM lww_intents WHERE request_id=?1", [request_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
     if risunest_sync_wire::hash(body.as_bytes()) != digest { return Err(error("request-id-integrity")); }
-    if let Some(expected) = serde_json::from_str::<Intent>(&body)?.device_revision() {
+    let intent: Intent = serde_json::from_str(&body)?;
+    if let Some(expected) = intent.device_revision() {
         if device_revision(db)? != expected { return Err(error("intent-device-changed")); }
+    }
+    verify_replacement_local_settings(db, &intent)?;
+    Ok(())
+}
+
+fn verify_replacement_local_settings(db: &Connection, intent: &Intent) -> StoreResult<()> {
+    if let Intent::Replacement { device_sections, device_settings_digest, .. } = intent {
+        match (device_sections, device_settings_digest) {
+            (Some(_), Some(expected)) => {
+                if device_store::sections::replacement_local_settings_digest(db)? != *expected {
+                    return Err(error("intent-device-changed"));
+                }
+            }
+            (None, None) => {}
+            _ => return Err(error("request-id-integrity")),
+        }
     }
     Ok(())
 }
@@ -1036,6 +1055,7 @@ impl PersistentStore {
             }
             serde_json::from_str(&stamp)?
         } else {
+            verify_replacement_local_settings(&tx, intent)?;
             let stamp = reserve_stamp(&tx)?;
             tx.execute(
                 "INSERT INTO lww_intents VALUES(?1,?2,?3,?4,?5,0)",
@@ -2720,13 +2740,14 @@ impl PersistentStore {
         let tx = self.connection.transaction()?;
         let changes = replacement_changes(&tx, &generation, staging_id, effective_source)?;
         tx.commit()?;
-        let device_changes = if let Some(sections) = device_sections {
+        let (device_changes, device_settings_digest) = if let Some(sections) = device_sections {
             let tx = self.device_store_mut()?.transaction()?;
             verify(&tx, header.binding_authority)?;
             let changes = projection::device_replacement_changes(&tx, sections)?;
+            let settings_digest = device_store::sections::replacement_local_settings_digest(&tx)?;
             tx.commit()?;
-            changes
-        } else { vec![] };
+            (changes, Some(settings_digest))
+        } else { (vec![], None) };
         let staging_digest = binding_stage::catalog_digest(&self.connection, staging_id)?;
         let rows = intent_rows::write(
             &mut self.device_store_mut()?.connection,
@@ -2744,6 +2765,7 @@ impl PersistentStore {
                 changes: rows,
                 source_units: source,
                 device_sections: device_sections.map(Cow::Borrowed),
+                device_settings_digest,
                 device_changes: Cow::Borrowed(&device_changes),
             },
         )?;
