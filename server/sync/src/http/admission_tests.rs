@@ -114,6 +114,7 @@ async fn queued_bulk_bodies_do_not_block_control_requests() {
         .acquire_owned()
         .await
         .unwrap();
+    let t_bulk = std::time::Instant::now();
     let mut jobs = Vec::new();
     for _ in 0..4 {
         jobs.push(fixture.request("/uploads/frames"));
@@ -122,6 +123,7 @@ async fn queued_bulk_bodies_do_not_block_control_requests() {
     for _ in 0..8 {
         jobs.push(fixture.request("/uploads/frames"));
     }
+    eprintln!("ADMISSION-PROBE bulk-sent {:?}", t_bulk.elapsed());
     tokio::time::sleep(Duration::from_millis(100)).await;
     let t0 = std::time::Instant::now();
     let mark = |label: &str| eprintln!("ADMISSION-PROBE {label} {:?}", t0.elapsed());
@@ -172,6 +174,8 @@ async fn queued_bulk_bodies_do_not_block_control_requests() {
         assert_eq!(job.await.unwrap().status(), 204);
     }
     assert!(completed, "control requests waited behind bulk capacity");
+    mark("jobs-done");
+    panic!("ADMISSION-PROBE diagnostic run");
 }
 
 #[tokio::test]

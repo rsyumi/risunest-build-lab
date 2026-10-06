@@ -4053,8 +4053,8 @@
     {
       "path": "server/sync/src/http/admission_tests.rs",
       "mode": "100644",
-      "bytes": 16569,
-      "sha256": "2f1d1e3dad5350ee94c889d42679fa7fcaf6f2c0e8d888adcda45a8fa6c7c8b3"
+      "bytes": 16749,
+      "sha256": "3ea486bd2ae85a0c7de3ff1b5cafc9b7f48c1eb093465aa7b5aadacd35cb180f"
     },
     {
       "path": "server/sync/src/http/lww.rs",
