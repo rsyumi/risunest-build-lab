@@ -88,7 +88,7 @@
       "path": "benchmarks/file-backup/Cargo.lock",
       "mode": "100644",
       "bytes": 21964,
-      "sha256": "0107a4590462865ce815c98a3dd05eb563206248a0e4a41ab3679dbfec32ba8f"
+      "sha256": "6c9824f1c92b3ca02e17ea6cc35bed2ac5df8e652f53b0f85f0a2e42fabd4326"
     },
     {
       "path": "benchmarks/file-backup/Cargo.toml",
@@ -165,14 +165,14 @@
     {
       "path": "benchmarks/ios/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 188114,
-      "sha256": "a422faace2f78b568fc3690e133ff740aa06c9b84b71fd44772763d577f97408"
+      "bytes": 188313,
+      "sha256": "54a8383c71ced692d27c9ad39c2cf788bc07e07c7c8de89c969881f17c37390f"
     },
     {
       "path": "benchmarks/ios/native/Cargo.toml",
       "mode": "100644",
-      "bytes": 1101,
-      "sha256": "6d61da38e5a9a58c0aa554dae0a8331acbeb79a52db71ff2c49201abc745858d"
+      "bytes": 1115,
+      "sha256": "d41d1de5cccd558e5607845c2ebc0112013bf1b26ae013fa662ee298c0c72a25"
     },
     {
       "path": "benchmarks/ios/native/build.rs",
@@ -189,8 +189,8 @@
     {
       "path": "benchmarks/ios/native/src/legacy_restore_memory.rs",
       "mode": "100644",
-      "bytes": 1689,
-      "sha256": "dfa143b5a0bc32b4ff7ce83e9980735edee70816ce33ac7087077de97c9fcb6d"
+      "bytes": 1782,
+      "sha256": "0a6b4e9cb614e899802f301d2e00ed45ce9d0747fa415f4a06e1ba88059bcafa"
     },
     {
       "path": "benchmarks/ios/native/src/lib.rs",
@@ -340,7 +340,7 @@
       "path": "benchmarks/lww-native/Cargo.lock",
       "mode": "100644",
       "bytes": 7511,
-      "sha256": "c16743758e6b8bcf3fc4077e200b9a5db960ad8e063fb200f22a66008e0fbbd1"
+      "sha256": "c8145bb5cad4d9aab5276ee6eb234b8a917ac8cb662f6490fa70b50b6f180899"
     },
     {
       "path": "benchmarks/lww-native/Cargo.toml",
@@ -502,7 +502,7 @@
       "path": "benchmarks/macos/native/Cargo.lock",
       "mode": "100644",
       "bytes": 188000,
-      "sha256": "4e293ac550fd1acb834ae4a5e28e63a0d1aa70161e35167298afb5e3b351fc59"
+      "sha256": "1488876813d1f5addbeace59630aa94f2c33afec05208b683251d9f8b1aaafd8"
     },
     {
       "path": "benchmarks/macos/native/Cargo.toml",
@@ -879,8 +879,8 @@
     {
       "path": "benchmarks/streaming/suite.ts",
       "mode": "100644",
-      "bytes": 8691,
-      "sha256": "b66612b0b4ddb055677fd9c01d4ad258bc5171f40f7cad0d626a3e7166af50fb"
+      "bytes": 9414,
+      "sha256": "253587c6c543066332dfed6ee7d57a08f618767b25c3977d4182255803cb724a"
     },
     {
       "path": "benchmarks/streaming/tauri.conf.json",
@@ -1222,7 +1222,7 @@
       "path": "crates/external-storage-format/Cargo.lock",
       "mode": "100644",
       "bytes": 23169,
-      "sha256": "e280c1aa7e2a67b90f12fcadbcf431f7f4a209a1fbabda15d7171828a68dd698"
+      "sha256": "461b0822cb7f6338116a4aa500248cce879cfba7d4c8481dbf812c223283c7f8"
     },
     {
       "path": "crates/external-storage-format/Cargo.toml",
@@ -1330,7 +1330,7 @@
       "path": "crates/external-storage-wasm/Cargo.lock",
       "mode": "100644",
       "bytes": 18716,
-      "sha256": "a78d90059b0c8b1ea9ee342ddd6a7051d9091425300fc372242dd36488b19581"
+      "sha256": "279ab03cfefd681b940c723aee0db28e6e89b061849de31d8701b956ae091764"
     },
     {
       "path": "crates/external-storage-wasm/Cargo.toml",
@@ -1348,7 +1348,7 @@
       "path": "crates/release-update/Cargo.lock",
       "mode": "100644",
       "bytes": 22804,
-      "sha256": "8af4413f84bead86cd3223ebb7b06346776de6717d6882c3e0c5c025fcb46124"
+      "sha256": "2067a578b2fd8eed23881a4eaaadb2809d461de76c94049c23fbca09a87b7c39"
     },
     {
       "path": "crates/release-update/Cargo.toml",
@@ -1402,7 +1402,7 @@
       "path": "crates/small-object-store/Cargo.lock",
       "mode": "100644",
       "bytes": 11764,
-      "sha256": "f2f01057ee42bffd0b339a2a90a4c57d097ce038d4bc079838e0466d6e5641f3"
+      "sha256": "c75073932065a1483b13de50481773ebc348e6bfcb5e06b6f8c698934825c823"
     },
     {
       "path": "crates/small-object-store/Cargo.toml",
@@ -1420,7 +1420,7 @@
       "path": "crates/sync-connect/Cargo.lock",
       "mode": "100644",
       "bytes": 20359,
-      "sha256": "c9224b1952008babc5080a401665940b2e8cad818f3aefdcc9ea235ba964f05b"
+      "sha256": "91ba7713070b5900f66b1c5a924966bda3f53f86503d117407759de29601457a"
     },
     {
       "path": "crates/sync-connect/Cargo.toml",
@@ -1474,7 +1474,7 @@
       "path": "crates/sync-wire/Cargo.lock",
       "mode": "100644",
       "bytes": 5470,
-      "sha256": "f9f7ed4e5d31f7709e5c702f0bf20336dc1f0b8a68a3763bc9bf5c5b788a34ba"
+      "sha256": "388256f346909f6f7e1362a1f2a843125505af835418905f9612695bf91e4f9f"
     },
     {
       "path": "crates/sync-wire/Cargo.toml",
@@ -2806,7 +2806,7 @@
       "path": "package.json",
       "mode": "100644",
       "bytes": 10260,
-      "sha256": "c700a903be2d6ff61b2a542e8fbf26b1e407b783615b48fba1d5d6516d943247"
+      "sha256": "4b5cc92382a70954fd23b0ac8522f33cefdd2e53a17b2f27f84a78b27a9ff0c4"
     },
     {
       "path": "patches/@tauri-apps__plugin-http@2.6.1.patch",
@@ -2829,8 +2829,8 @@
     {
       "path": "pnpm-lock.yaml",
       "mode": "100644",
-      "bytes": 151709,
-      "sha256": "369125e15a76ee48666546d0206a2b85a7beb8d14a10fbe76091ba44eea874ca"
+      "bytes": 151917,
+      "sha256": "a33912b5f8b5a97c1f7a83f6b54304a2a4aaf0a6bb524db558463c5e9c43eefe"
     },
     {
       "path": "pnpm-workspace.yaml",
@@ -3478,13 +3478,13 @@
       "path": "server/endpoint-registry/package.json",
       "mode": "100644",
       "bytes": 1053,
-      "sha256": "0668ef11be3697c1e11fdca71c3cf0d57600edd19d790c030c40080cca457e22"
+      "sha256": "15a70fb79ac3f01f67b2da5b724c959dc8ae80c64c4f057f58c755ef5472f4a5"
     },
     {
       "path": "server/endpoint-registry/pnpm-lock.yaml",
       "mode": "100644",
       "bytes": 59694,
-      "sha256": "108d1e89d1419c1306a1dc0c730f8fb78150d924e863771d2985906bce21eb4c"
+      "sha256": "309c45ca6995fd140e8ddd29620d15e04a4c0b7246db3e82ba9135e794f754e0"
     },
     {
       "path": "server/endpoint-registry/src/index.ts",
@@ -3580,7 +3580,7 @@
       "path": "server/manager/Cargo.lock",
       "mode": "100644",
       "bytes": 60245,
-      "sha256": "0bc23b6d748493ee49d3c1b4bb2db2ec377f1156c4ce162cb0084a337c3611bc"
+      "sha256": "bc1efa17425a9ebdc63f87d04638a57c545af2049d5f41d5e718bf757579203e"
     },
     {
       "path": "server/manager/Cargo.toml",
@@ -3598,19 +3598,19 @@
       "path": "server/manager/gui/package.json",
       "mode": "100644",
       "bytes": 865,
-      "sha256": "c1e1a478addebc58960f33deaa60090030825c60d8e4db8d16a712443872cc49"
+      "sha256": "54fdb165ce03cef93563f48c1e851c52f2dd62b74961d78e684692459f2c47c9"
     },
     {
       "path": "server/manager/gui/pnpm-lock.yaml",
       "mode": "100644",
       "bytes": 38407,
-      "sha256": "bcda9ad25d431db25386256129a6492dc07eb7dd0d9d147d5bf061fb9647697e"
+      "sha256": "228cce264be7f20df71b66411af7bad440245530d77d219fc386861d45dcf1b2"
     },
     {
       "path": "server/manager/gui/src-tauri/Cargo.lock",
       "mode": "100644",
       "bytes": 146063,
-      "sha256": "22efb5649f5ff2b5cc6e598742693c1b8d4a17ccfb1896524d75879a41d9172b"
+      "sha256": "ce017e8c8e531071787fa9c5c8f498813124eaca0e3738e9e0cac61f2cc899ff"
     },
     {
       "path": "server/manager/gui/src-tauri/Cargo.toml",
@@ -4018,7 +4018,7 @@
       "path": "server/sync/Cargo.lock",
       "mode": "100644",
       "bytes": 54040,
-      "sha256": "7802412be742cd5c3f93b2499b136b49d818900678ff25d6d8ef10519fa1ea6f"
+      "sha256": "70da4aa6d46fdae3a3ffafbd3a3ef016e649b3df51b2cb0d5bdcfde3a2178ef6"
     },
     {
       "path": "server/sync/Cargo.toml",
@@ -4426,7 +4426,7 @@
       "path": "src-tauri/Cargo.lock",
       "mode": "100644",
       "bytes": 192648,
-      "sha256": "24cc0b6d95777267f968426d3550bce2d40bb0eb91ee24ae26615b57deb8e7a4"
+      "sha256": "446c1644fda5a803d76f422600dc3d83782656086f4ec40e4ce226c05e4fb511"
     },
     {
       "path": "src-tauri/Cargo.toml",
@@ -8031,14 +8031,14 @@
     {
       "path": "src/lib/ChatScreens/ChatBody.inlayLifecycle.test.ts",
       "mode": "100644",
-      "bytes": 63000,
-      "sha256": "74b4010040599a4381c11480d444eb538847ca5a15ed2a3622f94dc669373963"
+      "bytes": 65824,
+      "sha256": "956965a4102e6d2c39afd2e9c60adc0789eeb5eef4f45255e93281b25ce7819a"
     },
     {
       "path": "src/lib/ChatScreens/ChatBody.svelte",
       "mode": "100644",
-      "bytes": 30439,
-      "sha256": "5e01767f7292de9911c67dbe7e666f81fafb30dfd5856fdf328976a2b4768028"
+      "bytes": 30547,
+      "sha256": "7537f24e003f937bddc8fb2350aa93047ce4279a88ff4dd42641d808780ab708"
     },
     {
       "path": "src/lib/ChatScreens/ChatBodyCaptureProbe.test.svelte",
@@ -16804,7 +16804,7 @@
       "path": "tests/native/native/Cargo.lock",
       "mode": "100644",
       "bytes": 187978,
-      "sha256": "4c47d25c479d229f7745b8928aa0e5de49e27556514fc2484302795a6f918897"
+      "sha256": "44d8074ce4cbc1f3bf97f60b5d6e30fb4097920c46699e8010140cccc7a16734"
     },
     {
       "path": "tests/native/native/Cargo.toml",
