@@ -135,14 +135,14 @@ export function assertMonacoBundle(output) {
   }
   for (const id of modules) {
     const normalized = id.replaceAll("\\", "/");
-    assert.ok(!/\/vs\/language\/(?:json|css|html|typescript)\//.test(normalized), `Unused Monaco language service: ${id}`);
-    assert.ok(!/\/vs\/editor\/editor\.main\.js/.test(normalized), `Full Monaco entry: ${id}`);
-    const basic = normalized.match(/\/vs\/basic-languages\/([^/]+)\//)?.[1];
+    assert.ok(!/\/vs\/languages?\/(?:features\/)?(?:json|css|html|typescript)\//.test(normalized), `Unused Monaco language service: ${id}`);
+    assert.ok(!/\/monaco-editor\/esm\/vs\/(?:editor\/editor\.main|index)\.js/.test(normalized), `Full Monaco entry: ${id}`);
+    const basic = normalized.match(/\/vs\/(?:basic-languages|languages\/definitions)\/([^/]+)\//)?.[1];
     assert.ok(!basic || ["markdown", "lua"].includes(basic), `Unused Monaco basic language: ${id}`);
   }
-  assert.ok(modules.some(id => id.replaceAll("\\", "/").includes("/vs/editor/edcore.main.js")), "Missing Monaco editor core");
+  assert.ok(modules.some(id => id.replaceAll("\\", "/").includes("/vs/editor/editor.api.js")), "Missing Monaco editor core");
   for (const language of ["markdown", "lua"]) {
-    assert.ok(modules.some(id => id.replaceAll("\\", "/").includes(`/vs/basic-languages/${language}/`)), `Missing Monaco ${language}`);
+    assert.ok(modules.some(id => id.replaceAll("\\", "/").includes(`/vs/languages/definitions/${language}/`)), `Missing Monaco ${language}`);
   }
   const workers = output.filter(item => /editor\.worker[.-].*\.js$/.test(item.fileName));
   assert.equal(workers.length, 1, "Expected one emitted Monaco editor worker");

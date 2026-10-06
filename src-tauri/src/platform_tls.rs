@@ -70,17 +70,19 @@ mod android {
     pub(super) struct VerifierUnavailable;
 
     #[no_mangle]
-    pub extern "system" fn Java_io_github_rsyumi_risunest_PlatformTls_initialize(
-        mut env: jni::JNIEnv,
-        _class: jni::objects::JClass,
-        context: jni::objects::JObject,
+    pub extern "system" fn Java_io_github_rsyumi_risunest_PlatformTls_initialize<'local>(
+        mut env: jni022::EnvUnowned<'local>,
+        _class: jni022::objects::JClass<'local>,
+        context: jni022::objects::JObject<'local>,
     ) {
-        match rustls_platform_verifier::android::init_with_env(&mut env, context) {
-            Ok(()) => VERIFIER_READY.store(true, Ordering::Release),
-            Err(_) => {
-                let _ = env.exception_clear();
+        env.with_env(|env| -> jni022::errors::Result<()> {
+            match rustls_platform_verifier::android::init_with_env(env, context) {
+                Ok(()) => VERIFIER_READY.store(true, Ordering::Release),
+                Err(_) => env.exception_clear(),
             }
-        }
+            Ok(())
+        })
+        .resolve::<jni022::errors::LogErrorAndDefault>();
     }
 
     fn config(alpn_protocols: Vec<Vec<u8>>) -> Option<rustls::ClientConfig> {
