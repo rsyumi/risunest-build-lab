@@ -87,8 +87,8 @@
     {
       "path": "benchmarks/file-backup/Cargo.lock",
       "mode": "100644",
-      "bytes": 21963,
-      "sha256": "e8e9018247fd40c236cea8cf5db73f0b56d4dd9a5469cbcd9710f524866276aa"
+      "bytes": 21964,
+      "sha256": "0107a4590462865ce815c98a3dd05eb563206248a0e4a41ab3679dbfec32ba8f"
     },
     {
       "path": "benchmarks/file-backup/Cargo.toml",
@@ -165,8 +165,8 @@
     {
       "path": "benchmarks/ios/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 188478,
-      "sha256": "0dbfa3d6ece1be017b581fce0da948247cf085d2d27308f14faadfc77353a257"
+      "bytes": 188114,
+      "sha256": "a422faace2f78b568fc3690e133ff740aa06c9b84b71fd44772763d577f97408"
     },
     {
       "path": "benchmarks/ios/native/Cargo.toml",
@@ -501,8 +501,8 @@
     {
       "path": "benchmarks/macos/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 187536,
-      "sha256": "3710a372f488f568f892df47602c0a2abdd1eb6c030da270552094bbf7085626"
+      "bytes": 188000,
+      "sha256": "4e293ac550fd1acb834ae4a5e28e63a0d1aa70161e35167298afb5e3b351fc59"
     },
     {
       "path": "benchmarks/macos/native/Cargo.toml",
@@ -1348,7 +1348,7 @@
       "path": "crates/release-update/Cargo.lock",
       "mode": "100644",
       "bytes": 22804,
-      "sha256": "305fe74d17d3f5fe21f22f194ea9d0bbdcae72f650479724f1619e4b0aed6061"
+      "sha256": "8af4413f84bead86cd3223ebb7b06346776de6717d6882c3e0c5c025fcb46124"
     },
     {
       "path": "crates/release-update/Cargo.toml",
@@ -2806,7 +2806,7 @@
       "path": "package.json",
       "mode": "100644",
       "bytes": 10260,
-      "sha256": "547d312ea7a86363fad7af60dd843781db877a0cdf12b9dde430e9f17f4dbd7e"
+      "sha256": "c700a903be2d6ff61b2a542e8fbf26b1e407b783615b48fba1d5d6516d943247"
     },
     {
       "path": "patches/@tauri-apps__plugin-http@2.6.1.patch",
@@ -2829,14 +2829,14 @@
     {
       "path": "pnpm-lock.yaml",
       "mode": "100644",
-      "bytes": 151661,
-      "sha256": "0b6373e9fc5c38d06d9bdd54ed18c4c001498aa3d4f701823480ba7f2bd75d06"
+      "bytes": 151709,
+      "sha256": "369125e15a76ee48666546d0206a2b85a7beb8d14a10fbe76091ba44eea874ca"
     },
     {
       "path": "pnpm-workspace.yaml",
       "mode": "100644",
       "bytes": 425,
-      "sha256": "c1339913dee45f0a0d137bd2a4293744b0565db94d11630c6286754f818c47dd"
+      "sha256": "5741e97f1b1b7aceb744466188ee52329340b933795e871507a93d5261d83edd"
     },
     {
       "path": "public/assets/bergamot-translator-worker.js",
@@ -3463,12 +3463,6 @@
       "sha256": "395a6630dacb44ef87e992181247cdae2ec41cd7de52342d129eca9ff20ce6e7"
     },
     {
-      "path": "server/endpoint-registry/.npmrc",
-      "mode": "100644",
-      "bytes": 26,
-      "sha256": "7081bc7cb2ab26837e06fa2942de10bc292f7e1bdfba1e0d97b9f3c899cdd55e"
-    },
-    {
       "path": "server/endpoint-registry/.prettierignore",
       "mode": "100644",
       "bytes": 95,
@@ -3483,14 +3477,14 @@
     {
       "path": "server/endpoint-registry/package.json",
       "mode": "100644",
-      "bytes": 1054,
-      "sha256": "6f5cace31f8f93776dbda914141655a93be726fe21441bb33fad8d19258aab96"
+      "bytes": 1053,
+      "sha256": "0668ef11be3697c1e11fdca71c3cf0d57600edd19d790c030c40080cca457e22"
     },
     {
       "path": "server/endpoint-registry/pnpm-lock.yaml",
       "mode": "100644",
-      "bytes": 59698,
-      "sha256": "df8cb6d407b425589859a510e44182f70aa03c1b426c8423c023bcff18edb463"
+      "bytes": 59694,
+      "sha256": "108d1e89d1419c1306a1dc0c730f8fb78150d924e863771d2985906bce21eb4c"
     },
     {
       "path": "server/endpoint-registry/src/index.ts",
@@ -3586,19 +3580,13 @@
       "path": "server/manager/Cargo.lock",
       "mode": "100644",
       "bytes": 60245,
-      "sha256": "2f63dca79e07c0a8f430a6de641663fb4cbbd9460bfcaf1caed4f6a654f15568"
+      "sha256": "0bc23b6d748493ee49d3c1b4bb2db2ec377f1156c4ce162cb0084a337c3611bc"
     },
     {
       "path": "server/manager/Cargo.toml",
       "mode": "100644",
       "bytes": 958,
       "sha256": "f32f6397b30e518d522dfe39d58c7690dc4173d6abd81028b792361c871f3c02"
-    },
-    {
-      "path": "server/manager/gui/.npmrc",
-      "mode": "100644",
-      "bytes": 70,
-      "sha256": "33cfb03a8cc0957b551db19d5aa6cd688dc1fe7f6ac819da30795f4710a05217"
     },
     {
       "path": "server/manager/gui/index.html",
@@ -3610,19 +3598,19 @@
       "path": "server/manager/gui/package.json",
       "mode": "100644",
       "bytes": 865,
-      "sha256": "de143c6e4931fa8e4e395e23f9dc667a77cf669575b202698b10c1baee786e71"
+      "sha256": "c1e1a478addebc58960f33deaa60090030825c60d8e4db8d16a712443872cc49"
     },
     {
       "path": "server/manager/gui/pnpm-lock.yaml",
       "mode": "100644",
-      "bytes": 38359,
-      "sha256": "f8bf374cabdf6facbdcf00fbe696d8ccdceae281e34ac2e334572dc4f54f84b5"
+      "bytes": 38407,
+      "sha256": "bcda9ad25d431db25386256129a6492dc07eb7dd0d9d147d5bf061fb9647697e"
     },
     {
       "path": "server/manager/gui/src-tauri/Cargo.lock",
       "mode": "100644",
-      "bytes": 145802,
-      "sha256": "85f8753af5e4fe73c85d2ff66468de5bf282cab470d1197f6aa1dfd8356bc36a"
+      "bytes": 146063,
+      "sha256": "22efb5649f5ff2b5cc6e598742693c1b8d4a17ccfb1896524d75879a41d9172b"
     },
     {
       "path": "server/manager/gui/src-tauri/Cargo.toml",
@@ -4030,7 +4018,7 @@
       "path": "server/sync/Cargo.lock",
       "mode": "100644",
       "bytes": 54040,
-      "sha256": "b7f78cce9215fe600eb3b9bea3874cedc47b2f7bef5a180ce9d7c7fd7e15bd75"
+      "sha256": "7802412be742cd5c3f93b2499b136b49d818900678ff25d6d8ef10519fa1ea6f"
     },
     {
       "path": "server/sync/Cargo.toml",
@@ -4438,7 +4426,7 @@
       "path": "src-tauri/Cargo.lock",
       "mode": "100644",
       "bytes": 192648,
-      "sha256": "03219af835b90a26e9201990083b84bcf19f16e71e109c312583cabfc17ecc83"
+      "sha256": "24cc0b6d95777267f968426d3550bce2d40bb0eb91ee24ae26615b57deb8e7a4"
     },
     {
       "path": "src-tauri/Cargo.toml",
@@ -12907,6 +12895,12 @@
       "sha256": "e8ff9cc9f87ef45796f76f07fbf4f6619aac97442c4b2351f35233c9a37f57d0"
     },
     {
+      "path": "src/ts/process/request/anthropic.bedrock.test.ts",
+      "mode": "100644",
+      "bytes": 3907,
+      "sha256": "d80227d0b9ceea9f2febe5fe1a25bbeee7489a0e3a0ebccda83c48050a720144"
+    },
+    {
       "path": "src/ts/process/request/anthropic.ts",
       "mode": "100644",
       "bytes": 43652,
@@ -12957,8 +12951,8 @@
     {
       "path": "src/ts/process/request/request.ollama.test.ts",
       "mode": "100644",
-      "bytes": 5873,
-      "sha256": "eac6ce188e9fc3741f7226ef1401b3fad86778b71d26fb42a42d9de322147f0c"
+      "bytes": 8767,
+      "sha256": "485301fd9920a09718eed594d65aeb45316ee2ffbea911fff32088a633d16e4c"
     },
     {
       "path": "src/ts/process/request/request.ts",
@@ -16809,8 +16803,8 @@
     {
       "path": "tests/native/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 188342,
-      "sha256": "d5f951d7ed7d7bcaf561cc895e9972c2af8762585e37591819916e0b053d7b07"
+      "bytes": 187978,
+      "sha256": "4c47d25c479d229f7745b8928aa0e5de49e27556514fc2484302795a6f918897"
     },
     {
       "path": "tests/native/native/Cargo.toml",
