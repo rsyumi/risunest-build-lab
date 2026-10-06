@@ -13,8 +13,59 @@ export interface ChatViewportPin {
 }
 
 export interface ChatViewportJumpOptions {
-    align?: 'start' | 'center'
+    align?: 'start' | 'center' | 'end'
+    // Height covered by an overlay at the bottom of the scroll area; 'end' keeps the row above it.
+    bottomInset?: number
     highlight?: boolean
+}
+
+export type ChatViewportStepDirection = 'previous' | 'next'
+
+export interface ChatViewportRowBounds {
+    index: number
+    top: number
+    bottom: number
+}
+
+export type ChatViewportStepTarget =
+    | { kind: 'row'; index: number; align: 'start' | 'end' }
+    | { kind: 'top' }
+    | { kind: 'bottom' }
+
+const STEP_EDGE_TOLERANCE = 8
+
+// Previous aligns the start of the row crossing the top edge, then of the row above it.
+// Next aligns the end of the row crossing the bottom edge, then of the row below it.
+export function resolveChatViewportStep(
+    rows: readonly ChatViewportRowBounds[],
+    visibleTop: number,
+    visibleBottom: number,
+    rowCount: number,
+    direction: ChatViewportStepDirection,
+): ChatViewportStepTarget {
+    const sorted = rows
+        .filter((row) => row.bottom > row.top)
+        .sort((left, right) => left.index - right.index)
+    if (direction === 'previous') {
+        const current =
+            sorted.find((row) => row.bottom > visibleTop + STEP_EDGE_TOLERANCE) ?? sorted.at(-1)
+        if (!current) return { kind: 'top' }
+        if (current.top < visibleTop - STEP_EDGE_TOLERANCE)
+            return { kind: 'row', index: current.index, align: 'start' }
+        return current.index > 0
+            ? { kind: 'row', index: current.index - 1, align: 'start' }
+            : { kind: 'top' }
+    }
+    let current = sorted[0]
+    for (const row of sorted) {
+        if (row.top < visibleBottom - STEP_EDGE_TOLERANCE) current = row
+    }
+    if (!current) return { kind: 'bottom' }
+    if (current.bottom > visibleBottom + STEP_EDGE_TOLERANCE)
+        return { kind: 'row', index: current.index, align: 'end' }
+    return current.index < rowCount - 1
+        ? { kind: 'row', index: current.index + 1, align: 'end' }
+        : { kind: 'bottom' }
 }
 
 export interface ChatViewportHandle {
@@ -22,6 +73,9 @@ export interface ChatViewportHandle {
     jumpTo(index: number, options?: ChatViewportJumpOptions): Promise<boolean>
     jumpToLatestMessage(): Promise<void>
     scrollToLatestMessage(): Promise<void>
+    jumpToTop(): Promise<boolean>
+    jumpToBottom(): Promise<boolean>
+    navigateMessage(direction: ChatViewportStepDirection, bottomInset?: number): Promise<boolean>
 }
 
 export interface ChatViewportKeySource {

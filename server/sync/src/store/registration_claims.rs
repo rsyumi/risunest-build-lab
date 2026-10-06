@@ -6,15 +6,21 @@ impl Store {
         let mut db = self.db()?;
         let tx = db.transaction()?;
         Self::require_device(&tx, device)?;
-        let saved: Option<(String, String)> = tx.query_row(
-            "SELECT digest,body FROM device_writer_claims WHERE device=?1",
-            [&device.id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).optional()?;
-        saved.map(|(request_digest, body)| Ok(NewDeviceClaimStatus {
-            request_digest,
-            receipt: parse(&body)?,
-        })).transpose()
+        let saved: Option<(String, String)> = tx
+            .query_row(
+                "SELECT digest,body FROM device_writer_claims WHERE device=?1",
+                [&device.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        saved
+            .map(|(request_digest, body)| {
+                Ok(NewDeviceClaimStatus {
+                    request_digest,
+                    receipt: parse(&body)?,
+                })
+            })
+            .transpose()
     }
 
     pub fn claim_new_device_writer(
