@@ -1,8 +1,8 @@
 diff --git a/dist-js/index.cjs b/dist-js/index.cjs
-index 18b6c78e7102523d557430eaae94d839fcef0cb0..a7658e4bb4e39a3f12a0a3c4c91a6cb90e103cdb 100644
+index b64701ce998c3fa590af90024c79dfcc55e9f2f1..d8c4566bf68324b88c67001b939e8df2c3700342 100644
 --- a/dist-js/index.cjs
 +++ b/dist-js/index.cjs
-@@ -43,6 +43,30 @@ const ERROR_REQUEST_CANCELLED = 'Request cancelled';
+@@ -53,6 +53,30 @@ const ERROR_REQUEST_CANCELLED = 'Request cancelled';
   *
   * @since 2.0.0
   */
@@ -33,7 +33,7 @@ index 18b6c78e7102523d557430eaae94d839fcef0cb0..a7658e4bb4e39a3f12a0a3c4c91a6cb9
  async function fetch(input, init) {
      // Optimistically check for abort signal and avoid doing any work
      const signal = init?.signal;
-@@ -53,12 +77,19 @@ async function fetch(input, init) {
+@@ -63,12 +87,19 @@ async function fetch(input, init) {
      const connectTimeout = init?.connectTimeout;
      const proxy = init?.proxy;
      const danger = init?.danger;
@@ -53,7 +53,7 @@ index 18b6c78e7102523d557430eaae94d839fcef0cb0..a7658e4bb4e39a3f12a0a3c4c91a6cb9
      }
      const headers = init?.headers
          ? init.headers instanceof Headers
-@@ -66,8 +97,12 @@ async function fetch(input, init) {
+@@ -76,8 +107,12 @@ async function fetch(input, init) {
              : new Headers(init.headers)
          : new Headers();
      const req = new Request(input, init);
@@ -66,7 +66,7 @@ index 18b6c78e7102523d557430eaae94d839fcef0cb0..a7658e4bb4e39a3f12a0a3c4c91a6cb9
      // append new headers created by the browser `Request` implementation,
      // if not already declared by the caller of this function
      for (const [key, value] of req.headers) {
-@@ -97,6 +132,7 @@ async function fetch(input, init) {
+@@ -107,6 +142,7 @@ async function fetch(input, init) {
              url: req.url,
              headers: mappedHeaders,
              data,
@@ -75,10 +75,10 @@ index 18b6c78e7102523d557430eaae94d839fcef0cb0..a7658e4bb4e39a3f12a0a3c4c91a6cb9
              connectTimeout,
              proxy,
 diff --git a/dist-js/index.d.ts b/dist-js/index.d.ts
-index b030d62112c969e59830227013a8c9f97cff02a9..972814979e3df0a38ddc85c06e75eeb819c3da26 100644
+index 7006c803dfe679127bae0dd15011a76ae764d3b2..4675a80ac14ce44316e97d9d4202de856c2f10d0 100644
 --- a/dist-js/index.d.ts
 +++ b/dist-js/index.d.ts
-@@ -41,6 +41,10 @@ export interface ProxyConfig {
+@@ -52,6 +52,10 @@ export interface ProxyConfig {
   * @since 2.0.0
   */
  export interface ClientOptions {
@@ -90,10 +90,10 @@ index b030d62112c969e59830227013a8c9f97cff02a9..972814979e3df0a38ddc85c06e75eeb8
       * Defines the maximum number of redirects the client should follow.
       * If set to 0, no redirects will be followed.
 diff --git a/dist-js/index.js b/dist-js/index.js
-index f38dbd4b68c3efa578cf6a8309543840a3619c77..cf29c6b72615ac1d7a2292f383b4f89ca265c275 100644
+index 12e51ed1f386583d99759b83c70f504a3e0890b6..d2f6f7b2e00285f453a2b17221c7189a532e5cff 100644
 --- a/dist-js/index.js
 +++ b/dist-js/index.js
-@@ -41,6 +41,30 @@ const ERROR_REQUEST_CANCELLED = 'Request cancelled';
+@@ -51,6 +51,30 @@ const ERROR_REQUEST_CANCELLED = 'Request cancelled';
   *
   * @since 2.0.0
   */
@@ -124,7 +124,7 @@ index f38dbd4b68c3efa578cf6a8309543840a3619c77..cf29c6b72615ac1d7a2292f383b4f89c
  async function fetch(input, init) {
      // Optimistically check for abort signal and avoid doing any work
      const signal = init?.signal;
-@@ -51,12 +75,19 @@ async function fetch(input, init) {
+@@ -61,12 +85,19 @@ async function fetch(input, init) {
      const connectTimeout = init?.connectTimeout;
      const proxy = init?.proxy;
      const danger = init?.danger;
@@ -144,7 +144,7 @@ index f38dbd4b68c3efa578cf6a8309543840a3619c77..cf29c6b72615ac1d7a2292f383b4f89c
      }
      const headers = init?.headers
          ? init.headers instanceof Headers
-@@ -64,8 +95,12 @@ async function fetch(input, init) {
+@@ -74,8 +105,12 @@ async function fetch(input, init) {
              : new Headers(init.headers)
          : new Headers();
      const req = new Request(input, init);
@@ -157,7 +157,7 @@ index f38dbd4b68c3efa578cf6a8309543840a3619c77..cf29c6b72615ac1d7a2292f383b4f89c
      // append new headers created by the browser `Request` implementation,
      // if not already declared by the caller of this function
      for (const [key, value] of req.headers) {
-@@ -95,6 +130,7 @@ async function fetch(input, init) {
+@@ -105,6 +140,7 @@ async function fetch(input, init) {
              url: req.url,
              headers: mappedHeaders,
              data,
