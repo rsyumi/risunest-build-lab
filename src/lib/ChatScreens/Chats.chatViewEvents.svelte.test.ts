@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { chatScreenState } from 'src/ts/ui/chatScreenState.svelte'
 import { mount, tick, unmount } from 'svelte'
 import type { character, Message } from 'src/ts/storage/database.svelte'
 import { ActiveConversationSession } from 'src/ts/storage/activeConversationSession'
@@ -143,6 +144,7 @@ describe('chat view events from the chat row lifecycle', () => {
     }
 
     beforeEach(() => {
+        chatScreenState.clear()
         resetChatMountProbe()
         frames = new Map()
         let nextFrame = 1

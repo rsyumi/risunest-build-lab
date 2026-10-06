@@ -2,6 +2,10 @@ mod account_credential;
 #[cfg(any(test, target_os = "android"))]
 mod android_commit_transport;
 mod app_paths;
+#[cfg(desktop)]
+mod desktop_notifications;
+#[cfg(desktop)]
+mod startup_appearance;
 mod cleanup_secrets;
 mod cleanup_webview;
 mod app_cleanup;
@@ -126,7 +130,13 @@ impl NativeStartupState {
         let failure = self
             .0
             .lock()
-            .map_err(|error| format!("native startup status lock failed: {error}"))?;
+            .map_err(|error| {
+                let _ = native_log::logged_without_detail::<(), _>(
+                    "native_startup_status",
+                    Err("startup-state-unavailable".to_owned()),
+                );
+                format!("native startup status lock failed: {error}")
+            })?;
         match failure.message.as_ref() {
             Some(error) => Err(format!("Native setup failed: {error}")),
             None => Ok(()),
@@ -154,18 +164,22 @@ fn boot_marker_now() -> i64 {
 /// before anything it could fail in, so a start that never reaches the app still counts.
 #[tauri::command(async)]
 fn boot_attempt_begin(app: tauri::AppHandle) -> Result<boot_marker::BootDecision, String> {
-    let version = app.package_info().version.to_string();
-    let root = boot_marker_root(&app)?;
-    boot_marker::begin(&root, &version, boot_marker_now())
-        .map_err(|error| format!("failed to record the start attempt: {error}"))
+    crate::native_log::logged_without_detail("boot_attempt_begin", (|| {
+        let version = app.package_info().version.to_string();
+        let root = boot_marker_root(&app)?;
+        boot_marker::begin(&root, &version, boot_marker_now())
+            .map_err(|error| format!("failed to record the start attempt: {error}"))
+    })())
 }
 
 /// Records that the start finished, so the next one begins from zero.
 #[tauri::command(async)]
 fn boot_attempt_complete(app: tauri::AppHandle) -> Result<(), String> {
-    let root = boot_marker_root(&app)?;
-    boot_marker::complete(&root)
-        .map_err(|error| format!("failed to clear the start attempt: {error}"))
+    crate::native_log::logged_without_detail("boot_attempt_complete", (|| {
+        let root = boot_marker_root(&app)?;
+        boot_marker::complete(&root)
+            .map_err(|error| format!("failed to clear the start attempt: {error}"))
+    })())
 }
 
 #[tauri::command]
@@ -173,11 +187,19 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+#[track_caller]
+fn log_native_request_failure(code: &'static str) {
+    let _ = native_log::logged_without_detail::<(), _>("native_request", Err(code.to_owned()));
+}
+
 #[tauri::command]
 async fn native_request(url: String, body: String, header: String, method: String) -> String {
     let headers_json: Value = match serde_json::from_str(&header) {
         Ok(h) => h,
-        Err(e) => return format!(r#"{{"success":false,"body":"{}"}}"#, e.to_string()),
+        Err(e) => {
+            log_native_request_failure("invalid-header-json");
+            return format!(r#"{{"success":false,"body":"{}"}}"#, e.to_string());
+        }
     };
 
     let mut headers = HeaderMap::new();
@@ -186,21 +208,31 @@ async fn native_request(url: String, body: String, header: String, method: Strin
         for (key, value) in obj {
             let header_name = match HeaderName::from_bytes(key.as_bytes()) {
                 Ok(name) => name,
-                Err(e) => return format!(r#"{{"success":false,"body":"{}"}}"#, e.to_string()),
+                Err(e) => {
+                    log_native_request_failure("invalid-header-name");
+                    return format!(r#"{{"success":false,"body":"{}"}}"#, e.to_string());
+                }
             };
             let header_value = match HeaderValue::from_str(value.as_str().unwrap_or("")) {
                 Ok(value) => value,
-                Err(e) => return format!(r#"{{"success":false,"body":"{}"}}"#, e.to_string()),
+                Err(e) => {
+                    log_native_request_failure("invalid-header-value");
+                    return format!(r#"{{"success":false,"body":"{}"}}"#, e.to_string());
+                }
             };
             headers.insert(header_name, header_value);
         }
     } else {
+        log_native_request_failure("header-json-shape");
         return format!(r#"{{"success":false,"body":"Invalid header JSON"}}"#);
     }
 
     let client = match platform_tls::client_builder().build() {
         Ok(client) => client,
-        Err(e) => return format!(r#"{{"success":false,"body":"{}"}}"#, e.to_string()),
+        Err(e) => {
+            log_native_request_failure("client-build");
+            return format!(r#"{{"success":false,"body":"{}"}}"#, e.to_string());
+        }
     };
     let response: Result<reqwest::Response, reqwest::Error>;
 
@@ -228,7 +260,10 @@ async fn native_request(url: String, body: String, header: String, method: Strin
             let status = resp.status().as_u16().to_string();
             let bytes = match resp.bytes().await {
                 Ok(b) => b,
-                Err(e) => return format!(r#"{{"success":false,"body":"{}"}}"#, e.to_string()),
+                Err(e) => {
+                    log_native_request_failure("response-body");
+                    return format!(r#"{{"success":false,"body":"{}"}}"#, e.to_string());
+                }
             };
             let encoded = general_purpose::STANDARD.encode(&bytes);
 
@@ -238,10 +273,13 @@ async fn native_request(url: String, body: String, header: String, method: Strin
                 encoded, header_json, status
             )
         }
-        Err(e) => format!(
-            r#"{{"success":false,"body":"{}","status":400}}"#,
-            e.to_string()
-        ),
+        Err(e) => {
+            log_native_request_failure("transport");
+            format!(
+                r#"{{"success":false,"body":"{}","status":400}}"#,
+                e.to_string()
+            )
+        }
     }
 }
 
@@ -459,7 +497,7 @@ fn builder_with_main_window(
                 ios_lifecycle::main_document_started(webview.app_handle());
                 #[cfg(target_os = "macos")]
                 macos_lifecycle::document_started(webview.app_handle());
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(target_os = "linux")]
                 renderer_recovery::document_started(webview.app_handle());
                 if let Some(state) = webview.try_state::<persistent_store::PersistentStoreState>() {
                     if let Err(error) = state.reset_renderer_session() {
@@ -543,12 +581,8 @@ fn builder_with_main_window(
             if let Some((config, data_directory)) = &main_window {
                 let window_builder = tauri::WebviewWindowBuilder::from_config(app, config)?
                     .data_directory(data_directory.clone());
-                #[cfg(target_os = "linux")]
-                let window_builder = if config.background_color.is_none() {
-                    window_builder.background_color(tauri::window::Color(33, 34, 44, 255))
-                } else {
-                    window_builder
-                };
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                let window_builder = startup_appearance::configure(app.handle(), config, window_builder);
                 window_builder.build()?;
             }
             let setup_result = (|| -> Result<(), String> {
@@ -736,7 +770,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         opened_files::desktop_relaunch,
         #[cfg(any(windows, target_os = "linux"))]
         desktop_session::desktop_flush_complete,
-        #[cfg(desktop)]
+        #[cfg(any(windows, target_os = "linux"))]
         renderer_recovery::desktop_close_ack,
         #[cfg(not(target_os = "android"))]
         renderer_recovery::renderer_recovery_take,
@@ -757,6 +791,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         server_sync::commands::server_sync_lww_fence,
         server_sync::commands::server_sync_lww_activate,
         server_sync::commands::server_sync_lww_hydrate,
+        server_sync::commands::server_sync_lww_pending_count,
+        server_sync::commands::server_sync_progress,
         server_sync::commands::server_sync_lww_inspect,
         server_sync::commands::server_sync_lww_pending_binding,
         server_sync::commands::server_sync_lww_stage_target,
@@ -769,7 +805,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         server_sync::commands::server_sync_notify_start,
         server_sync::commands::server_sync_notify_stop,
         server_sync::commands::server_sync_asset_policy,
-        server_sync::commands::asset_residency_download_remote,
+            server_sync::commands::asset_residency_download_remote,
+            server_sync::commands::asset_residency_prepare_download,
         server_sync::commands::server_sync_asset_evict,
         server_sync::commands::server_sync_cache_usage,
         server_sync::commands::server_sync_cache_cleanup,
@@ -794,6 +831,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::data_health::pds_data_health_repair_plan,
         persistent_store::commands::data_health::pds_data_health_repair_preview,
         persistent_store::commands::data_health::pds_data_health_repair_apply,
+        persistent_store::commands::data_health::pds_data_health_discard_intent,
+        persistent_store::commands::data_health::pds_data_health_complete_intent,
         persistent_store::commands::data_health::pds_data_health_journals,
         persistent_store::commands::data_health::pds_data_health_undo,
         native_log::native_log_tail,
@@ -828,6 +867,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         device_backup::native_device_backup_recovery_complete,
         native_file_jobs::native_content_source_metadata,
         native_file_jobs::native_file_job_status,
+        native_file_jobs::native_file_job_prepared_content,
         native_file_jobs::native_file_job_stage_inline_asset,
         native_file_jobs::native_file_job_list,
         native_file_jobs::native_file_job_finalize,
@@ -840,6 +880,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_file_jobs::native_portable_confirm_restore_adoption,
         native_file_jobs::native_portable_retry_restore_bodies,
         native_file_jobs::native_snapshot_restore_bodies_start,
+        native_file_jobs::native_snapshot_restore_bodies_status,
         native_file_jobs::native_plugin_values_assign,
         native_file_jobs::native_backup_source_format,
         native_file_jobs::native_portable_source_discard,
@@ -988,6 +1029,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         regex_shadow::regex_cancel_batch,
         #[cfg(windows)]
         windows_appearance::windows_set_appearance,
+        #[cfg(desktop)]
+        desktop_notifications::desktop_notify,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        startup_appearance::desktop_cache_appearance,
         persistent_store::commands::pds_read_section_participation,
         persistent_store::commands::pds_set_section_participating,
         persistent_store::commands::pds_read_character_summary,

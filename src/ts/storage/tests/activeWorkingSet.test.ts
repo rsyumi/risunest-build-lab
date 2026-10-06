@@ -2,7 +2,7 @@ import { IDBFactory, IDBKeyRange, IDBObjectStore } from 'fake-indexeddb'
 import { describe, expect, it, vi } from 'vitest'
 import { writeHistoryWindow } from '../../process/historyWindowWrite'
 import { ActiveWorkingSet } from '../activeWorkingSet.svelte'
-import type { Chat, Database, Message, character, groupChat } from '../database.svelte'
+import type { Chat, Database, Message, character } from '../database.svelte'
 import { IndexedDbPersistentDataStore } from '../indexedDbPersistentDataStore'
 import {
     capturePersistentRoot,
@@ -139,17 +139,9 @@ function makeHarness(
     } as unknown as PersistentDataStore
     const publishedCharacters: character[] = []
     const publishedConversations: Array<{ characterId: string; conversation: Chat }> = []
-    const publishCharacter = vi.fn((value: character | groupChat) => {
+    const publishCharacter = vi.fn((value: character) => {
         selectedCharacterId = value.chaId
         publishedCharacters.push(value as character)
-    })
-    const publishCharacterSet = vi.fn((
-        primary: character | groupChat,
-        related: Array<character | groupChat>,
-    ) => {
-        publishedCharacters.push(...related as character[])
-        selectedCharacterId = primary.chaId
-        publishedCharacters.push(primary as character)
     })
     const releaseInactiveCharacter = vi.fn()
     let releaseAllowed = true
@@ -162,7 +154,6 @@ function makeHarness(
         getResidentCharacter: (id) =>
             database.characters.find((character) => character.chaId === id) ?? null,
         publishCharacter,
-        publishCharacterSet,
         publishConversation: (characterId, conversation, nextCharacter) => {
             if (nextCharacter) {
                 const index = database.characters.findIndex(
@@ -190,7 +181,6 @@ function makeHarness(
         publishedCharacters,
         publishedConversations,
         publishCharacter,
-        publishCharacterSet,
         releaseInactiveCharacter,
         setSelectedCharacterId(id: string) {
             selectedCharacterId = id
@@ -338,7 +328,7 @@ function makeWindowedHarness(input: {
         recordActiveConversationMutation: vi.fn(),
         recordWindowedChatListChange: vi.fn(() => true),
     }
-    const publishCharacter = vi.fn((next: character | groupChat) => {
+    const publishCharacter = vi.fn((next: character) => {
         const index = database.characters.findIndex(
             (candidate) => candidate.chaId === next.chaId,
         )
@@ -350,7 +340,7 @@ function makeWindowedHarness(input: {
         (
             characterId: string,
             conversation: Chat,
-            nextCharacter?: character | groupChat,
+            nextCharacter?: character,
         ) => {
             const index = database.characters.findIndex(
                 (candidate) => candidate.chaId === characterId,
@@ -400,7 +390,6 @@ function makeWindowedHarness(input: {
             database.characters.find((candidate) => candidate.chaId === id) ??
             null,
         publishCharacter,
-        publishCharacterSet: (primary) => publishCharacter(primary),
         publishConversation,
         captureActivationRollback,
         canActivateWorkingSet: () => true,
@@ -526,6 +515,44 @@ describe('ActiveWorkingSet', () => {
         await expect(harness.workingSet.captureWindowedMessageMutation(target, 0, { role: 'user', data: 'stale', chatId: 'a' })).resolves.toBeNull()
         expect(harness.coordinator.recordActiveConversationMutation).not.toHaveBeenCalled()
         expect(harness.readConversation).not.toHaveBeenCalled()
+    })
+
+    it.each(['metadata', 'content', 'navigation'] as const)('adopts persisted window metadata with %s identity checks', async (change) => {
+        const full = makeChat('chat-a')
+        full.message = [
+            { role: 'user', data: 'outside', chatId: 'a' },
+            { role: 'user', data: 'tail', chatId: 'b' },
+        ] as Message[]
+        const harness = makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
+        await harness.workingSet.activateCharacter('a')
+        const target = harness.workingSet.captureSelectedConversationTarget()!
+        const local = { ...structuredClone(full), message: [structuredClone(full.message[1])] }
+        const controller = harness.workingSet.captureWindowedConversationMutationController(target, local, 1)!
+        const reader = makeLease({ characterId: 'a', revision: 2 })
+        reader.readConversationWindow = vi.fn(async () => ({
+            revision: 2,
+            value: {
+                characterId: 'a', conversationId: 'chat-a', startIndex: 1, endIndex: 2, totalMessages: 2,
+                hasMoreBefore: true, hasMoreAfter: false,
+                messages: [{ ...full.message[1], data: change === 'content' ? 'changed' : 'tail', __plugin: 'stored' }],
+            },
+        }))
+        const adopt = await harness.workingSet.prepareWindowedMetadataAdoption(reader)
+        if (change === 'navigation') harness.workingSet.fenceNavigation()
+        else harness.workingSet.advanceStoreRevision(2)
+        adopt()
+        expect(reader.readConversationWindow).toHaveBeenCalledExactlyOnceWith({
+            characterId: 'a', conversationId: 'chat-a', startIndex: 1, limit: 1,
+        })
+        expect(reader.readConversation).not.toHaveBeenCalled()
+        if (change === 'metadata') {
+            expect(local.message[0]).toMatchObject({ data: 'tail', __plugin: 'stored' })
+            expect(controller.applyRange(1, 0, [{ role: 'char', data: 'reply', chatId: 'c' }], 'append')).toBe(true)
+        } else {
+            expect(local.message[0]).not.toHaveProperty('__plugin')
+            expect(controller.isCurrent()).toBe(false)
+        }
+        controller.release()
     })
 
     it('fences a tail controller after another controller makes a same-length edit', async () => {
@@ -1126,42 +1153,6 @@ describe('ActiveWorkingSet', () => {
         })
     })
 
-    it('reconciles selected group dependencies from an authoritative snapshot', () => {
-        const harness = makeHarness(makeLease({ characterId: 'group-a' }))
-        const database = {
-            characters: [
-                {
-                    type: 'group',
-                    chaId: 'group-a',
-                    characters: ['member-b', 'missing', 'member-c', 'member-b'],
-                    chats: [],
-                },
-                makeCharacter('member-b'),
-                makeCharacter('member-c'),
-            ],
-        } as unknown as Database
-
-        expect([
-            ...harness.workingSet.reconcileActiveCharacterIds(database, 'group-a'),
-        ]).toEqual(['group-a', 'member-b', 'member-c'])
-        expect([...harness.workingSet.activeCharacterIds]).toEqual([
-            'group-a',
-            'member-b',
-            'member-c',
-        ])
-    })
-
-    it('treats a selected catalog group stub as inactive', () => {
-        const harness = makeHarness(makeLease({ characterId: 'group-a' }))
-        const database = {
-            characters: [{ type: 'group', chaId: 'group-a', name: 'Group' }],
-        } as unknown as Database
-
-        expect([
-            ...harness.workingSet.reconcileActiveCharacterIds(database, 'group-a'),
-        ]).toEqual([])
-    })
-
     it('flushes before releasing all active characters on leave', async () => {
         const harness = makeHarness(makeLease({ characterId: 'char-a' }))
         await harness.workingSet.activateCharacter('char-a')
@@ -1396,7 +1387,6 @@ describe('ActiveWorkingSet', () => {
                 residency.markCharacterHydrated(character.chaId)
                 selectedCharacterId = character.chaId
             },
-            publishCharacterSet: vi.fn(),
             publishConversation: vi.fn(),
             releaseInactiveCharacter: (id) => {
                 residency.releaseCharacterToCatalog(database, id)
@@ -1410,189 +1400,6 @@ describe('ActiveWorkingSet', () => {
         expect(database.characters[0]).not.toHaveProperty('personality')
         expect(database.characters[1]).not.toHaveProperty('personality')
         expect(database.characters[2]).toHaveProperty('personality', 'body-c')
-    })
-
-    it('publishes a group after every unique member detail is hydrated without member chat reads', async () => {
-        const memberTwo = deferred<{
-            revision: number
-            value: Omit<character, 'chats'>
-        } | null>()
-        const group = {
-            type: 'group',
-            chaId: 'group-a',
-            name: 'Group',
-            characters: ['member-a', 'member-b', 'member-a'],
-        } as Omit<groupChat, 'chats'>
-        const harness = makeHarness(makeLease({ characterId: 'group-a' }))
-        vi.mocked(harness.store.readCharacter).mockImplementation(async (id) => {
-            if (id === 'group-a') return { revision: 1, value: group }
-            if (id === 'member-a') return { revision: 1, value: makeCharacterDetail(id) }
-            if (id === 'member-b') return memberTwo.promise
-            return null
-        })
-        vi.mocked(harness.store.queryConversations).mockResolvedValue({
-            revision: 1,
-            items: [],
-        })
-
-        const activation = harness.workingSet.activateCharacter('group-a')
-        await vi.waitFor(() => expect(harness.store.readCharacter).toHaveBeenCalledTimes(3))
-        expect(harness.publishCharacterSet).not.toHaveBeenCalled()
-
-        memberTwo.resolve({ revision: 1, value: makeCharacterDetail('member-b') })
-        expect(await activation).toBe(true)
-
-        const [publishedGroup, publishedMembers] = harness.publishCharacterSet.mock.calls[0]
-        expect(publishedGroup).toEqual(expect.objectContaining({ chaId: 'group-a' }))
-        expect(publishedMembers).toEqual([
-            expect.objectContaining({ chaId: 'member-a', name: 'MEMBER-A' }),
-            expect.objectContaining({ chaId: 'member-b', name: 'MEMBER-B' }),
-        ])
-        expect(publishedMembers[0]).not.toHaveProperty('chats')
-        expect(publishedMembers[1]).not.toHaveProperty('chats')
-        expect(harness.store.queryConversations).toHaveBeenCalledTimes(1)
-        expect(harness.store.queryConversations).toHaveBeenCalledWith(
-            expect.objectContaining({ characterId: 'group-a' }),
-        )
-        expect(harness.coordinator.adoptHydratedCharacter).toHaveBeenCalledOnce()
-        expect([...harness.workingSet.activeCharacterIds]).toEqual([
-            'group-a',
-            'member-a',
-            'member-b',
-        ])
-    })
-
-    it('bounds concurrent group member hydration while preserving member order', async () => {
-        const memberIds = Array.from({ length: 12 }, (_, index) => `member-${index}`)
-        const group = {
-            type: 'group',
-            chaId: 'group-a',
-            name: 'Group',
-            characters: memberIds,
-        } as Omit<groupChat, 'chats'>
-        const harness = makeHarness(makeLease({ characterId: 'group-a' }))
-        let inFlight = 0
-        let peakInFlight = 0
-        vi.mocked(harness.store.readCharacter).mockImplementation(async (id) => {
-            if (id === 'group-a') return { revision: 1, value: group }
-            inFlight++
-            peakInFlight = Math.max(peakInFlight, inFlight)
-            await new Promise((resolve) => setTimeout(resolve, 5))
-            inFlight--
-            return { revision: 1, value: makeCharacterDetail(id) }
-        })
-        vi.mocked(harness.store.queryConversations).mockResolvedValue({
-            revision: 1,
-            items: [],
-        })
-
-        expect(await harness.workingSet.activateCharacter('group-a')).toBe(true)
-
-        expect(peakInFlight).toBeLessThanOrEqual(4)
-        expect(harness.publishCharacterSet.mock.calls[0][1].map((member) => member.chaId))
-            .toEqual(memberIds)
-    })
-
-    it('stops scheduling group member chunks after navigation is superseded', async () => {
-        const memberIds = Array.from({ length: 8 }, (_, index) => `member-${index}`)
-        const group = {
-            type: 'group',
-            chaId: 'group-a',
-            name: 'Group',
-            characters: memberIds,
-        } as Omit<groupChat, 'chats'>
-        const firstChunk = deferred<void>()
-        const harness = makeHarness(makeLease({ characterId: 'group-a' }))
-        vi.mocked(harness.store.readCharacter).mockImplementation(async (id) => {
-            if (id === 'group-a') return { revision: 1, value: group }
-            await firstChunk.promise
-            return { revision: 1, value: makeCharacterDetail(id) }
-        })
-        vi.mocked(harness.store.queryConversations).mockResolvedValue({
-            revision: 1,
-            items: [],
-        })
-
-        const activation = harness.workingSet.activateCharacter('group-a')
-        await vi.waitFor(() => expect(harness.store.readCharacter).toHaveBeenCalledTimes(5))
-        harness.workingSet.invalidateNavigation()
-        firstChunk.resolve()
-
-        expect(await activation).toBe(false)
-        expect(harness.store.readCharacter).toHaveBeenCalledTimes(5)
-    })
-
-    it('releases group members after navigating away from the group', async () => {
-        const group = {
-            type: 'group',
-            chaId: 'group-a',
-            name: 'Group',
-            characters: ['member-a', 'member-b'],
-        } as Omit<groupChat, 'chats'>
-        const harness = makeHarness(makeLease({ characterId: 'group-a' }))
-        vi.mocked(harness.store.readCharacter).mockImplementation(async (id) => ({
-            revision: 1,
-            value: id === 'group-a' ? group : makeCharacterDetail(id),
-        }))
-        vi.mocked(harness.store.queryConversations).mockResolvedValue({
-            revision: 1,
-            items: [],
-        })
-        await harness.workingSet.activateCharacter('group-a')
-        harness.releaseInactiveCharacter.mockClear()
-
-        await harness.workingSet.activateCharacter('char-next')
-
-        expect(harness.releaseInactiveCharacter.mock.calls.map(([id]) => id)).toEqual([
-            'group-a',
-            'member-a',
-            'member-b',
-        ])
-    })
-
-    it('opens a group after permanently deleted or trash-expired members are removed', async () => {
-        const group = {
-            type: 'group',
-            chaId: 'group-a',
-            name: 'Group',
-            characters: ['member-a', 'deleted-a', 'member-b', 'deleted-b'],
-            characterTalks: [0.1, 0.2, 0.3, 0.4],
-            characterActive: [true, false, true, false],
-        } as Omit<groupChat, 'chats'>
-        const harness = makeHarness(makeLease({ characterId: 'group-a' }))
-        vi.mocked(harness.store.readCharacter).mockImplementation(async (id) => {
-            if (id === 'group-a') return { revision: 1, value: group }
-            if (id === 'member-a' || id === 'member-b') {
-                return { revision: 1, value: makeCharacterDetail(id) }
-            }
-            return null
-        })
-        vi.mocked(harness.store.queryConversations).mockResolvedValue({
-            revision: 1,
-            items: [],
-        })
-
-        expect(await harness.workingSet.activateCharacter('group-a')).toBe(true)
-
-        const [publishedGroup, publishedMembers] = harness.publishCharacterSet.mock.calls[0]
-        expect(publishedGroup).toMatchObject({
-            characters: ['member-a', 'member-b'],
-            characterTalks: [0.1, 0.3],
-            characterActive: [true, true],
-        })
-        expect(publishedMembers.map((member) => member.chaId)).toEqual(['member-a', 'member-b'])
-        expect(harness.coordinator.adoptHydratedCharacter).toHaveBeenCalledWith(
-            1,
-            0,
-            expect.objectContaining({
-                characters: ['member-a', 'deleted-a', 'member-b', 'deleted-b'],
-            }),
-        )
-        expect([...harness.workingSet.activeCharacterIds]).toEqual([
-            'group-a',
-            'member-a',
-            'member-b',
-        ])
     })
 
     it('hydrates conversations concurrently while preserving configured order', async () => {
@@ -1942,7 +1749,6 @@ describe('ActiveWorkingSet', () => {
             getResidentCharacter: () => resident,
             canReleaseConversation: () => true,
             publishCharacter: vi.fn(),
-            publishCharacterSet: vi.fn(),
             publishConversation: (_characterId, _conversation, nextCharacter) => {
                 events.push('publish')
                 resident = nextCharacter as character
@@ -1989,7 +1795,6 @@ describe('ActiveWorkingSet', () => {
             getSelectedCharacterId: () => 'char-a',
             getResidentCharacter: () => resident,
             publishCharacter: vi.fn(),
-            publishCharacterSet: vi.fn(),
             publishConversation: (_characterId, _conversation, nextCharacter) => {
                 resident = nextCharacter as character
             },
@@ -2080,7 +1885,6 @@ describe('ActiveWorkingSet', () => {
             getResidentCharacter: () => resident,
             canReleaseConversation: () => true,
             publishCharacter: vi.fn(),
-            publishCharacterSet: vi.fn(),
             publishConversation,
         })
         workingSet.installCommittedWorkingSet(database, 1)
@@ -2138,7 +1942,6 @@ describe('ActiveWorkingSet', () => {
                 !character.chats.find((conversation) => conversation.id === conversationId)
                     ?.isStreaming,
             publishCharacter: vi.fn(),
-            publishCharacterSet: vi.fn(),
             publishConversation: (_characterId, _conversation, nextCharacter) => {
                 resident = nextCharacter as character
             },
@@ -2506,40 +2309,6 @@ describe('ActiveWorkingSet', () => {
         expect(harness.releaseInactiveCharacter).not.toHaveBeenCalled()
     })
 
-    it('does not publish a group when generation starts during member hydration', async () => {
-        const member = deferred<{ revision: number; value: Omit<character, 'chats'> } | null>()
-        const harness = makeHarness(makeLease({ characterId: 'group-a' }))
-        vi.mocked(harness.store.readCharacter).mockImplementation(async (id) => {
-            if (id === 'group-a') {
-                return {
-                    revision: 1,
-                    value: {
-                        type: 'group',
-                        chaId: 'group-a',
-                        characters: ['member-a'],
-                        characterTalks: [0.5],
-                        characterActive: [true],
-                    } as Omit<groupChat, 'chats'>,
-                }
-            }
-            return member.promise
-        })
-        vi.mocked(harness.store.queryConversations).mockResolvedValue({
-            revision: 1,
-            items: [],
-        })
-
-        const activation = harness.workingSet.activateCharacter('group-a')
-        await vi.waitFor(() => expect(harness.store.readCharacter).toHaveBeenCalledWith('member-a'))
-        harness.setWorkingSetActivationAllowed(false)
-        member.resolve({ revision: 1, value: makeCharacterDetail('member-a') })
-
-        expect(await activation).toBe(false)
-        expect(harness.coordinator.adoptHydratedCharacter).not.toHaveBeenCalled()
-        expect(harness.publishCharacterSet).not.toHaveBeenCalled()
-        expect(harness.releaseInactiveCharacter).not.toHaveBeenCalled()
-    })
-
     it('does not publish when the hydrated baseline can no longer be adopted', async () => {
         const lease = makeLease({ characterId: 'char-a' })
         const harness = makeHarness(lease)
@@ -2590,7 +2359,7 @@ describe('ActiveWorkingSet', () => {
             writes.clear++
             return originalClear.apply(this)
         })
-        const published: Array<character | groupChat> = []
+        const published: Array<character> = []
         const coordinator = {
             revision: imported.revision,
             mutationGeneration: 0,
@@ -2605,7 +2374,6 @@ describe('ActiveWorkingSet', () => {
             coordinator,
             getSelectedCharacterId: () => 'char-a',
             publishCharacter: (value) => published.push(value),
-            publishCharacterSet: vi.fn(),
             publishConversation: vi.fn(),
         })
 
@@ -2675,10 +2443,6 @@ describe('ActiveWorkingSet', () => {
             },
             getSelectedCharacterId: () => 'char-b',
             publishCharacter,
-            publishCharacterSet: (primary, related) => {
-                for (const value of related) publishCharacter(value)
-                publishCharacter(primary)
-            },
             publishConversation: vi.fn(),
         })
 

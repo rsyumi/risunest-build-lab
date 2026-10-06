@@ -50,12 +50,6 @@ describe('exportAsDataset', () => {
                     globalLore: [{ key: 'lore' }],
                     chats: [{ id: 'chat', message: [{ role: 'user', data: 'hello' }] }],
                 },
-                {
-                    type: 'group',
-                    chaId: 'group',
-                    name: 'Skipped group',
-                    chats: [{ id: 'group-chat', message: [] }],
-                },
             ],
         })
         mocks.downloadFile.mockReset().mockResolvedValue(undefined)
@@ -96,7 +90,21 @@ describe('exportAsDataset', () => {
 
         expect(mocks.materialize).not.toHaveBeenCalled()
         expect(mocks.downloadFile).not.toHaveBeenCalled()
-        expect(mocks.alertNormal).toHaveBeenCalledWith('exported')
+        expect(mocks.alertNormal).not.toHaveBeenCalled()
+    })
+
+    it('joins repeated clicks and leaves native terminal presentation to the shared dialog', async () => {
+        let finish!: (value: null) => void
+        mocks.exportNativeDataset.mockReturnValue(new Promise(resolve => { finish = resolve }))
+        const { exportAsDataset } = await import('./exportAsDataset')
+        const first = exportAsDataset()
+        expect(exportAsDataset()).toBe(first)
+        expect(mocks.exportNativeDataset).toHaveBeenCalledOnce()
+        finish(null)
+        await first
+        expect(mocks.materialize).not.toHaveBeenCalled()
+        expect(mocks.alertNormal).not.toHaveBeenCalled()
+        expect(mocks.alertError).not.toHaveBeenCalled()
     })
 
     it('stays silent when the export picker is cancelled', async () => {

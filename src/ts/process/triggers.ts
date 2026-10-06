@@ -1094,7 +1094,7 @@ function resolveTriggerCharacterOwner(source: character): {
     const database = getDatabase()
     const index = database.characters.findIndex((candidate) => candidate.chaId === source.chaId)
     const owner = database.characters[index]
-    if (!owner || owner.type === 'group') {
+    if (!owner) {
         throw new Error(`Trigger character ${source.chaId} is no longer available`)
     }
     return { character: owner as character, index }

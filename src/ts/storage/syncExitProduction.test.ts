@@ -16,6 +16,7 @@ function harness(result: 'exit' | 'cancelled' = 'exit') {
     }
     const coordinator = {
         requestExit: vi.fn(async () => result),
+        requestExitWithoutSync: vi.fn(),
     }
     return { window, coordinator, unlisten, getHandler: () => handler }
 }
@@ -32,6 +33,7 @@ describe('window close exit drain', () => {
         const first = h.getHandler()({ preventDefault: vi.fn() })
         const second = h.getHandler()({ preventDefault: vi.fn() })
         expect(h.coordinator.requestExit).toHaveBeenCalledOnce()
+        expect(h.coordinator.requestExitWithoutSync).toHaveBeenCalledOnce()
         finish('exit')
         await Promise.all([first, second])
 

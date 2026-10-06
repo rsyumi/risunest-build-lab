@@ -125,6 +125,30 @@ export function assertProductionBundle(output) {
   return { javascriptFiles, sourceMaps };
 }
 
+export function assertMonacoBundle(output) {
+  const modules = output.flatMap(item => item.type === "chunk" ? Object.keys(item.modules) : []);
+  for (const item of output) {
+    assert.ok(!/(?:json|css|html|ts)\.worker[.-]/.test(item.fileName), `Unused Monaco worker: ${item.fileName}`);
+    if (item.type === "asset" && item.fileName.endsWith(".map")) {
+      modules.push(...(JSON.parse(String(item.source)).sources ?? []));
+    }
+  }
+  for (const id of modules) {
+    const normalized = id.replaceAll("\\", "/");
+    assert.ok(!/\/vs\/language\/(?:json|css|html|typescript)\//.test(normalized), `Unused Monaco language service: ${id}`);
+    assert.ok(!/\/vs\/editor\/editor\.main\.js/.test(normalized), `Full Monaco entry: ${id}`);
+    const basic = normalized.match(/\/vs\/basic-languages\/([^/]+)\//)?.[1];
+    assert.ok(!basic || ["markdown", "lua"].includes(basic), `Unused Monaco basic language: ${id}`);
+  }
+  assert.ok(modules.some(id => id.replaceAll("\\", "/").includes("/vs/editor/edcore.main.js")), "Missing Monaco editor core");
+  for (const language of ["markdown", "lua"]) {
+    assert.ok(modules.some(id => id.replaceAll("\\", "/").includes(`/vs/basic-languages/${language}/`)), `Missing Monaco ${language}`);
+  }
+  const workers = output.filter(item => /editor\.worker[.-].*\.js$/.test(item.fileName));
+  assert.equal(workers.length, 1, "Expected one emitted Monaco editor worker");
+  return { monacoWorkers: workers.length };
+}
+
 async function main() {
   const mode = process.argv[2] ?? "desktop";
   assert.ok(
@@ -153,7 +177,7 @@ async function main() {
   const output = (Array.isArray(result) ? result : [result]).flatMap(
     (result) => result.output,
   );
-  console.log(JSON.stringify({ mode, ...assertProductionBundle(output) }));
+  console.log(JSON.stringify({ mode, ...assertProductionBundle(output), ...assertMonacoBundle(output) }));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)

@@ -18,7 +18,7 @@ const mocks = vi.hoisted(() => ({
     commitCharacterAddition: vi.fn(async (request: any, _reason: string) => request.install()),
     markPersistentDataDirty: vi.fn(),
     mutatePersistentCharacterDetail: vi.fn(),
-    deletePersistentCharacterWithGroupReferences: vi.fn(),
+    deletePersistentCharacter: vi.fn(),
     materializePersistentDatabaseSnapshotWithRevision: vi.fn(),
     replacePersistentDatabase: vi.fn(),
     readPersistentCharacterDetail: vi.fn(),
@@ -125,8 +125,8 @@ vi.mock('./storage/persistentDataRuntime.svelte', () => ({
     invalidatePersistentNavigation: mocks.invalidatePersistentNavigation,
     markPersistentDataDirty: mocks.markPersistentDataDirty,
     mutatePersistentCharacterDetail: mocks.mutatePersistentCharacterDetail,
-    deletePersistentCharacterWithGroupReferences:
-        mocks.deletePersistentCharacterWithGroupReferences,
+    deletePersistentCharacter:
+        mocks.deletePersistentCharacter,
     materializePersistentDatabaseSnapshotWithRevision:
         mocks.materializePersistentDatabaseSnapshotWithRevision,
     replacePersistentDatabase: mocks.replacePersistentDatabase,
@@ -149,7 +149,7 @@ import {
     characterFormatUpdate,
     createBlankChar,
     createNewCharacter,
-    createNewGroup,
+    commitDetachedCharacter,
     duplicateChat,
     editSelectedChatList,
     exportAllChats,
@@ -232,23 +232,10 @@ describe('runtime chat identity', () => {
             else Object.assign(mocks.database.characters[index], state.character)
             return true
         })
-        mocks.deletePersistentCharacterWithGroupReferences.mockImplementation(async (id) => {
+        mocks.deletePersistentCharacter.mockImplementation(async (id) => {
             const index = mocks.database.characters.findIndex((character) => character.chaId === id)
             if (index < 0) return false
             mocks.database.characters.splice(index, 1)
-            for (const character of mocks.database.characters) {
-                if (character.type !== 'group') continue
-                const retainedIndices = character.characters
-                    .map((memberId, memberIndex) => ({ memberId, memberIndex }))
-                    .filter(({ memberId }) => memberId !== id)
-                character.characters = retainedIndices.map(({ memberId }) => memberId)
-                character.characterTalks = retainedIndices.map(
-                    ({ memberIndex }) => character.characterTalks?.[memberIndex] ?? 1 / 6 * 4,
-                )
-                character.characterActive = retainedIndices.map(
-                    ({ memberIndex }) => character.characterActive?.[memberIndex] ?? true,
-                )
-            }
             return true
         })
         mocks.materializePersistentDatabaseSnapshotWithRevision.mockImplementation(async () => ({
@@ -419,7 +406,7 @@ describe('runtime chat identity', () => {
 
         await removeChar(first.chaId, first.name, 'permanentForce')
 
-        expect(mocks.deletePersistentCharacterWithGroupReferences).toHaveBeenCalledWith(
+        expect(mocks.deletePersistentCharacter).toHaveBeenCalledWith(
             first.chaId,
             'character-removal',
         )
@@ -452,7 +439,7 @@ describe('runtime chat identity', () => {
 
         await removeChar(0, first.name, 'permanent')
 
-        expect(mocks.deletePersistentCharacterWithGroupReferences).toHaveBeenCalledWith(
+        expect(mocks.deletePersistentCharacter).toHaveBeenCalledWith(
             first.chaId,
             'character-removal',
         )
@@ -626,77 +613,6 @@ describe('runtime chat identity', () => {
         expect(mocks.activateCharacter).not.toHaveBeenCalled()
     })
 
-    it('persists selected-group cleanup only after permanent member deletion succeeds', async () => {
-        const group = {
-            type: 'group',
-            chaId: 'group-a',
-            name: 'Group',
-            characters: ['member-a', 'member-b'],
-            characterTalks: [0.25, 0.75],
-            characterActive: [false, true],
-            chats: [],
-        }
-        const memberA = createBlankChar()
-        memberA.chaId = 'member-a'
-        const memberB = createBlankChar()
-        memberB.chaId = 'member-b'
-        mocks.database.characters.push(group, memberA, memberB)
-        selectedCharID.set(0)
-
-        await removeChar('member-a', memberA.name, 'permanentForce')
-
-        expect(mocks.deletePersistentCharacterWithGroupReferences).toHaveBeenCalledOnce()
-        const updatedGroup = mocks.database.characters.find(
-            (character) => character.chaId === 'group-a',
-        )
-        expect(updatedGroup.characters).toEqual(['member-b'])
-        expect(updatedGroup.characterTalks).toEqual([0.75])
-        expect(updatedGroup.characterActive).toEqual([true])
-        expect(mocks.deactivateActiveWorkingSet).toHaveBeenCalledTimes(2)
-    })
-
-    it('keeps permanent deletion and every group reference locally consistent when publication fails', async () => {
-        const group = {
-            type: 'group',
-            chaId: 'group-a',
-            characters: ['member-a', 'member-b'],
-            characterTalks: [0.25, 0.75],
-            characterActive: [false, true],
-            chats: [],
-        }
-        const memberA = createBlankChar()
-        memberA.chaId = 'member-a'
-        const memberB = createBlankChar()
-        memberB.chaId = 'member-b'
-        mocks.database.characters.push(group, memberA, memberB)
-        selectedCharID.set(0)
-        mocks.deletePersistentCharacterWithGroupReferences.mockImplementationOnce(async (id) => {
-            const index = mocks.database.characters.findIndex((character) => character.chaId === id)
-            mocks.database.characters.splice(index, 1)
-            const liveGroup = mocks.database.characters.find(
-                (character) => character.chaId === 'group-a',
-            )
-            liveGroup.characters = ['member-b']
-            liveGroup.characterTalks = [0.75]
-            liveGroup.characterActive = [true]
-            throw new Error('official publish failed')
-        })
-
-        await expect(
-            removeChar('member-a', memberA.name, 'permanentForce'),
-        ).rejects.toThrow('official publish failed')
-
-        expect(mocks.database.characters.some((character) => character.chaId === 'member-a')).toBe(false)
-        const updatedGroup = mocks.database.characters.find(
-            (character) => character.chaId === 'group-a',
-        )
-        expect(updatedGroup.characters).toEqual(['member-b'])
-        expect(updatedGroup.characterTalks).toEqual([0.75])
-        expect(updatedGroup.characterActive).toEqual([true])
-        expect(mocks.activateCharacter).not.toHaveBeenCalled()
-        expect(mocks.deactivateActiveWorkingSet).toHaveBeenCalledTimes(2)
-    })
-
     it('assigns an ID before a new character first chat is inserted', () => {
         const character = createBlankChar()
 
@@ -717,13 +633,6 @@ describe('runtime chat identity', () => {
         expect(installedDuringCommit).toBe(true)
         expect(characterId).toBe(mocks.database.characters[0].chaId)
         expect(mocks.database.characters[0].chats.every((chat) => chat.id)).toBe(true)
-    })
-
-    it('commits a complete detached group before installing it', async () => {
-        await createNewGroup()
-
-        expect(mocks.database.characters[0].chats[0].id).toBeTruthy()
-        expect(mocks.commitCharacterAddition).toHaveBeenCalledOnce()
     })
 
     it('preserves an installed dirty character when addition publication fails', async () => {
@@ -757,7 +666,6 @@ describe('runtime chat identity', () => {
 
     it.each([
         ['local', 'createfromScratch'],
-        ['official', 'createGroup'],
     ])('settles a %s addition rejection and restores the mobile stack', async (_kind, choice) => {
         mocks.alertAddCharacter.mockResolvedValue(choice)
         let installs = 0
@@ -1022,6 +930,121 @@ describe('chat list operations', () => {
         expect(imported.message).toEqual(message)
         expect(bufferCalls).toBe(0)
     })
+
+    it('imports and immediately duplicates large Unicode chats through bounded capture and commit pages', async () => {
+        const { SaveCoordinator } = await import('./storage/saveCoordinator')
+        const { createPersistenceCanonicalCapture } = await import('./storage/reactivePersistenceCapture.svelte')
+        const { createPersistentSaveObserverHarness } = await import('./storage/tests/persistentSaveObserverHarness.svelte')
+        const { cloneConversationByMessage, CONVERSATION_INSERT_PAGE_BYTES } = await import('./storage/conversationInsertPages')
+        const { utf8ByteLength } = await import('./storage/nativePersistenceValue')
+        const { encodeNativeCommit } = await import('./storage/nativeCommitTransport')
+        let encodedRequests = 0
+        class EncodingWorker {
+            onmessage: ((event: { data: { bytes: Uint8Array } }) => void) | null = null
+            onerror: (() => void) | null = null
+            terminate() {}
+            postMessage(data: { pages: Uint8Array[]; byteLength: number }, transfer: ArrayBuffer[]) {
+                expect(Object.keys(data)).toEqual(['pages', 'byteLength'])
+                expect(data.byteLength).toBeLessThan(CONVERSATION_INSERT_PAGE_BYTES + 64 * 1024)
+                expect(data.pages.every((page) => page.byteLength <= 1024 * 1024)).toBe(true)
+                const received = structuredClone(data, { transfer })
+                expect(data.pages.every((page) => page.byteLength === 0)).toBe(true)
+                const bytes = new Uint8Array(received.byteLength)
+                let offset = 0
+                for (const page of received.pages) { bytes.set(page, offset); offset += page.byteLength }
+                encodedRequests++
+                Promise.resolve().then(() => this.onmessage?.({ data: { bytes } }))
+            }
+        }
+        vi.stubGlobal('Worker', EncodingWorker)
+        const initial = buildSelectedCharacter()
+        const reactive = createPersistentSaveObserverHarness({ ...mocks.database } as any)
+        mocks.database.characters = reactive.database.characters
+        const current = () => mocks.database.characters[0]
+        const stored = new Map(current().chats.map((chat: any) => [chat.id, cloneConversationByMessage(chat)]))
+        let revision = 1
+        const requests: any[] = []
+        const capture = createPersistenceCanonicalCapture({
+            root: () => reactive.database, presets: () => [], pluginStorage: () => null,
+            character: current, characters: () => mocks.database.characters,
+        })
+        const store = {
+            commit: vi.fn(async (input: any) => {
+                expect(input.expectedRevision).toBe(revision)
+                const encoded = await encodeNativeCommit({ commit: input, assetAliases: [] })
+                expect(JSON.parse(new TextDecoder().decode(encoded)).commit).toEqual(input)
+                requests.push(input)
+                for (const mutation of input.conversations ?? []) {
+                    if (mutation.type !== 'replace-range') continue
+                    const previous: any = stored.get(mutation.conversationId)
+                    const chat = previous ?? { ...mutation.conversation, message: [] }
+                    chat.message.splice(mutation.start, mutation.deleteCount, ...mutation.messages)
+                    stored.set(mutation.conversationId, chat)
+                }
+                return { revision: ++revision }
+            }),
+            readConversation: vi.fn(async (_characterId: string, id: string) => {
+                const chat = stored.get(id)
+                return chat ? { revision, value: cloneConversationByMessage(chat as any) } : null
+            }),
+        }
+        const coordinator = new SaveCoordinator({
+            store: store as any, canonicalCapture: capture,
+            captureRoot: () => ({}) as any, capturePresets: () => [], capturePluginStorage: () => null,
+            captureCharacters: () => mocks.database.characters, captureSelectedCharacter: current,
+            captureCharacter: (id) => mocks.database.characters.find((value: any) => value.chaId === id) ?? null, replaceDatabase: () => {},
+        })
+        coordinator.initialize(revision)
+        mocks.getSelectedConversationMode.mockReturnValue('complete')
+        mocks.captureSelectedConversationTarget.mockImplementation(() => ({
+            characterId: current().chaId, conversationId: current().chats[current().chatPage].id,
+        }))
+        mocks.acquireCompleteConversation.mockResolvedValue({ release: () => {} })
+        mocks.flushPendingData.mockImplementation((reason) => coordinator.flushPendingData(reason))
+        mocks.commitCharacterAddition.mockImplementation((request, reason) => coordinator.commitCharacterAddition(request, reason))
+        mocks.readPersistentConversation.mockImplementation((characterId, id, reason) => coordinator.readPersistentConversation(characterId, id, reason))
+        mocks.changeChatTo.mockImplementation(async (id) => {
+            const result = await selectChat(id)
+            await coordinator.flushPendingData('after-duplicate-selection')
+            return result
+        })
+        const data = '한글🐿️é'.repeat(550_000)
+        const messages = [0, 1, 2].map((index) => ({ role: 'user', data: `${index}:${data}`, chatId: `import-message-${index}` }))
+        mocks.selectSingleFile.mockResolvedValueOnce({ name: 'large-synthetic.json', data: new TextEncoder().encode(JSON.stringify({
+            type: 'risuChat', ver: 2, data: { id: 'input', name: 'Large import', note: '', localLore: [], message: messages }, folders: [],
+        })) })
+        const originalStringify = JSON.stringify
+        let largestEncoding = 0
+        const stringify = vi.spyOn(JSON, 'stringify').mockImplementation(((value: unknown, ...args: any[]) => {
+            const json = (originalStringify as any)(value, ...args)
+            if (typeof json === 'string') largestEncoding = Math.max(largestEncoding, utf8ByteLength(json))
+            return json
+        }) as typeof JSON.stringify)
+        try {
+            await importChat()
+            expect(mocks.alertError).not.toHaveBeenCalled()
+            const imported = current().chats[0].id
+            expect(await duplicateChat(initial.chaId, imported)).toBe(true)
+            const firstDuplicate = current().chats[0].id
+            expect(await duplicateChat(initial.chaId, firstDuplicate)).toBe(true)
+            const secondDuplicate = current().chats[0].id
+            for (const id of [imported, firstDuplicate, secondDuplicate]) {
+                expect((stored.get(id) as any).message.map((message: any) => message.data)).toEqual(messages.map((message) => message.data))
+            }
+            await commitDetachedCharacter({ type: 'character', chaId: 'new-character', name: 'New character',
+                chats: [{ id: 'new-character-chat', name: 'New chat', note: '', localLore: [], message: messages }] } as any, 'large-character-import')
+            expect((stored.get('new-character-chat') as any).message.map((message: any) => message.data)).toEqual(messages.map((message) => message.data))
+            expect(requests.find((request) => request.addCharacter)?.addCharacter.chats).toEqual([])
+            expect(largestEncoding).toBeLessThan(CONVERSATION_INSERT_PAGE_BYTES + 64 * 1024)
+            expect(requests.filter((request) => request.conversations?.some((mutation: any) => mutation.start > 0))).toHaveLength(4)
+            expect(encodedRequests).toBe(requests.length)
+            expect(coordinator.hasPendingPersistenceWork).toBe(false)
+        } finally {
+            stringify.mockRestore()
+            vi.unstubAllGlobals()
+            mocks.commitCharacterAddition.mockImplementation(async (request: any) => request.install())
+        }
+    }, 30_000)
 
     it('keeps the selected chat when another chat is removed', async () => {
         const character = buildSelectedCharacter()
@@ -1367,19 +1390,6 @@ describe('chat list operations', () => {
         const exported = JSON.parse(Buffer.from(mocks.downloadFile.mock.calls[0][1]).toString())
         expect(exported.data[0].message).toEqual([
             { role: 'user', data: 'authoritative body' },
-        ])
-    })
-
-    it('seeds group chats with member first messages', async () => {
-        const character = buildSelectedCharacter() as any
-        character.type = 'group'
-        character.characters = ['member-1']
-        mocks.findCharacterbyId.mockReturnValue({ firstMessage: 'hello there' })
-
-        await addNewChat(character)
-
-        expect(character.chats[0].message).toEqual([
-            { saying: 'member-1', role: 'char', data: 'hello there', chatId: expect.stringMatching(/^generated-/) },
         ])
     })
 })

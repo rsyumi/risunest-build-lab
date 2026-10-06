@@ -1,7 +1,7 @@
 import { get } from "svelte/store";
 import { Mutex } from '../mutex';
 import { CharEmotion, selectedCharID } from "../stores.svelte";
-import { type Chat, type character, type customscript, type Database, type groupChat, type loreBook, getDatabase, getCurrentCharacter, getCurrentChat } from "../storage/database.svelte";
+import { type Chat, type character, type customscript, type Database, type loreBook, getDatabase, getCurrentCharacter, getCurrentChat } from "../storage/database.svelte";
 import { downloadFile } from "../globalApi.svelte";
 import { getStartupExclusions } from "../storage/deviceSettings";
 import { isStartupExcluded } from "../storage/recoveryMode.svelte";
@@ -34,7 +34,7 @@ import {
     setChatVarOnConversation,
 } from "../parser/chatVar.svelte";
 import { findActiveHistoryWindow, resolveHistoryWindowChat, toWindowIndex } from "./historyWindowIndex";
-import { writeHistoryWindowMessage } from "./historyWindowWrite";
+import { openHistoryWindowCopy, writeHistoryWindowMessage, type HistoryWindowCopy } from "./historyWindowWrite";
 
 export type ScriptMode = 'editinput'|'editoutput'|'editprocess'|'editdisplay'
 
@@ -57,8 +57,8 @@ export interface ProcessScriptCaptureContext {
     dynamicAssetsEditDisplay: boolean
     parserContext: {
         database: Database
-        character: character | groupChat
-        chara?: character | groupChat | string
+        character: character
+        chara?: character | string
         userName: string
         personaPrompt: string
         modules: RisuModule[]
@@ -73,7 +73,7 @@ export interface ProcessScriptCaptureContext {
 }
 
 export async function processScript(
-    char: character | groupChat,
+    char: character,
     data: string,
     mode: ScriptMode,
     cbsConditions: CbsConditions = {},
@@ -184,7 +184,7 @@ const HISTORY_SENSITIVE_CBS_NAMES = new Set([
 
 export interface ScriptConversationOwner {
     database: Database
-    character: character | groupChat | null
+    character: character | null
     session: ActiveConversationSession | null
     chat: Chat | null
     version: number | null
@@ -194,7 +194,7 @@ export interface ScriptConversationOwner {
 }
 
 function captureScriptConversationOwner(
-    char: character | groupChat | simpleCharacterArgument,
+    char: character | simpleCharacterArgument,
     requirePromptOwnerMatch = false,
 ): ScriptConversationOwner {
     const db = getDatabase()
@@ -342,7 +342,7 @@ export class PromptScriptOperationScope {
     }
 
     parse(
-        char: character | groupChat | simpleCharacterArgument,
+        char: character | simpleCharacterArgument,
         data: string,
         parserArgument: Parameters<typeof risuChatParserOrg>[1] = {},
     ): string {
@@ -456,7 +456,7 @@ export class PromptScriptOperationScope {
 }
 
 export function createPromptScriptOperationScope(
-    char: character | groupChat | simpleCharacterArgument,
+    char: character | simpleCharacterArgument,
     options: {
         pluginCompatibility?: boolean
         /** The window chat of a send that builds from a history window. */
@@ -486,7 +486,7 @@ export function createPromptScriptOperationScope(
 const liveDisplayScriptMutexes = new WeakMap<ActiveConversationSession, Mutex>()
 
 export async function processScriptFull(
-    char: character | groupChat | simpleCharacterArgument,
+    char: character | simpleCharacterArgument,
     data: string,
     mode: ScriptMode,
     chatID = -1,
@@ -570,7 +570,7 @@ export async function processScriptFull(
     }
 }
 
-async function processScriptFullImpl(char:character|groupChat|simpleCharacterArgument, data:string, mode:ScriptMode, chatID = -1, cbsConditions:CbsConditions = {}, options:ProcessScriptOptions = {}){
+async function processScriptFullImpl(char:character|simpleCharacterArgument, data:string, mode:ScriptMode, chatID = -1, cbsConditions:CbsConditions = {}, options:ProcessScriptOptions = {}){
     options.signal?.throwIfAborted()
     const captureContext = options.captureContext
     const promptOperationScope = captureContext ? undefined : options.promptOperationScope
@@ -591,26 +591,24 @@ async function processScriptFullImpl(char:character|groupChat|simpleCharacterArg
 
     if(mode === 'editdisplay' && !captureContext){
         const currentChar = getCurrentCharacter()
-        if(currentChar.type !== 'group'){
-            try{
-                const perf = performance.now()
-                const d = await runTrigger(currentChar, 'display', {
-                    chat: getCurrentChat(),
-                    displayMode: true,
-                    displayData: data
-                })
-    
-                data = d?.displayData ?? data
-                console.log('Trigger time', performance.now() - perf)
-            }
-            catch(e){
-                console.error(e)
-            }
+        try{
+            const perf = performance.now()
+            const d = await runTrigger(currentChar, 'display', {
+                chat: getCurrentChat(),
+                displayMode: true,
+                displayData: data
+            })
+
+            data = d?.displayData ?? data
+            console.log('Trigger time', performance.now() - perf)
+        }
+        catch(e){
+            console.error(e)
         }
     }
     options.signal?.throwIfAborted()
 
-    const conversationOwner = captureContext
+    let conversationOwner = captureContext
         ? null
         : promptOperationScope?.getOwner() ?? captureScriptConversationOwner(char)
     const usesPluginCompatibility = !captureContext &&
@@ -639,6 +637,7 @@ async function processScriptFullImpl(char:character|groupChat|simpleCharacterArg
     let conversationOperation: ConversationOperationContext | null = null
     let conversationAccess: ConversationAccess = 'none'
     let readPin: ActiveConversationPin | null = null
+    let windowCopy: HistoryWindowCopy | null = null
     try {
         const globalRegexOff = isStartupExcluded(
             'regex',
@@ -656,6 +655,20 @@ async function processScriptFullImpl(char:character|groupChat|simpleCharacterArg
             ? 'none'
             : classifyConversationAccess(plan, data)
         const needsConversationOperation = conversationAccess === 'mutating'
+        const historyWindow = needsConversationOperation && !captureContext && !promptOperationScope
+            && (mode === 'editinput' || mode === 'editoutput')
+            ? findActiveHistoryWindow(char.chaId, getCurrentChat()?.id)
+            : null
+        if (historyWindow && conversationOwner) {
+            windowCopy = openHistoryWindowCopy(historyWindow, options.onConversationCommit)
+            conversationOwner = {
+                ...conversationOwner,
+                session: null,
+                version: null,
+                chat: windowCopy.chat,
+                historyWindowConversationId: windowCopy.chat.id,
+            }
+        }
         if (conversationAccess !== 'none' && conversationOwner) {
             requireScriptConversationOwner(conversationOwner)
         }
@@ -684,7 +697,11 @@ async function processScriptFullImpl(char:character|groupChat|simpleCharacterArg
     const needsConversationOperation = conversationAccess === 'mutating'
     const ownsConversationOperation = conversationOperation !== null &&
         promptOperationScope === undefined
-    const operationDatabase = conversationOperation?.createDatabaseView(db) ?? db
+    const operationDatabase = conversationOperation?.createDatabaseView(db) ?? (windowCopy && conversationOwner
+        ? { ...db, characters: db.characters.map((character) => character.chaId === conversationOwner!.selectedCharacterId
+            ? { ...character, chats: character.chats.map((chat) => chat.id === windowCopy!.chat.id ? windowCopy!.chat : chat) }
+            : character) }
+        : db)
     const operationChat = conversationOperation?.chat ?? conversationOwner?.chat ?? null
     const parseCbs = (value: string) => captureContext
         ? risuChatParserOrg(value, {
@@ -728,6 +745,10 @@ async function processScriptFullImpl(char:character|groupChat|simpleCharacterArg
     let conversationOperationCommitted = false
     const finish = <T>(result: T): T => {
         options.signal?.throwIfAborted()
+        if (windowCopy) {
+            if (!windowCopy.commit()) throw new ConversationSessionInactiveError()
+            windowCopy = null
+        }
         if (conversationOperation && ownsConversationOperation) {
             conversationOperation.commit(peekActiveConversationSession(), {
                 origin: mode === 'editdisplay' ? 'display' : undefined,
@@ -825,10 +846,14 @@ async function processScriptFullImpl(char:character|groupChat|simpleCharacterArg
                             )
                             if (!selchar) throw new ConversationSessionInactiveError()
                             const chat = selchar.chats[selchar.chatPage]
-                            const historyWindow = conversationOperation
+                            const historyWindow = conversationOperation || windowCopy
                                 ? null
                                 : findActiveHistoryWindow(selchar.chaId, chat.id)
-                            if (!historyWindow) chat.message[chatID].data = data
+                            if (windowCopy) {
+                                const index = toWindowIndex(chat, chatID)
+                                if (chat.message[index]) chat.message[index].data = data
+                            }
+                            else if (!historyWindow) chat.message[chatID].data = data
                             else if (!writeHistoryWindowMessage(historyWindow, chatID, (message) => ({ ...message, data }))) {
                                 throw new ConversationSessionInactiveError()
                             }
@@ -1034,6 +1059,10 @@ async function processScriptFullImpl(char:character|groupChat|simpleCharacterArg
     return finish({data, emoChanged})
     } catch (error) {
         try {
+            if (!options.signal?.aborted && windowCopy) {
+                if (!windowCopy.commit()) throw new ConversationSessionInactiveError()
+                windowCopy = null
+            }
             if (
                 !options.signal?.aborted &&
                 ownsConversationOperation &&

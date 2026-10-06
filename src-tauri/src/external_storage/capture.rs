@@ -83,8 +83,81 @@ pub(crate) struct CaptureCatalog {
     backup_inputs: Option<BackupCaptureInputs>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct OriginalBackupUnits {
+    path: PathBuf,
+    count: u64,
+    _scratch: Option<std::sync::Arc<tempfile::NamedTempFile>>,
+}
+
+pub(crate) struct OriginalBackupUnitRows {
+    db: Connection,
+    _scratch: Option<std::sync::Arc<tempfile::NamedTempFile>>,
+    after: String,
+    remaining: u64,
+    page: std::collections::VecDeque<(String, String)>,
+    finished: bool,
+}
+impl OriginalBackupUnits {
+    pub(crate) fn capture(directory: &Path, produce: impl FnOnce(&mut dyn FnMut(risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue) -> Result<()>) -> Result<()>) -> Result<Self> {
+        fs::create_dir_all(directory)?;
+        let file = tempfile::NamedTempFile::new_in(directory)?;
+        let mut db = Connection::open(file.path())?;
+        db.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE; CREATE TABLE original_units(key TEXT PRIMARY KEY,value TEXT NOT NULL)")?;
+        let tx = db.transaction()?;
+        let mut count = 0u64;
+        produce(&mut |key, value| {
+            value.validate().map_err(|_| invalid("Invalid original backup value"))?;
+            tx.execute("INSERT INTO original_units VALUES(?1,?2)", params![key.as_str(),serde_json::to_string(&value)?])?;
+            count = count.checked_add(1).ok_or_else(|| invalid("Original backup count overflow"))?;
+            Ok(())
+        })?;
+        tx.commit()?;
+        drop(db);
+        Ok(Self { path: file.path().into(), count, _scratch: Some(std::sync::Arc::new(file)) })
+    }
+    pub(crate) fn len(&self) -> u64 { self.count }
+    pub(crate) fn units(&self) -> Result<OriginalBackupUnitRows> {
+        let db = Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.execute_batch("PRAGMA cache_size=-4096; PRAGMA temp_store=FILE")?;
+        let count: i64 = db.query_row("SELECT count(*) FROM original_units", [], |row| row.get(0))?;
+        if u64::try_from(count).ok() != Some(self.count) { return Err(invalid("Original backup unit count differs")); }
+        Ok(OriginalBackupUnitRows { db, _scratch:self._scratch.clone(), after: String::new(), remaining: self.count, page: Default::default(), finished: false })
+    }
+}
+impl Iterator for OriginalBackupUnitRows {
+    type Item = Result<(risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue)>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished { return None; }
+        let read = (|| {
+            if self.page.is_empty() {
+                let mut query = self.db.prepare("SELECT key,value FROM original_units WHERE key>?1 ORDER BY key LIMIT 128")?;
+                self.page = query.query_map([&self.after], |row| Ok((row.get(0)?,row.get(1)?)))?.collect::<std::result::Result<_,_>>()?;
+            }
+            let Some((key,value)) = self.page.pop_front() else {
+                self.finished = true;
+                if self.remaining != 0 { return Err(invalid("Original backup unit count differs")); }
+                return Ok(None);
+            };
+            self.after = key.clone();
+            self.remaining = self.remaining.checked_sub(1).ok_or_else(|| invalid("Original backup unit count differs"))?;
+            let key = risunest_sync_wire::unit::UnitKey::try_from(key).map_err(|_| invalid("Invalid original backup key"))?;
+            let value: risunest_sync_wire::unit::UnitValue = serde_json::from_str(&value)?;
+            value.validate().map_err(|_| invalid("Invalid original backup value"))?;
+            Ok(Some((key,value)))
+        })();
+        match read { Ok(value) => value.map(Ok), Err(error) => {self.finished=true;Some(Err(error))} }
+    }
+}
+#[cfg(test)]
+impl From<std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>> for OriginalBackupUnits {
+    fn from(units: std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>) -> Self {
+        Self::capture(&std::env::temp_dir(), |emit| {for (key,value) in units {emit(key,value)?;} Ok(())}).unwrap()
+    }
+}
+
 struct BackupCaptureInputs {
-    units: std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue>,
+    units: OriginalBackupUnits,
     closure: crate::persistent_store::external_capture::BackupDependencyClosure,
     sections: Vec<super::sections::CapturedSection>,
     streamed: Option<BackupDependencySpool>,
@@ -309,22 +382,9 @@ impl CaptureCatalog {
         })
     }
 
-    pub(crate) fn install_backup_inputs(
-        &mut self,
-        units: std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue>,
-        closure: crate::persistent_store::external_capture::BackupDependencyClosure,
-        sections: Vec<super::sections::CapturedSection>,
-    ) -> Result<()> {
-        if self.identity.is_some() || self.finalized || self.backup_inputs.is_some() {
-            return Err(invalid("Backup inputs must precede capture projection"));
-        }
-        self.backup_inputs = Some(BackupCaptureInputs { units, closure, sections, streamed:None });
-        Ok(())
-    }
-
     pub(crate) fn install_streamed_backup_inputs(
         &mut self,
-        units: std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
+        units: OriginalBackupUnits,
         inventory:crate::persistent_store::external_capture::BackupDependencyInventory,
         spool:BackupDependencySpool,
         sections:Vec<super::sections::CapturedSection>,
@@ -335,8 +395,10 @@ impl CaptureCatalog {
         let closure = crate::persistent_store::external_capture::BackupDependencyClosure {
             controls:Default::default(),payload_bodies:Default::default(),managed_payloads,record_payloads:inventory.record_payloads,
         };
-        self.install_backup_inputs(units,closure,sections)?;
-        self.backup_inputs.as_mut().unwrap().streamed = Some(spool);
+        if self.identity.is_some() || self.finalized || self.backup_inputs.is_some() {
+            return Err(invalid("Backup inputs must precede capture projection"));
+        }
+        self.backup_inputs = Some(BackupCaptureInputs { units, closure, sections, streamed: Some(spool) });
         Ok(())
     }
 
@@ -355,19 +417,11 @@ impl CaptureCatalog {
         Ok(sections)
     }
 
-    pub(crate) fn original_backup_units(&self) -> Result<std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue>> {
+    pub(crate) fn original_backup_units(&self) -> Result<OriginalBackupUnits> {
         if !self.finalized { return Err(invalid("Backup capture is not durable")); }
         let expected: i64 = self.db.query_row("SELECT unit_count FROM backup_scope WHERE singleton=1", [], |row| row.get(0))?;
-        let mut units = std::collections::BTreeMap::new();
-        let mut statement = self.db.prepare("SELECT key,value FROM original_units ORDER BY key")?;
-        for row in statement.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))? {
-            let (key,value) = row?;
-            let key = risunest_sync_wire::unit::UnitKey::try_from(key).map_err(|_| invalid("Invalid original backup key"))?;
-            let value: risunest_sync_wire::unit::UnitValue = serde_json::from_str(&value)?;
-            value.validate().map_err(|_| invalid("Invalid original backup value"))?;
-            if units.insert(key,value).is_some() { return Err(invalid("Repeated original backup key")); }
-        }
-        if i64::try_from(units.len()).ok() != Some(expected) { return Err(invalid("Original backup unit count differs")); }
+        let units = OriginalBackupUnits { path: self.path.clone(), count: u64::try_from(expected).map_err(|_| invalid("Original backup count differs"))?, _scratch: None };
+        for unit in units.units()? { unit?; }
         Ok(units)
     }
 
@@ -546,7 +600,8 @@ impl ContentCaptureSink for CaptureCatalog {
                 self.db.execute("INSERT INTO backup_sections VALUES(?1,?2)", params![section.kind.id(),serde_json::to_string(&section)?])?;
             }
             self.db.execute("INSERT INTO backup_scope VALUES(1,?1)", [i64::try_from(inputs.units.len()).map_err(|_| invalid("Original backup count overflow"))?])?;
-            for (key,value) in inputs.units {
+            for unit in inputs.units.units()? {
+                let (key,value) = unit?;
                 self.db.execute("INSERT INTO original_units VALUES(?1,?2)", params![key.as_str(),serde_json::to_string(&value)?])?;
             }
             if let Some(spool) = inputs.streamed {
@@ -1005,5 +1060,50 @@ mod tests {
         bytes[0] ^= 1;
         fs::write(path, bytes).unwrap();
         assert!(registered_capture_roots([&reference], root.path()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod original_unit_tests {
+    use super::*;
+    use risunest_sync_wire::unit::{UnitKey,UnitValue};
+
+    #[test]
+    fn original_units_are_ordered_in_bounded_pages_and_outlive_the_source_handle() {
+        let directory=tempfile::tempdir().unwrap();
+        let source=OriginalBackupUnits::capture(directory.path(),|emit| {
+            for index in (0..385).rev() {
+                emit(UnitKey::new(&["future-backup",&format!("{index:04}")]).unwrap(),UnitValue::inline(b"true").unwrap())?;
+            }
+            Ok(())
+        }).unwrap();
+        assert_eq!(source.len(),385);
+        let path=source.path.clone();
+        let mut rows=source.units().unwrap();
+        drop(source);
+        for index in 0..385 {
+            assert_eq!(rows.next().unwrap().unwrap().0,UnitKey::new(&["future-backup",&format!("{index:04}")]).unwrap());
+            assert!(rows.page.len()<128);
+        }
+        assert!(rows.next().is_none());
+        assert!(path.exists());
+        drop(rows);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn repeated_original_key_or_failed_producer_leaves_no_partial_source() {
+        let directory=tempfile::tempdir().unwrap();
+        let key=UnitKey::new(&["future-backup","duplicate"]).unwrap();
+        assert!(OriginalBackupUnits::capture(directory.path(),|emit| {
+            emit(key.clone(),UnitValue::Deleted)?;
+            emit(key,UnitValue::Deleted)
+        }).is_err());
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(),0);
+        assert!(OriginalBackupUnits::capture(directory.path(),|emit| {
+            emit(UnitKey::new(&["future-backup","partial"]).unwrap(),UnitValue::Deleted)?;
+            Err(invalid("cancelled synthetic producer"))
+        }).is_err());
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(),0);
     }
 }

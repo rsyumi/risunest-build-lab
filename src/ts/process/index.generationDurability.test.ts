@@ -33,9 +33,6 @@ const harness = vi.hoisted(() => {
     const acknowledge = vi.fn(async () => {
         events.push('ack')
     })
-    const peerSync = vi.fn(async () => {
-        events.push('peer')
-    })
     const drainDeferredReceives = vi.fn(async () => undefined)
     const requestChatData = vi.fn(async () => {
         events.push('request')
@@ -68,6 +65,10 @@ const harness = vi.hoisted(() => {
         char: structuredClone(input.liveCharacter),
         chat: structuredClone(input.liveConversation),
     }))
+    const resolvePosition = vi.fn(async (_characterId: string, _conversationId: string) => ({
+        characterIndex: 0,
+        chatIndex: 0,
+    }))
     const setChatToIndex = vi.fn(async (chat: any) => structuredClone(chat))
     const flushPendingData = vi.fn(async () => undefined)
     const generationKeepAliveBegin = vi.fn(() => true)
@@ -84,7 +85,6 @@ const harness = vi.hoisted(() => {
         requests,
         characters,
         acknowledge,
-        peerSync,
         drainDeferredReceives,
         requestChatData,
         tokenize,
@@ -101,6 +101,7 @@ const harness = vi.hoisted(() => {
         chatOutput,
         chatOutputListenerProvenance,
         projectChatOutput,
+        resolvePosition,
         setChatToIndex,
         flushPendingData,
         generationKeepAliveBegin,
@@ -147,7 +148,6 @@ vi.mock('./tts', async () => (await import('./tests/sendChatTestHarness')).ttsMo
 }))
 vi.mock('./memory/supaMemory', async () => (await import('./tests/sendChatTestHarness')).supaMemoryModule())
 vi.mock('uuid', () => ({ v4: vi.fn(() => `id-${Math.random()}`) }))
-vi.mock('./group', async () => (await import('./tests/sendChatTestHarness')).groupModule())
 vi.mock('./triggers', () => ({ runTrigger: harness.runTrigger }))
 vi.mock('./memory/hypamemory', () => ({
     HypaProcesser: class {
@@ -158,9 +158,6 @@ vi.mock('./memory/hypamemory', () => ({
 vi.mock('./embedding/addinfo', async () => (await import('./tests/sendChatTestHarness')).addinfoModule())
 vi.mock('./files/inlays', async () => (await import('./tests/sendChatTestHarness')).inlaysModule())
 vi.mock('./models/modelString', async () => (await import('./tests/sendChatTestHarness')).modelStringModule())
-vi.mock('../sync/multiuser', async () => (await import('./tests/sendChatTestHarness')).multiuserModule({
-    peerSync: harness.peerSync,
-}))
 vi.mock('./inlayScreen', async () => (await import('./tests/sendChatTestHarness')).inlayScreenModule({
     runInlayScreen: harness.runInlayScreen,
 }))
@@ -179,6 +176,9 @@ vi.mock('../plugins/plugins.svelte', () => ({
 }))
 vi.mock('../plugins/pluginDatabaseAccess', () => ({
     createProductionPluginChatOutputProjector: () => harness.projectChatOutput,
+}))
+vi.mock('../plugins/pinnedConversationPosition', () => ({
+    resolvePinnedConversationPosition: harness.resolvePosition,
 }))
 vi.mock('./presetChain', async () => (await import('./tests/sendChatTestHarness')).presetChainModule())
 vi.mock('./generationState', () => ({
@@ -208,6 +208,7 @@ vi.mock('../storage/persistentDataRuntime.svelte', () => ({
     acknowledgeGenerationCompletion: harness.acknowledge,
     drainDeferredLwwReceives: harness.drainDeferredReceives,
     captureSelectedConversationTarget: () => null,
+    captureSelectedConversationAuthority: () => null,
     acquireCompleteConversation: vi.fn(),
     getActiveConversationSession: () => null,
     invalidateActiveConversationSession: vi.fn(),
@@ -440,9 +441,13 @@ describe('sendChat generation durability control flow', () => {
         expect(harness.events.indexOf('ack')).toBeGreaterThan(-1)
         expect(harness.flushPendingData).not.toHaveBeenCalled()
         expect(harness.projectChatOutput).toHaveBeenCalledOnce()
+        const character = harness.DBState.db.characters[0]
+        expect(harness.resolvePosition).toHaveBeenCalledExactlyOnceWith(character.chaId, character.chats[0].id)
+        expect(first).toHaveBeenCalledWith(expect.objectContaining({ characterIndex: 0, chatIndex: 0 }))
+        expect(second).toHaveBeenCalledWith(expect.objectContaining({ characterIndex: 0, chatIndex: 0 }))
     })
 
-    it('acknowledges a non-streaming response before notification and peer publication', async () => {
+    it('acknowledges a non-streaming response before notification', async () => {
         const acknowledgement = deferred()
         harness.acknowledge.mockImplementationOnce(async () => {
             harness.events.push('ack:start')
@@ -456,13 +461,11 @@ describe('sendChat generation durability control flow', () => {
         await vi.waitFor(() => expect(harness.acknowledge).toHaveBeenCalledOnce())
 
         expect(harness.notificationConstruct).not.toHaveBeenCalled()
-        expect(harness.peerSync).not.toHaveBeenCalled()
         acknowledgement.resolve()
         await expect(sending).resolves.toBe(true)
 
         expect(harness.DBState.db.characters[0].chats[0].message.at(-1).data).toBe('Response')
         expect(harness.events.indexOf('ack:done')).toBeLessThan(harness.events.indexOf('notification'))
-        expect(harness.events.indexOf('ack:done')).toBeLessThan(harness.events.indexOf('peer'))
     })
 
     it.each([
@@ -478,7 +481,7 @@ describe('sendChat generation durability control flow', () => {
         }
         harness.requests.push(response)
 
-        await expect(sendChat(-1, arg)).resolves.toBe(true)
+        await expect(sendChat(arg)).resolves.toBe(true)
 
         expect(harness.acknowledge).toHaveBeenCalledOnce()
         expect(harness.DBState.db.characters[0].chats[0].message.at(-1).data).toContain(
@@ -491,14 +494,14 @@ describe('sendChat generation durability control flow', () => {
         harness.drainDeferredReceives.mockImplementation(async (epoch?: number) => {
             drained.push({ epoch, registered: generatingConversations.snapshot() })
         })
-        await expect(sendChat(-1, { preview: true })).resolves.toBe(true)
+        await expect(sendChat({ preview: true })).resolves.toBe(true)
 
         harness.doingChat.set(false)
         harness.events.length = 0
         harness.requests.push(success('Ignored'))
         const controller = new AbortController()
         controller.abort()
-        await expect(sendChat(-1, { signal: controller.signal })).resolves.toBe(false)
+        await expect(sendChat({ signal: controller.signal })).resolves.toBe(false)
 
         harness.doingChat.set(false)
         harness.events.length = 0
@@ -580,7 +583,7 @@ describe('sendChat generation durability control flow', () => {
             }),
         })
 
-        const sending = sendChat(-1, { signal: controller.signal })
+        const sending = sendChat({ signal: controller.signal })
         await vi.waitFor(() => expect(
             harness.DBState.db.characters[0].chats[0].message.at(-1).data,
         ).toBe('Partial response'))
@@ -708,7 +711,6 @@ describe('sendChat generation durability control flow', () => {
 
         expect(harness.DBState.db.characters[0].chats[0].message.at(-1).data).toContain('Kept response')
         expect(harness.acknowledge).toHaveBeenCalledOnce()
-        expect(harness.peerSync).not.toHaveBeenCalled()
     })
 
     it('acknowledges an emotion embedding early return', async () => {
@@ -805,48 +807,6 @@ describe('sendChat generation durability control flow', () => {
         expect(harness.events).not.toContain('doing:false')
     })
 
-    it('acknowledges each generated group member response', async () => {
-        const first = makeCharacter('member-a')
-        const second = makeCharacter('member-b')
-        harness.characters.clear()
-        harness.characters.set(first.chaId, first)
-        harness.characters.set(second.chaId, second)
-        const group = {
-            type: 'group',
-            chaId: 'group-a',
-            name: 'Group',
-            characters: [first.chaId, second.chaId],
-            characterActive: [true, true],
-            characterTalks: [1, 1],
-            orderByOrder: true,
-            chatPage: 0,
-            reloadKeys: 0,
-            supaMemory: false,
-            chats: [{
-                id: 'group-chat',
-                name: 'Group chat',
-                note: '',
-                localLore: [],
-                message: [{ role: 'user', data: 'Hi group', saying: first.chaId, chatId: 'group-user' }],
-            }],
-        }
-        harness.DBState.db = makeDatabase(group as any)
-        harness.requests.push(success('Member A'), success('Member B'))
-        const drained: unknown[] = []
-        harness.drainDeferredReceives.mockImplementation(async (epoch?: number) => {
-            drained.push({ epoch, registered: generatingConversations.snapshot() })
-        })
-
-        await expect(sendChat()).resolves.toBe(true)
-
-        expect(harness.requestChatData).toHaveBeenCalledTimes(2)
-        expect(harness.acknowledge).toHaveBeenCalledTimes(2)
-        expect(group.chats[0].message.filter((message) => message.role === 'char')).toHaveLength(2)
-        expect(harness.drainDeferredReceives).toHaveBeenCalledExactlyOnceWith(0)
-        expect(drained).toEqual([{ epoch: 0, registered: [] }])
-        expect(generatingConversations.snapshot()).toEqual([])
-    })
-
     it('does not publish terminal side effects when local acknowledgement fails', async () => {
         const failure = new Error('local PDS failed')
         harness.DBState.db.notification = true
@@ -857,7 +817,6 @@ describe('sendChat generation durability control flow', () => {
 
         expect(harness.acknowledge).toHaveBeenCalledOnce()
         expect(harness.notificationConstruct).not.toHaveBeenCalled()
-        expect(harness.peerSync).not.toHaveBeenCalled()
     })
 
     it('releases the generation keep-alive token after success, exception, and early return', async () => {
@@ -868,7 +827,7 @@ describe('sendChat generation durability control flow', () => {
         await expect(sendChat()).rejects.toThrow('request failed')
 
         harness.doingChat.set(false)
-        await expect(sendChat(-1, { preview: true })).resolves.toBe(true)
+        await expect(sendChat({ preview: true })).resolves.toBe(true)
 
         expect(harness.generationKeepAliveBegin).toHaveBeenCalledTimes(3)
         expect(harness.generationKeepAliveEnd).toHaveBeenCalledWith(true)

@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { resolve } from 'node:path'
 import { lazyAppBoundaries } from './lazyAppPlugin'
+import { settledThoughtBoundaries } from './settledThoughtPlugin'
 
 const adapters = new Set(["../plugins.svelte", "src/ts/storage/database.svelte", "src/ts/storage/workingSetCatalog", "../pluginSafeClass", "../pluginClaimSession", "src/ts/stores.svelte", "src/ts/util", "src/ts/alert", "src/lang", "src/ts/globalApi.svelte", "src/ts/gui/colorscheme", "src/ts/platform", "src/ts/process/mcp/pluginmcp", "src/ts/process/files/inlays", "src/ts/translator/translator", "src/ts/parser/parser.svelte", "src/ts/storage/nativePluginPermissions", "src/ts/process/index.svelte", "src/ts/process/generationState", "src/ts/model/modellist", "src/ts/process/request/request", "src/ts/process/modules", "src/ts/process/ttsHooks", "src/ts/storage/persistentDataRuntime.svelte", "src/ts/conversationMutations", "../pluginDatabaseAccess"])
 export default defineConfig(({ mode }) => {
@@ -9,10 +10,13 @@ export default defineConfig(({ mode }) => {
     return {
         root: resolve(import.meta.dirname),
         define: { 'import.meta.env.VITE_RISU_LEGAL_CONFIGURED': 'true' },
-        plugins: [lazyAppBoundaries(), {
+        plugins: [lazyAppBoundaries(), settledThoughtBoundaries(), {
             name: 'fixture-host-boundaries', enforce: 'pre',
             async resolveId(source, importer, options) {
                 source = source.replaceAll('\\', '/').replace(resolve(import.meta.dirname, '../../src').replaceAll('\\', '/') + '/', 'src/')
+                if (/\/src\/lib\/Others\/(?:MonacoEditor|TextEditorMonaco)\.svelte$/.test(importer?.replaceAll('\\', '/') ?? '') && ['src/ts/gui/codearea/cbsMonaco', 'src/ts/gui/colorscheme', 'src/lang'].includes(source)) {
+                    return resolve(import.meta.dirname, 'monacoAdapters.ts').replaceAll('\\', '/')
+                }
                 if (importer?.replaceAll('\\', '/').endsWith('/src/ts/ui/modalNavigation.ts') && /(?:^|\/)stores\.svelte$/.test(source)) {
                     return resolve(import.meta.dirname, 'modalNavigationAdapters.ts').replaceAll('\\', '/')
                 }
@@ -33,13 +37,17 @@ export default defineConfig(({ mode }) => {
                 return resolved.id.replace(/realmEndpoints\.ts$/, 'realmEndpoints.blocked.ts')
             },
         }, svelte()],
-        resolve: { alias: { src: resolve(import.meta.dirname, '../../src') } },
+        resolve: { alias: [
+            { find: /^monaco-editor$/, replacement: resolve(import.meta.dirname, '../../src/ts/gui/codearea/monacoRuntime.ts') },
+            { find: 'src', replacement: resolve(import.meta.dirname, '../../src') },
+        ] },
+        worker: { format: 'es' },
         server: { hmr: false, host: '127.0.0.1', port: 4187, strictPort: true, fs: { allow: [resolve(import.meta.dirname, '../..')] } },
         build: {
             outDir: resolve(import.meta.dirname, '../../.tmp/test-results/browser/dist'), emptyOutDir: true,
             rollupOptions: {
                 preserveEntrySignatures: 'strict',
-                input: [resolve(import.meta.dirname, 'index.html'), resolve(import.meta.dirname, 'dragDrop.html'), resolve(import.meta.dirname, 'modalNavigation.html'), resolve(import.meta.dirname, 'lazyApp.html')],
+                input: [resolve(import.meta.dirname, 'index.html'), resolve(import.meta.dirname, 'dragDrop.html'), resolve(import.meta.dirname, 'modalNavigation.html'), resolve(import.meta.dirname, 'lazyApp.html'), resolve(import.meta.dirname, 'monaco.html'), resolve(import.meta.dirname, 'settledThought.html')],
             },
         },
     }

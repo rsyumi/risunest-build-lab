@@ -32,7 +32,7 @@
             if($ShowRealmFrameStore.startsWith('preset') || $ShowRealmFrameStore.startsWith('module')){
                 //TODO, add preset edit
             }
-            else if(DBState.db.characters[$selectedCharID].type === 'character'){
+            else {
                 loadingStage = 0
                 DBState.db.characters[$selectedCharID].realmId = e.data.id
             }
@@ -102,7 +102,7 @@
         if($ShowRealmFrameStore.startsWith('preset') || $ShowRealmFrameStore.startsWith('module')){
             //TODO, add preset edit
         }
-        else if(DBState.db.characters[$selectedCharID].type === 'character' && DBState.db.characters[$selectedCharID].realmId){
+        else if(DBState.db.characters[$selectedCharID].realmId){
             url += `&edit=${DBState.db.characters[$selectedCharID].realmId}&edit-type=normal`
         }
         url += '#noLayout'

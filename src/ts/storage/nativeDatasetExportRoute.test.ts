@@ -11,6 +11,10 @@ vi.mock('./persistentDataRuntime.svelte', () => ({
 
 import { exportNativeDataset } from './nativeDatasetExportRoute'
 import type { NativeFileJobResult } from './nativeFileJobs'
+import { get } from 'svelte/store'
+import { doingChat, reserveGeneration } from '../process/generationState'
+import { isLibraryFileOperationReserved } from './libraryFileOperation'
+import { dismissNativeFileOperationOutcome, nativeFileOperationOutcome, runSharedNativeFileOperation } from './nativeFileJobManager'
 
 function dependencies(platform: 'desktop' | 'android' | 'ios' | 'web', calls: unknown[]) {
     let revision = 3
@@ -37,6 +41,50 @@ function dependencies(platform: 'desktop' | 'android' | 'ios' | 'web', calls: un
 }
 
 describe('native dataset export route', () => {
+    it('admits before flush and joins rapid clicks through destination publication', async () => {
+        const calls: unknown[] = []
+        const deps = dependencies('android', calls)
+        let finish!: () => void
+        const publication = new Promise<void>(resolve => { finish = resolve })
+        let entered!: () => void
+        const preparing = new Promise<void>(resolve => { entered = resolve })
+        const runExport = vi.fn(async () => {
+            expect(isLibraryFileOperationReserved()).toBe(true)
+            expect(reserveGeneration()).toBeNull()
+            entered()
+            await publication
+            return { revision: 4 } as NativeFileJobResult
+        })
+        dismissNativeFileOperationOutcome()
+        const first = exportNativeDataset({}, { ...deps, runExport })
+        const second = exportNativeDataset({}, { ...deps, runExport })
+        await preparing
+        expect(runExport).toHaveBeenCalledOnce()
+        expect(calls).toEqual([['flush', 'native-dataset-export']])
+        expect(get(nativeFileOperationOutcome)).toBeNull()
+        await expect(runSharedNativeFileOperation('import', 'other', async () => undefined)).rejects.toMatchObject({ name: 'NativeFileOperationBusyError' })
+        finish()
+        expect(await first).toEqual(await second)
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ state: 'succeeded', format: 'dataset' })
+        expect(isLibraryFileOperationReserved()).toBe(false)
+    })
+
+    it('rejects active generation before capturing or starting', async () => {
+        const calls: unknown[] = []
+        doingChat.set(true)
+        try {
+            await expect(exportNativeDataset({}, dependencies('android', calls))).rejects.toMatchObject({ code: 'generation-active' })
+            expect(calls).toEqual([])
+        } finally { doingChat.set(false) }
+    })
+
+    it('shows native publication failure once and never selects renderer fallback', async () => {
+        const calls: unknown[] = []
+        const deps = { ...dependencies('android', calls), runExport: async () => { throw new Error('synthetic destination failure') } }
+        await expect(exportNativeDataset({}, deps)).resolves.toBeNull()
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ state: 'failed', format: 'dataset' })
+        expect(isLibraryFileOperationReserved()).toBe(false)
+    })
     it('writes the desktop dataset into Downloads after flushing pending edits', async () => {
         const calls: unknown[] = []
 

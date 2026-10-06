@@ -72,7 +72,6 @@ vi.mock('./templates/templates', async () => (await import('./tests/sendChatTest
 vi.mock('./exampleMessages', async () => (await import('./tests/sendChatTestHarness')).exampleMessagesModule())
 vi.mock('./tts', async () => (await import('./tests/sendChatTestHarness')).ttsModule())
 vi.mock('./memory/supaMemory', async () => (await import('./tests/sendChatTestHarness')).supaMemoryModule())
-vi.mock('./group', async () => (await import('./tests/sendChatTestHarness')).groupModule())
 vi.mock('./triggers', () => ({
     runTrigger: vi.fn(async (_char: unknown, mode: string, arg: { chat: any }) => {
         const clone = JSON.parse(JSON.stringify(arg.chat))
@@ -84,7 +83,6 @@ vi.mock('./memory/hypamemory', async () => (await import('./tests/sendChatTestHa
 vi.mock('./embedding/addinfo', async () => (await import('./tests/sendChatTestHarness')).addinfoModule())
 vi.mock('./files/inlays', async () => (await import('./tests/sendChatTestHarness')).inlaysModule())
 vi.mock('./models/modelString', async () => (await import('./tests/sendChatTestHarness')).modelStringModule())
-vi.mock('../sync/multiuser', async () => (await import('./tests/sendChatTestHarness')).multiuserModule())
 vi.mock('./inlayScreen', () => ({ runInlayScreen: (_char: unknown, data: string) => ({ text: data }) }))
 vi.mock('./transformers', async () => (await import('./tests/sendChatTestHarness')).transformersModule())
 vi.mock('./memory/hanuraiMemory', () => ({
@@ -113,6 +111,7 @@ vi.mock('../storage/persistentDataRuntime.svelte', () => ({
     drainDeferredLwwReceives: vi.fn(async () => undefined),
     captureSelectedConversationTarget: () => mocks.selectedTarget,
     captureSelectedConversationAuthority: () => mocks.selectedAuthority,
+    recordSelectedCharacterLastInteraction: vi.fn(() => true),
     captureWindowedConversationMutationController: (...args: any[]) => mocks.windowedController?.(...args) ?? null,
     acquireCompleteConversation: mocks.acquireCompleteConversation,
     flushPendingData: mocks.flushPendingData,
@@ -352,7 +351,7 @@ describe('sendChat with the history window', () => {
         const before = structuredClone(stored.slice(0, 900))
         const { bodyReads, mutations } = installWindowed(stored)
 
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
 
         // maxContext 500 times 2 at ten tokens per message keeps a hundred messages.
         expect(promptContents()).toEqual(range(900, 1000))
@@ -370,7 +369,7 @@ describe('sendChat with the history window', () => {
         installWindowed(messages(1000))
         DBState.db.googleClaudeTokenizing = true
 
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
 
         expect(promptContents()).toEqual(range(900, 1000))
         const tokenizers = new Set(vi.mocked(encodeWithTokenizer).mock.calls.map((call) => call[1]))
@@ -381,19 +380,19 @@ describe('sendChat with the history window', () => {
         installWindowed(messages(1000))
         mocks.deviceSettings = { generationHistoryLimitEnabled: true, generationHistoryLimitMultiplier: 1.5 }
 
-        await sendChat(-1, { historyLimit: true })
+        await sendChat({ historyLimit: true })
 
         expect(promptContents()).toEqual(range(925, 1000))
     })
 
     it('leaves the greeting out when older messages are left out, and keeps it for a short conversation', async () => {
         installWindowed(messages(1000))
-        await sendChat(-1, { historyLimit: true })
+        await sendChat({ historyLimit: true })
         expect(promptContents()).not.toContain('greeting')
 
         installWindowed(messages(4))
         mocks.modelResponse = streamingResponse('answer')
-        await sendChat(-1, { historyLimit: true })
+        await sendChat({ historyLimit: true })
         expect(promptContents()).toEqual(['greeting', 'm0', 'm1', 'm2', 'm3'])
     })
 
@@ -409,7 +408,7 @@ describe('sendChat with the history window', () => {
         installComplete(messages(300))
         configure()
 
-        await sendChat(-1, arg)
+        await sendChat(arg)
 
         expect(processed()).toEqual(range(0, 300))
     })
@@ -417,7 +416,7 @@ describe('sendChat with the history window', () => {
     it('builds the same prompt and result from a complete conversation', async () => {
         const windowedStore = messages(300)
         installWindowed(windowedStore)
-        await sendChat(-1, { historyLimit: true })
+        await sendChat({ historyLimit: true })
         const windowedPrompt = promptContents()
 
         const completeStore = messages(300)
@@ -425,7 +424,7 @@ describe('sendChat with the history window', () => {
         const { session } = installComplete(completeStore)
         mocks.processScriptFull.mockClear()
         mocks.modelResponse = streamingResponse('answer')
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
 
         expect(processed()).toEqual(range(200, 300))
         expect(promptContents()).toEqual(windowedPrompt)
@@ -437,7 +436,7 @@ describe('sendChat with the history window', () => {
     it('passes absolute message indices to editprocess scripts', async () => {
         installWindowed(messages(1000))
 
-        await sendChat(-1, { historyLimit: true })
+        await sendChat({ historyLimit: true })
 
         const indices = mocks.processScriptFull.mock.calls
             .filter((call) => call[2] === 'editprocess' && String(call[1]).startsWith('m'))
@@ -451,7 +450,7 @@ describe('sendChat with the history window', () => {
         stored[950].disabled = true
         installWindowed(stored)
 
-        await sendChat(-1, { historyLimit: true })
+        await sendChat({ historyLimit: true })
 
         const indexOf = new Map(mocks.processScriptFull.mock.calls
             .filter((call) => call[2] === 'editprocess')
@@ -468,7 +467,7 @@ describe('sendChat with the history window', () => {
         installWindowed(messages(1000))
         mocks.modelResponse = response()
 
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
 
         const indices = mocks.processScriptFull.mock.calls
             .filter((call) => call[2] === 'editoutput')
@@ -482,7 +481,7 @@ describe('sendChat with the history window', () => {
         delete stored[29].chatId
         const { mutations } = installWindowed(stored)
 
-        await sendChat(-1, { historyLimit: true })
+        await sendChat({ historyLimit: true })
 
         expect(stored[29].chatId).toEqual(expect.any(String))
         expect(mutations[0]).toMatchObject({ start: 29, deleteCount: 1 })
@@ -494,7 +493,7 @@ describe('sendChat with the history window', () => {
         const before = structuredClone(stored)
         const { mutations } = installWindowed(stored)
 
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
 
         const idWrites = mutations.filter((mutation) => mutation.start < 1000)
         expect(idWrites).toHaveLength(1)
@@ -518,7 +517,7 @@ describe('sendChat with the history window', () => {
             }
         }
 
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
 
         expect(stored[999].data).toBe('edited by trigger')
         expect(stored.slice(0, 900)).toEqual(messages(900))
@@ -538,7 +537,7 @@ describe('sendChat with the history window', () => {
         mocks.onModelRequest = () => controller.abort()
         mocks.modelResponse = { type: 'fail', result: 'stopped' }
 
-        await expect(sendChat(-1, { historyLimit: true, signal: controller.signal })).resolves.toBe(false)
+        await expect(sendChat({ historyLimit: true, signal: controller.signal })).resolves.toBe(false)
 
         expect(owner.chats[0].scriptstate).toEqual({ $mood: 'set' })
     })
@@ -552,7 +551,7 @@ describe('sendChat with the history window', () => {
             throw failure
         })
 
-        await expect(sendChat(-1, { historyLimit: true })).rejects.toBe(failure)
+        await expect(sendChat({ historyLimit: true })).rejects.toBe(failure)
 
         expect(mocks.modelRequests).toHaveLength(0)
         expect(owner.chats[0].scriptstate).toEqual({ $mood: 'set' })
@@ -566,7 +565,7 @@ describe('sendChat with the history window', () => {
             return { chat }
         }
 
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
 
         expect(stored.at(-1)?.data).toBe('answer (checked)')
         expect(stored).toHaveLength(1001)
@@ -586,7 +585,7 @@ describe('sendChat with the history window', () => {
             memory: room.hypaV3Data,
         }))
 
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
 
         const [chats, , , , , , prepared] = mocks.hypaMemoryV3.mock.calls[0]
         expect(chats[0].memo).toBe('id-400')
@@ -610,7 +609,7 @@ describe('sendChat with the history window', () => {
             })
         }
 
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
 
         const promoted = (mocks.session as ActiveConversationSession).materializeCompatibilityArray()
         expect(promoted).toHaveLength(1001)
@@ -641,7 +640,7 @@ describe('sendChat with the history window', () => {
             return length
         }
 
-        const sending = sendChat(-1, { historyLimit: true })
+        const sending = sendChat({ historyLimit: true })
         await firstPart
         // The promotion reads the store, which already holds the first part of the response.
         windowed.current = false
@@ -671,7 +670,7 @@ describe('sendChat with the history window', () => {
         installWindowed(messages(1000))
         mocks.selectedAuthority.sessionVersion = 1
 
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(false)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(false)
 
         expect(mocks.flushPendingData).toHaveBeenCalledWith('generation-history-window')
         expect(mocks.modelRequests).toHaveLength(0)
@@ -688,7 +687,7 @@ describe('sendChat with the history window', () => {
             return page
         }
 
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(false)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(false)
 
         expect(mocks.modelRequests).toHaveLength(0)
         expect(mocks.alertError).toHaveBeenCalledWith('conversation action failed')
@@ -711,7 +710,7 @@ describe('sendChat with the history window', () => {
             })
         }
 
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(false)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(false)
 
         expect((mocks.session as ActiveConversationSession).totalMessages).toBe(999)
         expect(mocks.alertError).toHaveBeenCalledWith('conversation changed')

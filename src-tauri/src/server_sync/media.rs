@@ -1,6 +1,6 @@
 //! Native control-plane only. Media bodies travel from the server to WebView.
 use super::{
-    client::{AdmissionRetry, ServerClient},
+    client::ServerClient,
     residency::{RemoteObject, Residency},
     Result, SyncError,
 };
@@ -166,15 +166,11 @@ impl MediaProvider {
         }
     }
     fn issue(&self, issuing: &mut Option<Issuer>, issuer_key: &str, batch: &[PendingGrant]) -> Result<Vec<String>> {
-        // Another request of this device, such as a Sync transfer, can hold both
-        // slots. A refusal before admission is retried briefly; exhaustion is a
-        // retryable failure and leaves no grant cached.
         if issuing.as_ref().is_some_and(|session| session.key != issuer_key || session.expires <= Instant::now()) {
             *issuing = None;
         }
         if issuing.is_none() {
-            let client = ServerClient::new(batch[0].proof.config.resolve(&self.root)?)?
-                .with_admission_retry(Arc::new(AdmissionRetry::new()));
+            let client = ServerClient::new(batch[0].proof.config.resolve(&self.root)?)?;
             let head = client.resolve_identity()?;
             *issuing = Some(Issuer { key: issuer_key.to_owned(), client, head, expires: Instant::now() + Duration::from_secs(60) });
         }

@@ -30,7 +30,7 @@ impl TryFrom<String> for UnitKey {
         let n = components.len();
         let kind = components[0].as_str();
         let valid = match kind {
-            "root" | "toggle" | "variable" | "preset-protected" | "archive" | "asset" | "inlay" | "hypa" | "group-members" => n == 2,
+            "root" | "toggle" | "variable" | "preset-protected" | "archive" | "asset" | "inlay" | "hypa" => n == 2,
             "character" | "preset" | "persona" | "messages" | "record" | "plugin" => n == 3,
             "conversation" | "plugin-local" => n == 4,
             // Record kinds and order scopes this build does not know stay opaque.
@@ -56,7 +56,7 @@ impl TryFrom<String> for UnitKey {
             return Err(WireError("invalid-unit-key-shape"));
         }
         let structural_ids = match kind {
-            "character" | "preset" | "persona" | "group-members" | "archive" => &components[1..2],
+            "character" | "preset" | "persona" | "archive" => &components[1..2],
             "conversation" | "messages" => &components[1..3],
             "exists" => &components[2..],
             "record" if components[1] != "plugins" => &components[2..3],

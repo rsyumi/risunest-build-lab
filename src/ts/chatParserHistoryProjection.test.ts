@@ -151,7 +151,28 @@ describe('live chat parser history projection', () => {
         expect(result.context.parserContext.historyOffset).toBe(95)
         expect(input.contextSeed).toEqual(originalSeed)
         expect(reads[0]).toEqual({ startIndex: 99, limit: 1 })
-        expect(Math.max(...reads.map(({ limit }) => limit))).toBeLessThanOrEqual(32)
+        expect(reads).toEqual([
+            { startIndex: 99, limit: 1 },
+            { startIndex: 91, limit: 8 },
+        ])
+    })
+
+    it('expands backward batches only while role dependencies remain unresolved', async () => {
+        const messages = makeMessages(300)
+        for (let index = 250; index < messages.length; index += 1) messages[index].role = 'char'
+        const { input, reads } = makeInput(messages, 299)
+
+        const result = await createChatParserHistoryProjection(input)
+
+        expect(result).toMatchObject({ kind: 'bounded', historyOffset: 247 })
+        if (result.kind !== 'bounded') throw new Error('Expected bounded projection')
+        expect(result.messages).toEqual(messages.slice(247))
+        expect(reads).toEqual([
+            { startIndex: 299, limit: 1 },
+            { startIndex: 291, limit: 8 },
+            { startIndex: 275, limit: 16 },
+            { startIndex: 243, limit: 32 },
+        ])
     })
 
     it('keeps a literal previouschatlog index in one exact contiguous projection', async () => {

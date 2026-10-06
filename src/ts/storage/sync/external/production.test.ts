@@ -221,22 +221,31 @@ async function installActualRestorePause() {
 }
 
 describe('external storage production integration', () => {
-    it.each(['adoption', 'settled'] as const)('retries a committed restore after one %s failure without completing its actual guard twice', async failure => {
-        const production = await import('./production')
-        await production.installExternalStorageProduction()
-        mocks.bridge.startJob.mockImplementation(async (_request, id) => ({
-            ...succeeded('old-sync', '8'), id, kind: 'restore', applicationStarted: true,
-            result: { receivedRevision: '9' },
-        }))
-        if (failure === 'adoption') mocks.bridge.confirmRestoreAdoption.mockRejectedValueOnce(new Error('Lost adoption response'))
-        else mocks.bindingResume.mockRejectedValueOnce(new Error('Adapter resume failed'))
-        await expect(production.requestExternalStorageRestore('old-sync', 'snapshot', ['library'])).rejects.toThrow()
-        expect(mocks.completeGuard).toHaveBeenCalledTimes(failure === 'adoption' ? 0 : 1)
-        await (await import('./applicationRecovery')).retryExternalApplication()
-        expect(mocks.completeGuard).toHaveBeenCalledOnce()
-        expect(mocks.reloadPlugins).toHaveBeenCalledOnce()
-        expect(mocks.bridge.startJob).toHaveBeenCalledOnce()
-        expect((await import('./applicationRecovery')).hasPendingExternalApplication()).toBe(false)
+    describe('committed restore retries', () => {
+        let production: typeof import('./production')
+        let recovery: typeof import('./applicationRecovery')
+
+        beforeEach(async () => {
+            production = await import('./production')
+            recovery = await import('./applicationRecovery')
+        })
+
+        it.each(['adoption', 'settled'] as const)('retries a committed restore after one %s failure without completing its actual guard twice', async failure => {
+            await production.installExternalStorageProduction()
+            mocks.bridge.startJob.mockImplementation(async (_request, id) => ({
+                ...succeeded('old-sync', '8'), id, kind: 'restore', applicationStarted: true,
+                result: { receivedRevision: '9' },
+            }))
+            if (failure === 'adoption') mocks.bridge.confirmRestoreAdoption.mockRejectedValueOnce(new Error('Lost adoption response'))
+            else mocks.bindingResume.mockRejectedValueOnce(new Error('Adapter resume failed'))
+            await expect(production.requestExternalStorageRestore('old-sync', 'snapshot', ['library'])).rejects.toThrow()
+            expect(mocks.completeGuard).toHaveBeenCalledTimes(failure === 'adoption' ? 0 : 1)
+            await recovery.retryExternalApplication()
+            expect(mocks.completeGuard).toHaveBeenCalledOnce()
+            expect(mocks.reloadPlugins).toHaveBeenCalledOnce()
+            expect(mocks.bridge.startJob).toHaveBeenCalledOnce()
+            expect(recovery.hasPendingExternalApplication()).toBe(false)
+        })
     })
 
     it('restores the original plugins and binding after proven unchanged pause admission failure', async () => {

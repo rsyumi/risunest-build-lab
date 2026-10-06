@@ -22,6 +22,9 @@ impl restore::ReplacementSink for StoreSink {
     fn put_presets(&self, id: &str, presets: &[Value]) -> StoreResult<()> {
         self.store.lock().unwrap().replace_put_upstream_presets(id, presets)
     }
+    fn put_legacy_root(&self, id: &str, root: &crate::persistent_store::upstream_stream::RootSpool) -> StoreResult<()> {
+        self.store.lock().unwrap().replace_put_upstream_stream(id, root)
+    }
     fn add_characters(&self, id: &str, characters: &[Value]) -> StoreResult<()> {
         let mut unavailable = Vec::new();
         let expanded =

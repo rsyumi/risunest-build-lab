@@ -2,7 +2,7 @@ import type { Chat } from '../storage/database.svelte'
 import type { ActiveConversationSession } from '../storage/activeConversationSession'
 import type { CompleteConversationLease, SelectedConversationTarget } from '../storage/activeWorkingSet.svelte'
 import type { DataRevision, GeneratingConversation, PersistentRevisionReader } from '../storage/persistentDataStore'
-import type { PreparedUnitIntent } from '../storage/saveCoordinator'
+import type { PreparedUnitIntent, WindowedConversationPersistenceAuthority } from '../storage/saveCoordinator'
 import { cloneConversationMetadata } from '../storage/selectedConversationLifecycle'
 import {
     patchSetsMessageData,
@@ -22,6 +22,7 @@ export interface ConversationPatchAccessDependencies {
     captureSelectedConversationTarget(): SelectedConversationTarget | null
     acquireCompleteConversation(reason: string, target: SelectedConversationTarget): Promise<CompleteConversationLease>
     getActiveConversationSession(): ActiveConversationSession | null
+    captureSelectedConversationAuthority?(): WindowedConversationPersistenceAuthority | null
     /** The live object of the selected conversation, the one its session renders. */
     getSelectedConversation(): Chat | null
     /** The selected conversation while a generation runs, or a conversation being rerolled. */
@@ -62,6 +63,10 @@ export function createConversationPatchAccess(dependencies: ConversationPatchAcc
             throwIfAborted(signal)
             const planned = await planStoredConversationPatch(reader, request)
             throwIfAborted(signal)
+            if (!admitted()) {
+                outcome = busy()
+                return null
+            }
             if (planned.kind === 'conflict') {
                 outcome = { status: 'conflict', conflict: planned.conflict, revision: reader.revision }
                 return null
@@ -76,14 +81,24 @@ export function createConversationPatchAccess(dependencies: ConversationPatchAcc
 
     // The session adopts the commit as persisted metadata, which keeps the generation's
     // continuation point; the generation waits for this patch before it applies its response.
-    const commitDuringRequest = (request: ConversationPatchRequest, signal: AbortSignal | undefined) =>
-        commitThroughStore(request, signal, () => {
+    const commitDuringRequest = (request: ConversationPatchRequest, signal: AbortSignal | undefined) => {
+        const initialTarget = selectedTarget(request)
+        const initialSession = dependencies.getActiveConversationSession()
+        const initialAuthority = dependencies.captureSelectedConversationAuthority?.()
+        return commitThroughStore(request, signal, () => {
+            const selected = selectedTarget(request)
+            if (!selected || !initialTarget || selected.navigationGeneration !== initialTarget.navigationGeneration) return false
             const session = dependencies.getActiveConversationSession()
             const conversation = dependencies.getSelectedConversation()
-            return selectedTarget(request) !== null && session !== null && conversation !== null &&
-                session.matchesConversation(request.characterId, conversation) &&
-                session.canAdoptPersistedMetadata
+            if (initialSession) return session === initialSession && conversation !== null &&
+                session.matchesConversation(request.characterId, conversation) && session.canAdoptPersistedMetadata
+            const authority = dependencies.captureSelectedConversationAuthority?.()
+            return !!initialAuthority && !!authority &&
+                authority.sessionToken === initialAuthority.sessionToken &&
+                authority.characterId === request.characterId && authority.conversationId === request.conversationId &&
+                authority.sessionVersion === authority.persistedSessionVersion
         })
+    }
 
     async function commitToSelectedConversation(
         request: ConversationPatchRequest,

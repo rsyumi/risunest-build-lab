@@ -31,7 +31,7 @@ fn run<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 
 /// The connection the fixture's receiving store would hold for the repository.
-fn receiver_connection(f: &CycleFixture) -> ConnectedRepository {
+pub(super) fn receiver_connection(f: &CycleFixture) -> ConnectedRepository {
     ConnectedRepository {
         stored: StoredConnection {
             id: "receiver".into(),
@@ -225,6 +225,38 @@ fn shared_holders(f: &mut CycleFixture) -> (ConnectedRepository, String, String)
     assert!(!f.b.external_lww_object_is_local(&exclusive).unwrap());
     assert!(!f.b.external_lww_object_is_local(&shared).unwrap());
     (connection, exclusive, shared)
+}
+
+#[test]
+fn binding_membership_includes_shared_target_holders_without_changing_removal_counts() {
+    use crate::persistent_store::asset_residency::PreviousStorageTarget;
+    let mut f = CycleFixture::new();
+    let (connection, exclusive, shared) = shared_holders(&mut f);
+    let target = |id: &str| PreviousStorageTarget::External { connection_id: id.into() };
+    let remaining = |id: &str| serde_json::to_value(f.b.asset_residency_status_for_target(Some(&target(id))).unwrap()).unwrap()["previousStorageObjects"].as_u64().unwrap();
+    assert_eq!(remaining("receiver"), 0);
+    assert_eq!(remaining("second"), 1);
+    assert_eq!(remaining("other"), 2);
+    assert_eq!(status(&f.b)["externalObjects"], serde_json::json!([{"connectionId":"receiver","objects":1}]));
+    let _resolver = lww_residency::install_test_source_connection(f.directory_b.path(), Arc::new(connection)).unwrap();
+    f.b.asset_residency_download_previous(&target("second"), None, None, || Ok(())).unwrap();
+    assert!(f.b.external_lww_object_is_local(&exclusive).unwrap());
+    assert!(!f.b.external_lww_object_is_local(&shared).unwrap());
+}
+
+#[test]
+fn binding_membership_counts_only_nonlocal_files_the_server_target_lacks() {
+    let mut f = CycleFixture::new();
+    let (server, _held, _external) = split_holders(&mut f);
+    ConnectionStore::open(f.directory_b.path()).unwrap().insert(&receiver_connection(&f).stored).unwrap();
+    let core = server.client(&f.b);
+    let head = core.client.resolve_identity().unwrap();
+    let target = crate::persistent_store::asset_residency::PreviousStorageTarget::Server {
+        target_id: risunest_sync_wire::hash(format!("{}:{}", head.library_id, head.epoch).as_bytes()), library_id: head.library_id,
+    };
+    let status = serde_json::to_value(f.b.asset_residency_status_for_target(Some(&target)).unwrap()).unwrap();
+    assert_eq!(status["previousStorageObjects"], 1);
+    assert_eq!(status["serverObjects"], 1);
 }
 
 #[test]

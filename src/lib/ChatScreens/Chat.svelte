@@ -15,7 +15,7 @@
     import { runTrigger } from 'src/ts/process/triggers'
     import { sayTTS } from "src/ts/process/tts"
     import { DBState, ReloadChatPointer, CurrentTriggerIdStore, popupStore } from 'src/ts/stores.svelte'
-    import { ConnectionOpenStore } from "src/ts/sync/multiuser"
+
     import { capitalize, getUserIcon, getUserName, sleep } from "src/ts/util"
     import { onDestroy, onMount, tick, untrack } from "svelte"
     import { type Unsubscriber } from "svelte/store"
@@ -54,9 +54,8 @@
     import { safeStructuredClone } from 'src/ts/polyfill'
     import isEqual from 'lodash/isEqual'
     import type { ConversationViewportRow } from 'src/ts/conversationViewportSource'
-    import type { ChatDisplayRefresh } from 'src/ts/chatDisplayRefresh'
+    import type { ChatDisplayRefresh, ChatPresentationRefresh } from 'src/ts/chatDisplayRefresh'
     import type { BoundedLiveChatParserProjection } from 'src/ts/selectedConversationLiveParserProjection'
-    import type { groupChat as GroupChatRecord } from 'src/ts/storage/database.svelte'
     import type {
         SelectedConversationMessageEditIntent,
         SelectedConversationOperations,
@@ -82,9 +81,9 @@
     let bodyRoot:HTMLElement|null = $state(null)
     let editTarget: CapturedChatMessageTarget | null = null
     let editEvidence: Message | null = null
-    let partialEditTarget: CapturedChatMessageTarget | null = null
+    let partialEditTarget = $state.raw<CapturedChatMessageTarget | null>(null)
     let editIntent: SelectedConversationMessageEditIntent | null = null
-    let partialEditIntent: SelectedConversationMessageEditIntent | null = null
+    let partialEditIntent = $state.raw<SelectedConversationMessageEditIntent | null>(null)
     let partialEditController = $state<PartialEditController | undefined>()
     interface AcquiredChatMessageTarget {
         readonly target: CapturedChatMessageTarget
@@ -128,6 +127,7 @@
         parserAbortSignal?: AbortSignal
         restoredEditor?: ChatEditorDraft
         onEditorOpen?: () => void
+        onEditorClose?: () => void
         onBodyRendered?: () => void
     }
 
@@ -169,6 +169,7 @@
         parserAbortSignal,
         restoredEditor,
         onEditorOpen,
+        onEditorClose,
         onBodyRendered,
     }: Props = $props()
 
@@ -176,7 +177,15 @@
     let captureSettings = $derived(captureContext?.settings)
     let captureCharacter = $derived(captureContext?.parserContext.character)
     let captureChat = $derived(captureCharacter?.chats[captureCharacter.chatPage])
-    let captureTheme = $derived(captureSettings?.theme ?? DBState.db.theme)
+    let retainedLayout: { theme: string; gui: HTMLElement | null } | undefined
+    let presentedLayout = $derived.by(() => {
+        if (hasActiveEditor() && retainedLayout) return retainedLayout
+        const theme = captureSettings?.theme ?? DBState.db.theme
+        const gui = theme === 'customHTML' ? RenderGUIHtml(captureSettings?.guiHTML ?? DBState.db.guiHTML) : null
+        retainedLayout = { theme, gui }
+        return retainedLayout
+    })
+    let captureTheme = $derived(presentedLayout.theme)
     let captureIconSize = $derived(captureSettings?.iconSize ?? DBState.db.iconsize)
     let captureZoomSize = $derived(captureSettings?.zoomSize ?? DBState.db.zoomsize)
     let captureLineHeight = $derived(captureSettings?.lineHeight ?? DBState.db.lineHeight ?? 1.25)
@@ -220,9 +229,9 @@
         return captureContext?.parserContext ?? parserProjection?.context.parserContext
     }
 
-    function parserChara(): string | CharacterRecord | GroupChatRecord {
-        const character = parserContext()?.character as CharacterRecord | GroupChatRecord
-        return character?.type === 'group' ? name : character
+    function parserChara(): string | CharacterRecord {
+        const character = parserContext()?.character as CharacterRecord
+        return character
     }
 
     function parserArgs() {
@@ -314,6 +323,22 @@
         )
     }
 
+    let editorWasActive = false
+    $effect(() => {
+        const active = hasActiveEditor()
+        if (editorWasActive && !active) untrack(() => onEditorClose?.())
+        editorWasActive = active
+    })
+
+    export function updatePresentation(state: ChatPresentationRefresh): void {
+        img = state.img
+        name = state.name
+        largePortrait = state.largePortrait
+        bookmarked = state.bookmarked
+        role = state.role
+        messageGenerationInfo = state.messageGenerationInfo ?? null
+    }
+
     export function captureEditorDraft(): Omit<ChatEditorDraft, 'caret'> | null {
         if (editMode) {
             const evidence = editIntent?.messageEvidence ?? editEvidence
@@ -360,6 +385,8 @@
 
     export function refreshMessageDisplay(state: ChatDisplayRefresh): void {
         message = state.message
+        if (state.index !== undefined) idx = state.index
+        if (state.character !== undefined) character = state.character
         totalLength = state.totalMessages
         parserProjection = state.parserProjection
         parserAbortSignal = state.parserAbortSignal
@@ -475,6 +502,7 @@
     function beginPartialEdit() {
         partialEditIntent = captureViewportEditIntent()
         partialEditTarget = partialEditIntent ? null : captureCurrentMessage()
+        if (partialEditIntent || partialEditTarget) onEditorOpen?.()
     }
 
     function cancelPartialEdit() {
@@ -904,7 +932,7 @@
                     'manual-chat-trigger',
                     async (context) => {
                         const authority = context.requireCurrent()
-                        if (authority.character.type === 'group') return
+
                         const triggerResult = await runManualTrigger(
                             authority.character,
                             authority.conversation,
@@ -922,7 +950,7 @@
             }
         } else {
             const currentChar = getCurrentCharacter()
-            if(!currentChar || currentChar.type === 'group') return
+            if(!currentChar) return
             const triggerResult = await runManualTrigger(currentChar, getCurrentChat())
             if(triggerResult) {
                 setCurrentChat(triggerResult.chat)
@@ -1460,7 +1488,7 @@
     </button>    
 {/if}
 {#if idx > -1}
-    {#if DBState.db.characters[selIdState.selId].type !== 'group' && DBState.db.characters[selIdState.selId].ttsMode !== 'none' && (DBState.db.characters[selIdState.selId].ttsMode)}
+    {#if DBState.db.characters[selIdState.selId].ttsMode !== 'none' && (DBState.db.characters[selIdState.selId].ttsMode)}
         <button class="flex items-center hover:text-blue-500 transition-colors button-icon-tts" onclick={()=>{
             return sayTTS(null, isOptimizedStreamingMessage ? rawStreamingText : message)
         }}>
@@ -1470,15 +1498,13 @@
             {/if}
         </button>
     {/if}
-    {#if !$ConnectionOpenStore}
-        <button class="flex items-center hover:text-blue-500 transition-colors button-icon-remove" onclick={(e) => rm(e, false)} use:longpress={(e) => rm(e, true)}>
+    <button class="flex items-center hover:text-blue-500 transition-colors button-icon-remove" onclick={(e) => rm(e, false)} use:longpress={(e) => rm(e, true)}>
             <TrashIcon size={20}/>
 
             {#if showNames}
                 <span class="ml-1">{language.remove}</span>
             {/if}
         </button>
-    {/if}
 {/if}
 {/snippet}
 
@@ -1848,7 +1874,7 @@
                 </div>
             </div>
         {:else if captureTheme === 'customHTML' && !blankMessage}
-            {@render renderGuiHtmlPart(RenderGUIHtml(captureSettings?.guiHTML ?? DBState.db.guiHTML))}
+            {@render renderGuiHtmlPart(presentedLayout.gui!)}
         {:else}
             {@render senderIcon({rounded: captureSettings?.roundIcons ?? DBState.db.roundIcons})}
             <span class="flex flex-col ml-4 w-full max-w-full min-w-0 text-black">

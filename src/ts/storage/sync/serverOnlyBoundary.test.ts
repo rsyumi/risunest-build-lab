@@ -34,8 +34,7 @@ describe("server-only product boundaries", () => {
         /peer_sync|peer_clone|peer_delta|peer_bidirectional|device_sync|DeviceSync|PeerClone|PeerSync|PEER_CLONE|sync-device/,
       );
   });
-  it("preserves upstream multiuser, generation keep-alive, SAF and OS deep-link registration", () => {
-    expect(source("src/ts/sync/multiuser.ts")).toContain("import('peerjs')");
+  it("preserves generation keep-alive, SAF and OS deep-link registration", () => {
     const activity = source(
       "src-tauri/gen/android/app/src/main/java/io/github/rsyumi/risunest/MainActivity.kt",
     );

@@ -1,8 +1,9 @@
+import { resolvePinnedConversationPosition } from '../plugins/pinnedConversationPosition'
 import { registerGeneratingConversation } from '../storage/generatingConversationRegistry'
 import { openGenerationRequestPhase } from './generationRequestPhase'
 import { boundedGenerationFallbackReason } from './boundedGenerationAdmission'
 import { get, writable } from "svelte/store";
-import { type character, type groupChat, type MessageGenerationInfo, type Chat, type MessagePresetInfo, activatePresetOverride, setCurrentChat, type Message } from "../storage/database.svelte";
+import { type character, type MessageGenerationInfo, type Chat, type MessagePresetInfo, activatePresetOverride, setCurrentChat, type Message } from "../storage/database.svelte";
 import { DBState } from '../stores.svelte';
 import { CharEmotion, selectedCharID } from "../stores.svelte";
 import { ChatTokenizer, encodeWithTokenizer, tokenize, tokenizeNum } from "../tokenizer";
@@ -18,14 +19,14 @@ import { exampleMessage } from "./exampleMessages";
 import { sayTTS } from "./tts";
 import { supaMemory } from "./memory/supaMemory";
 import { v4 } from "uuid";
-import { groupOrder } from "./group";
+
 import { runTrigger } from "./triggers";
 import { HypaProcesser } from "./memory/hypamemory";
 import { additionalInformations } from "./embedding/addinfo";
 import { getInlayAsset } from "./files/inlays";
 import { inlayImageForProvider } from "./files/inlayProviderImage";
 import { getGenerationModelString } from "./models/modelString";
-import { connectionOpen, peerRevertChat, peerSafeCheck, peerSync } from "../sync/multiuser";
+
 import { runInlayScreen } from "./inlayScreen";
 import { runImageEmbedding } from "./transformers";
 import { hanuraiMemory } from "./memory/hanuraiMemory";
@@ -51,6 +52,7 @@ import {
     getPersistentNavigationGeneration,
     acquireCompleteConversation,
     captureSelectedConversationAuthority,
+    recordSelectedCharacterLastInteraction,
     captureWindowedConversationMutationController,
     captureSelectedConversationTarget,
     flushPendingData,
@@ -141,7 +143,7 @@ const projectPluginChatOutput = createProductionPluginChatOutputProjector(
     <T>(value: T) => $state.snapshot(value) as T,
 )
 
-export async function runChatOutputListeners(char: any, chat: any, characterIndex: number, chatIndex: number, messageIndex: number, signal?: AbortSignal){
+export async function runChatOutputListeners(char: any, chat: any, messageIndex: number, signal?: AbortSignal){
     if(pluginV2.chatOutput.size === 0){
         return
     }
@@ -149,8 +151,7 @@ export async function runChatOutputListeners(char: any, chat: any, characterInde
         listeners: pluginV2.chatOutput,
         char,
         chat,
-        characterIndex,
-        chatIndex,
+        resolvePosition: resolvePinnedConversationPosition,
         messageIndex,
         signal,
         projectScalable: projectPluginChatOutput,
@@ -177,7 +178,7 @@ export let previewFormated:OpenAIChat[] = []
 export let previewBody:string = ''
 
 function beginPromptHistoryOperation(
-    owner: character | groupChat,
+    owner: character,
     chat: Chat,
 ): ConversationHistoryOperation {
     const session = getActiveConversationSession()
@@ -236,7 +237,7 @@ export async function notifyGenerationCompletion(result: string): Promise<void> 
             }
         } catch {}
     }
-    void peerSync()
+
 }
 
 interface GenerationConversationResources {
@@ -270,7 +271,6 @@ export function getHistoryWindowMemoryMode(historyLimit: boolean | undefined): H
         requested: true,
         enabled: getDeviceSettings().generationHistoryLimitEnabled,
         maxContext: DBState.db.maxContext,
-        group: owner.type === 'group',
         supaMemory: !!owner.supaMemory,
         supaModelType: DBState.db.supaModelType,
         hanuraiEnable: !!DBState.db.hanuraiEnable,
@@ -294,6 +294,53 @@ function sameConversationTarget(
  * conversation is windowed or complete. With `tailStart`, the window holds
  * the messages from the absolute index it returns instead of the token window.
  */
+function createGenerationHistoryController(
+    target: NonNullable<ReturnType<typeof captureSelectedConversationTarget>>,
+    chat: Chat,
+    start: number,
+    initial: WindowedConversationMutationController,
+    isTargetCurrent: () => boolean,
+    signal: AbortSignal,
+    requireUnchangedContent = false,
+): HistoryWindowController {
+    const currentConversation = () => {
+        const currentOwner = DBState.db.characters[get(selectedCharID)]
+        const current = currentOwner?.chats[currentOwner.chatPage]
+        return currentOwner?.chaId === target.characterId && current?.id === target.conversationId
+            ? { owner: currentOwner, conversation: current }
+            : null
+    }
+    const environment: HistoryWindowControllerEnvironment = {
+        captureWindowed: (windowChat, absoluteStartIndex) => {
+            const current = captureSelectedConversationTarget()
+            if (!isTargetCurrent() || !current || !sameConversationTarget(current, target)) return null
+            return captureWindowedConversationMutationController(current, windowChat, absoluteStartIndex)
+        },
+        captureSession: () => {
+            const current = isTargetCurrent() ? currentConversation() : null
+            const session = getActiveConversationSession()
+            if (requireUnchangedContent && current && session?.matchesConversation(current.owner.chaId, current.conversation)) {
+                const fields = ['role', 'data', 'saying', 'chatId', 'name', 'disabled', 'isComment'] as const
+                if (current.conversation.message.length !== start + chat.message.length
+                    || chat.message.some((message, index) => fields.some((field) =>
+                        !Object.is(message[field], current.conversation.message[start + index]?.[field])))) return null
+            }
+            return current && session?.matchesConversation(current.owner.chaId, current.conversation)
+                ? { session, conversation: current.conversation }
+                : null
+        },
+        getCurrentSession: getActiveConversationSession,
+        readLiveMetadata: () => {
+            const current = currentConversation()
+            return current ? conversationFieldsOf(current.conversation) : null
+        },
+        onLost: () => {
+            if (isTargetCurrent() && !signal.aborted) alertError(language.generationConversationChanged)
+        },
+    }
+    return createHistoryWindowController(environment, chat, start, initial)
+}
+
 async function prepareGenerationHistoryWindow(
     initialTarget: NonNullable<ReturnType<typeof captureSelectedConversationTarget>>,
     memory: HistoryWindowMemoryMode,
@@ -400,36 +447,7 @@ async function prepareGenerationHistoryWindow(
     if (!initial) return null
     const start = prepared.selection.start
 
-    const currentConversation = () => {
-        const currentOwner = DBState.db.characters[get(selectedCharID)]
-        const current = currentOwner?.chats[currentOwner.chatPage]
-        return currentOwner?.chaId === target.characterId && current?.id === target.conversationId
-            ? { owner: currentOwner, conversation: current }
-            : null
-    }
-    const environment: HistoryWindowControllerEnvironment = {
-        captureWindowed: (windowChat, absoluteStartIndex) => {
-            const current = captureSelectedConversationTarget()
-            if (!isTargetCurrent() || !current || !sameConversationTarget(current, target)) return null
-            return captureWindowedConversationMutationController(current, windowChat, absoluteStartIndex)
-        },
-        captureSession: () => {
-            const current = isTargetCurrent() ? currentConversation() : null
-            const session = getActiveConversationSession()
-            return current && session?.matchesConversation(current.owner.chaId, current.conversation)
-                ? { session, conversation: current.conversation }
-                : null
-        },
-        getCurrentSession: getActiveConversationSession,
-        readLiveMetadata: () => {
-            const current = currentConversation()
-            return current ? conversationFieldsOf(current.conversation) : null
-        },
-        onLost: () => {
-            if (isTargetCurrent() && !signal.aborted) alertError(language.generationConversationChanged)
-        },
-    }
-    const controller = createHistoryWindowController(environment, chat, start, initial)
+    const controller = createGenerationHistoryController(target, chat, start, initial, isTargetCurrent, signal)
     // Prompt history and scripts find messages by id, so missing ids are stored
     // first, one write per run of messages without one.
     for (let index = 0; index < chat.message.length;) {
@@ -530,18 +548,18 @@ function hasObservableHistoryTokenizer(): boolean {
 export function getSelectedBoundedGenerationFallbackReason(): string | null {
     const owner = DBState.db.characters[get(selectedCharID)]
     const conversation = owner?.chats[owner.chatPage]
-    const hypaSettings = owner?.type !== 'group' && owner?.supaMemory
+    const hypaSettings = owner?.supaMemory
         && DBState.db.hypaV3 && !DBState.db.hypav2 && !DBState.db.hanuraiEnable
         ? getCurrentHypaV3Preset().settings : null
     const authority = hypaSettings ? captureSelectedConversationAuthority() : null
-    const scripts = owner?.type !== 'group' && hypaSettings
+    const scripts = hypaSettings
         ? [
             ...(DBState.db.presetRegex ?? []),
             ...(owner.customscript ?? []),
             ...getModuleRegexScripts(),
         ]
         : []
-    const parserHistory = owner?.type !== 'group' && conversation && hypaSettings
+    const parserHistory = conversation && hypaSettings
         ? classifyChatParserHistory({
             source: [
                 DBState.db.mainPrompt,
@@ -556,7 +574,7 @@ export function getSelectedBoundedGenerationFallbackReason(): string | null {
                 owner.replaceGlobalNote,
                 owner.exampleMessage,
                 owner.postHistoryInstructions,
-                DBState.db.groupTemplate,
+                DBState.db.messageNameTemplate,
                 DBState.db.promptSettings,
                 owner.firstMessage,
                 owner.alternateGreetings,
@@ -568,7 +586,6 @@ export function getSelectedBoundedGenerationFallbackReason(): string | null {
         : null
     return boundedGenerationFallbackReason({
         selected: !!owner && !!conversation,
-        group: owner?.type === 'group',
         hypaEnabled: !!hypaSettings,
         windowed: !!authority,
         observableTokenizer: !!hasObservableHistoryTokenizer(),
@@ -576,17 +593,17 @@ export function getSelectedBoundedGenerationFallbackReason(): string | null {
         editprocess: (pluginV2.editprocess?.size ?? 0) > 0,
         editoutput: (pluginV2.editoutput?.size ?? 0) > 0,
         chatOutput: pluginV2.chatOutput.size > 0,
-        triggers: (owner?.type !== 'group' && (owner?.triggerscript?.length ?? 0) > 0) || getModuleTriggers().length > 0,
+        triggers: ((owner?.triggerscript?.length ?? 0) > 0) || getModuleTriggers().length > 0,
         historyRegex: scripts.some(script => script.type === 'editprocess' || script.type === 'editoutput'),
-        lorebooks: (owner?.type !== 'group' && (owner?.globalLore?.length ?? 0) > 0) || (conversation?.localLore?.length ?? 0) > 0 || getModuleLorebooks().length > 0,
-        additionalText: owner?.type !== 'group' && !!owner?.additionalText,
-        inlayView: owner?.type !== 'group' && !!owner?.inlayViewScreen,
+        lorebooks: ((owner?.globalLore?.length ?? 0) > 0) || (conversation?.localLore?.length ?? 0) > 0 || getModuleLorebooks().length > 0,
+        additionalText: !!owner?.additionalText,
+        inlayView: !!owner?.inlayViewScreen,
         dynamicHistory: parserHistory?.requiresFullHistory !== false,
         explicitHistory: (parserHistory?.absoluteMessageIndices.length ?? 0) > 0,
     })
 }
 
-export async function sendChat(chatProcessIndex = -1,arg:{
+export async function sendChat(arg:{
     chatAdditonalTokens?:number,
     signal?:AbortSignal,
     continue?:boolean,
@@ -678,7 +695,6 @@ export async function sendChat(chatProcessIndex = -1,arg:{
         iosGeneration = await beginIOSGeneration(arg.signal)
         lifecycle.onProgress = iosGeneration.progress;
         const result = await sendChatInternal(
-          chatProcessIndex,
           { ...arg, signal: iosGeneration.signal },
           lifecycle,
           reservation,
@@ -737,7 +753,7 @@ export async function sendChat(chatProcessIndex = -1,arg:{
     }
 }
 
-async function sendChatInternal(chatProcessIndex: number,arg:{
+async function sendChatInternal(arg:{
     chatAdditonalTokens?:number,
     signal?:AbortSignal,
     continue?:boolean,
@@ -811,9 +827,6 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     }
 
     function reformatContent(data:string){
-        if(chatProcessIndex === -1){
-            return data.trim()
-        }
         return data.trim()
     }
 
@@ -888,26 +901,14 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     const generationSetupSession = getActiveConversationSession()
     if (hasMismatchedActiveConversationSession()) return false
 
-    if (chatProcessIndex === -1) {
-        await activatePresetChainForRequest(
-            DBState.db,
-            activatePresetOverride,
-            Math.random,
-            (name) => alertToast(`Cannot find preset: ${name}`),
-        )
-    }
+    await activatePresetChainForRequest(
+        DBState.db,
+        activatePresetOverride,
+        Math.random,
+        (name) => alertToast(`Cannot find preset: ${name}`),
+    )
 
-    if(connectionOpen){
-        chatProcessStage.set(4)
-        const peerSafe = await peerSafeCheck()
-        if(!peerSafe){
-            peerRevertChat()
-            throwError(language.otherUserRequesting)
-            return false
-        }
-        await peerSync()
-        chatProcessStage.set(0)
-    }
+
 
     if (
         !lifecycle.isTargetCurrent()
@@ -920,7 +921,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         const ownerIndex = get(selectedCharID)
         const owner = DBState.db.characters[ownerIndex]
         const conversation = owner?.chats[owner.chatPage]
-        const hypaSettings = owner?.type !== 'group' && owner?.supaMemory
+        const hypaSettings = owner?.supaMemory
             && DBState.db.hypaV3 && !DBState.db.hypav2 && !DBState.db.hanuraiEnable
             ? getCurrentHypaV3Preset().settings
             : null
@@ -997,15 +998,19 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 if (arg.continue && decision.preparation.chat.message.length === 0) {
                     await decision.preparation.release()
                 } else {
-                const controller = captureWindowedConversationMutationController(
+                const initial = captureWindowedConversationMutationController(
                     target,
                     decision.preparation.chat,
                     decision.preparation.plan.bodyStartIndex,
                 )
-                if (!controller) {
+                if (!initial) {
                     await decision.preparation.release()
                     return false
                 }
+                const controller = createGenerationHistoryController(
+                    target, decision.preparation.chat, decision.preparation.plan.bodyStartIndex,
+                    initial, lifecycle.isTargetCurrent, abortSignal, true,
+                )
                 conversationResources.preparation = decision.preparation
                 conversationResources.windowedController = controller
                 conversationResources.unbindWindowedController =
@@ -1040,15 +1045,22 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
 
     DBState.db.statics.messages += 1
     selectedChar = get(selectedCharID)
-    const nowChatroom = DBState.db.characters[selectedChar]
-    // A metadata-only conversation saves only its own messages and metadata,
-    // so the character detail is left as it was opened.
+    let nowChatroom = DBState.db.characters[selectedChar]
     const characterDetailWritable = () => {
         const owner = DBState.db.characters[selectedChar]
         const conversation = owner?.chats[owner.chatPage]
         return !conversation || !isMetadataOnlySelectedConversation(conversation)
     }
-    if (characterDetailWritable()) nowChatroom.lastInteraction = Date.now()
+    const interactionTime = Date.now()
+    const interactionAuthority = captureSelectedConversationAuthority()
+    if (interactionAuthority) {
+        if (interactionAuthority.characterId !== nowChatroom.chaId
+            || interactionAuthority.conversationId !== nowChatroom.chats[nowChatroom.chatPage]?.id
+            || !recordSelectedCharacterLastInteraction(interactionAuthority, nowChatroom.lastInteraction, interactionTime)) return false
+        nowChatroom.lastInteraction = interactionTime
+    } else if (characterDetailWritable()) {
+        nowChatroom.lastInteraction = interactionTime
+    }
     selectedChat = nowChatroom.chatPage
     const selectedConversation = boundedChat ?? nowChatroom.chats[selectedChat]
     const activeSession = getActiveConversationSession()
@@ -1102,51 +1114,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         caculatedChatTokens += 3
     }
 
-    if(nowChatroom.type === 'group'){
-        if(chatProcessIndex === -1){
-            const charNames =nowChatroom.characters.map((v) => findCharacterbyIdwithCache(v).name)
-
-            const messages = nowChatroom.chats[nowChatroom.chatPage].message
-            const lastMessage = messages[messages.length-1]
-            let order = nowChatroom.characters.map((v,i) => {
-                return {
-                    id: v,
-                    talkness: nowChatroom.characterActive[i] ? nowChatroom.characterTalks[i] : -1,
-                    index: i
-                }
-            }).filter((v) => {
-                return v.talkness > 0
-            })
-            if(!nowChatroom.orderByOrder){
-                order = groupOrder(order, lastMessage?.data).filter((v) => {
-                    if(v.id === lastMessage?.saying){
-                        return false
-                    }
-                    return true
-                })
-            }
-            for(let i=0;i<order.length;i++){
-                const r = await sendChat(order[i].index, {
-                    chatAdditonalTokens: caculatedChatTokens,
-                    signal: abortSignal
-                }, reservation)
-                if(!r){
-                    return false
-                }
-            }
-            return true
-        }
-        else{
-            currentChar = findCharacterbyIdwithCache(nowChatroom.characters[chatProcessIndex])
-            if(!currentChar){
-                throwError(`cannot find character: ${nowChatroom.characters[chatProcessIndex]}`)
-                return false
-            }
-        }
-    }
-    else{
-        currentChar = nowChatroom
-    }
+    currentChar = nowChatroom
 
     let chatAdditonalTokens = arg.chatAdditonalTokens ?? caculatedChatTokens
     const tokenizer = new ChatTokenizer(chatAdditonalTokens, DBState.db.aiModel.startsWith('gpt') ? 'noName' : 'name',
@@ -1297,13 +1265,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         }
         unformated.description.push(baseDescriptionPrompt)
 
-        if(nowChatroom.type === 'group'){
-            const systemMsg = `[Write the next reply only as ${currentChar.name}]`
-            unformated.postEverything.push({
-                role: 'system',
-                content: systemMsg
-            })
-        }
+
     }
 
     const loreHistory = beginPromptHistoryOperation(nowChatroom, currentChat)
@@ -1669,7 +1631,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     const greetingOutsideWindow = historyWindow !== null
         && historyWindow.start > 0
         && !historyWindow.endedAtAllBefore
-    if(nowChatroom.type !== 'group' && !greetingHistorySelection.resetByAllBefore && !greetingOutsideWindow){
+    if(!greetingHistorySelection.resetByAllBefore && !greetingOutsideWindow){
         const firstMsg = currentChat.fmIndex === -1 ? nowChatroom.firstMessage : nowChatroom.alternateGreetings[currentChat.fmIndex]
 
         const chat:OpenAIChat = {
@@ -1726,7 +1688,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     }
 
     const requiresLivePromptCompatibility = (pluginV2.editprocess?.size ?? 0) > 0
-    if (!historyWindow && !summaryAwareHistoryPlan && nowChatroom.type !== 'group' && nowChatroom.supaMemory
+    if (!historyWindow && !summaryAwareHistoryPlan && nowChatroom.supaMemory
         && DBState.db.hypaV3 && !DBState.db.hypav2 && !DBState.db.hanuraiEnable) {
         const settings = getCurrentHypaV3Preset().settings
         if (!settings.useExperimentalImpl && !requiresLivePromptCompatibility && !hasObservableHistoryTokenizer()
@@ -1887,22 +1849,20 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         let role:'user'|'assistant'|'system' = msg.role === 'user' ? 'user' : 'assistant'
 
         if(
-            (nowChatroom.type === 'group' && findCharacterbyIdwithCache(msg.saying).chaId !== currentChar.chaId) ||
-            (nowChatroom.type === 'group' && DBState.db.groupOtherBotRole === 'assistant') ||
             (usingPromptTemplate && DBState.db.promptSettings.sendName)
         ){
-            const form = DBState.db.groupTemplate || `<{{char}}\'s Message>\n{{slot}}\n</{{char}}\'s Message>`
-            const groupTemplate = promptScriptOperationScope
+            const form = DBState.db.messageNameTemplate || `<{{char}}\'s Message>\n{{slot}}\n</{{char}}\'s Message>`
+            const messageNameTemplate = promptScriptOperationScope
                 ? promptScriptOperationScope.parse(nowChatroom, form, {
                     chara: findCharacterbyIdwithCache(msg.saying).name,
                 })
                 : risuChatParser(form, {chara: findCharacterbyIdwithCache(msg.saying).name})
-            formatedChat = groupTemplate.replace('{{slot}}', formatedChat)
-            switch(DBState.db.groupOtherBotRole){
+            formatedChat = messageNameTemplate.replace('{{slot}}', formatedChat)
+            switch(DBState.db.namedMessageRole){
                 case 'user':
                 case 'assistant':
                 case 'system':
-                    role = DBState.db.groupOtherBotRole
+                    role = DBState.db.namedMessageRole
                     break
                 default:
                     role = 'assistant'
@@ -2514,20 +2474,22 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     const requestSourceCharacter = nowChatroom
     const requestSourceCharacterId = requestSourceCharacter.chaId
     const requestSourceChatPage = selectedChat
-    const requestSourceConversation = boundedChat
+    let requestSourceConversation = boundedChat
         ?? requestSourceCharacter.chats[requestSourceChatPage]
-    const requestSourceShell = requestSourceCharacter.chats[requestSourceChatPage]
-    const requestSourceMessages = requestSourceConversation.message
-    const requestSourceSession = getActiveConversationSession()
-    const requestSourceSessionVersion = requestSourceSession?.version
+    let requestSourceShell = requestSourceCharacter.chats[requestSourceChatPage]
+    let requestSourceMessages = requestSourceConversation.message
+    let requestSourceSession = getActiveConversationSession()
+    let requestSourceSessionVersion = requestSourceSession?.version
+    let requestSourceLost = false
     const isRequestSourceCurrent = () =>
+        !requestSourceLost &&
         lifecycle.isTargetCurrent() &&
         get(selectedCharID) === requestSourceCharacterIndex &&
         DBState.db.characters[requestSourceCharacterIndex]?.chaId === requestSourceCharacterId &&
         DBState.db.characters[requestSourceCharacterIndex]?.chatPage === requestSourceChatPage &&
-        (historyWindow
+        (boundedChat && conversationResources.windowedController
             // The window controller follows a promotion and checks the window's message ids.
-            ? historyWindow.controller.isCurrent()
+            ? conversationResources.windowedController.isCurrent()
             : DBState.db.characters[requestSourceCharacterIndex]?.chats[requestSourceChatPage] ===
                 requestSourceShell &&
             (conversationResources.windowedController?.isCurrent() ?? true) &&
@@ -2541,6 +2503,87 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     const closeRequestPhase = openGenerationRequestPhase({
         characterId: requestSourceCharacterId,
         conversationId: requestSourceConversation.id ?? '',
+    }, {
+        prepare() {
+            if (!isRequestSourceCurrent()) return null
+            const session = getActiveConversationSession()
+            if (!session) return null
+            const version = session.version
+            const invalidationVersion = session.generationInvalidationVersion
+            return () => lifecycle.isTargetCurrent() && !abortSignal.aborted
+                && getActiveConversationSession() === session
+                && session.canContinueGenerationFrom(version)
+                && session.generationInvalidationVersion === invalidationVersion
+        },
+        invalidate: () => { requestSourceLost = true },
+        async adopt(receipt) {
+            const target = captureSelectedConversationTarget()
+            const expectedSession = receipt.session
+            const expectedVersion = receipt.sessionVersion
+            const receiptIsCurrent = () => expectedSession?.isActive
+                && getActiveConversationSession() === expectedSession
+                && expectedVersion !== null
+                && expectedSession.canContinueGenerationFrom(expectedVersion)
+                && expectedSession.generationInvalidationVersion === receipt.generationInvalidationVersion
+                && getPersistentStorageAuthorityEpoch() === receipt.authorityEpoch
+                && receipt.target && sameConversationTarget(captureSelectedConversationTarget(), receipt.target)
+            if (!lifecycle.isTargetCurrent() || abortSignal.aborted || !target
+                || !receiptIsCurrent()
+                || target.characterId !== requestSourceCharacterId
+                || target.conversationId !== requestSourceConversation.id) {
+                requestSourceLost = true
+                return
+            }
+            let lease: CompleteConversationLease
+            try {
+                lease = await acquireCompleteConversation('generation-public-write', target)
+            } catch (error) {
+                if (error instanceof SelectedConversationPromotionStaleError) { requestSourceLost = true; return }
+                throw error
+            }
+            if (!lifecycle.isTargetCurrent() || abortSignal.aborted
+                || lease.session !== expectedSession
+                || !receiptIsCurrent()) {
+                requestSourceLost = true
+                lease.release()
+                return
+            }
+            conversationResources.unbindWindowedController?.()
+            conversationResources.unbindWindowedController = null
+            conversationResources.windowedController?.release()
+            conversationResources.windowedController = null
+            conversationResources.completeLease?.release()
+            conversationResources.completeLease = lease
+            nowChatroom = DBState.db.characters[selectedChar]
+            currentChar = nowChatroom
+            currentChat = nowChatroom.chats[selectedChat]
+            if (historyWindow) {
+                // The public write promotes storage, but output scripts keep the admitted absolute window.
+                const start = Math.min(historyWindow.start, currentChat.message.length)
+                const chat = { ...cloneConversationMetadata(currentChat), message: safeStructuredClone(currentChat.message.slice(start)) } as Chat
+                attachHistoryWindow(chat, start)
+                const initial = captureSessionHistoryWindowController(
+                    { session: lease.session, conversation: currentChat }, getActiveConversationSession, chat, start,
+                )
+                if (!initial) return
+                const controller = createGenerationHistoryController(target, chat, start, initial, lifecycle.isTargetCurrent, abortSignal)
+                historyWindow = { ...historyWindow, start, chat, controller, shell: null }
+                boundedChat = chat
+                conversationResources.windowedController = controller
+                const unbind = bindWindowedGenerationController(chat, controller)
+                const unregister = registerActiveHistoryWindow({
+                    characterId: target.characterId, conversationId: target.conversationId, shell: null, controller,
+                })
+                conversationResources.unbindWindowedController = () => { unregister(); unbind() }
+            } else {
+                boundedChat = null
+            }
+            requestSourceConversation = boundedChat ?? currentChat
+            requestSourceShell = currentChat
+            requestSourceMessages = currentChat.message
+            requestSourceSession = lease.session
+            requestSourceSessionVersion = lease.session.version
+        },
     })
     let req: Awaited<ReturnType<typeof requestChatData>>
     try {
@@ -2549,13 +2592,12 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             biasString: biases,
             currentChar: currentChar,
             useStreaming: true,
-            isGroupChat: nowChatroom.type === 'group',
             bias: {},
             continue: arg.continue,
             chatId: generationId,
             imageResponse: DBState.db.outputImageModal,
             previewBody: arg.previewPrompt,
-            escape: nowChatroom.type === 'character' && nowChatroom.escapeOutput,
+            escape: nowChatroom.escapeOutput,
             rememberToolUsage: DBState.db.rememberToolUsage,
         }, 'model', abortSignal)
     } finally {
@@ -2664,8 +2706,6 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 runChatOutputListeners(
                     currentChar,
                     chat,
-                    selectedChar,
-                    selectedChat,
                     historyWindow ? toWindowIndex(chat, messageIndex) : messageIndex,
                     abortSignal,
                 ),
@@ -2713,7 +2753,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     if(needsAutoContinue){
         await acknowledgeCompletedGeneration()
         responseApplication.release()
-        return await sendChat(chatProcessIndex, {
+        return await sendChat({
             chatAdditonalTokens: arg.chatAdditonalTokens,
             continue: true,
             signal: abortSignal,
@@ -2770,7 +2810,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
 
         await acknowledgeCompletedGeneration()
         responseApplication.release()
-        return await sendChat(chatProcessIndex, {
+        return await sendChat({
             signal: abortSignal,
             historyLimit: arg.historyLimit,
         }, reservation)
@@ -2983,9 +3023,6 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
 
         }
         else if(currentChar.viewScreen === 'imggen'){
-            if(chatProcessIndex !== -1){
-                throwError("Stable diffusion in group chat is not supported")
-            }
 
             const msgs = (boundedChat ?? DBState.db.characters[selectedChar].chats[selectedChat]).message
             let msgStr = ''

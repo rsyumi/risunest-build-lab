@@ -71,7 +71,6 @@ const everything = {
     character: true,
     lore: true,
     persona: true,
-    groupMembers: true,
     globals: true,
 }
 
@@ -130,7 +129,6 @@ describe('conversation context read', () => {
             lorebook: [expect.objectContaining({ key: 'module-enabled' })],
         })
         expect(context!.persona).toEqual({ id: 'persona-bound', name: 'Bound Persona', personaPrompt: 'bound prompt' })
-        expect(context!.groupMembers).toEqual([])
         expect(context!.chatVariables).toEqual({ $present: 'stored', $both: 'stored-both', $number: 3, $flag: true })
         expect(context!.messages).toEqual({
             characterId: 'char-plain',
@@ -211,39 +209,6 @@ describe('conversation context read', () => {
         expect(after.context!.messages!.messages.map((message) => message.chatId)).toEqual(['late'])
     })
 
-    it('reads the selected conversation of a group with its members and module set', async () => {
-        const { store } = await createStore()
-        const selected = { characterId: 'char-group', conversationId: 'conv-group' }
-        const { context } = await read(store, { include: everything }, { selected })
-
-        expect(context).toMatchObject({
-            characterId: 'char-group',
-            conversationId: 'conv-group',
-            characterIndex: 1,
-            chatIndex: 0,
-            selected: true,
-        })
-        expect(context!.character).toMatchObject({ type: 'group', characters: ['char-plain', 'char-member'] })
-        expect(context!.groupMembers).toEqual([
-            { chaId: 'char-plain', name: 'Plain', nickname: 'Plainy' },
-            { chaId: 'char-member', name: 'Member', nickname: 'Mem' },
-        ])
-        expect(context!.lore!.modules.map((entry) => entry.id)).toEqual([
-            'module-enabled', 'module-chat', 'module-int', 'module-ns', 'module-group',
-        ])
-        expect(context!.persona).toEqual({ id: 'persona-selected', name: 'Selected Persona', personaPrompt: 'selected prompt' })
-        expect(context!.globals).toMatchObject({
-            username: 'Selected Persona',
-            globalChatVariables: { shared: 'explicit', toggle_a: 'global-a', toggle_b: 'global-b' },
-        })
-
-        const second = await read(store, { characterId: 'char-plain', conversationId: 'conv-second' }, { selected })
-        expect(second.context).toMatchObject({ characterIndex: 0, chatIndex: 1, selected: false })
-        const named = await read(store, { ...selected, include: { character: false } }, { selected })
-        expect(named.context).toMatchObject({ selected: true })
-        expect(named.context).not.toHaveProperty('character')
-    })
-
     it('reads a missing target, or no selection without a target, as null', async () => {
         const { store } = await createStore()
 
@@ -266,7 +231,6 @@ describe('conversation context read', () => {
         expect(context).not.toHaveProperty('globals')
         expect(context!.character).toMatchObject({ chaId: 'char-plain' })
         expect(context!.lore!.modules.map((entry) => entry.id)).toContain('module-embedded')
-        expect(context!.groupMembers).toEqual([])
         expect(context!.chatVariables).toEqual({ $present: 'stored' })
     })
 

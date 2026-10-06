@@ -244,7 +244,17 @@ export class NativeCommitTransport {
 
 let encoder: Worker | undefined
 let encoderIdle: ReturnType<typeof setTimeout> | undefined
-export function encodeNativeCommit(input: CommitEnvelope): Promise<Uint8Array> {
+export async function encodeNativeCommit(input: CommitEnvelope): Promise<Uint8Array> {
+    const json = JSON.stringify(prepareNativePersistenceValue(input))
+    const byteLength = utf8ByteLength(json)
+    if (byteLength > MAX_NATIVE_REQUEST_BYTES) throw new PayloadTooLargeError('commit', byteLength)
+    const pages: Uint8Array[] = []
+    for (let offset = 0; offset < json.length;) {
+        let end = Math.min(offset + 256 * 1024, json.length)
+        if (end < json.length && json.charCodeAt(end - 1) >= 0xd800 && json.charCodeAt(end - 1) <= 0xdbff) end--
+        pages.push(textEncoder.encode(json.slice(offset, end)))
+        offset = end
+    }
     if (encoderIdle) clearTimeout(encoderIdle)
     encoder ??= new Worker(new URL('./nativeCommitEncoder.worker.ts', import.meta.url), {
         type: 'module',
@@ -272,7 +282,7 @@ export function encodeNativeCommit(input: CommitEnvelope): Promise<Uint8Array> {
             reject(new Error('Persistence encoder failed'))
         }
         try {
-            worker.postMessage(input)
+            worker.postMessage({ pages, byteLength }, pages.map((page) => page.buffer as ArrayBuffer))
         } catch (error) {
             cleanup()
             reject(error)

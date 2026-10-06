@@ -3,7 +3,7 @@
     import { language } from 'src/lang'
     import SettingButton from 'src/lib/Setting/RisuNest/SettingButton.svelte'
     import SettingProgress from 'src/lib/Setting/RisuNest/SettingProgress.svelte'
-    import { buildNativeFileJobDialogModel } from 'src/ts/gui/nativeFileJobDialogModel'
+    import { buildNativeFileJobDialogModel, failureReason } from 'src/ts/gui/nativeFileJobDialogModel'
     import {
         cancelActiveNativeFileOperation,
         dismissNativeFileOperationOutcome,
@@ -12,6 +12,11 @@
         nativeFileOperation,
         nativeFileOperationOutcome,
     } from 'src/ts/storage/nativeFileJobManager'
+
+    import { retrySnapshotRestoreBodiesFromOutcome } from 'src/ts/storage/nativePersistentMaintenance'
+
+    const snapshotRetryAvailable = $derived($nativeFileOperationOutcome?.status?.kind === 'snapshot-bodies'
+        && ['failed', 'cancelled'].includes($nativeFileOperationOutcome.status.state))
 
     let now = $state(Date.now())
     let panel = $state<HTMLDivElement | undefined>()
@@ -188,10 +193,19 @@
                         </SettingButton>
                     {/if}
                     {#if model.closeVisible}
+                        {#if snapshotRetryAvailable}
+                            <SettingButton variant="secondary" onclick={() => {void retrySnapshotRestoreBodiesFromOutcome().catch(async error => {
+                                const { alertError } = await import('src/ts/alert')
+                                alertError(failureReason(error?.code ?? ''))
+                            })}}>{language.retry}</SettingButton>
+                        {/if}
                         {#if retryAvailable}
                             <SettingButton variant="secondary" onclick={() => {void retryPortableRestoreBodiesFromOutcome().catch(() => {})}}>{language.retry}</SettingButton>
                         {/if}
-                        <SettingButton onclick={dismissNativeFileOperationOutcome}>{copy.close}</SettingButton>
+                        <SettingButton onclick={() => {void Promise.resolve(dismissNativeFileOperationOutcome()).catch(async error => {
+                            const { alertError } = await import('src/ts/alert')
+                            alertError(failureReason(error?.code ?? ''))
+                        })}}>{copy.close}</SettingButton>
                     {/if}
                 </footer>
             {/if}

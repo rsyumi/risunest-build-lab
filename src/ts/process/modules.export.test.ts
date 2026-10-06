@@ -81,6 +81,7 @@ import { exportModuleLegacy, importModule, importModuleData, readModule, type Ri
 import { DBState } from '../stores.svelte'
 import { alertConfirm, alertError, alertNormal } from '../alert'
 import { StdioModuleImportError } from './mcp/moduleImport'
+import { convertExternalLorebook } from './lorebook.svelte'
 
 describe('legacy module export', () => {
     beforeEach(() => {
@@ -94,6 +95,29 @@ describe('legacy module export', () => {
                 rpackMap.byteOffset + rpackMap.byteLength,
             ),
         })))
+    })
+
+    it.each([
+        { type: 'risuModule', id: 'source', name: '한글 😀', lorebook: [] },
+        { type: 'risu', data: [{ key: 'synthetic', content: '한글 😀' }] },
+        { entries: { synthetic: { content: '한글 😀' } } },
+        { type: 'regex', data: [{ in: 'synthetic', out: '한글 😀' }] },
+    ])('reuses parsed JSON without decoding while retaining the converter: %j', async value => {
+        vi.mocked(convertExternalLorebook).mockReturnValue([{ key: 'converted', content: '한글 😀' }] as any)
+        await importModuleData({ name: 'synthetic.json', data: new TextEncoder().encode(JSON.stringify(value)) })
+        const first = structuredClone(DBState.db.modules[0])
+        DBState.db.modules = []
+        await importModuleData({ name: 'synthetic.json', data: Uint8Array.of(0xff), parsedJson: { value } })
+        expect(first).toBeDefined()
+        expect(DBState.db.modules[0]).toEqual(first)
+    })
+
+    it('preserves browser malformed-byte replacement in JSON modules', async () => {
+        const prefix = new TextEncoder().encode('{"type":"risuModule","id":"synthetic","name":"')
+        await importModuleData({
+            name: 'synthetic.json', data: new Uint8Array([...prefix, 0xe2, 0x82, 0x22, 0x7d]),
+        })
+        expect(DBState.db.modules[0].name).toBe('\uFFFD\uFFFD')
     })
 
     it.each([false, true, undefined])('rejects JSON stdio modules regardless of lowLevelAccess=%s', async lowLevelAccess => {

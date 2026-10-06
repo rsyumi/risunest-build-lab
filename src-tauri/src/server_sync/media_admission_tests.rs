@@ -37,15 +37,14 @@ impl Fixture {
 use crate::server_sync::media::MediaProvider;
 use futures::StreamExt;
 use risunest_sync_connect::media::MediaObject;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Observes the real server's admission from outside it. A held `/head` body
-/// does not reach EOF, so the server keeps that request's device slot, until
+/// does not reach EOF, so the server keeps that request's processing slot until
 /// the gate opens.
 struct Admission {
     gate: tokio::sync::watch::Sender<bool>,
     held: tokio::sync::watch::Sender<usize>,
-    release_on_refusal: AtomicBool,
     refusals: AtomicUsize,
     sessions: AtomicUsize,
     accesses: AtomicUsize,
@@ -65,7 +64,6 @@ fn admission_fixture() -> (Fixture, Arc<Admission>) {
     let state = Arc::new(Admission {
         gate: tokio::sync::watch::channel(false).0,
         held: tokio::sync::watch::channel(0).0,
-        release_on_refusal: AtomicBool::new(false),
         refusals: AtomicUsize::new(0),
         sessions: AtomicUsize::new(0),
         accesses: AtomicUsize::new(0),
@@ -112,13 +110,6 @@ fn admission_fixture() -> (Fixture, Arc<Admission>) {
                 let response = next.run(request).await;
                 if response.status() == 429 {
                     state.refusals.fetch_add(1, Ordering::SeqCst);
-                    if state.release_on_refusal.load(Ordering::SeqCst) {
-                        // The refused client sees its 429 only after both held
-                        // bodies ended, so the slots are free when it retries.
-                        let mut held = state.held.subscribe();
-                        state.gate.send_replace(true);
-                        held.wait_for(|count| *count == 0).await.unwrap();
-                    }
                 }
                 if !hold || response.status() != 200 {
                     return response;
@@ -231,21 +222,21 @@ fn finish(held: Vec<reqwest::blocking::Response>) {
 }
 
 #[test]
-fn a_media_grant_is_issued_once_held_response_bodies_release_admission() {
+fn two_active_requests_do_not_refuse_a_media_grant() {
     let (fixture, state) = admission_fixture();
     let remote = Remote::new(&fixture);
     state.reset();
-    state.release_on_refusal.store(true, Ordering::SeqCst);
     let held = vec![remote.hold(&state), remote.hold(&state)];
     let url = match remote.provider.url(&remote.object("image/png"), false) {
         Ok(url) => url,
         Err(error) => panic!("code={} status={}", error.code, error.status),
     };
     assert!(url.starts_with(&fixture.endpoint));
-    assert_eq!(state.refusals.load(Ordering::SeqCst), 1);
-    assert_eq!(state.sessions.load(Ordering::SeqCst), 2);
+    assert_eq!(state.refusals.load(Ordering::SeqCst), 0);
+    assert_eq!(state.sessions.load(Ordering::SeqCst), 1);
     assert_eq!(state.accesses.load(Ordering::SeqCst), 1);
-    assert_eq!(*state.held.borrow(), 0);
+    assert_eq!(*state.held.borrow(), 2);
+    state.gate.send_replace(true);
     finish(held);
     let body = reqwest::blocking::get(&url).unwrap();
     assert_eq!(body.status().as_u16(), 200);
@@ -253,11 +244,10 @@ fn a_media_grant_is_issued_once_held_response_bodies_release_admission() {
 }
 
 #[test]
-fn eight_mime_variants_all_receive_grants_after_contended_admission() {
+fn eight_mime_variants_receive_grants_beside_two_active_requests() {
     let (fixture, state) = admission_fixture();
     let remote = Remote::new(&fixture);
     state.reset();
-    state.release_on_refusal.store(true, Ordering::SeqCst);
     let held = vec![remote.hold(&state), remote.hold(&state)];
     let barrier = Arc::new(std::sync::Barrier::new(8));
     let tasks = (0..8)
@@ -279,9 +269,10 @@ fn eight_mime_variants_all_receive_grants_after_contended_admission() {
         }
     }
     assert_eq!(urls.len(), 8);
-    assert!(state.refusals.load(Ordering::SeqCst) >= 1);
+    assert_eq!(state.refusals.load(Ordering::SeqCst), 0);
     assert!((1..=2).contains(&state.accesses.load(Ordering::SeqCst)));
-    assert_eq!(state.sessions.load(Ordering::SeqCst), 2);
+    assert_eq!(state.sessions.load(Ordering::SeqCst), 1);
+    state.gate.send_replace(true);
     finish(held);
 }
 
@@ -311,26 +302,28 @@ fn media_lookups_keep_the_residency_log_open_between_requests() {
 }
 
 #[test]
-fn exhausted_admission_is_retryable_and_leaves_no_grant_behind() {
+fn a_media_grant_completes_beside_eight_held_responses() {
     let (fixture, state) = admission_fixture();
     let remote = Remote::new(&fixture);
     state.reset();
-    let held = vec![remote.hold(&state), remote.hold(&state)];
+    let held = (0..8).map(|_| remote.hold(&state)).collect::<Vec<_>>();
     let object = remote.object("image/png");
-    let error = remote.provider.url(&object, false).unwrap_err();
-    assert_eq!(
-        (error.code.as_str(), error.status, error.retryable),
-        ("admission-unavailable", 503, true)
-    );
-    assert_eq!(state.refusals.load(Ordering::SeqCst), 3);
-    assert_eq!(state.sessions.load(Ordering::SeqCst), 3);
-    assert_eq!(state.accesses.load(Ordering::SeqCst), 0);
-    assert_eq!(*state.held.borrow(), 2);
-
+    let provider = remote.provider.clone();
+    let (sent, received) = std::sync::mpsc::channel();
+    let task = std::thread::spawn(move || sent.send(provider.url(&object, false)).unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while state.sessions.load(Ordering::SeqCst) == 0 {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    let early = received.recv_timeout(std::time::Duration::from_secs(2));
     state.gate.send_replace(true);
     finish(held);
-    remote.provider.url(&object, false).unwrap();
-    assert_eq!(state.sessions.load(Ordering::SeqCst), 4);
+    let url = early.expect("a grant waited behind unrelated responses").unwrap();
+    task.join().unwrap();
+    assert!(url.starts_with(&fixture.endpoint));
+    assert_eq!(state.refusals.load(Ordering::SeqCst), 0);
+    assert_eq!(state.sessions.load(Ordering::SeqCst), 1);
     assert_eq!(state.accesses.load(Ordering::SeqCst), 1);
 }
 
@@ -481,19 +474,61 @@ fn hydration_groups_reuse_one_identity_per_custody_and_skip_local_objects() {
     hashes.extend(second_hashes);
     first_state.reset();
     second_state.reset();
+    let lane = Arc::new(super::progress::ProgressLane::default());
     let mut hydration = HydrationSession::new(local.repository_root(), None).unwrap();
-    assert!(hydration
-        .hydrate_many(&hashes, &|| Ok(()))
-        .unwrap()
-        .is_empty());
+    let priority = [hashes[64].clone(), hashes[129].clone()].into_iter().collect();
+    crate::asset_repository::PayloadCas::new(local.repository_root()).unwrap()
+        .prepare_bytes(b"first synthetic 0").unwrap();
+    let mut downloaded = Vec::new();
+    let mut samples = Vec::new();
+    let mut duplicated = hashes.clone();
+    duplicated.push(hashes[0].clone());
+    super::progress::within(&lane, || {
+        assert!(hydration.hydrate_many_outcomes_prioritized(&duplicated, &priority, &|| Ok(()), |hash, outcome| {
+            let scope = lane.snapshot("hydrate").asset_scope.unwrap();
+            assert_eq!(scope.total, Some(130));
+            assert!(!scope.settled);
+            samples.push(scope.done);
+            if outcome == super::residency::HydrationOutcome::Downloaded { downloaded.push(hash.to_owned()); }
+        }).unwrap().is_empty());
+    });
+    assert_eq!(samples, (1..=130).collect::<Vec<_>>());
+    assert_eq!(&downloaded[..2], &[hashes[64].clone(), hashes[129].clone()]);
+    assert_eq!(downloaded.len(), 129, "already-local bodies count as items without downloads");
+    let first_scope = lane.snapshot("hydrate").asset_scope.unwrap();
+    assert_eq!((first_scope.done, first_scope.total, first_scope.settled), (130, Some(130), true));
     assert_eq!(first_state.sessions.load(Ordering::SeqCst), 1);
     assert_eq!(second_state.sessions.load(Ordering::SeqCst), 1);
-    assert!(hydration
-        .hydrate_many(&hashes, &|| Ok(()))
-        .unwrap()
-        .is_empty());
+    let wire_bytes = lane.snapshot("hydrate").received_bytes;
+    super::progress::within(&lane, || {
+        assert!(hydration.hydrate_many(&hashes[..2], &|| Ok(())).unwrap().is_empty());
+    });
+    let second_scope = lane.snapshot("hydrate").asset_scope.unwrap();
+    assert!(second_scope.id > first_scope.id);
+    assert_eq!((second_scope.done, second_scope.total, second_scope.settled), (2, Some(2), true));
+    assert_eq!(lane.snapshot("hydrate").received_bytes, wire_bytes);
     assert_eq!(first_state.sessions.load(Ordering::SeqCst), 1);
     assert_eq!(second_state.sessions.load(Ordering::SeqCst), 1);
+    let completed = std::cell::Cell::new(0);
+    super::progress::within(&lane, || {
+        let failure = hydration.hydrate_many_outcomes(&hashes, &|| {
+            if completed.get() >= 2 { Err(super::SyncError::new("cancelled", 409)) } else { Ok(()) }
+        }, |_, _| completed.set(completed.get() + 1)).unwrap_err();
+        assert_eq!(failure.code, "cancelled");
+    });
+    let cancelled_scope = lane.snapshot("hydrate").asset_scope.unwrap();
+    assert_eq!((cancelled_scope.done, cancelled_scope.total, cancelled_scope.settled), (64, Some(130), false));
+    super::progress::within(&lane, || {
+        assert!(hydration.hydrate_many(&hashes, &|| Ok(())).unwrap().is_empty());
+    });
+    let retry_scope = lane.snapshot("hydrate").asset_scope.unwrap();
+    assert!(retry_scope.id > cancelled_scope.id);
+    assert!(retry_scope.settled);
+    super::progress::within(&lane, || {
+        assert_eq!(hydration.hydrate_many(&["00".repeat(32)], &|| Ok(())).unwrap(), vec!["00".repeat(32)]);
+    });
+    let missing_scope = lane.snapshot("hydrate").asset_scope.unwrap();
+    assert_eq!((missing_scope.done, missing_scope.total, missing_scope.settled), (0, Some(1), false));
     let caches = || {
         std::fs::read_dir(local.repository_root())
             .unwrap()

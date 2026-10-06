@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
     NativeCommitTransport,
+    encodeNativeCommit,
     isLargeCommit,
     LARGE_COMMIT_BYTES,
     STAGED_REQUEST_BYTES,
@@ -9,6 +10,42 @@ import {
     type SharedWebview,
 } from './nativeCommitTransport'
 import { MAX_NATIVE_REQUEST_BYTES, PayloadTooLargeError } from './nativePersistenceValue'
+
+it('transfers encoded pages instead of structured-cloning the commit or callable hooks to its worker', async () => {
+    vi.useFakeTimers()
+    const sent: { pages: Uint8Array[]; byteLength: number }[] = []
+    class EncodingWorker {
+        onmessage: ((event: { data: { bytes: Uint8Array } }) => void) | null = null
+        onerror: (() => void) | null = null
+        terminate() {}
+        postMessage(data: { pages: Uint8Array[]; byteLength: number }, transfer: ArrayBuffer[]) {
+            expect(Object.keys(data)).toEqual(['pages', 'byteLength'])
+            expect(transfer).toEqual(data.pages.map((page) => page.buffer))
+            const received = structuredClone(data, { transfer })
+            expect(data.pages.every((page) => page.byteLength === 0)).toBe(true)
+            sent.push(received)
+            const bytes = new Uint8Array(received.byteLength)
+            let offset = 0
+            for (const page of received.pages) { bytes.set(page, offset); offset += page.byteLength }
+            Promise.resolve().then(() => this.onmessage?.({ data: { bytes } }))
+        }
+    }
+    vi.stubGlobal('Worker', EncodingWorker)
+    try {
+        const value = '한글🐿️é'.repeat(50_000)
+        const input = fixture()
+        input.commit.rootMutations![0] = { type: 'set', key: 'payload', value: { toJSON: () => value } }
+        const bytes = await encodeNativeCommit(input)
+        expect(JSON.parse(new TextDecoder().decode(bytes)).commit.rootMutations[0].value).toBe(value)
+        expect(sent).toHaveLength(1)
+        expect(sent[0].pages.length).toBeGreaterThan(1)
+        expect(sent[0].pages.every((page) => page.byteLength <= 1024 * 1024)).toBe(true)
+        await vi.advanceTimersByTimeAsync(30_000)
+    } finally {
+        vi.unstubAllGlobals()
+        vi.useRealTimers()
+    }
+})
 
 function fixture(large = true): CommitEnvelope {
     return {

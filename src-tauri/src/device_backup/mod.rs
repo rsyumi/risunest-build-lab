@@ -353,6 +353,11 @@ impl DeviceBackupState {
         Ok(active_session(self.lock()?.connection.as_ref().unwrap())?.is_some())
     }
 
+    pub(crate) fn owns_native_restore_job(&self, job_id: &str) -> Result<bool> {
+        Ok(active_session(self.lock()?.connection.as_ref().unwrap())?
+            .is_some_and(|session| session.includes_library && session.job_id == job_id))
+    }
+
     pub(crate) fn bootstrap_for_entry(&self) -> Result<BootstrapDecision> {
         let mut inner = self.lock()?;
         let restart = !inner.reconciled;

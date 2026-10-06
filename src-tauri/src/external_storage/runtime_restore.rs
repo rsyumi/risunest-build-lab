@@ -156,14 +156,17 @@ pub(crate) fn application_started(job: &DurableJob) -> bool {
 }
 
 /// Whether the restore that began a CAS journal can no longer use it. A restore
-/// of this process that has not finished keeps it. One left by an earlier run
-/// keeps it only while running the same restore again can still finish it.
+/// with a live worker keeps it. An unsettled local application keeps its
+/// journal until recovery or an explicit stop resolves its receipt.
 pub(crate) fn restore_journal_owner_ended(
     root: &Path,
     job_id: &str,
-    started_in_this_process: bool,
+    worker_active: bool,
     open_store: &dyn Fn() -> std::result::Result<PersistentStore, String>,
 ) -> std::result::Result<bool, String> {
+    if worker_active {
+        return Ok(false);
+    }
     let job = match JobStore::open(root).and_then(|jobs| jobs.read(job_id)) {
         Ok(job) => job,
         Err(error) if error.kind == ErrorKind::NotFound => return Ok(true),
@@ -172,17 +175,9 @@ pub(crate) fn restore_journal_owner_ended(
     if job.request.kind != JobKind::Restore || job.terminal() {
         return Ok(true);
     }
-    if started_in_this_process {
-        return Ok(false);
-    }
     // Before application a resumed restore pins what it needs again.
     if !application_started(&job) {
         return Ok(true);
-    }
-    match ConnectionStore::open(root).and_then(|connections| connections.read(&job.request.connection_id)) {
-        Ok(_) => {}
-        Err(error) if error.kind == ErrorKind::NotFound => return Ok(true),
-        Err(error) => return Err(error.to_string()),
     }
     let store = open_store()?;
     let Some(receipt) = completed_restore_in_store(&store, &job).map_err(|error| error.to_string())? else {
@@ -544,48 +539,45 @@ async fn receive_restore_bodies_in_store(mut store:PersistentStore,root:&Path,co
         Some(id)=>store.selected_character_asset_hashes(&id).map_err(pds_error)?.into_iter().collect::<BTreeSet<_>>(),
         None=>BTreeSet::new(),
     };
-    let mut after=String::new();let mut sources=Vec::new();
-    let mut interner=super::lww_residency::ObjectInterner::default();
-    loop {
-        let page=jobs.restore_body_page(&job.id,&after,&mut interner)?;
-        if page.is_empty() {break;}
-        for source in page {after=source.hash.clone();sources.push(source);}
-    }
-    let groups=super::lww_residency::packed_body_groups(sources,&priority);
     let stage=root.join("native-file-jobs/jobs").join(&job.id).join("external-restore-bodies");
-    // One handle records every body; opening the journal again reads every pin it holds.
+    let mut plan=snapshot_restore::RestoreBodyPlan::new(&stage)?;
     let mut pins=restore_pins(&root,&job.id)?;
     let cas=crate::asset_repository::PayloadCas::new(&root).map_err(runtime::local_error)?;
-    for mut group in groups {
-        group.sort_by_key(|source|!priority.contains(&source.hash));
+    let mut after=String::new();
+    loop {
+        cancel.check()?;require_activated_target(&store,job,revision)?;
+        let page=jobs.restore_body_page(&job.id,&after,&mut Default::default())?;
+        if page.is_empty() {break;}
         let mut present=Vec::new();
-        let mut missing=Vec::new();
-        for source in group {
+        for source in page {
+            after=source.hash.clone();
             super::lww_residency::validate_packed_source(&source,&connected.handle)?;
             match cas.stat_object(&source.hash).map_err(runtime::local_error)? {
-                Some(size) if size==source.byte_length=>present.push(source),
+                Some(size) if size==source.byte_length=>present.push((source.hash,source.byte_length,crate::asset_repository::job_pins::CasObjectRole::DirectObject)),
                 Some(_)=>return Err(corrupt()),
-                None=>missing.push(source),
+                None=>plan.push(&source,priority.contains(&source.hash),&connected.handle)?,
             }
         }
         if !present.is_empty() {
-            cancel.check()?;
+            cancel.check()?;require_activated_target(&store,job,revision)?;
+            pins.pin_existing_batch(&cas,&present).map_err(runtime::local_error)?;
             require_activated_target(&store,job,revision)?;
-            let batch=present.iter().map(|source|(source.hash.clone(),source.byte_length,crate::asset_repository::job_pins::CasObjectRole::DirectObject)).collect::<Vec<_>>();
-            pins.pin_existing_batch(&cas,&batch).map_err(runtime::local_error)?;
-            require_activated_target(&store,job,revision)?;
-            for source in &present {jobs.settle_restore_body(&job.id,&source.hash)?;}
+            for (hash,_,_) in &present {jobs.settle_restore_body(&job.id,hash)?;}
         }
-        if missing.is_empty() {continue;}
-        cancel.check()?;require_activated_target(&store,job,revision)?;
-        let mut files=snapshot_restore::download_packed_body_files(&missing,&stage,&connected.root_key,connected.provider.as_ref(),&connected.handle,cancel).await?;
-        for source in missing {
-            let path=files.remove(&source.hash).ok_or_else(corrupt)?;
-            (store,pins)=receive_restore_body(store,pins,&root,job,revision,&source,path,cancel).await?;
-            jobs.settle_restore_body(&job.id,&source.hash)?;
-        }
-        cleanup_staging(&stage);
     }
+    plan.seal()?;
+    loop {
+        cancel.check()?;require_activated_target(&store,job,revision)?;
+        while let Some((hash,path))=plan.ready()? {
+            let source=jobs.restore_body(&job.id,&hash)?.ok_or_else(corrupt)?.interned(&mut Default::default());
+            (store,pins)=receive_restore_body(store,pins,&root,job,revision,&source,path,cancel).await?;
+            jobs.settle_restore_body(&job.id,&hash)?;
+            plan.settled(&hash)?;
+        }
+        if !plan.next_pack(&connected.root_key,connected.provider.as_ref(),&connected.handle,cancel).await? {break;}
+    }
+    drop(plan);
+    cleanup_staging(&stage);
     cancel.check()?;
     require_activated_target(&store,job,revision)?;
     let worker_root=root.clone();let worker_id=job.id.clone();let worker_job=job.clone();
@@ -1184,7 +1176,7 @@ pub(super) mod tests {
         let native_jobs=|| -> std::result::Result<Vec<crate::native_file_jobs::JobStatus>,String> {Ok(Vec::new())};
         let open_store=|| store.open_native_job_store().map_err(|error| error.to_string());
         crate::asset_repository::commands::DurableCasJobState::default().sweep_after_page_start(store.repository_root(),
-            &crate::asset_repository::commands::CasJobOwnerProbe{native_jobs:&native_jobs,device_session_active:false,open_store:&open_store}).unwrap();
+            &crate::asset_repository::commands::CasJobOwnerProbe{native_jobs:&native_jobs,device_job_owned:&|_|Ok(false),external_job_active:&|_|Ok(false),open_store:&open_store}).unwrap();
     }
 
     #[test]
@@ -1196,17 +1188,19 @@ pub(super) mod tests {
         let ended=|id:&str,here:bool| restore_journal_owner_ended(root,id,here,&open_store).unwrap();
         let input=serde_json::from_value(json!({"connectionId":"synthetic-connection","kind":"restore","snapshotId":"synthetic-snapshot","targetRevision":"0"})).unwrap();
         let job=DurableJob::new(input,1,store.external_identity().unwrap());
-        assert!(ended(&job.id,true));
+        assert!(!ended(&job.id,true));
         assert!(ended(&job.id,false));
         JobStore::open(root).unwrap().put(&job).unwrap();
         assert!(!ended(&job.id,true));
         assert!(ended(&job.id,false));
         mark_application_started(root,&job).unwrap();
-        assert!(ended(&job.id,false));
+        assert!(!ended(&job.id,false));
         ConnectionStore::open(root).unwrap().insert(&synthetic_connection(&super::super::fake::repository())).unwrap();
         assert!(!ended(&job.id,false));
         commit_fixture(&mut store,root,&job);
         assert!(!ended(&job.id,false));
+        ConnectionStore::open(root).unwrap().remove(&job.request.connection_id).unwrap();
+        assert!(!ended(&job.id,false), "connection removal does not settle an application receipt");
         let stage=store.replace_begin().unwrap();
         store.replace_put_root(&stage.staging_id,&json!({"language":"synthetic later replacement"})).unwrap();
         store.replace_commit(&stage.staging_id,Some(1)).unwrap();
@@ -1216,7 +1210,8 @@ pub(super) mod tests {
         let mut failed=jobs.read(&job.id).unwrap();
         failed.summary["state"]=json!("failed");
         jobs.put(&failed).unwrap();
-        assert!(ended(&job.id,true));
+        assert!(!ended(&job.id,true));
+        assert!(ended(&job.id,false));
     }
 
     #[test]
@@ -1262,6 +1257,7 @@ pub(super) mod tests {
         _work:tempfile::TempDir,
         pub(in crate::external_storage) connected:ConnectedRepository,
         backup_id:String,
+        provider:std::sync::Arc<super::super::fake::FakeProvider>,
         pub(in crate::external_storage) restore_source:Value,
         assets:Vec<String>,
     }
@@ -1286,8 +1282,9 @@ pub(super) mod tests {
         let sections=capture.catalog.backup_sections().unwrap();
         let original_units=capture.catalog.original_backup_units().unwrap();
         let repository=fake::repository();
+        let provider=Arc::new(fake::FakeProvider::new(false));
         let connected=ConnectedRepository {
-            stored:synthetic_connection(&repository),provider:Arc::new(fake::FakeProvider::new(false)),handle:repository,
+            stored:synthetic_connection(&repository),provider:provider.clone(),handle:repository,
             dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new([21;32]),
         };
         let backup_id=uuid::Uuid::new_v4().to_string();
@@ -1310,7 +1307,7 @@ pub(super) mod tests {
             &connected.root_key,packaging::PackageLimits::from_capabilities(&connected.stored.capabilities).unwrap(),None,&mut transfer,
             connected.provider.as_ref(),&connected.handle,&PhaseProgress::silent(),&Cancellation::default()).await.unwrap();
         let restore_source=serde_json::to_value(backup.reference.stored(&connected.handle).unwrap()).unwrap();
-        PackagedBackup {_source_root:source_root,_work:work,connected,backup_id,restore_source,assets}
+        PackagedBackup {_source_root:source_root,_work:work,connected,backup_id,provider,restore_source,assets}
     }
 
     /// A restore of `backup` admitted against the library at `root`.
@@ -1365,6 +1362,8 @@ pub(super) mod tests {
             let job=restore_job(root,&store,&backup);
             let (database,sections)=prepare_database_first_backup(root,&backup.connected,&job,&Cancellation::default()).await.unwrap();
             assert_eq!(database.missing.len(),bodies.len());
+            let packs=database.sources.iter().flat_map(|source|source.packs.iter().map(|pack|pack.header.object_id.clone())).collect::<BTreeSet<_>>();
+            let reads=packs.iter().map(|pack|(pack.clone(),backup.provider.read_attempts(pack))).collect::<std::collections::BTreeMap<_,_>>();
             let admission=Arc::new(crate::native_file_jobs::admission::Admission::default());
             let state=PersistentStoreState::default();
             let (receipt,permit)=activate_database_first_backup(&mut store,&state,&job,database,sections,Cancellation::default(),admission.staging().unwrap()).unwrap();
@@ -1377,7 +1376,9 @@ pub(super) mod tests {
             settle_database_first_backup(store,&backup.connected,&job,adoption,&mut Some(permit),&Cancellation::default()).await.unwrap();
             assert_eq!(journal_opens(root,&job.id)-before,1);
             let cas=crate::asset_repository::PayloadCas::new(root).unwrap();
-            for asset in &backup.assets {assert!(cas.stat_object(asset).unwrap().is_some());}
+            for (asset,body) in backup.assets.iter().zip(&bodies) {assert_eq!(cas.read_object(asset).unwrap().unwrap(),*body);}
+            for (pack,before) in reads {assert_eq!(backup.provider.read_attempts(&pack)-before,1,"a shared restore pack is read once across every source page");}
+            assert!(!root.join("native-file-jobs/jobs").join(&job.id).join("external-restore-bodies").exists());
         });
     }
 

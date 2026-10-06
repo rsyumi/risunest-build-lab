@@ -763,6 +763,35 @@ describe('PersistentConversationViewportSource', () => {
         expect(() => oldPin.release()).not.toThrow()
     })
 
+    it('retains rows and live pins on unrelated revision advances and reads later pages at new authority', async () => {
+        let revision = 7
+        const reader = { readConversationWindow: vi.fn(async (query) => ({ revision,
+            value: persistentWindow(query.startIndex, [message(`id-${query.startIndex}`, 'synthetic')], 4) })) }
+        const source = new PersistentConversationViewportSource({ reader, characterId: 'character-a', conversationId: 'conversation-a', revision, totalMessages: 4, rowBudget: 1 })
+        const pin = source.acquireRangePin(0, 1, 'editor')
+        await source.ensureRange({ startIndex: 0, limit: 1, reason: 'viewport' })
+        const before = source.snapshot()
+        const row = before.rowAt(0)
+        const listener = vi.fn()
+        source.subscribe(listener)
+        revision = 8
+        source.advanceUnchangedRevision(revision)
+        const advanced = source.snapshot()
+        expect(advanced.storeRevision).toBe(8)
+        expect(advanced.sourceToken).toBe(before.sourceToken)
+        expect(advanced.version).toBe(before.version)
+        expect(advanced.keyAt(0)).toBe(before.keyAt(0))
+        expect(advanced.rowAt(0)).toBe(row)
+        expect(listener).not.toHaveBeenCalled()
+        await source.ensureRange({ startIndex: 3, limit: 1, reason: 'viewport' })
+        expect(source.snapshot().rowAt(0)).toBe(row)
+        expect(reader.readConversationWindow).toHaveBeenLastCalledWith({ characterId: 'character-a', conversationId: 'conversation-a', startIndex: 3, limit: 1 })
+        pin.release()
+        expect(() => source.advanceUnchangedRevision(7)).toThrow(/backwards/)
+        source.dispose()
+        expect(() => source.advanceUnchangedRevision(9)).toThrow()
+    })
+
     it('validates authority, range, pin, and monotonic revision inputs', async () => {
         const reader = {
             readConversationWindow: vi.fn(async () => null),

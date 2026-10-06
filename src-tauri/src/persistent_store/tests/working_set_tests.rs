@@ -2470,16 +2470,13 @@ fn character_detail_update_preserves_index_and_conversations() {
 #[test]
 fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
     let (_directory, mut store, database) = open_fixture();
-    let mut group = database["characters"][0].clone();
-    group.as_object_mut().expect("group object").remove("chats");
-    group["type"] = json!("group");
-    group["characters"] = json!(["char-a", "char-c"]);
-    group["characterTalks"] = json!([0.25, 0.75]);
-    group["characterActive"] = json!([false, true]);
+    let mut character = database["characters"][0].clone();
+    character.as_object_mut().expect("character object").remove("chats");
+    character["desc"] = json!("Original description");
 
     let prepared = store
         .commit(&WorkingSetCommit {
-            character: Some(group.clone()),
+            character: Some(character.clone()),
             plugin_storage: Some(vec![PluginStorageMutation::Set {
                 owner: UNOWNED_OWNER.to_owned(),
                 key: "zero".to_owned(),
@@ -2487,7 +2484,7 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
             }]),
             ..empty_working_set_commit(1)
         })
-        .expect("prepare group and plugin value");
+        .expect("prepare character and plugin value");
     let configured_index_before = store
         .query_characters(
             &CharacterQuery {
@@ -2499,11 +2496,11 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
             },
             None,
         )
-        .expect("query group before batch")
+        .expect("query character before batch")
         .items
         .into_iter()
         .find(|summary| summary.id == "char-b")
-        .expect("group summary before batch")
+        .expect("character summary before batch")
         .configured_index;
     let chats_before = store
         .materialize(None)
@@ -2512,16 +2509,14 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
         .expect("characters before batch")
         .iter()
         .find(|character| character["chaId"] == "char-b")
-        .expect("group before batch")["chats"]
+        .expect("character before batch")["chats"]
         .clone();
     let lease = store
         .acquire_revision(prepared.revision)
         .expect("acquire batch mutation lease");
-    let mut updated_group = group.clone();
-    updated_group["characters"] = json!(["char-c"]);
-    updated_group["characterTalks"] = json!([0.75]);
-    updated_group["characterActive"] = json!([true]);
-    let mut invalid_detail = updated_group.clone();
+    let mut updated_character = character.clone();
+    updated_character["desc"] = json!("Updated description");
+    let mut invalid_detail = updated_character.clone();
     invalid_detail["chaId"] = json!("char-c");
     invalid_detail
         .as_object_mut()
@@ -2530,7 +2525,7 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
 
     let failed = store.commit(&WorkingSetCommit {
         root: Some(json!({ "username": "Must roll back" })),
-        character_details: Some(vec![updated_group.clone(), invalid_detail]),
+        character_details: Some(vec![updated_character.clone(), invalid_detail]),
         delete_character_ids: Some(vec!["char-a".to_owned()]),
         ..empty_working_set_commit(prepared.revision)
     });
@@ -2547,10 +2542,10 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
     assert_eq!(
         store
             .read_character("char-b", None)
-            .expect("read rolled back group")
-            .expect("group exists")
-            .value["characters"],
-        json!(["char-a", "char-c"])
+            .expect("read rolled back character")
+            .expect("character exists")
+            .value["desc"],
+        json!("Original description")
     );
     assert_eq!(
         store
@@ -2564,7 +2559,7 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
     let committed = store
         .commit(&WorkingSetCommit {
             root: Some(json!({ "username": "Committed" })),
-            character_details: Some(vec![updated_group]),
+            character_details: Some(vec![updated_character]),
             delete_character_ids: Some(vec!["char-a".to_owned()]),
             ..empty_working_set_commit(prepared.revision)
         })
@@ -2578,10 +2573,10 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
     assert_eq!(
         store
             .read_character("char-b", None)
-            .expect("read committed group")
-            .expect("group exists")
-            .value["characters"],
-        json!(["char-c"])
+            .expect("read committed character")
+            .expect("character exists")
+            .value["desc"],
+        json!("Updated description")
     );
     assert_eq!(
         store
@@ -2603,11 +2598,11 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
                 },
                 None,
             )
-            .expect("query group after batch")
+            .expect("query character after batch")
             .items
             .into_iter()
             .find(|summary| summary.id == "char-b")
-            .expect("group summary after batch")
+            .expect("character summary after batch")
             .configured_index,
         configured_index_before
     );
@@ -2619,7 +2614,7 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
             .expect("characters after batch")
             .iter()
             .find(|character| character["chaId"] == "char-b")
-            .expect("group after batch")["chats"],
+            .expect("character after batch")["chats"],
         chats_before
     );
     assert!(store
@@ -2629,10 +2624,10 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
     assert_eq!(
         store
             .read_character("char-b", Some(&lease.lease))
-            .expect("read leased group")
-            .expect("leased group exists")
-            .value["characters"],
-        json!(["char-a", "char-c"])
+            .expect("read leased character")
+            .expect("leased character exists")
+            .value["desc"],
+        json!("Original description")
     );
     assert_eq!(
         store

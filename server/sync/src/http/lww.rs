@@ -38,6 +38,12 @@ pub(super) async fn claim_writer(
     )
     .await
 }
+pub(super) async fn writer_claim(
+    State(app): State<App>,
+    Extension(device): Extension<Device>,
+) -> Result<Response> {
+    blocking(move || Ok(Json(app.store.new_device_writer_claim(&device)?).into_response())).await
+}
 pub(super) async fn push(
     State(app): State<App>,
     Extension(device): Extension<Device>,
@@ -143,22 +149,16 @@ pub(super) async fn notify(
     let library = header(&headers, "x-risu-library")
         .ok_or(Error::new("unauthorized", 401))?
         .to_owned();
-    let store = app.store.clone();
-    let device = blocking(move || store.authenticate(&library, &token)).await?;
+    let device = app.authenticate(&library, &token).await?;
     if *app.shutdown.borrow() || app.workload.status()?.state != "open" {
         return Err(Error::new("server-updating", 503));
     }
-    let permit = app
-        .notice_slots
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| Error::new("server-busy", 429))?;
     let mut response = ws
         .max_message_size(1024)
         .max_frame_size(1024)
         .write_buffer_size(0)
         .max_write_buffer_size(4096)
-        .on_upgrade(move |socket| notify_socket(app, device, socket, permit))
+        .on_upgrade(move |socket| notify_socket(app, device, socket))
         .into_response();
     response
         .headers_mut()
@@ -170,7 +170,6 @@ async fn notify_socket(
     mut app: App,
     device: Device,
     mut socket: WebSocket,
-    _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
     let mut announced = app.store.head_announcements();
     let mut last = None;
@@ -271,7 +270,7 @@ pub(super) mod tests {
     pub(crate) static CHECKS: AtomicU64 = AtomicU64::new(0);
     pub(crate) static IDLE_MS: AtomicU64 = AtomicU64::new(60_000);
     // Notify sockets of every test share the counters and the idle limit above.
-    static NOTIFY_SOCKETS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    pub(crate) static NOTIFY_SOCKETS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     type Socket = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -387,7 +386,7 @@ pub(super) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_silent_socket_releases_its_slot_and_a_pinging_one_keeps_it() {
+    async fn silent_sockets_close_while_a_pinging_socket_stays_open() {
         let _serial = NOTIFY_SOCKETS.lock().await;
         struct Restore;
         impl Drop for Restore {
@@ -423,15 +422,14 @@ pub(super) mod tests {
         for _ in 0..31 {
             silent.push(connect(address, &credential).await.unwrap());
         }
-        assert_eq!(connect(address, &credential).await.err(), Some(429));
+        let mut late = tokio::time::timeout(bound, connect(address, &credential)).await.unwrap().unwrap();
         tokio::time::timeout(bound, async {
             for socket in &mut silent {
                 closed(socket).await;
             }
         })
         .await
-        .expect("silent sockets keep their slots");
-        let mut late = connect(address, &credential).await.unwrap();
+        .expect("silent sockets stay open");
         tokio::time::timeout(bound, closed(&mut late))
             .await
             .expect("a silent socket stays open");

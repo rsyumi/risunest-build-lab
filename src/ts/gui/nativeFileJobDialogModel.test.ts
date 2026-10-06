@@ -23,6 +23,24 @@ import {
 
 const copy = languageEnglish.risuNest.importDialog
 
+it('shows dataset publication progress without a terminal outcome or invented counters', () => {
+    const current = status({ kind: 'export-dataset', phase: 'publishing-destination', progress: { completedBytes: 5, totalBytes: 10, completedItems: 0 } })
+    const model = buildNativeFileJobDialogModel(running({ kind: 'export', format: 'dataset', status: current, observedStages: ['preparing-export', 'writing-export', 'publishing-destination'] }), null, 2000)
+    expect(model.title).toBe(languageEnglish.exportAsDataset)
+    expect(model.terminal).toBeNull()
+    expect(model.cancelEnabled).toBe(true)
+    expect(model.counters).toEqual([])
+    expect(model.stages.find(row => row.stage === 'publishing-destination')).toMatchObject({ state: 'active', detail: expect.stringContaining('5') })
+})
+
+it('shows dataset writing item progress while byte size is unknown', () => {
+    const current = status({ kind: 'export-dataset', phase: 'writing-export', progress: { completedBytes: 0, completedItems: 2, totalItems: 5 } })
+    const model = buildNativeFileJobDialogModel(running({ kind: 'export', format: 'dataset', status: current, observedStages: ['writing-export'] }), null, 2000)
+    expect(model.stages.find(row => row.stage === 'writing-export')?.detail).toBe(fillTemplate(copy.itemsOf, '2', '5'))
+    expect(model.overallPercent).toBeNull()
+    expect(model.indeterminate).toBe(true)
+})
+
 it('shows cancellable body copying after activation using the existing file copy label', () => {
     const current=status({kind:'restore-portable-backup',phase:'copying-missing-bodies',activationRevision:8,detail:detail('activating')})
     expect(resolveNativeFileJobStage(current)).toBe('copying-assets')

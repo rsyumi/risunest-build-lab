@@ -38,12 +38,15 @@ import {
     listNativePersistentSnapshots,
     requestNativePersistentSnapshotRestore,
     completeNativeSnapshotRestoreBodies,
+    attachNativeSnapshotRestoreBodies,
+    reattachNativeSnapshotRestoreBodies,
+    retrySnapshotRestoreBodiesFromOutcome,
     restartNativeApp,
     restoreNativePersistentSnapshot,
     schedulePeriodicNativeSnapshot,
 } from './nativePersistentMaintenance'
 import { get } from 'svelte/store'
-import { dismissNativeFileOperationOutcome, nativeFileOperationOutcome, runSharedNativeFileOperation } from './nativeFileJobManager'
+import { cancelActiveNativeFileOperation, dismissNativeFileOperationOutcome, nativeFileOperation, nativeFileOperationOutcome, runSharedNativeFileOperation } from './nativeFileJobManager'
 
 describe('native persistent maintenance', () => {
     it('sends the viewed diagnosis identity and expected revision for repair and undo', async () => {
@@ -59,12 +62,12 @@ describe('native persistent maintenance', () => {
     beforeEach(() => {
         mocks.invoke.mockReset().mockImplementation(async command => {
             if (command === 'native_snapshot_restore_bodies_start') return bodyReceipt
-            if (command === 'native_file_job_status') return bodyStatus
+            if (command === 'native_snapshot_restore_bodies_status') return bodyStatus
         })
         mocks.isTauriMobile = true
         mocks.relaunch.mockReset()
         mocks.snapshotRestore.mockReset().mockResolvedValue(activation)
-        dismissNativeFileOperationOutcome()
+        nativeFileOperationOutcome.set(null)
         vi.useRealTimers()
         vi.unstubAllGlobals()
         delete (window as Window & {
@@ -97,8 +100,8 @@ describe('native persistent maintenance', () => {
             ['pds_snapshot_create', { reason: 'periodic' }],
             ['pds_snapshot_list'],
             ['native_snapshot_restore_bodies_start',{stagingId:'stage',activationRevision:'8',bindingAuthority:'0'}],
-            ['native_file_job_status',{jobId:'bodies'}],
-            ['native_file_job_status',{jobId:'bodies'}],
+            ['native_snapshot_restore_bodies_status',{receipt:bodyReceipt}],
+            ['native_snapshot_restore_bodies_status',{receipt:bodyReceipt}],
         ])
     })
 
@@ -297,7 +300,7 @@ describe('native persistent maintenance', () => {
             events.push(command)
             if (command === 'pds_snapshot_list') return [{id:'snapshot.db',bytes:1,modifiedAt:2}]
             if (command === 'native_snapshot_restore_bodies_start') return bodyReceipt
-            if (command === 'native_file_job_status') return bodyStatus
+            if (command === 'native_snapshot_restore_bodies_status') return bodyStatus
         })
         await expect(restoreNativePersistentSnapshot({choose:async()=>'snapshot.db',onEmpty:vi.fn()})).resolves.toBe(true)
         expect(events.slice(0, 3)).toEqual(['pds_snapshot_list', 'activated', 'native_snapshot_restore_bodies_start'])
@@ -317,7 +320,7 @@ describe('native persistent maintenance', () => {
     })
     it('reports post-adoption body failure without restoring the snapshot again', async () => {
         const failed={...bodyStatus,state:'failed',error:{code:'snapshot-bodies-incomplete',message:'Snapshot library is restored, but some bodies remain unavailable'},snapshotBodies:{...bodyStatus.snapshotBodies,allBodiesLocal:false,settled:false,total:1,locallyPresent:0,unavailable:1}}
-        mocks.invoke.mockImplementation(async command=>command==='native_snapshot_restore_bodies_start'?bodyReceipt:command==='native_file_job_status'?failed:undefined)
+        mocks.invoke.mockImplementation(async command=>command==='native_snapshot_restore_bodies_start'?bodyReceipt:command==='native_snapshot_restore_bodies_status'?failed:undefined)
         await expect(requestNativePersistentSnapshotRestore('snapshot')).rejects.toMatchObject({name:'NativeSnapshotBodiesCommittedError',bodies:{unavailable:1}})
         expect(mocks.snapshotRestore).toHaveBeenCalledOnce()
         mocks.invoke.mockImplementation(async command=>command==='native_snapshot_restore_bodies_start'?bodyReceipt:bodyStatus)
@@ -325,7 +328,7 @@ describe('native persistent maintenance', () => {
         expect(mocks.snapshotRestore).toHaveBeenCalledOnce()
     })
     it('keeps the committed snapshot identity after a lost body-start response', async () => {
-        mocks.invoke.mockRejectedValueOnce(new Error('start response lost'))
+        mocks.invoke.mockRejectedValueOnce(new Error('start response lost')).mockResolvedValueOnce([])
         await expect(requestNativePersistentSnapshotRestore('snapshot')).rejects.toMatchObject({
             name:'NativeSnapshotBodiesCommittedError',code:'snapshot-body-start-unknown',
             receipt:{stagingId:'stage',activationRevision:'8',bindingAuthority:'0'},
@@ -334,6 +337,118 @@ describe('native persistent maintenance', () => {
         mocks.invoke.mockImplementation(async command=>command==='native_snapshot_restore_bodies_start'?bodyReceipt:bodyStatus)
         await expect(completeNativeSnapshotRestoreBodies('stage',8,'0')).resolves.toMatchObject({allBodiesLocal:true})
         expect(mocks.snapshotRestore).toHaveBeenCalledOnce()
+    })
+    it('reconciles a lost start response by the existing receipt even if the worker already finished', async () => {
+        mocks.invoke.mockImplementation(async command => {
+            if (command === 'native_snapshot_restore_bodies_start') throw new Error('lost response')
+            if (command === 'native_file_job_list') return [bodyStatus]
+            if (command === 'native_snapshot_restore_bodies_status') return bodyStatus
+        })
+        await expect(completeNativeSnapshotRestoreBodies('stage', 8, '0')).resolves.toMatchObject({settled:true})
+        expect(mocks.snapshotRestore).not.toHaveBeenCalled()
+        expect(mocks.invoke.mock.calls.filter(call => call[0] === 'native_snapshot_restore_bodies_start')).toHaveLength(1)
+    })
+    it('reattaches exactly one progress owner after reload and forwards cancellation without another restore', async () => {
+        const running = {...bodyStatus, jobId:'reloaded', state:'running', phase:'copying-missing-bodies'}
+        let cancelled = false
+        mocks.invoke.mockImplementation(async command => {
+            if (command === 'native_file_job_cancel') { cancelled = true; return 'requested' }
+            if (command === 'native_snapshot_restore_bodies_status') return {...running, state:cancelled ? 'cancelled' : 'running'}
+            throw new Error(`Unexpected ${command}`)
+        })
+        const first = reattachNativeSnapshotRestoreBodies([running as never])
+        await reattachNativeSnapshotRestoreBodies([running as never])
+        await vi.waitFor(() => expect(get(nativeFileOperation)?.status?.jobId).toBe('reloaded'))
+        cancelActiveNativeFileOperation()
+        await first
+        expect(get(nativeFileOperationOutcome)).toMatchObject({state:'cancelled',status:{jobId:'reloaded'}})
+        expect(mocks.invoke.mock.calls.filter(call => call[0] === 'native_file_job_cancel')).toHaveLength(1)
+        expect(mocks.snapshotRestore).not.toHaveBeenCalled()
+        expect(mocks.invoke.mock.calls.some(call => call[0] === 'native_snapshot_restore_bodies_start')).toBe(false)
+    })
+    it.each(['failed', 'cancelled'] as const)('shows a recovered %s outcome and starts only an explicit body retry', async state => {
+        const terminal = {...bodyStatus, jobId:`recovered-${state}`, state}
+        mocks.invoke.mockResolvedValue(terminal)
+        await reattachNativeSnapshotRestoreBodies([terminal as never])
+        expect(get(nativeFileOperationOutcome)).toMatchObject({state,status:{jobId:terminal.jobId}})
+        expect(mocks.invoke.mock.calls.every(call => call[0] === 'native_snapshot_restore_bodies_status')).toBe(true)
+        mocks.invoke.mockImplementation(async command => command === 'native_snapshot_restore_bodies_start' ? bodyReceipt : bodyStatus)
+        await retrySnapshotRestoreBodiesFromOutcome()
+        expect(mocks.invoke).toHaveBeenCalledWith('native_snapshot_restore_bodies_start', {...activation,activationRevision:'8',previousJobId:terminal.jobId})
+        expect(mocks.snapshotRestore).not.toHaveBeenCalled()
+    })
+    it('waits for an existing dialog owner before attaching the recovered job', async () => {
+        let release!: () => void
+        const busy = runSharedNativeFileOperation('export', 'busy-before-recovery', () => new Promise<void>(resolve => { release = resolve }))
+        const terminal = {...bodyStatus,jobId:'after-busy'}
+        mocks.invoke.mockResolvedValue(terminal)
+        const recovered = reattachNativeSnapshotRestoreBodies([terminal as never])
+        await Promise.resolve()
+        expect(mocks.invoke).not.toHaveBeenCalled()
+        release()
+        await Promise.all([busy, recovered])
+        expect(get(nativeFileOperationOutcome)).toMatchObject({state:'succeeded',status:{jobId:'after-busy'}})
+    })
+    it('keeps mixed-stage outcomes and their retries until each exact receipt is dismissed', async () => {
+        const first = {...bodyStatus, jobId:'mixed-failed', snapshotStagingId:'mixed-first', state:'failed'}
+        const retried = {...bodyStatus, jobId:'mixed-retried', snapshotStagingId:'mixed-first', snapshotBodies:{...bodyStatus.snapshotBodies,stageId:'mixed-first'}}
+        const second = {...bodyStatus, jobId:'mixed-cancelled', snapshotStagingId:'mixed-second', state:'cancelled'}
+        const third = {...bodyStatus, jobId:'mixed-succeeded', snapshotStagingId:'mixed-third', snapshotBodies:{...bodyStatus.snapshotBodies,stageId:'mixed-third'}}
+        const statuses = new Map([first, retried, second, third].map(status => [status.jobId, status]))
+        const acknowledged: string[] = []
+        let rejectAcknowledgement = false
+        mocks.invoke.mockImplementation(async (command, args) => {
+            if (command === 'native_snapshot_restore_bodies_status') return statuses.get(args.receipt.jobId)
+            if (command === 'native_snapshot_restore_bodies_start') return {...bodyReceipt,jobId:retried.jobId,stagingId:retried.snapshotStagingId}
+            if (command === 'native_file_job_forget') {
+                if (rejectAcknowledgement) throw new Error('synthetic acknowledgement failure')
+                acknowledged.push(args.jobId)
+                return true
+            }
+            throw new Error(`Unexpected ${command}`)
+        })
+        const recovered = reattachNativeSnapshotRestoreBodies([first, second, third] as never)
+        await vi.waitFor(() => expect(get(nativeFileOperationOutcome)?.status?.jobId).toBe(first.jobId))
+        expect(mocks.invoke.mock.calls.some(call => call[1]?.receipt?.jobId === second.jobId)).toBe(false)
+        await retrySnapshotRestoreBodiesFromOutcome()
+        expect(get(nativeFileOperationOutcome)?.status?.jobId).toBe(retried.jobId)
+        expect(mocks.invoke.mock.calls.some(call => call[1]?.receipt?.jobId === second.jobId)).toBe(false)
+        await dismissNativeFileOperationOutcome()
+        await vi.waitFor(() => expect(get(nativeFileOperationOutcome)?.status?.jobId).toBe(second.jobId))
+        expect(acknowledged).toEqual([retried.jobId])
+        rejectAcknowledgement = true
+        await expect(dismissNativeFileOperationOutcome()).rejects.toThrow('acknowledgement failure')
+        expect(get(nativeFileOperationOutcome)?.status?.jobId).toBe(second.jobId)
+        expect(mocks.invoke.mock.calls.some(call => call[1]?.receipt?.jobId === third.jobId)).toBe(false)
+        rejectAcknowledgement = false
+        await dismissNativeFileOperationOutcome()
+        await recovered
+        expect(get(nativeFileOperationOutcome)?.status?.jobId).toBe(third.jobId)
+        await dismissNativeFileOperationOutcome()
+        expect(acknowledged).toEqual([retried.jobId, second.jobId, third.jobId])
+        expect(get(nativeFileOperationOutcome)).toBeNull()
+        expect(mocks.snapshotRestore).not.toHaveBeenCalled()
+    })
+    it('shows an already finished job without starting more body work', async () => {
+        mocks.invoke.mockResolvedValue(bodyStatus)
+        await reattachNativeSnapshotRestoreBodies([bodyStatus as never])
+        expect(get(nativeFileOperationOutcome)).toMatchObject({state:'succeeded'})
+        expect(mocks.invoke.mock.calls.every(call => call[0] === 'native_snapshot_restore_bodies_status')).toBe(true)
+    })
+    it('refuses stale binding and substituted job receipts before publishing progress', async () => {
+        mocks.invoke.mockRejectedValueOnce({code:'invalid-activation-receipt',message:'stale binding'})
+        await expect(attachNativeSnapshotRestoreBodies(bodyReceipt as never)).rejects.toMatchObject({code:'invalid-activation-receipt'})
+        expect(get(nativeFileOperation)).toBeNull()
+        mocks.invoke.mockResolvedValue({...bodyStatus,jobId:'other-job'})
+        await expect(attachNativeSnapshotRestoreBodies(bodyReceipt as never)).rejects.toMatchObject({code:'snapshot-body-receipt-mismatch'})
+        expect(get(nativeFileOperation)).toBeNull()
+        expect(mocks.snapshotRestore).not.toHaveBeenCalled()
+    })
+    it('refuses a start response for a different activation before attaching its job', async () => {
+        mocks.invoke.mockResolvedValue({...bodyReceipt, stagingId:'other-stage'})
+        await expect(completeNativeSnapshotRestoreBodies('stage', 8, '0')).rejects.toMatchObject({code:'snapshot-body-receipt-mismatch'})
+        expect(mocks.invoke).toHaveBeenCalledOnce()
+        expect(get(nativeFileOperation)).toBeNull()
     })
     it('reports a restore the shared operation refused to start', async () => {
         let release!: () => void

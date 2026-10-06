@@ -619,7 +619,9 @@
 </script>
 
 {#if authorizationCompletionInFlight && pendingAuthorizationId}
-    <SettingButton variant="secondary" onclick={cancelPendingAuthorization}>{strings.cancel}</SettingButton>
+    <div class="pending-authorization" data-tone={tone}>
+        <SettingButton variant="secondary" onclick={cancelPendingAuthorization}>{strings.cancel}</SettingButton>
+    </div>
 {/if}
 <fieldset disabled={busy} class="form" data-external-storage-connection-form data-tone={tone}>
     {#if !renewalConnection}
@@ -832,12 +834,19 @@
         display: grid;
         min-width: 0;
     }
-    .form > .sub,
+    /* The settings panel already draws a line above the form. */
+    .form > * + .sub,
     .form > .contents > .sub + .sub {
         border-top: 1px solid color-mix(in srgb, var(--risu-theme-darkborderc) 55%, transparent);
     }
+    .pending-authorization {
+        padding: 0.75rem 1rem;
+    }
+    .pending-authorization[data-tone='onboarding'] {
+        padding: 0 0 0.75rem;
+    }
     /* The onboarding panel draws its own frame and gutter. */
-    .form[data-tone='onboarding'] > .sub,
+    .form[data-tone='onboarding'] > * + .sub,
     .form[data-tone='onboarding'] > .contents > .sub + .sub {
         border-top: 0;
     }

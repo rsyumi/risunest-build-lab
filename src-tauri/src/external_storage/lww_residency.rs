@@ -385,9 +385,6 @@ pub(crate) fn validate_packed_source<O:Borrow<StoredObject>>(source:&PackedSourc
     Ok(())
 }
 pub(crate) const PACKED_REGISTRATION_BATCH:usize=1024;
-pub(crate) fn register_packed<O:Borrow<StoredObject>+Serialize>(root:&Path,source:&PackedSource<O>,repository:&RepositoryHandle) -> Result<()> {
-    register_packed_many(root,std::slice::from_ref(source),repository)
-}
 pub(crate) fn register_packed_many<O:Borrow<StoredObject>+Serialize>(root:&Path,sources:&[PackedSource<O>],repository:&RepositoryHandle) -> Result<()> {
     for source in sources {validate_packed_source(source,repository)?;}
     register_verified_packed_many(root,sources)
@@ -411,74 +408,6 @@ pub(crate) fn packed_source(root:&Path,hash:&str) -> Result<Option<PackedSource>
     let Some(db)=database(root,false)? else {return Ok(None)};
     let value:Option<String>=db.query_row("SELECT source FROM packed_sources WHERE hash=?1 ORDER BY library LIMIT 1",[hash],|r|r.get(0)).optional().map_err(local)?;
     value.map(|v|serde_json::from_str(&v).map_err(local)).transpose()
-}
-pub(crate) async fn fulfill(
-    root: &Path,
-    hash: &str,
-    provider: &dyn Provider,
-    repository: &RepositoryHandle,
-    key: &[u8; 32],
-    cancel: &Cancellation,
-) -> Result<Option<std::fs::File>> {
-    let cas = crate::asset_repository::PayloadCas::new(root).map_err(local)?;
-    if let Some(file) = cas.open_object(hash).map_err(local)? {
-        return Ok(Some(file));
-    }
-    let Some(bytes) = verified_body(root, hash, provider, repository, key, cancel).await? else {
-        return Ok(None);
-    };
-    cancel.check()?;
-    promote(root, hash, &bytes)
-}
-async fn verified_body(
-    root: &Path,
-    hash: &str,
-    provider: &dyn Provider,
-    repository: &RepositoryHandle,
-    key: &[u8; 32],
-    cancel: &Cancellation,
-) -> Result<Option<Vec<u8>>> {
-    let source = match freeze_remote_body(root, hash)? {
-        Some(FrozenBodySource::Standalone(source)) => source,
-        Some(FrozenBodySource::Packed(source)) => {
-            let staging=tempfile::tempdir().map_err(local)?;
-            return super::snapshot_restore::download_packed_body(hash,source.byte_length,source.chunks,source.packs,staging.path(),key,provider,repository,cancel).await.map(Some);
-        }
-        None => return Ok(None),
-    };
-    let locator = source.body.locator.as_ref().ok_or_else(segment::corrupt)?;
-    locator.validate_for(repository)?;
-    let sealed = super::lww_engine::read_bytes(provider, repository, locator, cancel).await?;
-    if sealed.len() as u64 != source.body.byte_length.0
-        || segment::digest(&sealed) != source.body.sha256
-    {
-        return Err(segment::corrupt());
-    }
-    let bytes = segment::open_body(&sealed, &source.library_id, &source.body.object_id, key)?;
-    if bytes.len() as u64 != source.body.plaintext_byte_length.0 || segment::digest(&bytes) != hash
-    {
-        return Err(segment::corrupt());
-    }
-    Ok(Some(bytes))
-}
-fn promote(root: &Path, hash: &str, bytes: &[u8]) -> Result<Option<std::fs::File>> {
-    let cas = crate::asset_repository::PayloadCas::new(root).map_err(local)?;
-    let prepared = cas.prepare_bytes(bytes).map_err(local)?;
-    if prepared.content_hash != hash {
-        return Err(segment::corrupt());
-    }
-    crate::persistent_store::register_asset_objects_at_root(
-        root,
-        &[
-            crate::persistent_store::asset_object_catalog::AssetObjectRegistration {
-                object_hash: hash.into(),
-                byte_size: bytes.len() as u64,
-            },
-        ],
-        i64::try_from(super::runtime::now_ms()).map_err(local)?,
-    )
-    .map_err(local)?;
-    cas.open_object(hash).map_err(local)
 }
 /// A body grouped with every body it shares a pack with.
 trait PackMember {
@@ -848,14 +777,19 @@ impl Publisher<'_> {
     }
     fn publish_staged(&self,staged:Vec<crate::asset_repository::StagedPayload>)->crate::server_sync::Result<()> {
         if staged.is_empty() {return Ok(());}
+        use crate::asset_repository::job_pins::{CasJobKind,CasJobOwner,DurableCasJob};
+        let id=uuid::Uuid::new_v4().to_string();
+        let mut journal=DurableCasJob::begin(self.root,&id,CasJobKind::DirectAssetOrInlayWrite,
+            CasJobOwner::external_hydration(&id),self.created_at_ms)?;
         #[cfg(test)]
         hydration_tests::before_publish(self.root);
-        let _guard=crate::asset_repository::coordinator::lock_repository_mutation()?;
+        let guard=crate::asset_repository::coordinator::lock_repository_mutation()?;
         #[cfg(test)]
         let held=std::time::Instant::now();
         self.checked()?;
         #[cfg(test)]
         let count=staged.len();
+        journal.record_staged_publication(&staged,&guard)?;
         let published=self.cas.publish_staged_batch(staged)?;
         #[cfg(test)]
         hydration_tests::crash_point(self.root,hydration_tests::CrashPoint::AfterPublish)?;
@@ -863,6 +797,9 @@ impl Publisher<'_> {
         // yet, so each published body is registered again in this hold. A row still there is kept.
         self.register(&published.into_iter().map(|payload|crate::persistent_store::asset_object_catalog::AssetObjectRegistration{
             object_hash:payload.content_hash,byte_size:payload.byte_size}).collect::<Vec<_>>())?;
+        #[cfg(test)]
+        hydration_tests::crash_point(self.root,hydration_tests::CrashPoint::AfterPublishedRegistration)?;
+        journal.finish_catalog_registration(&guard)?;
         #[cfg(test)]
         hydration_tests::record_hold(self.root,count,held.elapsed());
         Ok(())
@@ -884,20 +821,6 @@ pub(crate) fn hydrate(
     check()?;cas.open_object(hash).map_err(Into::into)
 }
 
-pub(crate) async fn hydrate_missing(
-    root: &Path,
-    hash: &str,
-    cancel: &Cancellation,
-) -> Result<Option<std::fs::File>> {
-    let cas = crate::asset_repository::PayloadCas::new(root).map_err(local)?;
-    if let Some(file) = cas.open_object(hash).map_err(local)? {
-        return Ok(Some(file));
-    }
-    let Some((provider, repository, key)) = remote_source(root, hash, cancel).await? else {
-        return Ok(None);
-    };
-    fulfill(root, hash, provider.as_ref(), &repository, &key, cancel).await
-}
 pub(crate) async fn spool_verified_remote_body(root:&Path,hash:&str,destination:&Path,cancel:&Cancellation)->Result<Option<tempfile::NamedTempFile>> {
     let Some(source)=freeze_remote_body(root,hash)? else {return Ok(None)};
     spool_frozen_remote_body(&source,destination,cancel).await.map(Some)
@@ -966,66 +889,6 @@ async fn spool_standalone(source:&Source,output:&mut tempfile::NamedTempFile,des
     if !super::snapshot_restore::verify_body_file(output.path(),source.body.plaintext_byte_length.0,&source.hash)? {return Err(segment::corrupt());}
     Ok(())
 }
-pub(crate) async fn read_verified_remote_body(root:&Path,hash:&str,cancel:&Cancellation)->Result<Option<Vec<u8>>> {
-    let temporary=tempfile::tempdir().map_err(local)?;
-    let Some(source)=freeze_remote_body(root,hash)? else {return Ok(None)};
-    let file=spool_frozen_remote_body(&source,temporary.path(),cancel).await?;
-    read_frozen_body_spool(&source,&file,cancel).map(Some)
-}
-pub(crate) fn read_frozen_body_spool(source:&FrozenBodySource,file:&tempfile::NamedTempFile,cancel:&Cancellation)->Result<Vec<u8>> {
-    use std::io::Read;
-    cancel.check()?;
-    let hash=match source {FrozenBodySource::Standalone(source)=>&source.hash,FrozenBodySource::Packed(source)=>&source.hash};
-    risunest_sync_wire::validate_hash(hash).map_err(local)?;
-    #[cfg(test)]
-    let _scope=crate::asset_repository::body_io::object_scope(hash);
-    let input=crate::trust_boundary::open_regular_source(file.path());
-    #[cfg(test)]
-    crate::asset_repository::body_io::open_result("managed",&input);
-    let input=input.map_err(local)?;
-    if input.metadata().map_err(local)?.len()!=source.byte_length() {return Err(segment::corrupt());}
-    #[cfg(test)]
-    let mut input=crate::asset_repository::body_io::TrackedBodyFile::new(input,hash);
-    #[cfg(not(test))]
-    let mut input=input;
-    let mut bytes=Vec::new();
-    bytes.try_reserve_exact(usize::try_from(source.byte_length()).map_err(local)?).map_err(local)?;
-    let mut chunk=[0u8;64*1024];
-    loop {
-        cancel.check()?;
-        let count=input.read(&mut chunk).map_err(local)?;
-        if count==0 {break;}
-        bytes.extend_from_slice(&chunk[..count]);
-        if bytes.len() as u64>source.byte_length() {return Err(segment::corrupt());}
-    }
-    if bytes.len() as u64!=source.byte_length() {return Err(segment::corrupt());}
-    cancel.check()?;
-    Ok(bytes)
-}
-async fn fetch_missing(root:&Path,hash:&str,cancel:&Cancellation)->Result<Option<Vec<u8>>> {read_verified_remote_body(root,hash,cancel).await}
-#[cfg(test)]
-mod frozen_spool_tests {
-    use super::*;
-    use std::io::Write;
-    #[test]
-    fn frozen_spool_read_observes_actual_asset_open_and_bytes() {
-        let bytes=b"synthetic captured remote body";
-        let hash=risunest_sync_wire::hash(bytes);
-        let source=FrozenBodySource::Standalone(Source {
-            hash:hash.clone(),library_id:"synthetic-library".into(),connection_id:"synthetic-connection".into(),
-            connection_root:PathBuf::new(),protected_segment:"synthetic-segment".into(),
-            body:LargeBody {object_id:"synthetic-body".into(),sha256:hash.clone(),byte_length:(bytes.len() as u64).into(),plaintext_byte_length:(bytes.len() as u64).into(),locator:None},
-        });
-        let mut file=tempfile::NamedTempFile::new().unwrap();file.write_all(bytes).unwrap();
-        crate::asset_repository::body_io::reset_body_io();
-        crate::asset_repository::body_io::register_object_purpose(&hash,crate::asset_repository::body_io::BodyPurpose::Asset);
-        assert_eq!(read_frozen_body_spool(&source,&file,&Cancellation::default()).unwrap(),bytes);
-        let observed=crate::asset_repository::body_io::take_body_io();
-        assert!(observed.complete());
-        assert_eq!(observed.asset_work().opens,1);
-        assert_eq!(observed.asset_work().read_bytes,bytes.len() as u64);
-    }
-}
 #[cfg(test)]
 mod registration_tests {
     use super::*;
@@ -1059,24 +922,6 @@ mod registration_tests {
 mod hydration_tests;
 #[cfg(test)]
 pub(crate) use hydration_tests::{forget_registry_opens, register_synthetic_source, registry_opens, synthetic_packed};
-async fn remote_source(
-    root: &Path,
-    hash: &str,
-    cancel: &Cancellation,
-) -> Result<
-    Option<(
-        std::sync::Arc<dyn Provider>,
-        RepositoryHandle,
-        zeroize::Zeroizing<[u8; 32]>,
-    )>,
-> {
-    let (connection_root,connection_id,library_id)=match freeze_remote_body(root,hash)? {
-        Some(FrozenBodySource::Standalone(source))=>(source.connection_root,source.connection_id,source.library_id),
-        Some(FrozenBodySource::Packed(source))=>(source.connection_root,source.connection_id,source.library_id),
-        None=>return Ok(None),
-    };
-    open_source_connection(&connection_root,&connection_id,&library_id,cancel).await.map(|(provider,repository,key,_)|Some((provider,repository,key)))
-}
 #[cfg(test)]
 fn test_source_connections()->&'static std::sync::Mutex<std::collections::BTreeMap<(std::path::PathBuf,String),std::sync::Arc<super::connection_commands::ConnectedRepository>>> {
     static CONNECTIONS:std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<(std::path::PathBuf,String),std::sync::Arc<super::connection_commands::ConnectedRepository>>>>=std::sync::OnceLock::new();

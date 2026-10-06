@@ -616,15 +616,17 @@ pub(crate) async fn regex_execute_batch(
     input: String,
     registry: tauri::State<'_, RegexCancellationRegistry>,
 ) -> Result<RegexShadowResult, String> {
-    let execution = registry.register(&request_id)?;
-    let cancelled = Arc::clone(&execution.cancelled);
-    let result =
-        tauri::async_runtime::spawn_blocking(move || execute_batch(plan, input, Some(&cancelled)))
-            .await
-            .map_err(|_| "regex_shadow_join".to_string())?
-            .map_err(|error| error.0.to_string());
-    drop(execution);
-    result
+    logged_regex_command("regex_execute_batch", async {
+        let execution = registry.register(&request_id)?;
+        let cancelled = Arc::clone(&execution.cancelled);
+        let result =
+            tauri::async_runtime::spawn_blocking(move || execute_batch(plan, input, Some(&cancelled)))
+                .await
+                .map_err(|_| "regex_shadow_join".to_string())?
+                .map_err(|error| error.0.to_string());
+        drop(execution);
+        result
+    }.await)
 }
 
 #[tauri::command]
@@ -632,7 +634,36 @@ pub(crate) fn regex_cancel_batch(
     request_id: String,
     registry: tauri::State<'_, RegexCancellationRegistry>,
 ) -> Result<bool, String> {
-    registry.cancel(&request_id)
+    logged_regex_command("regex_cancel_batch", registry.cancel(&request_id))
+}
+
+struct RegexCommandFailure(String);
+
+impl crate::native_log::CommandFailure for RegexCommandFailure {
+    fn code(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(match self.0.as_str() {
+            "regex_shadow_registry" | "regex_shadow_request_active" | "regex_shadow_request_id"
+            | "regex_shadow_registry_limit" | "regex_shadow_join" | "regex_shadow_version"
+            | "regex_shadow_rule_limit" | "regex_shadow_pattern_limit" | "regex_shadow_capture_limit"
+            | "regex_shadow_pattern_total_limit" | "regex_shadow_replacement_total_limit"
+            | "regex_shadow_ir" | "regex_shadow_nest_limit" | "regex_shadow_capture_under_repeat"
+            | "regex_shadow_cancelled_compile" | "regex_shadow_cancelled_execute"
+            | "regex_shadow_deadline_compile" | "regex_shadow_deadline_execute"
+            | "regex_shadow_input_limit" | "regex_shadow_match_limit" | "regex_shadow_output_limit" => &self.0,
+            _ => "regex_shadow_failed",
+        })
+    }
+
+    fn expected(&self) -> bool {
+        matches!(self.0.as_str(), "regex_shadow_cancelled_compile" | "regex_shadow_cancelled_execute"
+            | "regex_shadow_request_active" | "regex_shadow_registry_limit")
+    }
+}
+
+#[track_caller]
+fn logged_regex_command<T>(command: &str, result: Result<T, String>) -> Result<T, String> {
+    crate::native_log::logged_without_detail(command, result.map_err(RegexCommandFailure))
+        .map_err(|error| error.0)
 }
 
 fn execute_plan_with_control(
@@ -996,6 +1027,33 @@ mod tests {
     }
 
     #[test]
+    fn regex_command_diagnostics_keep_audited_codes_and_do_not_log_success_or_input() {
+        let registry = RegexCancellationRegistry::default();
+        let refused = registry.cancel("").unwrap_err();
+        assert_eq!(super::logged_regex_command::<()>("regex_diagnostic_invalid", Err(refused.clone())).unwrap_err(), refused);
+        let private = "regex_shadow_synthetic-private-input".to_owned();
+        assert_eq!(super::logged_regex_command::<()>("regex_diagnostic_private", Err(private.clone())).unwrap_err(), private);
+        assert_eq!(super::logged_regex_command("regex_diagnostic_success", Ok(7)).unwrap(), 7);
+        let entries = crate::native_log::global_state().tail(None);
+        let invalid: Vec<_> = entries.iter().filter(|entry| entry.message.starts_with("regex_diagnostic_invalid failed: ")).collect();
+        assert_eq!(invalid.len(), 1);
+        assert!(invalid[0].message.contains("code=regex_shadow_request_id at="));
+        let unknown = entries.iter().find(|entry| entry.message.starts_with("regex_diagnostic_private failed: ")).unwrap();
+        assert!(unknown.message.contains("code=regex_shadow_failed at="));
+        assert!(!unknown.message.contains(&private));
+        assert!(entries.iter().all(|entry| !entry.message.starts_with("regex_diagnostic_success")));
+    }
+
+    fn assert_logged_cancellation(command: &str, code: &str) {
+        assert_eq!(super::logged_regex_command::<()>(command, Err(code.to_owned())).unwrap_err(), code);
+        let entries = crate::native_log::global_state().tail(None);
+        let failures: Vec<_> = entries.iter().filter(|entry| entry.message.starts_with(&format!("{command} failed: "))).collect();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].level, "warn");
+        assert!(failures[0].message.contains(&format!("code={code} at=")));
+    }
+
+    #[test]
     fn cancellation_registry_targets_only_the_matching_active_request() {
         let registry = RegexCancellationRegistry::default();
         let execution = registry.register("request-a").unwrap();
@@ -1139,6 +1197,7 @@ mod tests {
             execute_plan_with_control(literal_plan("x".to_string()), "a", control).unwrap_err();
 
         assert_eq!(error.0, "regex_shadow_cancelled_compile");
+        assert_logged_cancellation("regex_compile_cancel_diagnostic", error.0);
     }
 
     #[test]
@@ -1410,6 +1469,7 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.0, "regex_shadow_cancelled_execute");
+        assert_logged_cancellation("regex_execute_cancel_diagnostic", error.0);
     }
 
     #[derive(serde::Deserialize)]

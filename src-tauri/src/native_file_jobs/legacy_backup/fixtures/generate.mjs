@@ -123,7 +123,7 @@ const stored = {
 const directory = fileURLToPath(new URL(".", import.meta.url));
 writeFileSync(
   `${directory}expected.json`,
-  `${JSON.stringify(expected, null, 2)}\n`,
+  `${JSON.stringify({ ...expected, characters: expected.characters.filter(character => character !== coldGroup), characterOrder: expected.characterOrder.filter(entry => typeof entry === 'string' || !entry.data.includes(coldGroup.chaId)) }, null, 2)}\n`,
 );
 for (const [tag, compression] of [
   ["v1.10.0", "compression"],

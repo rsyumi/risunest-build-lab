@@ -1,5 +1,5 @@
 import { isTauri } from '../platform'
-import type { Database, botPreset, character, groupChat } from './database.svelte'
+import type { Database, botPreset, character } from './database.svelte'
 import type { PersistentRoot, PluginStorageMutation } from './persistentDataStore'
 import { defineOwnEnumerableProperty } from './ownEnumerableProperty'
 import { UNOWNED_PLUGIN_OWNER } from '../plugins/pluginOwner'
@@ -29,6 +29,14 @@ export function canonicalJson(value: unknown): string {
 
 export function canonicalClone<T>(value: T): T {
     return JSON.parse(canonicalJson(value)) as T
+}
+
+export function requiresWholeObjectCapture(value: object, omit: ReadonlySet<string> = new Set()): boolean {
+    return Object.keys(value).some((key) => {
+        if (omit.has(key)) return false
+        const descriptor = Object.getOwnPropertyDescriptor(value, key)
+        return Boolean(descriptor?.get) || (key === 'toJSON' && typeof descriptor?.value === 'function')
+    })
 }
 
 export function clonePersistentRootFields(root: PersistentRoot): PersistentRoot {
@@ -511,7 +519,7 @@ export function rebaseConcurrentLiveDelta<T>(base: T, live: T, candidate: T): T 
 
 export function splitDatabase(database: Database): {
     root: PersistentRoot
-    characters: Array<character | groupChat>
+    characters: Array<character>
     presets: botPreset[]
     pluginStorage: Database['pluginCustomStorage']
 } {

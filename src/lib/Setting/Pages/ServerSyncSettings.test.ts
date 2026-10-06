@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { languageEnglish } from 'src/lang/en'
-const f = vi.hoisted(() => ({ connect: vi.fn(), complete: vi.fn(), configure: vi.fn(), bind: vi.fn(), disconnect: vi.fn(), hold: vi.fn(), release: vi.fn(), status: vi.fn(), policy: vi.fn(), cancel: vi.fn(), checkbox: vi.fn(), native: true, scan: false, os: 'windows', listeners: new Set<(value: Record<string, unknown>) => void>(), bindingState: vi.fn(), preset: vi.fn(), state: { db: {} as Record<string, unknown> }, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
+const f = vi.hoisted(() => ({ pending: vi.fn(async (): Promise<number | undefined> => undefined), connect: vi.fn(), complete: vi.fn(), configure: vi.fn(), bind: vi.fn(), disconnect: vi.fn(), hold: vi.fn(), release: vi.fn(), status: vi.fn(), policy: vi.fn(), cancel: vi.fn(), checkbox: vi.fn(), native: true, scan: false, os: 'windows', listeners: new Set<(value: Record<string, unknown>) => void>(), bindingState: vi.fn(), preset: vi.fn(), state: { db: {} as Record<string, unknown> }, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
 vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish, changeLanguage: vi.fn() }))
 vi.mock('src/ts/platform', () => ({ get isTauri() { return f.native } }))
 vi.mock('@tauri-apps/plugin-os', () => ({ platform: () => f.os }))
@@ -10,7 +10,7 @@ vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertCheckboxConfirm: f.
 vi.mock('src/ts/storage/sync/serverSyncProduction', () => ({
     connectServerSync: f.connect, completeServerSyncBinding: f.complete, configureServerSyncConnection: f.configure, disconnectServerSync: f.disconnect, retryServerSync: vi.fn(), holdServerSync: f.hold,
     getServerSyncCacheUsage: vi.fn(), cleanupServerSyncCache: vi.fn(),
-    getServerSyncController: () => ({ snapshot: () => f.view, subscribe: (listener: (value: Record<string, unknown>) => void) => { f.listeners.add(listener); listener(f.view); return () => { f.listeners.delete(listener) } }, ensureStatus: vi.fn() }),
+    getServerSyncController: () => ({ snapshot: () => f.view, subscribe: (listener: (value: Record<string, unknown>) => void) => { f.listeners.add(listener); listener(f.view); return () => { f.listeners.delete(listener) } }, ensureStatus: vi.fn(), watchProgress: () => () => {}, pendingChanges: f.pending, track: (_stage: string, operation: () => Promise<unknown>) => operation() }),
 }))
 vi.mock('src/ts/storage/sync/serverAssetResidency', () => ({ getAssetResidencyStatus: f.status, setAssetResidencyPolicy: f.policy, evictLocalAssets: vi.fn(), cancelAssetResidencyOperation: f.cancel }))
 vi.mock('src/ts/storage/sync/serverSyncRegistration', () => ({ parseServerRegistration: () => ({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }) }))
@@ -24,7 +24,7 @@ vi.mock('src/ts/storage/fileOperationErrorPresentation', () => ({ presentFileOpe
 vi.mock('src/ts/characterCards', () => ({ hubURL: 'https://synthetic.invalid' }))
 vi.mock('src/ts/globalApi.svelte', () => ({ getVersionString: () => 'synthetic' }))
 vi.mock('src/ts/gui/colorscheme', () => ({ updateTextThemeAndCSS: vi.fn() }))
-vi.mock('src/ts/gui/nativeFileJobDialogModel', () => ({ buildNativeFileJobDialogModel: () => ({ open: false }) }))
+vi.mock('src/ts/gui/nativeFileJobDialogModel', () => ({ buildNativeFileJobDialogModel: () => ({ open: false }), formatElapsed: (milliseconds: number) => `${Math.floor(milliseconds / 1000)}s` }))
 vi.mock('src/ts/process/templates/templates', () => ({ prebuiltPresets: {} }))
 vi.mock('src/ts/storage/database.svelte', () => ({ setPreset: f.preset }))
 vi.mock('src/ts/storage/nativeFileJobManager', async () => { const { writable } = await import('svelte/store'); return { cancelActiveNativeFileOperation: vi.fn(), dismissNativeFileOperationOutcome: vi.fn(), nativeFileJobHost: writable('dialog'), nativeFileOperation: writable(null), nativeFileOperationOutcome: writable(null) } })
@@ -47,6 +47,7 @@ beforeEach(() => {
     f.state.db = { language: 'en', characters: [] }
     f.preset.mockImplementation((db: Record<string, unknown>) => ({ ...db, preset: 'starting' }))
     f.bindingState.mockResolvedValue({ target: { kind: 'none' } })
+    f.pending.mockResolvedValue(undefined)
 })
 afterEach(async () => { if (component) await unmount(component); component = undefined; host.remove() })
 const settle = async () => { for (let i = 0; i < 12; i++) await tick() }
@@ -475,4 +476,166 @@ it('a late bound response does not advance a dismissed server screen', async () 
     click(languageEnglish.risuNest.onboarding.back); await tick()
     finish({ kind: 'bound' }); await settle()
     expect(host.querySelector('h1')?.textContent).toBe(languageEnglish.risuNest.onboarding.sync.title)
+})
+
+describe('layout', () => {
+    const statusText = () => host.querySelector('[data-tone]')?.textContent?.trim()
+    it('folds the registration input on a connected device until it is asked for', async () => {
+        f.view = { status: { configured: true, bound: true }, paused: false, error: '' }
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+        expect(host.querySelector('textarea')).toBeNull()
+        click(sync.enterCode); await tick()
+        expect(host.querySelector('textarea')).not.toBeNull()
+    })
+    it.each([
+        { name: 'not connected', view: { status: { configured: false }, paused: false, error: '' }, shown: true },
+        { name: 'left unfinished', view: { status: { configured: true, bound: false }, paused: false, error: '', bindingIncomplete: true }, shown: true },
+        { name: 'connected', view: { status: { configured: true, bound: true }, paused: false, error: '' }, shown: false },
+        { name: 'connected and asked for a new code', view: { status: { configured: true, bound: true }, paused: true, error: 'unauthorized' }, shown: false },
+    ])('warns about concurrent edits only before the device connects, when $name', async ({ view, shown }) => {
+        f.view = view
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+        expect(host.textContent?.includes(languageEnglish.lwwSync.concurrentEditNotice)).toBe(shown)
+    })
+    it.each([
+        { name: 'not connected', view: { status: { configured: false }, paused: false, error: '' }, label: sync.disconnected, tone: 'idle' },
+        { name: 'connected', view: { status: { configured: true, bound: true }, paused: false, error: '' }, label: sync.ready, tone: 'connected' },
+        { name: 'running', view: { status: { configured: true, bound: true }, paused: false, running: true, error: '' }, label: sync.running, tone: 'working' },
+        { name: 'paused', view: { status: { configured: true, bound: true }, paused: true, error: '' }, label: sync.paused, tone: 'paused' },
+        { name: 'stopped by an error', view: { status: { configured: true, bound: true }, paused: true, error: 'unit-too-large' }, label: sync.blocked, tone: 'attention' },
+        { name: 'revoked', view: { status: { configured: true, bound: true }, paused: true, error: 'unauthorized' }, label: sync.registrationRequired, tone: 'attention' },
+    ])('labels the connection state when $name', async ({ view, label, tone }) => {
+        f.view = view
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+        expect(statusText()).toBe(label)
+        expect(host.querySelector('[data-tone]')?.getAttribute('data-tone')).toBe(tone)
+    })
+    it('leaves the section heading and the sync storage to the settings page', async () => {
+        const cache = { totalBytes: 2, cacheBytes: 1, protectedBytes: 0, reclaimableBytes: 1, ledgerBytes: 1, databaseBytes: 0, blockedReason: null }
+        const { getServerSyncCacheUsage } = await import('src/ts/storage/sync/serverSyncProduction')
+        vi.mocked(getServerSyncCacheUsage).mockResolvedValue(cache)
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn(), tone: 'onboarding' } })
+        await settle()
+        expect([...host.querySelectorAll('h2')].map(node => node.textContent)).toEqual([])
+        expect(host.textContent).not.toContain(sync.management.title)
+        expect(host.querySelector('textarea')).not.toBeNull()
+        await unmount(component); component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+        expect([...host.querySelectorAll('h2')].map(node => node.textContent)).toEqual([sync.title, sync.management.title])
+    })
+})
+describe('progress', () => {
+    const lane = (name: string, counts: Record<string, unknown> = {}) => ({ lane: name, active: false, step: 'idle', listed: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...counts })
+    const running = (startedAt: number) => ({
+        status: { configured: true, bound: true }, paused: false, running: true, error: '',
+        progress: { mode: 'full', startedAt, stages: ['downloading', 'publishing'], active: ['publishing'], current: 'publishing', rate: 2048, lanes: [lane('send', { active: true, step: 'uploading', filesDone: 1, filesTotal: 2, bytesDone: 1024, bytesTotal: 4096, sentBytes: 3000 }), lane('receive', { receivedBytes: 500 })] },
+    })
+    const panel = () => host.querySelector('[data-sync-progress]')
+    it('shows the running step, the stages and the transfer counts of a sync', async () => {
+        f.view = running(Date.now() - 5000)
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+        expect(panel()?.querySelector('[role="status"]')?.textContent).toContain(sync.activity.uploading)
+        expect(panel()?.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('25')
+        expect([...panel()!.querySelectorAll('li')].map(item => [item.textContent?.trim(), item.getAttribute('aria-current')])).toEqual([[sync.stage.downloading, null], [sync.stage.publishing, 'step']])
+        expect([...panel()!.querySelectorAll('dt')].map(term => term.textContent)).toEqual([sync.verifiedBytes, sync.transferRate, sync.progressFiles, sync.elapsed])
+        expect(panel()!.textContent).toContain('2.0 KiB/s')
+        expect(host.querySelector('[data-tone]')?.textContent?.trim()).toBe(sync.running)
+    })
+    it('opens the panel only once a sync has run for a moment', async () => {
+        vi.useFakeTimers()
+        try {
+            f.view = running(Date.now())
+            component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+            await settle()
+            expect(panel()).toBeNull()
+            await vi.advanceTimersByTimeAsync(500); await settle()
+            expect(panel()).toBeNull()
+            await vi.advanceTimersByTimeAsync(500); await settle()
+            expect(panel()).not.toBeNull()
+        } finally { vi.useRealTimers() }
+    })
+    it('shows the changes to upload and the last successful sync while idle', async () => {
+        f.pending.mockResolvedValue(3)
+        f.view = { status: { configured: true, bound: true }, paused: false, error: '', lastSuccessAt: 0 }
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+        const rows = Object.fromEntries([...host.querySelectorAll('dt')].map(term => [term.textContent, term.nextElementSibling?.textContent]))
+        expect(rows[sync.pendingChanges]).toBe(sync.count.replace('{0}', '3'))
+        expect(rows[sync.lastSuccess]).toBe(new Date(0).toLocaleString())
+        expect(panel()).toBeNull()
+    })
+    it('shows a first connection under the server check in place of its hint', async () => {
+        f.view = { status: { configured: false }, paused: false, error: '' }
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await registration()
+        expect(host.textContent).toContain(sync.connectHint)
+        publish({ status: { configured: false }, paused: false, error: '', progress: { mode: 'full', startedAt: Date.now() - 1000, stages: ['preparing'], active: ['preparing'], current: 'preparing' } })
+        await settle()
+        expect(panel()?.closest('.sync-block')?.textContent).toContain(sync.reviewTitle)
+        expect(host.textContent).not.toContain(sync.connectHint)
+        expect(host.querySelector('[data-tone]')?.textContent?.trim()).toBe(sync.running)
+    })
+    describe('automatic sync', () => {
+        const routine = (lanes: unknown[], fields: Record<string, unknown> = {}) => ({ mode: 'routine', startedAt: Date.now(), stages: ['downloading', 'publishing'], active: ['publishing'], current: 'publishing', lanes, ...fields })
+        const connected = (fields: Record<string, unknown>) => ({ status: { configured: true, bound: true, libraryId: 'library' }, paused: false, error: '', lastSuccessAt: 0, ...fields })
+        const lastSync = () => [...host.querySelectorAll('dt')].some(term => term.textContent === sync.lastSuccess)
+        it('shows one bar as soon as a change moves, with its steps folded under Details', async () => {
+            f.view = connected({ running: true, progress: routine([lane('send', { active: true, step: 'confirming', itemsDone: 1, itemsTotal: 4, sentBytes: 900 })], { plannedSend: 4 }) })
+            component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+            await settle()
+            expect(panel()?.getAttribute('data-mode')).toBe('routine')
+            expect(panel()?.querySelector('[role="status"]')?.textContent).toContain(sync.running)
+            expect(panel()?.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('25')
+            expect(lastSync()).toBe(false)
+            const details = panel()!.querySelector('details')!
+            expect(details.open).toBe(false)
+            expect(details.querySelector('summary')?.textContent?.trim()).toBe(sync.details)
+            details.querySelector('summary')!.click(); await settle()
+            expect(details.open).toBe(true)
+            expect(details.textContent).toContain(`${sync.activity.confirming} · 1 / 4`)
+            expect([...details.querySelectorAll('li')].map(item => item.textContent?.trim())).toEqual([sync.stage.downloading, sync.stage.publishing])
+            expect([...details.querySelectorAll('dt')].map(term => term.textContent)).toEqual([sync.verifiedBytes, sync.transferRate, sync.progressItems, sync.elapsed])
+        })
+        it('shows nothing while automatic sync has no change to move', async () => {
+            vi.useFakeTimers()
+            try {
+                f.view = connected({ running: true, progress: routine([lane('send', { active: true, step: 'preparing' }), lane('receive')]) })
+                component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+                await vi.advanceTimersByTimeAsync(2000); await settle()
+                expect(panel()).toBeNull()
+                expect(lastSync()).toBe(true)
+            } finally { vi.useRealTimers() }
+        })
+        it('keeps a finished bar for a moment, then shows the last sync again', async () => {
+            const finished = routine([lane('send', { itemsDone: 3, itemsTotal: 3 })], { active: [], endedAt: Date.now() })
+            f.view = connected({ finished })
+            component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+            await settle()
+            expect(panel()?.querySelector('[role="status"]')?.textContent).toContain(sync.complete)
+            expect(panel()?.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('100')
+            expect(panel()?.querySelector('[role="status"] .lucide-loader-circle')).toBeNull()
+            expect(host.querySelector('[data-tone]')?.textContent?.trim()).toBe(sync.ready)
+            expect(lastSync()).toBe(false)
+            publish(connected({}))
+            await settle()
+            expect(panel()).toBeNull()
+            expect(lastSync()).toBe(true)
+        })
+        it('keeps Details as it was left for the next sync', async () => {
+            f.view = connected({ running: true, progress: routine([lane('send', { active: true, step: 'confirming', itemsDone: 1, itemsTotal: 2 })]) })
+            component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+            await settle()
+            panel()!.querySelector('summary')!.click(); await settle()
+            publish(connected({}))
+            await settle()
+            publish(connected({ running: true, progress: routine([lane('receive', { active: true, step: 'downloading', backlogDone: 10, backlogLeft: 30 })], { stages: ['downloading'], active: ['downloading'], current: 'downloading' }) }))
+            await settle()
+            expect(panel()!.querySelector('details')!.open).toBe(true)
+            expect(panel()?.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('25')
+        })
+    })
 })

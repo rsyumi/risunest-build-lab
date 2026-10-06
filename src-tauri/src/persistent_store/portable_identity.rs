@@ -59,7 +59,6 @@ impl IdentityRemap {
     }
     pub(crate) fn character(&self, value: &mut Value) {
         self.field(value, "chaId", "character");
-        self.list(value, "characters", "character");
         self.list(value, "modules", "modules");
     }
     pub(crate) fn chat(&self, owner: &str, value: &mut Value) {
@@ -135,7 +134,7 @@ impl IdentityRemap {
                 p[3] = self.conversation(&owner, &p[3]);
             }
             "exists" => p[2] = self.id(&p[1], &p[2]),
-            "character" | "group-members" | "archive" => p[1] = self.id("character", &p[1]),
+            "character" | "archive" => p[1] = self.id("character", &p[1]),
             "conversation" | "messages" => {
                 let owner = p[1].clone();
                 p[1] = self.id("character", &owner);
@@ -160,7 +159,6 @@ impl IdentityRemap {
                 self.root(&mut root);
                 *value = root[&p[1]].take();
             }
-            "group-members" => self.list(value, "characters", "character"),
             "character" | "conversation" => {
                 let field = p.last().unwrap();
                 let mut detail = serde_json::json!({field.clone():value.clone()});
@@ -524,14 +522,14 @@ mod tests {
     }
     fn stage(store: &mut PersistentStore) -> String {
         let id = store.replace_begin().unwrap().staging_id;
-        store.replace_put_root(&id,&json!({"botPresetsId":"preset","selectedPersona":"persona","personas":[{"id":"persona"}],"modules":[{"id":"module"}],"enabledModules":["module"],"loadouts":[{"id":"loadout","characterIds":["char"],"modules":["module"],"personaId":"persona","presetName":"kept upstream name"}],"customModels":[{"id":"model"}],"characterOrder":[{"name":"folder","data":["char"]},"group"]})).unwrap();
+        store.replace_put_root(&id,&json!({"botPresetsId":"preset","selectedPersona":"persona","personas":[{"id":"persona"}],"modules":[{"id":"module"}],"enabledModules":["module"],"loadouts":[{"id":"loadout","characterIds":["char"],"modules":["module"],"personaId":"persona","presetName":"kept upstream name"}],"customModels":[{"id":"model"}],"characterOrder":[{"name":"folder","data":["char"]}]})).unwrap();
         store
             .replace_put_presets(
                 &id,
                 &[json!({"id":"preset","name":"kept upstream name","aiModel":"model"})],
             )
             .unwrap();
-        store.replace_add_characters(&id,&[json!({"chaId":"char","type":"character","name":"synthetic","modules":["module"],"chats":[{"id":"chat","name":"synthetic chat","bindedPersona":"persona","modules":["module"],"message":[{"role":"user","data":"synthetic","chatId":"message"}],"bookmarks":["message"],"bookmarkNames":{"message":"kept"},"hypaV3Data":{"memos":["message"]}}]}),json!({"chaId":"group","type":"group","name":"group","characters":["char"],"characterTalks":[1],"characterActive":[true],"chats":[]})]).unwrap();
+        store.replace_add_characters(&id,&[json!({"chaId":"char","type":"character","name":"synthetic","modules":["module"],"chats":[{"id":"chat","name":"synthetic chat","bindedPersona":"persona","modules":["module"],"message":[{"role":"user","data":"synthetic","chatId":"message"}],"bookmarks":["message"],"bookmarkNames":{"message":"kept"},"hypaV3Data":{"memos":["message"]}}]})]).unwrap();
         id
     }
     fn retire(store: &mut PersistentStore, p: &[&str]) {
@@ -608,7 +606,6 @@ mod tests {
         let char = &db["characters"][0];
         let id = char["chaId"].as_str().unwrap();
         assert_ne!(id, "char");
-        assert_eq!(db["characters"][1]["characters"][0], id);
         assert_eq!(db["loadouts"][0]["characterIds"][0], id);
         assert_eq!(db["characterOrder"][0]["data"][0], id);
         assert_eq!(db["loadouts"][0]["presetName"], "kept upstream name");
@@ -637,9 +634,9 @@ mod tests {
                 UnitValue::inline(br#"{"type":"character"}"#).unwrap(),
             ),
             (
-                key(&["group-members", "group"]),
+                key(&["character", "char", "name"]),
                 UnitValue::inline(
-                    br#"{"characters":["char"],"characterTalks":[1],"characterActive":[true]}"#,
+                    br#""Synthetic name""#,
                 )
                 .unwrap(),
             ),

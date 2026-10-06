@@ -70,6 +70,82 @@ fn custody_survives_reopen_but_stays_device_local() {
 }
 
 #[test]
+fn the_latest_confirmed_custody_wins_when_an_existing_context_is_reused() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = Residency::open(root.path()).unwrap();
+    let a = config("device-a");
+    let mut b = config("device-b");
+    b.library_id = "other-library".into();
+    let mut b_head = head();
+    b_head.library_id = b.library_id.clone();
+    store.confirm(&a, &head(), &[object(b"a-first")]).unwrap();
+    let old_a = store.object(&hash(b"payload"), None).unwrap().unwrap();
+    assert!(store.begin_release(&old_a).unwrap());
+    store.confirm(&b, &b_head, &[object(b"b")]).unwrap();
+    let retained_b = store.object(&old_a.hash, None).unwrap().unwrap();
+    assert_eq!(retained_b.config.library_id, b.library_id);
+
+    let mut invalid = object(b"invalid-a");
+    invalid.retention_id = "invalid".into();
+    assert!(store.confirm(&a, &head(), &[invalid]).is_err());
+    assert_eq!(store.object(&old_a.hash, None).unwrap().unwrap().context, retained_b.context);
+
+    let mut renewed = serde_json::to_value(&a).unwrap();
+    renewed["credentialId"] = serde_json::json!("00000000-0000-4000-8000-000000000001");
+    let renewed_a = serde_json::from_value::<StoredConfig>(renewed.clone()).unwrap();
+    store.confirm(&renewed_a, &head(), &[object(b"a-renewed")]).unwrap();
+    store.finish_release(&old_a).unwrap();
+    drop(store);
+    let store = Residency::open(root.path()).unwrap();
+    let latest = store.object(&old_a.hash, None).unwrap().unwrap();
+    assert_eq!(latest.context, old_a.context);
+    assert_eq!(latest.retention_id, hash(b"a-renewed"));
+    assert_eq!(serde_json::to_value(&latest.config).unwrap()["credentialId"], renewed["credentialId"]);
+    assert!(store.object(&old_a.hash, Some(&retained_b.context)).unwrap().is_some());
+}
+
+#[test]
+fn a_new_device_or_epoch_also_becomes_the_latest_custody() {
+    for change_epoch in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Residency::open(root.path()).unwrap();
+        let mut registration = config("device");
+        let mut remote = head();
+        store.confirm(&registration, &remote, &[object(b"first")]).unwrap();
+        let original = Residency::context_id(&registration, &remote.epoch);
+        if change_epoch { remote.epoch = "new-epoch".into(); }
+        else { registration.device_id = "new-device".into(); }
+        store.confirm(&registration, &remote, &[object(b"next")]).unwrap();
+        let latest = store.object(&hash(b"payload"), None).unwrap().unwrap();
+        assert_ne!(latest.context, original);
+        assert_eq!(latest.retention_id, hash(b"next"));
+        assert!(store.object(&latest.hash, Some(&original)).unwrap().is_some());
+    }
+}
+
+#[test]
+fn target_membership_uses_the_inspected_library_and_epoch_across_retained_routes() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = Residency::open(root.path()).unwrap();
+    let a = config("device-a");
+    let mut b = config("device-b");
+    b.library_id = "other-library".into();
+    let mut b_head = head();
+    b_head.library_id = b.library_id.clone();
+    store.confirm(&a, &head(), &[object(b"a")]).unwrap();
+    store.confirm(&b, &b_head, &[object(b"b")]).unwrap();
+    let digest = hash(b"payload");
+    assert_eq!(store.object(&digest, None).unwrap().unwrap().config.library_id, b.library_id);
+    assert!(store.target_holds(&digest, &a.library_id, &hash(b"library:epoch")).unwrap());
+    assert!(store.target_holds(&digest, &b.library_id, &hash(b"other-library:epoch")).unwrap());
+    assert!(!store.target_holds(&digest, &a.library_id, &hash(b"library:new-epoch")).unwrap());
+    assert!(!store.target_holds(&digest, &b.library_id, &hash(b"library:epoch")).unwrap());
+    let old = store.object(&digest, Some(&Residency::context_id(&a, "epoch"))).unwrap().unwrap();
+    store.begin_release(&old).unwrap();
+    assert!(!store.target_holds(&digest, &a.library_id, &hash(b"library:epoch")).unwrap());
+}
+
+#[test]
 fn stale_release_cannot_remove_renewed_custody() {
     let root = tempfile::tempdir().unwrap();
     let mut store = Residency::open(root.path()).unwrap();

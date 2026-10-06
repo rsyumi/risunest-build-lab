@@ -104,6 +104,16 @@ impl NativeTokenizerError {
     }
 }
 
+impl crate::native_log::CommandFailure for NativeTokenizerError {
+    fn code(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(&self.code)
+    }
+
+    fn expected(&self) -> bool {
+        self.code != "tokenizer_worker_failed"
+    }
+}
+
 fn tokenize_batch_core(
     request: TokenizeBatchRequest,
 ) -> Result<TokenizeBatchResponse, NativeTokenizerError> {
@@ -238,14 +248,16 @@ fn tokenize_batch_core(
 pub async fn tokenize_batch(
     request: TokenizeBatchRequest,
 ) -> Result<TokenizeBatchResponse, NativeTokenizerError> {
-    tauri::async_runtime::spawn_blocking(move || tokenize_batch_core(request))
-        .await
-        .map_err(|error| {
-            NativeTokenizerError::new(
-                "tokenizer_worker_failed",
-                format!("Native tokenizer worker failed: {error}"),
-            )
-        })?
+    crate::native_log::logged_without_detail("tokenize_batch", async {
+        tauri::async_runtime::spawn_blocking(move || tokenize_batch_core(request))
+            .await
+            .map_err(|error| {
+                NativeTokenizerError::new(
+                    "tokenizer_worker_failed",
+                    format!("Native tokenizer worker failed: {error}"),
+                )
+            })?
+    }.await)
 }
 
 #[cfg(test)]
@@ -510,6 +522,24 @@ mod tests {
                 "counts": [1, 5],
             })
         );
+    }
+
+    #[test]
+    fn command_refusal_logs_only_the_code_without_fingerprint_or_input() {
+        let private = "synthetic-private-tokenizer-input";
+        let failure = tauri::async_runtime::block_on(tokenize_batch(TokenizeBatchRequest {
+            tokenizer_id: NativeTokenizerId::Cl100kBase,
+            artifact_fingerprint: private.to_owned(),
+            mode: NativeTokenizeMode::Count,
+            texts: vec![private.to_owned()],
+        })).unwrap_err();
+        assert_eq!(failure.received_fingerprint.as_deref(), Some(private));
+        let entries = crate::native_log::global_state().tail(None);
+        let failures: Vec<_> = entries.iter().filter(|entry| entry.message.starts_with("tokenize_batch failed: ")).collect();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].level, "warn");
+        assert!(failures[0].message.contains(&format!("code={}", failure.code)));
+        assert!(!failures[0].message.contains(private));
     }
 
     #[test]

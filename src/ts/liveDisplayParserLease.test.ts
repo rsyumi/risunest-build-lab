@@ -1,8 +1,5 @@
 import { expect, test, vi } from 'vitest'
-import {
-    captureLiveDisplayParserInputs,
-    createLiveDisplayParserLeaseAcquirer,
-} from './liveDisplayParserLease'
+import { createLiveDisplayParserLeaseAcquirer } from './liveDisplayParserLease'
 import { getDatabase, getCurrentCharacter, getCurrentChat } from './storage/database.svelte'
 import { getModuleRegexScripts, getModuleTriggers } from './process/modules'
 
@@ -53,38 +50,6 @@ test('keeps plain live display windowed without acquiring history', async () => 
         }),
     ).resolves.toBeNull()
     expect(f.runtime.acquireCompleteConversation).not.toHaveBeenCalled()
-})
-
-test('admits complete history for a plain group without reading its metadata-only body', async () => {
-    const f = fixture()
-    const readBody = vi.fn(() => {
-        throw new Error('metadata-only body read')
-    })
-    const chat = {
-        id: 'chat',
-        get message() {
-            return readBody()
-        },
-    }
-    const group = { type: 'group', chaId: 'owner', chatPage: 0, chats: [chat], customscript: [] }
-    vi.mocked(getDatabase).mockReturnValue({ characters: [group] } as never)
-    vi.mocked(getCurrentCharacter).mockReturnValue(group as never)
-    vi.mocked(getCurrentChat).mockReturnValue(chat as never)
-    vi.mocked(getModuleRegexScripts).mockReturnValue([])
-    vi.mocked(getModuleTriggers).mockReturnValue([])
-    const acquire = createLiveDisplayParserLeaseAcquirer({
-        runtime: () => f.runtime as never,
-        classify: captureLiveDisplayParserInputs,
-    })
-    const lease = await acquire({
-        source: 'plain group background',
-        character: group as never,
-        signal: new AbortController().signal,
-    })
-    expect(f.runtime.acquireCompleteConversation).toHaveBeenCalledOnce()
-    expect(readBody).not.toHaveBeenCalled()
-    lease!.release()
-    expect(f.release).toHaveBeenCalledOnce()
 })
 
 test('holds a history lease until explicitly released and releases once', async () => {

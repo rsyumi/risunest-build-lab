@@ -4,10 +4,18 @@ import { language } from "src/lang";
 import { materializePersistentDatabaseSnapshot } from "./persistentDataRuntime.svelte";
 import { DATASET_EXPORT_FILE_NAME, exportNativeDataset } from "./nativeDatasetExportRoute";
 
-export async function exportAsDataset(){
+let activeExport: Promise<void> | undefined
+
+export function exportAsDataset(): Promise<void> {
+    if (activeExport) return activeExport
+    const operation = exportDataset().finally(() => { if (activeExport === operation) activeExport = undefined })
+    activeExport = operation
+    return operation
+}
+
+async function exportDataset(){
     try {
         if(await exportNativeDataset() !== undefined){
-            alertNormal(language.successExport)
             return
         }
     } catch (error) {
@@ -21,9 +29,7 @@ export async function exportAsDataset(){
 
     let dataset = []
     for(const char of db.characters){
-        if(char.type === 'group'){
-            continue
-        }
+
         for(const chat of char.chats){
             
             dataset.push({

@@ -119,6 +119,51 @@ async function open() {
   await settle();
 }
 
+async function applyConnection(endpoint: string) {
+  button("연결").click();
+  await settle();
+  const input = target.querySelector<HTMLInputElement>("input[type=url]")!;
+  input.value = endpoint;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  target
+    .querySelector('form[aria-label="연결 설정"]')!
+    .dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+  await settle();
+}
+
+it("dismisses the applied notice after four seconds", async () => {
+  await open();
+  await applyConnection("https://changed.example.com");
+  expect(target.textContent).toContain("변경 사항을 적용했습니다.");
+  await vi.advanceTimersByTimeAsync(3999);
+  expect(target.textContent).toContain("변경 사항을 적용했습니다.");
+  await vi.advanceTimersByTimeAsync(1);
+  expect(target.textContent).not.toContain("변경 사항을 적용했습니다.");
+});
+
+it("gives a repeated applied notice its own four seconds", async () => {
+  await open();
+  await applyConnection("https://first.example.com");
+  await vi.advanceTimersByTimeAsync(2000);
+  await applyConnection("https://second.example.com");
+  expect(backend.mutate).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(target.textContent).toContain("변경 사항을 적용했습니다.");
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(target.textContent).not.toContain("변경 사항을 적용했습니다.");
+});
+
+it("does not dismiss a later error with the applied notice timer", async () => {
+  await open();
+  await applyConnection("https://changed.example.com");
+  await vi.advanceTimersByTimeAsync(2000);
+  vi.mocked(backend.mutate).mockRejectedValue("management-stale-state");
+  await applyConnection("https://retry.example.com");
+  expect(target.textContent).toContain("서버 상태가 변경되었습니다. 새로 확인한 뒤 다시 시도하세요.");
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(target.textContent).toContain("서버 상태가 변경되었습니다. 새로 확인한 뒤 다시 시도하세요.");
+});
+
 it("keeps a dirty form tied to its original revision during status refresh", async () => {
   await open();
   button("연결").click();

@@ -219,6 +219,47 @@ mod tests {
         job
     }
 
+    #[test]
+    fn snapshot_body_retry_requires_an_explicit_terminal_owner() {
+        for state in [JobState::Running, JobState::Succeeded, JobState::Failed, JobState::Cancelled] {
+            assert!(!super::super::should_retry_snapshot_bodies(state, None));
+        }
+        assert!(!super::super::should_retry_snapshot_bodies(JobState::Running, Some("previous")));
+        assert!(!super::super::should_retry_snapshot_bodies(JobState::Succeeded, Some("previous")));
+        assert!(super::super::should_retry_snapshot_bodies(JobState::Failed, Some("previous")));
+        assert!(super::super::should_retry_snapshot_bodies(JobState::Cancelled, Some("previous")));
+    }
+
+    #[test]
+    fn reattachment_receipt_checks_job_stage_revision_and_binding_without_activation() {
+        let (_root, mut store) = local();
+        let plan = activated(&mut store);
+        let job = job(&plan);
+        let receipt = super::super::NativeSnapshotBodiesStarted {
+            job_id: job.id(), kind: super::super::JobKind::SnapshotBodies,
+            staging_id: plan.stage_id.clone(), activation_revision: plan.revision.to_string(), binding_authority: plan.authority.clone(),
+        };
+        let revision = store.revision().unwrap();
+        assert_eq!(super::super::validate_snapshot_body_status(&job.status(), &receipt).unwrap(), revision);
+        store.validate_snapshot_body_receipt(&plan.stage_id, revision, &plan.authority).unwrap();
+        for wrong in [
+            super::super::NativeSnapshotBodiesStarted {job_id: uuid::Uuid::new_v4().to_string(), ..receipt.clone()},
+            super::super::NativeSnapshotBodiesStarted {staging_id: uuid::Uuid::new_v4().to_string(), ..receipt.clone()},
+            super::super::NativeSnapshotBodiesStarted {activation_revision: (revision + 1).to_string(), ..receipt.clone()},
+            super::super::NativeSnapshotBodiesStarted {binding_authority: format!("{}0", plan.authority), ..receipt.clone()},
+        ] {
+            assert!(super::super::validate_snapshot_body_status(&job.status(), &wrong).is_err());
+        }
+        assert!(store.validate_snapshot_body_receipt(&plan.stage_id, revision + 1, &plan.authority).is_err());
+        assert!(store.validate_snapshot_body_receipt(&plan.stage_id, revision, "wrong-binding").is_err());
+        assert_eq!(job.request_cancel().unwrap(), super::super::CancelOutcome::Requested);
+        job.finish_cancelled().unwrap();
+        assert_eq!(job.status().state, JobState::Cancelled);
+        assert!(job.retains_terminal_receipt_until_forget());
+        assert!(plan.source.exists());
+        assert_eq!(store.revision().unwrap(), revision);
+    }
+
     fn cached_plan(store:&mut PersistentStore)->(BodyPlan,String,Vec<u8>) {
         use crate::persistent_store::lww::{Header,Change,StageReceive,ApplyReceive,Progress};
         use risunest_sync_wire::{stamp::Stamp,unit::{UnitKey,UnitValue},descriptor::RecordDescriptor};

@@ -30,7 +30,7 @@ describe('sync exit dialog', () => {
         'shows %s inside the modal with an explicit retry action', async (reason) => {
             const decide = vi.fn((_choice: SyncExitDecision) => true)
             configureSyncExitCoordinator({
-                requestExit: async () => 'cancelled', decide,
+                requestExit: async () => 'cancelled', requestExitWithoutSync: () => false, decide,
                 snapshot: () => ({ phase: 'idle' }),
                 subscribe: listener => { listener({ phase: 'idle' }); return () => {} },
             })

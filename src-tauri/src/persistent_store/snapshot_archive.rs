@@ -270,6 +270,7 @@ impl Archive {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn restore(&self, id: &str, destination: &Path) -> StoreResult<Metadata> {
         self.restore_observed(id, destination, &crate::local_backup::NeverCancelled)
     }

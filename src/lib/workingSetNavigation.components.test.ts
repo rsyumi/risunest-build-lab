@@ -54,14 +54,6 @@ vi.mock('src/ts/util', async () => {
         findCharacterIndexbyId: (id: string) => DBState.db.characters.findIndex((character) => character.chaId === id),
     }
 })
-vi.mock('src/ts/sync/multiuser', async () => {
-    const { writable } = await import('svelte/store')
-    return {
-        joinMultiuserRoom: vi.fn(), ConnectionIsHost: writable(false),
-        createMultiuserRoom: vi.fn(),
-        ConnectionOpenStore: writable(false), RoomIdStore: writable('synthetic-room'),
-    }
-})
 vi.mock('src/ts/gui/guisize', async () => ({ sideBarSize: (await import('svelte/store')).writable(300) }))
 vi.mock('src/lang', () => ({
     language: {
@@ -69,7 +61,7 @@ vi.mock('src/lang', () => ({
         character: 'Character', Chat: 'Chat', playground: { playground: 'Playground', inlayExplorer: 'Inlays' },
         embedding: 'Embedding', tokenizer: 'Tokenizer', syntax: 'Syntax', imageGeneration: 'Images',
         subtitles: 'Subtitles', imageTranslation: 'Image translation', translator: 'Translation',
-        promptConvertion: 'Prompts', joinMultiUserRoom: 'Join room',
+        promptConvertion: 'Prompts',
         navigationBlockedWhileGenerating: 'Generation is active',
     },
 }))

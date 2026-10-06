@@ -4,11 +4,12 @@ import { writable } from 'svelte/store'
 import { languageEnglish } from 'src/lang/en'
 import { DBState } from 'src/ts/stores.svelte'
 import DefaultChatScreen from './DefaultChatScreen.svelte'
+import { chatScreenState } from '../../ts/ui/chatScreenState.svelte'
 
 const mocks = vi.hoisted(() => ({ trigger: vi.fn(), generate: vi.fn(), process: vi.fn(), error: vi.fn(), postFile: vi.fn(),
     bounded: false, appended: [] as any[], acquireComplete: vi.fn(), flush: vi.fn(async () => {}),
     historyLimit: false, openWindow: vi.fn(), notify: vi.fn(async () => {}), scope: { finish: vi.fn(), release: vi.fn() }, createScope: vi.fn(),
-    chatsProps: null as any, confirm: vi.fn(async () => false),
+    translate: vi.fn(), chatsProps: null as any, confirm: vi.fn(async () => false),
     target: { characterId: 'character', conversationId: 'chat', navigationGeneration: 1, storeRevision: 1, sessionToken: 'windowed' },
 }))
 vi.mock('src/lang', () => ({ language: languageEnglish }))
@@ -22,14 +23,13 @@ vi.mock('src/ts/process/index.svelte', () => ({ doingChat: writable(false), chat
     getHistoryWindowMemoryMode: (historyLimit: boolean) => historyLimit && mocks.historyLimit ? 'none' : null, openSelectedHistoryWindow: mocks.openWindow, notifyGenerationCompletion: mocks.notify }))
 vi.mock('src/ts/util', () => ({ sleep: async () => {}, getPersonaPrompt: () => '' }))
 vi.mock('src/ts/alert', () => ({ alertError: mocks.error, alertConfirm: mocks.confirm }))
-vi.mock('src/ts/translator/translator', () => ({}))
+vi.mock('src/ts/translator/translator', () => ({ translate: mocks.translate, isExpTranslator: () => false }))
 vi.mock('src/ts/process/scripts', () => ({ processScript: mocks.process, createPromptScriptOperationScope: mocks.createScope }))
 vi.mock('src/ts/process/triggers', () => ({ runTrigger: mocks.trigger }))
 vi.mock('src/ts/process/tts', () => ({}))
 vi.mock('src/ts/process/command', () => ({}))
 vi.mock('src/ts/process/files/multisend', () => ({ postChatFile: mocks.postFile }))
 vi.mock('src/ts/globalApi.svelte', () => ({ aiLawApplies: false, chatFoldedState: writable(false), chatFoldedStateMessageIndex: writable(0) }))
-vi.mock('src/ts/sync/multiuser', () => ({ ConnectionOpenStore: writable(false) }))
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
     getActiveConversationSession: () => null,
     getPersistentDataRuntime: () => ({
@@ -80,6 +80,8 @@ function send() {
 }
 beforeEach(async () => {
     vi.clearAllMocks()
+    chatScreenState.clear()
+    mocks.translate.mockResolvedValue('')
     mocks.bounded = false
     mocks.historyLimit = false
     mocks.createScope.mockReturnValue(mocks.scope)
@@ -239,7 +241,7 @@ it('runs the input step over a history window when the loading limit is on', asy
     expect(store[4]).toEqual(expect.objectContaining({ role: 'user', chatId: expect.any(String) }))
     expect(window.release).toHaveBeenCalledOnce()
     expect(mocks.flush).toHaveBeenCalledWith('generation-input')
-    expect(mocks.generate).toHaveBeenCalledWith(-1, expect.objectContaining({ historyLimit: true }))
+    expect(mocks.generate).toHaveBeenCalledWith(expect.objectContaining({ historyLimit: true }))
     expect(mocks.acquireComplete).not.toHaveBeenCalled()
     expect(DBState.db.characters[0].chats[0].message).toEqual([])
     expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('')
@@ -268,7 +270,7 @@ it('rerolls over a tail window when the loading limit is on', async () => {
     type('').dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true }))
     await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
     await vi.waitFor(() => expect(store.at(-1)?.responseVariants?.candidates).toHaveLength(2))
-    expect(mocks.generate).toHaveBeenCalledWith(-1, expect.objectContaining({ historyLimit: true }))
+    expect(mocks.generate).toHaveBeenCalledWith(expect.objectContaining({ historyLimit: true }))
     expect(store.slice(0, 39)).toEqual(before)
     expect(store.at(-1).data).toBe('new')
     for (const [options] of mocks.openWindow.mock.calls) expect(options.tailStart(store.length)).toBeGreaterThan(30)
@@ -338,4 +340,98 @@ it('rerolls with a user message last by reading only the newest messages', async
     expect(mocks.generate).not.toHaveBeenCalled()
     expect(mocks.error).not.toHaveBeenCalled()
     expect(store).toEqual(before)
+})
+
+
+it('restores paired composer fields after the chat screen is destroyed and remounted', async () => {
+    DBState.db.useAutoTranslateInput = true
+    await tick()
+    type('Unsent original')
+    const translated = document.querySelector<HTMLTextAreaElement>('#messageInputTranslate')!
+    translated.value = 'Unsent translation'
+    translated.dispatchEvent(new Event('input', { bubbles: true }))
+    await tick()
+    await unmount(instance!)
+    instance = mount(DefaultChatScreen, { target: document.body })
+    await tick()
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('Unsent original')
+    expect(document.querySelector<HTMLTextAreaElement>('#messageInputTranslate')!.value).toBe('Unsent translation')
+})
+
+it('keeps each composer with its conversation and discards a removed conversation', async () => {
+    const character = DBState.db.characters[0]
+    character.chats.push({ id: 'other', message: [] } as any)
+    type('First draft')
+    character.chatPage = 1
+    await tick()
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('')
+    type('Second draft')
+    character.chatPage = 0
+    await tick()
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('First draft')
+    character.chats.splice(1, 1)
+    await tick()
+    character.chats.push({ id: 'other', message: [] } as any)
+    character.chatPage = 1
+    await tick()
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('')
+})
+
+it('a send completing after remount preserves new typing in the restored composer', async () => {
+    type('Submitted before Settings')
+    send()
+    await vi.waitFor(() => expect(mocks.trigger).toHaveBeenCalledOnce())
+    await unmount(instance!)
+    instance = mount(DefaultChatScreen, { target: document.body })
+    await tick()
+    type('Typed after Settings')
+    finishTrigger()
+    await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('Typed after Settings')
+})
+
+it('a late translation cannot replace newer text or write into another conversation', async () => {
+    DBState.db.useAutoTranslateInput = true
+    DBState.db.characters[0].chats.push({ id: 'other', message: [] } as any)
+    let finishTranslation: (value: string) => void = () => {}
+    mocks.translate.mockImplementationOnce(() => new Promise(resolve => { finishTranslation = resolve }))
+    await tick()
+    type('Original for translation')
+    await vi.waitFor(() => expect(mocks.translate).toHaveBeenCalledWith('Original for translation', false))
+    type('New original')
+    DBState.db.characters[0].chatPage = 1
+    await tick()
+    type('Other conversation draft')
+    finishTranslation('Late result')
+    await tick()
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('Other conversation draft')
+    expect(document.querySelector<HTMLTextAreaElement>('#messageInputTranslate')!.value).toBe('')
+    DBState.db.characters[0].chatPage = 0
+    await tick()
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('New original')
+    expect(document.querySelector<HTMLTextAreaElement>('#messageInputTranslate')!.value).toBe('')
+})
+
+
+it('clears the same submitted composer after it was restored by a remount', async () => {
+    type('Submitted before grid')
+    send()
+    await vi.waitFor(() => expect(mocks.trigger).toHaveBeenCalledOnce())
+    await unmount(instance!)
+    instance = mount(DefaultChatScreen, { target: document.body })
+    await tick()
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('Submitted before grid')
+    finishTrigger()
+    await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('')
+})
+
+it('does not send or reroll from composing keyboard events', async () => {
+    const input = type('Composition draft')
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, isComposing: true, bubbles: true }))
+    await tick()
+    expect(mocks.trigger).not.toHaveBeenCalled()
+    expect(mocks.generate).not.toHaveBeenCalled()
+    expect(input.value).toBe('Composition draft')
 })

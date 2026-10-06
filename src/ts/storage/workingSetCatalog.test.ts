@@ -1,22 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CharacterSummary } from './persistentDataStore'
-import {
-    createCatalogPresetWorkingSet,
-    carryCatalogCharacterMetadata,
-    createCatalogCharacterStub,
-    getCatalogCharacterMetadata,
-    getCatalogConversationCount,
-    getCatalogPresetMetadata,
-    hydrateWorkingSetCharacterDetail,
-    isArchivedCharacter,
-    isCatalogCharacterStub,
-    isCatalogPresetWorkingSet,
-    isWorkingSetCharacterStub,
-    patchWorkingSetCharacterDetail,
-    patchWorkingSetRoot,
-    projectCatalogWorkingSet,
-    projectCompleteScalableWorkingSet,
-} from './workingSetCatalog'
+import { createCatalogPresetWorkingSet, carryCatalogCharacterMetadata, createCatalogCharacterStub, getCatalogCharacterMetadata, getCatalogConversationCount, getCatalogPresetMetadata, isArchivedCharacter, isCatalogCharacterStub, isCatalogPresetWorkingSet, isWorkingSetCharacterStub, patchWorkingSetCharacterDetail, patchWorkingSetRoot, projectCatalogWorkingSet, projectCompleteScalableWorkingSet } from './workingSetCatalog'
 import type { Database, character } from './database.svelte'
 
 const summary: CharacterSummary = {
@@ -202,31 +186,6 @@ describe('working-set catalog', () => {
         expect(resident.emotionImages).toEqual([['sad', 'assets/sad.png']])
     })
 
-    it('creates unmarked group-generation detail while preserving catalog origin metadata', () => {
-        const stub = createCatalogCharacterStub(summary)
-        const database = { characters: [stub] }
-
-        const hydrated = hydrateWorkingSetCharacterDetail(database, 0, {
-            type: 'character',
-            chaId: 'char-a',
-            name: 'Alpha',
-            firstMessage: 'Generation greeting',
-            personality: 'Generation personality',
-        } as any)
-
-        expect(hydrated).toMatchObject({
-            firstMessage: 'Generation greeting',
-            personality: 'Generation personality',
-            chats: [],
-        })
-        expect(hydrated).not.toBe(stub)
-        expect(database.characters[0]).toBe(hydrated)
-        expect(isCatalogCharacterStub(hydrated)).toBe(false)
-        expect(getCatalogConversationCount(hydrated)).toBe(37)
-        expect(isCatalogCharacterStub(stub)).toBe(true)
-        expect(stub).not.toHaveProperty('personality')
-    })
-
     it('keeps preset indexes stable while hydrating only the selected preset body', () => {
         const active = {
             name: 'Active',
@@ -331,68 +290,5 @@ describe('working-set catalog', () => {
         expect(isCatalogCharacterStub(projected.characters[1])).toBe(true)
         expect(projected.characters[1].chats).toEqual([])
         expect(complete).toEqual(snapshot)
-    })
-
-    it('preserves a selected group and its hydrated member set during scalable transition', () => {
-        const complete = {
-            botPresetsId: 0,
-            botPresets: [{ name: 'Active', mainPrompt: 'active body' }],
-            characters: [
-                {
-                    chaId: 'member-a',
-                    type: 'character',
-                    name: 'Alpha',
-                    personality: 'alpha body',
-                    chats: [{
-                        id: 'member-a-chat',
-                        name: 'Alpha chat',
-                        message: [{ role: 'assistant', data: 'must be released' }],
-                    }],
-                },
-                {
-                    chaId: 'member-b',
-                    type: 'character',
-                    name: 'Beta',
-                    personality: 'beta body',
-                    chats: [],
-                },
-                {
-                    chaId: 'group-a',
-                    type: 'group',
-                    name: 'Group',
-                    characters: ['member-a', 'member-b'],
-                    characterTalks: [1, 1],
-                    characterActive: [true, true],
-                    chats: [],
-                },
-                {
-                    chaId: 'inactive',
-                    type: 'character',
-                    name: 'Inactive',
-                    personality: 'must be released',
-                    chats: [],
-                },
-            ],
-        } as unknown as Database
-
-        const projected = projectCompleteScalableWorkingSet(
-            complete,
-            'group-a',
-            9,
-            new Set(['group-a', 'member-a', 'member-b']),
-        )
-
-        expect(projected.characters.slice(0, 3).every(isCatalogCharacterStub)).toBe(false)
-        expect(projected.characters[0].personality).toBe('alpha body')
-        expect(projected.characters[0].chats).toHaveLength(1)
-        expect(projected.characters[0].chats[0]).toMatchObject({
-            id: 'member-a-chat',
-            name: 'Alpha chat',
-            message: [],
-        })
-        expect(projected.characters[1].personality).toBe('beta body')
-        expect(projected.characters[2].type).toBe('group')
-        expect(isCatalogCharacterStub(projected.characters[3])).toBe(true)
-        expect(projected.characters[3]).not.toHaveProperty('personality')
     })
 })

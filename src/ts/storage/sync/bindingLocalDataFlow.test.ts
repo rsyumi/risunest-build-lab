@@ -13,7 +13,7 @@ import { bindSyncTarget, registerSyncBindingTransport } from './bindingRegistry'
 
 // The binding table composed through the real native content check, defaults comparison and dialogs.
 const target = { kind: 'server', connectionId: 'server' } as const
-const residency = { policy: 'remote', localBytes: 0, remoteBytes: 0, remoteObjects: 0, serverBytes: 0, serverObjects: 0, externalObjects: [], unavailableObjects: 0, evictedBytes: 0 }
+const residency = { policy: 'remote', localBytes: 0, remoteBytes: 0, remoteObjects: 0, serverBytes: 0, serverObjects: 0, externalObjects: [], unavailableObjects: 0, previousStorageObjects: 0, evictedBytes: 0 }
 const factory = () => structuredClone(normalizeDatabaseDefaults({} as Database))
 let state: SyncBindingState
 let cleanup: (() => void)[] = []

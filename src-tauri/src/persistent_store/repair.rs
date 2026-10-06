@@ -107,9 +107,12 @@ fn locate(owner_kind: &str, owner_id: &str) -> Option<Located> {
             key: vec![owner_id.to_owned()],
             column: "value",
         }),
-        "plugin" if parts.len() == 2 => Some(Located {
+        "plugin-storage" => Some(Located {
             table: "plugin_storage",
-            key: parts,
+            key: {
+                let identity: Value = serde_json::from_str(owner_id).ok()?;
+                vec![identity.get("owner")?.as_str()?.to_owned(), identity.get("key")?.as_str()?.to_owned()]
+            },
             column: "value",
         }),
         "character" => Some(Located {
@@ -213,12 +216,17 @@ fn drop_references(
         remove_at(&mut value, &steps);
     }
     let updated = serde_json::to_string(&value)?;
+    let value_parameter = located.key.len() + 2;
+    let derived = match located.table {
+        "plugin_storage" => format!(", byte_size=length(CAST(?{value_parameter} AS BLOB))"),
+        "bot_presets" => format!(", name=COALESCE(json_extract(?{value_parameter}, '$.name'), ''), image=json_extract(?{value_parameter}, '$.image')"),
+        "characters" => format!(", image=json_extract(?{value_parameter}, '$.image')"),
+        _ => String::new(),
+    };
     transaction.execute(
         &format!(
-            "UPDATE {} SET \"{}\"=?{} WHERE generation=?1{sql_where}",
-            located.table,
-            located.column,
-            located.key.len() + 2
+            "UPDATE {} SET \"{}\"=?{value_parameter}{derived} WHERE generation=?1{sql_where}",
+            located.table, located.column,
         ),
         rusqlite::params_from_iter(
             std::iter::once(staging.to_owned())
@@ -295,10 +303,15 @@ fn renumber(
         &format!(
             "UPDATE {table} SET \"{column}\"=(
                  SELECT position-1 FROM (
-                     SELECT {identity}, row_number() OVER (ORDER BY \"{column}\", {order}) AS position
+                     SELECT {identity}, row_number() OVER ({partition}ORDER BY \"{column}\", {order}) AS position
                      FROM {table} WHERE generation=?1
                  ) ranked WHERE ({identity})=({prefixed})
              ) WHERE generation=?1",
+            partition = match table {
+                "conversations" => "PARTITION BY character_id ",
+                "plugin_storage" => "PARTITION BY owner ",
+                _ => "",
+            },
             prefixed = identity_columns(table)
                 .iter()
                 .map(|column| format!("{table}.\"{column}\""))
@@ -389,7 +402,7 @@ fn recover_orphans(transaction: &Connection, staging: &str, table: &str, now_ms:
             transaction.execute(
                 "INSERT INTO characters (generation, character_id, configured_index, recent_at, trashed, name, image, conversation_count, type, creator_notes, trash_time, detail)
                  SELECT ?1, c.character_id, 0, 0, 1, c.character_id, NULL, 0, 'character', NULL, ?2,
-                        json_object('chaId', c.character_id, 'name', c.character_id, 'type', 'character', 'trashTime', ?2, 'chats', json_array(), 'chatPage', 0)
+                        json_object('chaId', c.character_id, 'name', c.character_id, 'type', 'character', 'trashTime', ?2, 'chatPage', 0)
                  FROM (SELECT DISTINCT character_id FROM conversations WHERE generation=?1) c
                  WHERE NOT EXISTS(SELECT 1 FROM characters p WHERE p.generation=?1 AND p.character_id=c.character_id)",
                 rusqlite::params![staging, now_ms],
@@ -400,7 +413,7 @@ fn recover_orphans(transaction: &Connection, staging: &str, table: &str, now_ms:
             transaction.execute(
                 "INSERT INTO conversations (generation, character_id, conversation_id, configured_index, recent_at, name, message_count, detail)
                  SELECT ?1, m.character_id, m.conversation_id, 0, 0, m.conversation_id, 0,
-                        json_object('id', m.conversation_id, 'name', m.conversation_id, 'message', json_array())
+                        json_object('id', m.conversation_id, 'name', m.conversation_id)
                  FROM (SELECT DISTINCT character_id, conversation_id FROM messages WHERE generation=?1) m
                  WHERE NOT EXISTS(SELECT 1 FROM conversations c WHERE c.generation=?1 AND c.character_id=m.character_id AND c.conversation_id=m.conversation_id)",
                 [staging],

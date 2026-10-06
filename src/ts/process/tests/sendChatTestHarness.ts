@@ -36,7 +36,6 @@ export function langModule(language: ModuleOverrides = {}) {
         changeLanguage: vi.fn(),
         language: {
             errors: { toomuchtoken: 'too many tokens', httpError: 'http error' },
-            otherUserRequesting: 'other user requesting',
             ...language,
         },
     }
@@ -119,10 +118,6 @@ export function stableDiffModule(overrides: ModuleOverrides = {}) {
     return { stableDiff: vi.fn(), ...overrides }
 }
 
-export function groupModule(overrides: ModuleOverrides = {}) {
-    return { groupOrder: vi.fn((value: unknown) => value), ...overrides }
-}
-
 export function supaMemoryModule(overrides: ModuleOverrides = {}) {
     return { supaMemory: vi.fn(), ...overrides }
 }
@@ -153,16 +148,6 @@ export function inlaysModule(overrides: ModuleOverrides = {}) {
 
 export function modelStringModule(overrides: ModuleOverrides = {}) {
     return { getGenerationModelString: vi.fn(() => 'test-model'), ...overrides }
-}
-
-export function multiuserModule(overrides: ModuleOverrides = {}) {
-    return {
-        connectionOpen: false,
-        peerRevertChat: vi.fn(),
-        peerSafeCheck: vi.fn(async () => true),
-        peerSync: vi.fn(async () => undefined),
-        ...overrides,
-    }
 }
 
 export function inlayScreenModule(overrides: ModuleOverrides = {}) {

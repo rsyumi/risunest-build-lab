@@ -1,5 +1,5 @@
 use super::{
-    active_generation, archive, asset_object_catalog, current_revision, hash_exact_file, schema,
+    active_generation, archive, asset_object_catalog, current_revision, schema,
     snapshot,
     AnchorOccurrence, AssetAlias, AssetAliasListQuery, AssetOwnerHead, AssetOwnerLocator,
     CharacterQuery, CheckpointMode, ConversationMutation,
@@ -8,6 +8,8 @@ use super::{
     StoreError, Versioned, WorkingSetCommit, ASSET_GC_PRODUCT_MINIMUM_GRACE_MS,
     ASSET_GC_PRODUCT_PAGE_LIMIT, GENERATION_TABLES, JAVASCRIPT_MAX_SAFE_INTEGER,
 };
+#[cfg(feature = "native-official-publication")]
+use super::hash_exact_file;
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -124,6 +126,8 @@ fn stage_root(store: &mut PersistentStore, username: &str) -> String {
 
 #[path = "tests/activation_golden_tests.rs"]
 mod activation_golden_tests;
+#[path = "tests/message_staging_tests.rs"]
+mod message_staging_tests;
 #[path = "tests/archive_tests.rs"]
 mod archive_tests;
 #[path = "tests/asset_alias_tests.rs"]

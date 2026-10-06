@@ -18,12 +18,15 @@ use uuid::Uuid;
 
 #[path = "lww_classification.rs"]
 mod classification;
+#[path = "lww_quarantine.rs"]
+mod quarantine;
 #[path = "lww_binding_stage.rs"]
 mod binding_stage;
 pub(crate) use binding_stage::BindingUnitStage;
-pub(super) use binding_stage::{catalog_digest, seed_binding_holds, validate_binding_source, BINDING_STAGE_SCHEMA};
+pub(super) use binding_stage::{binding_source_rows, source_digest_rows, catalog_digest, seed_binding_holds, validate_binding_source, validate_binding_source_rows, BINDING_STAGE_SCHEMA};
 #[path = "lww_intent_rows.rs"]
-mod intent_rows;
+pub(super) mod intent_rows;
+pub(super) use intent_rows::FrozenRows;
 #[path = "lww_new_device.rs"]
 mod new_device;
 #[path = "lww_projection.rs"]
@@ -55,6 +58,7 @@ CREATE INDEX lww_receive_scope ON lww_receive_rows(json_extract(key,'$[0]'),json
 "#;
 pub(super) const DEVICE_SCHEMA: &str = r#"CREATE TABLE lww_clock(singleton INTEGER PRIMARY KEY CHECK(singleton=1),issued TEXT,accepted TEXT,binding_authority TEXT NOT NULL);
 CREATE TABLE lww_intents(request_id TEXT PRIMARY KEY,authority TEXT NOT NULL,stamp TEXT NOT NULL,body TEXT NOT NULL,digest TEXT NOT NULL,complete INTEGER NOT NULL CHECK(complete IN (0,1)));
+CREATE TABLE lww_intent_proofs(request_id TEXT PRIMARY KEY,identity TEXT NOT NULL);
 CREATE TABLE lww_intent_rows(request_id TEXT NOT NULL,ordinal INTEGER NOT NULL,key TEXT NOT NULL,stamp TEXT,value TEXT NOT NULL,source_override INTEGER NOT NULL CHECK(source_override IN (0,1)),PRIMARY KEY(request_id,ordinal));
 CREATE TABLE lww_intent_failures(request_id TEXT PRIMARY KEY,failures INTEGER NOT NULL CHECK(failures>0),error TEXT NOT NULL,quarantined INTEGER NOT NULL CHECK(quarantined IN (0,1)));
 CREATE TABLE lww_receive(request_id TEXT PRIMARY KEY,authority TEXT NOT NULL,digest TEXT NOT NULL,body TEXT NOT NULL,applied INTEGER NOT NULL CHECK(applied IN (0,1)),finished INTEGER NOT NULL CHECK(finished IN (0,1)),kind TEXT NOT NULL,writer_id TEXT NOT NULL,cursor TEXT NOT NULL);
@@ -284,6 +288,7 @@ enum Intent<'a> {
         expected_revision: i64,
     },
     Replacement {
+        device_revision: i64,
         staging_id: String,
         base_revision: i64,
         staging_digest: String,
@@ -293,13 +298,17 @@ enum Intent<'a> {
         /// Recognizes a retry with the same source units; nothing replays them.
         source_units: Option<intent_rows::IntentRows>,
         device_sections: Option<Cow<'a, device_store::sections::FrozenBackupSections>>,
+        /// Fixed settings and permissions do not advance device_revision.
+        device_settings_digest: Option<String>,
         device_changes: Cow<'a, [(UnitKey, UnitValue)]>,
     },
     Target {
+        device_revision: i64,
         staging_id: String,
         changes: intent_rows::IntentRows,
     },
     NewDevice {
+        device_revision: i64,
         authorization_id: String,
         staging_id: String,
         changes: Vec<Change>,
@@ -319,6 +328,7 @@ enum Intent<'a> {
         incoming: Option<Change>,
     },
     Switch {
+        device_revision: i64,
         change: super::sync_selection::BindingSelectionChange,
         new_authority: DecimalU64,
     },
@@ -330,9 +340,51 @@ pub(crate) struct QuarantinedIntent {
     pub(crate) request_id: String,
     pub(crate) kind: String,
     pub(crate) error: String,
+    pub(crate) token: String,
+    pub(crate) discardable: bool,
+    pub(crate) recoverable: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QuarantineDisposition { Delete, KeepReceipt, Unfinished }
+
+fn quarantine_disposition(library: &Connection, device: &Connection, request_id: &str, body: &str, digest: &str) -> StoreResult<QuarantineDisposition> {
+    let receipt: Option<(String,i64,Option<String>)> = library.query_row(
+        "SELECT digest,revision,activated_generation FROM lww_requests WHERE request_id=?1", [request_id],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).optional()?;
+    if let Some((committed_digest, revision, generation)) = receipt {
+        if committed_digest != digest || risunest_sync_wire::hash(body.as_bytes()) != digest { return Ok(QuarantineDisposition::Unfinished); }
+        return Ok(match serde_json::from_str::<Intent>(body) {
+            Ok(Intent::Commit { .. } | Intent::PluginClaim { .. } | Intent::PluginAssign { .. } | Intent::Archive { .. }) => QuarantineDisposition::Delete,
+            Ok(Intent::Replacement { staging_id, base_revision, device_sections: None, .. })
+                if base_revision.checked_add(1) == Some(revision) && generation.as_deref() == Some(staging_id.as_str()) => QuarantineDisposition::KeepReceipt,
+            _ => QuarantineDisposition::Unfinished,
+        });
+    }
+    for db in [library, device] {
+        let applied: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM lww_units WHERE version=?1) OR EXISTS(SELECT 1 FROM lww_outbox WHERE version=?1)",
+            [request_id], |row| row.get(0),
+        )?;
+        if applied { return Ok(QuarantineDisposition::Unfinished); }
+    }
+    if device.query_row("SELECT EXISTS(SELECT 1 FROM lww_receive WHERE request_id=?1 AND applied=1)", [request_id], |row| row.get::<_,bool>(0))? {
+        return Ok(QuarantineDisposition::Unfinished);
+    }
+    Ok(QuarantineDisposition::Delete)
 }
 
 impl Intent<'_> {
+    fn device_revision(&self) -> Option<i64> {
+        match self {
+            Self::Replacement { device_revision, device_sections: Some(_), .. }
+            | Self::Target { device_revision, .. }
+            | Self::NewDevice { device_revision, .. }
+            | Self::Switch { device_revision, .. } => Some(*device_revision),
+            _ => None,
+        }
+    }
     /// Whether the completed row stays. A retry of these kinds with the same request id is
     /// answered from it; the others are answered from the library receipt.
     fn kept_after_completion(&self) -> bool {
@@ -352,6 +404,51 @@ pub(crate) struct CommitIntentInput(Intent<'static>);
 std::thread_local! {
     static BACKUP_CAPTURE_PINNED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BACKUP_CAPTURE_RELEASED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn device_revision(db: &Connection) -> StoreResult<i64> {
+    Ok(db.query_row("SELECT revision FROM device_meta WHERE singleton=1", [], |row| row.get(0))?)
+}
+
+fn intent_identity(authority: &str, stamp: &str, digest: &str) -> StoreResult<String> {
+    let body = serde_json::to_string(&(authority, stamp, digest))?;
+    #[cfg(test)]
+    crate::persistent_store::hash_work::observe("native_intent_identity", body.len());
+    Ok(risunest_sync_wire::hash(body.as_bytes()))
+}
+
+fn record_intent_identity(db: &Connection, request_id: &str) -> StoreResult<()> {
+    let (authority, stamp, digest): (String, String, String) = db.query_row(
+        "SELECT authority,stamp,digest FROM lww_intents WHERE request_id=?1", [request_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    )?;
+    db.execute("INSERT INTO lww_intent_proofs VALUES(?1,?2)", params![request_id,intent_identity(&authority,&stamp,&digest)?])?;
+    Ok(())
+}
+
+fn verify_device_intent_revision(db: &Connection, request_id: &str) -> StoreResult<()> {
+    let (body, digest): (String, String) = db.query_row("SELECT body,digest FROM lww_intents WHERE request_id=?1", [request_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    if risunest_sync_wire::hash(body.as_bytes()) != digest { return Err(error("request-id-integrity")); }
+    let intent: Intent = serde_json::from_str(&body)?;
+    if let Some(expected) = intent.device_revision() {
+        if device_revision(db)? != expected { return Err(error("intent-device-changed")); }
+    }
+    verify_replacement_local_settings(db, &intent)?;
+    Ok(())
+}
+
+fn verify_replacement_local_settings(db: &Connection, intent: &Intent) -> StoreResult<()> {
+    if let Intent::Replacement { device_sections, device_settings_digest, .. } = intent {
+        match (device_sections, device_settings_digest) {
+            (Some(_), Some(expected)) => {
+                if device_store::sections::replacement_local_settings_digest(db)? != *expected {
+                    return Err(error("intent-device-changed"));
+                }
+            }
+            (None, None) => {}
+            _ => return Err(error("request-id-integrity")),
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn authority(db: &Connection) -> StoreResult<DecimalU64> {
@@ -454,7 +551,7 @@ fn parent_keys(key: &UnitKey) -> StoreResult<Vec<UnitKey>> {
     let c = key.components();
     let p: Vec<&str> = c.iter().map(String::as_str).collect();
     match p[0] {
-        "character" | "group-members" | "archive" => {
+        "character" | "archive" => {
             Ok(vec![unit_key(&["exists", "character", p[1]])?])
         }
         "conversation" | "messages" => Ok(vec![
@@ -501,58 +598,54 @@ fn parent_status_in_generation(db: &Connection, key: &UnitKey, generation: Optio
     }
     Ok(if missing { "held" } else { "ready" })
 }
-/// Projects activated replacement units into the library. With `overrides`,
-/// the stage already holds every value it was captured from, so only those
-/// source-unit overrides, deletions and archive units are applied again, and
-/// each character detail they patch is written once.
+/// The stage already contains captured values; project source overrides,
+/// deletions and archives in dependency order, spooling pending detail patches.
 pub(super) fn project_replacement_units(
     tx: &Transaction<'_>, generation: &str, header: &Header, stamp: &Stamp,
-    changes: &[(UnitKey,UnitValue)], overrides: Option<&BTreeSet<UnitKey>>,
+    changes: &FrozenRows,
 ) -> StoreResult<()> {
-    let mut ordered=changes.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|(key,_)| match key.components()[0].as_str() {
-        "exists" if key.components()[1]!="conversation" => 0,
-        "exists" => 1,
-        "archive" => 2,
-        _ => 3,
-    });
-    let mut details=BTreeMap::<String,Value>::new();
-    for (key,value) in ordered {
-        if read_unit(tx,key)? != Some((stamp.clone(),value.clone())) { continue; }
-        let p=key.components();
-        let hard_delete=p[0]=="exists"&&matches!(value,UnitValue::Deleted);
-        match parent_status_in_generation(tx,key,Some(generation))? {
-            "retired" if !hard_delete => continue,
+    changes.db.execute_batch("CREATE TABLE IF NOT EXISTS detail_changes(id TEXT PRIMARY KEY,value TEXT NOT NULL); DELETE FROM detail_changes;")?;
+    changes.visit(true, |key, _, value, source_override| {
+        if read_unit(tx, &key)? != Some((stamp.clone(), value.clone())) { return Ok(()); }
+        let p = key.components();
+        let hard_delete = p[0] == "exists" && matches!(value, UnitValue::Deleted);
+        match parent_status_in_generation(tx, &key, Some(generation))? {
+            "retired" if !hard_delete => return Ok(()),
             "held" => {
-                tx.execute("INSERT INTO lww_receive_rows VALUES(?1,?2,?3,?4,'held')", params![header.request_id,key.as_str(),serde_json::to_string(stamp)?,serde_json::to_string(value)?])?;
-            }
-            _ if overrides.is_none_or(|overrides| matches!(value,UnitValue::Deleted)||p[0]=="archive"||overrides.contains(key)) => {
-                if let Some(id)=projection::character_detail_key(key) {
-                    let detail=match details.entry(id) {
-                        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-                        std::collections::btree_map::Entry::Vacant(entry) => {
-                            let detail=projection::character_detail(tx,generation,entry.key())?;
-                            entry.insert(detail)
-                        }
-                    };
-                    projection::patch_character_detail(tx,detail,key,value)?;
-                    continue;
-                }
-                if p[0]=="order"&&p[1]=="conversations" {
-                    if let Some(detail)=details.remove(&p[2]) { commit::put_character_detail(tx,generation,&detail)?; }
-                }
-                projection::apply(tx,generation,key,value)?;
+                tx.execute("INSERT INTO lww_receive_rows VALUES(?1,?2,?3,?4,'held')", params![header.request_id,key.as_str(),serde_json::to_string(stamp)?,serde_json::to_string(&value)?])?;
+                return Ok(());
             }
             _ => {}
         }
+        if !source_override && !matches!(value, UnitValue::Deleted) && p[0] != "archive" { return Ok(()); }
+        if let Some(id) = projection::character_detail_key(&key) {
+            let saved: Option<String> = changes.db.query_row("SELECT value FROM detail_changes WHERE id=?1", [&id], |row| row.get(0)).optional()?;
+            let mut detail = match saved { Some(saved) => serde_json::from_str(&saved)?, None => projection::character_detail(tx, generation, &id)? };
+            projection::patch_character_detail(tx, &mut detail, &key, &value)?;
+            changes.db.execute("INSERT INTO detail_changes VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET value=excluded.value", params![id,serde_json::to_string(&detail)?])?;
+        } else {
+            if p[0] == "order" && p[1] == "conversations" {
+                let saved: Option<String> = changes.db.query_row("SELECT value FROM detail_changes WHERE id=?1", [&p[2]], |row| row.get(0)).optional()?;
+                if let Some(saved) = saved {
+                    commit::put_character_detail(tx, generation, &serde_json::from_str(&saved)?)?;
+                    changes.db.execute("DELETE FROM detail_changes WHERE id=?1", [&p[2]])?;
+                }
+            }
+            projection::apply(tx, generation, &key, &value)?;
+        }
+        Ok(())
+    })?;
+    let mut details = changes.db.prepare("SELECT value FROM detail_changes ORDER BY id")?;
+    let mut rows = details.query([])?;
+    while let Some(row) = rows.next()? {
+        commit::put_character_detail(tx, generation, &serde_json::from_str(&row.get::<_,String>(0)?)?)?;
     }
-    for detail in details.values() { commit::put_character_detail(tx,generation,detail)?; }
     Ok(())
 }
 fn suppress_retired(db: &Connection, parent: &UnitKey) -> StoreResult<()> {
     let p = parent.components();
     let (condition,first,second)=match p[1].as_str(){
-        "character"=>("((json_extract(key,'$[0]') IN ('character','group-members','archive','conversation','messages') AND json_extract(key,'$[1]')=?1) OR (json_extract(key,'$[0]')='exists' AND json_extract(key,'$[1]')='conversation' AND json_extract(key,'$[2]')=?1) OR (json_extract(key,'$[0]')='order' AND json_extract(key,'$[1]')='conversations' AND json_extract(key,'$[2]')=?1))",p[2].as_str(),None),
+        "character"=>("((json_extract(key,'$[0]') IN ('character','archive','conversation','messages') AND json_extract(key,'$[1]')=?1) OR (json_extract(key,'$[0]')='exists' AND json_extract(key,'$[1]')='conversation' AND json_extract(key,'$[2]')=?1) OR (json_extract(key,'$[0]')='order' AND json_extract(key,'$[1]')='conversations' AND json_extract(key,'$[2]')=?1))",p[2].as_str(),None),
         "conversation"=>("json_extract(key,'$[0]') IN ('conversation','messages') AND json_extract(key,'$[1]')=?1 AND json_extract(key,'$[2]')=?2",p[2].as_str(),Some(p[3].as_str())),
         "preset"|"persona"=>("json_extract(key,'$[0]')=?2 AND json_extract(key,'$[1]')=?1",p[2].as_str(),Some(p[1].as_str())),
         other=>("json_extract(key,'$[0]')='record' AND json_extract(key,'$[1]')=?2 AND json_extract(key,'$[2]')=?1",p[2].as_str(),Some(other)),
@@ -668,7 +761,8 @@ impl PersistentStore {
         if !pinned { return Err(error("backup-capture-lease-required")); }
         Ok(reader.connection.query_row("SELECT revision FROM backup_device.device_meta WHERE singleton=1", [], |row| row.get(0))?)
     }
-    pub(crate) fn lww_backup_unit_values(&self, lease: &str) -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
+    pub(crate) fn lww_visit_backup_units(&self, lease: &str, probe: &dyn crate::local_backup::CancellationProbe,
+        emit: &mut dyn FnMut(UnitKey, UnitValue) -> StoreResult<()>) -> StoreResult<()> {
         let reader = self.revision_leases.get(lease).ok_or(StoreError::SnapshotReleased)?;
         if current_revision(&reader.connection)? != reader.target.revision
             || active_generation(&reader.connection)? != reader.target.generation
@@ -679,8 +773,13 @@ impl PersistentStore {
         let authority: DecimalU64 = wire(authority.try_into())?;
         let mut statement = reader.connection.prepare("SELECT key,stamp,value FROM lww_units ORDER BY key")?;
         let rows = statement.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?;
-        let mut values = BTreeMap::<UnitKey,(Stamp,UnitValue)>::new();
+        let scratch = crate::external_storage::leftovers::managed_scratch(&self.repository_root, "backup-units-")
+            .map_err(|error| StoreError::Store { message: error.to_string() })?;
+        let values = Connection::open(scratch.path().join("units.sqlite"))?;
+        values.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
+            CREATE TABLE units(key TEXT PRIMARY KEY,stamp TEXT NOT NULL,value TEXT NOT NULL); BEGIN")?;
         for row in rows {
+            if probe.is_cancelled() { return Err(error("cancelled")); }
             let (key,stamp,value) = row?;
             let key: UnitKey = wire(key.try_into())?;
             let stamp: Stamp = serde_json::from_str(&stamp)?;
@@ -692,23 +791,24 @@ impl PersistentStore {
                 crate::persistent_store::hash_work::validation(&value);
                 result
             })?;
-            if !projection::is_device(&key) { values.insert(key,(stamp,value)); }
+            if !projection::is_device(&key) { values.execute("INSERT INTO units VALUES(?1,?2,?3)",params![key.as_str(),serde_json::to_string(&stamp)?,serde_json::to_string(&value)?])?; }
         }
         let mut statement = reader.connection.prepare("SELECT rows.request_id,rows.key,rows.stamp,rows.value,proof.digest,proof.body FROM lww_receive_rows rows JOIN backup_device.lww_receive proof ON proof.request_id=rows.request_id WHERE rows.status IN ('held','deferred') AND proof.applied=1 AND proof.finished=1 AND proof.authority=?1 ORDER BY rows.request_id,rows.key")?;
         let rows = statement.query_map([authority.0.to_string()], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,String>(5)?)))?;
-        let mut proofs = BTreeMap::<String,StageReceive>::new();
+        let mut proof: Option<(String,StageReceive)> = None;
         for row in rows {
+            if probe.is_cancelled() { return Err(error("cancelled")); }
             let (request_id,key,stamp,value,digest,body) = row?;
-            if !proofs.contains_key(&request_id) {
+            if proof.as_ref().is_none_or(|(id,_)| id != &request_id) {
                 #[cfg(test)]
                 crate::persistent_store::hash_work::observe("native_backup_receive_proof", body.len());
                 if risunest_sync_wire::hash(body.as_bytes()) != digest { return Err(error("request-id-integrity")); }
                 let request: StageReceive = serde_json::from_str(&body)?;
                 if request.header.request_id != request_id || request.header.binding_authority != authority { return Err(error("request-id-integrity")); }
-                proofs.insert(request_id.clone(),request);
+                proof = Some((request_id.clone(),request));
             }
             let change = Change { key:wire(key.try_into())?, stamp:serde_json::from_str(&stamp)?, value:serde_json::from_str(&value)? };
-            let request = &proofs[&request_id];
+            let request = &proof.as_ref().unwrap().1;
             if !request.changes.contains(&change) || change.stamp.physical_ms > request.admitted_time_upper_ms { return Err(error("request-id-integrity")); }
             wire(change.stamp.validate())?;
             wire({
@@ -719,18 +819,33 @@ impl PersistentStore {
             })?;
             projection::validate_received(&reader.connection,&change.key,&change.value)?;
             if projection::is_device(&change.key) || parent_status(&reader.connection,&change.key)?=="retired" { continue; }
-            let decision = match values.get(&change.key) {
+            let previous: Option<(String,String)> = values.query_row("SELECT stamp,value FROM units WHERE key=?1",[change.key.as_str()],|row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+            let decision = match previous {
                 Some((stamp,value)) => wire({
-                    let result=compare_version(stamp,value,&change.stamp,&change.value);
+                    let stamp: Stamp = serde_json::from_str(&stamp)?;
+                    let value: UnitValue = serde_json::from_str(&value)?;
+                    let result=compare_version(&stamp,&value,&change.stamp,&change.value);
                     #[cfg(test)]
-                    crate::persistent_store::hash_work::comparison(value,&change.value,&result);
+                    crate::persistent_store::hash_work::comparison(&value,&change.value,&result);
                     result
                 })?,
                 None => LwwDecision::ApplyRemote,
             };
-            if decision==LwwDecision::ApplyRemote { values.insert(change.key,(change.stamp,change.value)); }
+            if decision==LwwDecision::ApplyRemote { values.execute("INSERT INTO units VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET stamp=excluded.stamp,value=excluded.value",params![change.key.as_str(),serde_json::to_string(&change.stamp)?,serde_json::to_string(&change.value)?])?; }
         }
-        Ok(values.into_iter().map(|(key,(_,value))|(key,value)).collect())
+        values.execute_batch("COMMIT")?;
+        let mut query = values.prepare("SELECT key,value FROM units ORDER BY key")?;
+        let mut rows = query.query([])?;
+        while let Some(row) = rows.next()? {
+            if probe.is_cancelled() { return Err(error("cancelled")); }
+            emit(wire(row.get::<_,String>(0)?.try_into())?,serde_json::from_str(&row.get::<_,String>(1)?)?)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn lww_backup_unit_values(&self, lease: &str) -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
+        let mut values = BTreeMap::new();
+        self.lww_visit_backup_units(lease, &crate::local_backup::NeverCancelled, &mut |key,value| { values.insert(key,value); Ok(()) })?;
+        Ok(values)
     }
     pub(crate) fn lww_activated_receipt(&self, request_id: &str) -> StoreResult<Option<(i64, String)>> {
         activated_receipt(&self.connection, request_id)
@@ -900,6 +1015,19 @@ impl PersistentStore {
     pub(crate) fn lww_clock_state(&self) -> StoreResult<ClockState> {
         clock_state(self.device_store()?.connection())
     }
+    fn intent_device_revision(&self, request_id: &str) -> StoreResult<i64> {
+        let db = self.device_store()?.connection();
+        let body: Option<String> = db.query_row("SELECT body FROM lww_intents WHERE request_id=?1", [request_id], |row| row.get(0)).optional()?;
+        match body {
+            Some(body) => serde_json::from_str::<Intent>(&body)?.device_revision().ok_or_else(|| error("request-id-integrity")),
+            None => device_revision(db),
+        }
+    }
+
+    fn verify_intent_device_revision(&self, request_id: &str) -> StoreResult<()> {
+        verify_device_intent_revision(self.device_store()?.connection(), request_id)
+    }
+
     fn reserve_intent(&mut self, header: &Header, intent: &Intent) -> StoreResult<(Stamp, String)> {
         validate_header(header)?;
         let body = serde_json::to_string(intent)?;
@@ -927,6 +1055,7 @@ impl PersistentStore {
             }
             serde_json::from_str(&stamp)?
         } else {
+            verify_replacement_local_settings(&tx, intent)?;
             let stamp = reserve_stamp(&tx)?;
             tx.execute(
                 "INSERT INTO lww_intents VALUES(?1,?2,?3,?4,?5,0)",
@@ -938,6 +1067,7 @@ impl PersistentStore {
                     digest
                 ],
             )?;
+            record_intent_identity(&tx, &header.request_id)?;
             stamp
         };
         tx.commit()?;
@@ -956,6 +1086,7 @@ impl PersistentStore {
         }
         tx.execute("DELETE FROM lww_intent_rows WHERE request_id=?1", [&header.request_id])?;
         tx.execute("DELETE FROM lww_intent_failures WHERE request_id=?1", [&header.request_id])?;
+        tx.execute("DELETE FROM lww_intent_proofs WHERE request_id=?1", [&header.request_id])?;
         tx.commit()?;
         Ok(())
     }
@@ -1105,6 +1236,7 @@ impl PersistentStore {
         let rows: Vec<(String, String, String, String, String)> = {
             let db = self.device_store()?.connection();
             intent_rows::delete_settled(db)?;
+            db.execute("DELETE FROM lww_intent_proofs WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0)", [])?;
             db.execute("DELETE FROM lww_intent_failures WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0)", [])?;
             let mut s=db.prepare("SELECT request_id,authority,stamp,body,digest FROM lww_intents i WHERE complete=0 AND NOT EXISTS(SELECT 1 FROM lww_intent_failures f WHERE f.request_id=i.request_id AND f.quarantined=1) ORDER BY rowid")?;
             let v = s
@@ -1154,6 +1286,7 @@ impl PersistentStore {
         };
         let stamp = serde_json::from_str(stamp)?;
         let intent = serde_json::from_str::<Intent>(body)?;
+        if risunest_sync_wire::hash(body.as_bytes()) != digest { return Err(error("request-id-integrity")); }
         let keep = intent.kept_after_completion();
         if let Intent::NewDevice {
             staging_id,
@@ -1180,6 +1313,7 @@ impl PersistentStore {
         if let Intent::Switch {
             change,
             new_authority,
+            ..
         } = intent
         {
             return self.finish_lww_switch(&header, &change, new_authority, digest);
@@ -1228,14 +1362,56 @@ impl PersistentStore {
     pub(crate) fn lww_quarantined_intents(&self) -> StoreResult<Vec<QuarantinedIntent>> {
         let db = self.device_store()?.connection();
         let mut statement = db.prepare(
-            "SELECT f.request_id,coalesce(CASE WHEN json_valid(i.body) THEN CAST(json_extract(i.body,'$.kind') AS TEXT) END,''),f.error
+            "SELECT i.request_id,coalesce(CASE WHEN json_valid(i.body) THEN CAST(json_extract(i.body,'$.kind') AS TEXT) END,''),f.error,
+             json_array(i.authority,i.stamp,i.body,i.digest,i.complete,f.failures,f.error,f.quarantined),i.body,i.digest
              FROM lww_intent_failures f JOIN lww_intents i ON i.request_id=f.request_id
              WHERE f.quarantined=1 AND i.complete=0 ORDER BY i.rowid",
         )?;
-        let intents = statement
-            .query_map([], |r| Ok(QuarantinedIntent { request_id: r.get(0)?, kind: r.get(1)?, error: r.get(2)? }))?
-            .collect::<Result<_, _>>()?;
+        let mut rows = statement.query([])?;
+        let mut intents = Vec::new();
+        while let Some(row) = rows.next()? {
+            let request_id: String = row.get(0)?;
+            let identity: String = row.get(3)?;
+            let body: String = row.get(4)?;
+            let digest: String = row.get(5)?;
+            let disposition = quarantine_disposition(&self.connection, db, &request_id, &body, &digest)?;
+            intents.push(QuarantinedIntent {
+                recoverable: disposition == QuarantineDisposition::Unfinished && self.validate_quarantined_completion(&request_id).is_ok(),
+                request_id, kind: row.get(1)?, error: row.get(2)?, token: risunest_sync_wire::hash(identity.as_bytes()),
+                discardable: disposition != QuarantineDisposition::Unfinished,
+            });
+        }
         Ok(intents)
+    }
+    pub(crate) fn lww_discard_quarantined_intent(&mut self, request_id: &str, expected_token: &str, expected_revision: i64) -> StoreResult<bool> {
+        let actual = current_revision(&self.connection)?;
+        if actual != expected_revision { return Err(StoreError::RevisionConflict { expected: expected_revision, actual }); }
+        let library = &self.connection;
+        let device = self.device_store.as_mut().map_err(|failure| error(failure))?;
+        let tx = device.transaction()?;
+        let record: Option<(bool, Option<bool>, Option<String>, String, String)> = tx.query_row(
+            "SELECT i.complete,f.quarantined,CASE WHEN f.request_id IS NOT NULL THEN json_array(i.authority,i.stamp,i.body,i.digest,i.complete,f.failures,f.error,f.quarantined) END,i.body,i.digest
+             FROM lww_intents i LEFT JOIN lww_intent_failures f ON f.request_id=i.request_id WHERE i.request_id=?1",
+            [request_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+        ).optional()?;
+        let Some((complete, quarantined, identity, body, digest)) = record else { return Ok(false); };
+        if complete { return Ok(false); }
+        if quarantined != Some(true) || identity.as_ref().map(|identity| risunest_sync_wire::hash(identity.as_bytes())).as_deref() != Some(expected_token) {
+            return Err(error("stale-quarantined-intent"));
+        }
+        let disposition = quarantine_disposition(library, &tx, request_id, &body, &digest)?;
+        if disposition == QuarantineDisposition::Unfinished { return Err(error("intent-partially-applied")); }
+        tx.execute("DELETE FROM lww_intent_rows WHERE request_id=?1", [request_id])?;
+        tx.execute("DELETE FROM lww_intent_failures WHERE request_id=?1", [request_id])?;
+        tx.execute("DELETE FROM lww_intent_proofs WHERE request_id=?1", [request_id])?;
+        if disposition == QuarantineDisposition::KeepReceipt {
+            tx.execute("UPDATE lww_intents SET complete=1 WHERE request_id=?1", [request_id])?;
+        } else {
+            tx.execute("DELETE FROM lww_intents WHERE request_id=?1", [request_id])?;
+        }
+        tx.commit()?;
+        self.invalidate_message_object_roots();
+        Ok(true)
     }
     fn lww_request_recorded(&self, request_id: &str) -> StoreResult<bool> {
         Ok(self.connection.query_row(
@@ -1282,28 +1458,27 @@ impl PersistentStore {
                 device_changes,
                 ..
             } => {
-                let (changes, overrides) =
+                let changes =
                     intent_rows::read_replacement(self.device_store()?.connection(), &header.request_id, &changes)?;
                 if let Some(sections) = device_sections {
-                    self.finish_lww_device_replacement(&header, &staging_id, &changes, &overrides, &sections, &device_changes, &stamp, &digest)?;
+                    self.finish_lww_device_replacement(&header, &staging_id, &changes, &sections, &device_changes, &stamp, &digest)?;
                 } else {
-                    self.finish_lww_replacement(&header, &staging_id, &changes, &overrides, &stamp, &digest, false, &[])?;
+                    self.finish_lww_replacement(&header, &staging_id, &changes, &stamp, &digest, false)?;
                 }
             }
             Intent::Target {
                 staging_id,
                 changes,
+                ..
             } => {
                 let changes = intent_rows::read_target(self.device_store()?.connection(), &header.request_id, &changes)?;
                 self.finish_lww_replacement(
                     &header,
                     &staging_id,
-                    &[],
-                    &BTreeSet::new(),
+                    &changes,
                     &stamp,
                     &digest,
                     true,
-                    &changes,
                 )?;
             }
             Intent::Archive {
@@ -1440,6 +1615,7 @@ impl PersistentStore {
                 .ok_or_else(|| error("binding-authority-exhausted"))?,
         );
         let intent = Intent::Switch {
+            device_revision: self.intent_device_revision(&header.request_id)?,
             change: change.clone(),
             new_authority,
         };
@@ -1472,13 +1648,13 @@ impl PersistentStore {
         new: DecimalU64,
         digest: &str,
     ) -> StoreResult<()> {
+        self.verify_intent_device_revision(&header.request_id)?;
         let current = self.lww_binding_authority()?;
         if current != header.binding_authority && current != new {
             return Err(error("binding-authority-changed"));
         }
         let retain = super::sync_selection::switch_retains_binding_state(&self.connection, &header.request_id)?;
-        // The device commit below drops unfinished receives. Until it does, their ids stay readable,
-        // so a replay after a stop between the two commits removes the same library rows.
+        // The receipt keeps later library edits out of the reset on a device-side retry.
         let dropped = if retain {
             unfinished_receives(self.device_store()?.connection(), header.binding_authority)?
         } else {
@@ -1487,24 +1663,33 @@ impl PersistentStore {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let receipt: Option<String> = tx.query_row("SELECT digest FROM lww_requests WHERE request_id=?1", [&header.request_id], |row| row.get(0)).optional()?;
+        if receipt.as_ref().is_some_and(|old| old != digest) { return Err(error("request-id-integrity")); }
         super::sync_selection::apply_binding_selection(&tx, change)?;
-        tx.execute("DELETE FROM lww_initial_publication", [])?;
-        if change.initial_publication {
-            tx.execute("INSERT INTO lww_initial_publication VALUES(1,?1)", [new.0.to_string()])?;
-        }
-        if retain {
-            carry_units(&tx, header.binding_authority, new)?;
-            for request_id in &dropped {
-                tx.execute("DELETE FROM lww_receive_rows WHERE request_id=?1", [request_id])?;
+        if receipt.is_none() {
+            tx.execute("DELETE FROM lww_initial_publication", [])?;
+            if change.initial_publication {
+                tx.execute("INSERT INTO lww_initial_publication VALUES(1,?1)", [new.0.to_string()])?;
             }
+            if retain {
+                carry_units(&tx, header.binding_authority, new)?;
+                for request_id in &dropped {
+                    tx.execute("DELETE FROM lww_receive_rows WHERE request_id=?1", [request_id])?;
+                }
+            } else {
+                tx.execute("DELETE FROM lww_outbox", [])?;
+                tx.execute("DELETE FROM lww_receive_rows", [])?;
+            }
+            tx.execute(
+                "INSERT INTO lww_requests(request_id,digest,revision) VALUES(?1,?2,?3)",
+                params![header.request_id, digest, current_revision(&tx)?],
+            )?;
+        } else if retain {
+            carry_units(&tx, header.binding_authority, new)?;
         } else {
-            tx.execute("DELETE FROM lww_outbox", [])?;
-            tx.execute("DELETE FROM lww_receive_rows", [])?;
+            // Only edits made after the recorded reset remain in this outbox.
+            tx.execute("UPDATE lww_outbox SET authority=?2 WHERE authority=?1", params![header.binding_authority.0.to_string(), new.0.to_string()])?;
         }
-        tx.execute(
-            "INSERT OR IGNORE INTO lww_requests(request_id,digest,revision) VALUES(?1,?2,?3)",
-            params![header.request_id, digest, current_revision(&tx)?],
-        )?;
         tx.commit()?;
         #[cfg(test)]
         if SWITCH_LIBRARY_COMMITTED.with(|stop| stop.replace(false)) {
@@ -1517,6 +1702,7 @@ impl PersistentStore {
         if active != header.binding_authority && active != new {
             return Err(error("binding-authority-changed"));
         }
+        verify_device_intent_revision(&tx, &header.request_id)?;
         tx.execute(
             "UPDATE lww_clock SET binding_authority=?1 WHERE singleton=1",
             [new.0.to_string()],
@@ -1536,6 +1722,8 @@ impl PersistentStore {
             "UPDATE lww_intents SET complete=1 WHERE request_id=?1",
             [&header.request_id],
         )?;
+        tx.execute("DELETE FROM lww_intent_failures WHERE request_id=?1", [&header.request_id])?;
+        tx.execute("DELETE FROM lww_intent_proofs WHERE request_id=?1", [&header.request_id])?;
         tx.commit()?;
         Ok(())
     }
@@ -1569,6 +1757,20 @@ impl PersistentStore {
         limit: usize,
     ) -> StoreResult<OutboxPage> {
         self.lww_read_outbox_generating(expected, limit, &[])
+    }
+    /// Units waiting to be published, selected as `lww_read_outbox` selects them.
+    pub(crate) fn lww_outbox_count(&self, expected: DecimalU64) -> StoreResult<u64> {
+        verify(self.device_store()?.connection(), expected)?;
+        let participates = projection::plugin_participates(self.device_store()?.connection())?;
+        let mut count = 0;
+        for db in [&self.connection, self.device_store()?.connection()] {
+            count += db.query_row(
+                "SELECT COUNT(*) FROM lww_outbox WHERE authority=?1 AND (?2 OR json_extract(key,'$[0]')<>'plugin-local')",
+                params![expected.0.to_string(), participates],
+                |r| r.get::<_, i64>(0),
+            )? as u64;
+        }
+        Ok(count)
     }
     pub(crate) fn lww_read_outbox_generating(
         &self,
@@ -2285,6 +2487,7 @@ impl PersistentStore {
                 digest
             ],
         )?;
+        record_intent_identity(&tx, &header.request_id)?;
         tx.commit()?;
         self.finish_lww_repair(header, &stamp, &entries)?;
         self.complete_intent(header, intent.kept_after_completion())?;
@@ -2334,21 +2537,32 @@ impl PersistentStore {
                 .path()
                 .is_some_and(|p| p.ends_with(device_store::DEVICE_DATABASE_FILE));
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if device { verify(&tx, header.binding_authority)?; }
             for entry in entries {
                 if projection::is_device(&entry.key) != device {
                     continue;
                 }
-                let row: Option<(String, String)> = tx
+                let row: Option<(String, String, String, String)> = tx
                     .query_row(
-                        "SELECT version,stamp FROM lww_outbox WHERE key=?1",
+                        "SELECT version,stamp,value,authority FROM lww_outbox WHERE key=?1",
                         [entry.key.as_str()],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                     )
                     .optional()?;
-                if row == Some((header.request_id.clone(), serde_json::to_string(stamp)?)) {
+                let Some((version, current_stamp, value, authority)) = row else { return Err(error("unpublished-version-changed")); };
+                let unit: Option<(String, String, String)> = tx.query_row(
+                    "SELECT version,stamp,value FROM lww_units WHERE key=?1", [entry.key.as_str()],
+                    |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+                ).optional()?;
+                if authority != header.binding_authority.0.to_string() || entry.target_authority != header.binding_authority
+                    || serde_json::from_str::<UnitValue>(&value)? != entry.value
+                    || unit != Some((version.clone(), current_stamp.clone(), value)) {
+                    return Err(error("unpublished-version-changed"));
+                }
+                if version == header.request_id && current_stamp == serde_json::to_string(stamp)? {
                     continue;
                 }
-                if row != Some((entry.version.clone(), serde_json::to_string(&entry.stamp)?)) {
+                if version != entry.version || current_stamp != serde_json::to_string(&entry.stamp)? {
                     return Err(error("unpublished-version-changed"));
                 }
                 put_unit(
@@ -2524,38 +2738,41 @@ impl PersistentStore {
         }
         let generation = active_generation(&self.connection)?;
         let tx = self.connection.transaction()?;
-        let (changes, overrides) = replacement_changes(&tx, &generation, staging_id, effective_source)?;
+        let changes = replacement_changes(&tx, &generation, staging_id, effective_source)?;
         tx.commit()?;
-        let device_changes = if let Some(sections) = device_sections {
+        let (device_changes, device_settings_digest) = if let Some(sections) = device_sections {
             let tx = self.device_store_mut()?.transaction()?;
             verify(&tx, header.binding_authority)?;
             let changes = projection::device_replacement_changes(&tx, sections)?;
+            let settings_digest = device_store::sections::replacement_local_settings_digest(&tx)?;
             tx.commit()?;
-            changes
-        } else { vec![] };
+            (changes, Some(settings_digest))
+        } else { (vec![], None) };
         let staging_digest = binding_stage::catalog_digest(&self.connection, staging_id)?;
         let rows = intent_rows::write(
             &mut self.device_store_mut()?.connection,
             &header.request_id,
             "changes",
-            changes.iter().map(|(key, value)| intent_rows::replacement_row(key, value, overrides.contains(key))),
+            changes.texts(),
         )?;
         let (stamp, digest) = self.reserve_intent(
             header,
             &Intent::Replacement {
+                device_revision: device_revision(self.device_store()?.connection())?,
                 staging_id: staging_id.into(),
                 base_revision,
                 staging_digest,
                 changes: rows,
                 source_units: source,
                 device_sections: device_sections.map(Cow::Borrowed),
+                device_settings_digest,
                 device_changes: Cow::Borrowed(&device_changes),
             },
         )?;
         let result = if let Some(sections) = device_sections {
-            self.finish_lww_device_replacement(header, staging_id, &changes, &overrides, sections, &device_changes, &stamp, &digest)?
+            self.finish_lww_device_replacement(header, staging_id, &changes, sections, &device_changes, &stamp, &digest)?
         } else {
-            let result = self.finish_lww_replacement(header, staging_id, &changes, &overrides, &stamp, &digest, false, &[])?;
+            let result = self.finish_lww_replacement(header, staging_id, &changes, &stamp, &digest, false)?;
             self.complete_intent(header, true)?;
             result
         };
@@ -2565,17 +2782,18 @@ impl PersistentStore {
         &mut self,
         header: &Header,
         staging_id: &str,
-        changes: &[(UnitKey, UnitValue)],
-        overrides: &BTreeSet<UnitKey>,
+        changes: &FrozenRows,
         sections: &device_store::sections::FrozenBackupSections,
         device_changes: &[(UnitKey, UnitValue)],
         stamp: &Stamp,
         digest: &str,
     ) -> StoreResult<RevisionResult> {
+        self.verify_intent_device_revision(&header.request_id)?;
         verify(self.device_store()?.connection(), header.binding_authority)?;
-        let result = self.finish_lww_replacement(header, staging_id, changes, overrides, stamp, digest, false, &[])?;
+        let result = self.finish_lww_replacement(header, staging_id, changes, stamp, digest, false)?;
         let tx = self.device_store_mut()?.transaction()?;
         verify(&tx, header.binding_authority)?;
+        verify_device_intent_revision(&tx, &header.request_id)?;
         device_store::begin_mutation_remote(&tx)?;
         device_store::sections::restore_frozen_backup_sections(&tx, sections, stamp)?;
         for (key, value) in device_changes {
@@ -2584,6 +2802,8 @@ impl PersistentStore {
         device_store::finish_mutation_remote(&tx)?;
         tx.execute("UPDATE lww_intents SET complete=1 WHERE request_id=?1", [&header.request_id])?;
         tx.execute("DELETE FROM lww_intent_rows WHERE request_id=?1", [&header.request_id])?;
+        tx.execute("DELETE FROM lww_intent_failures WHERE request_id=?1", [&header.request_id])?;
+        tx.execute("DELETE FROM lww_intent_proofs WHERE request_id=?1", [&header.request_id])?;
         tx.commit()?;
         Ok(result)
     }
@@ -2593,14 +2813,22 @@ impl PersistentStore {
         staging_id: &str,
         changes: &[Change],
     ) -> StoreResult<RevisionResult> {
+        let rows = FrozenRows::new()?;
+        for change in changes { rows.insert(intent_rows::target_row(change)?)?; }
+        self.lww_replace_target_rows(header, staging_id, &rows)
+    }
+    pub(super) fn lww_replace_target_rows(
+        &mut self, header: &Header, staging_id: &str, changes: &FrozenRows,
+    ) -> StoreResult<RevisionResult> {
         let issued: bool = self.device_store()?.connection().query_row(
             "SELECT EXISTS(SELECT 1 FROM lww_intents WHERE request_id=?1)", [&header.request_id], |row| row.get(0),
         )?;
         if issued {
             // Only a retry needs the digest of rows it does not store again.
             let intent = Intent::Target {
+                device_revision: self.intent_device_revision(&header.request_id)?,
                 staging_id: staging_id.into(),
-                changes: intent_rows::digest("target", changes.iter().map(intent_rows::target_row))?,
+                changes: intent_rows::digest("target", changes.texts())?,
             };
             if let Some(result) = self.completed_intent(header, &intent)? {
                 return Ok(result);
@@ -2613,27 +2841,22 @@ impl PersistentStore {
             self.lww_recover_intents()?;
         }
         verify(self.device_store()?.connection(), header.binding_authority)?;
-        for c in changes {
-            wire({
-                let result = c.value.validate();
-                #[cfg(test)]
-                crate::persistent_store::hash_work::validation(&c.value);
-                result
-            })?;
-            wire(c.stamp.validate())?;
-            projection::validate_received(&self.connection, &c.key, &c.value)?;
-        }
-        validate_binding_source(&self.connection, staging_id, header, changes)?;
+        changes.visit(false, |key, stamp, value, _| {
+            wire(value.validate())?;
+            wire(stamp.ok_or_else(|| error("request-id-integrity"))?.validate())?;
+            projection::validate_received(&self.connection, &key, &value)
+        })?;
+        binding_stage::validate_binding_source_rows(&self.connection, staging_id, header, changes)?;
         let rows = intent_rows::write(
             &mut self.device_store_mut()?.connection,
             &header.request_id,
             "target",
-            changes.iter().map(intent_rows::target_row),
+            changes.texts(),
         )?;
-        let intent = Intent::Target { staging_id: staging_id.into(), changes: rows };
+        let intent = Intent::Target { device_revision: device_revision(self.device_store()?.connection())?, staging_id: staging_id.into(), changes: rows };
         let (stamp, digest) = self.reserve_intent(header, &intent)?;
         let result = self.finish_lww_replacement(
-            header, staging_id, &[], &BTreeSet::new(), &stamp, &digest, true, changes,
+            header, staging_id, changes, &stamp, &digest, true,
         )?;
         self.complete_intent(header, intent.kept_after_completion())?;
         Ok(result)
@@ -2642,13 +2865,12 @@ impl PersistentStore {
         &mut self,
         header: &Header,
         staging_id: &str,
-        changes: &[(UnitKey, UnitValue)],
-        overrides: &BTreeSet<UnitKey>,
+        changes: &FrozenRows,
         stamp: &Stamp,
         digest: &str,
         target: bool,
-        received: &[Change],
     ) -> StoreResult<RevisionResult> {
+        if target { self.verify_intent_device_revision(&header.request_id)?; }
         let proof = if target { None } else {
             let body: String = self.device_store()?.connection().query_row(
                 "SELECT body FROM lww_intents WHERE request_id=?1", [&header.request_id], |row| row.get(0),
@@ -2660,7 +2882,7 @@ impl PersistentStore {
             if original != staging_id { return Err(error("request-id-integrity")); }
             Some((base_revision, staging_digest))
         };
-        let result = commit::replace_commit_lww(
+        let result = commit::replace_commit_lww_rows(
             &mut self.connection,
             staging_id,
             header,
@@ -2668,20 +2890,26 @@ impl PersistentStore {
             digest,
             changes,
             target,
-            received,
             None,
             None,
             proof.as_ref().map(|(base_revision, staging_digest)| commit::ReplacementProof {
                 base_revision: *base_revision,
                 staging_digest,
-                overrides,
             }),
         )?;
         if target {
-            self.copy_device_unit_bodies(received)?;
+            changes.visit(false, |key, stamp, value, _| {
+                let change = Change { key, stamp: stamp.ok_or_else(|| error("request-id-integrity"))?, value };
+                self.copy_device_unit_bodies(std::iter::once(&change))
+            })?;
             let tx = self.device_store_mut()?.transaction()?;
             verify(&tx, header.binding_authority)?;
-            reset_target_device(&tx, header, received, header.binding_authority)?;
+            verify_device_intent_revision(&tx, &header.request_id)?;
+            reset_target_device_rows(&tx, header, changes, header.binding_authority)?;
+            tx.execute("UPDATE lww_intents SET complete=1 WHERE request_id=?1", [&header.request_id])?;
+            tx.execute("DELETE FROM lww_intent_rows WHERE request_id=?1", [&header.request_id])?;
+            tx.execute("DELETE FROM lww_intent_failures WHERE request_id=?1", [&header.request_id])?;
+            tx.execute("DELETE FROM lww_intent_proofs WHERE request_id=?1", [&header.request_id])?;
             tx.commit()?;
         }
         Ok(result)
@@ -2692,41 +2920,44 @@ impl PersistentStore {
 fn archived_character(key: &UnitKey) -> Option<String> {
     let mut p = key.components();
     match p[0].as_str() {
-        "character" | "group-members" | "conversation" | "messages" => Some(p.swap_remove(1)),
+        "character" | "conversation" | "messages" => Some(p.swap_remove(1)),
         "exists" if p[1] == "conversation" => Some(p.swap_remove(2)),
         "order" if p[1] == "conversations" => Some(p.swap_remove(2)),
         _ => None,
     }
 }
 
-/// The changes that make the active library's units those of the stage with
-/// the source units applied, sorted by key, and the changed keys whose source
-/// unit replaced the staged value. Both libraries are captured one character
-/// at a time and merged in key order, so besides the returned changes only one
-/// character's units and the set of captured keys are held at once. Incremental
-/// commits keep the active
-/// manifests current, and staging pages each conversation once all of its
-/// messages are written, so captures read stored manifests.
+/// Capture one record at a time and spool inputs, differences, overrides and
+/// membership to disk. Stored message manifests keep captures independent of
+/// message bodies, and replay retains the same key order and frozen digest.
 fn replacement_changes(
     tx: &Transaction<'_>,
     active: &str,
     staging_id: &str,
     source: Option<SourceLayer<'_>>,
-) -> StoreResult<(Vec<(UnitKey, UnitValue)>, BTreeSet<UnitKey>)> {
+) -> StoreResult<FrozenRows> {
     let sourced = |key: &UnitKey| -> StoreResult<Option<UnitValue>> {
         source.map(|source| replacement_source::get(tx, source, key)).transpose().map(Option::flatten)
     };
-    let mut changes = Vec::new();
-    let mut overrides = BTreeSet::new();
-    let mut captured = BTreeSet::new();
-    let mut staged_archives = BTreeSet::new();
-    let archived = |staged_archives: &BTreeSet<String>, id: &str| -> StoreResult<bool> {
+    let changes = FrozenRows::new()?;
+    changes.db.execute_batch("CREATE TABLE captured(key TEXT PRIMARY KEY,before_value TEXT,staged_value TEXT);")?;
+    for (generation, column) in [(active, "before_value"), (staging_id, "staged_value")] {
+        let sql = format!("INSERT INTO captured(key,{column}) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET {column}=excluded.{column}");
+        projection::visit_generation_units(tx, generation, |key, value| {
+            changes.db.execute(&sql, params![key.as_str(),serde_json::to_string(&value)?])?;
+            Ok(())
+        })?;
+    }
+    let archived = |id: &str| -> StoreResult<bool> {
         Ok(match sourced(&unit_key(&["archive", id])?)? {
             Some(value) => matches!(value, UnitValue::Object { .. }),
-            None => staged_archives.contains(id),
+            None => {
+                let value: Option<Option<String>> = changes.db.query_row("SELECT staged_value FROM captured WHERE key=?1", [unit_key(&["archive", id])?.as_str()], |row| row.get(0)).optional()?;
+                value.flatten().map(|value| serde_json::from_str::<UnitValue>(&value)).transpose()?.is_some_and(|value| matches!(value, UnitValue::Object { .. }))
+            },
         })
     };
-    let mut decide = |key: UnitKey, before: Option<&UnitValue>, staged: Option<&UnitValue>, skip: bool| -> StoreResult<()> {
+    let decide = |key: UnitKey, before: Option<&UnitValue>, staged: Option<&UnitValue>, skip: bool| -> StoreResult<()> {
         let source_value = sourced(&key)?;
         if skip && source_value.is_none() {
             return Ok(());
@@ -2740,87 +2971,45 @@ fn replacement_changes(
             .or_else(|| before.cloned())
             .unwrap_or(UnitValue::Deleted);
         if prior != value {
-            if source_value.is_some() && staged != source_value.as_ref() {
-                overrides.insert(key.clone());
-            }
-            changes.push((key, value));
+            changes.insert(intent_rows::replacement_row(&key, &value, source_value.is_some() && staged != source_value.as_ref())?)?;
         }
         Ok(())
     };
-    let ids = projection::character_ids(tx, active)?
-        .into_iter()
-        .chain(projection::character_ids(tx, staging_id)?)
-        .collect::<BTreeSet<_>>();
-    let mut segments = ids.into_iter().map(Some).collect::<Vec<_>>();
-    segments.push(None);
-    for segment in segments {
-        let (before, staged) = match &segment {
-            Some(id) => (
-                projection::capture_character_units(tx, active, id)?,
-                projection::capture_character_units(tx, staging_id, id)?,
-            ),
-            None => (projection::capture_shared(tx, active)?, projection::capture_shared(tx, staging_id)?),
-        };
-        if let Some(id) = &segment {
-            if staged.get(&unit_key(&["archive", id])?).is_some_and(|value| matches!(value, UnitValue::Object { .. })) {
-                staged_archives.insert(id.clone());
-            }
-        }
-        let (mut before, mut staged) = (before.into_iter().peekable(), staged.into_iter().peekable());
-        loop {
-            let order = match (before.peek(), staged.peek()) {
-                (None, None) => break,
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (Some((old, _)), Some((new, _))) => old.cmp(new),
-            };
-            let (old, new) = match order {
-                std::cmp::Ordering::Less => (before.next(), None),
-                std::cmp::Ordering::Greater => (None, staged.next()),
-                std::cmp::Ordering::Equal => (before.next(), staged.next()),
-            };
-            let key = old.as_ref().or(new.as_ref()).map(|(key, _)| key.clone()).expect("one side has a key");
-            let skip = match archived_character(&key) {
-                Some(id) => archived(&staged_archives, &id)?,
-                None => false,
-            };
-            captured.insert(key.clone());
-            decide(key, old.as_ref().map(|(_, value)| value), new.as_ref().map(|(_, value)| value), skip)?;
-        }
+    let mut captured = changes.db.prepare("SELECT key,before_value,staged_value FROM captured ORDER BY key")?;
+    let mut captured_rows = captured.query([])?;
+    while let Some(row) = captured_rows.next()? {
+        let key: UnitKey = wire(row.get::<_,String>(0)?.try_into())?;
+        let before = row.get::<_,Option<String>>(1)?.map(|value| serde_json::from_str::<UnitValue>(&value)).transpose()?;
+        let staged = row.get::<_,Option<String>>(2)?.map(|value| serde_json::from_str::<UnitValue>(&value)).transpose()?;
+        let skip = archived_character(&key).map(|id| archived(&id)).transpose()?.unwrap_or(false);
+        decide(key, before.as_ref(), staged.as_ref(), skip)?;
     }
-    let mut rest = Vec::new();
+    drop(captured_rows);
+    drop(captured);
     for unit in source.into_iter().flat_map(|source| replacement_source::units(tx, source)) {
         let (key, _) = unit?;
-        if !captured.contains(&key) {
-            rest.push(key);
+        let captured: bool = changes.db.query_row("SELECT EXISTS(SELECT 1 FROM captured WHERE key=?1)", [key.as_str()], |row| row.get(0))?;
+        if !captured {
+            let skip = archived_character(&key).map(|id| archived(&id)).transpose()?.unwrap_or(false);
+            decide(key, None, None, skip)?;
         }
     }
-    {
-        let mut statement = tx.prepare("SELECT key FROM lww_units")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let key: UnitKey = wire(row.get::<_, String>(0)?.try_into())?;
-            if projection::known(&key) && !captured.contains(&key) && sourced(&key)?.is_none() {
-                rest.push(key);
-            }
+    let mut statement = tx.prepare("SELECT key FROM lww_units ORDER BY key")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let key: UnitKey = wire(row.get::<_, String>(0)?.try_into())?;
+        let captured: bool = changes.db.query_row("SELECT EXISTS(SELECT 1 FROM captured WHERE key=?1)", [key.as_str()], |row| row.get(0))?;
+        if projection::known(&key) && !captured && sourced(&key)?.is_none() {
+            let skip = archived_character(&key).map(|id| archived(&id)).transpose()?.unwrap_or(false);
+            decide(key, None, None, skip)?;
         }
     }
-    drop(captured);
-    for key in rest {
-        let skip = match archived_character(&key) {
-            Some(id) => archived(&staged_archives, &id)?,
-            None => false,
-        };
-        decide(key, None, None, skip)?;
-    }
-    changes.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok((changes, overrides))
+    Ok(changes)
 }
 
 #[cfg(test)]
 impl PersistentStore {
-    /// The replacement changes merged one character at a time and computed
-    /// from two whole-library maps.
+    /// Compare streamed replacement changes with the whole-library reference.
     pub(crate) fn replacement_change_sets(
         &mut self,
         staging_id: &str,
@@ -2831,7 +3020,13 @@ impl PersistentStore {
         }
         let generation = active_generation(&self.connection)?;
         let tx = self.connection.transaction()?;
-        let merged = replacement_changes(&tx, &generation, staging_id, source.map(|_| SourceLayer::staged(staging_id)))?;
+        let rows = replacement_changes(&tx, &generation, staging_id, source.map(|_| SourceLayer::staged(staging_id)))?;
+        let mut merged = (Vec::new(), BTreeSet::new());
+        rows.visit(false, |key, _, value, source_override| {
+            if source_override { merged.1.insert(key.clone()); }
+            merged.0.push((key, value));
+            Ok(())
+        })?;
         tx.commit()?;
         let whole = tests::whole_library_changes(&mut self.connection, &generation, staging_id, source)?;
         Ok([merged, whole])
@@ -2937,20 +3132,26 @@ fn reset_target_device(
     received: &[Change],
     binding: DecimalU64,
 ) -> StoreResult<()> {
+    let rows = FrozenRows::new()?;
+    for change in received { rows.insert(intent_rows::target_row(change)?)?; }
+    reset_target_device_rows(tx, header, &rows, binding)
+}
+fn reset_target_device_rows(tx: &Transaction<'_>, header: &Header, received: &FrozenRows, binding: DecimalU64) -> StoreResult<()> {
     tx.execute("DELETE FROM hypa_embeddings", [])?;
     tx.execute("DELETE FROM plugin_device_storage", [])?;
     tx.execute("DELETE FROM lww_units", [])?;
     tx.execute("DELETE FROM lww_outbox", [])?;
     tx.execute("DELETE FROM lww_receive_rows", [])?;
-    for c in received {
+    received.visit(false, |key, stamp, value, _| {
+        let c = Change { key, stamp: stamp.ok_or_else(|| error("request-id-integrity"))?, value };
         observe(tx, &c.stamp)?;
         if projection::is_device(&c.key) {
             projection::apply(tx, "", &c.key, &c.value)?;
             put_unit(tx, &c.key, &c.stamp, &c.value, &header.request_id, None)?;
-            witness_received(tx, c, binding)?;
+            witness_received(tx, &c, binding)?;
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -3246,7 +3447,7 @@ fn initialize_owner(
         return Ok(());
     }
     let (sql,parameters):(String,Vec<String>)=match kind {
-        "character"=>("SELECT key FROM lww_units WHERE json_extract(key,'$[0]') IN ('character','group-members','archive') AND json_extract(key,'$[1]')=?1 UNION ALL SELECT key FROM lww_units WHERE json_extract(key,'$[0]')='order' AND json_extract(key,'$[1]')='conversations' AND json_extract(key,'$[2]')=?1".into(),vec![first.into()]),
+        "character"=>("SELECT key FROM lww_units WHERE json_extract(key,'$[0]') IN ('character','archive') AND json_extract(key,'$[1]')=?1 UNION ALL SELECT key FROM lww_units WHERE json_extract(key,'$[0]')='order' AND json_extract(key,'$[1]')='conversations' AND json_extract(key,'$[2]')=?1".into(),vec![first.into()]),
         "conversation"=>("SELECT key FROM lww_units WHERE json_extract(key,'$[0]') IN ('conversation','messages') AND json_extract(key,'$[1]')=?1 AND json_extract(key,'$[2]')=?2".into(),vec![first.into(),second.unwrap().into()]),
         "preset"|"persona"=>("SELECT key FROM lww_units WHERE json_extract(key,'$[0]')=?1 AND json_extract(key,'$[1]')=?2".into(),vec![kind.into(),first.into()]),
         _=>("SELECT key FROM lww_units WHERE json_extract(key,'$[0]')='record' AND json_extract(key,'$[1]')=?1 AND json_extract(key,'$[2]')=?2".into(),vec![kind.into(),first.into()]),

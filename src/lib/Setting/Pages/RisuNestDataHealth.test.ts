@@ -13,10 +13,13 @@ const maintenance = vi.hoisted(() => ({
     applyNativeDataHealthRepair: vi.fn(),
     listNativeDataHealthJournals: vi.fn(),
     undoNativeDataHealthRepair: vi.fn(),
+    discardNativeDataHealthIntent: vi.fn(),
+    completeNativeDataHealthIntent: vi.fn(),
 }))
 const alerts = vi.hoisted(() => ({
     alertError: vi.fn(),
     alertNormal: vi.fn(),
+    alertCheckboxConfirm: vi.fn(),
 }))
 const files = vi.hoisted(() => ({ downloadFile: vi.fn() }))
 const repairRuntime = vi.hoisted(() => ({
@@ -155,6 +158,54 @@ describe('RisuNestDataHealth', () => {
         await settle()
         return target
     }
+
+    it.each([
+        { confirmed: false, checked: false },
+        { confirmed: true, checked: false },
+        { confirmed: true, checked: true },
+    ])('discards only the selected recovery record after one required checkbox confirmation: %o', async (confirmation) => {
+        const stored: DataHealthResult = { ...damaged, items: [{
+            code: 'intent-quarantined', severity: 'degraded', owner: { kind: 'intent', id: 'intent-a' },
+            locator: { sourcePath: 'immutable-token', occurrence: 0 }, target: { kind: 'intent', key: 'target' }, detail: 'synthetic failure', intentAction: 'discard',
+        }] }
+        const cleared = { ...stored, items: [], counts: { blocking: 0, degraded: 0, informational: 0 } }
+        alerts.alertCheckboxConfirm.mockResolvedValue(confirmation)
+        maintenance.discardNativeDataHealthIntent.mockResolvedValue({ discarded: true, result: cleared })
+        const target = await setup(stored, {}, [])
+        ;[...target.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.trim() === strings.discardIntent)!.click()
+        await settle()
+        expect(alerts.alertCheckboxConfirm).toHaveBeenCalledExactlyOnceWith({
+            title: strings.discardIntentTitle, description: strings.discardIntentDescription,
+            checkboxLabel: strings.discardIntentAcknowledge, actionLabel: strings.discardIntent,
+            cancelLabel: languageEnglish.cancel, requireChecked: true,
+        })
+        if (confirmation.confirmed && confirmation.checked) {
+            expect(maintenance.discardNativeDataHealthIntent).toHaveBeenCalledExactlyOnceWith(0, stored.revision, stored.scannedAt)
+            expect(target.querySelectorAll('[data-data-health-item]')).toHaveLength(0)
+        } else expect(maintenance.discardNativeDataHealthIntent).not.toHaveBeenCalled()
+        expect(maintenance.applyNativeDataHealthRepair).not.toHaveBeenCalled()
+        expect(repairRuntime.acquireDestructiveReplacementFence).not.toHaveBeenCalled()
+    })
+
+    it('offers completion only for native eligibility and refreshes through the mutation fence', async () => {
+        const stored: DataHealthResult = { ...damaged, items: [{
+            code: 'intent-quarantined', severity: 'degraded', owner: { kind: 'intent', id: 'partial' },
+            locator: { sourcePath: 'immutable-token', occurrence: 0 }, target: { kind: 'intent', key: 'target' }, detail: 'synthetic failure', intentAction: 'complete',
+        }] }
+        const cleared = { ...stored, items: [], counts: { blocking: 0, degraded: 0, informational: 0 } }
+        alerts.alertCheckboxConfirm.mockResolvedValue({ confirmed: true, checked: true })
+        maintenance.completeNativeDataHealthIntent.mockResolvedValue({ completed: true, revision: stored.revision, result: cleared })
+        const target = await setup(stored, {}, [])
+        const buttons = [...target.querySelectorAll<HTMLButtonElement>('button')]
+        expect(buttons.some(button => button.textContent?.trim() === strings.discardIntent)).toBe(false)
+        buttons.find(button => button.textContent?.trim() === strings.completeIntent)!.click()
+        await vi.waitFor(() => expect(maintenance.completeNativeDataHealthIntent).toHaveBeenCalled())
+        await settle()
+        expect(maintenance.completeNativeDataHealthIntent).toHaveBeenCalledExactlyOnceWith(0, stored.revision, stored.scannedAt)
+        expect(repairRuntime.acquireDestructiveReplacementFence).toHaveBeenCalledOnce()
+        expect(target.querySelectorAll('[data-data-health-item]')).toHaveLength(0)
+        expect(maintenance.discardNativeDataHealthIntent).not.toHaveBeenCalled()
+    })
 
     it('retries failed store preparation and keeps scans disabled until it succeeds', async () => {
         const prepare = vi.fn().mockRejectedValueOnce(new Error('synthetic open')).mockResolvedValueOnce(undefined)
@@ -335,7 +386,7 @@ describe('RisuNestDataHealth', () => {
         expect(onOpenUnusedImages).toHaveBeenCalledOnce()
     })
 
-    it('lists a change that was not applied with its own help and the error it stopped on', async () => {
+    it('lists an incomplete recovery record with its own help and the error it stopped on', async () => {
         const target = await setup({
             ...damaged,
             counts: { blocking: 0, degraded: 1, informational: 0 },

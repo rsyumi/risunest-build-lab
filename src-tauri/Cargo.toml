@@ -28,12 +28,11 @@ tauri = { version = "2.11.6", features = ["protocol-asset", "devtools"] }
 rusqlite = { version = "0.40.2", features = ["bundled", "backup", "blob"] }
 ryu-js = { version = "1.0.3", optional = true }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1.0", features = ["preserve_order"] }
+serde_json = { version = "1.0", features = ["preserve_order", "unbounded_depth"] }
 sha2 = "0.11.0"
 tiktoken-rs = "=0.12.1"
 base64 = "0.23.1"
 cap-primitives = "4.0.3"
-darling = "0.20.3"
 zip = "0.6.6"
 futures = "0.3.30"
 async-trait = "0.1"
@@ -95,6 +94,7 @@ tauri-plugin-updater = "2.12.0"
 tauri-plugin-window-state = "2"
 # 2.5 requires Tauri 2.12.
 tauri-plugin-notification = "~2.4.0"
+notify-rust = "=4.18.1"
 getrandom = "0.2.15"
 reqwest = { version = "0.12.28", features = ["blocking", "json"] }
 
@@ -102,6 +102,7 @@ reqwest = { version = "0.12.28", features = ["blocking", "json"] }
 regex = "1.13.1"
 
 [target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "=0.8.1"
 webview2-com = "0.38.2"
 windows = { version = "0.61.3", features = ["Win32_System_Com", "Win32_Graphics_Dwm", "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging"] }
 windows-sys = { version = "0.61", features = [

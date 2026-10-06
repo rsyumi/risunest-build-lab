@@ -192,10 +192,17 @@ def run_phase(app, phase, artifacts, fixtures, expected=None):
             if process.returncode != 0:
                 raise RuntimeError(f'{phase}: app exited {process.returncode}')
             result = records(report)
-            required = {phase: {phase}}[phase] if phase.startswith('appearance-') else {'termination-probe': {'termination-probe-cancel', 'termination-probe-reload', 'termination-probe-approved'}, 'contracts': {'persistence', 'regex', 'tokenizer', 'reload', 'closed', 'reopened', 'finder', 'quit-cancelled', 'quit-saved'}, 'restart': {'restart'}, 'app': {'app', 'app-native-saving', 'app-native-reload-cancelled', 'app-native-stale-rejected', 'app-native-saved', 'app-native-exit'}, 'app-restart': {'app-restart'}, 'streaming': {'streaming'}, 'quit-escape': {'quit-escape-armed', 'quit-escape-exit'}}[phase]
+            required = ({'session-dispatch-ready', 'session-dispatch-sent', 'session-dispatch-exit'}
+                        if phase.startswith('session-dispatch-') else
+                        {phase} if phase.startswith('appearance-') else
+                        {'session-upgrade': {'session-deadline-started', 'session-deadline-reply', 'session-deadline-exit'}, 'session-deadline': {'session-deadline-started', 'session-deadline-reply', 'session-deadline-exit'}, 'termination-probe': {'termination-probe-cancel', 'termination-probe-reload', 'termination-probe-approved'}, 'contracts': {'persistence', 'regex', 'tokenizer', 'reload', 'closed', 'reopened', 'finder', 'quit-cancelled', 'quit-saved'}, 'restart': {'restart'}, 'app': {'app', 'app-native-saving', 'app-native-reload-cancelled', 'app-native-stale-rejected', 'app-native-saved', 'app-native-exit'}, 'app-restart': {'app-restart'}, 'streaming': {'streaming'}, 'quit-escape': {'quit-escape-delivered', 'quit-escape-exit'}}[phase])
             stages = {entry['stage'] for entry in result}
             if not required <= stages or 'failure' in stages:
                 raise RuntimeError(f'{phase}: incomplete results {stages}')
+            if phase.startswith('session-dispatch-'):
+                from termination_dispatch import validate_dispatch
+                observation = validate_dispatch(phase, result)
+                (artifacts / f'{phase}-observation.json').write_text(json.dumps(observation, indent=2))
             if phase.startswith('appearance-'):
                 appearance = [entry['result'] for entry in result if entry['stage'] == phase]
                 theme = phase.rsplit('-', 1)[1]
@@ -380,23 +387,44 @@ def main():
     for fixture in fixtures:
         fixture.write_text('synthetic file association fixture')
     configured_phases = os.environ.get('RISUNEST_MACOS_PHASES')
-    phases = configured_phases.split(',') if configured_phases else ['contracts', 'restart', 'app', 'app-restart', 'streaming', 'quit-escape']
-    allowed_phases = {'termination-probe', 'contracts', 'restart', 'app', 'app-restart', 'streaming', 'quit-escape',
+    phases = configured_phases.split(',') if configured_phases else [
+        'contracts', 'restart', 'app', 'app-restart', 'streaming',
+        'session-dispatch-initial', 'session-dispatch-local', 'session-dispatch-drain', 'session-dispatch-dialog',
+        'quit-escape', 'session-deadline', 'session-upgrade',
+    ]
+    allowed_phases = {'session-upgrade', 'session-deadline', 'termination-probe', 'contracts', 'restart', 'app', 'app-restart', 'streaming', 'quit-escape',
+                      'session-dispatch-initial', 'session-dispatch-local', 'session-dispatch-drain', 'session-dispatch-dialog',
                       'appearance-seed-light', 'appearance-app-light', 'appearance-seed-dark', 'appearance-app-dark'}
     if not phases or any(phase not in allowed_phases for phase in phases):
         raise RuntimeError('invalid RISUNEST_MACOS_PHASES')
+    # A failed phase skips only the phases that read the data it leaves; the rest still run.
+    dependencies = {'restart': 'contracts', 'app': 'contracts', 'app-restart': 'app',
+                    'appearance-app-light': 'appearance-seed-light', 'appearance-app-dark': 'appearance-seed-dark'}
     results = {}
+    failures = {}
     for phase in phases:
-        expected = None
-        if phase == 'app-restart' and 'app' in results:
-            expected = next(entry['result'] for entry in results['app'] if entry['stage'] == 'app-native-saved')
-        results[phase] = run_phase(app, phase, artifacts, fixtures, expected)
+        if dependencies.get(phase) in failures:
+            failures[phase] = f'skipped because {dependencies[phase]} did not pass'
+            print(f'{phase}: {failures[phase]}', flush=True)
+            continue
+        try:
+            expected = None
+            if phase == 'restart' and 'contracts' in results:
+                expected = next(entry['result'] for entry in results['contracts'] if entry['stage'] == 'quit-saved')
+            if phase == 'app-restart' and 'app' in results:
+                expected = next(entry['result'] for entry in results['app'] if entry['stage'] == 'app-native-saved')
+            results[phase] = run_phase(app, phase, artifacts, fixtures, expected)
+        except Exception as error:
+            failures[phase] = f'{type(error).__name__}: {error}'
+            print(f'{phase}: FAILED {failures[phase]}', flush=True)
     if 'app' in results and 'app-restart' in results:
         saved = next(entry['result']['revision'] for entry in results['app'] if entry['stage'] == 'app-native-saved')
         restarted = next(entry['result']['revision'] for entry in results['app-restart'] if entry['stage'] == 'app-restart')
         if saved != restarted:
-            raise RuntimeError('Product restart revision differs from the native-approved saved revision')
-    (artifacts / 'result.json').write_text(json.dumps({'passed': True, 'phases': results}, indent=2))
+            failures['app-restart'] = 'Product restart revision differs from the native-approved saved revision'
+    (artifacts / 'result.json').write_text(json.dumps({'passed': not failures, 'phases': results, 'failures': failures}, indent=2))
+    if failures:
+        raise RuntimeError(f'Failed phases: {json.dumps(failures, indent=2)}')
     print('Mac WKWebView contracts, restart and product app passed', flush=True)
 
 

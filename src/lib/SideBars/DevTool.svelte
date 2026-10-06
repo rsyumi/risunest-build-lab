@@ -40,7 +40,7 @@
             return false
         }
         alertWait("Loading...")
-        await sendChat(-1, {
+        await sendChat({
             preview: previewJoin !== 'prompt',
             previewPrompt: previewJoin === 'prompt'
         })
@@ -275,7 +275,7 @@
             currentChar.chats[currentChar.chatPage] = currentChat
             db.characters[$selectedCharID] = currentChar
             doingChat.set(false)
-            await sendChat(i);
+            await sendChat();
             currentChar = db.characters[$selectedCharID]
             currentChat = currentChar.chats[currentChar.chatPage]
         }

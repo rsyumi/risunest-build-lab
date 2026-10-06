@@ -30,7 +30,7 @@ describe('risunestReadConversationContext', () => {
         await expect(api.readConversationContext({
             characterId: 'char',
             conversationId: 'conv',
-            include: { character: true, lore: true, groupMembers: true },
+            include: { character: true, lore: true },
             chatVariables: ['$key'],
             messages: { limit: 4, extraFields: ['__plugin'] },
         })).resolves.toBe(context)
@@ -38,7 +38,7 @@ describe('risunestReadConversationContext', () => {
         expect(hasDatabasePermission).not.toHaveBeenCalled()
         expect(readConversationContext).toHaveBeenCalledWith({
             target: { characterId: 'char', conversationId: 'conv' },
-            include: { character: true, lore: true, persona: false, groupMembers: true, globals: false },
+            include: { character: true, lore: true, persona: false, globals: false },
             chatVariables: ['$key'],
             messages: { window: { limit: 4 }, extraFields: ['__plugin'] },
         }, { allowPrivate: false, signal: expect.any(AbortSignal) })

@@ -432,7 +432,7 @@ pub(super) fn capture_scratch(
     let result = (|| {
         let units = store.lww_backup_unit_values(&lease.lease)?;
         let (connection, target) = store.read_view(Some(&lease.lease))?;
-        let current_bytes = logical_database_bytes(connection)?;
+        let current_bytes = snapshot_retention_basis_bytes(connection)?;
         let mut output = Connection::open(&scratch.path)?;
         {
             let backup = rusqlite::backup::Backup::new(connection, &mut output)?;
@@ -507,9 +507,49 @@ pub(super) fn snapshot_path_is_link_or_reparse(path: &Path) -> StoreResult<bool>
     }
 }
 
-/// Database page bytes less the values retired generations still store. Those
-/// rows only wait for the purge, so a size estimate leaves them out.
-pub(super) fn logical_database_bytes(connection: &Connection) -> StoreResult<u64> {
+/// File lengths of the database and its SQLite sidecars. This includes reusable
+/// pages and WAL frames, rather than estimating the active library's contents.
+pub(super) fn allocated_database_bytes(database_path: &Path) -> StoreResult<u64> {
+    let mut bytes = fs::metadata(database_path)?.len();
+    for suffix in ["-wal", "-shm"] {
+        let mut path = database_path.as_os_str().to_os_string();
+        path.push(suffix);
+        match fs::metadata(Path::new(&path)) {
+            Ok(metadata) => bytes = bytes.saturating_add(metadata.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(bytes)
+}
+
+/// Sum the active generation's stored column bytes (UTF-8 bytes for text and
+/// SQLite's text representation for numbers). Excludes generation keys, record
+/// and index overhead, free pages, staged/retired rows and shared coordination
+/// tables. This is a data estimate, not a file size or an archive size guarantee.
+pub(super) fn active_database_bytes(connection: &Connection) -> StoreResult<u64> {
+    let active = active_generation(connection)?;
+    let mut bytes = 0u64;
+    for (table, columns) in super::GENERATION_TABLES {
+        let values = columns
+            .split(',')
+            .map(|column| format!("coalesce(octet_length({}),0)", column.trim()))
+            .collect::<Vec<_>>()
+            .join("+");
+        let stored: i64 = connection.query_row(
+            &format!("SELECT coalesce(sum({values}),0) FROM {table} WHERE generation=?1"),
+            [&active],
+            |row| row.get(0),
+        )?;
+        bytes = bytes.saturating_add(stored.max(0) as u64);
+    }
+    Ok(bytes)
+}
+
+/// Keep the snapshot retention basis unchanged: allocated database pages less
+/// retired generation column bytes. This historical policy input is neither an
+/// on-disk size nor an active-data estimate and must not feed other consumers.
+pub(super) fn snapshot_retention_basis_bytes(connection: &Connection) -> StoreResult<u64> {
     let page_count: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
     let page_size: i64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
     let pages = (page_count.max(0) as u64).saturating_mul(page_size.max(0) as u64);
@@ -1322,13 +1362,18 @@ pub(crate) enum SnapshotRestoreStep {
 }
 
 impl super::PersistentStore {
-    pub(crate) fn snapshot_restore_body_plan(&mut self, stage_id: &str, revision: i64, authority: &str) -> StoreResult<crate::native_file_jobs::snapshot_bodies::BodyPlan> {
+    pub(crate) fn validate_snapshot_body_receipt(&self, stage_id: &str, revision: i64, authority: &str) -> StoreResult<()> {
         let (request, stored_authority, state, committed):(String,String,String,Option<i64>) = self.connection.query_row("SELECT request_id,authority,state,revision FROM snapshot_restore_stages WHERE stage_id=?1",[stage_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
         let request_revision:Option<i64> = self.connection.query_row("SELECT revision FROM lww_requests WHERE request_id=?1",[request],|row|row.get(0)).optional()?;
         if state != "committed" || committed != Some(revision) || request_revision != Some(revision)
             || stored_authority != authority || self.lww_binding_authority()?.0.to_string() != authority {
             return Err(validation("snapshot body job activation receipt differs"));
         }
+        Ok(())
+    }
+
+    pub(crate) fn snapshot_restore_body_plan(&mut self, stage_id: &str, revision: i64, authority: &str) -> StoreResult<crate::native_file_jobs::snapshot_bodies::BodyPlan> {
+        self.validate_snapshot_body_receipt(stage_id, revision, authority)?;
         let protection:Option<String>=self.connection.query_row("SELECT protection_job_id FROM snapshot_restore_body_jobs WHERE stage_id=?1",[stage_id],|row|row.get(0)).optional()?;
         let protection_id=match protection {
             Some(id)=>id,

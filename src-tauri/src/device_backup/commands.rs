@@ -104,6 +104,7 @@ pub(crate) fn native_device_backup_bootstrap(
             )?;
             state.fail(&session.session_id, "interrupted-before-native-apply")?;
             state.recovery_complete(&session.session_id)?;
+            sweep_settled_cas_jobs(&app);
             return state.bootstrap_for_entry();
         }
         if matches!(
@@ -132,9 +133,22 @@ pub(crate) fn native_device_backup_bootstrap(
 }
 
 #[tauri::command(async)]
-pub(crate) fn native_device_backup_recovery_complete(
+pub(crate) fn native_device_backup_recovery_complete<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: State<'_, DeviceBackupState>,
     session_id: String,
 ) -> Result<()> {
-    logged("native_device_backup_recovery_complete", complete_native_recovery(&state, &session_id))
+    logged("native_device_backup_recovery_complete", (|| {
+        complete_native_recovery(&state, &session_id)?;
+        sweep_settled_cas_jobs(&app);
+        Ok(())
+    })())
+}
+
+fn sweep_settled_cas_jobs<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some(cas) = app.try_state::<crate::asset_repository::commands::DurableCasJobState>() {
+        if let Err(error) = cas.sweep_settled_jobs(app) {
+            crate::nlog!("warn", "Device recovery asset journals await cleanup: {error}");
+        }
+    }
 }

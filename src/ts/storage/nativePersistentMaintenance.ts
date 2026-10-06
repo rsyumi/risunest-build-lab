@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { relaunch } from '../desktopRelaunch'
 import { isTauriIOS, isTauriMobile } from '../platform'
 import { NativeFileJobError, runNativeSnapshotRestore, type NativeFileJobStatus, type NativeSnapshotBodiesStarted, type NativeSnapshotBodyResult, type NativeSnapshotRestoreActivation } from './nativeFileJobs'
-import { nativeFileOperationOutcomeShown, runSharedNativeFileOperation } from './nativeFileJobManager'
+import { nativeFileOperationOutcomeShown, runSharedNativeFileOperation, waitForSnapshotBodyOutcomeDismissal } from './nativeFileJobManager'
 import type {
     DataHealthResult,
     RepairApplied,
@@ -40,6 +40,7 @@ export interface NativeStorageBytes {
 
 export interface NativePersistentStorageStats {
     snapshotBytes: number
+    /** Database, WAL and SHM file lengths, including reusable pages. */
     databaseBytes: number
     assetObjects: NativeStorageBytes
     assetAliases: NativeStorageAliasStats[]
@@ -156,6 +157,20 @@ export function applyNativeDataHealthRepair(
     return invoke('pds_data_health_repair_apply', { selection, snapshot, expectedRevision, expectedScannedAt })
 }
 
+export function discardNativeDataHealthIntent(
+    finding: number,
+    expectedRevision: number,
+    expectedScannedAt: number,
+): Promise<{ discarded: boolean; result: DataHealthResult }> {
+    return invoke('pds_data_health_discard_intent', { finding, expectedRevision, expectedScannedAt })
+}
+
+export function completeNativeDataHealthIntent(
+    finding: number, expectedRevision: number, expectedScannedAt: number,
+): Promise<{ completed: boolean; revision: number; result: DataHealthResult }> {
+    return invoke('pds_data_health_complete_intent', { finding, expectedRevision, expectedScannedAt })
+}
+
 export function listNativeDataHealthJournals(): Promise<RepairJournalSummary[]> {
     return invoke('pds_data_health_journals')
 }
@@ -171,37 +186,95 @@ export class NativeSnapshotBodiesCommittedError extends NativeFileJobError {
     }
 }
 
-export async function completeNativeSnapshotRestoreBodies(stagingId: string, activationRevision: number, bindingAuthority: string): Promise<NativeSnapshotBodyResult> {
-    const identity={stagingId,activationRevision:String(activationRevision),bindingAuthority}
-    let receipt:NativeSnapshotBodiesStarted
-    try {receipt=await invoke<NativeSnapshotBodiesStarted>('native_snapshot_restore_bodies_start',identity)}
-    catch {throw new NativeSnapshotBodiesCommittedError(identity,undefined,'snapshot-body-start-unknown','Snapshot library is restored, but body transfer could not be confirmed')}
-    return runSharedNativeFileOperation('import', `snapshot-bodies:${stagingId}`, async context => {
+export function snapshotBodyReceipt(status: NativeFileJobStatus): NativeSnapshotBodiesStarted {
+    if (status.kind !== 'snapshot-bodies' || !status.jobId || !status.snapshotStagingId
+        || !Number.isSafeInteger(status.activationRevision) || status.activationRevision! < 0
+        || !status.activationAuthority || !/^(0|[1-9][0-9]*)$/.test(status.activationAuthority)) {
+        throw new NativeFileJobError('snapshot-body-receipt-mismatch', 'Snapshot body transfer receipt differs')
+    }
+    return {jobId: status.jobId, kind: 'snapshot-bodies', stagingId: status.snapshotStagingId,
+        activationRevision: String(status.activationRevision), bindingAuthority: status.activationAuthority}
+}
+
+export async function attachNativeSnapshotRestoreBodies(receipt: NativeSnapshotBodiesStarted): Promise<NativeSnapshotBodyResult> {
+    return runSharedNativeFileOperation('import', `snapshot-bodies:${receipt.stagingId}`, async context => {
         let cancelled = false
         while (true) {
-            if (context.signal.aborted && !cancelled) {
-                cancelled = true
-                await invoke('native_file_job_cancel', {jobId: receipt.jobId})
-            }
-            const status = await invoke<NativeFileJobStatus>('native_file_job_status', {jobId: receipt.jobId})
-            context.onStatus(status)
-            if (status.kind !== 'snapshot-bodies' || status.snapshotStagingId !== stagingId
-                || status.activationRevision !== activationRevision || status.activationAuthority !== bindingAuthority) {
+            const status = await invoke<NativeFileJobStatus>('native_snapshot_restore_bodies_status', {receipt})
+            const actual = snapshotBodyReceipt(status)
+            if (Object.keys(receipt).some(key => receipt[key as keyof typeof receipt] !== actual[key as keyof typeof actual])) {
                 throw new NativeSnapshotBodiesCommittedError(receipt, status.snapshotBodies, 'snapshot-body-receipt-mismatch', 'Snapshot library is restored, but the body transfer receipt differs')
             }
+            context.onStatus(status)
             if (status.state === 'succeeded') {
                 const bodies = status.snapshotBodies
-                if (!bodies?.settled || bodies.stageId !== stagingId || bodies.activatedRevision !== activationRevision || bodies.bindingAuthority !== bindingAuthority) {
+                if (!bodies?.settled || bodies.stageId !== receipt.stagingId || String(bodies.activatedRevision) !== receipt.activationRevision || bodies.bindingAuthority !== receipt.bindingAuthority) {
                     throw new NativeSnapshotBodiesCommittedError(receipt, bodies, 'snapshot-body-result-mismatch', 'Snapshot library is restored, but body completion could not be confirmed')
                 }
                 return bodies
             }
-            if (status.state === 'failed' || status.state === 'cancelled') {
+            if (status.state === 'cancelled') throw new DOMException('Snapshot body transfer cancelled', 'AbortError')
+            if (status.state === 'failed') {
                 throw new NativeSnapshotBodiesCommittedError(receipt, status.snapshotBodies, status.error?.code ?? 'snapshot-bodies-incomplete', status.error?.message ?? 'Snapshot library is restored, but body transfer is incomplete')
+            }
+            if (context.signal.aborted && !cancelled) {
+                cancelled = true
+                await invoke('native_file_job_cancel', {jobId: receipt.jobId})
             }
             await new Promise(resolve => setTimeout(resolve, 100))
         }
     }, {presentation: 'dialog', format: 'library-backup', snapshotBodyOwner: receipt})
+}
+
+const reattachedSnapshotJobs = new Set<string>()
+export async function reattachNativeSnapshotRestoreBodies(jobs: NativeFileJobStatus[]): Promise<void> {
+    // Native retry admission replaces the earlier terminal owner for the same stage.
+    const latest = new Map<string, NativeFileJobStatus>()
+    for (const job of jobs) if (job.snapshotStagingId) latest.set(job.snapshotStagingId, job)
+    for (const job of latest.values()) {
+        if (reattachedSnapshotJobs.has(job.jobId)) continue
+        const receipt = snapshotBodyReceipt(job)
+        reattachedSnapshotJobs.add(job.jobId)
+        while (true) {
+            await waitForSnapshotBodyOutcomeDismissal()
+            try { await attachNativeSnapshotRestoreBodies(receipt); break }
+            catch (error) {
+                if (error instanceof Error && error.name === 'NativeFileOperationBusyError') continue
+                if (!(error instanceof NativeSnapshotBodiesCommittedError) && !(error instanceof DOMException && error.name === 'AbortError')) {
+                    console.error('Snapshot body receipt could not be reattached', error)
+                }
+                break
+            }
+        }
+    }
+}
+
+export async function completeNativeSnapshotRestoreBodies(stagingId: string, activationRevision: number, bindingAuthority: string, previousJobId?: string): Promise<NativeSnapshotBodyResult> {
+    const identity = {stagingId, activationRevision: String(activationRevision), bindingAuthority}
+    let receipt: NativeSnapshotBodiesStarted
+    try { receipt = await invoke<NativeSnapshotBodiesStarted>('native_snapshot_restore_bodies_start', {...identity, ...(previousJobId ? {previousJobId} : {})}) }
+    catch {
+        // A lost start response does not authorize another restore or another worker.
+        const jobs = await invoke<NativeFileJobStatus[]>('native_file_job_list').catch(() => [])
+        const job = jobs.filter(job => job.kind === 'snapshot-bodies' && job.snapshotStagingId === stagingId
+            && job.activationRevision === activationRevision && job.activationAuthority === bindingAuthority).at(-1)
+        if (!job) throw new NativeSnapshotBodiesCommittedError(identity, undefined, 'snapshot-body-start-unknown', 'Snapshot library is restored, but body transfer could not be confirmed')
+        receipt = snapshotBodyReceipt(job)
+    }
+    if (receipt.kind !== 'snapshot-bodies' || !receipt.jobId || receipt.stagingId !== stagingId
+        || receipt.activationRevision !== identity.activationRevision || receipt.bindingAuthority !== bindingAuthority) {
+        throw new NativeSnapshotBodiesCommittedError(identity, undefined, 'snapshot-body-receipt-mismatch', 'Snapshot library is restored, but the body transfer receipt differs')
+    }
+    return attachNativeSnapshotRestoreBodies(receipt)
+}
+
+export async function retrySnapshotRestoreBodiesFromOutcome(): Promise<NativeSnapshotBodyResult> {
+    const {get} = await import('svelte/store')
+    const {nativeFileOperationOutcome} = await import('./nativeFileJobManager')
+    const status = get(nativeFileOperationOutcome)?.status
+    if (!status || !['failed', 'cancelled'].includes(status.state)) throw new NativeFileJobError('snapshot-body-retry-refused', 'Snapshot body retry is unavailable')
+    const receipt = snapshotBodyReceipt(status)
+    return completeNativeSnapshotRestoreBodies(receipt.stagingId, Number(receipt.activationRevision), receipt.bindingAuthority, receipt.jobId)
 }
 
 export async function requestNativePersistentSnapshotRestore(id: string): Promise<boolean> {

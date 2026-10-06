@@ -1656,7 +1656,7 @@ const makeRisuaiAPIV3 = (
                     });
                 }
 
-                const sent = await processSendChat(-1, {}, reservation);
+                const sent = await processSendChat({}, reservation);
                 assertPersistentMutationAllowed(authorityEpoch);
                 if(!sent){
                     rollbackAppendedMessage();

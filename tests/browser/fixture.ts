@@ -3,7 +3,8 @@ import { test as base, expect } from '@playwright/test'
 import { classifyTestRequest } from '../support/testNetwork'
 import type { BrowserDriver } from './main'
 import type { thoughtDriver } from './thoughtDriver'
-declare global { interface Window { boundary: BrowserDriver; thought: typeof thoughtDriver } }
+import type { settledThought } from './settledThoughtMain'
+declare global { interface Window { boundary: BrowserDriver; thought: typeof thoughtDriver; settledThought: typeof settledThought } }
 export const test = base.extend<{ guarded: void }>({
     guarded: [async ({ context, baseURL }, use) => {
         const rejected: string[] = []
@@ -12,7 +13,7 @@ export const test = base.extend<{ guarded: void }>({
             const reason = classifyTestRequest(route.request().url(), origins)
             // Serve our owned HTML directly so machine-level HTTP injectors cannot add scripts.
             const pathname = new URL(route.request().url()).pathname
-            if (!reason && (pathname === '/' || pathname === '/dragDrop.html' || pathname === '/modalNavigation.html' || pathname === '/lazyApp.html')) {
+            if (!reason && (pathname === '/' || pathname === '/dragDrop.html' || pathname === '/modalNavigation.html' || pathname === '/lazyApp.html' || pathname === '/monaco.html' || pathname === '/settledThought.html')) {
                 const file = pathname === '/' ? 'index.html' : pathname.slice(1)
                 await route.fulfill({ contentType: 'text/html', body: readFileSync(new URL(`../../.tmp/test-results/browser/dist/${file}`, import.meta.url), 'utf8') })
                 return

@@ -100,7 +100,6 @@ function pluginChatVar(context: ConversationContext, key: string): string {
 describe.each([
     ['a character chat with a bound persona and toggle binding', 'char-plain', 'conv-plain'],
     ['a character chat with the selected persona', 'char-plain', 'conv-second'],
-    ['a group chat', 'char-group', 'conv-group'],
 ])('conversation context for %s', (_name, characterId, conversationId) => {
     it('matches the module set, persona and variables the prompt builder uses', async () => {
         const context = await readContext(characterId, conversationId)

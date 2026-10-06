@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { registerMacosLifecycle } from "../../src/ts/storage/macosLifecycle";
+import { registerMacosLifecycle, type MacosExitRequest } from "../../src/ts/storage/macosLifecycle";
 import {
   invokeNativeTokenizerBatch,
   resolveNativeTokenizerRoute,
@@ -129,8 +129,7 @@ async function tokenizer() {
   return { passed: true, ids, errors, samples };
 }
 
-async function verifyStored() {
-  const expected = JSON.parse(localStorage.getItem(expectedKey)!);
+async function verifyStored(expected = JSON.parse(localStorage.getItem(expectedKey)!)) {
   check(expected, "previous synthetic result exists");
   const actual = await reload();
   check(
@@ -220,6 +219,10 @@ async function lifecycle() {
       isSyncActive: () => false,
       hasPendingSync: () => false,
       confirmExit: async () => false,
+    },
+    saveLocally: async () => {
+      // The harness quits through terminate:, which never ends the session.
+      await report("failure", { passed: false, message: "Unexpected session-end quit" });
     },
   });
   await invoke("macos_bench_quit");
@@ -351,10 +354,17 @@ async function startupAppearance(seed: boolean, theme: "light" | "dark") {
 async function main() {
   await guard();
   const phase = await invoke<string>("macos_bench_phase");
-  if (/^appearance-(seed|app)-(light|dark)$/.test(phase)) {
+  if (phase.startsWith("session-dispatch-")) {
+    await (await import("./terminationDispatch")).terminationDispatch(phase);
+  } else if (/^appearance-(seed|app)-(light|dark)$/.test(phase)) {
     const [, action, theme] = phase.split("-");
     await report(phase, await startupAppearance(action === "seed", theme as "light" | "dark"));
     await invoke("macos_bench_quit");
+  } else if (phase === "session-deadline" || phase === "session-upgrade") {
+    // Deliberately install no renderer exit listener. Native expiry must release AppKit.
+    await invoke("macos_lifecycle_ready");
+    await report("session-deadline-started", { passed: true, rendererResponds: false });
+    await invoke("macos_bench_session_quit");
   } else if (phase === "termination-probe") {
     const settle = async (attempt: number) => {
       await invoke("macos_bench_modal_ack", { attempt, approve: attempt === 3 });
@@ -393,7 +403,9 @@ async function main() {
     sessionStorage.setItem("macos-contract-reload", "true");
     location.reload();
   } else if (phase === "restart") {
-    await report("restart", { passed: true, ...(await verifyStored()) });
+    // The controller hands over the quit save; WebKit may drop storage written this close to the quit.
+    const stored = await invoke<string | null>("macos_bench_expected");
+    await report("restart", { passed: true, ...(await verifyStored(stored ? JSON.parse(stored) : null)) });
     await invoke("macos_bench_quit");
   } else if (phase === "app") {
     document.getElementById("benchmark")!.remove();
@@ -548,9 +560,9 @@ async function main() {
       }
     };
     let nativeRequests = 0;
-    const unlisten = await listen<string>("risu-macos-exit-requested", ({ payload }) => {
+    const unlisten = await listen<MacosExitRequest>("risu-macos-exit-requested", ({ payload }) => {
       nativeRequests++;
-      if (attempt === 1) localStorage.setItem("macos-app-departed-token", payload);
+      if (attempt === 1) localStorage.setItem("macos-app-departed-token", payload.token);
     });
     await invoke("macos_bench_native_quit");
     await until(async () => flushEntered && get(syncExitDialogState).phase === "saving"
@@ -594,22 +606,21 @@ async function main() {
     await invoke("macos_bench_quit");
   } else if (phase === "quit-escape") {
     // The document never acknowledges, as a hung renderer would not.
-    const requests: { repeated?: boolean }[] = [];
-    await listen<{ repeated?: boolean }>("risu-macos-exit-requested", ({ payload }) => {
+    const requests: unknown[] = [];
+    await listen("risu-macos-exit-requested", ({ payload }) => {
       requests.push(payload);
     });
+    // As in the product, the page-start reset queued for the main thread runs before the document is ready.
+    await invoke("macos_bench_main_thread_settled");
     await invoke("macos_lifecycle_ready");
+    await report("quit-escape-ready", { passed: true });
     await invoke("macos_bench_native_quit");
     await until(async () => requests.length === 1, "native quit did not reach the document");
-    check(requests[0].repeated !== true, "the first native quit is not a repeat");
-    await invoke("macos_bench_repeat_native_quit");
-    await until(async () => requests.length === 2, "a repeated native quit did not ask the app again");
-    check(requests[1].repeated === true, "a quit repeated within the acknowledgement limit is delivered again");
-    await pause(5_500);
-    await report("quit-escape-armed", { passed: true, requests: requests.length });
+    await report("quit-escape-delivered", { passed: true });
+    // AppKit ends a quit repeated while the first one waits, without asking the product again.
     await invoke("macos_bench_repeat_native_quit");
     await pause(15_000);
-    throw new Error("a repeated native quit after the acknowledgement limit did not end the app");
+    throw new Error("a repeated native quit did not end the app");
   } else if (phase === "streaming") {
     document.getElementById("benchmark")!.remove();
     await import("../streaming/main");

@@ -25,10 +25,8 @@ static int sessionEnding(void) {
 
 static NSApplicationTerminateReply shouldTerminate(id delegate, SEL command, NSApplication *sender) {
     if (pending) {
-        // A repeated quit ends the app when the document left the pending one unanswered.
-        if (!requestQuit || requestQuit(sessionEnding()) != 0) return NSTerminateLater;
-        pending = NO;
-        return NSTerminateNow;
+        if (sessionEnding() && requestQuit) requestQuit(1);
+        return NSTerminateLater;
     }
     pending = YES;
     int disposition = requestQuit ? requestQuit(sessionEnding()) : 0;
@@ -57,6 +55,22 @@ int risunest_queue_termination_response(void (*callback)(void *), void *context)
         callback(context);
     });
     CFRunLoopWakeUp(loop);
+    return 1;
+}
+
+int risunest_queue_termination_deadline(void (*callback)(void *), void *context, double seconds) {
+    if (![NSThread isMainThread] || !callback || !context) return 0;
+    CFRunLoopRef loop = CFRunLoopGetMain();
+    if (!loop) return 0;
+    CFRunLoopTimerRef timer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault,
+        CFAbsoluteTimeGetCurrent() + seconds, 0, 0, 0, ^(CFRunLoopTimerRef timer) {
+            callback(context);
+        });
+    if (!timer) return 0;
+    // AppKit's termination wait services the modal mode even with a silent WebView.
+    CFRunLoopAddTimer(loop, timer, kCFRunLoopCommonModes);
+    CFRunLoopAddTimer(loop, timer, (__bridge CFStringRef)NSModalPanelRunLoopMode);
+    CFRelease(timer);
     return 1;
 }
 

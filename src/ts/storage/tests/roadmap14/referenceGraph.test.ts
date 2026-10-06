@@ -46,11 +46,6 @@ describe('roadmap 14 reference graph', () => {
                 && edge.target.key === 'assets/shared/shared.bin'),
         ).toHaveLength(8)
         expect(
-            graph.filter((edge) => edge.owner.id === 'group-main'
-                && edge.target.kind === 'character'
-                && edge.target.key === 'character-main'),
-        ).toHaveLength(2)
-        expect(
             graph.filter((edge) => edge.target.kind === 'inlay'
                 && edge.target.key === 'inlay-image'),
         ).toHaveLength(6)
@@ -71,7 +66,6 @@ describe('roadmap 14 reference graph', () => {
                 ['asset', 'assets/missing/known-missing.dat'],
                 ['asset', 'assets/missing/module.dat'],
                 ['inlay', 'inlay-known-missing'],
-                ['character', 'character-known-missing'],
                 ['card', 'card-known-missing'],
             ]))
         expect(summary.external.map((edge) => edge.target.key)).toEqual(

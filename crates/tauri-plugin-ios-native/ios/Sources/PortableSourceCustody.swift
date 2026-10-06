@@ -49,7 +49,13 @@ final class PortableSourceCustody {
     private var reservedOwner: String?
     private var retiredOwners = Set<String>()
     private var released: [String] = []
-    private var retired: [String] = []
+    struct RetiredSource: Equatable {
+        let token: String
+        let name: String?
+        var receipt: [String: String?] { ["token": token, "name": name] }
+    }
+    private var retired: [RetiredSource] = []
+    private var selectionFinished: DispatchGroup?
     private let retirementQueue: OperationQueue = {
         let queue = OperationQueue(); queue.maxConcurrentOperationCount = 1
         queue.name = "io.github.rsyumi.risunest.portable-source-retirement"; return queue
@@ -60,6 +66,10 @@ final class PortableSourceCustody {
         guard !reserved else { lock.unlock(); completion(.failure(PortableSourceError.busy)); return }
         reserved = true
         reservedOwner = owner
+        let selectionDone = DispatchGroup()
+        selectionDone.enter()
+        selectionFinished = selectionDone
+        let selectionToken = UUID().uuidString.lowercased()
         lock.unlock()
         coordinatorQueue.addOperation {
             let scope = url.startAccessingSecurityScopedResource()
@@ -78,7 +88,7 @@ final class PortableSourceCustody {
                     var info = stat()
                     guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size > 0,
                           lseek(fd, 0, SEEK_SET) == 0 else { throw PortableSourceError.notSeekable }
-                    let token = UUID().uuidString.lowercased()
+                    let token = selectionToken
                     let source = Source(handle: handle, info: info, name: url.lastPathComponent, owner: owner)
                     self.lock.lock()
                     guard !self.retiredOwners.contains(owner) else { self.lock.unlock(); handle.closeFile(); throw PortableSourceError.ownership }
@@ -96,12 +106,18 @@ final class PortableSourceCustody {
             if scope { url.stopAccessingSecurityScopedResource() }
             selectedSource?.finished.signal()
             if !selected {
-                self.lock.lock(); self.reserved = false; self.reservedOwner = nil; self.retiredOwners.remove(owner); self.lock.unlock()
+                self.lock.lock()
+                if self.retiredOwners.contains(owner) {
+                    self.retired.append(RetiredSource(token: selectionToken, name: url.lastPathComponent.isEmpty ? nil : url.lastPathComponent))
+                }
+                self.reserved = false; self.reservedOwner = nil; self.retiredOwners.remove(owner)
+                self.lock.unlock()
                 if !completionSent {
                     if let error = coordinationError { completion(.failure(error)) }
                     else { completion(.failure(PortableSourceError.unavailable)) }
                 }
             }
+            selectionDone.leave()
         }
     }
 
@@ -188,7 +204,7 @@ final class PortableSourceCustody {
     func release(token: String, jobId: String?) -> Bool {
         lock.lock()
         guard let source = active[token] else {
-            let completed = released.contains(token) || retired.contains(token)
+            let completed = released.contains(token) || retired.contains(where: { $0.token == token })
             lock.unlock()
             return completed
         }
@@ -217,25 +233,29 @@ final class PortableSourceCustody {
     func retireUnclaimed(owner: String, completion: (() -> Void)? = nil) {
         lock.lock()
         if reservedOwner == owner { retiredOwners.insert(owner) }
-        let tokens = active.filter { $0.value.owner == owner && $0.value.jobId == nil && $0.value.claimRequest == nil }.map { $0.key }
+        let receipts = active.filter { $0.value.owner == owner && $0.value.jobId == nil && $0.value.claimRequest == nil }
+            .map { RetiredSource(token: $0.key, name: $0.value.name.isEmpty ? nil : $0.value.name) }
+        let pending = receipts.isEmpty && reservedOwner == owner && active.isEmpty ? selectionFinished : nil
         lock.unlock()
         retirementQueue.addOperation {
-            for token in tokens where self.release(token: token, jobId: nil) {
-                self.lock.lock(); self.retired.append(token)
+            pending?.wait()
+            for receipt in receipts where self.release(token: receipt.token, jobId: nil) {
+                self.lock.lock()
+                if !self.retired.contains(where: { $0.token == receipt.token }) { self.retired.append(receipt) }
                 self.lock.unlock()
             }
             completion?()
         }
     }
 
-    func orphanTokens() -> [String] {
+    func orphanReceipts() -> [RetiredSource] {
         retirementQueue.waitUntilAllOperationsAreFinished()
         lock.lock(); defer { lock.unlock() }; return retired
     }
 
     func acknowledgeOrphan(token: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard active[token] == nil, let index = retired.firstIndex(of: token) else { return false }
+        guard active[token] == nil, let index = retired.firstIndex(where: { $0.token == token }) else { return false }
         retired.remove(at: index)
         return true
     }

@@ -18,16 +18,18 @@ fn slot(app: &AppHandle) -> Result<crate::external_storage::secrets::NamedSecret
 
 #[tauri::command(async)]
 pub(crate) fn account_credential_read(app: AppHandle) -> Result<Option<Value>, String> {
-    let Some(bytes) = slot(&app)?.read() else {
-        return Ok(None);
-    };
-    match serde_json::from_slice::<Value>(&bytes.0) {
-        Ok(value) => Ok(Some(value)),
-        Err(_) => {
-            crate::nlog!("warn", "stored account credential is not readable");
-            Ok(None)
+    crate::native_log::logged_without_detail("account_credential_read", (|| {
+        let Some(bytes) = slot(&app)?.read() else {
+            return Ok(None);
+        };
+        match serde_json::from_slice::<Value>(&bytes.0) {
+            Ok(value) => Ok(Some(value)),
+            Err(_) => {
+                crate::nlog!("warn", "stored account credential is not readable");
+                Ok(None)
+            }
         }
-    }
+    })())
 }
 
 pub(crate) fn export_account(app: &AppHandle, omit_account: bool) -> Result<Option<Value>, String> {
@@ -86,16 +88,20 @@ mod tests {
 
 #[tauri::command(async)]
 pub(crate) fn account_credential_write(app: AppHandle, credential: Value) -> Result<(), String> {
-    let serialized =
-        serde_json::to_vec(&credential).map_err(|_| "account credential is invalid".to_owned())?;
-    slot(&app)?
-        .write(&SecretBytes(zeroize::Zeroizing::new(serialized)))
-        .map_err(|error| format!("account credential could not be stored: {error}"))
+    crate::native_log::logged_without_detail("account_credential_write", (|| {
+        let serialized =
+            serde_json::to_vec(&credential).map_err(|_| "account credential is invalid".to_owned())?;
+        slot(&app)?
+            .write(&SecretBytes(zeroize::Zeroizing::new(serialized)))
+            .map_err(|error| format!("account credential could not be stored: {error}"))
+    })())
 }
 
 #[tauri::command(async)]
 pub(crate) fn account_credential_clear(app: AppHandle) -> Result<(), String> {
-    slot(&app)?
-        .remove()
-        .map_err(|error| format!("account credential could not be removed: {error}"))
+    crate::native_log::logged_without_detail("account_credential_clear", (|| {
+        slot(&app)?
+            .remove()
+            .map_err(|error| format!("account credential could not be removed: {error}"))
+    })())
 }

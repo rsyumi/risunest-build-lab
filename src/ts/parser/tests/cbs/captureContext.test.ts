@@ -248,30 +248,6 @@ test('uses frozen variable snapshots for #when operators', () => {
     )).toBe('var|vis|toggle|tis')
 })
 
-test('uses the supplied database when resolving the active member of a frozen group', () => {
-    const member = makeCharacter('Frozen Member')
-    const group = {
-        type: 'group' as const,
-        name: 'Frozen Group',
-        chaId: 'group',
-        chatPage: 0,
-        chats: [{
-            message: [{ role: 'char' as const, data: 'hello', saying: member.chaId }],
-            note: '', name: '', localLore: [],
-        }],
-        characters: [member.chaId],
-        customscript: [],
-        globalLore: [],
-    }
-    const database = { characters: [group, member] } as Database
-
-    expect(risuChatParser('{{char}}', {
-        db: database,
-        chara: group as any,
-        selectedCharID: 0,
-    })).toBe('Frozen Member')
-})
-
 test('uses frozen CBS values for the initial message and dynamic regex pattern', async () => {
     const frozenCharacter = makeCharacter('Frozen')
     const script: customscript = {

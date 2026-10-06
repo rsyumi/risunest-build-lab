@@ -23,6 +23,21 @@ fn state(root: &Path) -> DeviceBackupState {
 }
 
 #[test]
+fn active_device_restore_owns_only_its_exact_native_library_job() {
+    for includes_library in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = crate::persistent_store::PersistentStore::open(root.path()).unwrap();
+        let coordinator = state(root.path());
+        assert!(!coordinator.owns_native_restore_job("synthetic-owner").unwrap());
+        let stage = includes_library.then(|| store.replace_begin().unwrap().staging_id);
+        coordinator.create_native_portable_session("synthetic-owner", includes_library,
+            &["hypa".into()], 0, stage).unwrap();
+        assert_eq!(coordinator.owns_native_restore_job("synthetic-owner").unwrap(), includes_library);
+        assert!(!coordinator.owns_native_restore_job("synthetic-unrelated").unwrap());
+    }
+}
+
+#[test]
 fn portable_adoption_requires_completed_exact_native_session_before_release() {
     use crate::local_backup::NeverCancelled;
     let root=tempfile::tempdir().unwrap();
@@ -1002,7 +1017,7 @@ fn device_backup_commands_log_their_failures() {
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap();
     tauri::Manager::manage(&app, state(root.path()));
-    let missing = native_device_backup_recovery_complete(tauri::Manager::state(&app), "missing-session".into());
+    let missing = native_device_backup_recovery_complete(app.handle().clone(), tauri::Manager::state(&app), "missing-session".into());
     assert_eq!(missing.unwrap_err().code, "device-session-missing");
     let entry = crate::native_log::global_state()
         .tail(None)

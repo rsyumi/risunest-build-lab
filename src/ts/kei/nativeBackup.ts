@@ -92,16 +92,13 @@ export async function runNativeKeiBackupJob(
         await request.runtime.flushPendingData('kei-auto-backup')
         const revision = request.runtime.revision
         const lease = await request.runtime.store.acquireRevision(revision)
-        if (!hasNativePersistentRevisionLease(lease)) {
-            await releasePersistentRevisionLease(lease)
-            return false
-        }
-
         let started: { jobId: string } | undefined
-        let capabilityUnavailable = false
         let startError: unknown
         let releaseError: unknown
         try {
+            if (!hasNativePersistentRevisionLease(lease)) {
+                throw new NativeKeiBackupJobError('native-lease-unavailable', 'Native KEI backup requires a native revision lease')
+            }
             started = await invokeJob(dependencies, 'native_file_job_start', {
                 request: {
                     kind: 'kei-backup-upload',
@@ -114,8 +111,6 @@ export async function runNativeKeiBackupJob(
             }) as { jobId: string }
         }
         catch (error) {
-            capabilityUnavailable = error instanceof NativeKeiBackupJobError
-                && error.code === 'capability-unavailable'
             startError = error
         }
         finally {
@@ -133,7 +128,6 @@ export async function runNativeKeiBackupJob(
                     throw releaseError
                 }
             }
-            if (capabilityUnavailable) return false
             throw startError
         }
         if (releaseError !== undefined) {
@@ -194,12 +188,10 @@ export async function tryNativeKeiBackup(
     await request.runtime.flushPendingData('kei-auto-backup')
     const revision = request.runtime.revision
     const lease = await request.runtime.store.acquireRevision(revision)
-    if (!hasNativePersistentRevisionLease(lease)) {
-        await releasePersistentRevisionLease(lease)
-        return false
-    }
-
     await withPersistentRevisionLease(lease, async () => {
+        if (!hasNativePersistentRevisionLease(lease)) {
+            throw new NativeKeiBackupJobError('native-lease-unavailable', 'Native KEI backup requires a native revision lease')
+        }
         await dependencies.invoke('pds_kei_backup_upload', {
             lease: lease[nativePersistentRevisionLease],
             url: request.url,

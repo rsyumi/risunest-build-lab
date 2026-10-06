@@ -21,12 +21,61 @@ use tauri::{AppHandle,Manager};
 
 struct Session {
     engine: Option<ExternalLwwEngine>,
+    identity: Option<Vec<u8>>,
     dependencies: Option<Dependencies>,
     fresh_after: Instant,
     cancel: Cancellation,
     /// Ids of the receive pages the last listing produced, in order.
     receive_pages: VecDeque<String>,
 }
+impl Session {
+    fn new() -> Self {
+        Self {
+            engine: None,
+            identity: None,
+            dependencies: None,
+            fresh_after: Instant::now(),
+            cancel: Cancellation::default(),
+            receive_pages: VecDeque::new(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.engine = None;
+        self.identity = None;
+        self.dependencies = None;
+        self.receive_pages.clear();
+        self.fresh_after = Instant::now();
+    }
+
+    fn use_cancellation(&mut self, cancel: &Cancellation) {
+        if !self.cancel.same(cancel)
+            || self.engine.as_ref().is_some_and(|engine| engine.admitted_upper().is_err())
+        {
+            if let Some(engine) = self.engine.as_mut() { engine.invalidate_clock(); }
+            self.fresh_after = Instant::now();
+        }
+        self.cancel = cancel.clone();
+    }
+
+    fn finish_maintenance<T>(&mut self, result: Result<T>) -> Result<T> {
+        if result.is_err() { self.reset(); }
+        result
+    }
+}
+
+// Only effective opening inputs belong here; completion timestamps never reopen a session.
+fn session_identity(
+    stored: &super::connection_store::StoredConnection,
+    capabilities: &super::capabilities::Capabilities,
+) -> Result<Vec<u8>> {
+    serde_json::to_vec(&(
+        &stored.id, &stored.config, &stored.descriptor, &stored.descriptor_locator,
+        &stored.provider_repository_id, &stored.credential_ref, &stored.root_key_ref,
+        capabilities,
+    )).map_err(runtime::local_error)
+}
+
 struct Context {
     session: tokio::sync::Mutex<Session>,
     cancel: Mutex<Cancellation>,
@@ -47,15 +96,9 @@ fn context(id: &str) -> Result<Arc<Context>> {
         .entry(id.into())
         .or_insert_with(|| {
             Arc::new(Context {
-                session: tokio::sync::Mutex::new(Session {
-                    engine: None,
-                    dependencies: None,
-                    fresh_after: Instant::now(),
-                    cancel: Cancellation::default(),
-                    receive_pages: VecDeque::new(),
-                }),
+                session: tokio::sync::Mutex::new(Session::new()),
                 cancel: Mutex::new(Cancellation::default()),
-                maintenance:tokio::sync::Mutex::new(Session{engine:None,dependencies:None,fresh_after:Instant::now(),cancel:Cancellation::default(),receive_pages:VecDeque::new()}),
+                maintenance: tokio::sync::Mutex::new(Session::new()),
                 checkpoints:Default::default(),
                 turn:Mutex::new(Default::default()),
             })
@@ -63,32 +106,50 @@ fn context(id: &str) -> Result<Arc<Context>> {
         .clone())
 }
 async fn connect(app: &AppHandle, id: &str, session: &mut Session) -> Result<()> {
-    if session.engine.is_none() {
-        session.fresh_after = Instant::now();
-        session.receive_pages.clear();
-        let connected =
-            connection_commands::open_connected_with_cancel(app, id, &session.cancel).await?;
-        if !matches!(
-            connected.stored.config.provider.as_str(),
-            "webdav" | "s3" | "google_drive" | "onedrive"
-        ) || connected.stored.descriptor.publication_strategy.is_none()
-        {
-            return Err(ProviderError::new(ErrorKind::Unsupported));
-        }
-        super::connection::validate_sync_location(&connected.stored.config)?;
-        session.dependencies = Some(connected.dependencies);
-        session.engine = Some(ExternalLwwEngine {
-            provider: connected.provider,
-            repository: connected.handle,
-            library: connected.stored.descriptor.repository_id.clone(),
-            root_key: connected.root_key,
-            admission: None,
-            connection_id: id.into(),
-            connection_root: runtime::root(app)?,
-            capabilities: connected.stored.capabilities,
-            descriptor: connected.stored.descriptor,
-        });
+    let root = runtime::root(app)?;
+    let stored = super::connection_store::ConnectionStore::open(&root)?.read(id)?;
+    let cancel = session.cancel.clone();
+    connect_with(&root, &stored, session,
+        connection_commands::open_connected_with_cancel(app, id, &cancel)).await
+}
+
+async fn connect_with(
+    root: &std::path::Path,
+    stored: &super::connection_store::StoredConnection,
+    session: &mut Session,
+    opening: impl std::future::Future<Output = Result<connection_commands::ConnectedRepository>>,
+) -> Result<()> {
+    session.cancel.check()?;
+    let identity = session_identity(stored, &stored.capabilities)?;
+    if session.engine.is_some() && session.identity.as_ref() == Some(&identity) {
+        return Ok(());
     }
+    session.reset();
+    let connected = opening.await?;
+    // Capabilities are negotiated on open, while invalidation compares the persisted inputs.
+    if session_identity(&connected.stored, &stored.capabilities)? != identity {
+        return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+    }
+    if !matches!(connected.stored.config.provider.as_str(), "webdav" | "s3" | "google_drive" | "onedrive")
+        || connected.stored.descriptor.publication_strategy.is_none()
+    {
+        return Err(ProviderError::new(ErrorKind::Unsupported));
+    }
+    super::connection::validate_sync_location(&connected.stored.config)?;
+    session.cancel.check()?;
+    session.dependencies = Some(connected.dependencies);
+    session.engine = Some(ExternalLwwEngine {
+        provider: connected.provider,
+        repository: connected.handle,
+        library: connected.stored.descriptor.repository_id.clone(),
+        root_key: connected.root_key,
+        admission: None,
+        connection_id: stored.id.clone(),
+        connection_root: root.to_path_buf(),
+        capabilities: connected.stored.capabilities,
+        descriptor: connected.stored.descriptor,
+    });
+    session.identity = Some(identity);
     Ok(())
 }
 async fn open(app: &AppHandle, id: &str, session: &mut Session) -> Result<()> {
@@ -411,11 +472,7 @@ pub(crate) async fn external_lww_maintenance(app:AppHandle,request:Request)->Res
         let Ok(mut session)=context.maintenance.try_lock() else {return Ok(None)};
         let cancel=context.cancel.lock().map_err(runtime::local_error)?.clone();
         let result=maintain(&app,&request,&context,&mut session,&cancel).await;
-        if result.is_err() {
-            session.engine=None;
-            session.dependencies=None;
-        }
-        result
+        session.finish_maintenance(result)
     }.await)
 }
 /// One maintenance tick on the engine kept from earlier ticks. A replaced
@@ -423,16 +480,7 @@ pub(crate) async fn external_lww_maintenance(app:AppHandle,request:Request)->Res
 /// a changed connection or any failure connects again.
 async fn maintain(app:&AppHandle,request:&Request,context:&Context,session:&mut Session,cancel:&Cancellation)->Result<Option<serde_json::Value>> {
     let root=runtime::root(app)?;
-    let stored=super::connection_store::ConnectionStore::open(&root)?.read(&request.connection_id)?;
-    if session.engine.as_ref().is_some_and(|engine|engine.descriptor!=stored.descriptor) {
-        session.engine=None;
-        session.dependencies=None;
-    }
-    if !session.cancel.same(cancel) || session.engine.as_ref().is_some_and(|engine|engine.admitted_upper().is_err()) {
-        if let Some(engine)=session.engine.as_mut() {engine.invalidate_clock();}
-        session.fresh_after=Instant::now();
-    }
-    session.cancel=cancel.clone();
+    session.use_cancellation(cancel);
     open(app,&request.connection_id,session).await?;
     let mut store=check(app,request,true)?;
     let writer=store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
@@ -440,7 +488,7 @@ async fn maintain(app:&AppHandle,request:&Request,context:&Context,session:&mut 
     let due=engine.maintenance_needed_cached(&context.checkpoints,cancel).await?;
     let compact=context.turn.lock().map_err(runtime::local_error)?.ready(due,Instant::now());
     let job=uuid::Uuid::new_v4().to_string();
-    let protection=super::leases::LeaseContext{root:&root,connection_id:&request.connection_id,writer_id:&writer,descriptor:&stored.descriptor,root_key:&engine.root_key,provider:engine.provider.as_ref(),repository:&engine.repository,clock:super::leases::system_clock(),protection_supported:stored.capabilities.lease_operations,ledger:Some(app.state::<super::job_store::JobCommandState>().lease_ledger()?)};
+    let protection=super::leases::LeaseContext{root:&root,connection_id:&request.connection_id,writer_id:&writer,descriptor:&engine.descriptor,root_key:&engine.root_key,provider:engine.provider.as_ref(),repository:&engine.repository,clock:super::leases::system_clock(),protection_supported:engine.capabilities.lease_operations,ledger:Some(app.state::<super::job_store::JobCommandState>().lease_ledger()?)};
     let snapshot_id=if compact {
         let owner=match super::leases::admit_shared_work(&protection,&job,cancel).await? {
             super::leases::Admission::Admitted(owner)=>owner,
@@ -451,7 +499,7 @@ async fn maintain(app:&AppHandle,request:&Request,context:&Context,session:&mut 
         let result=owner.run(&protection,cancel,async {
             if let Some(reason)=owner.recheck(&protection,cancel).await? {return Err(super::leases::yield_error(reason));}
             check(app,request,true)?;
-            let completed=engine.compact_published(&mut store,&directory,&job,&writer,&stored.capabilities,cancel,Some((&owner,&protection))).await?;
+            let completed=engine.compact_published(&mut store,&directory,&job,&writer,&engine.capabilities,cancel,Some((&owner,&protection))).await?;
             check(app,request,true)?;
             Ok(completed)
         }).await?;
@@ -592,6 +640,166 @@ pub(crate) async fn external_lww_prepare_new_device(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn stored_connection() -> super::super::connection_store::StoredConnection {
+        super::super::connection_store::StoredConnection {
+            id: "synthetic-sync".into(),
+            config: ConnectionConfig {
+                provider: "webdav".into(), profile: None,
+                endpoint: "https://synthetic.invalid".into(), account_id: "synthetic".into(),
+                location: BTreeMap::from([("root".into(), "sync".into())]), oauth_profile: None,
+            },
+            descriptor: risunest_external_storage_format::format::Descriptor::new(
+                "synthetic-library".into(), Some(PublicationStrategy::Sequential)).unwrap(),
+            descriptor_locator: super::super::fake::locator(),
+            provider_repository_id: "synthetic-repository".into(),
+            credential_ref: "synthetic-credential".into(), root_key_ref: "synthetic-key".into(),
+            recovery_key_ref: "synthetic-recovery".into(),
+            capabilities: super::super::fake::capabilities(false),
+            created_at_ms: 1, verified_at_ms: 1, last_sync_at_ms: None,
+            last_backup_at_ms: None, retention_policy: None,
+        }
+    }
+
+    async fn open_fixture(
+        stored: &super::super::connection_store::StoredConnection,
+        opens: &std::cell::Cell<usize>,
+    ) -> Result<connection_commands::ConnectedRepository> {
+        opens.set(opens.get() + 1);
+        let mut connected = stored.clone();
+        // Provider negotiation need not return the persisted capability snapshot.
+        connected.capabilities.range = !connected.capabilities.range;
+        Ok(connection_commands::ConnectedRepository {
+            stored: connected,
+            provider: Arc::new(super::super::fake::FakeProvider::new(false)),
+            handle: super::super::fake::repository(),
+            dependencies: super::super::fake::loopback_dependencies(
+                super::super::fake::MemoryVault::default(), runtime::now_ms()).dependencies,
+            root_key: zeroize::Zeroizing::new([7; 32]),
+        })
+    }
+
+    #[test]
+    fn unchanged_sessions_reuse_opening_despite_completion_timestamp_churn() {
+        tauri::async_runtime::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let mut stored = stored_connection();
+            let opens = std::cell::Cell::new(0);
+            let mut session = Session::new();
+            connect_with(root.path(), &stored, &mut session, open_fixture(&stored, &opens)).await.unwrap();
+            session.receive_pages.push_back("pending-page".into());
+            for n in 2..5 {
+                stored.created_at_ms = n;
+                stored.verified_at_ms = n;
+                stored.last_sync_at_ms = Some(n);
+                stored.last_backup_at_ms = Some(n);
+                stored.recovery_key_ref = format!("recovery-{n}");
+                connect_with(root.path(), &stored, &mut session, open_fixture(&stored, &opens)).await.unwrap();
+                session.finish_maintenance(Ok(())).unwrap();
+            }
+            assert_eq!(opens.get(), 1);
+            assert_eq!(session.receive_pages.front().map(String::as_str), Some("pending-page"));
+        });
+    }
+
+    #[test]
+    fn effective_connection_changes_reopen_receive_and_maintenance_sessions() {
+        use super::super::connection_store::StoredConnection;
+        let changes: &[fn(&mut StoredConnection)] = &[
+            |s| s.id.push_str("-new"),
+            |s| s.config.provider = "s3".into(),
+            |s| s.config.profile = Some("synthetic-profile".into()),
+            |s| s.config.endpoint.push_str("/new"),
+            |s| s.config.account_id.push_str("-new"),
+            |s| { s.config.location.insert("root".into(), "new-root".into()); },
+            |s| s.config.oauth_profile = Some(OAuthProfile { project_id: "synthetic-project".into(), platform_client_ids: BTreeMap::new() }),
+            |s| s.descriptor = risunest_external_storage_format::format::Descriptor::new("new-library".into(), Some(PublicationStrategy::Sequential)).unwrap(),
+            |s| s.descriptor_locator.object.push_str("-new"),
+            |s| s.provider_repository_id.push_str("-new"),
+            |s| s.credential_ref.push_str("-renewed"),
+            |s| s.root_key_ref.push_str("-unlocked"),
+            |s| s.capabilities.lease_operations = !s.capabilities.lease_operations,
+        ];
+        tauri::async_runtime::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            for change in changes {
+                let mut stored = stored_connection();
+                let opens = std::cell::Cell::new(0);
+                let mut receive = Session::new();
+                let mut maintenance = Session::new();
+                for session in [&mut receive, &mut maintenance] {
+                    connect_with(root.path(), &stored, session, open_fixture(&stored, &opens)).await.unwrap();
+                    session.receive_pages.push_back("old-page".into());
+                }
+                change(&mut stored);
+                for session in [&mut receive, &mut maintenance] {
+                    connect_with(root.path(), &stored, session, open_fixture(&stored, &opens)).await.unwrap();
+                    assert!(session.receive_pages.is_empty());
+                    assert!(session.engine.as_ref().unwrap().admitted_upper().is_err());
+                    connect_with(root.path(), &stored, session, open_fixture(&stored, &opens)).await.unwrap();
+                }
+                assert_eq!(opens.get(), 4);
+            }
+        });
+    }
+
+    #[test]
+    fn failed_reopening_and_maintenance_retry_without_stale_session_state() {
+        tauri::async_runtime::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let mut stored = stored_connection();
+            let opens = std::cell::Cell::new(0);
+            let mut session = Session::new();
+            connect_with(root.path(), &stored, &mut session, open_fixture(&stored, &opens)).await.unwrap();
+            stored.credential_ref.push_str("-renewed");
+            let failure = connect_with(root.path(), &stored, &mut session, async {
+                opens.set(opens.get() + 1);
+                Err(ProviderError::new(ErrorKind::Unauthorized))
+            }).await;
+            assert_eq!(failure.unwrap_err().kind, ErrorKind::Unauthorized);
+            assert!(session.engine.is_none() && session.dependencies.is_none() && session.identity.is_none());
+            connect_with(root.path(), &stored, &mut session, open_fixture(&stored, &opens)).await.unwrap();
+            session.receive_pages.push_back("failed-page".into());
+            let failure = session.finish_maintenance::<()>(Err(ProviderError::new(ErrorKind::Transient)));
+            assert_eq!(failure.unwrap_err().kind, ErrorKind::Transient);
+            assert!(session.receive_pages.is_empty());
+            connect_with(root.path(), &stored, &mut session, open_fixture(&stored, &opens)).await.unwrap();
+            assert_eq!(opens.get(), 4);
+            let mut racing = stored.clone();
+            racing.config.endpoint.push_str("/changed-during-open");
+            session.reset();
+            let failure = connect_with(root.path(), &stored, &mut session, open_fixture(&racing, &opens)).await;
+            assert_eq!(failure.unwrap_err().kind, ErrorKind::PreconditionFailed);
+            assert!(session.engine.is_none());
+            connect_with(root.path(), &racing, &mut session, open_fixture(&racing, &opens)).await.unwrap();
+            assert_eq!(opens.get(), 6);
+        });
+    }
+
+    #[test]
+    fn replacement_cancellation_and_invalid_clock_refresh_without_reopening() {
+        tauri::async_runtime::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let stored = stored_connection();
+            let opens = std::cell::Cell::new(0);
+            let mut session = Session::new();
+            connect_with(root.path(), &stored, &mut session, open_fixture(&stored, &opens)).await.unwrap();
+            session.engine.as_mut().unwrap().admission = Some(super::super::lww_engine::Admission::synthetic(runtime::now_ms()));
+            let cancel = session.cancel.clone();
+            session.use_cancellation(&cancel);
+            assert!(session.engine.as_ref().unwrap().admitted_upper().is_ok());
+            cancel.cancel();
+            session.use_cancellation(&Cancellation::default());
+            assert!(session.engine.as_ref().unwrap().admitted_upper().is_err());
+            connect_with(root.path(), &stored, &mut session, open_fixture(&stored, &opens)).await.unwrap();
+            session.engine.as_mut().unwrap().admission = Some(super::super::lww_engine::Admission::synthetic(0));
+            let cancel = session.cancel.clone();
+            session.use_cancellation(&cancel);
+            assert!(session.engine.as_ref().unwrap().admission.is_none());
+            connect_with(root.path(), &stored, &mut session, open_fixture(&stored, &opens)).await.unwrap();
+            assert_eq!(opens.get(), 1);
+        });
+    }
+
     #[test]
     fn external_commands_log_their_own_failures() {
         use crate::external_storage::contract::{ConnectionConfig, ErrorKind};

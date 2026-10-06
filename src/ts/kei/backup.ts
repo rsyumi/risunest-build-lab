@@ -1,6 +1,4 @@
 import { isTauri } from '../platform'
-import { createNativeAccountCredentialVault } from '../storage/nativeAccountCredential'
-import type { Database } from '../storage/database.svelte'
 import { getDatabase } from '../storage/database.svelte'
 import {
     getPersistentDataRuntime,
@@ -32,6 +30,9 @@ export async function saveDbKei(): Promise<void> {
         })) {
             return
         }
+        if (isTauri) {
+            throw new Error('Native KEI backup did not complete')
+        }
         const currentAccount = () => {
             const account = getDatabase()?.account
             if (!account?.kei || account.id !== liveAccountId || account.token !== liveToken) {
@@ -40,17 +41,8 @@ export async function saveDbKei(): Promise<void> {
             return account
         }
         currentAccount()
-        let nativeAccount: Database['account']
-        if (isTauri) {
-            nativeAccount = await createNativeAccountCredentialVault().read() as Database['account']
-            currentAccount()
-            if (!nativeAccount?.kei || nativeAccount.id !== liveAccountId || nativeAccount.token !== liveToken) {
-                throw new Error('Kei account changed during backup materialization')
-            }
-        }
         const database = await materializePersistentDatabaseSnapshot('kei-auto-backup')
         currentAccount()
-        if (isTauri) database.account = nativeAccount
         const snapshotAccount = database.account
         if (
             !snapshotAccount?.kei ||

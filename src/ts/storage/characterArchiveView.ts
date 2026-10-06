@@ -1,29 +1,19 @@
-import type { character, groupChat } from './database.svelte'
+import type { character } from './database.svelte'
 import { getCatalogCharacterMetadata, isArchivedCharacter } from './workingSetCatalog'
 
-export function characterIsArchived(value: character | groupChat): boolean {
+export function characterIsArchived(value: character): boolean {
     return isArchivedCharacter(value)
 }
 
-export function archivedConversationCount(value: character | groupChat): number {
+export function archivedConversationCount(value: character): number {
     return getCatalogCharacterMetadata(value)?.conversationCount ?? 0
 }
 
-export function archivedAt(value: character | groupChat): number | undefined {
+export function archivedAt(value: character): number | undefined {
     return getCatalogCharacterMetadata(value)?.archivedAt
 }
 
-export function countBlockedGroupMembers(
-    group: groupChat,
-    characters: readonly (character | groupChat)[],
-): number {
-    let blocked = 0
-    for (const memberId of group.characters ?? []) {
-        const member = characters.find((candidate) => candidate.chaId === memberId)
-        if (member && isArchivedCharacter(member)) blocked += 1
-    }
-    return blocked
-}
+
 
 export function formatArchivedAt(value: number | undefined): string {
     if (value === undefined) return ''
@@ -31,7 +21,7 @@ export function formatArchivedAt(value: number | undefined): string {
 }
 
 export function countArchivedCharacters(
-    characters: readonly (character | groupChat)[],
+    characters: readonly (character)[],
 ): number {
     let archived = 0
     for (const character of characters) {

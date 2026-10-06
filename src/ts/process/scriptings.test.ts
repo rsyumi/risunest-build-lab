@@ -1981,6 +1981,7 @@ test('releases a read-only Lua edit operation without publishing an empty commit
 })
 
 test('settles a resumed coroutine rejection without leaving an unhandled rejection', async () => {
+  const readyMessage = '\nRISUNEST_A4_COROUTINE_READY\n'
   if (process.env.RISUNEST_A4_COROUTINE_CHILD !== 'true') {
     const child = spawn(process.execPath, [
       resolve(process.cwd(), 'node_modules/vitest/vitest.mjs'),
@@ -2002,27 +2003,43 @@ test('settles a resumed coroutine rejection without leaving an unhandled rejecti
     let stdout = ''
     child.stderr.setEncoding('utf8')
     child.stdout.setEncoding('utf8')
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk
-    })
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk
-    })
-    const childResult = await new Promise<{ code: number | null; timedOut: boolean }>(
-      (resolveChild) => {
-        let timedOut = false
-        const timeout = setTimeout(() => {
-          timedOut = true
-          child.kill()
-        }, 8_000)
-        child.once('exit', (code) => {
+    const childResult = await new Promise<{
+      code: number | null
+      ready: boolean
+      timedOut: 'startup' | 'execution' | null
+    }>((resolveChild, rejectChild) => {
+      let ready = false
+      let timedOut: 'startup' | 'execution' | null = null
+      const expire = (phase: 'startup' | 'execution') => {
+        timedOut = phase
+        child.kill()
+      }
+      // Cold Vitest transforms and Lua initialization have their own bounded allowance.
+      let timeout = setTimeout(() => expire('startup'), 30_000)
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk
+      })
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk
+        if (!ready && !timedOut && stdout.includes(readyMessage)) {
+          ready = true
           clearTimeout(timeout)
-          resolveChild({ code, timedOut })
-        })
-      },
-    )
+          timeout = setTimeout(() => expire('execution'), 8_000)
+        }
+      })
+      child.once('error', (error) => {
+        clearTimeout(timeout)
+        rejectChild(error)
+      })
+      child.once('close', (code) => {
+        clearTimeout(timeout)
+        resolveChild({ code, ready, timedOut })
+      })
+    }).finally(() => {
+      if (child.exitCode === null) child.kill()
+    })
 
-    expect(childResult, `${stdout}\n${stderr}`).toEqual({ code: 0, timedOut: false })
+    expect(childResult, `${stdout}\n${stderr}`).toEqual({ code: 0, ready: true, timedOut: null })
     return
   }
 
@@ -2032,10 +2049,11 @@ test('settles a resumed coroutine rejection without leaving an unhandled rejecti
   }
   process.on('unhandledRejection', onUnhandledRejection)
   vi.mocked(requestChatData).mockReset()
-  vi.mocked(requestChatData).mockResolvedValueOnce({
-    type: 'success',
-    result: 'resume into loop',
-  } as never)
+  vi.mocked(requestChatData).mockImplementationOnce(async () => {
+    // The coroutine has reached its async boundary; only its resumed execution remains.
+    process.stdout.write(readyMessage)
+    return { type: 'success', result: 'resume into loop' } as never
+  })
 
   try {
     const scriptingPromise = runScripted(`
@@ -2053,12 +2071,13 @@ test('settles a resumed coroutine rejection without leaving an unhandled rejecti
     await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate))
 
     expect(settled).toBe(true)
+    expect(requestChatData).toHaveBeenCalledOnce()
     expect(unhandledRejections).toEqual([])
   } finally {
     process.off('unhandledRejection', onUnhandledRejection)
     vi.mocked(requestChatData).mockReset()
   }
-}, 12_000)
+}, 40_000)
 
 test.each(['editinput', 'editoutput'] as const)(
   'continues after real Lua %s full-chat and variable edits',
