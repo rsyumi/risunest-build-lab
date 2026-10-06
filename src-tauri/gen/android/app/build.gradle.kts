@@ -123,9 +123,9 @@ rust {
 }
 
 // Native TLS verifies servers through Android with the Kotlin half of
-// rustls-platform-verifier, which ships inside that crate as a local Maven
-// repository. Cargo resolves its location and version.
-val rustlsPlatformVerifier = providers.exec {
+// rustls-platform-verifier, published to that project's Maven archive. Its
+// version must equal rustls-platform-verifier-android in the Cargo lock.
+val rustlsPlatformVerifierVersion = providers.exec {
     workingDir = rootProject.file("../..")
     commandLine(
         "cargo", "metadata", "--format-version", "1", "--locked",
@@ -135,16 +135,18 @@ val rustlsPlatformVerifier = providers.exec {
     @Suppress("UNCHECKED_CAST")
     val packages = (groovy.json.JsonSlurper().parseText(metadata) as Map<String, Any?>)["packages"]
         as List<Map<String, Any?>>
-    val component = packages.single { it["name"] == "rustls-platform-verifier-android" }
-    File(component["manifest_path"] as String).resolveSibling("maven") to component["version"] as String
+    packages.single { it["name"] == "rustls-platform-verifier-android" }["version"] as String
 }
 
 repositories {
-    maven { url = uri(rustlsPlatformVerifier.get().first) }
+    maven {
+        url = uri("https://github.com/rustls/rustls-platform-verifier/raw/maven-archive/android-release-support/maven/")
+        content { includeGroup("org.rustls") }
+    }
 }
 
 dependencies {
-    implementation("rustls:rustls-platform-verifier:${rustlsPlatformVerifier.get().second}")
+    implementation("org.rustls:rustls-platform-verifier:${rustlsPlatformVerifierVersion.get()}")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")

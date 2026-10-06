@@ -165,8 +165,8 @@
     {
       "path": "benchmarks/ios/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 187409,
-      "sha256": "1813654389c339c8dbd85cbadf123eaaa1ed4ed15d271f6f529725068b5b95c1"
+      "bytes": 186912,
+      "sha256": "967e7e738436be28f1a01c1bc08f035b19a5ad40bfa4452661b8d6a6efdb5037"
     },
     {
       "path": "benchmarks/ios/native/Cargo.toml",
@@ -501,14 +501,14 @@
     {
       "path": "benchmarks/macos/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 187239,
-      "sha256": "ce7c851667f458606ebb5526526648efb9437f03e672de700121633864f5f36f"
+      "bytes": 186742,
+      "sha256": "0f1fd3f39ed76f19c7846fe50cb9c697c90b5d5032c942fece791c68a20415eb"
     },
     {
       "path": "benchmarks/macos/native/Cargo.toml",
       "mode": "100644",
-      "bytes": 1189,
-      "sha256": "28f7d3fb8576d8292a9443d24285249d8da594d7753ebd05d06ce11737b800ab"
+      "bytes": 1188,
+      "sha256": "8729cbd391a1887fecb858272c0dc21f04af9d255a7e4e9415c3bde68eb3600e"
     },
     {
       "path": "benchmarks/macos/native/build.rs",
@@ -2799,8 +2799,8 @@
     {
       "path": "package.json",
       "mode": "100644",
-      "bytes": 10260,
-      "sha256": "743888873435880980e4b42a6a44c26c14238d9517606b1bd653563fe4b46183"
+      "bytes": 10259,
+      "sha256": "d692d066e2fd4c607f25a8f28aa0daf8c19278049e3ce0a259e14cddb95b0ae9"
     },
     {
       "path": "patches/@tauri-apps__plugin-http@2.8.0.patch",
@@ -2823,14 +2823,14 @@
     {
       "path": "pnpm-lock.yaml",
       "mode": "100644",
-      "bytes": 151917,
-      "sha256": "38d59aea9d0d789fec53abb2c464725d819fedc24444b466582eadb5699e1b5c"
+      "bytes": 151482,
+      "sha256": "379544f833374e56642d22d08ee82a896a407a383c7bd9d0386b0c0a86b477f4"
     },
     {
       "path": "pnpm-workspace.yaml",
       "mode": "100644",
-      "bytes": 425,
-      "sha256": "468f9489e3a5f0832e9049850187a8bc51b10754c769efd489f710293b19edcf"
+      "bytes": 484,
+      "sha256": "c5bc17db624145601b3e96fbe05d44c6246d314289dab119a7f1b9d06c6e74f8"
     },
     {
       "path": "public/assets/bergamot-translator-worker.js",
@@ -3478,7 +3478,7 @@
       "path": "server/endpoint-registry/pnpm-lock.yaml",
       "mode": "100644",
       "bytes": 59694,
-      "sha256": "309c45ca6995fd140e8ddd29620d15e04a4c0b7246db3e82ba9135e794f754e0"
+      "sha256": "c2e4a1a18a992f0828478e6523eb1930997111ef38a5a6b603d5fc544addeb9c"
     },
     {
       "path": "server/endpoint-registry/src/index.ts",
@@ -4047,8 +4047,8 @@
     {
       "path": "server/sync/src/http/admission_tests.rs",
       "mode": "100644",
-      "bytes": 16087,
-      "sha256": "6a7af040e3d1006a00c361f92e12685021926a9949479863413b23f878ec02b7"
+      "bytes": 16259,
+      "sha256": "7ea5e5dc46a34a3b44ae2872ffc9675c3dbfaebbbde4e3748e992f7f392d58d8"
     },
     {
       "path": "server/sync/src/http/lww.rs",
@@ -4419,14 +4419,14 @@
     {
       "path": "src-tauri/Cargo.lock",
       "mode": "100644",
-      "bytes": 191887,
-      "sha256": "2d3690874cbf4d07725eb124d394ec81458453e4d9beba92f646709fb1901302"
+      "bytes": 191390,
+      "sha256": "6cfdfdd7dd5a731b3f228f5332c7366ac54311efa3b9d326bd1cc22a51608ac2"
     },
     {
       "path": "src-tauri/Cargo.toml",
       "mode": "100644",
-      "bytes": 6933,
-      "sha256": "80e85b25f43a19d4a8193ae878d7a038c77f8ee911c431d3717b49736fc2b1f9"
+      "bytes": 6998,
+      "sha256": "3727bffbf316eeade176d9396ef4c9d28ae0e3ae58a9a3bda66d44500bc533b0"
     },
     {
       "path": "src-tauri/Info.plist",
@@ -4545,8 +4545,8 @@
     {
       "path": "src-tauri/gen/android/app/build.gradle.kts",
       "mode": "100644",
-      "bytes": 10510,
-      "sha256": "1c1dbaaa2509e6ce4660775c407adf958a944e757c8ab8229933b3efe359526e"
+      "bytes": 10565,
+      "sha256": "d6d86115ef7a8512ee3142ed0720b28b1c5b70b39ddb051e8eafaeaafede4340"
     },
     {
       "path": "src-tauri/gen/android/app/proguard-rules.pro",
@@ -7389,8 +7389,8 @@
     {
       "path": "src-tauri/src/platform_tls.rs",
       "mode": "100644",
-      "bytes": 10226,
-      "sha256": "46dd0023bf41d0c472db0b1f130236439afc71e8de6d6b755f7eedee060ec5ca"
+      "bytes": 10389,
+      "sha256": "a955dea3259cc35b347724887c6cd1b36699b9fb17e12ce8a144600c5111f57b"
     },
     {
       "path": "src-tauri/src/portable_backup/capture.rs",
@@ -8601,8 +8601,8 @@
     {
       "path": "src/lib/Others/MonacoEditor.svelte",
       "mode": "100644",
-      "bytes": 2759,
-      "sha256": "d6084256f97e3728ba922fe59666c9479751e27bfbcb2d4d2a41cdd3d5ef0b3c"
+      "bytes": 2752,
+      "sha256": "34195008edc1d72324bd5e5b84913264c4af35f1314674c57c8e9fa0a1714e3b"
     },
     {
       "path": "src/lib/Others/NativeFileJobDialog.svelte",
@@ -10911,8 +10911,8 @@
     {
       "path": "src/ts/gui/codearea/monacoRuntime.ts",
       "mode": "100644",
-      "bytes": 209,
-      "sha256": "28b48af99b0791d9e21ca8b3c0208cdb7bf9f6e27d3026848a396f4f8f474f8a"
+      "bytes": 531,
+      "sha256": "6d3ee29796f91f6758e6025b3635916aa0391f9fb4baee6bb34cf37104b4a39b"
     },
     {
       "path": "src/ts/gui/colorscheme.ts",
@@ -16797,14 +16797,14 @@
     {
       "path": "tests/native/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 187217,
-      "sha256": "8192337cb28caac043aadbcfe09ec5f4c7631ea7594390f17c8385e545725ba5"
+      "bytes": 186720,
+      "sha256": "66a52e6729afd7947947dc9c68d4e46bded3aa07e7f56109cff96cf3664deff7"
     },
     {
       "path": "tests/native/native/Cargo.toml",
       "mode": "100644",
-      "bytes": 1159,
-      "sha256": "0466bef13fb4192e5333773645132802a5ab1813de980ceb309015f93517681d"
+      "bytes": 1158,
+      "sha256": "6ed619aca9fac338eeac1e29745634cfd77e2055d4f9dd93ae8ce1a6960462a4"
     },
     {
       "path": "tests/native/native/build.rs",
@@ -16869,14 +16869,14 @@
     {
       "path": "tests/productionBundle.mjs",
       "mode": "100644",
-      "bytes": 6576,
-      "sha256": "95039a58959315f228d605d97fd0c0066f6fb98a54dff3d93721fc4892119652"
+      "bytes": 6655,
+      "sha256": "9b185cea3f9b142250067093cda4af481829d6024d11fa6ef439ebc56ba8d3c5"
     },
     {
       "path": "tests/productionBundle.node-test.mjs",
       "mode": "100644",
-      "bytes": 8348,
-      "sha256": "1003eb0427bc7fb0b921e41d8e59a38a76a985c5ba58bb61c9c800ffade6c078"
+      "bytes": 8463,
+      "sha256": "e44e418dfe242321eb8cfa8c72b4d8b709f5b6559c6e9384e012704afb332309"
     },
     {
       "path": "tests/referencePins.node-test.mjs",
