@@ -8,12 +8,12 @@ import { PersistentMutationFencedError, SaveCoordinator } from './saveCoordinato
 import { capturePersistentRoot, createPersistentDataRuntime, type PersistentDataRuntimeStateAdapter } from './persistentDataRuntime'
 import { applyLwwWorkingSetUnits, captureLwwWorkingSetBaseline } from './lwwWorkingSetApply'
 import { createGeneratingConversationRegistry } from './generatingConversationRegistry'
-import { diffMaterializedCharacter, diffRecordCollection } from './persistentUnitCapture'
+import { diffRecordCollection } from './persistentUnitCapture'
 import { createConversationSummaryStubFromChat } from './conversationResidency'
 import { createMetadataOnlySelectedConversation, isMetadataOnlySelectedConversation } from './selectedConversationLifecycle'
 import type { Database, character } from './database.svelte'
 import type { LwwStageReceive, PersistentDataStore, WorkingSetCommit } from './persistentDataStore'
-import { MAX_NATIVE_REQUEST_BYTES, PayloadTooLargeError } from './nativePersistenceValue'
+import { planConversationInsertPages } from './conversationInsertPages'
 
 async function harness() {
     const database = structuredClone(fixtureDatabase)
@@ -97,6 +97,94 @@ async function identityRuntimeHarness() {
 }
 
 describe('LWW renderer save path', () => {
+    it('stores every page of a newly added character with its final conversation order', async () => {
+        const { store, coordinator } = await harness()
+        const added = { type: 'character', chaId: 'paged-addition', name: 'Paged addition', chatPage: 1,
+            chats: [
+                { id: 'added-first', name: 'First', message: [{ role: 'user', data: 'first' }, { role: 'char', data: 'second' }] },
+                { id: 'added-second', name: 'Second', message: [{ role: 'user', data: 'third' }] },
+            ] } as unknown as character
+        const plan = planConversationInsertPages({ expectedRevision: coordinator.revision, addCharacter: added }, 40)!
+        let revision = coordinator.revision
+        for (const step of plan.steps) revision = (await store.commit({ expectedRevision: revision, ...step })).revision
+        expect((await store.readCharacter(added.chaId))!.value.chatPage).toBe(1)
+        expect((await store.queryConversations({ characterId: added.chaId, order: 'configured', limit: 10 })).items.map((value) => value.id))
+            .toEqual(added.chats.map((value) => value.id))
+        for (const chat of added.chats) expect((await store.readConversation(added.chaId, chat.id!))!.value.message).toEqual(chat.message)
+    })
+
+    it('persists windowed recency and retains selected rows across an unrelated receive with later reads', async () => {
+        const factory = new IDBFactory()
+        const name = `recency-unrelated-receive-${crypto.randomUUID()}`
+        const store = new IndexedDbPersistentDataStore(name, factory, IDBKeyRange) as PersistentDataStore
+        let database = { username: 'Synthetic', botPresets: [], characters: [
+            { type: 'character', chaId: 'selected', name: 'Selected', lastInteraction: 10, chatPage: 0,
+                chats: [{ id: 'selected-chat', name: 'Chat', note: '', localLore: [], message: Array.from({ length: 12 }, (_, index) => ({ role: 'user', data: `synthetic-${index}`, chatId: `message-${index}` })) }] },
+            { type: 'character', chaId: 'other', name: 'Other', lastInteraction: 20, chats: [] },
+        ] } as unknown as Database
+        await store.open()
+        await store.replaceFromDatabase(database)
+        const selected = () => database.characters.find((value) => value.chaId === 'selected')!
+        const runtime = createPersistentDataRuntime({ store, state: {
+            captureRoot: () => capturePersistentRoot(database), capturePresets: () => database.botPresets,
+            captureCharacters: () => database.characters, captureWorkingSetDatabase: () => database,
+            captureSelectedCharacter: selected, captureCharacter: (id) => database.characters.find((value) => value.chaId === id) ?? null,
+            getSelectedCharacterId: () => 'selected', getSelectedConversationId: () => 'selected-chat',
+            replaceDatabase: (value) => { database = value },
+            publishCharacter: (value) => { database.characters[database.characters.findIndex((entry) => entry.chaId === value.chaId)] = value },
+            publishConversation: (_id, conversation, next) => {
+                if (next) database.characters[database.characters.findIndex((entry) => entry.chaId === next.chaId)] = next
+                else selected().chats[selected().chats.findIndex((entry) => entry.id === conversation.id)] = conversation
+            },
+            canUseWindowedSelectedConversation: () => true, shouldHydrateFullCharacter: () => false, canReleaseConversation: () => true,
+        }, prepareDatabase: async (value) => value })
+        await runtime.initializeActiveWorkingSet(database)
+        expect(await runtime.activateCharacter('selected')).toBe(true)
+        expect(runtime.getSelectedConversationMode()).toBe('windowed')
+        const fullReads = vi.spyOn(store, 'readConversation')
+        const windowReads = vi.spyOn(store, 'readConversationWindow')
+        const beforeRecency = runtime.captureSelectedConversationAuthority()!
+        expect(runtime.recordSelectedCharacterLastInteraction(beforeRecency, 10, 30)).toBe(true)
+        await runtime.flushPendingDataLocally('send-recency')
+        expect(fullReads).not.toHaveBeenCalled()
+        expect(windowReads).not.toHaveBeenCalled()
+        const reopened = new IndexedDbPersistentDataStore(name, factory, IDBKeyRange)
+        await reopened.open()
+        expect((await reopened.readCharacter('selected'))!.value.lastInteraction).toBe(30)
+        expect((await reopened.queryCharacters({ order: 'recent', trash: false, limit: 10 })).items.map((value) => value.id)).toEqual(['selected', 'other'])
+        const source = runtime.getActiveConversationViewportSource()!
+        await source.ensureRange({ startIndex: 0, limit: 2, reason: 'viewport' })
+        const pin = source.acquireRangePin(0, 2, 'editor')
+        const snapshot = source.snapshot()
+        const row = snapshot.rowAt(0)
+        let mutations: NonNullable<WorkingSetCommit['unitMutations']> = [{ key: '["character","other","name"]', type: 'set', value: 'Received other' }]
+        store.lwwStageReceive = async () => undefined
+        store.lwwApplyReceive = async () => {
+            const result = await store.commit({ expectedRevision: runtime.revision, unitMutations: mutations })
+            return { ...result, affectedKeys: mutations.map((value) => value.key), heldKeys: [], deferredKeys: [] }
+        }
+        store.lwwFinishReceive = async () => undefined
+        const receive = () => runtime.applyLwwReceive({ bindingAuthority: '1', requestId: crypto.randomUUID(), changes: [], progress: { kind: 'server', cursor: '1' }, admittedTimeUpperMs: '100' })
+        await receive()
+        expect(runtime.getActiveConversationViewportSource()).toBe(source)
+        expect(source.snapshot().version).toBe(snapshot.version)
+        expect(source.snapshot().rowAt(0)).toBe(row)
+        expect(source.snapshot().keyAt(0)).toBe(snapshot.keyAt(0))
+        expect(source.snapshot().storeRevision).toBe(runtime.revision)
+        expect(runtime.captureSelectedConversationTarget()!.storeRevision).toBe(runtime.revision)
+        await source.ensureRange({ startIndex: 8, limit: 2, reason: 'viewport' })
+        expect(source.snapshot().rowAt(8)!.message.data).toBe('synthetic-8')
+        mutations = [{ key: '["conversation","selected","selected-chat","note"]', type: 'set', value: 'Received note' }]
+        await receive()
+        expect(runtime.getActiveConversationViewportSource()).not.toBe(source)
+        expect(selected().chats[0].note).toBe('Received note')
+        const afterReceiveRevision = runtime.revision
+        await runtime.flushPendingDataLocally('after-relevant-receive')
+        expect(runtime.revision).toBe(afterReceiveRevision)
+        expect(selected().lastInteraction).toBe(30)
+        pin.release()
+    })
+
     it('derives received preset/persona selection and record changes then flushes without echo', async () => {
         const {database,store,commit,runtime,receive} = await identityRuntimeHarness()
         await receive([
@@ -423,15 +511,14 @@ describe('LWW renderer save path', () => {
         expect((await store.readConversation('char-a', 'conv-long'))?.value.message).toHaveLength(130)
     })
 
-    it('pages a chat added inside a complete character when the save is too large', async () => {
+    it('commits a created chat and its order without an unsplit size probe', async () => {
         const {database,store,commit,coordinator} = await harness()
         const owner = database.characters[0]
         const added = {...structuredClone(owner.chats[0]),id:'conv-added',name:'Added'}
         owner.chats.splice(1,0,added)
         const expected = owner.chats.map((chat) => chat.id)
-        commit.mockRejectedValueOnce(new PayloadTooLargeError('commit',MAX_NATIVE_REQUEST_BYTES + 1))
         await coordinator.flushPendingDataLocally('large-added-chat')
-        expect(commit.mock.calls.length).toBeGreaterThan(1)
+        expect(commit).toHaveBeenCalledOnce()
         expect((await store.readConversation(owner.chaId,'conv-added'))?.value.message).toEqual(added.message)
         const stored = await store.queryConversations({characterId:owner.chaId,order:'configured',limit:128})
         expect(stored.items.map((item) => item.id)).toEqual(expected)
@@ -460,15 +547,6 @@ describe('LWW renderer save path', () => {
         await coordinator.commitPersistentUnitIntent('remove', [{ key: '["record","plugins","owner"]', type: 'delete' }])
         await coordinator.commitPersistentUnitIntent('reinstall', [{ key: '["record","plugins","owner"]', type: 'set', value: { name: 'owner', source: 'second' } }])
         expect((await store.readRoot()).value.plugins).toEqual([{ name: 'owner', source: 'second' }])
-    })
-
-    it('keeps group membership atomic and excludes unchanged fields', () => {
-        const before = { ...fixtureDatabase.characters[0], type: 'group', characters: ['a'], characterTalks: [1], characterActive: [true] } as unknown as Database['characters'][number]
-        const after = structuredClone(before)
-        Object.assign(after, { characters: ['b'], characterTalks: [2], characterActive: [false] })
-        expect(diffMaterializedCharacter(before, after).unitMutations).toEqual([
-            { key: '["group-members","char-b"]', type: 'set', value: { characters: ['b'], characterTalks: [2], characterActive: [false] } },
-        ])
     })
 
     it('pins export under paused writes while later saves wait', async () => {

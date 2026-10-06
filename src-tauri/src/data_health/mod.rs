@@ -66,7 +66,12 @@ pub(crate) struct Finding {
     pub(crate) locator: Option<Locator>,
     pub(crate) target: Option<Target>,
     pub(crate) detail: String,
+    pub(crate) intent_action: Option<IntentAction>,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum IntentAction { Discard, Complete }
 
 impl Finding {
     pub(crate) fn new(
@@ -85,6 +90,7 @@ impl Finding {
             locator: None,
             target: None,
             detail: detail.into(),
+            intent_action: None,
         }
     }
 

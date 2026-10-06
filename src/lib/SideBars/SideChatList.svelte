@@ -4,7 +4,7 @@
     import type Sortable from 'sortablejs/modular/sortable.core.esm.js';
     import { DownloadIcon, PencilIcon, HardDriveUploadIcon, MenuIcon, TrashIcon, SplitIcon, FolderPlusIcon, BookmarkCheckIcon } from "@lucide/svelte";
 
-    import type { character, groupChat } from "src/ts/storage/database.svelte";
+    import type { character } from "src/ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
     import { selectedCharID } from "src/ts/stores.svelte";
 
@@ -15,7 +15,7 @@
     import { addNewChat, duplicateChat, editSelectedChatList as applyChatListEdit, exportChat, importChat, exportAllChats, removeChat } from "src/ts/characters";
     import { alertChatOptions, alertConfirm, alertError, alertNormal, alertSelect, alertStore } from "src/ts/alert";
     import { sortableOptions } from "src/ts/util";
-    import { createMultiuserRoom } from "src/ts/sync/multiuser";
+
     import { bookmarkListOpen } from "src/ts/stores.svelte";
     import { language } from "src/lang";
     import { bindPersona, chatBindingBlockedByGeneration, saveChatBinding } from 'src/ts/chatBindings.svelte'
@@ -25,7 +25,7 @@
     import { indexSideChatListRows, orderChatsByDroppedRows, orderFoldersByDroppedIds, type DroppedChatRow } from "./sideChatListRows";
 
     interface Props {
-        chara: character|groupChat;
+        chara: character;
     }
 
     let { chara = $bindable() }: Props = $props();
@@ -337,9 +337,6 @@
                                         }
                                         break
                                     }
-                                    case 2:{
-                                        if(await changeChatTo(chat.id)) createMultiuserRoom()
-                                    }
                                 }
                             }}>
                                 <MenuIcon size={18}/>
@@ -440,9 +437,6 @@
                                 }
                                 break
                             }
-                            case 2:{
-                                if(await changeChatTo(chat.id)) createMultiuserRoom()
-                            }
                         }
                     }}>
                         <MenuIcon size={18}/>
@@ -536,13 +530,5 @@
             <Toggles bind:chara={chara} noContainer />
         {/if}
     </div>
-    {#if chara.type === 'group'}
-    <div class="flex mt-2 items-center">
-        <CheckInput check={chara.orderByOrder} onChange={(value) => editSelectedChatList(chara.chaId, 'group-chat-order', (character) => {
-            if (character.type !== 'group') return false
-            character.orderByOrder = value
-            return null
-        })} name={language.orderByOrder}/>
-    </div>
-    {/if}
+
 </div>

@@ -1,4 +1,4 @@
-import type { Chat, Database, character, groupChat, loreBook } from '../storage/database.svelte'
+import type { Chat, Database, character, loreBook } from '../storage/database.svelte'
 import type { RisuModule } from '../process/modules'
 
 function lore(key: string): loreBook {
@@ -102,28 +102,6 @@ export function conversationContextDatabase(): Database {
     const member = baseCharacter('char-member', 'Member', [conversation('conv-member')], {
         nickname: 'Mem',
     })
-    const group = {
-        type: 'group',
-        chaId: 'char-group',
-        name: 'Group',
-        image: '',
-        firstMessage: 'Group hello',
-        chats: [conversation('conv-group', { modules: ['module-chat'] })],
-        chatPage: 0,
-        characters: ['char-plain', 'char-member'],
-        characterTalks: [],
-        characterActive: [true, true],
-        globalLore: [lore('char-group-global')],
-        autoMode: false,
-        useCharacterLore: true,
-        emotionImages: [],
-        customscript: [],
-        viewScreen: 'none',
-        chatFolders: [],
-        modules: ['module-group'],
-        defaultVariables: 'groupvar=group',
-        lastInteraction: 50,
-    } as unknown as groupChat
     return {
         apiType: 'fixture',
         formatversion: 4,
@@ -164,14 +142,13 @@ export function conversationContextDatabase(): Database {
             module('module-char'),
             module('module-int'),
             module('module-ns', 'ns-shared'),
-            module('module-group'),
             module('module-unused'),
         ],
         enabledModules: ['module-enabled'],
         explicitGlobalChatVariables: { shared: 'explicit', toggle_a: 'global-a', toggle_b: 'global-b' },
         globalChatVariables: { shared: 'stale' },
         pluginCustomStorage: {},
-        characters: [plain, group, member],
+        characters: [plain, member],
     } as unknown as Database
 }
 

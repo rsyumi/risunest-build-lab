@@ -79,7 +79,7 @@ describe('coldstorageData', () => {
         expect(listDatabaseRootResources(root)[0]).toBe('assets/background.png')
     })
 
-    it('lists and replaces the exact non-group character resource fields symmetrically', () => {
+    it('lists and replaces the exact character resource fields symmetrically', () => {
         const value = {
             type: 'character',
             image: 'assets/character.png',
@@ -116,21 +116,6 @@ describe('coldstorageData', () => {
             'remote/assets/card.png',
         ])
         expect(value.image).toBe('assets/character.png')
-    })
-
-    it('does not treat group-only compatibility fields as resources', () => {
-        const group = {
-            type: 'group',
-            image: 'assets/group.png',
-            emotionImages: [['happy', 'assets/group-emotion.png']],
-            additionalAssets: [['prop', 'assets/ignored.png', 'png']],
-            vits: { files: { model: 'assets/ignored.onnx' } },
-        } as any
-
-        expect(listCharacterResources(group)).toEqual([
-            'assets/group.png',
-            'assets/group-emotion.png',
-        ])
     })
 
     it('replaces VITS and CC assets when additional assets are absent', () => {

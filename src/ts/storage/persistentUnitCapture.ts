@@ -1,9 +1,9 @@
-import type { Chat, character, groupChat } from './database.svelte'
+import type { Chat, character } from './database.svelte'
 import type { ConversationMutation, PersistentUnitMutation } from './persistentDataStore'
-import { canonicalJson, canonicalClone, messageReplaceRange } from './saveCoordinatorHelpers'
+import { canonicalJson, canonicalClone, messageReplaceRange, requiresWholeObjectCapture } from './saveCoordinatorHelpers'
 import { isConversationSummaryStub } from './conversationResidency'
 
-type CompleteCharacter = character | groupChat
+type CompleteCharacter = character
 
 export function diffFields(
     components: string[], beforeValue: object, afterValue: object,
@@ -22,12 +22,17 @@ export function diffFields(
 }
 
 export function captureMaterializedCharacter(value: CompleteCharacter): CompleteCharacter {
+    if (requiresWholeObjectCapture(value)) return canonicalClone(value)
     const result = Object.fromEntries(Object.keys(value).filter((key) => key !== 'chats' && value[key] !== undefined)
         .map((key) => [key, canonicalClone(value[key])])) as CompleteCharacter
-    result.chats = value.chats.map((chat) => Object.fromEntries(Object.keys(chat)
+    result.chats = value.chats.map((chat) => requiresWholeObjectCapture(chat,
+        isConversationSummaryStub(chat) || !Object.prototype.propertyIsEnumerable.call(chat, 'message') ? new Set(['message']) : undefined)
+        ? canonicalClone(chat) : Object.fromEntries(Object.keys(chat)
         .filter((key) => chat[key] !== undefined && (key !== 'message' || (!isConversationSummaryStub(chat)
             && Object.prototype.propertyIsEnumerable.call(chat, 'message'))))
-        .map((key) => [key, canonicalClone(chat[key])])) as Chat)
+        .map((key) => [key, key === 'message'
+            ? chat.message.map((message, index) => JSON.parse(canonicalJson({ [index]: message }))[index])
+            : canonicalClone(chat[key])])) as Chat)
     return result
 }
 
@@ -35,12 +40,8 @@ export function diffMaterializedCharacter(before: CompleteCharacter, after: Comp
     unitMutations: PersistentUnitMutation[]; conversations: ConversationMutation[]
 } {
     const unitMutations = diffFields(['character', after.chaId], before, after,
-        new Set(['chats', 'chaId', 'characters', 'characterTalks', 'characterActive', 'chatFolders']))
-    if (after.type === 'group' && canonicalJson([(before as groupChat).characters, (before as groupChat).characterTalks, (before as groupChat).characterActive])
-        !== canonicalJson([after.characters, after.characterTalks, after.characterActive])) {
-        unitMutations.push({ key: JSON.stringify(['group-members', after.chaId]), type: 'set',
-            value: { characters: after.characters, characterTalks: after.characterTalks, characterActive: after.characterActive } })
-    }
+        new Set(['chats', 'chaId', 'chatFolders']))
+
     const conversations: ConversationMutation[] = []
     const previous = new Map(before.chats.map((chat) => [chat.id, chat]))
     for (const [index, chat] of after.chats.entries()) {
@@ -54,10 +55,11 @@ export function diffMaterializedCharacter(before: CompleteCharacter, after: Comp
             continue
         }
         unitMutations.push(...diffFields(['conversation', after.chaId, chat.id], old, chat, new Set(['message', 'id'])))
-        if (chat.message !== old.message && Object.hasOwn(chat, 'message') && Object.hasOwn(old, 'message')
-            && canonicalJson(chat.message) !== canonicalJson(old.message)) {
-            conversations.push({ type: 'replace-range', characterId: after.chaId, conversationId: chat.id,
-                ...messageReplaceRange(old.message, chat.message) })
+        if (chat.message !== old.message && Object.hasOwn(chat, 'message') && Object.hasOwn(old, 'message')) {
+            const range = messageReplaceRange(old.message, chat.message)
+            if (range.deleteCount || range.messages.length) {
+                conversations.push({ type: 'replace-range', characterId: after.chaId, conversationId: chat.id, ...range })
+            }
         }
     }
     const nextIds = new Set(after.chats.map((chat) => chat.id))
@@ -100,5 +102,5 @@ export function diffRecordCollection(collection: string, before: unknown[], afte
     return mutations
 }
 
-export const CHARACTER_SHARED_FIELDS: ReadonlySet<string> = new Set(['statics', 'additionalAssets', 'additionalData', 'additionalText', 'alternateGreetings', 'autoMode', 'backgroundCSS', 'backgroundHTML', 'bias', 'ccAssets', 'characterVersion', 'coldStoragedChats', 'coldstorage', 'creation_date', 'creator', 'creatorNotes', 'customModuleToggle', 'customscript', 'defaultVariables', 'depth_prompt', 'desc', 'doNotChangeSeperateModels', 'emotionImages', 'escapeOutput', 'exampleMessage', 'extentions', 'firstMessage', 'firstMsgIndex', 'fishSpeechConfig', 'globalLore', 'gptSoVitsConfig', 'group_only_greetings', 'hfTTS', 'hideChatIcon', 'image', 'imported', 'inlayViewScreen', 'largePortrait', 'license', 'loreExt', 'lorePlus', 'loreSettings', 'lowLevelAccess', 'modification_date', 'moduleNamespace', 'modules', 'naittsConfig', 'name', 'newGenData', 'nickname', 'notes', 'oaiTTSConfig', 'oaiVoice', 'oneAtTime', 'orderByOrder', 'personality', 'postHistoryInstructions', 'prebuiltAssetCommand', 'prebuiltAssetExclude', 'prebuiltAssetStyle', 'private', 'realmId', 'removedQuotes', 'replaceGlobalNote', 'scenario', 'scriptstate', 'sdData', 'source', 'suggestMessages', 'supaMemory', 'systemPrompt', 'tags', 'translatorNote', 'trashTime', 'triggerscript', 'ttsMode', 'ttsReadOnlyQuoted', 'ttsSpeech', 'useCharacterLore', 'utilityBot', 'viewScreen', 'virtualscript', 'vits', 'voicevoxConfig'])
+export const CHARACTER_SHARED_FIELDS: ReadonlySet<string> = new Set(['statics', 'additionalAssets', 'additionalData', 'additionalText', 'alternateGreetings', 'backgroundCSS', 'backgroundHTML', 'bias', 'ccAssets', 'characterVersion', 'coldStoragedChats', 'coldstorage', 'creation_date', 'creator', 'creatorNotes', 'customModuleToggle', 'customscript', 'defaultVariables', 'depth_prompt', 'desc', 'doNotChangeSeperateModels', 'emotionImages', 'escapeOutput', 'exampleMessage', 'extentions', 'firstMessage', 'firstMsgIndex', 'fishSpeechConfig', 'globalLore', 'gptSoVitsConfig', 'hfTTS', 'hideChatIcon', 'image', 'imported', 'inlayViewScreen', 'largePortrait', 'license', 'loreExt', 'lorePlus', 'loreSettings', 'lowLevelAccess', 'modification_date', 'moduleNamespace', 'modules', 'naittsConfig', 'name', 'newGenData', 'nickname', 'notes', 'oaiTTSConfig', 'oaiVoice', 'personality', 'postHistoryInstructions', 'prebuiltAssetCommand', 'prebuiltAssetExclude', 'prebuiltAssetStyle', 'private', 'realmId', 'removedQuotes', 'replaceGlobalNote', 'scenario', 'scriptstate', 'sdData', 'source', 'suggestMessages', 'supaMemory', 'systemPrompt', 'tags', 'translatorNote', 'trashTime', 'triggerscript', 'ttsMode', 'ttsReadOnlyQuoted', 'ttsSpeech', 'utilityBot', 'viewScreen', 'virtualscript', 'vits', 'voicevoxConfig'])
 export const CONVERSATION_SHARED_FIELDS: ReadonlySet<string> = new Set(['GLGlobalVariables', 'bindedPersona', 'bookmarkNames', 'bookmarks', 'fmIndex', 'folderId', 'hypaV2Data', 'hypaV3Data', 'lastDate', 'lastMemory', 'localLore', 'modules', 'name', 'note', 'rerollRecovery', 'savedToggleValues', 'scriptstate', 'sdData', 'suggestMessages', 'supaMemoryData', 'toolCalls', 'useLocallySetGlobalVariables'])

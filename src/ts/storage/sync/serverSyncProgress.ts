@@ -20,10 +20,12 @@ export interface ServerSyncLane {
     bytesTotal: number
     sentBytes: number
     receivedBytes: number
-    /** Work measured before it runs: server changes after the cursor, or the assets a hydration downloads. */
+    /** Server changes after the receive cursor. */
     backlogDone: number
     /** What remains of that work now. It falls as well as grows, so a view reads it as it is. */
     backlogLeft: number
+    /** A finite hydration call, independent of cumulative transfer counters. */
+    assetScope?: { id: number; done: number; total: number | null; settled: boolean } | null
 }
 export const readServerSyncLanes = () => invoke<ServerSyncLane[]>('server_sync_progress')
 
@@ -35,6 +37,8 @@ export function laneDeltas(current: ServerSyncLane[], baseline: ServerSyncLane[]
         const base = baseline.find(entry => entry.lane === lane.lane)
         const delta = { ...lane }
         for (const key of COUNTS) delta[key] = Math.max(0, lane[key] - (base?.[key] ?? 0))
+        const baseScope = base?.assetScope
+        if (!lane.active && lane.assetScope && baseScope && lane.assetScope.id === baseScope.id && lane.assetScope.done === baseScope.done && lane.assetScope.settled === baseScope.settled) delta.assetScope = null
         return delta
     })
 }
@@ -76,7 +80,7 @@ export interface ServerSyncAttempt {
     rate?: number
     /** Changes a watched routine attempt had to upload when it began publishing. */
     plannedSend?: number
-    /** The furthest each routine bar got. A bar does not fall back when more work turns up. */
+    /** Change progress keeps its peak; asset progress belongs to its current finite scope. */
     peak?: Partial<Record<ServerSyncRoutinePhase, number>>
 }
 
@@ -118,6 +122,7 @@ function stageLane(attempt: ServerSyncAttempt, stage: ServerSyncStage): ServerSy
         .find(lane => lane?.active && lane.step !== 'idle')
 }
 function laneDetail(lane: ServerSyncLane, text: Text): string {
+    if (lane.assetScope) return lane.assetScope.total === null ? '' : ratio(lane.assetScope.done, lane.assetScope.total)
     if (lane.step === 'listing') return lane.listed > 0 ? text.itemsCount.replace('{0}', count(lane.listed)) : ''
     if ((lane.step === 'uploading' || lane.step === 'downloading') && lane.filesTotal > 0) {
         const transferred = lane.bytesTotal > 0 ? `${bytes(lane.bytesDone)} / ${bytes(lane.bytesTotal)}` : bytes(lane.bytesDone)
@@ -126,6 +131,7 @@ function laneDetail(lane: ServerSyncLane, text: Text): string {
     return lane.itemsTotal > 0 ? ratio(lane.itemsDone, lane.itemsTotal) : ''
 }
 function laneFraction(lane: ServerSyncLane): number | null {
+    if (lane.assetScope) return lane.assetScope.total ? Math.min(1, lane.assetScope.done / lane.assetScope.total) : null
     if (lane.step !== 'uploading' && lane.step !== 'downloading') return null
     if (lane.bytesTotal > 0) return Math.min(1, lane.bytesDone / lane.bytesTotal)
     return lane.filesTotal > 0 ? Math.min(1, lane.filesDone / lane.filesTotal) : null
@@ -174,29 +180,35 @@ export function routineWork(attempt: ServerSyncAttempt): Record<ServerSyncRoutin
     const received = backlog(lane('receive')) ?? { done: 0, total: 0 }
     return {
         changes: { done: sent + received.done, total: Math.max(sent, send?.itemsTotal ?? 0, attempt.plannedSend ?? 0) + received.total },
-        assets: backlog(lane('hydrate')) ?? { done: 0, total: 0 },
+        assets: assetWork(lane('hydrate')),
     }
+}
+function assetWork(lane: ServerSyncLane | undefined): Work {
+    const scope = lane?.assetScope
+    return scope?.total ? { done: scope.done, total: scope.total } : { done: 0, total: 0 }
 }
 const share = (work: Work) => work.total > 0 ? Math.min(1, work.done / work.total) : 0
 function routinePhase(attempt: ServerSyncAttempt, work: Record<ServerSyncRoutinePhase, Work>): ServerSyncRoutinePhase {
-    return work.assets.total > 0 && (attempt.active.includes('assets') || work.changes.total === 0) ? 'assets' : 'changes'
+    return attempt.active.includes('assets') || (work.assets.total > 0 && work.changes.total === 0) ? 'assets' : 'changes'
 }
 /** `peak` after the latest counts, for the bar the attempt shows now. */
 export function routinePeak(attempt: ServerSyncAttempt): ServerSyncAttempt['peak'] {
     const work = routineWork(attempt), phase = routinePhase(attempt, work)
-    return { ...attempt.peak, [phase]: Math.max(attempt.peak?.[phase] ?? 0, share(work[phase])) }
+    return { ...attempt.peak, [phase]: phase === 'assets' ? share(work.assets) : Math.max(attempt.peak?.changes ?? 0, share(work.changes)) }
 }
 
 export interface ServerSyncRoutineView {
     label: string
-    fraction: number
+    fraction: number | null
     complete: boolean
 }
 /** The one bar of a routine attempt, or undefined while it has nothing to move. */
 export function serverSyncRoutineView(attempt: ServerSyncAttempt, text: Text, complete: boolean): ServerSyncRoutineView | undefined {
     const work = routineWork(attempt)
-    if (work.changes.total + work.assets.total === 0) return undefined
+    if (work.changes.total + work.assets.total === 0 && !attempt.active.includes('assets')) return undefined
+    complete = complete && attempt.active.length === 0 && !attempt.lanes?.some(lane => lane.active || (lane.assetScope && !lane.assetScope.settled))
     if (complete) return { label: text.complete, fraction: 1, complete }
     const phase = routinePhase(attempt, work)
-    return { label: phase === 'assets' ? text.progress.assets : text.running, fraction: Math.max(attempt.peak?.[phase] ?? 0, share(work[phase])), complete }
+    if (phase === 'assets' && work.assets.total === 0) return { label: text.progress.assets, fraction: null, complete: false }
+    return { label: phase === 'assets' ? text.progress.assets : text.running, fraction: phase === 'assets' ? share(work.assets) : Math.max(attempt.peak?.changes ?? 0, share(work.changes)), complete }
 }

@@ -205,7 +205,11 @@ describe("rendered palette startup hint", () => {
     expect(localStorage.getItem(WINDOWS_APPEARANCE_CACHE)).toBeNull();
     await vi.runAllTimersAsync();
     expect(JSON.parse(localStorage.getItem(WINDOWS_APPEARANCE_CACHE)!)).toEqual(expected);
-    expect(platform.invoke).not.toHaveBeenCalled();
+    if (desktop) {
+      expect(platform.invoke).toHaveBeenCalledExactlyOnceWith("desktop_cache_appearance", { appearance: expected });
+    } else {
+      expect(platform.invoke).not.toHaveBeenCalled();
+    }
     if (os === "macos") {
       expect(platform.setTheme).toHaveBeenCalledExactlyOnceWith("light");
     } else {
@@ -230,7 +234,7 @@ describe("rendered palette startup hint", () => {
     reply();
     await vi.runAllTimersAsync();
     expect(platform.setTheme).toHaveBeenCalledOnce();
-    expect(platform.invoke).not.toHaveBeenCalled();
+    expect(platform.invoke).toHaveBeenCalledExactlyOnceWith("desktop_cache_appearance", { appearance: expected });
   });
 
   it("keeps the macOS startup hint after native failure and retries the same theme", async () => {
@@ -246,7 +250,7 @@ describe("rendered palette startup hint", () => {
     scheduleWindowsAppearance(palette);
     await vi.runAllTimersAsync();
     expect(platform.setTheme.mock.calls).toEqual([["light"], ["light"]]);
-    expect(platform.invoke).not.toHaveBeenCalled();
+    expect(platform.invoke).toHaveBeenCalledExactlyOnceWith("desktop_cache_appearance", { appearance: expected });
   });
 
   it("orders macOS theme updates while keeping the newest rendered startup hint", async () => {
@@ -282,6 +286,35 @@ describe("rendered palette startup hint", () => {
     scheduleWindowsAppearance(palette);
     await vi.runAllTimersAsync();
     expect(platform.invoke).toHaveBeenCalledOnce();
+  });
+
+  it("orders Linux startup hints and retries a failed cache write without changing the live palette", async () => {
+    platform.desktop = true;
+    platform.os = "linux";
+    let reply!: () => void;
+    platform.invoke.mockImplementationOnce(() => new Promise<void>(resolve => { reply = resolve; }));
+    const { scheduleWindowsAppearance } = await import("./windowsAppearance");
+    scheduleWindowsAppearance({ ...palette, type: "dark" });
+    await vi.runAllTimersAsync();
+    scheduleWindowsAppearance(palette);
+    await vi.runAllTimersAsync();
+    expect(platform.invoke).toHaveBeenCalledTimes(1);
+    expect(document.documentElement.style.colorScheme).toBe("light");
+    reply();
+    await vi.runAllTimersAsync();
+    expect(platform.invoke.mock.calls).toEqual([
+      ["desktop_cache_appearance", { appearance: { ...expected, dark: true } }],
+      ["desktop_cache_appearance", { appearance: expected }],
+    ]);
+    platform.invoke.mockRejectedValueOnce(new Error("synthetic failure"));
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    scheduleWindowsAppearance({ ...palette, type: "dark" });
+    await vi.runAllTimersAsync();
+    expect(warning).toHaveBeenCalledExactlyOnceWith("Could not cache desktop startup colors");
+    scheduleWindowsAppearance();
+    await vi.runAllTimersAsync();
+    expect(platform.invoke).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(localStorage.getItem(WINDOWS_APPEARANCE_CACHE)!).dark).toBe(true);
   });
 
   it("keeps the previous Windows hint when native application fails", async () => {

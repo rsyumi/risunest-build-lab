@@ -772,39 +772,6 @@ for (const target of ["risuai", "pocket"]) {
           }
         },
       );
-
-      if (target === "pocket")
-        await t.test(
-          "actual Pocket bootstrap purges group and folder references",
-          async () => {
-            const db = await harness.normalize({
-              characters: [
-                { chaId: "synthetic-a", type: "character", chats: [] },
-                { chaId: "synthetic-group", type: "group", chats: [] },
-              ],
-              characterOrder: [
-                "synthetic-group",
-                {
-                  type: "folder",
-                  name: "Synthetic",
-                  data: ["synthetic-a", "synthetic-group"],
-                },
-              ],
-              formatversion: 5,
-            });
-            assert.deepEqual(plain(db.characters.map((c) => c.chaId)), [
-              "synthetic-a",
-            ]);
-            assert.equal(
-              JSON.stringify(db.characterOrder).includes("synthetic-group"),
-              false,
-            );
-            assert.equal(
-              JSON.stringify(db.characterOrder).includes("synthetic-a"),
-              true,
-            );
-          },
-        );
     },
   );
 }

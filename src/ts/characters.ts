@@ -2,7 +2,7 @@ import { offerHtmlClipboardExport } from './htmlClipboardExport'
 import { defaultChatToggleBinding } from './toggleBindings'
 import { get, writable } from "svelte/store";
 import { saveImage, type character, type Chat, defaultSdDataFunc, type loreBook, getDatabase, getCharacterByIndex, setCharacterByIndex } from "./storage/database.svelte";
-import { alertAddCharacter, alertCheckboxConfirm, alertClear, alertError, alertNormal, alertSelect, alertStore, alertToast, alertWait } from "./alert";
+import { alertAddCharacter, alertCheckboxConfirm, alertError, alertNormal, alertSelect, alertStore, alertToast, alertWait } from "./alert";
 import { language } from "../lang";
 import { isArchivedCharacter } from "./storage/workingSetCatalog";
 import { restoreArchivedCharacterWithConfirmation } from "./storage/characterArchive";
@@ -23,7 +23,7 @@ import {
     captureSelectedConversationTarget,
     commitCharacterAddition,
     deactivateActiveWorkingSet,
-    deletePersistentCharacterWithGroupReferences,
+    deletePersistentCharacter,
     editWindowedChatList,
     fencePersistentNavigation,
     flushPendingData,
@@ -34,7 +34,6 @@ import {
     readPersistentConversation,
     reconcilePersistentActiveCharacterIds,
 } from "./storage/persistentDataRuntime.svelte";
-import type { groupChat } from "./storage/database.svelte";
 import { removeCharacterIdFromOrder } from './storage/characterOrderMutation'
 import { safeStructuredClone } from './polyfill'
 import { isConversationSummaryStub } from './storage/conversationResidency'
@@ -51,15 +50,16 @@ import { SelectedConversationPromotionStaleError } from './storage/activeWorking
 import { PersistentMutationFencedError } from './storage/saveCoordinator'
 import { beginNavigationActivity } from './ui/navigationActivity'
 import { yieldToUi } from './ui/yieldToUi'
+import { estimateCharacterBytes } from './storage/conversationInsertPages'
 
 export async function commitDetachedCharacter(
-    character: character | groupChat,
+    character: character,
     reason: string,
 ): Promise<string> {
     const characterId = character.chaId
     await commitCharacterAddition({
         characterId,
-        estimatedBytes: new TextEncoder().encode(JSON.stringify(character)).byteLength,
+        estimatedBytes: estimateCharacterBytes(character),
         install() {
             DBState.db.characters.push(character)
             checkCharOrder()
@@ -72,36 +72,7 @@ export async function createNewCharacter(): Promise<string> {
     return commitDetachedCharacter(createBlankChar(), 'create-character')
 }
 
-export async function createNewGroup(): Promise<string> {
-    const character: groupChat = {
-        type: 'group',
-        name: "",
-        firstMessage: "",
-        chats: [{
-            ...defaultChatToggleBinding(DBState.db),
-            message: [],
-            note: '',
-            name: 'Chat 1',
-            localLore: [],
-            id: v4()
-        }],
-        chatFolders: [],
-        chatPage: 0,
-        viewScreen: 'none',
-        globalLore: [],
-        characters: [],
-        autoMode: false,
-        useCharacterLore: true,
-        emotionImages: [],
-        customscript: [],
-        chaId: uuidv4(),
-        firstMsgIndex: -1,
-        characterTalks: [],
-        characterActive: [],
-        realmId: ''
-    }
-    return commitDetachedCharacter(character, 'create-group')
-}
+
 
 export async function getCharImage(loc:string, type:'plain'|'css'|'contain'|'lgcss') {
     const db = DBState.db
@@ -187,7 +158,7 @@ export async function selectCharImg(charIndex:number) {
             await mutatePersistentCharacterDetail(characterId, 'select-character-image', ({ character }) => {
                 archiveCurrentCharacterImage(character)
                 character.image = imgp
-                if (character.type === 'character' && Object.keys(pngExif).length > 0) {
+                if (Object.keys(pngExif).length > 0) {
                     character.extentions ??= {}
                     character.extentions.pngExif = { ...character.extentions.pngExif, ...pngExif }
                 }
@@ -231,7 +202,7 @@ export async function addCharEmotion(charId:number) {
             images.push([f.name.replace('.png', '').replace('.webp', ''), imgp])
         }
         await mutatePersistentCharacterDetail(characterId, 'add-character-emotions', ({ character }) => {
-            if (character.type === 'character') character.emotionImages.push(...images)
+            character.emotionImages.push(...images)
         })
     } finally {
         addingEmotion.set(false)
@@ -240,10 +211,8 @@ export async function addCharEmotion(charId:number) {
 
 export function rmCharEmotion(charId:number, emotionId:number) {
     let dbChar = DBState.db.characters[charId]
-    if(dbChar.type !== 'group'){
-        dbChar.emotionImages.splice(emotionId, 1)
-        DBState.db.characters[charId] = dbChar
-    }
+    dbChar.emotionImages.splice(emotionId, 1)
+    DBState.db.characters[charId] = dbChar
 }
 
 
@@ -414,9 +383,7 @@ export async function exportChat(page:number){
                 }
             }).join('\n\n')
 
-            if(char.type !== 'group'){
-                stringl = `--${char.name}\n${char.firstMessage}\n\n` + stringl
-            }
+            stringl = `--${char.name}\n${char.firstMessage}\n\n` + stringl
 
             await downloadFile(`${char.name}_${date}_chat`.replace(/[<>:"/\\|?*\.\,]/g, "") + '.txt', Buffer.from(stringl, 'utf-8'))
 
@@ -621,7 +588,7 @@ function formatTavernChat(chat:string, charName:string){
     return chat.replace(/<([Uu]ser)>|\{\{([Uu]ser)\}\}/g, getUserName()).replace(/((\{\{)|<)([Cc]har)(=.+)?((\}\})|>)/g, charName)
 }
 
-export function characterFormatUpdate(indexOrCharacter:number|character|groupChat, arg:{
+export function characterFormatUpdate(indexOrCharacter:number|character, arg:{
     updateInteraction?:boolean,
 } = {}){
     let cha = typeof(indexOrCharacter) === 'number' ? getCharacterByIndex(indexOrCharacter) : indexOrCharacter
@@ -649,77 +616,61 @@ export function characterFormatUpdate(indexOrCharacter:number|character|groupCha
     if(!cha.chaId){
         cha.chaId = uuidv4()
     }
-    if(cha.type !== 'group'){
-        if(checkNullish(cha.sdData)){
-            cha.sdData = defaultSdDataFunc()
-        }
-        if(checkNullish(cha.utilityBot)){
-            cha.utilityBot = false
-        }
-        cha.triggerscript = cha.triggerscript ?? []
-        cha.alternateGreetings = cha.alternateGreetings ?? []
-        cha.exampleMessage = cha.exampleMessage ?? ''
-        cha.creatorNotes = cha.creatorNotes ?? ''
-        cha.systemPrompt = cha.systemPrompt ?? ''
-        cha.tags = cha.tags ?? []
-        cha.creator = cha.creator ?? ''
-        cha.characterVersion = cha.characterVersion ?? ''
-        cha.personality = cha.personality ?? ''
-        cha.scenario = cha.scenario ?? ''
-        cha.firstMsgIndex = cha.firstMsgIndex ?? -1
-        cha.additionalData = cha.additionalData ?? {
-            tag: [],
-            creator: '',
-            character_version: ''
-        }
-        cha.voicevoxConfig = cha.voicevoxConfig ?? {
-            SPEED_SCALE: 1,
-            PITCH_SCALE: 0,
-            INTONATION_SCALE: 1,
-            VOLUME_SCALE: 1
-        }
-        if(cha.postHistoryInstructions){
-            cha.chats[cha.chatPage].note += "\n" + cha.postHistoryInstructions
-            cha.chats[cha.chatPage].note = cha.chats[cha.chatPage].note.trim()
-            cha.postHistoryInstructions = null
-        }
-        cha.additionalText ??= ''
-        cha.depth_prompt ??= {
-            depth: 0,
-            prompt: ''
-        }
-        cha.hfTTS ??= {
-            model: '',
-            language: 'en'
-        }
-        cha.backgroundHTML ??= ''
-        cha.backgroundCSS ??= ''
-        cha.creation_date ??= Date.now()
-        cha.globalLore = updateLorebooks(cha.globalLore)
-        if(!cha.newGenData){
-            cha = updateInlayScreen(cha)
-        }
-        // Migrate legacy 'none' value to '' for UI dropdown compatibility
-        // Using '' because it's falsy, so `if (ttsMode)` correctly detects enabled TTS
-        if (cha.ttsMode === 'none') {
-            cha.ttsMode = ''
-        }
-        cha.ttsMode ??= ''
+    if(checkNullish(cha.sdData)){
+        cha.sdData = defaultSdDataFunc()
     }
-    else{
-        if((!cha.characterTalks) || cha.characterTalks.length !== cha.characters.length){
-            cha.characterTalks = []
-            for(let i=0;i<cha.characters.length;i++){
-                cha.characterTalks.push(1 / 6 * 4)
-            }
-        }
-        if((!cha.characterActive) || cha.characterActive.length !== cha.characters.length){
-            cha.characterActive = []
-            for(let i=0;i<cha.characters.length;i++){
-                cha.characterActive.push(true)
-            }
-        }
+    if(checkNullish(cha.utilityBot)){
+        cha.utilityBot = false
     }
+    cha.triggerscript = cha.triggerscript ?? []
+    cha.alternateGreetings = cha.alternateGreetings ?? []
+    cha.exampleMessage = cha.exampleMessage ?? ''
+    cha.creatorNotes = cha.creatorNotes ?? ''
+    cha.systemPrompt = cha.systemPrompt ?? ''
+    cha.tags = cha.tags ?? []
+    cha.creator = cha.creator ?? ''
+    cha.characterVersion = cha.characterVersion ?? ''
+    cha.personality = cha.personality ?? ''
+    cha.scenario = cha.scenario ?? ''
+    cha.firstMsgIndex = cha.firstMsgIndex ?? -1
+    cha.additionalData = cha.additionalData ?? {
+        tag: [],
+        creator: '',
+        character_version: ''
+    }
+    cha.voicevoxConfig = cha.voicevoxConfig ?? {
+        SPEED_SCALE: 1,
+        PITCH_SCALE: 0,
+        INTONATION_SCALE: 1,
+        VOLUME_SCALE: 1
+    }
+    if(cha.postHistoryInstructions){
+        cha.chats[cha.chatPage].note += "\n" + cha.postHistoryInstructions
+        cha.chats[cha.chatPage].note = cha.chats[cha.chatPage].note.trim()
+        cha.postHistoryInstructions = null
+    }
+    cha.additionalText ??= ''
+    cha.depth_prompt ??= {
+        depth: 0,
+        prompt: ''
+    }
+    cha.hfTTS ??= {
+        model: '',
+        language: 'en'
+    }
+    cha.backgroundHTML ??= ''
+    cha.backgroundCSS ??= ''
+    cha.creation_date ??= Date.now()
+    cha.globalLore = updateLorebooks(cha.globalLore)
+    if(!cha.newGenData){
+        cha = updateInlayScreen(cha)
+    }
+    // Migrate legacy 'none' value to '' for UI dropdown compatibility
+    // Using '' because it's falsy, so `if (ttsMode)` correctly detects enabled TTS
+    if (cha.ttsMode === 'none') {
+        cha.ttsMode = ''
+    }
+    cha.ttsMode ??= ''
     if(checkNullish(cha.customscript)){
         cha.customscript = []
     }
@@ -817,80 +768,7 @@ export function createBlankChar():character{
 }
 
 
-export async function makeGroupImage() {
-    try {
-        alertStore.set({
-            type: 'wait',
-            msg: `Loading..`
-        })
-        const db = getDatabase()
-        const charID = get(selectedCharID)
-        const group = db.characters[charID]
-        if(group.type !== 'group'){
-            return
-        }
-    
-        const imageUrls = await Promise.all(group.characters.map((v) => {
-            return getCharImage(findCharacterbyId(v).image, 'plain')
-        }))
-    
-        
-    
-        const canvas = document.createElement("canvas");
-        canvas.width = 256
-        canvas.height = 256
-        const ctx = canvas.getContext("2d");
-      
-        // Load the images
-        const images = [];
-        let loadedImages = 0;
-      
-        await Promise.all(
-            imageUrls.map(
-            (url) =>
-                new Promise<void>((resolve) => {
-                    const img = new Image();
-                    img.crossOrigin="anonymous"
-                    img.onload = () => {
-                        images.push(img);
-                        resolve();
-                    };
-                    img.src = url;
-                })
-            )
-        );
-      
-        // Calculate dimensions and draw the grid
-        const numImages = images.length;
-        const numCols = Math.ceil(Math.sqrt(images.length));
-        const numRows = Math.ceil(images.length / numCols);
-        const cellWidth = canvas.width / numCols;
-        const cellHeight = canvas.height / numRows;
-      
-        for (let row = 0; row < numRows; row++) {
-          for (let col = 0; col < numCols; col++) {
-            const index = row * numCols + col;
-            if (index >= numImages) break;
-            ctx.drawImage(
-              images[index],
-              col * cellWidth,
-              row * cellHeight,
-              cellWidth,
-              cellHeight
-            );
-          }
-        }
-      
-        // Return the image URI
-    
-        const uri = canvas.toDataURL()
-        canvas.remove()
-        db.characters[charID].image = await saveImage(dataURLtoBuffer(uri));
-        alertClear()
-    } catch (error) {
-        alertError(error)
-    }
-}
+
 
 function dataURLtoBuffer(string:string){
     const regex = /^data:.+\/(.+);base64,(.*)$/;
@@ -985,7 +863,7 @@ export async function removeChar(identifier:string|number,name:string, type:'nor
                 },
             )
         } else {
-            changed = await deletePersistentCharacterWithGroupReferences(
+            changed = await deletePersistentCharacter(
                 targetId,
                 'character-removal',
             )
@@ -1042,9 +920,6 @@ export async function addCharacter(arg:{
             case 'createfromScratch':
                 addedCharacterId = await createNewCharacter()
                 break
-            case 'createGroup':
-                addedCharacterId = await createNewGroup()
-                break
             case 'importCharacter':
                 addedCharacterId = await importCharacter()
                 break
@@ -1100,7 +975,7 @@ export async function changeChar(index: number, arg:{
         if (!isRestoreCurrent()) return false
         const expectedNavigationGeneration = restoreNavigationGeneration + 1
         const activationOptions = {
-            normalize: (candidate: character | groupChat) =>
+            normalize: (candidate: character) =>
                 characterFormatUpdate(candidate, {
                     updateInteraction: true,
                 }),
@@ -1133,7 +1008,7 @@ export async function changeChar(index: number, arg:{
 export async function editSelectedChatList(
     characterId: string,
     reason: string,
-    edit: (character: character | groupChat) => string | null | false,
+    edit: (character: character) => string | null | false,
 ): Promise<boolean> {
     const blockedByGeneration = () => {
         if (!get(doingChat)) return false
@@ -1189,8 +1064,8 @@ export async function editSelectedChatList(
 async function editWindowedSelectedChatList(
     characterId: string,
     reason: string,
-    resolveCharacter: () => character | groupChat | null,
-    edit: (character: character | groupChat) => string | null | false,
+    resolveCharacter: () => character | null,
+    edit: (character: character) => string | null | false,
 ): Promise<boolean | 'unsupported'> {
     const initial = captureSelectedConversationTarget()
     if (
@@ -1224,7 +1099,7 @@ async function editWindowedSelectedChatList(
     return result.nextId === null ? true : await changeChatTo(result.nextId)
 }
 
-export async function addNewChat(character: character | groupChat): Promise<boolean> {
+export async function addNewChat(character: character): Promise<boolean> {
     return editSelectedChatList(character.chaId, 'add-chat', (current) => {
         const chats = current.chats
         const newChat: Chat = {
@@ -1236,16 +1111,7 @@ export async function addNewChat(character: character | groupChat): Promise<bool
             fmIndex: -1,
             id: uuidv4(),
         }
-        if(current.type === 'group'){
-            for(const memberId of current.characters){
-                newChat.message.push({
-                    saying: memberId,
-                    role: 'char',
-                    data: findCharacterbyId(memberId).firstMessage,
-                    chatId: v4(),
-                })
-            }
-        }
+
         chats.unshift(newChat)
         current.chats = chats
         return newChat.id
@@ -1259,7 +1125,8 @@ export async function duplicateChat(characterId: string, chatId: string): Promis
     if (!source) return false
     return editSelectedChatList(characterId, 'duplicate-chat', (character) => {
         if (!character.chats.some((conversation) => conversation.id === chatId)) return false
-        const duplicate = safeStructuredClone(source)
+        // The persistent reader returns an owned copy, including its message pages.
+        const duplicate = { ...source }
         duplicate.name = createChatCopyName(duplicate.name, 'Copy')
         duplicate.id = v4()
         character.chats.unshift(duplicate)
@@ -1268,7 +1135,7 @@ export async function duplicateChat(characterId: string, chatId: string): Promis
     })
 }
 
-export async function removeChat(character: character | groupChat, chatId: string): Promise<boolean> {
+export async function removeChat(character: character, chatId: string): Promise<boolean> {
     const chats = character.chats
     if(!chats.some((chat) => chat.id === chatId)) return false
     const selectedChatId = chats[character.chatPage]?.id

@@ -11,7 +11,7 @@ fn blank_character(kind: &str) -> Value {
 
 #[test]
 fn empty_names_survive_creation_edit_and_reopen() {
-    for kind in ["character", "group"] {
+    for kind in ["character"] {
         let (directory, mut store, _) = open_fixture();
         let mut character = blank_character(kind);
         store
@@ -19,7 +19,7 @@ fn empty_names_survive_creation_edit_and_reopen() {
                 add_character: Some(character.clone()),
                 ..empty_working_set_commit(1)
             })
-            .expect("create unnamed character or group");
+            .expect("create unnamed character");
 
         let messages = vec![json!({"role": "user", "data": "synthetic message"})];
         store

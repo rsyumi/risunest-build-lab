@@ -65,7 +65,7 @@ pub(super) fn known(key: &UnitKey) -> bool {
                 | "customModels"
                 | "plugin-storage"
         ),
-        "toggle" | "variable" | "group-members" | "plugin" | "asset" | "inlay" | "hypa"
+        "toggle" | "variable" | "plugin" | "asset" | "inlay" | "hypa"
         | "plugin-local" | "messages" | "archive" => true,
         _ => false,
     }
@@ -263,15 +263,6 @@ fn capture_character(
                 o.shift_remove("messages");
             }
             add(db, out, &["character", id, "statics"], &statics)?;
-        }
-        if value.get("type").and_then(Value::as_str) == Some("group") {
-            let mut members = Map::new();
-            for field in ["characters", "characterTalks", "characterActive"] {
-                if let Some(v) = value.get(field) {
-                    members.insert(field.into(), v.clone());
-                }
-            }
-            add(db, out, &["group-members", id], &Value::Object(members))?;
         }
         let archived: Option<String> = db.query_row(
             "SELECT archived_object FROM characters WHERE generation=?1 AND character_id=?2",
@@ -524,7 +515,7 @@ fn capture_key(
 ) -> StoreResult<()> {
     let p = key.components();
     match p[0].as_str() {
-        "character" | "group-members" | "archive" => {
+        "character" | "archive" => {
             capture_character(db, generation, &p[1], false, true, out)?
         }
         "order" if p[1] == "conversations" => {
@@ -804,11 +795,6 @@ pub(in crate::persistent_store) fn validate_received(
                     return Err(error("invalid-unit-payload"));
                 }
             }
-            "group-members" => {
-                if !v.is_object() {
-                    return Err(error("invalid-unit-payload"));
-                }
-            }
             "record" => {
                 if !v.is_object()
                     || v.get(if p[1] == "plugins" { "name" } else { "id" })
@@ -948,7 +934,7 @@ pub(in crate::persistent_store) fn apply(
 /// touches nothing else.
 pub(in crate::persistent_store) fn character_detail_key(key: &UnitKey) -> Option<String> {
     let mut p = key.components();
-    (matches!(p[0].as_str(), "character" | "group-members") && known(key)).then(|| p.swap_remove(1))
+    (matches!(p[0].as_str(), "character") && known(key)).then(|| p.swap_remove(1))
 }
 pub(in crate::persistent_store) fn character_detail(
     tx: &Transaction<'_>,
@@ -973,15 +959,7 @@ pub(in crate::persistent_store) fn patch_character_detail(
     patch_character(detail, &key.components(), json_value_resolved(tx, value)?, false)
 }
 fn patch_character(v: &mut Value, p: &[String], next: Option<Value>, local: bool) -> StoreResult<()> {
-    if p[0] == "group-members" {
-        for field in ["characters", "characterTalks", "characterActive"] {
-            patch(
-                v,
-                field,
-                next.as_ref().and_then(|v| v.get(field)).cloned(),
-            )?;
-        }
-    } else if p[2] == "statics" {
+    if p[2] == "statics" {
         let messages = if local {
             None
         } else {
@@ -1077,7 +1055,7 @@ fn apply_value(
             patch(field, &p[1], next)?;
             write_root(tx, generation, &v)?;
         }
-        "character" | "group-members" => {
+        "character" => {
             let mut v = character_detail(tx, generation, &p[1])?;
             patch_character(&mut v, &p, next, local)?;
             commit::put_character_detail(tx, generation, &v)?;
@@ -1782,7 +1760,7 @@ pub(in crate::persistent_store) fn reproject_archived_children(
     char_id: &str,
 ) -> StoreResult<()> {
     let rows: Vec<(String, String)> = {
-        let mut q=tx.prepare("SELECT key,value FROM lww_units WHERE (json_extract(key,'$[0]') IN ('character','group-members','conversation','messages') AND json_extract(key,'$[1]')=?1) OR (json_extract(key,'$[0]')='order' AND json_extract(key,'$[1]')='conversations' AND json_extract(key,'$[2]')=?1) OR (json_extract(key,'$[0]')='exists' AND json_extract(key,'$[1]')='conversation' AND json_extract(key,'$[2]')=?1)")?;
+        let mut q=tx.prepare("SELECT key,value FROM lww_units WHERE (json_extract(key,'$[0]') IN ('character','conversation','messages') AND json_extract(key,'$[1]')=?1) OR (json_extract(key,'$[0]')='order' AND json_extract(key,'$[1]')='conversations' AND json_extract(key,'$[2]')=?1) OR (json_extract(key,'$[0]')='exists' AND json_extract(key,'$[1]')='conversation' AND json_extract(key,'$[2]')=?1)")?;
         let rows = q
             .query_map([char_id], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?;
@@ -1830,9 +1808,6 @@ pub(in crate::persistent_store) fn shared_archive_character(mut value: Value) ->
                         | "type"
                         | "chatFolders"
                         | "statics"
-                        | "characters"
-                        | "characterTalks"
-                        | "characterActive"
                 )
         });
         if let Some(statics) = object.get_mut("statics").and_then(Value::as_object_mut) {

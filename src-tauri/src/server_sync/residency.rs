@@ -132,8 +132,9 @@ impl Residency {
                 return Err(SyncError::new("invalid-residency-store", 409));
             }
             tx.execute_batch("CREATE TABLE contexts(id TEXT PRIMARY KEY,library_id TEXT NOT NULL,device_id TEXT NOT NULL,epoch TEXT NOT NULL,config TEXT NOT NULL);
-                CREATE TABLE objects(context TEXT NOT NULL REFERENCES contexts(id),hash TEXT NOT NULL,size INTEGER NOT NULL CHECK(size>=0),retention_id TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('active','releasing','released')),PRIMARY KEY(context,hash));
+                CREATE TABLE objects(context TEXT NOT NULL REFERENCES contexts(id),hash TEXT NOT NULL,size INTEGER NOT NULL CHECK(size>=0),retention_id TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('active','releasing','released')),confirmation_order INTEGER NOT NULL CHECK(confirmation_order>0),PRIMARY KEY(context,hash));
                 CREATE INDEX objects_hash ON objects(hash);
+                CREATE INDEX objects_confirmation_order ON objects(confirmation_order);
                 PRAGMA user_version=1;")?;
             tx.commit()?;
         } else if version != 1 {
@@ -173,6 +174,7 @@ impl Residency {
         let context = Self::context_id(config, &head.epoch);
         let tx = self.db.transaction()?;
         tx.execute("INSERT INTO contexts VALUES(?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET config=excluded.config",params![context,config.library_id,config.device_id,head.epoch,serde_json::to_string(config).map_err(|_|SyncError::new("invalid-retention-config",409))?])?;
+        let order: i64 = tx.query_row("SELECT COALESCE(MAX(confirmation_order),0)+1 FROM objects", [], |row| row.get(0))?;
         for object in objects {
             validate_hash(&object.hash)?;
             validate_hash(&object.retention_id)?;
@@ -181,7 +183,7 @@ impl Residency {
                 .as_str()
                 .parse::<i64>()
                 .map_err(|_| SyncError::new("invalid-retention-size", 409))?;
-            tx.execute("INSERT INTO objects VALUES(?1,?2,?3,?4,'active') ON CONFLICT(context,hash) DO UPDATE SET size=excluded.size,retention_id=excluded.retention_id,state='active'",params![context,object.hash,size,object.retention_id])?;
+            tx.execute("INSERT INTO objects VALUES(?1,?2,?3,?4,'active',?5) ON CONFLICT(context,hash) DO UPDATE SET size=excluded.size,retention_id=excluded.retention_id,state='active',confirmation_order=excluded.confirmation_order",params![context,object.hash,size,object.retention_id,order])?;
         }
         tx.commit()?;
         Ok(())
@@ -226,6 +228,15 @@ impl Residency {
     pub fn object(&self, digest: &str, context: Option<&str>) -> Result<Option<RemoteObject>> {
         self.lookup(digest, context, true)
     }
+    pub(crate) fn target_holds(&self, digest: &str, library_id: &str, target_id: &str) -> Result<bool> {
+        validate_hash(digest)?;
+        validate_hash(target_id)?;
+        let mut query = self.db.prepare("SELECT DISTINCT c.epoch FROM objects o JOIN contexts c ON c.id=o.context WHERE o.hash=?1 AND o.state='active' AND c.library_id=?2")?;
+        for epoch in query.query_map(params![digest, library_id], |row| row.get::<_, String>(0))? {
+            if hash(format!("{library_id}:{}", epoch?).as_bytes()) == target_id { return Ok(true); }
+        }
+        Ok(false)
+    }
     pub fn release_object(&self, digest: &str, context: &str) -> Result<Option<RemoteObject>> {
         self.lookup(digest, Some(context), false)
     }
@@ -236,7 +247,7 @@ impl Residency {
         active: bool,
     ) -> Result<Option<RemoteObject>> {
         validate_hash(digest)?;
-        let value:Option<(String,i64,String,String,String)>=self.db.query_row("SELECT o.context,o.size,o.retention_id,c.device_id,c.config FROM objects o JOIN contexts c ON c.id=o.context WHERE o.hash=?1 AND o.state!='released' AND (NOT ?3 OR o.state='active') AND (?2 IS NULL OR o.context=?2) ORDER BY o.rowid DESC LIMIT 1",params![digest,context,active],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+        let value:Option<(String,i64,String,String,String)>=self.db.query_row("SELECT o.context,o.size,o.retention_id,c.device_id,c.config FROM objects o JOIN contexts c ON c.id=o.context WHERE o.hash=?1 AND o.state!='released' AND (NOT ?3 OR o.state='active') AND (?2 IS NULL OR o.context=?2) ORDER BY o.confirmation_order DESC LIMIT 1",params![digest,context,active],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
         value
             .map(|(context, size, retention_id, device_id, config)| {
                 Ok(RemoteObject {
@@ -568,7 +579,16 @@ impl HydrationSession {
         let mut server_pages = Vec::new();
         let cas = crate::asset_repository::PayloadCas::new(&self.root)?;
         let lane = super::progress::current().filter(|_| self.planned);
-        if let Some(lane) = &lane { lane.backlog(0, 0); }
+        let mut seen = std::collections::BTreeSet::new();
+        let digests = digests.iter().filter(|hash| seen.insert((*hash).clone())).cloned().collect::<Vec<_>>();
+        let scope = lane.as_ref().map(|lane| lane.asset_plan(Some(digests.len())));
+        let mut completed = std::collections::BTreeSet::new();
+        let mut opened = |hash: &str, outcome| {
+            if completed.insert(hash.to_owned()) {
+                if let (Some(lane), Some(scope)) = (&lane, scope) { lane.asset_done(scope); }
+                opened(hash, outcome);
+            }
+        };
         for page in digests.chunks(64) {
             check()?;
             let hashes = page.iter().collect::<std::collections::BTreeSet<_>>();
@@ -609,7 +629,6 @@ impl HydrationSession {
             drop(guards);
             std::thread::yield_now();
         }
-        if let Some(lane) = &lane { lane.backlog(0, server_pages.iter().map(Vec::len).sum::<usize>() as u64); }
         let external = digests.iter().filter(|hash| external.remove(hash.as_str())).cloned().collect::<Vec<_>>();
         for selected in [true, false] {
             for page in &server_pages {
@@ -629,7 +648,6 @@ impl HydrationSession {
                         let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
                         if cas.stat_object(hash)?.is_some() {
                             opened(hash, HydrationOutcome::AlreadyLocal);
-                            if let Some(lane) = &lane { lane.backlog_step(); }
                             continue;
                         }
                     }
@@ -643,7 +661,6 @@ impl HydrationSession {
                         check()?;
                         outcome?;
                         opened(hash, HydrationOutcome::Downloaded);
-                        if let Some(lane) = &lane { lane.backlog_step(); }
                         continue;
                     }
                     let key = format!("{}:{}", proof.context, serde_json::to_string(&proof.config)
@@ -680,7 +697,6 @@ impl HydrationSession {
                             check()?;
                             outcome?;
                             opened(&object.hash, HydrationOutcome::Downloaded);
-                            if let Some(lane) = &lane { lane.backlog_step(); }
                         }
                         drop(body);
                         cache.remove_derived(&object.hash)?;
@@ -694,6 +710,10 @@ impl HydrationSession {
                     &self.root, &external, priority, self.cancellation.clone(), check, &mut opened,
                 )?);
             }
+        }
+        check()?;
+        if unavailable.is_empty() {
+            if let (Some(lane), Some(scope)) = (&lane, scope) { lane.asset_settled(scope); }
         }
         Ok(unavailable)
     }

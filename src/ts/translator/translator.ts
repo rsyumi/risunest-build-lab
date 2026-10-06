@@ -1,6 +1,6 @@
 import { get } from "svelte/store"
 import { parseChatML } from "../parser/chatML";
-import { getDatabase, type character, type customscript, type Database, type groupChat } from "../storage/database.svelte"
+import { getDatabase, type character, type customscript, type Database } from "../storage/database.svelte"
 import {
     defaultTranslatorPrompt,
     getCurrentTranslatorPresetFromState,
@@ -35,7 +35,7 @@ let waitTrans = 0
 export interface TranslateHTMLContext {
     scriptContext: ProcessScriptCaptureContext
     projectedChatID?: number
-    chara?: character | groupChat | string
+    chara?: character | string
     cbsConditions?: CbsConditions
 }
 
@@ -274,7 +274,7 @@ export function isExpTranslator(database: Database = getDatabase()){
 export async function translateHTML(
     html: string,
     reverse:boolean,
-    charArg:simpleCharacterArgument|character|groupChat|string|null = '',
+    charArg:simpleCharacterArgument|character|string|null = '',
     chatID:number,
     regenerate = false,
     captureContext?: TranslateHTMLContext,
@@ -286,7 +286,7 @@ export async function translateHTML(
     }
 
     const db = captureContext?.scriptContext.parserContext.database ?? getDatabase()
-    let alwaysExistChar: character | groupChat | simpleCharacterArgument;
+    let alwaysExistChar: character | simpleCharacterArgument;
     if(charArg){
         if(typeof(charArg) === 'string'){
             const charId = captureContext?.scriptContext.parserContext.selectedCharID ?? get(selectedCharID)
@@ -575,7 +575,7 @@ async function translateLLM(text:string, arg:{to:string, from:string, regenerate
     if(arg.translatorNote){
         translatorNote = arg.translatorNote
     }
-    else if (currentChar?.type === "character") {
+    else if (!!currentChar) {
         translatorNote = currentChar.translatorNote ?? ""
     } else {
         translatorNote = ""
@@ -684,8 +684,8 @@ interface pEdittransScript {
 
 export function applyEdittransRegex(
       text: string,
-      charArg: simpleCharacterArgument | character | groupChat | string | null,
-      alwaysExistChar: character | groupChat | simpleCharacterArgument,
+      charArg: simpleCharacterArgument | character | string | null,
+      alwaysExistChar: character | simpleCharacterArgument,
       chatID = -1,
       captureContext?: TranslateHTMLContext,
   ): string {

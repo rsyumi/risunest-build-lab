@@ -930,15 +930,15 @@ pub(super) fn replace_preserve_repositories(
         }
     }
     let active = active_generation(&transaction)?;
-    let source_root = replacement_root(&transaction, &active)?;
-    let staged_root = replacement_root(&transaction, staging_id)?;
+    let source_root = super::upstream_stream::RootSpool::from_stored(&transaction, &active)?;
+    let staged_root = super::upstream_stream::RootSpool::from_stored(&transaction, staging_id)?;
     let owner_heads = replacement_owner_heads(&transaction, &active)?;
     let retained_owner_heads = owner_heads
         .iter()
         .map(|head| -> StoreResult<Option<&AssetOwnerHead>> {
-            let source = replacement_owner_tuple(&transaction, &active, &source_root, &head.owner)?;
+            let source = streamed_replacement_owner_tuple(&transaction, &active, &source_root, &head.owner)?;
             let staged =
-                replacement_owner_tuple(&transaction, staging_id, &staged_root, &head.owner)?;
+                streamed_replacement_owner_tuple(&transaction, staging_id, &staged_root, &head.owner)?;
             Ok((source.is_some() && source == staged).then_some(head))
         })
         .collect::<StoreResult<Vec<_>>>()?
@@ -974,7 +974,7 @@ pub(super) fn replace_preserve_repositories(
          WHERE generation = ?1 AND object_hash IS NOT NULL",
         [staging_id],
     )?;
-    prune_proven_unreachable_forwarded_aliases(&transaction, staging_id)?;
+    prune_proven_unreachable_forwarded_aliases(&transaction, staging_id, &staged_root)?;
 
     transaction.execute(
         "DELETE FROM asset_owner_heads WHERE generation = ?1",
@@ -1061,8 +1061,9 @@ fn preserve_archived_characters(
 fn prune_proven_unreachable_forwarded_aliases(
     transaction: &Transaction<'_>,
     generation: &str,
+    root: &super::upstream_stream::RootSpool,
 ) -> StoreResult<()> {
-    if !replacement_asset_owner_scan_is_complete(transaction, generation)? {
+    if !replacement_asset_owner_scan_is_complete(transaction, generation, root)? {
         return Ok(());
     }
     let plugin_rows: i64 = transaction.query_row(
@@ -1075,8 +1076,11 @@ fn prune_proven_unreachable_forwarded_aliases(
     }
 
     let mut references = BTreeSet::new();
+    root.visit_values(|value| {
+        observe_replacement_alias_references(&value, &mut references);
+        Ok(())
+    })?;
     for query in [
-        "SELECT value FROM root WHERE generation = ?1",
         "SELECT value FROM bot_presets WHERE generation = ?1",
         "SELECT detail FROM characters WHERE generation = ?1",
         "SELECT detail FROM conversations WHERE generation = ?1",
@@ -1136,53 +1140,30 @@ fn prune_proven_unreachable_forwarded_aliases(
 fn replacement_asset_owner_scan_is_complete(
     transaction: &Transaction<'_>,
     generation: &str,
+    root: &super::upstream_stream::RootSpool,
 ) -> StoreResult<bool> {
-    let root = replacement_root(transaction, generation)?;
-    let root = root
-        .as_object()
-        .ok_or_else(|| validation("Replacement root must be an object"))?;
-    match root.get("plugins") {
+    use super::upstream_stream::FieldKind;
+    match root.kind("plugins")? {
         None => {}
-        Some(Value::Array(plugins)) if plugins.is_empty() => {}
+        Some(FieldKind::Array) if root.count("plugins")? == 0 => {}
         Some(_) => return Ok(false),
     }
     for property in ["modules", "personas"] {
-        if root.get(property).is_some_and(|value| !value.is_array()) {
+        if root.kind(property)?.is_some_and(|kind| kind != FieldKind::Array) {
             return Ok(false);
         }
     }
-    for module in root
-        .get("modules")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let Some(module) = module.as_object() else {
-            return Ok(false);
-        };
-        if module.get("assets").is_some_and(|value| !value.is_array()) {
-            return Ok(false);
-        }
-    }
-    for persona in root
-        .get("personas")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let Some(persona) = persona.as_object() else {
-            return Ok(false);
-        };
-        let Some(module) = persona.get("embeddedModule") else {
-            continue;
-        };
-        let Some(module) = module.as_object() else {
-            return Ok(false);
-        };
-        if module.get("assets").is_some_and(|value| !value.is_array()) {
-            return Ok(false);
-        }
-    }
+    let mut complete=true;
+    root.visit("modules",|_,module| {
+        complete &= module.as_object().is_some_and(|module|module.get("assets").is_none_or(Value::is_array));
+        Ok(())
+    })?;
+    root.visit("personas",|_,persona| {
+        complete &= persona.as_object().is_some_and(|persona|persona.get("embeddedModule").is_none_or(|module|
+            module.as_object().is_some_and(|module|module.get("assets").is_none_or(Value::is_array))));
+        Ok(())
+    })?;
+    if !complete { return Ok(false); }
 
     let mut statement = transaction
         .prepare("SELECT detail FROM characters WHERE generation = ?1 ORDER BY character_id ASC")?;
@@ -1413,6 +1394,27 @@ fn replacement_owner_tuple(
     }
 }
 
+fn streamed_replacement_owner_tuple(
+    connection: &Connection,
+    generation: &str,
+    root: &super::upstream_stream::RootSpool,
+    owner: &AssetOwnerLocator,
+) -> StoreResult<Option<ReplacementOwnerTuple>> {
+    let parent=match owner {
+        AssetOwnerLocator::CharacterAdditionalAssets { .. } => {
+            return replacement_owner_tuple(connection,generation,&serde_json::json!({}),owner);
+        }
+        AssetOwnerLocator::RootModuleAssets { module_id } => root.record_by_id("modules",module_id)?,
+        AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id,module_id } => {
+            root.record_by_id("personas",persona_id)?
+                .and_then(|mut persona|persona.as_object_mut()?.shift_remove("embeddedModule"))
+                .filter(|module|module.get("id").and_then(Value::as_str)==Some(module_id))
+        }
+    };
+    let Some(parent)=parent else { return Ok(None); };
+    replacement_owner_tuple_from_parent(&parent,"assets")
+}
+
 // A malformed parent or non-array property yields no tuple, so the head is
 // dropped instead of failing the whole replacement. Staging accepts such
 // shapes, and extraction here exists only to compare retention candidates.
@@ -1626,7 +1628,7 @@ fn put_root(transaction: &Transaction<'_>, generation: &str, root: &Value) -> St
 /// A key that still waits for an owner keeps the import it arrived in, so a
 /// full replacement written afterwards cannot hand a plugin a second chance at
 /// the values a person left alone.
-fn carried_plugin_import_batches(
+pub(super) fn carried_plugin_import_batches(
     transaction: &Transaction<'_>,
 ) -> StoreResult<HashMap<String, String>> {
     let active = active_generation(transaction)?;
@@ -1654,7 +1656,7 @@ pub(super) fn replace_plugin_storage(
     put_plugin_storage_map(transaction, generation, values, meta, carried, 0)
 }
 
-fn put_plugin_storage_map(
+pub(super) fn put_plugin_storage_map(
     transaction: &Transaction<'_>,
     generation: &str,
     values: &Map<String, Value>,
@@ -1784,7 +1786,7 @@ pub(super) fn replace_presets(
     put_preset_rows(transaction, generation, presets, 0)
 }
 
-fn put_preset_rows(
+pub(super) fn put_preset_rows(
     transaction: &Transaction<'_>,
     generation: &str,
     presets: &[Value],
@@ -2618,7 +2620,7 @@ fn object<'a>(value: &'a Value, context: &str) -> StoreResult<&'a Map<String, Va
         .ok_or_else(|| validation(format!("{context} must be a JSON object")))
 }
 
-// Upstream allows unnamed characters, groups, and conversations. IDs remain nonempty.
+// Upstream allows unnamed characters and conversations. IDs remain nonempty.
 fn required_display_name<'a>(value: &'a Value, context: &str) -> StoreResult<&'a str> {
     value
         .get("name")
@@ -3019,27 +3021,29 @@ pub(super) fn staged_plugin_preview(
 /// The plugins the staged save carries. The working set still holds the
 /// database being replaced, so the names have to come from the staging.
 fn staged_plugin_names(connection: &Connection, staging_id: &str) -> StoreResult<Vec<String>> {
-    let plugins: Option<String> = connection
-        .query_row(
-            "SELECT json_extract(value, '$.plugins') FROM root WHERE generation = ?1",
-            params![staging_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .flatten();
-    let Some(plugins) = plugins else {
+    let exists: bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM root WHERE generation=?1)",[staging_id],|r|r.get(0))?;
+    if !exists { return Ok(Vec::new()); }
+    let root=super::upstream_stream::RootSpool::from_stored(connection,staging_id)?;
+    if root.kind("plugins")? != Some(super::upstream_stream::FieldKind::Array) {
+        let scalar=root.scalar("plugins")?;
+        if scalar.as_ref().is_some_and(|value|value.is_number() || value.is_boolean()) {
+            let _: Option<String>=connection.query_row("SELECT json_extract(value,'$.plugins') FROM root WHERE generation=?1",[staging_id],|r|r.get(0))?;
+        }
+        if let Some(Value::String(raw))=scalar {
+            if let Ok(Value::Array(entries))=serde_json::from_str::<Value>(&raw) {
+                return Ok(entries.into_iter().filter_map(|entry|entry.get("name").and_then(Value::as_str).filter(|name|!name.is_empty()).map(str::to_owned)).collect());
+            }
+        }
         return Ok(Vec::new());
-    };
-    let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(&plugins) else {
-        return Ok(Vec::new());
-    };
-    Ok(entries
-        .into_iter()
-        .filter_map(|entry| match entry.get("name") {
-            Some(Value::String(name)) if !name.is_empty() => Some(name.clone()),
-            _ => None,
-        })
-        .collect())
+    }
+    let mut names=Vec::new();
+    root.visit("plugins",|_,entry| {
+        if let Some(Value::String(name))=entry.get("name") {
+            if !name.is_empty() { names.push(name.clone()); }
+        }
+        Ok(())
+    })?;
+    Ok(names)
 }
 
 /// Applies the choices made before an import is activated. Staging is invisible

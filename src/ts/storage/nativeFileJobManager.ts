@@ -271,7 +271,7 @@ function runSharedNativeFileOperationWithAdmission<T>(
             : Promise.reject(new NativeFileOperationBusyError())
     }
 
-    if (!bodyOnly && options.format === 'library-backup' && get(doingChat)) {
+    if (!bodyOnly && (options.format === 'library-backup' || options.format === 'dataset') && get(doingChat)) {
         return Promise.reject(
             new NativeFileJobError(
                 'generation-active',

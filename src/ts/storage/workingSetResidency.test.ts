@@ -3,14 +3,7 @@ import type { Chat, Database, character } from './database.svelte'
 import { createConversationSummaryStubFromChat } from './conversationResidency'
 import { captureResidentPersistentCharacter } from './persistentDataRuntime'
 import { WorkingSetResidencyRegistry } from './workingSetResidency'
-import {
-    createCatalogCharacterStub,
-    createCatalogPresetWorkingSet,
-    getCatalogCharacterMetadata,
-    hasIncompletePersistentWorkingSet,
-    hydrateWorkingSetCharacterDetail,
-    isCatalogCharacterStub,
-} from './workingSetCatalog'
+import { createCatalogCharacterStub, createCatalogPresetWorkingSet, getCatalogCharacterMetadata, hasIncompletePersistentWorkingSet, isCatalogCharacterStub } from './workingSetCatalog'
 
 function chat(id: string, options: { streaming?: boolean; empty?: boolean } = {}): Chat {
     return {
@@ -92,55 +85,6 @@ describe('WorkingSetResidencyRegistry', () => {
         expect(database.characters[0]).not.toHaveProperty('personality')
         expect(getCatalogCharacterMetadata(database.characters[0])?.conversationCount).toBe(0)
         expect(registry.isCharacterReleased('char-empty')).toBe(true)
-    })
-
-    it('releases group-member detail and reloads fresh detail on revisit', () => {
-        const registry = new WorkingSetResidencyRegistry()
-        const catalog = createCatalogCharacterStub({
-            id: 'member-a',
-            name: 'Member',
-            configuredIndex: 3,
-            recentAt: 0,
-            trashed: false,
-            conversationCount: 12,
-            type: 'character',
-        })
-        const database = { characters: [catalog] } as unknown as Database
-        const firstVisit = hydrateWorkingSetCharacterDetail(database, 0, {
-            type: 'character',
-            chaId: 'member-a',
-            name: 'Member',
-            personality: 'first personality',
-            globalLore: [{ key: 'first lore', content: 'first' }],
-        } as any) as character
-        registry.markCharacterHydrated('member-a')
-
-        expect(registry.releaseCharacterToCatalog(database, 'member-a')).toBe(true)
-        expect(isCatalogCharacterStub(database.characters[0])).toBe(true)
-        expect(database.characters[0]).not.toHaveProperty('personality')
-        expect(database.characters[0]).not.toHaveProperty('globalLore')
-        expect(getCatalogCharacterMetadata(database.characters[0])).toMatchObject({
-            configuredIndex: 3,
-            conversationCount: 12,
-        })
-
-        const secondVisit = hydrateWorkingSetCharacterDetail(database, 0, {
-            type: 'character',
-            chaId: 'member-a',
-            name: 'Member reloaded',
-            personality: 'second personality',
-            globalLore: [{ key: 'second lore', content: 'second' }],
-        } as any) as character
-        registry.markCharacterHydrated('member-a')
-
-        expect(secondVisit).not.toBe(firstVisit)
-        expect(isCatalogCharacterStub(secondVisit)).toBe(false)
-        expect(registry.isCharacterReleased('member-a')).toBe(false)
-        expect(secondVisit).toMatchObject({
-            name: 'Member reloaded',
-            personality: 'second personality',
-            globalLore: [{ key: 'second lore', content: 'second' }],
-        })
     })
 
     it('keeps a streaming character fully resident', () => {

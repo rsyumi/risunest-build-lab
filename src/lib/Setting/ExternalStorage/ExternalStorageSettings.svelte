@@ -67,7 +67,8 @@
     let historyCursor = $state<Record<string, string | undefined>>({})
     let historyLoading = $state<Record<string, boolean>>({})
     let quota = $state<Record<string, ExternalQuotaSummary>>({})
-    let remoteOnly = $state<Record<string, number>>({})
+    let remoteOnly = $state<Record<string, number | null>>({})
+    let removalDownload = $state<{ connectionId: string; controller: AbortController; cancelling: boolean } | null>(null)
     let recoveryKey = $state('')
     let recoveryPanel = $state<HTMLDivElement | undefined>()
     let connectionSettings = $state<ExternalConnectionSettingsMaterial | null>(null)
@@ -373,7 +374,7 @@
         try {
             remoteOnly[connection.id] = await remoteOnlyFiles(connection)
         } catch {
-            delete remoteOnly[connection.id]
+            remoteOnly[connection.id] = null
         }
     }
 
@@ -436,15 +437,15 @@
     }
 
     async function removeConnection(connection: ExternalConnectionSummary): Promise<void> {
-        let held = 0
+        let held: number | undefined
         try {
             held = await remoteOnlyFiles(connection)
         } catch {}
         let download = false
-        if (held) {
+        if (held !== 0) {
             const choice = await alertCheckboxConfirm({
                 title: strings.removeRemoteOnlyTitle,
-                description: strings.removeRemoteOnly,
+                description: held === undefined ? strings.removeRemoteOnlyUnknown : strings.removeRemoteOnly,
                 checkboxLabel: strings.downloadThenRemove,
                 actionLabel: strings.remove,
                 cancelLabel: strings.cancel,
@@ -457,11 +458,16 @@
         activeAction = `remove:${connection.id}`
         try {
             if (download) {
+                const controller = new AbortController()
+                removalDownload = { connectionId: connection.id, controller, cancelling: false }
                 try {
-                    await downloadRemoteAssets(connection.id)
+                    await downloadRemoteAssets(connection.id, { signal: controller.signal })
+                    if (controller.signal.aborted) return
                 } catch (reason) {
-                    if (externalErrorKind(reason) !== 'cancelled') error = strings.downloadFailedKeptConnection
+                    if (!controller.signal.aborted && externalErrorKind(reason) !== 'cancelled') error = strings.downloadFailedKeptConnection
                     return
+                } finally {
+                    removalDownload = null
                 }
             }
             await bridge.removeConnection(connection.id)
@@ -470,6 +476,7 @@
         } catch (reason) {
             error = externalErrorMessage(strings, reason)
         } finally {
+            await loadRemoteOnlyFiles(connection)
             busy = false
             activeAction = ''
         }
@@ -682,6 +689,7 @@
     })
     onDestroy(() => {
         destroyed = true
+        removalDownload?.controller.abort()
         clearTimeout(pollTimer)
         stopJobEvents?.()
         stopSyncFailures?.()
@@ -827,7 +835,7 @@
                                 {/if}
                                 {#if remoteOnly[connection.id] !== undefined}
                                     <dt>{strings.remoteOnlyFiles}</dt>
-                                    <dd>{remoteOnly[connection.id]}</dd>
+                                    <dd>{remoteOnly[connection.id] ?? strings.unknownUsage}</dd>
                                 {/if}
                             </dl>
                         {/if}
@@ -861,6 +869,9 @@
                 <div class="foot">
                     <SettingButton variant="secondary" busy={activeAction === `settings:${connection.id}`} disabled={busy} onclick={() => createConnectionSettings(connection)}>{strings.connectionSettings}</SettingButton>
                     <SettingButton variant="danger" busy={activeAction === `remove:${connection.id}`} disabled={busy} onclick={() => removeConnection(connection)}>{strings.remove}</SettingButton>
+                    {#if removalDownload?.connectionId === connection.id}
+                        <SettingButton variant="secondary" disabled={removalDownload.cancelling} onclick={() => { if (removalDownload) { removalDownload.cancelling = true; removalDownload.controller.abort() } }}>{strings.cancel}</SettingButton>
+                    {/if}
                 </div>
             </article>
         {/each}

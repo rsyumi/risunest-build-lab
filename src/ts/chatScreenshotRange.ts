@@ -1,4 +1,4 @@
-import type { Chat, Message, character, customscript, groupChat } from './storage/database.svelte'
+import type { Chat, Message, character, customscript } from './storage/database.svelte'
 import { CONVERSATION_RANGE_MAX_LIMIT, type DataRevision } from './storage/persistentDataStore'
 import type { simpleCharacterArgument } from './parser/parser.svelte'
 import type { ProcessScriptCaptureContext } from './process/scripts'
@@ -108,7 +108,7 @@ export interface ChatScreenshotRangeReader {
     readonly revision: DataRevision
     readonly totalTurns: number
     readRange(startIndex: number, limit: number, signal?: AbortSignal): Promise<Message[]>
-    readCharacter?(characterId: string, signal?: AbortSignal): Promise<character | groupChat | null>
+    readCharacter?(characterId: string, signal?: AbortSignal): Promise<character | null>
 }
 
 export function validateScreenshotRange(
@@ -136,9 +136,9 @@ export function fullScreenshotRange(totalTurns: number): ScreenshotRange {
 }
 
 export function snapshotChatScreenshotCharacter(
-    source: character | groupChat,
+    source: character,
     chat: Chat,
-): character | groupChat {
+): character {
     const captureChat: Chat = {
         message: [],
         note: chat.note ?? '',
@@ -173,15 +173,7 @@ export function snapshotChatScreenshotCharacter(
         prebuiltAssetCommand: source.prebuiltAssetCommand ?? false,
         prebuiltAssetExclude: source.prebuiltAssetExclude ?? [],
     }
-    if (source.type === 'group') {
-        return {
-            ...shared,
-            type: 'group',
-            characters: source.characters ?? [],
-            characterTalks: source.characterTalks ?? [],
-            characterActive: source.characterActive ?? [],
-        } as groupChat
-    }
+
     return {
         ...shared,
         type: 'character',

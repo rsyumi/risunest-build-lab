@@ -1,11 +1,11 @@
 <script lang="ts">
     import ListPager from "src/lib/UI/GUI/ListPager.svelte"
     import { FileMusicIcon, PlusIcon } from "@lucide/svelte";
-    import { type character, type groupChat } from "src/ts/storage/database.svelte";
+    import { type character } from "src/ts/storage/database.svelte";
     import { getFileSrc, saveAsset } from "src/ts/globalApi.svelte";
     import { selectMultipleFile } from "src/ts/util";
     interface Props {
-        currentCharacter: character|groupChat;
+        currentCharacter: character;
         onSelect: (additionalAsset:[string,string,string])=>void;
     }
 
@@ -15,7 +15,7 @@
     let assetFilePath:string[] = $state([])
 
     let assetPage = $state(0)
-    const allAssets = $derived(currentCharacter.type === 'character' ? currentCharacter.additionalAssets ?? [] : [])
+    const allAssets = $derived(currentCharacter.additionalAssets ?? [])
     const assetRows = $derived(allAssets.slice(assetPage * 60, (assetPage + 1) * 60).map((asset, offset) => ({ asset, i: assetPage * 60 + offset })))
     $effect(() => {
         let active = true
@@ -30,9 +30,8 @@
     })
 
 </script>
-{#if currentCharacter.type ==='character'}
-    <button class="hover:text-green-500 bg-textcolor2 flex justify-center items-center w-16 h-16 m-1 rounded-md" onclick={async () => {
-        if(currentCharacter.type === 'character'){
+<button class="hover:text-green-500 bg-textcolor2 flex justify-center items-center w-16 h-16 m-1 rounded-md" onclick={async () => {
+        {
             const da = await selectMultipleFile(['png', 'webp', 'mp4', 'mp3', 'gif'])
             currentCharacter.additionalAssets = currentCharacter.additionalAssets ?? []
             if(!da){
@@ -73,4 +72,3 @@
                 </button>
         {/each}
     {/if}
-{/if}

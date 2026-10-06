@@ -22,6 +22,7 @@ const current = vi.hoisted(() => ({
     runtime: null as unknown as ReturnType<typeof createPersistentDataRuntime>,
     store: null as unknown as IndexedDbPersistentDataStore,
     alertError: null as unknown as ReturnType<typeof vi.fn>,
+    snapshots: ['answer'],
 }))
 
 vi.mock('../storage/persistentDataRuntime.svelte', async (importOriginal) => ({
@@ -33,10 +34,13 @@ vi.mock('../storage/persistentDataRuntime.svelte', async (importOriginal) => ({
     getPersistentNavigationGeneration: () => current.runtime.getNavigationGeneration(),
     acquireCompleteConversation: (reason: string, target: never) => current.runtime.acquireCompleteConversation(reason, target),
     captureSelectedConversationAuthority: () => current.runtime.captureSelectedConversationAuthority(),
+    recordSelectedCharacterLastInteraction: (authority: never, before: number | undefined, after: number) =>
+        current.runtime.recordSelectedCharacterLastInteraction(authority, before, after),
     captureWindowedConversationMutationController: (target: never, chat: Chat, start: number) =>
         current.runtime.captureWindowedConversationMutationController(target, chat, start),
     captureSelectedConversationTarget: () => current.runtime.captureSelectedConversationTarget(),
     flushPendingData: (reason: string) => current.runtime.flushPendingData(reason),
+    flushPendingDataLocally: (reason: string) => current.runtime.flushPendingDataLocally(reason),
     getActiveConversationSession: () => current.runtime.getActiveConversationSession(),
     peekActiveConversationSession: () => current.runtime?.getActiveConversationSession() ?? null,
     invalidateActiveConversationSession: () => current.runtime.invalidateActiveConversationSession(),
@@ -82,7 +86,7 @@ vi.mock('./request/request', () => ({
         type: 'streaming',
         result: new ReadableStream<Record<string, string>>({
             start(controller) {
-                controller.enqueue({ response: 'answer' })
+                for (const response of current.snapshots) controller.enqueue({ response })
                 controller.close()
             },
         }),
@@ -99,12 +103,10 @@ vi.mock('./templates/templates', async () => (await import('./tests/sendChatTest
 vi.mock('./exampleMessages', async () => (await import('./tests/sendChatTestHarness')).exampleMessagesModule())
 vi.mock('./tts', async () => (await import('./tests/sendChatTestHarness')).ttsModule())
 vi.mock('./memory/supaMemory', async () => (await import('./tests/sendChatTestHarness')).supaMemoryModule())
-vi.mock('./group', async () => (await import('./tests/sendChatTestHarness')).groupModule())
 vi.mock('./memory/hypamemory', async () => (await import('./tests/sendChatTestHarness')).hypamemoryModule())
 vi.mock('./embedding/addinfo', async () => (await import('./tests/sendChatTestHarness')).addinfoModule())
 vi.mock('./files/inlays', async () => (await import('./tests/sendChatTestHarness')).inlaysModule({ writeInlayImage: vi.fn() }))
 vi.mock('./models/modelString', async () => (await import('./tests/sendChatTestHarness')).modelStringModule())
-vi.mock('../sync/multiuser', async () => (await import('./tests/sendChatTestHarness')).multiuserModule())
 vi.mock('./inlayScreen', () => ({ runInlayScreen: (_char: unknown, data: string) => ({ text: data }) }))
 vi.mock('./transformers', async () => (await import('./tests/sendChatTestHarness')).transformersModule())
 vi.mock('./memory/hanuraiMemory', async () => (await import('./tests/sendChatTestHarness')).hanuraiMemoryModule())
@@ -248,11 +250,14 @@ function syntheticDatabase(messages: Message[]): Database {
     } as unknown as Database
 }
 
-async function bootWindowedConversation(messages: Message[]) {
+async function bootWindowedConversation(messages: Message[], configure?: (seed: Database) => void) {
     const seed = syntheticDatabase(messages)
+    configure?.(seed)
+    const name = `history-window-send-${crypto.randomUUID()}`
+    const factory = new IDBFactory()
     const store = new IndexedDbPersistentDataStore(
-        `history-window-send-${crypto.randomUUID()}`,
-        new IDBFactory(),
+        name,
+        factory,
         IDBKeyRange,
     )
     await store.open()
@@ -294,7 +299,11 @@ async function bootWindowedConversation(messages: Message[]) {
         () => expect(current.runtime.getSelectedConversationMode()).toBe('windowed'),
         { timeout: 5_000 },
     )
-    return { store, backgroundErrors }
+    return { store, backgroundErrors, async reopen() {
+        const reopened = new IndexedDbPersistentDataStore(name, factory, IDBKeyRange)
+        await reopened.open()
+        return (await reopened.readConversation('character-a', 'chat-a'))!.value
+    } }
 }
 
 let restoreFetch: (() => void) | null = null
@@ -333,13 +342,52 @@ afterAll(() => {
 })
 
 describe('a windowed send through the production runtime', () => {
+    it.each(['insert', 'remove'] as const)('persists the response after Lua %s moves its output target', async (action) => {
+        const original = storedMessages()
+        const { reopen, backgroundErrors } = await bootWindowedConversation(structuredClone(original), (seed) => {
+            seed.characters[0].customscript = []
+            seed.characters[0].triggerscript = [{ type: 'start', conditions: [], effect: [{ type: 'triggerlua', code: `
+                local moved = false
+                listenEdit('editOutput', function(id, value, meta)
+                    if not moved then
+                        setChatVar(id, 'first_index', tostring(meta.index))
+                        ${action === 'insert' ? "insertChat(id, 960, 'user', 'owned insert')" : 'removeChat(id, 960)'}
+                        moved = true
+                    else
+                        setChatVar(id, 'later_index', tostring(meta.index))
+                    end
+                    return value
+                end)
+            ` }] }] as never
+        })
+        const { sendChat } = await import('./index.svelte')
+        const { pluginV2 } = await import('../plugins/plugins.svelte')
+        const output = vi.fn(async () => undefined)
+        pluginV2.chatOutput.add(output)
+        current.snapshots = ['preview', 'answer']
+        vi.spyOn(console, 'log').mockImplementation(() => undefined)
+        try {
+            await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
+            const stored = await reopen()
+            const index = action === 'insert' ? 1001 : 999
+            expect(stored.message[index]).toMatchObject({ role: 'char', data: 'answer' })
+            expect(stored.scriptstate).toMatchObject({ $first_index: '1000', $later_index: String(index) })
+            expect(JSON.stringify(stored.message.slice(0, WINDOW_START))).toBe(JSON.stringify(original.slice(0, WINDOW_START)))
+            expect(output).toHaveBeenCalledOnce()
+            expect(backgroundErrors).toEqual([])
+        } finally {
+            pluginV2.chatOutput.delete(output)
+            current.snapshots = ['answer']
+        }
+    })
+
     it('stores trigger, Lua, @@inject and response writes inside the window and leaves earlier messages byte-identical', async () => {
         const original = storedMessages()
         const { store, backgroundErrors } = await bootWindowedConversation(structuredClone(original))
         const { sendChat } = await import('./index.svelte')
         vi.spyOn(console, 'log').mockImplementation(() => undefined)
 
-        await expect(sendChat(-1, { historyLimit: true })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
         await current.runtime.flushPendingData('history-window-send-test')
 
         expect(current.runtime.getSelectedConversationMode()).toBe('windowed')

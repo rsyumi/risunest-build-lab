@@ -296,7 +296,8 @@ fn a_saved_publication_keeps_its_asset_pins_across_a_page_reload_until_it_is_sen
         let open_store = || f.a.open_native_job_store().map_err(|error| error.to_string());
         DurableCasJobState::default().sweep_after_page_start(&root, &CasJobOwnerProbe {
             native_jobs: &native_jobs,
-            device_session_active: false,
+                device_job_owned: &|_| Ok(false),
+                external_job_active: &|_| Ok(false),
             open_store: &open_store,
         }).unwrap();
         assert_eq!(durable_cas_job_ids(&root).unwrap(), journals);
@@ -2127,6 +2128,87 @@ fn a_new_device_switch_drops_the_old_writers_segments_and_releases_their_files()
         assert_eq!(writer_rows(&f.a, "external_lww_sequences", &old_writer), 0);
         assert!(job_released(&f.a, &job));
         assert!(!files.exists(), "the retired writer's publication files stay");
+    })
+}
+#[test]
+fn fresh_writer_adoption_retries_retired_job_cleanup_and_preserves_other_writers() {
+    run(async {
+        use crate::persistent_store::sync_selection::SyncTarget;
+        let mut f = CycleFixture::new();
+        let authority = bind_external(&mut f.a, &f.sender, &SyncTarget::External("repository".into()));
+        let old_writer = f.a.lww_clock_state().unwrap().writer_id;
+        let other_writer = uuid::Uuid::new_v4().to_string();
+        let library = f.sender.library.clone();
+        // Seed another writer's real pending job without retiring its local work.
+        f.a.device_store().unwrap().connection().execute(
+            "UPDATE device_meta SET writer_id=?1 WHERE singleton=1", [&other_writer],
+        ).unwrap();
+        f.sender.library = "synthetic-other-library".into();
+        set(&mut f.a, &["root", "language"], serde_json::json!("other-sequence"));
+        f.sender.publish(&mut f.a, authority, &[], &Cancellation::default()).await.unwrap();
+        small_asset(&mut f.a, "synthetic-other-asset", b"synthetic unrelated writer asset");
+        let other = seal_unsent(&mut f, authority).await;
+        let other_job = other.asset_job.clone().unwrap();
+        let other_files = crate::persistent_store::external_lww::publication_directory(f.directory_a.path(), &other_job.job_id);
+        f.a.device_store().unwrap().connection().execute(
+            "UPDATE device_meta SET writer_id=?1 WHERE singleton=1", [&old_writer],
+        ).unwrap();
+        f.sender.library = library;
+        set(&mut f.a, &["root", "language"], serde_json::json!("retired-sequence"));
+        f.sender.publish(&mut f.a, authority, &[], &Cancellation::default()).await.unwrap();
+        small_asset(&mut f.a, "synthetic-retired-asset", b"synthetic retired writer asset");
+        let retired = send_unconfirmed(&mut f, authority, false).await;
+        let retired_job = retired.asset_job.clone().unwrap();
+        let retired_files = crate::persistent_store::external_lww::publication_directory(f.directory_a.path(), &retired_job.job_id);
+        let fresh = uuid::Uuid::new_v4().to_string();
+        let entries = |store: &PersistentStore| {
+            serde_json::to_value(store.lww_read_outbox(authority, 256).unwrap().entries).unwrap()
+        };
+        let original = entries(&f.a);
+        let other_metadata = serde_json::to_string(&f.a.external_lww_pending(&other.target, &other_writer).unwrap().unwrap().0).unwrap();
+        assert!(retired_files.exists() && other_files.exists());
+        for (offered_authority, offered_writer) in [
+            (DecimalU64(authority.0 + 1), old_writer.as_str()),
+            (authority, other_writer.as_str()),
+        ] {
+            assert!(f.a.lww_adopt_fresh_writer(offered_authority, offered_writer, &fresh).is_err());
+            assert!(!job_released(&f.a, &retired_job));
+            assert!(!job_released(&f.a, &other_job));
+            assert_eq!(entries(&f.a), original);
+        }
+        f.a.device_store().unwrap().connection().execute_batch(
+            "CREATE TRIGGER stop_fresh_writer BEFORE UPDATE OF writer_id ON device_meta
+             BEGIN SELECT RAISE(FAIL, 'synthetic-writer-adoption-stop'); END;",
+        ).unwrap();
+        assert!(f.a.lww_adopt_fresh_writer(authority, &old_writer, &fresh).is_err());
+        assert!(job_released(&f.a, &retired_job));
+        assert!(!retired_files.exists());
+        assert_eq!(f.a.lww_clock_state().unwrap().writer_id, old_writer);
+        assert_eq!(writer_rows(&f.a, "external_lww_segments", &old_writer), 1);
+        assert_eq!(writer_rows(&f.a, "external_lww_sequences", &old_writer), 1);
+        assert_eq!(entries(&f.a), original);
+        f.a.device_store().unwrap().connection().execute_batch("DROP TRIGGER stop_fresh_writer").unwrap();
+        f.restart_a();
+        set(&mut f.a, &["root", "askRemoval"], serde_json::json!(true));
+        let retained = entries(&f.a);
+        let before = f.a.lww_clock_state().unwrap();
+        let progress = f.a.lww_binding_state().unwrap().progress;
+        f.a.lww_adopt_fresh_writer(authority, &old_writer, &fresh).unwrap();
+        let revision = f.a.device_store().unwrap().revision().unwrap();
+        f.a.lww_adopt_fresh_writer(authority, &old_writer, &fresh).unwrap();
+        assert_eq!(f.a.device_store().unwrap().revision().unwrap(), revision);
+        let after = f.a.lww_clock_state().unwrap();
+        assert_eq!(after.writer_id, fresh);
+        assert_eq!((after.issued, after.accepted, after.binding_authority), (before.issued, before.accepted, authority));
+        assert_eq!(entries(&f.a), retained);
+        assert_eq!(f.a.lww_binding_state().unwrap().progress, progress);
+        assert_eq!(writer_rows(&f.a, "external_lww_segments", &old_writer), 0);
+        assert_eq!(writer_rows(&f.a, "external_lww_sequences", &old_writer), 0);
+        assert_eq!(writer_rows(&f.a, "external_lww_segments", &other_writer), 1);
+        assert_eq!(writer_rows(&f.a, "external_lww_sequences", &other_writer), 1);
+        assert_eq!(serde_json::to_string(&f.a.external_lww_pending(&other.target, &other_writer).unwrap().unwrap().0).unwrap(), other_metadata);
+        assert!(!job_released(&f.a, &other_job));
+        assert!(other_files.exists());
     })
 }
 #[test]

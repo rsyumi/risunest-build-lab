@@ -27,7 +27,6 @@ import { getDatabase, getEffectivePresetId, normalizeDatabaseDefaults, setDataba
 import {
     configurePersistentDataRuntime,
     createProductionStateAdapter,
-    hydrateCurrentGroupMemberDetail,
 } from './persistentDataRuntime.svelte'
 import {
     createCatalogCharacterStub,
@@ -110,9 +109,9 @@ describe('production persistent working-set publication', () => {
         const commit = vi.spyOn(store, 'commit')
         await runtime.flushPendingDataLocally('sparse-activated-no-op')
         expect(commit).not.toHaveBeenCalled()
-        if (scope === 'metadata') await runtime.mutatePersistentCharacterDetail('sparse-owner', 'first-targeted-edit', ({character}) => { if (character.type === 'group') throw new Error('Expected character'); character.desc = 'Real targeted edit' })
+        if (scope === 'metadata') await runtime.mutatePersistentCharacterDetail('sparse-owner', 'first-targeted-edit', ({character}) => { character.desc = 'Real targeted edit' })
         if (scope === 'presets') await runtime.mutatePersistentPresets('first-targeted-preset', (state) => { state.root.username = 'Explicit root edit' })
-        if (scope === 'delete') await runtime.deletePersistentCharacterWithGroupReferences('sparse-owner', 'first-targeted-delete')
+        if (scope === 'delete') await runtime.deletePersistentCharacter('sparse-owner', 'first-targeted-delete')
         if (scope === 'upsert') await runtime.upsertPersistentCompleteCharacter('new-owner', 'first-targeted-upsert', () => ({type: 'character', chaId: 'new-owner', name: 'New', chatPage: 0, chatFolders: [], chats: []}) as Database['characters'][number])
         if (scope === 'module') await runtime.appendPersistentRootModule('first-targeted-module', {module: {id: 'new-module', name: 'New module', description: ''}, assetAliases: [], ownerHead: {present: false, manifestHash: null, entryCount: 0}})
         await runtime.flushPendingDataLocally('after-targeted-edit')
@@ -140,7 +139,6 @@ describe('production persistent working-set publication', () => {
             root.translator = 'Callback edit'
             ;(root as unknown as Record<string, unknown>).opaqueRoot = {explicit: true}
             ;(root as unknown as Record<string, unknown>).nullableRoot = null
-            if (character.type === 'group') throw new Error('Expected character')
             character.desc = 'Explicit detail'
             await Promise.resolve()
             getDatabase().translator = concurrent
@@ -236,12 +234,11 @@ describe('production persistent working-set publication', () => {
         },
     )
 
-    it.each(['character', 'group'])('tracks cold selection and subsequent %s edits in the same canonical capture', (type) => {
+    it.each(['character'])('tracks cold selection and subsequent %s edits in the same canonical capture', (type) => {
         setDatabaseLite({
             botPresets: [], plugins: [], pluginCustomStorage: {},
             characters: ['a', 'b'].map((id) => ({
                 type, chaId: id, name: id, chatPage: 0,
-                ...(type === 'group' ? { characters: [], characterTalks: [] } : {}),
                 chats: [{ id: `chat-${id}`, note: '', message: [] }],
             })),
         } as unknown as Database)
@@ -701,88 +698,6 @@ describe('production persistent working-set publication', () => {
         expect(workingSetResidency.isCharacterReleased('char-b')).toBe(true)
     })
 
-    it('hydrates only the restored catalog member while preserving the selected group', () => {
-        const group = {
-            type: 'group',
-            chaId: 'group-a',
-            name: 'Group',
-            characters: ['member-a'],
-            characterTalks: [1],
-            characterActive: [true],
-            chats: [{ id: 'group-chat', message: [] }],
-            chatPage: 0,
-        }
-        const memberStub = createCatalogCharacterStub({
-            id: 'member-b',
-            configuredIndex: 1,
-            conversationCount: 0,
-            name: 'Beta',
-            type: 'character',
-            recentAt: 0,
-            trashed: false,
-        })
-        const database = {
-            botPresets: [],
-            plugins: [],
-            characters: [group, memberStub],
-        } as unknown as Database
-        setDatabaseLite(database)
-        selectedCharID.set(0)
-        const residentGroup = getDatabase().characters[0]
-        const residentMemberStub = getDatabase().characters[1]
-        const detail = {
-            type: 'character',
-            chaId: 'member-b',
-            name: 'Beta',
-            personality: 'Persistent personality',
-            scenario: 'Persistent scenario',
-        } as any
-
-        expect(hydrateCurrentGroupMemberDetail('group-a', detail)).toBe(true)
-
-        expect(getDatabase().characters[0]).toBe(residentGroup)
-        expect(getDatabase().characters[1]).toMatchObject({
-            personality: 'Persistent personality',
-            scenario: 'Persistent scenario',
-        })
-        expect(isCatalogCharacterStub(getDatabase().characters[1])).toBe(false)
-        expect(getDatabase().characters[1].chats).toBe(residentMemberStub.chats)
-        expect(getDatabase().characters[get(selectedCharID)]).toBe(residentGroup)
-    })
-
-    it('leaves an already complete maximum-compatibility member unchanged', () => {
-        const group = {
-            type: 'group',
-            chaId: 'group-a',
-            characters: [],
-            characterTalks: [],
-            characterActive: [],
-            chats: [],
-        }
-        const member = {
-            type: 'character',
-            chaId: 'member-b',
-            personality: 'Complete personality',
-            chats: [],
-        }
-        setDatabaseLite({
-            botPresets: [],
-            plugins: [{ enabled: true, version: '2.1' }],
-            characters: [group, member],
-        } as unknown as Database)
-        selectedCharID.set(0)
-        const residentMember = getDatabase().characters[1]
-
-        expect(hydrateCurrentGroupMemberDetail('group-a', {
-            type: 'character',
-            chaId: 'member-b',
-            personality: 'Replacement personality',
-        } as any)).toBe(true)
-
-        expect(getDatabase().characters[1]).toBe(residentMember)
-        expect(getDatabase().characters[1].personality).toBe('Complete personality')
-    })
-
     it('reports selected lifecycle policy, operation and viewport budget', () => {
         setDatabaseLite({
             botPresets: [],
@@ -818,12 +733,9 @@ describe('production persistent working-set publication', () => {
             botPresetsId: 0,
             botPresets: [{ name: 'Active' }],
             characters: [{
-                type: 'group',
-                chaId: 'group-a',
-                name: 'Group',
-                characters: ['member-a'],
-                characterTalks: [1],
-                characterActive: [true],
+                type: 'character',
+                chaId: 'selected-a',
+                name: 'Selected',
                 chats: [],
             }],
         } as unknown as Database
@@ -869,7 +781,7 @@ describe('production persistent working-set publication', () => {
 
         createProductionStateAdapter().replaceDatabase(
             replacement,
-            new Set(['group-a', 'member-a']),
+            new Set(['selected-a', 'member-a']),
             true,
         )
 

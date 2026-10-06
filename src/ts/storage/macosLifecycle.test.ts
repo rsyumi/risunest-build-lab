@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createMacosExitHandler } from './macosLifecycle'
+import { SaveCoordinator } from './saveCoordinator'
+import { createSyncExitCoordinator } from './syncExitCoordinator'
+import { captureRoot, deferred, makeDatabase, makeStore } from './saveCoordinator.testSupport'
 
 function harness() {
     const dependencies = {
@@ -39,6 +42,68 @@ function coordinated(limitMillis?: number) {
 }
 
 describe('macOS acknowledged quit', () => {
+    it('coalesces the real local save across conditional handler supersession and settles both checkpoints', async () => {
+        const commitGate = deferred<{ revision: number }>()
+        const normalCheckpoint = deferred<void>()
+        const sessionCheckpoint = deferred<void>()
+        const commit = vi.fn(() => commitGate.promise)
+        let root = captureRoot(makeDatabase())
+        const save = new SaveCoordinator({
+            store: makeStore(commit),
+            captureRoot: () => root,
+            captureSelectedCharacter: () => null,
+            captureCharacter: () => null,
+            replaceDatabase: vi.fn(),
+        })
+        save.initialize(0)
+        root = { ...root, username: 'synthetic-after' }
+        save.markPersistentDataDirty(32)
+        const pendingFlushes: Promise<void>[] = []
+        const flushLocal = () => {
+            const promise = save.flushPendingDataLocally('conditional-session-upgrade')
+            pendingFlushes.push(promise)
+            return promise
+        }
+        const checkpoint = vi.fn()
+            .mockImplementationOnce(() => normalCheckpoint.promise)
+            .mockImplementationOnce(() => sessionCheckpoint.promise)
+        const coordinator = createSyncExitCoordinator({
+            flushLocal,
+            checkpointLocal: checkpoint,
+            acquireEditFence: async () => ({ release: vi.fn() }),
+            captureTarget: async () => ({
+                revision: save.revision, libraryEpoch: 'synthetic-library',
+                selectionEpoch: 'synthetic-selection', selectionId: 'synthetic-target',
+            }),
+            selectedDrain: () => null,
+        })
+        const respond = vi.fn(async () => {})
+        const handler = createMacosExitHandler({
+            coordinator,
+            saveLocally: async () => { await flushLocal(); await checkpoint() },
+            respond,
+            reportError: vi.fn(),
+        })
+        const ordinary = handler({ token: 'same', sessionEnd: false })
+        const session = handler({ token: 'same', sessionEnd: true, deadlineUnixMillis: Date.now() + 5_000 })
+        await vi.waitFor(() => expect(commit).toHaveBeenCalledTimes(1))
+        expect(pendingFlushes).toHaveLength(2)
+        expect(pendingFlushes[0]).toBe(pendingFlushes[1])
+        expect(checkpoint).not.toHaveBeenCalled()
+        commitGate.resolve({ revision: 1 })
+        await vi.waitFor(() => expect(checkpoint).toHaveBeenCalledTimes(2))
+        expect(save.revision).toBe(1)
+        expect(respond).not.toHaveBeenCalled()
+        sessionCheckpoint.resolve()
+        await session
+        expect(respond).toHaveBeenCalledExactlyOnceWith('same', true)
+        normalCheckpoint.resolve()
+        await ordinary
+        expect(commit).toHaveBeenCalledTimes(1)
+        expect(checkpoint).toHaveBeenCalledTimes(2)
+        expect(respond).toHaveBeenCalledExactlyOnceWith('same', true)
+    })
+
     it('uses the remaining native budget instead of starting five more seconds on delivery', async () => {
         vi.useFakeTimers()
         try {

@@ -1,5 +1,6 @@
 import { defineConfig, type Plugin } from "vite";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { svelte, vitePreprocess } from "@sveltejs/vite-plugin-svelte";
 import wasm from "vite-plugin-wasm";
 import strip from '@rollup/plugin-strip';
@@ -117,9 +118,10 @@ export default defineConfig(({command, mode}) => {
     },
 
     resolve:{
-      alias:{
-        'src':'/src',
-      }
+      alias: [
+        { find: /^monaco-editor$/, replacement: fileURLToPath(new URL('./src/ts/gui/codearea/monacoRuntime.ts', import.meta.url)) },
+        { find: 'src', replacement: '/src' },
+      ]
     },
     worker: {
       format: 'es'

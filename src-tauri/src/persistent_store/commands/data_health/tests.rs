@@ -2,6 +2,7 @@ use super::*;
 use crate::data_health::{codes, result_path, Severity};
 use crate::local_backup::NeverCancelled;
 use crate::persistent_store::{active_generation, PersistentStore};
+use crate::persistent_store::commands::{with_store_mutex, with_store_mutex_mut};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::sync::Mutex;
@@ -455,4 +456,39 @@ fn discard_admission_requires_the_same_diagnosis_and_an_intent_finding() {
     assert!(matches!(discard_intent(&state, &health, usize::MAX, result.revision, result.scanned_at), Err(StoreError::Validation { .. })));
     assert!(matches!(discard_intent(&state, &health, 0, result.revision, result.scanned_at), Err(StoreError::Validation { .. })));
     assert_eq!(last_result(&state).unwrap().unwrap(), result);
+}
+
+#[test]
+fn completion_requires_current_diagnosis_and_returns_new_native_eligibility() {
+    use crate::persistent_store::lww::Header;
+    use crate::persistent_store::sync_selection::{SwitchBindingRequest, SyncTarget};
+    let (_directory, state, _) = damaged_payload_fixture();
+    with_store_mutex_mut(&state, |store| {
+        let before = store.lww_binding_state()?;
+        store.stop_next_switch_after_library_commit();
+        assert!(store.switch_lww_binding(&SwitchBindingRequest {
+            header: Header { binding_authority: before.target_authority, request_id: "diagnosed-switch".into() },
+            expected_selection_epoch: before.selection_epoch, target: SyncTarget::None,
+            inspection_id: None, initial_publication: false,
+        }).is_err());
+        for _ in 0..3 {
+            store.stop_next_switch_after_library_commit();
+            let _ = store.lww_recover_intents();
+        }
+        Ok(())
+    }).unwrap();
+    let health = DataHealthState::default();
+    let diagnosis = quick_scan(&state, &health).unwrap();
+    let finding = diagnosis.items.iter().position(|item| item.code == codes::INTENT_QUARANTINED).unwrap();
+    assert_eq!(diagnosis.items[finding].intent_action, Some(crate::data_health::IntentAction::Complete));
+    assert!(discard_intent(&state, &health, finding, diagnosis.revision, diagnosis.scanned_at).is_err());
+    assert!(complete_intent(&state, &health, finding, diagnosis.revision, diagnosis.scanned_at - 1).is_err());
+    assert!(complete_intent(&state, &health, finding, diagnosis.revision + 1, diagnosis.scanned_at).is_err());
+    assert!(complete_intent(&state, &health, usize::MAX, diagnosis.revision, diagnosis.scanned_at).is_err());
+    let completed = complete_intent(&state, &health, finding, diagnosis.revision, diagnosis.scanned_at).unwrap();
+    assert!(completed.completed);
+    assert_eq!(completed.revision, diagnosis.revision);
+    assert!(!has(&completed.result, codes::INTENT_QUARANTINED));
+    assert!(complete_intent(&state, &health, finding, diagnosis.revision, diagnosis.scanned_at).is_err());
+    assert_eq!(with_store_mutex(&state, |store| store.lww_binding_authority()).unwrap().0, 1);
 }

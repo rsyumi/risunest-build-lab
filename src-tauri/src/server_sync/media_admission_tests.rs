@@ -474,19 +474,61 @@ fn hydration_groups_reuse_one_identity_per_custody_and_skip_local_objects() {
     hashes.extend(second_hashes);
     first_state.reset();
     second_state.reset();
+    let lane = Arc::new(super::progress::ProgressLane::default());
     let mut hydration = HydrationSession::new(local.repository_root(), None).unwrap();
-    assert!(hydration
-        .hydrate_many(&hashes, &|| Ok(()))
-        .unwrap()
-        .is_empty());
+    let priority = [hashes[64].clone(), hashes[129].clone()].into_iter().collect();
+    crate::asset_repository::PayloadCas::new(local.repository_root()).unwrap()
+        .prepare_bytes(b"first synthetic 0").unwrap();
+    let mut downloaded = Vec::new();
+    let mut samples = Vec::new();
+    let mut duplicated = hashes.clone();
+    duplicated.push(hashes[0].clone());
+    super::progress::within(&lane, || {
+        assert!(hydration.hydrate_many_outcomes_prioritized(&duplicated, &priority, &|| Ok(()), |hash, outcome| {
+            let scope = lane.snapshot("hydrate").asset_scope.unwrap();
+            assert_eq!(scope.total, Some(130));
+            assert!(!scope.settled);
+            samples.push(scope.done);
+            if outcome == super::residency::HydrationOutcome::Downloaded { downloaded.push(hash.to_owned()); }
+        }).unwrap().is_empty());
+    });
+    assert_eq!(samples, (1..=130).collect::<Vec<_>>());
+    assert_eq!(&downloaded[..2], &[hashes[64].clone(), hashes[129].clone()]);
+    assert_eq!(downloaded.len(), 129, "already-local bodies count as items without downloads");
+    let first_scope = lane.snapshot("hydrate").asset_scope.unwrap();
+    assert_eq!((first_scope.done, first_scope.total, first_scope.settled), (130, Some(130), true));
     assert_eq!(first_state.sessions.load(Ordering::SeqCst), 1);
     assert_eq!(second_state.sessions.load(Ordering::SeqCst), 1);
-    assert!(hydration
-        .hydrate_many(&hashes, &|| Ok(()))
-        .unwrap()
-        .is_empty());
+    let wire_bytes = lane.snapshot("hydrate").received_bytes;
+    super::progress::within(&lane, || {
+        assert!(hydration.hydrate_many(&hashes[..2], &|| Ok(())).unwrap().is_empty());
+    });
+    let second_scope = lane.snapshot("hydrate").asset_scope.unwrap();
+    assert!(second_scope.id > first_scope.id);
+    assert_eq!((second_scope.done, second_scope.total, second_scope.settled), (2, Some(2), true));
+    assert_eq!(lane.snapshot("hydrate").received_bytes, wire_bytes);
     assert_eq!(first_state.sessions.load(Ordering::SeqCst), 1);
     assert_eq!(second_state.sessions.load(Ordering::SeqCst), 1);
+    let completed = std::cell::Cell::new(0);
+    super::progress::within(&lane, || {
+        let failure = hydration.hydrate_many_outcomes(&hashes, &|| {
+            if completed.get() >= 2 { Err(super::SyncError::new("cancelled", 409)) } else { Ok(()) }
+        }, |_, _| completed.set(completed.get() + 1)).unwrap_err();
+        assert_eq!(failure.code, "cancelled");
+    });
+    let cancelled_scope = lane.snapshot("hydrate").asset_scope.unwrap();
+    assert_eq!((cancelled_scope.done, cancelled_scope.total, cancelled_scope.settled), (64, Some(130), false));
+    super::progress::within(&lane, || {
+        assert!(hydration.hydrate_many(&hashes, &|| Ok(())).unwrap().is_empty());
+    });
+    let retry_scope = lane.snapshot("hydrate").asset_scope.unwrap();
+    assert!(retry_scope.id > cancelled_scope.id);
+    assert!(retry_scope.settled);
+    super::progress::within(&lane, || {
+        assert_eq!(hydration.hydrate_many(&["00".repeat(32)], &|| Ok(())).unwrap(), vec!["00".repeat(32)]);
+    });
+    let missing_scope = lane.snapshot("hydrate").asset_scope.unwrap();
+    assert_eq!((missing_scope.done, missing_scope.total, missing_scope.settled), (0, Some(1), false));
     let caches = || {
         std::fs::read_dir(local.repository_root())
             .unwrap()

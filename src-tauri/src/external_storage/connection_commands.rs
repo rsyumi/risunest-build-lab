@@ -2250,6 +2250,9 @@ pub(crate) async fn external_storage_remove_connection(
         if let Err(error) = super::leftovers::remove_connection_directory(&root, &connection_id) {
             crate::nlog!("warn", "Removed external connection files were kept: {error}");
         }
+        if let Err(error) = app.state::<crate::asset_repository::commands::DurableCasJobState>().sweep_settled_jobs(&app) {
+            crate::nlog!("warn", "Removed external connection asset journals await cleanup: {error}");
+        }
         Ok(())
     }.await)
 }

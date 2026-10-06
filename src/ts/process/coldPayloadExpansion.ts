@@ -1,5 +1,5 @@
 import { normalizePocketColdPayload } from '../drive/pocketRisuFeatures'
-import type { Database, character, groupChat } from '../storage/database.svelte'
+import type { Database, character } from '../storage/database.svelte'
 import { coldStorageHeader, isColdStorageBackupData } from './coldstorageData'
 
 type ColdCharacter = Database['characters'][number]
@@ -35,11 +35,11 @@ function applyChatPayload(chat: Record<string, unknown>, payload: unknown): bool
     return true
 }
 
-function payloadCharacter(payload: unknown): character | groupChat | null {
+function payloadCharacter(payload: unknown): character | null {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
     const value = (payload as { character?: unknown }).character
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-    return value as character | groupChat
+    return value as character
 }
 
 /**

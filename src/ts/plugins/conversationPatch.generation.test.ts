@@ -60,14 +60,12 @@ vi.mock('src/ts/process/templates/templates', async () => (await import('../proc
 vi.mock('src/ts/process/exampleMessages', async () => (await import('../process/tests/sendChatTestHarness')).exampleMessagesModule())
 vi.mock('src/ts/process/tts', async () => (await import('../process/tests/sendChatTestHarness')).ttsModule())
 vi.mock('src/ts/process/memory/supaMemory', async () => (await import('../process/tests/sendChatTestHarness')).supaMemoryModule())
-vi.mock('src/ts/process/group', async () => (await import('../process/tests/sendChatTestHarness')).groupModule())
 // A character without trigger scripts: the real `runTrigger` returns null for every mode.
 vi.mock('src/ts/process/triggers', () => ({ runTrigger: vi.fn(async () => null) }))
 vi.mock('src/ts/process/memory/hypamemory', async () => (await import('../process/tests/sendChatTestHarness')).hypamemoryModule())
 vi.mock('src/ts/process/embedding/addinfo', async () => (await import('../process/tests/sendChatTestHarness')).addinfoModule())
 vi.mock('src/ts/process/files/inlays', async () => (await import('../process/tests/sendChatTestHarness')).inlaysModule())
 vi.mock('src/ts/process/models/modelString', async () => (await import('../process/tests/sendChatTestHarness')).modelStringModule())
-vi.mock('src/ts/sync/multiuser', async () => (await import('../process/tests/sendChatTestHarness')).multiuserModule())
 vi.mock('src/ts/process/inlayScreen', () => ({ runInlayScreen: (_char: unknown, data: string) => ({ text: data }) }))
 vi.mock('src/ts/process/transformers', async () => (await import('../process/tests/sendChatTestHarness')).transformersModule())
 vi.mock('src/ts/process/memory/hanuraiMemory', () => ({
@@ -265,7 +263,7 @@ describe.each([false, true])('plugin conversation patch from a beforeRequest rep
             return formated
         })
 
-        await expect(sendChat(-1, { historyLimit })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit })).resolves.toBe(true)
 
         fixture.outputs.delete(output)
         expect(output).toHaveBeenCalledOnce()
@@ -304,7 +302,7 @@ describe.each([false, true])('plugin conversation patch from a beforeRequest rep
             return formated
         })
 
-        await expect(sendChat(-1, { historyLimit })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit })).resolves.toBe(true)
 
         await expect(pending).resolves.toEqual({ status: 'applied', revision: expect.any(Number) })
         const applied = await live()
@@ -344,7 +342,7 @@ describe.each([false, true])('plugin conversation patch from a beforeRequest rep
             return formated
         })
         try {
-            const sending = sendChat(-1, { historyLimit })
+            const sending = sendChat({ historyLimit })
             await vi.waitFor(() => expect(held).toBe(true))
             await vi.waitFor(() => expect(fixture.modelRequests).toBe(3))
             if (historyLimit) {
@@ -385,7 +383,7 @@ describe.each([false, true])('plugin conversation patch from a beforeRequest rep
             }), abort.signal)).rejects.toThrow()
             return formated
         })
-        await expect(sendChat(-1, { historyLimit })).resolves.toBe(true)
+        await expect(sendChat({ historyLimit })).resolves.toBe(true)
         activeRerollConversations.set([target.conversationId])
         try {
             await expect(patches.patchConversation({
@@ -442,7 +440,7 @@ describe.each([false, true])('plugin conversation patch from a beforeRequest rep
             return formated
         })
         try {
-            await expect(sendChat(-1, { historyLimit })).resolves.toBe(true)
+            await expect(sendChat({ historyLimit })).resolves.toBe(true)
             await flushPendingDataLocally('patch-window-test')
             expect(fullReads).not.toHaveBeenCalled()
             expect(leasedFullReads).not.toHaveBeenCalled()

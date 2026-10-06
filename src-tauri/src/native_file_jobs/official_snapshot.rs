@@ -95,7 +95,7 @@ async fn download_snapshot(
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
                     Err(error) => return Err(store_error(error)),
                 }
-                super::publication::wait_for_retry(job, retry_after).await?;
+                super::transfer_retry::wait_for_retry(job, retry_after).await?;
             }
             outcome => return outcome,
         }
@@ -178,7 +178,7 @@ async fn download_snapshot_attempt(
         ));
     }
     if matches!(status, 429 | 502 | 503 | 504) {
-        *retry_after = super::publication::retry_delay(response.headers(), 0);
+        *retry_after = super::transfer_retry::retry_delay(response.headers(), 0);
         return Err(NativeJobError::new("http-retryable", format!("Official account snapshot download returned {status}")));
     }
     if !(200..300).contains(&status) {

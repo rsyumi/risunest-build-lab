@@ -12,6 +12,7 @@ const maintenance = vi.hoisted(() => ({
     previewNativeDataHealthRepair: vi.fn(),
     applyNativeDataHealthRepair: vi.fn(),
     discardNativeDataHealthIntent: vi.fn(),
+    completeNativeDataHealthIntent: vi.fn(),
     listNativeDataHealthJournals: vi.fn().mockResolvedValue([]),
     undoNativeDataHealthRepair: vi.fn(),
 }))

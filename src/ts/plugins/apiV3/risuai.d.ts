@@ -393,7 +393,7 @@ interface DatabaseSubset {
     selectedPersona?: number;
     /** Character ordering */
     characterOrder?: any[];
-    /** Array of characters and group chats */
+    /** Array of characters */
     characters?: any[];
     /** Risuai modules */
     modules?: RisuModule[];
@@ -1281,7 +1281,6 @@ interface PluginConversationMessage {
     generationInfo?: Record<string, unknown>;
     promptInfo?: Record<string, unknown>;
     name?: string;
-    otherUser?: boolean;
     disabled?: false | true | 'allBefore';
     isComment?: boolean;
 }
@@ -1504,7 +1503,7 @@ interface RisuaiPluginAPI {
     getCurrentChatIndex: () => Promise<number>;
 
     /**
-     * Gets raw lorebook entries for the current character or group, the
+     * Gets raw lorebook entries for the current character, the
      * current chat, and currently active modules.
      *
      * This does not apply lorebook activation or token budget filtering.

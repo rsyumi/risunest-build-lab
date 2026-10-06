@@ -87,10 +87,8 @@ static NSApplicationTerminateReply observeProductDecision(id delegate, SEL selec
     return reply;
 }
 
-int risunest_bench_queue_native_quit(void (*observer)(int, int, int), void (*decision)(int)) {
+static int installProductObservers(void (*observer)(int, int, int), void (*decision)(int)) {
     if (![NSThread isMainThread] || !NSApp.delegate || !observer || !decision || productBeginPending) return 0;
-    CFRunLoopRef loop = CFRunLoopGetMain();
-    if (!loop) return 0;
     if (!productReplyOriginal) {
         Method should = class_getInstanceMethod(object_getClass(NSApp.delegate), @selector(applicationShouldTerminate:));
         if (!should) return 0;
@@ -103,6 +101,13 @@ int risunest_bench_queue_native_quit(void (*observer)(int, int, int), void (*dec
     } else if (productReplyObserver != observer || productDecisionObserver != decision) {
         return 0;
     }
+    return 1;
+}
+
+int risunest_bench_queue_native_quit(void (*observer)(int, int, int), void (*decision)(int)) {
+    if (!installProductObservers(observer, decision)) return 0;
+    CFRunLoopRef loop = CFRunLoopGetMain();
+    if (!loop) return 0;
     productBeginPending = YES;
     CFRunLoopPerformBlock(loop, kCFRunLoopCommonModes, ^{
         [NSApp terminate:nil];
@@ -110,6 +115,19 @@ int risunest_bench_queue_native_quit(void (*observer)(int, int, int), void (*dec
     });
     CFRunLoopWakeUp(loop);
     return 1;
+}
+
+int risunest_bench_dispatch_session_event(void (*observer)(int, int, int), void (*decision)(int)) {
+    // The normal quit remains inside terminate:, so installing twice must not require its return.
+    if (!productReplyOriginal && !installProductObservers(observer, decision)) return 0;
+    NSAppleEventDescriptor *target = [NSAppleEventDescriptor descriptorWithProcessIdentifier:NSProcessInfo.processInfo.processIdentifier];
+    NSAppleEventDescriptor *event = [NSAppleEventDescriptor appleEventWithEventClass:kCoreEventClass
+        eventID:kAEQuitApplication targetDescriptor:target returnID:kAutoGenerateReturnID transactionID:kAnyTransactionID];
+    [event setAttributeDescriptor:[NSAppleEventDescriptor descriptorWithTypeCode:kAELogOut]
+        forKeyword:kAEQuitReason];
+    NSError *error = nil;
+    [event sendEventWithOptions:NSAppleEventSendNoReply timeout:5 error:&error];
+    return error ? (int)error.code : 1;
 }
 
 int risunest_bench_queue_repeated_quit(void) {
@@ -147,7 +165,7 @@ int risunest_bench_session_quit(void (*observer)(int, int, int), void (*decision
     CFRunLoopRef loop = CFRunLoopGetMain();
     CFRunLoopTimerRef repeat = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault,
         CFAbsoluteTimeGetCurrent() + 1.0, 0, 0, 0, ^(CFRunLoopTimerRef timer) {
-            // Deliver another session event to the delegate while the first real terminate: waits.
+            // Exercise only the conditional delegate contract, not natural event dispatch.
             // A second terminate: itself follows AppKit's ordinary force-quit behavior instead.
             syntheticSessionEvent = YES;
             [NSApp.delegate applicationShouldTerminate:NSApp];

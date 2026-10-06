@@ -13,6 +13,8 @@ it('keeps the existing regex list when file selection is cancelled', async () =>
 import { setRuntimePerformanceProfile } from '../runtimePerformanceProfile'
 import { registerActiveHistoryWindow } from './historyWindowIndex'
 import { createStoreHistoryWindow, historyMessages } from './tests/historyWindowTestUtils'
+import { createHistoryWindowController } from './historyWindowController'
+import * as polyfill from '../polyfill'
 import {
     ActiveConversationSession,
     cloneConversationMetadata,
@@ -1451,6 +1453,39 @@ describe('regex history actions over a history window', () => {
         expect(result.data).toBe('')
         expect(store[950].data).toBe('x')
         expect(store.slice(0, 900)).toEqual(historyMessages(900))
+    })
+
+    it.each(['editinput', 'editoutput'] as const)('keeps %s mutations window-owned when the full conversation is resident', async (mode) => {
+        const { store, char, controller: initial } = windowedCharacter([
+            { ...makeScript('^input$', '{{setvar::scratch::regex}}'), type: mode },
+        ])
+        const complete = { ...initial.chat, message: structuredClone(store) }
+        char.chats[0] = complete
+        mocks.state.currentChat = complete
+        const session = mocks.state.session = new ActiveConversationSession({
+            characterId: char.chaId, conversationId: complete.id!, conversation: complete, storeRevision: 1,
+        })
+        const controller = createHistoryWindowController({
+            captureWindowed: () => null,
+            captureSession: () => ({ session, conversation: complete }),
+            getCurrentSession: () => mocks.state.session,
+            readLiveMetadata: () => complete,
+        }, initial.chat, 900)
+        unregister?.()
+        unregister = registerActiveHistoryWindow({
+            characterId: char.chaId, conversationId: complete.id!, shell: null, controller,
+        })
+        const clone = vi.spyOn(polyfill, 'safeStructuredClone')
+        try {
+            const result = await processScriptFull(char, 'input', mode, 950, {}, { cache: 'bypass', regexWorker: false })
+            expect(result.data).toBe('written')
+            expect(complete.scriptstate).toEqual({ $scratch: 'regex' })
+            expect(complete.message).toEqual(store)
+            expect(clone.mock.calls.some(([value]) => Array.isArray(value) && value.length === 1000)).toBe(false)
+        } finally {
+            clone.mockRestore()
+            controller.release()
+        }
     })
 
     it('reads @@repeat_back from the previous same-role message inside the window', async () => {

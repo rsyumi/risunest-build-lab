@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertProductionBundle } from "./productionBundle.mjs";
+import { assertProductionBundle, assertMonacoBundle } from "./productionBundle.mjs";
 
 const chunk = (modules = {}, code = "export {};") => ({
   type: "chunk",
@@ -98,13 +98,7 @@ test("rejects an empty bundle instead of claiming validation", () => {
   assert.throws(() => assertProductionBundle([]), /No JavaScript/);
 });
 
-test("rejects removed peer transport modules but preserves upstream PeerJS", () => {
-  assertProductionBundle([
-    chunk({
-      "/src/ts/sync/multiuser.ts": {},
-      "/node_modules/peerjs/dist/bundler.mjs": {},
-    }),
-  ]);
+test("rejects removed peer transport modules", () => {
   for (const id of [
     "/src/ts/storage/sync/peerClone.ts",
     "/src/ts/storage/sync/deviceSyncController.ts",
@@ -208,4 +202,26 @@ test("rejects isolated persistence probes in product chunks, workers and source 
     }]), /Verification marker/);
     assert.throws(() => assertProductionBundle([chunk(), map(["/src/main.ts"], [marker])]), /Verification source text/);
   }
+});
+
+const monacoBundle = () => [
+  chunk(Object.fromEntries([
+    "editor/edcore.main.js", "basic-languages/markdown/markdown.contribution.js", "basic-languages/lua/lua.contribution.js",
+  ].map(id => [`/node_modules/monaco-editor/esm/vs/${id}`, {}]))),
+  { type: "asset", fileName: "assets/editor.worker-123.js", source: "self.onmessage = () => {};" },
+];
+
+test("Monaco bundle retains core, markdown, Lua and its editor worker", () => {
+  assert.deepEqual(assertMonacoBundle(monacoBundle()), { monacoWorkers: 1 });
+  assert.throws(() => assertMonacoBundle(monacoBundle().slice(0, 1)), /editor worker/);
+  assert.throws(() => assertMonacoBundle([monacoBundle()[1]]), /editor core/);
+});
+
+test("Monaco bundle rejects unused contributions in chunks and worker maps", () => {
+  for (const path of ["language/json/jsonMode.js", "language/typescript/ts.worker.js", "language/css/cssMode.js", "language/html/htmlMode.js", "basic-languages/python/python.js", "editor/editor.main.js"]) {
+    const id = `/node_modules/monaco-editor/esm/vs/${path}`;
+    assert.throws(() => assertMonacoBundle([...monacoBundle(), chunk({ [id]: {} })]), /Monaco/);
+    assert.throws(() => assertMonacoBundle([...monacoBundle(), map([id])]), /Monaco/);
+  }
+  assert.throws(() => assertMonacoBundle([...monacoBundle(), { type: "asset", fileName: "assets/ts.worker-123.js", source: "unused" }]), /Unused Monaco worker/);
 });

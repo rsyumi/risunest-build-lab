@@ -94,7 +94,7 @@ async function sendPofile(arg:sendFileArg){
                 data: text
             })
             if (!refreshMutationTarget()) return
-            await sendChat(-1, {}, reservation);
+            await sendChat({}, reservation);
             if (!refreshMutationTarget()) return
             const res = currentConversation.message[currentConversation.message.length-1]
             const msgStr = res.data.split('\n').filter((a) => {

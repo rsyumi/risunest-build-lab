@@ -94,12 +94,20 @@ pub(crate) async fn appimage_integration_state(_app: AppHandle) -> Result<Integr
     let unavailable = IntegrationState { available: false, registered: false, replaces_existing: false, token: String::new(), error: None };
     #[cfg(target_os = "linux")]
     if linux::available(&_app) {
-        return tauri::async_runtime::spawn_blocking(move || match linux::state(&_app) {
+        return log_state_outcome(tauri::async_runtime::spawn_blocking(move || match linux::state(&_app) {
             Ok(state) => state,
             Err(error) => IntegrationState { available: true, error: Some(error), ..unavailable },
-        }).await.map_err(|error| error.to_string());
+        }).await.map_err(|error| error.to_string()));
     }
     Ok(unavailable)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn log_state_outcome(result: Result<IntegrationState, String>) -> Result<IntegrationState, String> {
+    if let Ok(IntegrationState { error: Some(error), .. }) = &result {
+        let _ = crate::native_log::logged_without_detail::<(), _>("appimage_integration_state", Err(error.clone()));
+    }
+    crate::native_log::logged_without_detail("appimage_integration_state", result)
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -197,16 +205,33 @@ pub(crate) fn remove_owned(
 
 #[tauri::command]
 pub(crate) async fn appimage_integration_register(_app: AppHandle, token: String, replace_existing: bool) -> Result<(), String> {
-    #[cfg(target_os = "linux")]
-    return tauri::async_runtime::spawn_blocking(move || linux::register(&_app, &token, replace_existing))
-        .await.map_err(|error| error.to_string())?;
-    #[cfg(not(target_os = "linux"))]
-    { let _ = (token, replace_existing); Err("AppImage integration is unavailable on this platform.".into()) }
+    crate::native_log::logged_without_detail("appimage_integration_register", async {
+        #[cfg(target_os = "linux")]
+        return tauri::async_runtime::spawn_blocking(move || linux::register(&_app, &token, replace_existing))
+            .await.map_err(|error| error.to_string())?;
+        #[cfg(not(target_os = "linux"))]
+        { let _ = (token, replace_existing); Err("AppImage integration is unavailable on this platform.".into()) }
+    }.await)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_and_outer_state_failures_are_logged_once_without_private_text() {
+        let private = "synthetic private desktop path".to_owned();
+        let state = IntegrationState { available: true, registered: false, replaces_existing: false, token: String::new(), error: Some(private.clone()) };
+        assert_eq!(log_state_outcome(Ok(state)).unwrap().error.as_ref(), Some(&private));
+        assert_eq!(log_state_outcome(Err(private.clone())).err().unwrap(), private);
+        let entries = crate::native_log::global_state().tail(None);
+        let failures: Vec<_> = entries.iter().filter(|entry| entry.message.starts_with("appimage_integration_state failed: ")).collect();
+        assert_eq!(failures.len(), 2);
+        assert!(failures.iter().all(|entry| !entry.message.contains(&private)));
+        let state = IntegrationState { available: false, registered: false, replaces_existing: false, token: String::new(), error: None };
+        assert!(!log_state_outcome(Ok(state)).unwrap().available);
+        assert_eq!(crate::native_log::global_state().tail(None).iter().filter(|entry| entry.message.starts_with("appimage_integration_state failed: ")).count(), 2);
+    }
     #[test]
     fn registration_compares_both_default_handler_and_launch_path() {
         let same = "[Desktop Entry]\nExec=\"/a/app.AppImage\" %u\n";

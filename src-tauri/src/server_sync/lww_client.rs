@@ -1385,6 +1385,11 @@ impl LwwClient {
                 }
             }
         }
+        #[cfg(test)]
+        if let Some(counter) = &self.client.test_io {
+            let mut traffic = counter.traffic.lock().unwrap();
+            traffic.prepared_units += changes.len() as u64;
+        }
         Ok(())
     }
 }

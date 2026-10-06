@@ -102,6 +102,7 @@ const EXPECTED_EXPORT_STAGES: DialogStageId[] = [
 
 /** Stages shown as pending from the start; optional stages appear only once observed. */
 const EXPECTED_STAGES: Record<NativeFileOperationFormat, DialogStageId[]> = {
+    dataset: [],
     'raw-recovery': ['reading-archive'],
     'library-backup': [
         'reading-database',
@@ -206,6 +207,8 @@ function formatOf(
     status: NativeFileJobStatus | undefined,
 ): NativeFileOperationFormat | undefined {
     switch (status?.kind) {
+        case 'export-dataset':
+            return 'dataset'
         case 'restore-block-risu-save':
             return 'risu-save'
         case 'restore-portable-backup':
@@ -230,6 +233,7 @@ function exportTitleOf(
     status: NativeFileJobStatus | undefined,
 ): string {
     const copy = language.risuNest.importDialog
+    if (format === 'dataset') return language.exportAsDataset
     switch (status?.kind) {
         case 'official-publication-upload':
             return language.risuNest.backup.officialPublish
@@ -332,6 +336,9 @@ function activeStageDetail(stage: DialogStageId, status: NativeFileJobStatus | u
         return progressText(detail.stageCompleted, detail.stageTotal, detail.stageUnit)
     }
     if (detail) return ''
+    if (status.kind === 'export-dataset' && stage === 'writing-export') {
+        return progressText(status.progress.completedItems, status.progress.totalItems, 'items')
+    }
     return progressText(status.progress.completedBytes, status.progress.totalBytes, 'bytes')
 }
 
@@ -398,6 +405,7 @@ function buildCounters(
     succeeded: boolean,
 ): NativeFileJobDialogCounter[] {
     const copy = language.risuNest.importDialog
+    if (format === 'dataset') return []
     if (format === 'content')
         return [
             {

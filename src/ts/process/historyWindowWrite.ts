@@ -3,6 +3,7 @@ import type { WindowedConversationMutationController } from '../storage/activeWo
 import type { Chat, Message } from '../storage/database.svelte'
 import type { HistoryWindowController } from './historyWindowController'
 import { inheritHistoryWindow } from './historyWindowIndex'
+import type { ConversationCommitObserver } from './conversationOperationContext'
 
 export interface HistoryWindowChange {
     start: number
@@ -97,12 +98,46 @@ export interface HistoryWindowCopy {
 }
 
 /** A copy of the window chat for a script that edits the chat it is handed. */
-export function openHistoryWindowCopy(controller: HistoryWindowController): HistoryWindowCopy {
+export function openHistoryWindowCopy(
+    controller: HistoryWindowController,
+    onCommit?: ConversationCommitObserver,
+): HistoryWindowCopy {
+    const current = controller.isCurrent()
+    const sourceVersion = controller.mutationVersion
+    const source = [...controller.chat.message]
     const chat = safeStructuredClone(controller.chat)
+    const drafts = [...chat.message]
     inheritHistoryWindow(controller.chat, chat)
+    let committed = false
     return {
         chat,
-        commit: () => writeHistoryWindowChat(controller, chat),
+        commit() {
+            if (committed || !current || !controller.isCurrent()
+                || sourceVersion !== controller.mutationVersion
+                || source.length !== controller.chat.message.length
+                || source.some((message, index) => controller.chat.message[index] !== message)) return false
+            if (!writeHistoryWindowChat(controller, chat)) return false
+            committed = true
+            const writtenVersion = controller.mutationVersion
+            const written = [...controller.chat.message]
+            onCommit?.({
+                follows: () => false,
+                remapWindowTarget(owner, message) {
+                    if (owner !== controller || !controller.isCurrent()
+                        || writtenVersion !== controller.mutationVersion
+                        || written.length !== controller.chat.message.length
+                        || written.some((entry, index) => controller.chat.message[index] !== entry)) return null
+                    const oldIndex = source.indexOf(message)
+                    if (oldIndex < 0 || !message.chatId
+                        || source.filter((entry) => entry.chatId === message.chatId).length !== 1) return null
+                    const nextIndex = chat.message.indexOf(drafts[oldIndex])
+                    if (nextIndex < 0 || chat.message[nextIndex].chatId !== message.chatId
+                        || chat.message.filter((entry) => entry.chatId === message.chatId).length !== 1) return null
+                    return nextIndex
+                },
+            })
+            return true
+        },
     }
 }
 

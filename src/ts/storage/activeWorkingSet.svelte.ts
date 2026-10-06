@@ -1,4 +1,4 @@
-import type { Chat, Database, Message, character, groupChat } from './database.svelte'
+import type { Chat, Database, Message, character } from './database.svelte'
 import type { CommittedApplyOutcome } from './persistentDataRuntime'
 import { safeStructuredClone } from '../polyfill'
 import { replaceArrayRange } from '../arrayRange'
@@ -37,13 +37,11 @@ import {
     createMetadataOnlySelectedConversation,
     isMetadataOnlySelectedConversation,
 } from './selectedConversationLifecycle'
-import { removeGroupMemberReferences } from './groupMembership'
 import { isConversationStreaming } from './streamingConversationRegistry'
 
-type CompleteCharacter = character | groupChat
+type CompleteCharacter = character
 
 const CONVERSATION_HYDRATION_CONCURRENCY = 8
-const RELATED_CHARACTER_HYDRATION_CONCURRENCY = 4
 const WINDOWED_PUBLISH_SETTLE_ATTEMPTS = 8
 const WINDOWED_CHARACTER_ACTIVATION_RETRIES = 3
 
@@ -104,7 +102,6 @@ export interface ActiveWorkingSetDependencies {
     getSelectedCharacterId(): string | null | undefined
     getResidentCharacter?(id: string): CompleteCharacter | null
     publishCharacter(character: CompleteCharacter): void
-    publishCharacterSet(primary: CompleteCharacter, related: CharacterDetail[]): void
     publishConversation(
         characterId: string,
         conversation: Chat,
@@ -429,7 +426,7 @@ export class ActiveWorkingSet {
                 messages.push(...page.value.messages)
                 offset += page.value.messages.length
             }
-            const contentKeys = ['role', 'data', 'saying', 'chatId', 'name', 'otherUser', 'disabled', 'isComment'] as const
+            const contentKeys = ['role', 'data', 'saying', 'chatId', 'name', 'disabled', 'isComment'] as const
             if (messages.length !== length || !messages.every((message, index) =>
                 contentKeys.every((key) => Object.is(message[key], controller.chat.message[index]?.[key])))) {
                 controller.release()
@@ -907,7 +904,7 @@ export class ActiveWorkingSet {
         return true
     }
 
-    advanceStoreRevision(revision: DataRevision, totalMessages?: number): void {
+    advanceStoreRevision(revision: DataRevision, totalMessages?: number, preserveRows = false): void {
         const state = this.selectedConversationState
         if (state?.kind !== 'windowed') {
             const previousRevision = this.activeSession?.storeRevision
@@ -928,6 +925,16 @@ export class ActiveWorkingSet {
             throw new Error('Windowed selected conversation revision advance is unavailable')
         }
         const authority = { ...state.authority, storeRevision: revision, totalMessages: totalMessages ?? state.authority.totalMessages }
+        if (preserveRows && authority.totalMessages === state.authority.totalMessages) {
+            const previousAuthority = state.authority
+            state.authority = authority
+            if (!advance.call(this.dependencies.coordinator, revision, authority)) {
+                state.authority = previousAuthority
+                throw new Error('Windowed selected conversation revision was not adopted')
+            }
+            state.viewportSource.advanceUnchangedRevision(revision)
+            return
+        }
         const viewportSource = new PersistentConversationViewportSource({
             reader: this.dependencies.store,
             characterId: state.characterId,
@@ -1031,13 +1038,7 @@ export class ActiveWorkingSet {
             this.activeIds = new Set()
             return this.activeCharacterIds
         }
-        const existingIds = new Set(database.characters.map((character) => character.chaId))
-        const relatedIds = selected.type === 'group' && Array.isArray(selected.characters)
-            ? selected.characters.filter(
-                (id, index) => existingIds.has(id) && selected.characters.indexOf(id) === index,
-            )
-            : []
-        this.activeIds = new Set([selected.chaId, ...relatedIds])
+        this.activeIds = new Set([selected.chaId])
         return this.activeCharacterIds
     }
 
@@ -1267,47 +1268,8 @@ export class ActiveWorkingSet {
             generation,
         )
         if (!characterValue) return false
-        let relatedIds = characterValue.type === 'group'
-            ? [...new Set(characterValue.characters)].filter((memberId) => memberId !== id)
-            : []
-        const relatedValues: Array<CharacterDetail | null | undefined> = []
-        for (
-            let start = 0;
-            start < relatedIds.length;
-            start += RELATED_CHARACTER_HYDRATION_CONCURRENCY
-        ) {
-            const chunk = relatedIds.slice(
-                start,
-                start + RELATED_CHARACTER_HYDRATION_CONCURRENCY,
-            )
-            const hydratedChunk = await Promise.all(chunk.map(async (memberId) => {
-                try {
-                    return await this.hydrateCharacterDetail(
-                        memberId,
-                        revision,
-                        mutationGeneration,
-                        generation,
-                    )
-                } catch (error) {
-                    if (error instanceof MissingCharacterError) return undefined
-                    throw error
-                }
-            }))
-            relatedValues.push(...hydratedChunk)
-            if (hydratedChunk.some((value) => value === null)) return false
-        }
-        const missingRelatedIds = new Set(
-            relatedIds.filter((_memberId, index) => relatedValues[index] === undefined),
-        )
         const persistedCharacterValue = safeStructuredClone(characterValue)
-        if (characterValue.type === 'group' && missingRelatedIds.size > 0) {
-            const groupValue = characterValue
-            characterValue = {
-                ...groupValue,
-                ...removeGroupMemberReferences(groupValue, missingRelatedIds),
-            }
-            relatedIds = relatedIds.filter((memberId) => !missingRelatedIds.has(memberId))
-        }
+
         characterValue = this.normalizeCharacterCandidate(
             characterValue,
             options.normalize,
@@ -1322,19 +1284,12 @@ export class ActiveWorkingSet {
             return false
         }
         if (this.dependencies.canActivateWorkingSet?.() === false) return false
-        const completeRelated = relatedValues.filter(
-            (value): value is CharacterDetail => value !== null && value !== undefined,
-        )
-        if (completeRelated.length > 0) {
-            this.dependencies.publishCharacterSet(characterValue, completeRelated)
-        } else {
-            this.dependencies.publishCharacter(characterValue)
-        }
+        this.dependencies.publishCharacter(characterValue)
         const selectedConversation = characterValue.chats[characterValue.chatPage ?? 0]
         if (selectedConversation) {
             this.publishActiveConversationSession(id, selectedConversation, revision)
         } else this.clearActiveConversationSession()
-        const nextActiveIds = new Set([id, ...relatedIds])
+        const nextActiveIds = new Set([id])
         this.activeIds = nextActiveIds
         for (const previousId of previousActiveIds) {
             if (!nextActiveIds.has(previousId)) {
@@ -1396,48 +1351,6 @@ export class ActiveWorkingSet {
         if (this.dependencies.getSelectedCharacterId() !== previousCharacterId)
             return false
 
-        let relatedIds =
-            hydrated.character.type === 'group'
-                ? [...new Set(hydrated.character.characters)].filter(
-                      (memberId) => memberId !== id,
-                  )
-                : []
-        const relatedValues: Array<CharacterDetail | null | undefined> = []
-        for (
-            let start = 0;
-            start < relatedIds.length;
-            start += RELATED_CHARACTER_HYDRATION_CONCURRENCY
-        ) {
-            const chunk = relatedIds.slice(
-                start,
-                start + RELATED_CHARACTER_HYDRATION_CONCURRENCY,
-            )
-            const values = await Promise.all(
-                chunk.map(async (memberId) => {
-                    try {
-                        return await this.hydrateCharacterDetail(
-                            memberId,
-                            revision,
-                            mutationGeneration,
-                            generation,
-                        )
-                    } catch (error) {
-                        if (error instanceof MissingCharacterError)
-                            return undefined
-                        throw error
-                    }
-                }),
-            )
-            relatedValues.push(...values)
-            if (!this.isCurrent(generation, revision, mutationGeneration))
-                return false
-            if (!this.canDirectlyActivateWindowed(options))
-                return 'complete-fallback'
-            if (values.some((value) => value === null)) return false
-        }
-        if (relatedValues.some((value) => value === undefined)) {
-            return 'complete-fallback'
-        }
         const settled = await this.settleBeforeWindowedPublish(
             generation,
             revision,
@@ -1489,10 +1402,6 @@ export class ActiveWorkingSet {
             activationChange.character || activationChange.conversation
                 ? activationChange
                 : undefined
-        const completeRelated = relatedValues.filter(
-            (value): value is CharacterDetail =>
-                value !== null && value !== undefined,
-        )
         return this.publishWindowedSelection({
             character: normalized,
             metadata: hydrated.selectedMetadata,
@@ -1502,8 +1411,7 @@ export class ActiveWorkingSet {
             generation,
             previousState,
             previousActiveIds,
-            nextActiveIds: new Set([id, ...relatedIds]),
-            related: completeRelated,
+            nextActiveIds: new Set([id]),
             publishAsConversation: false,
             activation,
         })
@@ -1816,7 +1724,6 @@ export class ActiveWorkingSet {
             nextActiveIds: new Set(
                 previousActiveIds.size > 0 ? previousActiveIds : [characterId],
             ),
-            related: [],
             publishAsConversation: true,
             activation,
         })
@@ -2089,7 +1996,6 @@ export class ActiveWorkingSet {
         previousState: SelectedConversationState | null
         previousActiveIds: ReadonlySet<string>
         nextActiveIds: Set<string>
-        related: CharacterDetail[]
         publishAsConversation: boolean
         activation?: WindowedConversationActivationChange
     }): boolean {
@@ -2125,7 +2031,6 @@ export class ActiveWorkingSet {
                 ...input.previousActiveIds,
                 ...input.nextActiveIds,
                 input.character.chaId,
-                ...input.related.map((detail) => detail.chaId),
             ]),
         ]
         const restorePublication =
@@ -2164,11 +2069,6 @@ export class ActiveWorkingSet {
                         input.character.chaId,
                         conversation,
                         input.character,
-                    )
-                } else if (input.related.length > 0) {
-                    this.dependencies.publishCharacterSet(
-                        input.character,
-                        input.related,
                     )
                 } else {
                     this.dependencies.publishCharacter(input.character)

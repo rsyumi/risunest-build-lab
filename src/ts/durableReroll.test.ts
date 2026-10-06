@@ -9,7 +9,7 @@ import {
     type OpenResponseTail,
 } from './durableReroll'
 import { attachHistoryWindow } from './process/historyWindowIndex'
-import { recoverRerollMessages, trackRerollOutput } from './responseVariants'
+import { captureResponseVariants, projectResponseVariant, recoverRerollMessages, trackRerollOutput } from './responseVariants'
 
 const message = (data: string, role: Message['role'] = 'char', saying = 'bot'): Message => ({
     data,
@@ -178,10 +178,11 @@ describe('durable response candidates', () => {
         expect(reopened.message.at(-1)?.data).toBe('original')
     })
 
-    it('preserves a variable length group response and trailing comments without a user message', async () => {
+    it('preserves a variable length response and trailing comments without a user message', async () => {
+        const original = [message('a'), message('b')]
+        const variants = captureResponseVariants(original, () => 'original')
         const f = fixture([
-            message('a', 'char', 'a'),
-            message('b', 'char', 'b'),
+            ...projectResponseVariant(variants, variants.selectedId),
             { ...message('note'), isComment: true },
         ])
         await generateResponseCandidate(f.options)
@@ -336,9 +337,11 @@ describe('response candidates over a history window', () => {
     })
 
     it('widens the tail until it holds the message before a long response', async () => {
+        const response = Array.from({ length: 10 }, (_, index) => message(`r${index}`))
+        const variants = captureResponseVariants(response, () => 'original')
         const conversation = storedConversation([
             ...longConversation(20),
-            ...Array.from({ length: 10 }, (_, index) => message(`r${index}`, 'char', `speaker-${index}`)),
+            ...projectResponseVariant(variants, variants.selectedId),
         ])
         const { open, createId, flush } = conversation.options
         const move = await moveWindowedResponseCandidate(open, 1, createId, flush)

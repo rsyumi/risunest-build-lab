@@ -74,13 +74,13 @@ describe('ChatRenderIdentityRegistry', () => {
                 before,
                 signatureFor(message('id'), { index: 2 }),
             ),
-        ).toBe(false)
+        ).toBe(true)
         expect(
             canRefreshChatRenderInPlace(
                 before,
                 signatureFor(message('id'), { resolvedImage: 'changed' }),
             ),
-        ).toBe(false)
+        ).toBe(true)
         expect(
             canRefreshChatRenderInPlace(
                 before,
@@ -91,7 +91,7 @@ describe('ChatRenderIdentityRegistry', () => {
                     },
                 }),
             ),
-        ).toBe(false)
+        ).toBe(true)
     })
 
     it('keeps an id-less identity when a chat ID is assigned later', () => {
@@ -386,8 +386,8 @@ describe('createChatRenderSignature', () => {
         expect(sameSignature(signatureFor({ ...original, generationInfo: { generationId: 'reroll-2' } }), base)).toBe(false)
         expect(sameSignature(signatureFor(original, { index: 2 }), base)).toBe(false)
         expect(sameSignature(signatureFor(original, { reloadPointer: 1 }), base)).toBe(false)
-        expect(sameSignature(signatureFor(original, { bookmarked: true }), base)).toBe(false)
-        expect(sameSignature(signatureFor(original, { resolvedImage: 'changed.png' }), base)).toBe(false)
+        expect(sameSignature(signatureFor(original, { bookmarked: true }), base)).toBe(true)
+        expect(sameSignature(signatureFor(original, { resolvedImage: 'changed.png' }), base)).toBe(true)
     })
 
     it('reuses the render signature during optimized streaming and remounts when streaming settles', () => {
@@ -423,6 +423,21 @@ describe('createChatRenderSignature', () => {
             parserCharacter: { ...parserCharacter, virtualscript: 'changed' },
         }), base)).toBe(false)
         expect(sameSignature(signatureFor(original, { globalReloadPointer: 1, parserCharacter }), base)).toBe(false)
+    })
+
+    it('ignores regex labels while preserving executable and trigger dependencies', () => {
+        const character = { ...defaultParserCharacter, customscript: [{ comment: 'Label', in: 'before', out: 'after' }], triggerscript: [{ comment: 'trigger' }] }
+        const original = createChatParserDependencyStamp(character)
+        character.customscript[0].comment = 'Renamed'
+        expect(createChatParserDependencyStamp(character)).toBe(original)
+        character.customscript[0].in = 'new pattern'
+        const pattern = createChatParserDependencyStamp(character)
+        expect(pattern).not.toBe(original)
+        character.triggerscript[0].comment = 'other trigger'
+        expect(createChatParserDependencyStamp(character)).not.toBe(pattern)
+        expect(canRefreshChatRenderInPlace(signatureFor(message('id')), signatureFor(message('id'), {
+            parserCharacter: { ...defaultParserCharacter, chaId: 'other-owner' },
+        }))).toBe(false)
     })
 
     it('tracks in-place parser asset and script mutations without replacing their arrays', () => {

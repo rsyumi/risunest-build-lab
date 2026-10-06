@@ -52,7 +52,7 @@ final class PortableSourceCustody {
     struct RetiredSource: Equatable {
         let token: String
         let name: String?
-        var receipt: [String: Any] { ["token": token, "name": name as Any? ?? NSNull()] }
+        var receipt: [String: String?] { ["token": token, "name": name] }
     }
     private var retired: [RetiredSource] = []
     private var selectionFinished: DispatchGroup?

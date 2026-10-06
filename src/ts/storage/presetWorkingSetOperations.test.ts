@@ -72,6 +72,17 @@ describe('store-backed preset operations', () => {
         })
     })
 
+    it('validates a repeated selection without applying or persisting over pending edits', async () => {
+        const before = live.botPresets
+        await controller.changeToPreset(0, false)
+        expect(live.botPresets).toBe(before)
+        expect(live.mainPrompt).toBe('edited active first')
+        expect(persisted[0].mainPrompt).toBe('stored first')
+        await expect(controller.changeToPreset(0, true, ['Wrong', 'Second'])).rejects.toThrow('Preset list changed')
+        await controller.saveCurrentPreset()
+        expect(persisted[0].mainPrompt).toBe('edited active first')
+    })
+
     it('saves the active body and hydrates the selected inactive body before returning', async () => {
         await controller.changeToPreset(1)
 

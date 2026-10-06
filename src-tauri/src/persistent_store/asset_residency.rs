@@ -13,6 +13,13 @@ use crate::{
 use std::collections::BTreeSet;
 use rusqlite::OptionalExtension;
 
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub(crate) enum PreviousStorageTarget {
+    Server { #[serde(rename = "libraryId")] library_id: String, #[serde(rename = "targetId")] target_id: String },
+    External { #[serde(rename = "connectionId")] connection_id: String },
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ResidencyStatus {
@@ -24,6 +31,8 @@ pub(crate) struct ResidencyStatus {
     server_objects: u64,
     external_objects: Vec<ExternalObjects>,
     unavailable_objects: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_storage_objects: Option<u64>,
     pub evicted_bytes: u64,
 }
 #[derive(serde::Serialize)]
@@ -176,6 +185,7 @@ impl PersistentStore {
         check: impl Fn() -> Result<()>,
         on_object_done: impl Fn(),
     ) -> Result<()> {
+        if let Some(lane) = crate::server_sync::progress::current() { lane.asset_plan(None); }
         let residency = Residency::exists(&self.repository_root).then(||Residency::open(&self.repository_root)).transpose()?;
         let mut hydration = crate::server_sync::residency::HydrationSession::new(&self.repository_root, cancellation)?;
         let priority=selected_character_id.map(|id|self.selected_character_asset_hashes(id)).transpose()?.unwrap_or_default().into_iter().collect::<BTreeSet<_>>();
@@ -365,6 +375,7 @@ impl PersistentStore {
             server_objects: 0,
             external_objects: Vec::new(),
             unavailable_objects: 0,
+            previous_storage_objects: None,
             evicted_bytes: 0,
         };
         let mut external = std::collections::BTreeMap::<String, u64>::new();
@@ -405,6 +416,60 @@ impl PersistentStore {
             .collect();
         Ok(status)
     }
+    pub(crate) fn asset_residency_status_for_target(&self, target: Option<&PreviousStorageTarget>) -> Result<ResidencyStatus> {
+        let mut status = self.asset_residency_status()?;
+        if let Some(target) = target {
+            status.previous_storage_objects = Some(self.previous_storage_assets(target, &|| Ok(()))?.len() as u64);
+        }
+        Ok(status)
+    }
+    fn previous_storage_assets(&self, target: &PreviousStorageTarget, check: &impl Fn() -> Result<()>) -> Result<BTreeSet<String>> {
+        let inventory = self.residency_inventory(false)?;
+        let cas = PayloadCas::new(&self.repository_root)?;
+        let residency = Residency::open(&self.repository_root)?;
+        let mut missing = Vec::new();
+        for hash in inventory.referenced {
+            check()?;
+            if cas.stat_object(&hash)?.is_none() { missing.push(hash); }
+        }
+        let mut remote = RemoteBodies::deferred(&self.repository_root);
+        let mut connections = Connections::default();
+        let mut wanted = BTreeSet::new();
+        for page in missing.chunks(HOLDER_PAGE) {
+            check()?;
+            let available = self.residency_holders(&residency, &mut remote, &mut connections, page)?;
+            let mut external = if matches!(target, PreviousStorageTarget::External { .. }) {
+                remote.holders(&page.iter().map(String::as_str).collect::<Vec<_>>())
+                    .map_err(|_| std::io::Error::other("external-source-invalid"))?
+            } else { Default::default() };
+            for (hash, holder) in page.iter().zip(available) {
+                if matches!(holder, Holder::Unavailable) { continue; }
+                let held = match target {
+                    PreviousStorageTarget::Server { library_id, target_id } => residency.target_holds(hash, library_id, target_id)?,
+                    PreviousStorageTarget::External { connection_id: id } => {
+                        let mut held = false;
+                        if let Some(registration) = external.remove(hash) {
+                            for (root, candidate) in registration.connections {
+                                if candidate == *id && connections.contains(&root, &candidate)? { held = true; break; }
+                            }
+                        }
+                        held
+                    }
+                };
+                if !held { wanted.insert(hash.clone()); }
+            }
+        }
+        Ok(wanted)
+    }
+    pub(crate) fn asset_residency_download_previous(
+        &self, target: &PreviousStorageTarget,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        selected_character_id: Option<&str>, check: impl Fn() -> Result<()>,
+    ) -> Result<ResidencyStatus> {
+        check()?;
+        let targets = self.previous_storage_assets(target, &check)?;
+        self.hydrate_residency_targets(targets, cancellation, selected_character_id, check)
+    }
     /// Downloads the bodies another storage holds without changing the policy:
     /// every one, or only those `connection_id` holds and no other live
     /// connection does. A body no storage holds is left as it is.
@@ -443,6 +508,12 @@ impl PersistentStore {
                 }
             }
         }
+        self.hydrate_residency_targets(targets, cancellation, selected_character_id, check)
+    }
+    fn hydrate_residency_targets(
+        &self, targets: BTreeSet<String>, cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        selected_character_id: Option<&str>, check: impl Fn() -> Result<()>,
+    ) -> Result<ResidencyStatus> {
         let mut hydration = crate::server_sync::residency::HydrationSession::new(&self.repository_root, cancellation)?;
         if let Some(character_id) = selected_character_id {
             let selected = self.selected_character_asset_hashes(character_id)?.into_iter()

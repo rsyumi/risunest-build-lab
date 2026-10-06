@@ -358,7 +358,7 @@ pub(crate) async fn external_storage_stop_restore(app: AppHandle, job_id: String
         let store = JobStore::open(&root)?;
         // A restore that is running again continues instead of stopping, and
         // the claim keeps a worker from starting it while it stops.
-        let (_, _claim) = app.state::<JobCommandState>().claim(&store.read(&job_id)?)?;
+        let (_, _claim) = app.state::<JobCommandState>().claim_restore_settlement(&store.read(&job_id)?)?;
         let _permit = app.state::<crate::native_file_jobs::NativeFileJobState>()
             .admission.file(false).map_err(local_error)?;
         // A restore found applied stays applied even when recording that failed.

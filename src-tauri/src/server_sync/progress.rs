@@ -5,7 +5,7 @@
 //! known work now. Lanes that can run at the same time never share counters.
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -39,6 +39,15 @@ impl Step {
     }
 }
 
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AssetScope {
+    pub id: u64,
+    pub done: u64,
+    pub total: Option<u64>,
+    pub settled: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct ProgressLane {
     active: AtomicU32,
@@ -54,10 +63,11 @@ pub(crate) struct ProgressLane {
     bytes_total: AtomicU64,
     sent: AtomicU64,
     received: AtomicU64,
-    /// Work measured before it runs: the server's changes after the cursor, or
-    /// the assets a hydration will download.
+    /// The server's changes after the receive cursor.
     backlog_done: AtomicU64,
     backlog_left: AtomicU64,
+    asset_scope: Mutex<Option<AssetScope>>,
+    asset_scope_id: AtomicU64,
 }
 impl ProgressLane {
     pub(crate) fn step(&self, step: Step) {
@@ -89,9 +99,23 @@ impl ProgressLane {
         self.backlog_done.fetch_add(done, Relaxed);
         self.backlog_left.store(left, Relaxed);
     }
-    pub(crate) fn backlog_step(&self) {
-        self.backlog_done.fetch_add(1, Relaxed);
-        let _ = self.backlog_left.fetch_update(Relaxed, Relaxed, |left| Some(left.saturating_sub(1)));
+    pub(crate) fn asset_plan(&self, total: Option<usize>) -> u64 {
+        let mut scope = self.asset_scope.lock().unwrap_or_else(|error| error.into_inner());
+        let id = self.asset_scope_id.fetch_add(1, Relaxed) + 1;
+        *scope = Some(AssetScope { id, done: 0, total: total.map(|total| total as u64), settled: false });
+        id
+    }
+    pub(crate) fn asset_done(&self, id: u64) {
+        let mut scope = self.asset_scope.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(scope) = scope.as_mut().filter(|scope| scope.id == id) {
+            scope.done = (scope.done + 1).min(scope.total.unwrap_or(0));
+        }
+    }
+    pub(crate) fn asset_settled(&self, id: u64) {
+        let mut scope = self.asset_scope.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(scope) = scope.as_mut().filter(|scope| scope.id == id) {
+            scope.settled = scope.total == Some(scope.done);
+        }
     }
     pub(crate) fn snapshot(&self, lane: &'static str) -> LaneSnapshot {
         let active = self.active.load(Relaxed) > 0;
@@ -110,6 +134,7 @@ impl ProgressLane {
             received_bytes: self.received.load(Relaxed),
             backlog_done: self.backlog_done.load(Relaxed),
             backlog_left: self.backlog_left.load(Relaxed),
+            asset_scope: *self.asset_scope.lock().unwrap_or_else(|error| error.into_inner()),
         }
     }
 }
@@ -131,6 +156,7 @@ pub(crate) struct LaneSnapshot {
     pub received_bytes: u64,
     pub backlog_done: u64,
     pub backlog_left: u64,
+    pub asset_scope: Option<AssetScope>,
 }
 
 #[derive(Default)]
@@ -176,7 +202,9 @@ pub(crate) fn within<T>(lane: &Arc<ProgressLane>, operation: impl FnOnce() -> T)
             CURRENT.with(|current| *current.borrow_mut() = previous);
         }
     }
-    lane.active.fetch_add(1, Relaxed);
+    if lane.active.fetch_add(1, Relaxed) == 0 {
+        *lane.asset_scope.lock().unwrap_or_else(|error| error.into_inner()) = None;
+    }
     let previous = CURRENT.with(|current| current.borrow_mut().replace(lane.clone()));
     let _scope = Scope { lane, previous };
     operation()
@@ -220,12 +248,27 @@ mod tests {
         lane.backlog(60, 5);
         let read = lane.snapshot("receive");
         assert_eq!((read.backlog_done, read.backlog_left), (100, 5));
-        lane.backlog(0, 2);
-        for _ in 0..3 {
-            lane.backlog_step();
-        }
-        let read = lane.snapshot("hydrate");
-        assert_eq!((read.backlog_done, read.backlog_left), (103, 0));
+    }
+
+    #[test]
+    fn asset_scopes_are_finite_and_only_settle_after_all_items() {
+        let lane = Arc::new(ProgressLane::default());
+        within(&lane, || {
+            let first = lane.asset_plan(Some(130));
+            for _ in 0..64 { lane.asset_done(first); }
+            lane.asset_settled(first);
+            let scope = lane.snapshot("hydrate").asset_scope.unwrap();
+            assert_eq!((scope.done, scope.total, scope.settled), (64, Some(130), false));
+            for _ in 64..130 { lane.asset_done(first); }
+            assert!(!lane.snapshot("hydrate").asset_scope.unwrap().settled);
+            lane.asset_settled(first);
+            assert!(lane.snapshot("hydrate").asset_scope.unwrap().settled);
+            let next = lane.asset_plan(None);
+            lane.asset_done(first);
+            assert_eq!(lane.snapshot("hydrate").asset_scope.unwrap().done, 0);
+            assert!(next > first);
+        });
+        within(&lane, || assert!(lane.snapshot("hydrate").asset_scope.is_none()));
     }
 
     #[test]

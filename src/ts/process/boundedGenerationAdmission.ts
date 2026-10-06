@@ -1,6 +1,5 @@
 export interface BoundedGenerationAdmission {
     selected: boolean
-    group: boolean
     hypaEnabled: boolean
     windowed: boolean
     observableTokenizer: boolean
@@ -19,7 +18,6 @@ export interface BoundedGenerationAdmission {
 
 export function boundedGenerationFallbackReason(input: BoundedGenerationAdmission): string | null {
     if (!input.selected) return 'selected-conversation-unavailable'
-    if (input.group) return 'group-conversation'
     if (!input.hypaEnabled) return 'standard-hypa-v3-disabled'
     if (!input.windowed) return 'selected-conversation-not-windowed'
     if (input.observableTokenizer) return 'custom-or-remote-tokenizer'

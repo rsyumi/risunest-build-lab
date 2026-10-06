@@ -100,7 +100,6 @@ vi.mock('./tts', async () => (await import('./tests/sendChatTestHarness')).ttsMo
     sayTTS: mocks.sayTTS,
 }))
 vi.mock('./memory/supaMemory', async () => (await import('./tests/sendChatTestHarness')).supaMemoryModule())
-vi.mock('./group', async () => (await import('./tests/sendChatTestHarness')).groupModule())
 vi.mock('./triggers', () => ({
     runTrigger: vi.fn(async (_char: unknown, mode: string, arg: { chat: any }) => {
         if (mode === 'start') return null
@@ -114,7 +113,6 @@ vi.mock('./memory/hypamemory', async () => (await import('./tests/sendChatTestHa
 vi.mock('./embedding/addinfo', async () => (await import('./tests/sendChatTestHarness')).addinfoModule())
 vi.mock('./files/inlays', async () => (await import('./tests/sendChatTestHarness')).inlaysModule())
 vi.mock('./models/modelString', async () => (await import('./tests/sendChatTestHarness')).modelStringModule())
-vi.mock('../sync/multiuser', async () => (await import('./tests/sendChatTestHarness')).multiuserModule())
 vi.mock('./inlayScreen', () => ({
     runInlayScreen: (_char: unknown, data: string) => {
         mocks.events.push('inlay-sync')
@@ -168,8 +166,10 @@ vi.mock('../storage/persistentDataRuntime.svelte', () => ({
     getPersistentStorageAuthorityEpoch: () => mocks.authorityEpoch,
     getPersistentNavigationGeneration: () => 0,
     acknowledgeGenerationCompletion: mocks.acknowledge,
+    drainDeferredLwwReceives: vi.fn(async () => undefined),
     captureSelectedConversationTarget: () => mocks.selectedTarget,
     captureSelectedConversationAuthority: () => mocks.selectedAuthority,
+    recordSelectedCharacterLastInteraction: vi.fn(() => true),
     captureWindowedConversationMutationController: (...args: any[]) =>
         typeof mocks.windowedController === 'function'
             ? mocks.windowedController(...args)
@@ -386,6 +386,7 @@ describe('sendChat generation session integration', () => {
         mocks.acquireCompleteConversation.mockImplementation(async (_reason, target) => {
             const session = mocks.session
             const pin = session.acquirePin('compatibility')
+            mocks.selectedAuthority = null
             mocks.activeCompleteLeases += 1
             let released = false
             return {
@@ -430,7 +431,16 @@ describe('sendChat generation session integration', () => {
         installed.currentCharacter.supaMemory = true
         DBState.db.hypaV3 = true
         mocks.selectedTarget = { characterId: installed.currentCharacter.chaId, conversationId: installed.chat.id, storeRevision: 1 }
-        mocks.selectedAuthority = { sessionVersion: 0, persistedSessionVersion: 0 }
+        mocks.selectedAuthority = {
+            kind: 'windowed',
+            characterId: installed.currentCharacter.chaId,
+            conversationId: installed.chat.id,
+            sessionToken: 'windowed-session',
+            storeRevision: 1,
+            sessionVersion: 0,
+            persistedSessionVersion: 0,
+            totalMessages: installed.chat.message.length,
+        }
         const output = vi.fn(async () => undefined)
         if (consumer === 'plugin-editprocess') mocks.editHooks.add(() => undefined)
         if (consumer === 'plugin-output') mocks.listeners.add(output)
@@ -1448,7 +1458,7 @@ describe('sendChat generation session integration', () => {
                 }
                 return { data, emoChanged: false }
             })
-            const sending = sendChat(-1, { continue: continuing, signal: controller.signal })
+            const sending = sendChat({ continue: continuing, signal: controller.signal })
             await enteredOutput.promise
             expect(
                 mocks.processScriptFull.mock.calls.find((call) => call[2] === 'editoutput')?.[5]
@@ -1484,7 +1494,7 @@ describe('sendChat generation session integration', () => {
                 enteredInlay.resolve()
                 return { text: data, promise: finishInlay.promise }
             }
-            const sending = sendChat(-1, { signal: controller.signal })
+            const sending = sendChat({ signal: controller.signal })
             await enteredInlay.promise
             controller.abort()
             finishInlay.resolve('late inlay')
@@ -1515,7 +1525,7 @@ describe('sendChat generation session integration', () => {
             }
             const listener = vi.fn()
             mocks.listeners.add(listener)
-            const sending = sendChat(-1, { signal: controller.signal })
+            const sending = sendChat({ signal: controller.signal })
             await enteredTrigger.promise
             controller.abort()
             finishTrigger.resolve()
@@ -1538,7 +1548,7 @@ describe('sendChat generation session integration', () => {
         })
         const nextListener = vi.fn()
         mocks.listeners.add(nextListener)
-        const sending = sendChat(-1, { signal: controller.signal })
+        const sending = sendChat({ signal: controller.signal })
         await enteredListener.promise
         controller.abort()
         finishListener.resolve()
@@ -1591,7 +1601,7 @@ describe('sendChat generation session integration', () => {
         Object.assign(chat.message[0], { __translation: 'existing-record' })
         mocks.modelResponse = { type: 'success', result: ' plus' }
 
-        await expect(sendChat(-1, { continue: true })).resolves.toBe(true)
+        await expect(sendChat({ continue: true })).resolves.toBe(true)
 
         expect(DBState.db.characters[0].chats[0].message).toHaveLength(1)
         expect(DBState.db.characters[0].chats[0].message[0].data).toBe('existing plus')
@@ -1618,7 +1628,7 @@ describe('sendChat generation session integration', () => {
         }) }
         vi.mocked(alertNormal).mockClear()
         vi.mocked(notifyIOSGenerationComplete).mockClear()
-        const pending = sendChat(-1, { signal: user.signal })
+        const pending = sendChat({ signal: user.signal })
         await vi.waitFor(() => expect(DBState.db.characters[0].chats[0].message.at(-1)?.data).toBe('Kept partial'))
         if (end === 'user-stop') user.abort()
         else events.dispatchEvent(new CustomEvent('risunest-ios-lifecycle', { detail: { event: end === 'expired' ? 'expired' : 'active', id: 'generation' } }))

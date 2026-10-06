@@ -44,6 +44,13 @@ pub struct NewDeviceClaimReceipt {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NewDeviceClaimStatus {
+    pub request_digest: String,
+    pub receipt: NewDeviceClaimReceipt,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UnitChange {
     pub key: UnitKey,
     pub stamp: Stamp,

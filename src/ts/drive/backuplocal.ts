@@ -1,3 +1,4 @@
+import { prepareExternalDatabaseImport } from '../storage/upstreamImport'
 import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 import { BaseDirectory, open, writeFile } from "@tauri-apps/plugin-fs";
 import localforage from "localforage";
@@ -234,7 +235,7 @@ async function saveLocalBackupSnapshot(blobStore: BlobStore, pinned: PinnedRisuS
  * Saves a partial local backup with only critical assets.
  * 
  * Differences from SaveLocalBackup:
- * - Only includes profile images for characters/groups (excludes emotion images, additional assets, VITS files, CC assets)
+ * - Only includes profile images for characters (excludes emotion images, additional assets, VITS files, CC assets)
  * - Additionally includes: persona icons, folder images, bot preset images
  * - Processes only assets in assetMap (selective) instead of all .png files in assets folder
  * - Faster and more efficient for quick backups
@@ -591,7 +592,7 @@ export async function importLegacyBackupWithWebView(
                 alertError('Failed to decrypt database backup, will attempt to load it without decryption.')
             }
         }
-        const dbData = await decodeRisuSave(db)
+        const dbData = prepareExternalDatabaseImport(await decodeRisuSave(db))
         counts.characters = dbData.characters?.length ?? 0
         counts.charactersTotal = counts.characters
         counts.presets = dbData.botPresets?.length ?? 0
@@ -615,6 +616,9 @@ export async function importLegacyBackupWithWebView(
         }
         if (missingColdStorageKeys.length > 0 && !warningCodes.includes('upstream-restore-losses')) warningCodes.push('upstream-restore-losses')
         await expandColdPayloads(dbData, async (key) => restoredColdStoragePayloads.get(key) ?? null)
+        prepareExternalDatabaseImport(dbData)
+        counts.characters = dbData.characters.length
+        counts.charactersTotal = counts.characters
         checkCancelled()
 
         report('activating')

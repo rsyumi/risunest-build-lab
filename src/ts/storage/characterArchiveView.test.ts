@@ -1,15 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import type { character, groupChat } from './database.svelte'
+import type { character } from './database.svelte'
 import { createCatalogCharacterStub } from './workingSetCatalog'
 import {
     archivedAt,
     archivedConversationCount,
     characterIsArchived,
-    countBlockedGroupMembers,
     formatArchivedAt,
 } from './characterArchiveView'
 
-function archivedStub(id: string): character | groupChat {
+function archivedStub(id: string): character {
     return createCatalogCharacterStub({
         id,
         name: id,
@@ -22,7 +21,7 @@ function archivedStub(id: string): character | groupChat {
     }) as character
 }
 
-function activeStub(id: string): character | groupChat {
+function activeStub(id: string): character {
     return createCatalogCharacterStub({
         id,
         name: id,
@@ -50,19 +49,5 @@ describe('character archive view helpers', () => {
 
         expect(characterIsArchived(stub)).toBe(false)
         expect(archivedAt(stub)).toBeUndefined()
-    })
-
-    it('counts the archived members a group cannot use', () => {
-        const characters = [archivedStub('a'), activeStub('b'), archivedStub('c')]
-        const group = { chaId: 'group', characters: ['a', 'b', 'c'] } as unknown as groupChat
-
-        expect(countBlockedGroupMembers(group, characters)).toBe(2)
-    })
-
-    it('counts nothing when every member is usable', () => {
-        const characters = [activeStub('a'), activeStub('b')]
-        const group = { chaId: 'group', characters: ['a', 'b'] } as unknown as groupChat
-
-        expect(countBlockedGroupMembers(group, characters)).toBe(0)
     })
 })

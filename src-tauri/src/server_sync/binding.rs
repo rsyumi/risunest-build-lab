@@ -9,7 +9,7 @@ use crate::persistent_store::{
     PersistentStore,
 };
 use risunest_sync_wire::{
-    lww::{AckRequest, NewDeviceClaimReceipt, NewDeviceClaimRequest, StatePage, StatePin},
+    lww::{AckRequest, NewDeviceClaimReceipt, NewDeviceClaimRequest, NewDeviceClaimStatus, StatePage, StatePin},
     stamp::DecimalU64,
     MAX_METADATA_BYTES,
 };
@@ -440,6 +440,8 @@ struct FreshWriterReservation {
     authorization_id: String,
     writer_id: String,
     old_writer_id: String,
+    request_digest: String,
+    former_credential_inactive: bool,
 }
 fn fresh_writer_record(kind: &str, config: &StoredConfig) -> String {
     format!("{kind}:{}:{}", config.library_id, config.device_id)
@@ -497,9 +499,16 @@ pub(crate) fn prepare_fresh_writer(
     let reservation = match claim_record::<FreshWriterReservation>(&log, &reservation_id)? {
         Some(reservation) => reservation,
         None => {
-            let reservation = FreshWriterReservation {
+            let request = NewDeviceClaimRequest {
                 authorization_id: uuid::Uuid::new_v4().to_string(),
                 writer_id: uuid::Uuid::new_v4().to_string(),
+                former_token: readable(&old, &root)?.map(|config| config.token),
+            };
+            let reservation = FreshWriterReservation {
+                request_digest: request.digest()?,
+                former_credential_inactive: request.former_token.is_some(),
+                authorization_id: request.authorization_id,
+                writer_id: request.writer_id,
                 old_writer_id: store.lww_clock_state()?.writer_id,
             };
             log.save_verified("claims", &reservation_id, &reservation)?;
@@ -523,21 +532,33 @@ fn complete_fresh_writer(
     reservation: &FreshWriterReservation,
 ) -> Result<()> {
     let root = store.repository_root().to_owned();
-    // An old credential this device cannot read leaves that registration listed on the server.
-    let former_token = readable(old, &root)?.map(|config| config.token);
-    let former = former_token.is_some();
     let core = LwwClient::new(&root, target.config.resolve(&root)?)?;
-    let (_, receipt): (_, NewDeviceClaimReceipt) = core.client.json(
-        reqwest::Method::POST,
+    let (_, saved): (_, Option<NewDeviceClaimStatus>) = core.client.json(
+        reqwest::Method::GET,
         "session/claim-writer",
         &[],
-        Some(&NewDeviceClaimRequest {
-            writer_id: reservation.writer_id.clone(),
-            authorization_id: reservation.authorization_id.clone(),
-            former_token,
-        }),
+        None::<&()>,
         &[],
     )?;
+    let receipt = if let Some(saved) = saved {
+        if saved.request_digest != reservation.request_digest {
+            return Err(SyncError::new("new-device-registration-integrity", 409));
+        }
+        saved.receipt
+    } else {
+        let request = NewDeviceClaimRequest {
+            writer_id: reservation.writer_id.clone(),
+            authorization_id: reservation.authorization_id.clone(),
+            former_token: readable(old, &root)?.map(|config| config.token),
+        };
+        if request.digest()? != reservation.request_digest {
+            return Err(SyncError::new("new-device-registration-integrity", 409));
+        }
+        let (_, receipt): (_, NewDeviceClaimReceipt) = core.client.json(
+            reqwest::Method::POST, "session/claim-writer", &[], Some(&request), &[],
+        )?;
+        receipt
+    };
     #[cfg(test)]
     if STOP_AFTER_FRESH_CLAIM.with(|stop| stop.replace(false)) {
         return Err(SyncError::new("fresh-writer-stopped-after-claim", 409));
@@ -547,7 +568,7 @@ fn complete_fresh_writer(
         || receipt.device_id != target.config.device_id
         || receipt.library_id != target.config.library_id
         || receipt.epoch != target.epoch
-        || receipt.former_credential_inactive != former
+        || receipt.former_credential_inactive != reservation.former_credential_inactive
     {
         return Err(SyncError::new("new-device-registration-integrity", 409));
     }
@@ -1909,6 +1930,159 @@ mod tests {
         let receipt = push_now(&bound_client(&a), &mut a).unwrap().unwrap();
         assert_eq!(receipt.accepted_keys, vec![retained[0].0.clone()]);
         assert_eq!(server_unit(&server, &fresh, &retained[0].0).unwrap().stamp, retained[0].1);
+    }
+    #[test]
+    fn a_lost_fresh_writer_claim_response_recovers_without_the_former_credential() {
+        use axum::response::IntoResponse;
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        let lose_response = Arc::new(AtomicBool::new(false));
+        let fault = lose_response.clone();
+        let server = LocalServerFixture::with_router(move |router| {
+            router.layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let fault = fault.clone();
+                    async move {
+                        let claim = request.method() == axum::http::Method::POST
+                            && request.uri().path() == "/session/claim-writer";
+                        let response = next.run(request).await;
+                        if claim && response.status().is_success() && fault.swap(false, Ordering::SeqCst) {
+                            return (axum::http::StatusCode::OK, "{").into_response();
+                        }
+                        response
+                    }
+                },
+            ))
+        });
+        let (root, mut a) = local();
+        let old = configure(&server, &a);
+        bind(&mut a);
+        save(&mut a, &["root", "language"], serde_json::json!("ko"));
+        let retained = outbox(&a);
+        let old_writer = a.lww_clock_state().unwrap().writer_id;
+        let old_stored = a.server_stored_config().unwrap().unwrap();
+        let fresh = configure(&server, &a);
+        let inspected = fresh_inspection(&a);
+        lose_response.store(true, Ordering::SeqCst);
+        assert!(fresh_writer(&mut a, &inspected.inspection_id).is_err());
+        assert!(!lose_response.load(Ordering::SeqCst));
+        assert!(server.server.authenticate(&old.library_id, &old.token).is_err());
+        assert_eq!(a.lww_clock_state().unwrap().writer_id, old_writer);
+        let log = OperationLog::open(root.path()).unwrap();
+        let target: VerifiedTarget = log.verified("bindings", &inspected.inspection_id).unwrap();
+        let reserved: FreshWriterReservation = log.verified("claims", &fresh_writer_record("fresh-writer", &target.config)).unwrap();
+        assert!(claim_record::<NewDeviceClaimReceipt>(&log, &fresh_writer_record("fresh-writer-claim", &target.config)).unwrap().is_none());
+        let journal = serde_json::to_string(&reserved).unwrap();
+        assert!(!journal.contains(&old.token) && !journal.contains(&fresh.token));
+        old_stored.remove(root.path()).unwrap();
+        assert!(readable(&old_stored, root.path()).unwrap().is_none());
+        drop(log);
+        drop(a);
+
+        let mut a = PersistentStore::open(root.path()).unwrap();
+        resume(&mut a);
+        assert_eq!(a.lww_clock_state().unwrap().writer_id, reserved.writer_id);
+        assert_eq!(a.server_stored_config().unwrap().unwrap().device_id, fresh.device_id);
+        assert_eq!(outbox(&a), retained);
+        let receipt = push_now(&bound_client(&a), &mut a).unwrap().unwrap();
+        assert_eq!(receipt.accepted_keys, vec![retained[0].0.clone()]);
+        assert_eq!(server_unit(&server, &fresh, &retained[0].0).unwrap().stamp, retained[0].1);
+        resume(&mut a);
+        assert!(push_now(&bound_client(&a), &mut a).unwrap().is_none());
+    }
+    #[test]
+    fn recovering_a_fresh_writer_rejects_changed_claim_digest_and_every_receipt_identity() {
+        use axum::response::IntoResponse;
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let changed_field = Arc::new(AtomicUsize::new(0));
+        let fault = changed_field.clone();
+        let server = LocalServerFixture::with_router(move |router| {
+            router.layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let fault = fault.clone();
+                    async move {
+                        let lookup = request.method() == axum::http::Method::GET
+                            && request.uri().path() == "/session/claim-writer";
+                        let response = next.run(request).await;
+                        let field = fault.load(Ordering::SeqCst);
+                        if !lookup || field == 0 || !response.status().is_success() {
+                            return response;
+                        }
+                        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+                        let mut saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        match field {
+                            1 => saved["requestDigest"] = serde_json::json!("0".repeat(64)),
+                            2 => saved["receipt"]["authorizationId"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
+                            3 => saved["receipt"]["writerId"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
+                            4 => saved["receipt"]["deviceId"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
+                            5 => saved["receipt"]["libraryId"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
+                            6 => saved["receipt"]["epoch"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
+                            7 => saved["receipt"]["formerCredentialInactive"] = serde_json::json!(false),
+                            _ => unreachable!(),
+                        }
+                        axum::Json(saved).into_response()
+                    }
+                },
+            ))
+        });
+        let (root, mut a) = local();
+        configure(&server, &a);
+        bind(&mut a);
+        save(&mut a, &["root", "language"], serde_json::json!("ko"));
+        let retained = outbox(&a);
+        let old = a.server_stored_config().unwrap().unwrap();
+        configure(&server, &a);
+        let inspected = fresh_inspection(&a);
+        STOP_AFTER_FRESH_CLAIM.with(|stop| stop.set(true));
+        assert_eq!(fresh_writer(&mut a, &inspected.inspection_id).unwrap_err().code, "fresh-writer-stopped-after-claim");
+        let log = OperationLog::open(root.path()).unwrap();
+        let target: VerifiedTarget = log.verified("bindings", &inspected.inspection_id).unwrap();
+        let reserved: FreshWriterReservation = log.verified("claims", &fresh_writer_record("fresh-writer", &target.config)).unwrap();
+        old.remove(root.path()).unwrap();
+        let authority = a.lww_binding_authority().unwrap();
+        for field in 1..=7 {
+            changed_field.store(field, Ordering::SeqCst);
+            let error = complete_fresh_writer(&mut a, &log, authority, &target, &old, &reserved).unwrap_err();
+            assert_eq!(error.code, "new-device-registration-integrity", "field {field}");
+            assert_eq!(a.lww_clock_state().unwrap().writer_id, reserved.old_writer_id);
+            assert_eq!(outbox(&a), retained);
+            assert!(claim_record::<NewDeviceClaimReceipt>(&log, &fresh_writer_record("fresh-writer-claim", &target.config)).unwrap().is_none());
+        }
+        changed_field.store(0, Ordering::SeqCst);
+        complete_fresh_writer(&mut a, &log, authority, &target, &old, &reserved).unwrap();
+        assert_eq!(a.lww_clock_state().unwrap().writer_id, reserved.writer_id);
+        assert_eq!(outbox(&a), retained);
+    }
+    #[test]
+    fn an_unclaimed_fresh_writer_never_changes_its_request_after_the_former_credential_is_lost() {
+        let server = LocalServerFixture::new();
+        let (root, mut a) = local();
+        let old_config = configure(&server, &a);
+        bind(&mut a);
+        let old = a.server_stored_config().unwrap().unwrap();
+        let fresh = configure(&server, &a);
+        let inspected = fresh_inspection(&a);
+        let log = OperationLog::open(root.path()).unwrap();
+        let target: VerifiedTarget = log.verified("bindings", &inspected.inspection_id).unwrap();
+        let request = NewDeviceClaimRequest {
+            authorization_id: uuid::Uuid::new_v4().to_string(),
+            writer_id: uuid::Uuid::new_v4().to_string(),
+            former_token: Some(old_config.token.clone()),
+        };
+        let reserved = FreshWriterReservation {
+            request_digest: request.digest().unwrap(),
+            former_credential_inactive: true,
+            authorization_id: request.authorization_id,
+            writer_id: request.writer_id,
+            old_writer_id: a.lww_clock_state().unwrap().writer_id,
+        };
+        log.save_verified("claims", &fresh_writer_record("fresh-writer", &target.config), &reserved).unwrap();
+        old.remove(root.path()).unwrap();
+        let authority = a.lww_binding_authority().unwrap();
+        assert_eq!(complete_fresh_writer(&mut a, &log, authority, &target, &old, &reserved).unwrap_err().code, "new-device-registration-integrity");
+        let new = server.server.authenticate(&fresh.library_id, &fresh.token).unwrap();
+        assert!(server.server.new_device_writer_claim(&new).unwrap().is_none());
+        assert!(server.server.authenticate(&old_config.library_id, &old_config.token).is_ok());
+        assert_eq!(a.lww_clock_state().unwrap().writer_id, reserved.old_writer_id);
     }
     #[test]
     fn a_new_registration_whose_old_credential_cannot_be_read_still_swaps_the_writer_and_publishes_unsent_edits() {

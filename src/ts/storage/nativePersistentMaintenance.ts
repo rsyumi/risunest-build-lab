@@ -40,6 +40,7 @@ export interface NativeStorageBytes {
 
 export interface NativePersistentStorageStats {
     snapshotBytes: number
+    /** Database, WAL and SHM file lengths, including reusable pages. */
     databaseBytes: number
     assetObjects: NativeStorageBytes
     assetAliases: NativeStorageAliasStats[]
@@ -162,6 +163,12 @@ export function discardNativeDataHealthIntent(
     expectedScannedAt: number,
 ): Promise<{ discarded: boolean; result: DataHealthResult }> {
     return invoke('pds_data_health_discard_intent', { finding, expectedRevision, expectedScannedAt })
+}
+
+export function completeNativeDataHealthIntent(
+    finding: number, expectedRevision: number, expectedScannedAt: number,
+): Promise<{ completed: boolean; revision: number; result: DataHealthResult }> {
+    return invoke('pds_data_health_complete_intent', { finding, expectedRevision, expectedScannedAt })
 }
 
 export function listNativeDataHealthJournals(): Promise<RepairJournalSummary[]> {

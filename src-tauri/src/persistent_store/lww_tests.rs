@@ -4,6 +4,9 @@ use crate::persistent_store::query;
 #[path = "lww_retention_tests.rs"]
 mod retention;
 
+#[path = "lww_quarantine_tests.rs"]
+mod quarantine;
+
 /// Replacement changes as they were computed before the merge: both libraries
 /// captured into whole maps.
 pub(super) fn whole_library_changes(
@@ -2736,6 +2739,7 @@ fn explicit_new_device_recovery_finishes_after_library_activation_without_exposi
     let selection_change=serde_json::from_str::<super::super::sync_selection::BindingSelectionChange>(&store.device_store().unwrap().connection().query_row("SELECT selection_change FROM lww_new_device_authorizations WHERE authorization_id=?1",[&preparation.authorization_id],|r|r.get::<_,String>(0)).unwrap()).unwrap();
     let new_authority = DecimalU64(header.binding_authority.0 + 1);
     let intent = Intent::NewDevice {
+        device_revision: device_revision(store.device_store().unwrap().connection()).unwrap(),
         authorization_id: preparation.authorization_id.clone(),
         selection_change: selection_change.clone(),
         staging_id: staging.clone(),

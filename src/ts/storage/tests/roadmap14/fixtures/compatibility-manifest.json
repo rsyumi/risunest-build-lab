@@ -1,7 +1,7 @@
 {
     "version": 1,
-    "canonicalSha256": "8fbd86d275a129dc06fbc382aac35192efb200b44aff95456d0c9340977afd17",
-    "referenceGraphSha256": "a7a085cd7667a831aae3a606797043c5e078e8e7b1226df703d8be61fbbefb7d",
+    "canonicalSha256": "18ab5d7a47214f1d78587ff41ee1791aec487e8590a1eb20891b830f8b9bfc50",
+    "referenceGraphSha256": "c394a8c3f2a745f8801888200f269e5cb78051c59ea4ac8e29a70809f51dd62f",
     "payloadCount": 32,
     "payloads": {
         "assets/characters/main.PNG": "ce93c75fb081569e3902c2ec5f98dec0ff493d99653a5744f9d6e8c31c2d8352",
@@ -10,8 +10,8 @@
         "assets/cards/card-main.avif": "005837077935d27af118c019c1fe822d17743c8543d7b1b5d9fc2740811d2810",
         "assets/models/voice.onnx": "7cc4ca9b0db6462ea04128bf215ad48bb8ef01bb0d59632f631eccaad8a01869",
         "assets/data/config.json": "549f6d7a276cf50617adf2f0e9a02cd97b6d6ffdca49e99318940960d90ad3e3",
-        "assets/groups/group-main.gif": "f15e6424abab5a974147c850f9b71d66d2445012986cb903767cb6ab64862edc",
-        "assets/groups/group-emotion.svg": "0b2f817e03711ab33f67a9434a2e0341e494516860d5e45735e4eb5a4f9164cd",
+        "assets/characters/secondary-main.gif": "962640a2358514f07169a5a9dd4dcd2dc3706ff4d4bc4cc4bb76e5dc47b519d7",
+        "assets/characters/secondary-emotion.svg": "fa0e4111d2e71e5c174b25cf15e8346a6af29a8056c8ecb81c49bff27a04e707",
         "assets/modules/module-icon.webp": "20f86430e1b28b12edfd2b559bd0a702d677b0e60f26aafdc45a3bdddb1ccf11",
         "assets/personas/persona-main.jpg": "eb17b17aef6c4ddde2873e50cc5cda9dcd499c3c2379c418d7b1f55502251d57",
         "assets/modules/embedded-icon.webp": "278625a1e590033a5a0462c1bb3a6363cf1ae76a127ebee4a4e3f5a4cbd82aba",

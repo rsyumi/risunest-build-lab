@@ -3,16 +3,7 @@ import { runNativeDataHealthRepair } from './nativeDataHealthRepair'
 import { subscribeLocalPersistentRevision } from './persistentRevisionEvents'
 import { describe, expect, it, vi } from 'vitest'
 import type { Database } from './database.svelte'
-import {
-    capturePersistentPluginStorage,
-    capturePersistentPresets,
-    capturePersistentRoot,
-    captureResidentPersistentCharacter,
-    createPersistentDataRuntime,
-    publishPersistentCharacterMutationToWorkingSet,
-    publishPersistentConversationReplacementToWorkingSet,
-    restoreStableWorkingSetSelection,
-} from './persistentDataRuntime'
+import { capturePersistentPluginStorage, capturePersistentPresets, capturePersistentRoot, createPersistentDataRuntime, publishPersistentCharacterMutationToWorkingSet, publishPersistentConversationReplacementToWorkingSet, restoreStableWorkingSetSelection } from './persistentDataRuntime'
 import type { PersistentDataStore, PersistentRevisionLease } from './persistentDataStore'
 import { RevisionConflictError } from './persistentDataStore'
 import {
@@ -666,135 +657,6 @@ describe('persistent conversation replacement publication', () => {
 })
 
 describe('persistent character mutation publication', () => {
-    it('publishes every committed group detail with a deletion and forgets its released stable ID', () => {
-        const residency = new WorkingSetResidencyRegistry()
-        const group = {
-            type: 'group',
-            chaId: 'group-a',
-            name: 'Group',
-            characters: ['char-a', 'char-b'],
-            characterTalks: [0.25, 0.75],
-            characterActive: [false, true],
-            chats: [],
-        } as any
-        const removed = {
-            type: 'character',
-            chaId: 'char-a',
-            name: 'Removed',
-            chats: [],
-        } as any
-        const database = {
-            ...makeDatabase('Delete'),
-            characters: [group, {
-                type: 'group',
-                chaId: 'group-b',
-                name: 'Other group',
-                characters: ['char-a'],
-                characterTalks: [0.5],
-                characterActive: [true],
-                chats: [],
-            }, removed, {
-                type: 'character',
-                chaId: 'char-b',
-                name: 'Remaining',
-                chats: [],
-            }],
-        } as Database
-        residency.markCharacterReleased('char-a')
-
-        publishPersistentCharacterMutationToWorkingSet(
-            database,
-            {
-                revision: 2,
-                root: capturePersistentRoot(database),
-                characterId: 'char-a',
-                kind: 'delete',
-                character: null,
-                relatedCharacters: [{
-                    type: 'group',
-                    chaId: 'group-a',
-                    name: 'Group',
-                    characters: ['char-b'],
-                    characterTalks: [0.75],
-                    characterActive: [true],
-                } as any, {
-                    type: 'group',
-                    chaId: 'group-b',
-                    name: 'Other group',
-                    characters: [],
-                    characterTalks: [],
-                    characterActive: [],
-                } as any],
-            },
-            residency,
-            0,
-            vi.fn(),
-        )
-
-        expect(group.characters).toEqual(['char-b'])
-        expect(group.characterTalks).toEqual([0.75])
-        expect(group.characterActive).toEqual([true])
-        expect((database.characters[1] as any).characters).toEqual([])
-        expect(residency.isCharacterReleased('char-a')).toBe(false)
-
-        const readded = { ...removed, name: 'Re-added' }
-        database.characters.push(readded)
-        expect(captureResidentPersistentCharacter(database, 'char-a', residency)).toBe(readded)
-    })
-
-    it('keeps a related scalable group as a catalog stub after deletion publication', () => {
-        const residency = new WorkingSetResidencyRegistry()
-        const groupStub = createCatalogCharacterStub({
-            id: 'group-a',
-            name: 'Group',
-            configuredIndex: 0,
-            recentAt: 0,
-            trashed: false,
-            conversationCount: 3,
-            type: 'group',
-        })
-        const targetStub = createCatalogCharacterStub({
-            id: 'char-a',
-            name: 'Target',
-            configuredIndex: 1,
-            recentAt: 0,
-            trashed: false,
-            conversationCount: 1,
-            type: 'character',
-        })
-        const database = {
-            ...makeDatabase('Scalable delete'),
-            characters: [groupStub, targetStub],
-        } as Database
-
-        publishPersistentCharacterMutationToWorkingSet(
-            database,
-            {
-                revision: 2,
-                root: capturePersistentRoot(database),
-                characterId: 'char-a',
-                kind: 'delete',
-                character: null,
-                relatedCharacters: [{
-                    type: 'group',
-                    chaId: 'group-a',
-                    name: 'Updated group',
-                    characters: ['char-b'],
-                    characterTalks: [0.75],
-                    characterActive: [true],
-                } as any],
-            },
-            residency,
-            -1,
-            vi.fn(),
-        )
-
-        expect(database.characters).toHaveLength(1)
-        expect(database.characters[0].name).toBe('Updated group')
-        expect(isCatalogCharacterStub(database.characters[0])).toBe(true)
-        expect(database.characters[0]).not.toHaveProperty('characters')
-        expect(database.characters[0].chats).toEqual([])
-    })
 
     it('keeps scalable add, released replace, and detail mutations bounded', () => {
         const residency = new WorkingSetResidencyRegistry()
@@ -835,9 +697,9 @@ describe('persistent character mutation publication', () => {
             {
                 revision: 3,
                 root: capturePersistentRoot(database),
-                characterId: '§temp',
+                characterId: '§playground',
                 kind: 'add',
-                character: { ...complete, chaId: '§temp', name: 'Temporary' },
+                character: { ...complete, chaId: '§playground', name: 'Temporary' },
             },
             residency,
             -1,
@@ -848,11 +710,11 @@ describe('persistent character mutation publication', () => {
             {
                 revision: 4,
                 root: capturePersistentRoot(database),
-                characterId: '§temp',
+                characterId: '§playground',
                 kind: 'detail',
                 character: {
                     type: 'character',
-                    chaId: '§temp',
+                    chaId: '§playground',
                     name: 'Renamed temporary',
                     personality: 'must remain absent',
                 } as any,
@@ -866,13 +728,13 @@ describe('persistent character mutation publication', () => {
         expect(database.characters.every(isCatalogCharacterStub)).toBe(true)
         expect(database.characters[0]).not.toHaveProperty('personality')
         expect(database.characters[1]).toMatchObject({
-            chaId: '§temp',
+            chaId: '§playground',
             name: 'Renamed temporary',
             chats: [],
         })
         expect(database.characters[1]).not.toHaveProperty('personality')
         expect(residency.isCharacterReleased('char-a')).toBe(true)
-        expect(residency.isCharacterReleased('§temp')).toBe(true)
+        expect(residency.isCharacterReleased('§playground')).toBe(true)
         expect(select).not.toHaveBeenCalled()
     })
 
@@ -1316,120 +1178,6 @@ describe('prepared persistent replacement', () => {
         expect(replaceDatabase).not.toHaveBeenCalled()
     })
 
-    it('preserves active group members when an explicit replacement is projected', async () => {
-        const complete = {
-            username: 'Initial',
-            botPresetsId: 0,
-            botPresets: [{ name: 'Active', mainPrompt: 'body' }],
-            characters: [
-                {
-                    type: 'character',
-                    chaId: 'member-a',
-                    name: 'Alpha',
-                    personality: 'alpha body',
-                    chats: [],
-                },
-                {
-                    type: 'character',
-                    chaId: 'member-b',
-                    name: 'Beta',
-                    personality: 'beta body',
-                    chats: [],
-                },
-                {
-                    type: 'character',
-                    chaId: 'member-c',
-                    name: 'Gamma',
-                    personality: 'gamma body',
-                    chats: [],
-                },
-                {
-                    type: 'group',
-                    chaId: 'group-a',
-                    name: 'Group',
-                    characters: ['member-a', 'member-b'],
-                    characterTalks: [1, 1],
-                    characterActive: [true, true],
-                    chats: [],
-                },
-                {
-                    type: 'character',
-                    chaId: 'inactive',
-                    name: 'Inactive',
-                    personality: 'release me',
-                    chats: [],
-                },
-            ],
-        } as unknown as Database
-        let database = structuredClone(complete)
-        let projectedActiveIds: string[] = []
-        const store = {
-            open: vi.fn(async () => undefined),
-            readRoot: vi.fn(async () => ({ revision: 1, value: capturePersistentRoot(complete) })),
-            readCharacter: vi.fn(async (id: string) => ({
-                revision: 1,
-                value: structuredClone(
-                    complete.characters.find((character) => character.chaId === id),
-                ),
-            })),
-            queryConversations: vi.fn(async () => ({ revision: 1, items: [] })),
-            replaceFromDatabase: vi.fn(async () => ({ revision: 2 })),
-        } as unknown as PersistentDataStore
-        const runtime = createPersistentDataRuntime({
-            store,
-            state: {
-                captureRoot: () => capturePersistentRoot(database),
-                capturePresets: () => database.botPresets,
-                captureSelectedCharacter: () =>
-                    database.characters.find((character) => character.chaId === 'group-a') ?? null,
-                captureCharacter: (id) =>
-                    database.characters.find((character) => character.chaId === id) ?? null,
-                getSelectedCharacterId: () => 'group-a',
-                replaceDatabase: (replacement, activeCharacterIds) => {
-                    projectedActiveIds = [...(activeCharacterIds ?? [])]
-                    database = projectCompleteScalableWorkingSet(
-                        replacement,
-                        'group-a',
-                        2,
-                        activeCharacterIds,
-                    )
-                },
-                publishCharacter: vi.fn(),
-                publishCharacterSet: (primary, related) => {
-                    for (const value of [primary, ...related]) {
-                        const resident = database.characters.find((item) => item.chaId === value.chaId)
-                        if (resident) Object.assign(resident, structuredClone(value))
-                    }
-                },
-                publishConversation: vi.fn(),
-            },
-            prepareDatabase: async (value) => value,
-        })
-        await runtime.initializeActiveWorkingSet(database)
-        await expect(runtime.activateCharacter('group-a')).resolves.toBe(true)
-        const replacement = structuredClone(complete)
-        replacement.username = 'Replacement'
-        const replacementGroup = replacement.characters.find(
-            (character) => character.chaId === 'group-a',
-        ) as Database['characters'][number] & {
-            characters: string[]
-            characterTalks: number[]
-            characterActive: boolean[]
-        }
-        replacementGroup.characters = ['member-b', 'member-c']
-        replacementGroup.characterTalks = [1, 1]
-        replacementGroup.characterActive = [true, true]
-
-        await runtime.replacePersistentDatabase(replacement, 'explicit-replacement')
-
-        expect(projectedActiveIds).toEqual(['group-a', 'member-b', 'member-c'])
-        expect(isCatalogCharacterStub(database.characters[0])).toBe(true)
-        expect(database.characters[1].personality).toBe('beta body')
-        expect(database.characters[2].personality).toBe('gamma body')
-        expect(database.characters[3].type).toBe('group')
-        expect(isCatalogCharacterStub(database.characters[4])).toBe(true)
-    })
-
     it('blocks a stale UI edit and persists fresh edits after bounded replacement publication', async () => {
         const complete = {
             username: 'Initial',
@@ -1444,12 +1192,9 @@ describe('prepared persistent replacement', () => {
                 personality: 'member detail',
                 chats: [],
             }, {
-                type: 'group',
-                chaId: 'group-a',
-                name: 'Group',
-                characters: ['member-a'],
-                characterTalks: [1],
-                characterActive: [true],
+                type: 'character',
+                chaId: 'selected-a',
+                name: 'Selected',
                 chats: [],
             }, {
                 type: 'character',
@@ -1488,16 +1233,16 @@ describe('prepared persistent replacement', () => {
                 capturePluginStorage: () => database.pluginCustomStorage,
                 capturePresets: () => database.botPresets,
                 captureSelectedCharacter: () => database.characters.find(
-                    (character) => character.chaId === 'group-a',
+                    (character) => character.chaId === 'selected-a',
                 ) ?? null,
                 captureCharacter: (id) => database.characters.find(
                     (character) => character.chaId === id,
                 ) ?? null,
-                getSelectedCharacterId: () => 'group-a',
+                getSelectedCharacterId: () => 'selected-a',
                 replaceDatabase: (replacement, activeCharacterIds) => {
                     database = projectCompleteScalableWorkingSet(
                         replacement,
-                        'group-a',
+                        'selected-a',
                         8,
                         activeCharacterIds,
                     )
@@ -1523,7 +1268,7 @@ describe('prepared persistent replacement', () => {
         expect(database.username).toBe('Replacement')
         expect(database.customBackground).toBe('')
         expect(database.pluginCustomStorage).toEqual({})
-        expect(database.characters[0].personality).toBe('member detail')
+        expect(isCatalogCharacterStub(database.characters[0])).toBe(true)
         expect(isCatalogCharacterStub(database.characters[2])).toBe(true)
         expect(acquireRevision).not.toHaveBeenCalled()
         expect(materializeDatabase).not.toHaveBeenCalled()

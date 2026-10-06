@@ -278,8 +278,9 @@ export interface NativeFileJobDetail {
     counts: NativeImportCounts
 }
 
-/** Which user-facing import a dialog-presented operation belongs to. */
+/** Which user-facing format a dialog-presented operation belongs to. */
 export type NativeFileOperationFormat =
+    | 'dataset'
     | 'risu-save'
     | 'local-backup'
     | 'library-backup'
@@ -490,7 +491,6 @@ export interface NativeFileJobStatus {
     }
     publicationAttempt?: NativeOfficialPublicationAttemptResult
     result?: NativeFileJobResult
-    preparedContent?: PreparedNativeContent
     error?: {
         code: string
         message: string
@@ -2146,6 +2146,10 @@ async function runNativeManagedExport(
                     'unsupported',
                     'iOS file publication is unavailable',
                 )
+            if (spec.relaySafCopyProgress) options.onStatus?.({
+                ...terminal, state: 'running', phase: 'publishing-destination', detail: undefined,
+                progress: { completedBytes: 0, totalBytes: committedResult.sourceBytes, completedItems: 0, totalItems: 1 },
+            })
             const published = await publish({
                 sourcePath: managedSource,
                 suggestedName: spec.destination.suggestedName,
@@ -2157,6 +2161,7 @@ async function runNativeManagedExport(
                                   ...terminal,
                                   state: 'running',
                                   phase: 'publishing-destination',
+                                  detail: undefined,
                                   progress: {
                                       completedBytes: progress.copiedBytes,
                                       ...(progress.totalBytes === null
@@ -2324,6 +2329,7 @@ export function runNativeDatasetExport(
             operation: 'Native dataset export',
             safLengthMismatchLabel: 'dataset',
             handoffCleanupCommand: 'native_dataset_export_handoff_cleanup',
+            relaySafCopyProgress: true,
             destination: input.destination,
             prepareRequest: () => ({
                 kind: 'export-dataset',
@@ -2670,9 +2676,10 @@ export async function prepareNativeContentImport(
             }
 
             const content = validatePreparedContent(
-                status.preparedContent,
+                await invokeNative(dependencies, 'native_file_job_prepared_content', { jobId: started.jobId }),
                 started.jobId,
             )
+            options.signal?.throwIfAborted()
             let lifecycleState:
                 | 'unfinalized'
                 | 'staging'

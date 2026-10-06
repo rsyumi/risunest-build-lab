@@ -1113,6 +1113,7 @@ describe('native file jobs', () => {
 
     it('hands a revision-pinned dataset to Android SAF and cleans both receipts', async () => {
         const calls: Array<[string, Record<string, unknown> | undefined]> = []
+        const statuses: NativeFileJobStatus[] = []
         const handoffPath =
             'C:\\app\\native-file-jobs\\handoffs\\risu-dataset-123e4567-e89b-42d3-a456-426614174007.json'
         const copies: unknown[] = []
@@ -1124,7 +1125,7 @@ describe('native file jobs', () => {
                 },
                 expectedRevision: 45,
             },
-            {},
+            { onStatus: status => { statuses.push(status) } },
             {
                 isTauri: () => true,
                 invoke: async (command, args) => {
@@ -1156,11 +1157,14 @@ describe('native file jobs', () => {
                 wait: async () => undefined,
                 copyToAndroidSaf: async (request) => {
                     copies.push(request)
+                    expect(statuses.at(-1)).toMatchObject({ state: 'running', phase: 'publishing-destination', progress: { completedBytes: 0, totalBytes: 11 } })
+                    request.onProgress?.({ requestId: 'dataset-publication', operation: 'destination-copy', token: null, copiedBytes: 5, totalBytes: 11 })
                     return { bytes: 11, warningCodes: [] }
                 },
             },
         )
         expect(result.handoffPath).toBeUndefined()
+        expect(statuses.at(-1)).toMatchObject({ state: 'running', phase: 'publishing-destination', progress: { completedBytes: 5, totalBytes: 11 } })
         expect(copies).toEqual([
             expect.objectContaining({ sourcePath: handoffPath, suggestedName: 'dataset.json' }),
         ])

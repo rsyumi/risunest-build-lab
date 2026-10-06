@@ -70,14 +70,7 @@ export class ChatHandler extends MCPToolHandler {
     }
 
     const { character: char, conversation } = selected
-    if (char.type === 'group') {
-      return [
-        {
-          type: 'text',
-          text: `Error: The id pointed to a group chat, not a character.`,
-        },
-      ]
-    }
+
     if (!conversation) {
       return [
         {

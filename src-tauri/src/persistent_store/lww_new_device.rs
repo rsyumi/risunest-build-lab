@@ -104,8 +104,8 @@ impl PersistentStore {
             .optional()?)
     }
 
-    /// Takes over the writer a changed registration claimed. The clock, unsent versions,
-    /// publications and receive progress stay, so retained versions keep their stamps.
+    /// Takes over the writer a changed registration claimed and releases its retired
+    /// external publications. The clock, unsent versions and receive progress stay.
     pub(crate) fn lww_adopt_fresh_writer(
         &mut self,
         authority: DecimalU64,
@@ -113,6 +113,22 @@ impl PersistentStore {
         writer_id: &str,
     ) -> StoreResult<()> {
         self.lww_recover_intents()?;
+        {
+            let device = self.device_store()?.connection();
+            verify(device, authority)?;
+            let current: String = device.query_row(
+                "SELECT writer_id FROM device_meta WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )?;
+            if current == writer_id {
+                return Ok(());
+            }
+            if current != old_writer_id {
+                return Err(error("fresh-writer-changed"));
+            }
+        }
+        self.external_lww_release_writer_jobs(old_writer_id)?;
         let tx = self.device_store_mut()?.transaction()?;
         verify(&tx, authority)?;
         let current: String = tx.query_row(
@@ -126,6 +142,8 @@ impl PersistentStore {
         if current != old_writer_id {
             return Err(error("fresh-writer-changed"));
         }
+        tx.execute("DELETE FROM external_lww_segments WHERE writer=?1", [old_writer_id])?;
+        tx.execute("DELETE FROM external_lww_sequences WHERE writer=?1", [old_writer_id])?;
         tx.execute(
             "UPDATE device_meta SET writer_id=?1,revision=revision+1 WHERE singleton=1",
             [writer_id],
@@ -160,6 +178,7 @@ impl PersistentStore {
                 writer_id,
                 new_authority,
                 selection_change,
+                ..
             } = intent
             else {
                 return Err(error("request-id-integrity"));
@@ -221,6 +240,7 @@ impl PersistentStore {
                 .ok_or_else(|| error("binding-authority-exhausted"))?,
         );
         let intent = Intent::NewDevice {
+            device_revision: device_revision(self.device_store()?.connection())?,
             authorization_id: authorization_id.into(),
             staging_id: staging_id.into(),
             changes: changes.clone(),
@@ -257,6 +277,7 @@ impl PersistentStore {
                 digest
             ],
         )?;
+        record_intent_identity(&tx, &header.request_id)?;
         tx.commit()?;
         self.finish_lww_new_device(
             header,
@@ -353,6 +374,7 @@ impl PersistentStore {
         digest: &str,
         selection_change: &BindingSelectionChange,
     ) -> StoreResult<()> {
+        self.verify_intent_device_revision(&header.request_id)?;
         let state = self.lww_clock_state()?;
         if state.binding_authority != header.binding_authority || state.writer_id != old_writer_id {
             return Err(error("new-device-intent-authority-changed"));
@@ -370,12 +392,15 @@ impl PersistentStore {
             Some(selection_change),
             None,
         )?;
+        // A delayed device completion keeps edits made after library activation publishable.
+        self.connection.execute("UPDATE lww_outbox SET authority=?2 WHERE authority=?1", params![header.binding_authority.0.to_string(), new_authority.0.to_string()])?;
         crate::server_sync::carry_operation_log(&self.repository_root, header.binding_authority, new_authority, false)
             .map_err(|failure| error(failure.code))?;
         self.copy_device_unit_bodies(changes)?;
         self.external_lww_release_writer_jobs(old_writer_id)?;
         let tx = self.device_store_mut()?.transaction()?;
         verify(&tx, header.binding_authority)?;
+        verify_device_intent_revision(&tx, &header.request_id)?;
         let current_writer: String = tx.query_row(
             "SELECT writer_id FROM device_meta WHERE singleton=1",
             [],
@@ -402,6 +427,8 @@ impl PersistentStore {
             "UPDATE lww_intents SET complete=1 WHERE request_id=?1",
             [&header.request_id],
         )?;
+        tx.execute("DELETE FROM lww_intent_failures WHERE request_id=?1", [&header.request_id])?;
+        tx.execute("DELETE FROM lww_intent_proofs WHERE request_id=?1", [&header.request_id])?;
         tx.commit()?;
         Ok(())
     }

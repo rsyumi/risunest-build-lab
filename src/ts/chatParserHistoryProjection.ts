@@ -14,7 +14,8 @@ import {
 } from './storage/persistentDataStore'
 
 const cloneProjectionData = rfdc()
-const BACKWARD_SCAN_BATCH_SIZE = 128
+const INITIAL_BACKWARD_SCAN_BATCH_SIZE = 8
+const MAX_BACKWARD_SCAN_BATCH_SIZE = 128
 
 export type ChatParserCompleteProjectionReason =
     | ChatParserHistoryReason
@@ -23,6 +24,8 @@ export type ChatParserCompleteProjectionReason =
 export interface ChatParserHistoryProjectionReader {
     readonly revision: DataRevision
     readConversationWindow: PersistentRevisionReader['readConversationWindow']
+    /** Rows must belong to this revision and remain leased until projection capture finishes. */
+    readResidentMessage?(absoluteIndex: number): Readonly<Message> | undefined
 }
 
 export interface ChatParserCompleteProjectionRequest {
@@ -152,12 +155,13 @@ export async function createChatParserHistoryProjection(
 
     const backward = createBackwardRowScan(currentMessage, input.currentAbsoluteIndex)
     inspectBackwardRows(initialPrefix, prefixStart, backward)
+    let backwardBatchSize = INITIAL_BACKWARD_SCAN_BATCH_SIZE
     while (!backwardRowsSatisfied(backward) && prefixStart > 0) {
         const minimumAllowedStart = initialEnd - input.maxProjectionMessages
         const nextStart = Math.max(
             0,
             minimumAllowedStart,
-            prefixStart - BACKWARD_SCAN_BATCH_SIZE,
+            prefixStart - backwardBatchSize,
         )
         if (nextStart === prefixStart) {
             return acquireCompleteProjection(input, currentMessage, ['projection-budget'])
@@ -166,6 +170,7 @@ export async function createChatParserHistoryProjection(
         prefixSegmentsNewestFirst.push(extension)
         prefixStart = nextStart
         inspectBackwardRows(extension, prefixStart, backward)
+        backwardBatchSize = Math.min(backwardBatchSize * 2, MAX_BACKWARD_SCAN_BATCH_SIZE)
     }
 
     const historyOffset = Math.min(initialStart, backward.requiredStart)
@@ -236,7 +241,23 @@ async function readExactRange(
     const messages: Message[] = []
     for (let cursor = startIndex; cursor < endIndex;) {
         assertProjectionCurrent(input)
-        const limit = Math.min(CONVERSATION_RANGE_MAX_LIMIT, endIndex - cursor)
+        const resident = input.reader.readResidentMessage?.(cursor)
+        if (resident) {
+            assertValidMessageRows([resident], 'Invalid resident parser message', 'Sparse resident parser message')
+            messages.push(cloneProjectionData(resident))
+            cursor += 1
+            assertProjectionCurrent(input)
+            continue
+        }
+        let limit = Math.min(CONVERSATION_RANGE_MAX_LIMIT, endIndex - cursor)
+        if (input.reader.readResidentMessage) {
+            for (let offset = 1; offset < limit; offset += 1) {
+                if (input.reader.readResidentMessage(cursor + offset)) {
+                    limit = offset
+                    break
+                }
+            }
+        }
         const query: ConversationWindowQuery = {
             characterId: input.characterId,
             conversationId: input.conversationId,

@@ -49,6 +49,7 @@ pub(crate) enum CasJobOwnerKind {
     SnapshotExport,
     ExternalPublication,
     ExternalCompaction,
+    ExternalHydration,
     ExternalRestore,
 }
 
@@ -92,6 +93,10 @@ impl CasJobOwner {
 
     pub(crate) fn external_compaction(id: &str) -> Self {
         Self::current(CasJobOwnerKind::ExternalCompaction, id)
+    }
+
+    pub(crate) fn external_hydration(id: &str) -> Self {
+        Self::current(CasJobOwnerKind::ExternalHydration, id)
     }
 
     pub(crate) fn external_restore(id: &str) -> Self {
@@ -480,6 +485,10 @@ impl DurableCasJob {
                 .register(batch, created_at_ms)
                 .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
         }
+        self.record_seal()
+    }
+
+    fn record_seal(&mut self) -> io::Result<()> {
         let record = JobJournalRecord::Seal {
             sequence: self.state.next_sequence,
             job_id: self.state.job_id.clone(),
@@ -490,6 +499,39 @@ impl DurableCasJob {
         self.state.sealed = true;
         self.state.next_sequence += 1;
         Ok(())
+    }
+
+    /// Persist the exact batch before any canonical file can appear. A partial
+    /// publication is recovered from these hashes without enumerating the CAS.
+    pub(crate) fn record_staged_publication(
+        &mut self,
+        staged: &[super::StagedPayload],
+        _guard: &std::sync::MutexGuard<'_, ()>,
+    ) -> io::Result<()> {
+        self.ensure_preparable()?;
+        if self.state.owner.kind != CasJobOwnerKind::ExternalHydration {
+            return invalid_data("CAS publication journal has a different owner kind");
+        }
+        for payload in staged {
+            if payload.repository_root != self.repository_root {
+                return invalid_data("staged CAS object belongs to another repository");
+            }
+            self.record_pin(&payload.content_hash, payload.byte_size, CasObjectRole::DirectObject, true)?;
+        }
+        OpenOptions::new().append(true).open(&self.journal_path)?.sync_all()
+    }
+
+    /// The caller has registered every published body while holding exclusion.
+    pub(crate) fn finish_catalog_registration(
+        &mut self,
+        _guard: &std::sync::MutexGuard<'_, ()>,
+    ) -> io::Result<()> {
+        self.ensure_preparable()?;
+        if self.state.owner.kind != CasJobOwnerKind::ExternalHydration {
+            return invalid_data("CAS publication journal has a different owner kind");
+        }
+        self.record_seal()?;
+        self.release_already_guarded(CasReleaseOutcome::Committed)
     }
 
     pub(crate) fn root_set(&self) -> io::Result<AssetRootSet> {
@@ -508,6 +550,10 @@ impl DurableCasJob {
             return invalid_data("unsealed CAS job cannot be released as committed");
         }
         let _repository_guard = super::coordinator::lock_repository_mutation()?;
+        self.release_already_guarded(outcome)
+    }
+
+    fn release_already_guarded(&mut self, outcome: CasReleaseOutcome) -> io::Result<()> {
         if outcome == CasReleaseOutcome::Aborted && !self.state.sealed {
             self.register_abort_candidates()?;
         }
@@ -537,16 +583,21 @@ impl DurableCasJob {
     }
 
     fn register_abort_candidates(&self) -> io::Result<()> {
+        let cas = PayloadCas::new(&self.repository_root)?;
         let registrations = self
             .state
             .pins
             .iter()
             .filter(|(_, pin)| pin.published_by_job)
-            .map(|(object_hash, pin)| AssetObjectRegistration {
-                object_hash: object_hash.clone(),
-                byte_size: pin.byte_size,
+            .filter_map(|(object_hash, pin)| match cas.stat_object(object_hash) {
+                Ok(None) => None,
+                Ok(Some(size)) if size == pin.byte_size => Some(Ok(AssetObjectRegistration {
+                    object_hash: object_hash.clone(), byte_size: pin.byte_size,
+                })),
+                Ok(Some(_)) => Some(invalid_data("published CAS object size does not match its journal")),
+                Err(error) => Some(Err(error)),
             })
-            .collect::<Vec<_>>();
+            .collect::<io::Result<Vec<_>>>()?;
         if registrations.is_empty() {
             return Ok(());
         }
@@ -1240,6 +1291,42 @@ mod tests {
     use std::io::{Write,Seek,SeekFrom};
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn interrupted_staged_publication_recovers_only_its_present_files() {
+        use sha2::Digest;
+        for published_count in 0..=3 {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path();
+            let store = PersistentStore::open(root).unwrap();
+            let cas = PayloadCas::new(root).unwrap();
+            cas.prepare_bytes(b"synthetic unrelated uncataloged file").unwrap();
+            let bodies: [&[u8]; 3] = [b"synthetic first", b"synthetic second", b"synthetic third"];
+            let hashes = bodies.iter().map(|body| hex::encode(sha2::Sha256::digest(body))).collect::<Vec<_>>();
+            let mut staged = bodies.iter().zip(&hashes).map(|(body, hash)|
+                cas.stage_reader_expected(&mut std::io::Cursor::new(body), hash, body.len() as u64).unwrap()).collect::<Vec<_>>();
+            let mut job = DurableCasJob::begin(root, "interrupted-publication", CasJobKind::DirectAssetOrInlayWrite,
+                CasJobOwner::from_another_process(CasJobOwnerKind::ExternalHydration, "interrupted-publication"), 1).unwrap();
+            {
+                let guard = crate::asset_repository::coordinator::lock_repository_mutation().unwrap();
+                job.record_staged_publication(&staged, &guard).unwrap();
+                cas.publish_staged_batch(staged.drain(..published_count).collect()).unwrap();
+            }
+            drop(staged);
+            drop(job);
+            drop(store);
+            let mut recovered = DurableCasJob::open(root, "interrupted-publication").unwrap();
+            assert_eq!(recovered.pin_count(), 3);
+            recovered.release(CasReleaseOutcome::Aborted).unwrap();
+            let _store = PersistentStore::open(root).unwrap();
+            let db = rusqlite::Connection::open(root.join("persistent").join(crate::persistent_store::DATABASE_FILE)).unwrap();
+            let mut query = db.prepare("SELECT object_hash FROM asset_objects").unwrap();
+            let registered = query.query_map([], |row| row.get::<_, String>(0)).unwrap()
+                .collect::<Result<std::collections::BTreeSet<_>, _>>().unwrap();
+            assert_eq!(registered, hashes[..published_count].iter().cloned().collect());
+            assert!(super::durable_cas_job_ids(root).unwrap().is_empty());
+        }
+    }
 
     #[test]
     fn durable_job_transitions_wait_for_repository_mutation_exclusion() {

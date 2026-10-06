@@ -89,6 +89,7 @@ function captureWindowedOperation(
     options: GenerationConversationOperationOptions,
 ): GenerationConversationOperation {
     const chat = controller.chat
+    if (!controller.isCurrent()) throw new RangeError('Windowed generation operation owner is no longer current')
     let localIndex: number
     if (options.append !== undefined) {
         localIndex = chat.message.length
@@ -107,6 +108,7 @@ function captureWindowedOperation(
     }
     let released = false
     let currentMessageId = chat.message[localIndex]?.chatId
+    let target = chat.message[localIndex]
     const operation: GenerationConversationOperation = {
         get absoluteIndex() { return controller.absoluteStartIndex + localIndex },
         get messageId() { return currentMessageId },
@@ -129,6 +131,7 @@ function captureWindowedOperation(
             trackRerollOutput(chat, message)
             if (!controller.applyRange(localIndex, 1, [message], 'edit')) return false
             currentMessageId = chat.message[localIndex]?.chatId
+            target = chat.message[localIndex]
             return true
         },
         refresh() {
@@ -136,9 +139,21 @@ function captureWindowedOperation(
             const nextIndex = chat.message.findIndex((message) => message.chatId === currentMessageId)
             if (nextIndex < 0) return false
             localIndex = nextIndex
+            target = chat.message[localIndex]
             return true
         },
-        acceptCommit: () => operation.isOwned(),
+        acceptCommit(commit) {
+            if (released || options.isOwnerCurrent?.() === false) return false
+            const nextIndex = commit.remapWindowTarget?.(controller, target)
+            if (nextIndex === undefined) return operation.isOwned()
+            if (nextIndex === null) {
+                released = true
+                return false
+            }
+            localIndex = nextIndex
+            target = chat.message[localIndex]
+            return operation.isOwned()
+        },
         release() { released = true },
     }
     return operation

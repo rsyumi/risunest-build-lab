@@ -156,10 +156,50 @@ pub(crate) struct TestIoCounters {
     pub requests: std::sync::atomic::AtomicU64,
     pub request_body_bytes: std::sync::atomic::AtomicU64,
     pub response_body_bytes: std::sync::atomic::AtomicU64,
+    pub traffic: std::sync::Mutex<TestTraffic>,
+}
+#[cfg(test)]
+#[derive(Default, Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TestTraffic {
+    pub journal_requests: u64,
+    pub journal_response_bytes: u64,
+    /// Decoded inline values, not additional wire bytes.
+    pub journal_inline_decoded_bytes: u64,
+    pub object_get_requests: u64,
+    pub object_get_response_bytes: u64,
+    pub object_transfer_requests: u64,
+    pub object_transfer_response_bytes: u64,
+    pub prepared_units: u64,
+}
+#[cfg(test)]
+impl TestTraffic {
+    fn response(&mut self, method: &Method, path: &str, bytes: &[u8]) {
+        if *method == Method::GET && path == "changes" {
+            self.journal_requests += 1;
+            self.journal_response_bytes += bytes.len() as u64;
+            if let Ok(page) = risunest_sync_wire::canonical::decode::<risunest_sync_wire::lww::ChangesPage>(bytes, risunest_sync_wire::MAX_METADATA_BYTES) {
+                use base64::Engine;
+                for entry in page.items {
+                    if let risunest_sync_wire::unit::UnitValue::Inline { bytes } = entry.value {
+                        if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(bytes) {
+                            self.journal_inline_decoded_bytes += bytes.len() as u64;
+                        }
+                    }
+                }
+            }
+        } else if *method == Method::GET && path.strip_prefix("objects/").is_some_and(|hash| risunest_sync_wire::validate_hash(hash).is_ok()) {
+            self.object_get_requests += 1;
+            self.object_get_response_bytes += bytes.len() as u64;
+        } else if *method == Method::POST && path == "objects/transfer" {
+            self.object_transfer_requests += 1;
+            self.object_transfer_response_bytes += bytes.len() as u64;
+        }
+    }
 }
 #[cfg(test)]
 impl TestIoCounters {
-    pub(crate) fn reset(&self) { for value in [&self.requests,&self.request_body_bytes,&self.response_body_bytes] {value.store(0,std::sync::atomic::Ordering::Relaxed);} }
+    pub(crate) fn reset(&self) { *self.traffic.lock().unwrap() = TestTraffic::default(); for value in [&self.requests,&self.request_body_bytes,&self.response_body_bytes] {value.store(0,std::sync::atomic::Ordering::Relaxed);} }
     pub(crate) fn snapshot(&self) -> [u64;3] { [self.requests.load(std::sync::atomic::Ordering::Relaxed),self.request_body_bytes.load(std::sync::atomic::Ordering::Relaxed),self.response_body_bytes.load(std::sync::atomic::Ordering::Relaxed)] }
 }
 #[cfg(test)]
@@ -557,6 +597,8 @@ impl ServerClient {
     ) -> Result<Reply> {
         self.ensure_active()?;
         #[cfg(test)]
+        let observed_method = method.clone();
+        #[cfg(test)]
         if let Some(counter)=&self.test_io {
             counter.requests.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
             counter.request_body_bytes.fetch_add(body.as_ref().map_or(0,|b|b.len() as u64),std::sync::atomic::Ordering::Relaxed);
@@ -650,7 +692,10 @@ impl ServerClient {
             return Err(SyncError::new("response-too-large", 502));
         }
         #[cfg(test)]
-        if let Some(counter)=&self.test_io {counter.response_body_bytes.fetch_add(bytes.len() as u64,std::sync::atomic::Ordering::Relaxed);}
+        if let Some(counter)=&self.test_io {
+            counter.response_body_bytes.fetch_add(bytes.len() as u64,std::sync::atomic::Ordering::Relaxed);
+            counter.traffic.lock().unwrap().response(&observed_method, path, &bytes);
+        }
         Ok(Reply {
             status,
             body: bytes,

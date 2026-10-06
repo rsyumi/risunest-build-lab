@@ -373,8 +373,9 @@ fn corrupt_replacement_tail_never_activates_a_prefix_and_exact_replay_keeps_its_
         intent_rows::replacement_row(&unit_key(&["root", &format!("synthetic-{index:04}")])?, &inline(&serde_json::json!(index))?, true)
     })).unwrap();
     let intent = Intent::Replacement {
+        device_revision: device_revision(store.device_store().unwrap().connection()).unwrap(),
         staging_id: stage.clone(), base_revision: store.revision().unwrap(), staging_digest: binding_stage::catalog_digest(&store.connection, &stage).unwrap(),
-        changes, source_units: None, device_sections: None, device_changes: Cow::Owned(vec![]),
+        changes, source_units: None, device_sections: None, device_settings_digest: None, device_changes: Cow::Owned(vec![]),
     };
     let (stamp, _) = store.reserve_intent(&header, &intent).unwrap();
     let generation = active_generation(&store.connection).unwrap();
@@ -448,11 +449,12 @@ fn cross_store_quarantine_cannot_abandon_device_or_binding_completion() {
     let rows = intent_rows::digest("target", std::iter::empty()).unwrap();
     let sections = full_device_backup(Some("unapplied-device-restore"));
     let cases = [
-        Intent::Target { staging_id: "stage".into(), changes: rows.clone() },
-        Intent::Replacement { staging_id: "stage".into(), base_revision: 0, staging_digest: "synthetic".into(), changes: rows, source_units: None,
-            device_sections: Some(Cow::Owned(device_store::sections::freeze_backup_sections(&sections.iter().collect::<Vec<_>>()).unwrap())), device_changes: Cow::Owned(vec![]) },
-        Intent::Switch { change: change.clone(), new_authority: 1.into() },
-        Intent::NewDevice { authorization_id: "authorized".into(), staging_id: "stage".into(), changes: vec![], old_writer_id: "old".into(), writer_id: "new".into(), new_authority: 1.into(), selection_change: change },
+        Intent::Target { device_revision: 0, staging_id: "stage".into(), changes: rows.clone() },
+        Intent::Replacement { device_revision: 0, staging_id: "stage".into(), base_revision: 0, staging_digest: "synthetic".into(), changes: rows, source_units: None,
+            device_sections: Some(Cow::Owned(device_store::sections::freeze_backup_sections(&sections.iter().collect::<Vec<_>>()).unwrap())),
+            device_settings_digest: Some(device_store::sections::replacement_local_settings_digest(store.device_store().unwrap().connection()).unwrap()), device_changes: Cow::Owned(vec![]) },
+        Intent::Switch { device_revision: 0, change: change.clone(), new_authority: 1.into() },
+        Intent::NewDevice { device_revision: 0, authorization_id: "authorized".into(), staging_id: "stage".into(), changes: vec![], old_writer_id: "old".into(), writer_id: "new".into(), new_authority: 1.into(), selection_change: change },
     ];
     for (index, intent) in cases.into_iter().enumerate() {
         let header = Header { binding_authority: 0.into(), request_id: format!("partial-{index}") };
@@ -479,5 +481,222 @@ fn quarantine_classification_checks_repair_versions_in_both_stores() {
         let selected = store.lww_quarantined_intents().unwrap().into_iter().find(|intent| intent.request_id == header.request_id).unwrap();
         assert!(!selected.discardable);
         assert!(store.lww_discard_quarantined_intent(&selected.request_id, &selected.token, 0).is_err());
+    }
+}
+
+fn interrupted_binding(new_device: bool) -> (tempfile::TempDir, PersistentStore, Header, String) {
+    use crate::persistent_store::sync_selection::{SwitchBindingRequest, SyncTarget};
+    let (dir, mut store) = store();
+    let (mut header, stage, changes) = new_device_stage(&mut store);
+    let authorization = if new_device {
+        let prepared = store.prepare_lww_new_device(&header, &stage).unwrap();
+        store.authorize_lww_new_device(&prepared.authorization_id).unwrap();
+        Some(prepared.authorization_id)
+    } else {
+        let inspection: String = store.connection.query_row("SELECT inspection_id FROM lww_binding_stages WHERE staging_id=?1", [&stage], |row| row.get(0)).unwrap();
+        let state = store.lww_binding_state().unwrap();
+        let switched = store.switch_lww_binding(&SwitchBindingRequest {
+            header: Header { binding_authority: state.target_authority, request_id: Uuid::new_v4().to_string() },
+            expected_selection_epoch: state.selection_epoch, target: SyncTarget::Server("fresh-connection".into()),
+            inspection_id: Some(inspection), initial_publication: false,
+        }).unwrap();
+        header.binding_authority = switched.target_authority;
+        None
+    };
+    store.device_store().unwrap().connection().execute_batch("CREATE TEMP TRIGGER fail_device_completion BEFORE UPDATE OF complete ON lww_intents BEGIN SELECT RAISE(ABORT,'synthetic-device-completion'); END").unwrap();
+    let failed = if let Some(authorization) = authorization {
+        store.lww_replace_target_as_new_device(&header, &stage, &authorization).map(|_| ())
+    } else { store.lww_replace_target(&header, &stage, &changes).map(|_| ()) };
+    assert!(failed.is_err());
+    assert_eq!(store.lww_activated_receipt(&header.request_id).unwrap().unwrap().1, stage);
+    let selected = quarantine_issued(&mut store, &header.request_id);
+    assert!(selected.recoverable && !selected.discardable);
+    store.device_store().unwrap().connection().execute_batch("DROP TRIGGER fail_device_completion").unwrap();
+    (dir, store, header, stage)
+}
+
+#[test]
+fn quarantined_target_and_new_device_finish_once_after_reopen_and_keep_later_publication() {
+    for new_device in [false, true] {
+        let (dir, store, header, stage) = interrupted_binding(new_device);
+        let old_writer = store.lww_clock_state().unwrap().writer_id;
+        drop(store);
+        let mut store = PersistentStore::open(dir.path()).unwrap();
+        assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intent_failures WHERE quarantined=1"), 1);
+        save(&mut store, vec![mutation(&["root", "askRemoval"], serde_json::json!(true))]);
+        let later = store.lww_read_outbox(header.binding_authority, 100).unwrap().entries.into_iter().find(|row| row.key == unit_key(&["root", "askRemoval"]).unwrap()).unwrap();
+        let selected = store.lww_quarantined_intents().unwrap().remove(0);
+        let revision = store.revision().unwrap();
+        assert!(store.lww_complete_quarantined_intent(&selected.request_id, &selected.token, revision).unwrap());
+        assert!(!store.lww_complete_quarantined_intent(&selected.request_id, &selected.token, revision).unwrap());
+        assert_eq!(active_generation(&store.connection).unwrap(), stage);
+        assert_eq!(store.read_root(None).unwrap().value["askRemoval"], true);
+        assert_eq!(store.revision().unwrap(), revision);
+        let state = store.lww_clock_state().unwrap();
+        assert_eq!(state.binding_authority.0, header.binding_authority.0 + u64::from(new_device));
+        assert_eq!(state.writer_id == old_writer, !new_device);
+        let published = store.lww_read_outbox(state.binding_authority, 100).unwrap().entries.into_iter().find(|row| row.key == later.key).unwrap();
+        assert_eq!(published.stamp, later.stamp);
+        assert_eq!(published.version, later.version);
+        assert_eq!(published.value, later.value);
+        assert!(store.lww_quarantined_intents().unwrap().is_empty());
+        assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intent_rows"), 0);
+    }
+}
+
+#[test]
+fn quarantined_device_restore_finishes_each_device_boundary_without_replacing_later_library_edits() {
+    for phase in ["settings", "outbox", "completion"] {
+        let (dir, mut store) = store();
+        store.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+        write_restore_device_fixture(&mut store, "before");
+        let sections = full_device_backup(Some("restored"));
+        let stage = restore_stage(&mut store, "restored");
+        let header = Header { binding_authority: 0.into(), request_id: format!("quarantined-restore-{phase}") };
+        let sql = match phase {
+            "settings" => "CREATE TEMP TRIGGER fail_device BEFORE INSERT ON device_settings BEGIN SELECT RAISE(ABORT,'settings'); END",
+            "outbox" => "CREATE TEMP TRIGGER fail_device BEFORE INSERT ON lww_outbox BEGIN SELECT RAISE(ABORT,'outbox'); END",
+            _ => "CREATE TEMP TRIGGER fail_device BEFORE UPDATE OF complete ON lww_intents BEGIN SELECT RAISE(ABORT,'completion'); END",
+        };
+        store.device_store().unwrap().connection().execute_batch(sql).unwrap();
+        assert!(store.lww_commit_replacement_with_device_sections(&header, &stage, None, &sections.iter().collect::<Vec<_>>()).is_err());
+        assert_eq!(store.revision().unwrap(), 1);
+        assert_device_restore_label(&store, "before");
+        let selected = quarantine_issued(&mut store, &header.request_id);
+        assert!(selected.recoverable);
+        assert!(store.lww_complete_quarantined_intent(&selected.request_id, &selected.token, 1).is_err());
+        assert_eq!(store.lww_quarantined_intents().unwrap()[0].token, selected.token);
+        assert!(device_count(&store, "SELECT count(*) FROM lww_intent_rows") > 0);
+        store.device_store().unwrap().connection().execute_batch("DROP TRIGGER fail_device").unwrap();
+        drop(store);
+        let mut store = PersistentStore::open(dir.path()).unwrap();
+        store.device_store().unwrap().write_setting("risu_lastsaved", &serde_json::json!("later")).unwrap();
+        save(&mut store, vec![mutation(&["root", "username"], serde_json::json!("keep-later"))]);
+        let revision = store.revision().unwrap();
+        let selected = store.lww_quarantined_intents().unwrap().remove(0);
+        assert!(store.lww_complete_quarantined_intent(&selected.request_id, &selected.token, revision).unwrap());
+        assert_device_restore_label(&store, "restored");
+        assert_eq!(store.read_root(None).unwrap().value["username"], "keep-later");
+        assert_eq!(store.device_store().unwrap().read_setting("risu_lastsaved").unwrap(), Some(serde_json::json!("later")));
+        let device_revision = store.device_store().unwrap().revision().unwrap();
+        store.device_store().unwrap().write_setting("accountst", &serde_json::json!("after-receipt")).unwrap();
+        store.device_store().unwrap().write_plugin_permission("restored", "synthetic", false).unwrap();
+        assert_eq!(store.device_store().unwrap().revision().unwrap(), device_revision);
+        drop(store);
+        let mut store = PersistentStore::open(dir.path()).unwrap();
+        assert_eq!(store.lww_device_replacement_receipt(&header, &stage).unwrap().unwrap().revision, 1);
+        assert_eq!(store.lww_commit_replacement_with_device_sections(&header, &stage, None, &sections.iter().collect::<Vec<_>>()).unwrap().revision, 1);
+        assert!(!store.lww_complete_quarantined_intent(&selected.request_id, &selected.token, revision).unwrap());
+        assert!(store.lww_quarantined_intents().unwrap().is_empty());
+        assert_eq!(store.device_store().unwrap().read_setting("accountst").unwrap(), Some(serde_json::json!("after-receipt")));
+        assert!(!store.device_store().unwrap().read_plugin_permissions().unwrap().into_iter().find(|permission| permission.code_hash == "restored").unwrap().granted);
+        assert_eq!(store.device_store().unwrap().revision().unwrap(), device_revision);
+        assert_eq!(store.revision().unwrap(), revision);
+    }
+}
+
+#[test]
+fn quarantined_device_restore_preserves_later_fixed_settings_and_permissions_at_each_boundary() {
+    for phase in ["settings", "outbox", "completion"] {
+        for mutation in ["setting-update", "setting-add", "setting-delete", "permission-update", "permission-add", "permission-delete"] {
+            let (dir, mut store) = store();
+            store.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+            write_restore_device_fixture(&mut store, "before");
+            let sections = full_device_backup(Some("restored"));
+            let stage = restore_stage(&mut store, "restored");
+            let header = Header { binding_authority: 0.into(), request_id: format!("fixed-edit-{phase}-{mutation}") };
+            let sql = match phase {
+                "settings" => "CREATE TEMP TRIGGER fail_device BEFORE INSERT ON device_settings BEGIN SELECT RAISE(ABORT,'settings'); END",
+                "outbox" => "CREATE TEMP TRIGGER fail_device BEFORE INSERT ON lww_outbox BEGIN SELECT RAISE(ABORT,'outbox'); END",
+                _ => "CREATE TEMP TRIGGER fail_device BEFORE UPDATE OF complete ON lww_intents BEGIN SELECT RAISE(ABORT,'completion'); END",
+            };
+            store.device_store().unwrap().connection().execute_batch(sql).unwrap();
+            assert!(store.lww_commit_replacement_with_device_sections(&header, &stage, None, &sections.iter().collect::<Vec<_>>()).is_err());
+            assert_eq!(store.revision().unwrap(), 1);
+            assert_device_restore_label(&store, "before");
+            assert!(store.lww_device_replacement_receipt(&header, &stage).unwrap().is_none());
+            let selected = quarantine_issued(&mut store, &header.request_id);
+            assert!(selected.recoverable);
+            let device = store.device_store().unwrap();
+            let original: (String, String, String) = device.connection().query_row(
+                "SELECT body,digest,stamp FROM lww_intents WHERE request_id=?1", [&header.request_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+            let original_rows = device_count(&store, "SELECT count(*) FROM lww_intent_rows");
+            let original_proofs = device_count(&store, "SELECT count(*) FROM lww_intent_proofs");
+            let device_revision = device.revision().unwrap();
+            device.connection().execute_batch("DROP TRIGGER fail_device").unwrap();
+            match mutation {
+                "setting-update" => device.write_setting("accountst", &serde_json::json!("later")).unwrap(),
+                "setting-add" => device.write_setting("risuNestDeviceSettings", &serde_json::json!({"later":true})).unwrap(),
+                "setting-delete" => device.remove_setting("accountst").unwrap(),
+                "permission-update" => device.write_plugin_permission("before", "synthetic", false).unwrap(),
+                "permission-add" => device.write_plugin_permission("later", "synthetic", true).unwrap(),
+                _ => store.device_store_mut().unwrap().clear_plugin_permissions().unwrap(),
+            }
+            let local_rows = |store: &PersistentStore| -> (Vec<(String, String)>, Vec<(String, String, bool)>) {
+                let device = store.device_store().unwrap();
+                let settings = device.connection().prepare("SELECT key,value FROM device_settings ORDER BY key").unwrap()
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().collect::<Result<_, _>>().unwrap();
+                let permissions = device.read_plugin_permissions().unwrap().into_iter().map(|row| (row.code_hash, row.permission, row.granted)).collect();
+                (settings, permissions)
+            };
+            let later = local_rows(&store);
+            assert_eq!(store.device_store().unwrap().revision().unwrap(), device_revision);
+            drop(store);
+            let mut store = PersistentStore::open(dir.path()).unwrap();
+            let current = store.lww_quarantined_intents().unwrap().remove(0);
+            assert_eq!(current.token, selected.token);
+            assert!(!current.recoverable && !current.discardable, "{phase}/{mutation}");
+            assert!(store.lww_complete_quarantined_intent(&selected.request_id, &selected.token, 1).is_err(), "{phase}/{mutation}");
+            assert!(store.lww_discard_quarantined_intent(&selected.request_id, &selected.token, 1).is_err());
+            assert!(store.lww_commit_replacement_with_device_sections(&header, &stage, None, &sections.iter().collect::<Vec<_>>()).is_err());
+            let after: (String, String, String) = store.device_store().unwrap().connection().query_row(
+                "SELECT body,digest,stamp FROM lww_intents WHERE request_id=?1", [&header.request_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+            assert_eq!(after, original);
+            assert_eq!(local_rows(&store), later);
+            assert_eq!(store.device_store().unwrap().revision().unwrap(), device_revision);
+            assert_eq!(store.revision().unwrap(), 1);
+            assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intent_failures WHERE quarantined=1"), 1);
+            assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intent_rows"), original_rows);
+            assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intent_proofs"), original_proofs);
+            assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intents WHERE complete=0"), 1);
+            if phase == "completion" && mutation == "setting-update" {
+                let stale_intent: Intent = serde_json::from_str(&original.0).unwrap();
+                let new_header = Header { binding_authority: 0.into(), request_id: "stale-preimage-reservation".into() };
+                assert!(store.reserve_intent(&new_header, &stale_intent).is_err());
+                assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intents"), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn quarantined_completion_rejects_missing_rows_receipt_and_changed_device_without_losing_evidence() {
+    for failure in ["rows", "receipt", "device", "authority", "body"] {
+        let (_dir, mut store, header, _) = interrupted_binding(false);
+        let selected = store.lww_quarantined_intents().unwrap().remove(0);
+        let revision = store.revision().unwrap();
+        assert!(store.lww_complete_quarantined_intent(&selected.request_id, "wrong-token", revision).is_err());
+        assert!(store.lww_complete_quarantined_intent(&selected.request_id, &selected.token, revision - 1).is_err());
+        match failure {
+            "rows" => { store.device_store().unwrap().connection().execute("DELETE FROM lww_intent_rows WHERE request_id=?1", [&header.request_id]).unwrap(); }
+            "receipt" => { store.connection.execute("UPDATE lww_requests SET digest='changed' WHERE request_id=?1", [&header.request_id]).unwrap(); }
+            "device" => {
+                let device = store.device_store_mut().unwrap();
+                let before = device.revision().unwrap();
+                device.write_plugin_device_values("quarantine-fixture", &[device_store::plugin_values::PluginDeviceMutation::Set {
+                    space: "string".into(), key: "later".into(), value: "later-device".into(),
+                }]).unwrap();
+                assert!(device.revision().unwrap() > before);
+            }
+            "authority" => { store.device_store().unwrap().connection().execute("UPDATE lww_clock SET binding_authority='999'", []).unwrap(); }
+            _ => { store.device_store().unwrap().connection().execute("UPDATE lww_intents SET body=json_set(body,'$.staging_id','changed') WHERE request_id=?1", [&header.request_id]).unwrap(); }
+        }
+        assert!(store.lww_complete_quarantined_intent(&selected.request_id, &selected.token, revision).is_err(), "{failure}");
+        let current = store.lww_quarantined_intents().unwrap().remove(0);
+        assert!(!current.recoverable && !current.discardable);
+        assert_eq!(device_count(&store, "SELECT count(*) FROM lww_intent_failures WHERE quarantined=1"), 1);
+        assert_eq!(store.revision().unwrap(), revision);
     }
 }

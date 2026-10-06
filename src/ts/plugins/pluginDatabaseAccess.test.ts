@@ -520,6 +520,74 @@ describe('plugin unit writes with read provenance', () => {
         expect(harness.releasedLeases.every(release => release.mock.calls.length === 1)).toBe(true)
     })
 
+    it.each(['archived predecessor', 'trashed configured order'])(
+        'admits a no-read chat write by pinned order with %s and keeps later unrelated edits',
+        async (order) => {
+            const harness = createHarness({ unitIntent: true })
+            const archived = makeCharacter('archived')
+            const other = makeCharacter('other')
+            const target = makeCharacter('target', order === 'trashed configured order')
+            target.chats.reverse()
+            const database = makeFullObjectDatabase(order === 'archived predecessor'
+                ? [archived, other, target]
+                : [other, target])
+            harness.archivedCharacterIds.add(archived.chaId)
+            harness.pinnedDatabases.push(database)
+            const liveTarget = structuredClone(target)
+            liveTarget.chats.reverse()
+            const liveChat = liveTarget.chats.find(chat => chat.id === 'target-chat-a')!
+            liveChat.note = 'Unsaved call-boundary note'
+            harness.compatibilityDatabase.characters = order === 'archived predecessor'
+                ? [archived, other, liveTarget]
+                : [liveTarget, other]
+            const submitted = structuredClone(liveChat)
+            submitted.name = 'Plugin edit'
+            const flush = deferred<void>()
+            harness.flushPendingData.mockReturnValueOnce(flush.promise)
+
+            const writing = harness.access.setChatToIndex(1, 1, submitted, callContext())
+            liveChat.note = 'Edit after admission'
+            await vi.waitFor(() => expect(harness.flushPendingData).toHaveBeenCalledOnce())
+            const persistedChat = target.chats.find(chat => chat.id === submitted.id)!
+            persistedChat.note = liveChat.note
+            persistedChat.message.push({ role: 'char', data: 'Reply during flush' })
+            flush.resolve()
+            await writing
+
+            expect(harness.commitPersistentUnitIntent).toHaveBeenCalledExactlyOnceWith(
+                'plugin-setChatToIndex',
+                [{ key: '["conversation","target","target-chat-a","name"]', type: 'set', value: 'Plugin edit' }],
+                [], [],
+            )
+            expect(harness.releasedLeases.every(release => release.mock.calls.length === 1)).toBe(true)
+        },
+    )
+
+    it('rejects a no-read chat write when its pinned owner changes during flush', async () => {
+        const harness = createHarness({ unitIntent: true })
+        const first = makeCharacter('first')
+        const second = makeCharacter('second')
+        first.chats[0].id = 'shared-chat-id'
+        second.chats[0].id = 'shared-chat-id'
+        harness.pinnedDatabases.push(
+            makeFullObjectDatabase([first, second]),
+            makeFullObjectDatabase([second, first]),
+        )
+        harness.compatibilityDatabase.characters = [first, second]
+        const submitted = { ...structuredClone(first.chats[0]), name: 'Original owner edit' }
+        const flush = deferred<void>()
+        harness.flushPendingData.mockReturnValueOnce(flush.promise)
+
+        const writing = harness.access.setChatToIndex(0, 0, submitted, callContext())
+        await vi.waitFor(() => expect(harness.flushPendingData).toHaveBeenCalledOnce())
+        flush.resolve()
+
+        await expect(writing).rejects.toThrow('target')
+        expect(harness.commitPersistentUnitIntent).not.toHaveBeenCalled()
+        expect(harness.acquireCompleteConversation).not.toHaveBeenCalled()
+        expect(harness.releasedLeases.every(release => release.mock.calls.length === 1)).toBe(true)
+    })
+
     it('rejects a no-read setter when its admitted revision cannot be pinned', async () => {
         const harness = createHarness({ unitIntent: true, revisionAdmission: true })
         harness.store.acquireRevision = vi.fn(async () => { throw new RevisionConflictError(4, 5) })

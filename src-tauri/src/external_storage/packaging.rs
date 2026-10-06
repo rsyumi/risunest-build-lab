@@ -2406,7 +2406,10 @@ async fn seal_plain_object(
             validate_receipt(&record.intent, repository, receipt)?;
             // The copy read back to prove the object is charged to the spool
             // budget too, until the directory holding it is gone.
-            let room = match journal.reserve_spool(record.intent.byte_length)? {
+            let admission = if wave == 0 {
+                journal.reserve_spool_after_release(record.intent.byte_length, cancel).await?
+            } else { journal.reserve_spool(record.intent.byte_length)? };
+            let room = match admission {
                 SpoolAdmission::Admitted(reservation) => reservation,
                 SpoolAdmission::Full => return Ok(None),
             };
@@ -2495,9 +2498,11 @@ async fn seal_plain_object(
     // Held until the journal answers for the file, so another job always sees
     // either the reservation or the bytes. The room includes the page that
     // registers this object with the `wave` already waiting beside it.
-    let reservation = match journal.reserve_spool(
-        ciphertext_length.saturating_add(super::control::inventory_page_headroom(wave + 1)),
-    )? {
+    let bytes = ciphertext_length.saturating_add(super::control::inventory_page_headroom(wave + 1));
+    let admission = if wave == 0 {
+        journal.reserve_spool_after_release(bytes, cancel).await?
+    } else { journal.reserve_spool(bytes)? };
+    let reservation = match admission {
         SpoolAdmission::Admitted(reservation) => reservation,
         SpoolAdmission::Full => return Ok(None),
     };
@@ -3602,6 +3607,7 @@ pub(crate) async fn package_and_upload_protected(
     cancel: &Cancellation,
     protection:Option<(&super::leases::LeaseOwner,&super::leases::LeaseContext<'_>)>,
 ) -> Result<CompletedSnapshot> {
+    let _spool_execution = journal.begin_spool_execution();
     cancel.check()?;
     journal.verification = Default::default();
     if metadata.repository_id.is_empty()

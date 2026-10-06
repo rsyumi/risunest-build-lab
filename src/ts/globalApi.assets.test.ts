@@ -5,6 +5,8 @@ const state = vi.hoisted(() => ({
     isTauri: false,
     isTauriIOS: false,
     exportIOSFile: vi.fn(),
+    fileWrite: vi.fn(async (data: Uint8Array) => data.byteLength),
+    fileClose: vi.fn(async () => undefined),
     downloadThroughAndroidSaf: vi.fn(async (_name: string, _data: Uint8Array) => true),
     isTauriMobile: false,
     blobStore: null as any,
@@ -126,6 +128,7 @@ vi.mock('./gui/guisize', () => ({ updateGuisize: vi.fn() }))
 vi.mock('src/lang', () => ({ language: {} }))
 vi.mock('streamsaver', () => ({ default: { createWriteStream: vi.fn() } }))
 vi.mock('@tauri-apps/plugin-fs', () => ({
+    open: vi.fn(async () => ({ write: state.fileWrite, close: state.fileClose })),
     writeFile: vi.fn(), readFile: vi.fn(), exists: vi.fn(), mkdir: vi.fn(),
     readDir: vi.fn(), remove: vi.fn(), BaseDirectory: { Download: 1, AppData: 2 },
 }))
@@ -146,7 +149,7 @@ import {
     saveAsset,
     TauriWriter,
 } from './globalApi.svelte'
-import { remove, writeFile } from '@tauri-apps/plugin-fs'
+import { open as openFile, remove, writeFile } from '@tauri-apps/plugin-fs'
 import { alertToast } from './alert'
 import { doingChat } from './process/generationState'
 import { save } from '@tauri-apps/plugin-dialog'
@@ -179,6 +182,9 @@ function deferred<T>() {
 
 beforeEach(() => {
     vi.clearAllMocks()
+    state.fileWrite.mockReset().mockImplementation(async data => data.byteLength)
+    state.fileClose.mockReset().mockResolvedValue(undefined)
+    vi.mocked(openFile).mockClear()
     state.isTauriIOS = false
     state.isTauri = false
     state.isTauriMobile = false
@@ -583,12 +589,13 @@ describe('LocalWriter streamed backup entries', () => {
         await writer.write(Uint8Array.of(1, 2, 3))
         await writer.abort()
 
-        expect(writeFile).toHaveBeenCalledOnce()
+        expect(state.fileWrite).toHaveBeenCalledOnce()
+        expect(state.fileClose).toHaveBeenCalledOnce()
         expect(remove).not.toHaveBeenCalled()
     })
 
     test('does not delete a pre-existing Tauri destination after a failed flush', async () => {
-        vi.mocked(writeFile).mockRejectedValueOnce(new Error('write failed'))
+        state.fileWrite.mockRejectedValueOnce(new Error('write failed'))
         const writer = new TauriWriter('failed.zip')
 
         await expect(writer.write(new Uint8Array(4 * 1024 * 1024))).rejects.toThrow('write failed')
@@ -671,7 +678,9 @@ describe('iOS LocalWriter completed-file publication', () => {
         expect(save).not.toHaveBeenCalled()
         expect(state.exportIOSFile).not.toHaveBeenCalled()
         await writer.close()
-        expect(writeFile).toHaveBeenLastCalledWith('/synthetic/staging/owned/export.bin', Uint8Array.of(1, 2, 3), { append: false })
+        expect(openFile).toHaveBeenLastCalledWith('/synthetic/staging/owned/export.bin', { write: true, create: true, truncate: true, append: false })
+        expect(state.fileWrite).toHaveBeenCalledExactlyOnceWith(Uint8Array.of(1, 2, 3))
+        expect(state.fileClose).toHaveBeenCalledOnce()
         expect(state.exportIOSFile).toHaveBeenCalledExactlyOnceWith({ sourcePath: '/synthetic/staging/owned/export.bin', suggestedName: '캐릭터.png' })
         expect(remove).toHaveBeenCalledExactlyOnceWith('/synthetic/staging/owned', { recursive: true })
         await writer.close()
@@ -710,9 +719,188 @@ describe('iOS LocalWriter completed-file publication', () => {
         const writer = new LocalWriter()
         await writer.init()
         await writer.write(Uint8Array.of(1))
-        vi.mocked(writeFile).mockRejectedValueOnce(new Error('flush failed'))
+        state.fileWrite.mockRejectedValueOnce(new Error('flush failed'))
         await expect(writer.close()).rejects.toThrow('flush failed')
         expect(state.exportIOSFile).not.toHaveBeenCalled()
         expect(remove).toHaveBeenCalledOnce()
+    })
+})
+
+
+describe('bounded TauriWriter', () => {
+    test('keeps an untouched close separate from an explicit empty write', async () => {
+        await new TauriWriter('untouched.bin').close()
+        expect(openFile).not.toHaveBeenCalled()
+        const writer = new TauriWriter('empty.bin')
+        await writer.write(new Uint8Array())
+        await writer.close()
+        expect(openFile).toHaveBeenCalledExactlyOnceWith('empty.bin', {
+            write: true, create: true, truncate: true, append: false,
+        })
+        expect(state.fileClose).toHaveBeenCalledOnce()
+    })
+
+    test.each([false, true])('bounds every buffer and request with a huge input (Android: %s)', async android => {
+        state.isTauriMobile = android
+        const limit = android ? 64 * 1024 : 4 * 1024 * 1024
+        const input = Uint8Array.from({ length: limit * 2 + 71 }, (_, index) => index % 251)
+        const inputSlice = vi.spyOn(input, 'slice')
+        const chunks: Uint8Array[] = []
+        state.fileWrite.mockImplementation(async chunk => {
+            expect(chunk.byteLength).toBeLessThanOrEqual(limit)
+            expect(chunk.buffer.byteLength).toBe(limit)
+            chunks.push(chunk.slice())
+            return chunk.byteLength
+        })
+        const writer = new TauriWriter(android ? 'content://synthetic/export' : '/synthetic/export')
+        await writer.write(Uint8Array.of(252, 253))
+        await writer.write(input)
+        await writer.close()
+        const expected = new Uint8Array(input.byteLength + 2)
+        expected.set([252, 253])
+        expected.set(input, 2)
+        expect(Buffer.compare(Buffer.concat(chunks), Buffer.from(expected))).toBe(0)
+        expect(inputSlice).not.toHaveBeenCalled()
+        expect(chunks.map(chunk => chunk.byteLength)).toEqual([limit, limit, 73])
+        expect(openFile).toHaveBeenCalledExactlyOnceWith(writer.path, {
+            write: true, create: true, truncate: true, append: false,
+        })
+        expect(state.fileClose).toHaveBeenCalledOnce()
+        await writer.close()
+        expect(state.fileClose).toHaveBeenCalledOnce()
+        await expect(writer.write(Uint8Array.of(1))).rejects.toThrow('closed')
+    })
+
+    test('retries short writes in order and preserves caller-selected append mode', async () => {
+        const chunks: Uint8Array[] = []
+        state.fileWrite.mockImplementation(async chunk => {
+            const length = Math.min(2, chunk.byteLength)
+            chunks.push(chunk.slice(0, length))
+            return length
+        })
+        const writer = new TauriWriter('existing.bin')
+        writer.firstWrite = false
+        await writer.write(Uint8Array.of(1, 2, 3, 4, 5))
+        await writer.close()
+        expect(Buffer.concat(chunks)).toEqual(Buffer.from([1, 2, 3, 4, 5]))
+        expect(openFile).toHaveBeenCalledWith('existing.bin', {
+            write: true, create: true, truncate: false, append: true,
+        })
+    })
+
+    test.each([0, -1, 4, 1.5, NaN])('rejects invalid write length %s without retrying or reopening', async length => {
+        state.fileWrite.mockResolvedValueOnce(length)
+        const writer = new TauriWriter('existing.bin')
+        await writer.write(Uint8Array.of(1, 2, 3))
+        await expect(writer.close()).rejects.toThrow('invalid write length')
+        await expect(writer.close()).rejects.toThrow('invalid write length')
+        await writer.abort()
+        expect(state.fileWrite).toHaveBeenCalledOnce()
+        expect(state.fileClose).toHaveBeenCalledOnce()
+        expect(remove).not.toHaveBeenCalled()
+    })
+
+    test('serializes overlapping writes and close without reusing an in-flight buffer', async () => {
+        state.isTauriMobile = true
+        const gate = deferred<number>()
+        const chunks: Uint8Array[] = []
+        state.fileWrite.mockImplementationOnce(async chunk => {
+            await gate.promise
+            chunks.push(chunk.slice())
+            return chunk.byteLength
+        }).mockImplementation(async chunk => {
+            chunks.push(chunk.slice())
+            return chunk.byteLength
+        })
+        const writer = new TauriWriter('ordered.bin')
+        const first = writer.write(new Uint8Array(64 * 1024).fill(1))
+        await vi.waitFor(() => expect(state.fileWrite).toHaveBeenCalledOnce())
+        const second = writer.write(Uint8Array.of(2, 3))
+        const closing = writer.close()
+        expect(state.fileWrite).toHaveBeenCalledOnce()
+        gate.resolve(64 * 1024)
+        await Promise.all([first, second, closing])
+        expect(chunks).toEqual([new Uint8Array(64 * 1024).fill(1), Uint8Array.of(2, 3)])
+        expect(state.fileClose).toHaveBeenCalledOnce()
+    })
+
+    test('cancels between bounded requests and closes the active handle without deleting the destination', async () => {
+        state.isTauriMobile = true
+        const gate = deferred<number>()
+        state.fileWrite.mockImplementationOnce(() => gate.promise)
+        const writer = new TauriWriter('existing.bin')
+        const writing = writer.write(new Uint8Array(3 * 64 * 1024))
+        const rejected = expect(writing).rejects.toThrow('aborted')
+        await vi.waitFor(() => expect(state.fileWrite).toHaveBeenCalledOnce())
+        const aborting = writer.abort()
+        expect(state.fileClose).not.toHaveBeenCalled()
+        gate.resolve(64 * 1024)
+        await rejected
+        await aborting
+        expect(state.fileWrite).toHaveBeenCalledOnce()
+        expect(state.fileClose).toHaveBeenCalledOnce()
+        expect(remove).not.toHaveBeenCalled()
+        await expect(writer.close()).rejects.toThrow('aborted')
+    })
+
+    test('does not open or truncate a destination when aborted before the first flush', async () => {
+        const writer = new TauriWriter('existing.bin')
+        await writer.write(Uint8Array.of(1, 2))
+        await writer.abort()
+        await writer.abort()
+        expect(openFile).not.toHaveBeenCalled()
+        expect(state.fileWrite).not.toHaveBeenCalled()
+        expect(remove).not.toHaveBeenCalled()
+    })
+
+    test('keeps a write failure terminal and closes once', async () => {
+        state.isTauriMobile = true
+        const failure = new Error('synthetic destination failure')
+        state.fileWrite.mockRejectedValueOnce(failure)
+        const writer = new TauriWriter('existing.bin')
+        await expect(writer.write(new Uint8Array(64 * 1024))).rejects.toBe(failure)
+        await expect(writer.write(Uint8Array.of(1))).rejects.toBe(failure)
+        await expect(writer.close()).rejects.toBe(failure)
+        await writer.abort()
+        expect(openFile).toHaveBeenCalledOnce()
+        expect(state.fileClose).toHaveBeenCalledOnce()
+        expect(remove).not.toHaveBeenCalled()
+    })
+
+    test('preserves open errors without touching or deleting the destination', async () => {
+        const failure = new Error('synthetic open failure')
+        vi.mocked(openFile).mockRejectedValueOnce(failure)
+        const writer = new TauriWriter('existing.bin')
+        await writer.write(Uint8Array.of(1))
+        await expect(writer.close()).rejects.toBe(failure)
+        await writer.abort()
+        expect(openFile).toHaveBeenCalledOnce()
+        expect(state.fileWrite).not.toHaveBeenCalled()
+        expect(state.fileClose).not.toHaveBeenCalled()
+        expect(remove).not.toHaveBeenCalled()
+    })
+
+    test('does not publish an iOS staging file if closing its handle fails', async () => {
+        state.isTauri = true
+        state.isTauriIOS = true
+        const failure = new Error('synthetic close failure')
+        state.fileClose.mockRejectedValueOnce(failure)
+        const writer = new LocalWriter()
+        await writer.init()
+        await writer.write(Uint8Array.of(1))
+        await expect(writer.close()).rejects.toBe(failure)
+        expect(state.exportIOSFile).not.toHaveBeenCalled()
+        expect(remove).toHaveBeenCalledOnce()
+    })
+
+    test('writes a backup header separately from the original payload', async () => {
+        const payload = new Uint8Array(64 * 1024 + 7)
+        const chunks: Uint8Array[] = []
+        const writer = new LocalWriter()
+        writer.writer = { write: vi.fn(async (chunk: Uint8Array) => { chunks.push(chunk) }) } as any
+        await writer.writeBackup('entry.bin', payload)
+        expect(chunks).toHaveLength(2)
+        expect(chunks[1]).toBe(payload)
+        expect(new DataView(chunks[0].buffer).getUint32(4 + 'entry.bin'.length, true)).toBe(payload.byteLength)
     })
 })

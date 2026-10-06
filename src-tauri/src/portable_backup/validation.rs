@@ -718,7 +718,7 @@ impl LibraryView<'_> {
                     .get("characterId")
                     .and_then(Value::as_str)
                     .or_else(|| {
-                        matches!(r.owner_kind.as_str(), "character" | "group")
+                        matches!(r.owner_kind.as_str(), "character")
                             .then_some(r.owner_id.as_str())
                     });
                 if let Some(scope) = scope {

@@ -137,10 +137,6 @@ function makeHarness(messageCount = 10_000) {
             resident = character as character
             selectedCharacterId = character.chaId
         },
-        publishCharacterSet: (character) => {
-            resident = character as character
-            selectedCharacterId = character.chaId
-        },
         publishConversation: published,
         canUseWindowedSelectedConversation: () => allowWindowed,
         isConversationOperationActive: () => operationActive,

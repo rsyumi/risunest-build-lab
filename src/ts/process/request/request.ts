@@ -40,7 +40,6 @@ interface requestDataArgument{
     frequencyPenalty?: number,
     useStreaming?:boolean
     forceStreaming?:boolean
-    isGroupChat?:boolean
     useEmotion?:boolean
     continue?:boolean
     chatId?:string
@@ -247,28 +246,26 @@ export async function requestChatData(arg:requestDataArgument, model:ModelModeEx
             
             try{
                 const currentChar = getCurrentCharacter()
-                if(currentChar?.type !== 'group'){
-                    const perf = performance.now()
-                    const currentChat = getCurrentChat()
-                    // A send that builds from a history window hands the trigger the window.
-                    const historyWindow = findActiveHistoryWindow(currentChar.chaId, currentChat?.id)
-                    const historyWindowCopy = historyWindow ? openHistoryWindowCopy(historyWindow) : null
-                    const d = await runTrigger(currentChar, 'request', {
-                        chat: historyWindowCopy?.chat ?? currentChat,
-                        displayMode: true,
-                        displayData: JSON.stringify(arg.formated)
-                    })
-                    if (historyWindowCopy && !historyWindowCopy.commit()) {
-                        throw new Error('The conversation changed during the request trigger')
-                    }
-        
-                    const got = JSON.parse(d.displayData)
-                    if(!got || !Array.isArray(got)){
-                        throw new Error('Invalid return')
-                    }
-                    arg.formated = got
-                    console.log('Trigger time', performance.now() - perf)
+                const perf = performance.now()
+                const currentChat = getCurrentChat()
+                // A send that builds from a history window hands the trigger the window.
+                const historyWindow = findActiveHistoryWindow(currentChar.chaId, currentChat?.id)
+                const historyWindowCopy = historyWindow ? openHistoryWindowCopy(historyWindow) : null
+                const d = await runTrigger(currentChar, 'request', {
+                    chat: historyWindowCopy?.chat ?? currentChat,
+                    displayMode: true,
+                    displayData: JSON.stringify(arg.formated)
+                })
+                if (historyWindowCopy && !historyWindowCopy.commit()) {
+                    throw new Error('The conversation changed during the request trigger')
                 }
+
+                const got = JSON.parse(d.displayData)
+                if(!got || !Array.isArray(got)){
+                    throw new Error('Invalid return')
+                }
+                arg.formated = got
+                console.log('Trigger time', performance.now() - perf)
             }
             catch(e){
                 console.error(e)

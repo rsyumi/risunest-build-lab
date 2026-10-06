@@ -777,14 +777,19 @@ impl Publisher<'_> {
     }
     fn publish_staged(&self,staged:Vec<crate::asset_repository::StagedPayload>)->crate::server_sync::Result<()> {
         if staged.is_empty() {return Ok(());}
+        use crate::asset_repository::job_pins::{CasJobKind,CasJobOwner,DurableCasJob};
+        let id=uuid::Uuid::new_v4().to_string();
+        let mut journal=DurableCasJob::begin(self.root,&id,CasJobKind::DirectAssetOrInlayWrite,
+            CasJobOwner::external_hydration(&id),self.created_at_ms)?;
         #[cfg(test)]
         hydration_tests::before_publish(self.root);
-        let _guard=crate::asset_repository::coordinator::lock_repository_mutation()?;
+        let guard=crate::asset_repository::coordinator::lock_repository_mutation()?;
         #[cfg(test)]
         let held=std::time::Instant::now();
         self.checked()?;
         #[cfg(test)]
         let count=staged.len();
+        journal.record_staged_publication(&staged,&guard)?;
         let published=self.cas.publish_staged_batch(staged)?;
         #[cfg(test)]
         hydration_tests::crash_point(self.root,hydration_tests::CrashPoint::AfterPublish)?;
@@ -792,6 +797,9 @@ impl Publisher<'_> {
         // yet, so each published body is registered again in this hold. A row still there is kept.
         self.register(&published.into_iter().map(|payload|crate::persistent_store::asset_object_catalog::AssetObjectRegistration{
             object_hash:payload.content_hash,byte_size:payload.byte_size}).collect::<Vec<_>>())?;
+        #[cfg(test)]
+        hydration_tests::crash_point(self.root,hydration_tests::CrashPoint::AfterPublishedRegistration)?;
+        journal.finish_catalog_registration(&guard)?;
         #[cfg(test)]
         hydration_tests::record_hold(self.root,count,held.elapsed());
         Ok(())

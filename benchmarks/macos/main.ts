@@ -354,7 +354,9 @@ async function startupAppearance(seed: boolean, theme: "light" | "dark") {
 async function main() {
   await guard();
   const phase = await invoke<string>("macos_bench_phase");
-  if (/^appearance-(seed|app)-(light|dark)$/.test(phase)) {
+  if (phase.startsWith("session-dispatch-")) {
+    await (await import("./terminationDispatch")).terminationDispatch(phase);
+  } else if (/^appearance-(seed|app)-(light|dark)$/.test(phase)) {
     const [, action, theme] = phase.split("-");
     await report(phase, await startupAppearance(action === "seed", theme as "light" | "dark"));
     await invoke("macos_bench_quit");

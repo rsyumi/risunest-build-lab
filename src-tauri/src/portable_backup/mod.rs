@@ -47,10 +47,21 @@ pub(crate) enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(e) => e.fmt(f),
-            Self::Sql(e) => e.fmt(f),
-            Self::Zip(e) => e.fmt(f),
-            Self::Json(e) => e.fmt(f),
+            Self::Io(e) => f.write_str(&io_summary(e)),
+            Self::Sql(rusqlite::Error::FromSqlConversionFailure(index, _, inner)) => {
+                if let Some(json) = inner.downcast_ref::<serde_json::Error>() {
+                    write!(f, "column {index} is not readable: {}", json_summary(json))
+                } else {
+                    write!(f, "column {index} is not readable")
+                }
+            }
+            Self::Sql(rusqlite::Error::SqliteFailure(code, _)) => {
+                write!(f, "sqlite failure ({:?}, {})", code.code, code.extended_code)
+            }
+            Self::Sql(_) => f.write_str("sqlite failure"),
+            Self::Zip(zip::result::ZipError::Io(e)) => write!(f, "archive {}", io_summary(e)),
+            Self::Zip(_) => f.write_str("archive failure"),
+            Self::Json(e) => f.write_str(&json_summary(e)),
             Self::Store(e) => e.fmt(f),
             Self::Invalid(e) => f.write_str(e),
             Self::Cancelled => f.write_str("portable backup cancelled"),
@@ -58,6 +69,21 @@ impl std::fmt::Display for Error {
                 f.write_str("source requires a fresh preservation capture")
             }
         }
+    }
+}
+
+fn json_summary(error: &serde_json::Error) -> String {
+    if error.is_io() {
+        format!("json-io ({:?})", error.io_error_kind())
+    } else {
+        crate::native_log::json_failure(error)
+    }
+}
+
+fn io_summary(error: &io::Error) -> String {
+    match error.get_ref().and_then(|inner| inner.downcast_ref::<serde_json::Error>()) {
+        Some(json) => json_summary(json),
+        None => format!("io failure ({:?})", error.kind()),
     }
 }
 impl std::error::Error for Error {
