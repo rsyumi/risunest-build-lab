@@ -5,6 +5,6 @@ overrides:
   'rollup@>=4.0.0 <4.59.0': ^4.59.0
   'yaml@>=2.0.0 <2.8.3': ^2.8.3
 patchedDependencies:
-  '@tauri-apps/plugin-http@2.6.1': patches/@tauri-apps__plugin-http@2.6.1.patch
+  '@tauri-apps/plugin-http@2.8.0': patches/@tauri-apps__plugin-http@2.8.0.patch
   playwright-core@1.63.0: patches/playwright-core@1.63.0.patch
   playwright@1.63.0: patches/playwright@1.63.0.patch

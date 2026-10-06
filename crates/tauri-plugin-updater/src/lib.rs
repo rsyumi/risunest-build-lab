@@ -24,8 +24,8 @@ use std::{ffi::OsString, sync::Arc};
 use http::{HeaderMap, HeaderName, HeaderValue};
 use semver::Version;
 use tauri::{
-    plugin::{Builder as PluginBuilder, TauriPlugin},
     Manager, Runtime,
+    plugin::{Builder as PluginBuilder, TauriPlugin},
 };
 
 #[cfg(any(
@@ -150,6 +150,21 @@ struct UpdaterState {
     relaunch_args: Option<Vec<OsString>>,
 }
 
+/// Builder for the updater plugin.
+///
+/// The values set here are the defaults used by every [`Updater`] created through
+/// [`UpdaterExt::updater`] and [`UpdaterExt::updater_builder`]; they can still be overridden
+/// per updater instance on the [`UpdaterBuilder`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use tauri::Runtime;
+///
+/// fn register_updater<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+///     builder.plugin(tauri_plugin_updater::Builder::new().build())
+/// }
+/// ```
 #[derive(Default)]
 pub struct Builder {
     target: Option<String>,
@@ -166,15 +181,27 @@ impl Builder {
         self.relaunch_args = Some(args);
         self
     }
+
+    /// Creates a new builder with the default configuration.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Sets the target name used when checking for updates.
+    ///
+    /// It replaces the `{{target}}` variable in the endpoint URLs and is used as the key to look
+    /// up the release in the `platforms` object of a static update manifest.
+    ///
+    /// When it is not set, the updater uses the current operating system name (`linux`, `darwin`
+    /// or `windows`) in the endpoint URLs and looks for `{os}-{arch}-{bundle_type}` then
+    /// `{os}-{arch}` in the manifest.
     pub fn target(mut self, target: impl Into<String>) -> Self {
         self.target.replace(target.into());
         self
     }
 
+    /// Sets the public key used to verify the update signature,
+    /// overriding the `pubkey` value of the plugin configuration.
     pub fn pubkey<S: Into<String>>(mut self, pubkey: S) -> Self {
         self.pubkey.replace(pubkey.into());
         self
@@ -208,6 +235,11 @@ impl Builder {
         self
     }
 
+    /// Adds a header to be sent on every updater request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the header name or the header value is not valid.
     pub fn header<K, V>(mut self, key: K, value: V) -> Result<Self>
     where
         HeaderName: TryFrom<K>,
@@ -223,11 +255,22 @@ impl Builder {
         Ok(self)
     }
 
+    /// Replaces all the headers sent on updater requests with the given map,
+    /// discarding the ones previously added with [`Self::header`].
     pub fn headers(mut self, headers: HeaderMap) -> Self {
         self.headers = headers;
         self
     }
 
+    /// Sets the default function used to decide whether a remote release should be installed.
+    ///
+    /// The closure receives the current application version and the remote release,
+    /// and must return `true` when the release should be treated as an update.
+    ///
+    /// It applies to every updater created through [`UpdaterExt`] and takes precedence over the
+    /// `allowDowngrades` configuration value; it can still be overridden per updater instance with
+    /// [`UpdaterBuilder::version_comparator`]. When no comparator is set at all, a release is
+    /// installed only if its version is greater than the current one.
     pub fn default_version_comparator<
         F: Fn(Version, RemoteRelease) -> bool + Send + Sync + 'static,
     >(
@@ -238,6 +281,10 @@ impl Builder {
         self
     }
 
+    /// Builds the updater plugin, registering the `check`, `download`, `install`
+    /// and `download_and_install` commands used by the JavaScript API.
+    ///
+    /// Pass the returned plugin to [`tauri::Builder::plugin`].
     pub fn build<R: Runtime>(self) -> TauriPlugin<R, Config> {
         let pubkey = self.pubkey;
         let target = self.target;
