@@ -10,10 +10,10 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2024"
-rust-version = "1.90"
+edition = "2021"
+rust-version = "1.77.2"
 name = "tauri-plugin-updater"
-version = "2.13.1"
+version = "2.12.0"
 authors = ["Tauri Programme within The Commons Conservancy"]
 build = "build.rs"
 links = "tauri-plugin-updater"
@@ -92,7 +92,7 @@ version = "0.3"
 version = "1"
 
 [dependencies.infer]
-version = "0.22"
+version = "0.19"
 
 [dependencies.log]
 version = "0.4.21"
@@ -129,7 +129,7 @@ features = ["derive"]
 version = "1"
 
 [dependencies.tauri]
-version = "2.12"
+version = "2.10"
 default-features = false
 
 [dependencies.tempfile]
@@ -152,11 +152,11 @@ version = "1"
 version = "2"
 
 [build-dependencies.tauri-plugin]
-version = "2.7"
+version = "2.5"
 features = ["build"]
 
 [target.'cfg(target_os = "linux")'.dependencies.dirs]
-version = "7"
+version = "6"
 
 [target.'cfg(target_os = "linux")'.dependencies.flate2]
 version = "1"
@@ -177,7 +177,7 @@ features = ["full"]
 version = "0.4"
 
 [target.'cfg(target_os = "windows")'.dependencies.windows-sys]
-version = "0.61.0"
+version = "0.60.0"
 features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",

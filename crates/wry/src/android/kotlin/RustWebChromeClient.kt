@@ -14,7 +14,6 @@ import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.DialogInterface
 import android.content.Intent
-import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -22,17 +21,52 @@ import android.provider.MediaStore
 import android.view.View
 import android.webkit.*
 import android.widget.EditText
+import androidx.activity.result.ActivityResult
+import androidx.activity.result.ActivityResultCallback
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.FileProvider
 import java.io.File
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.*
 
-class RustWebChromeClient(private val activity: WryActivity, private val webViewId: String) : WebChromeClient() {
-  private companion object {
-    const val PERMISSION_REQUEST_DEFAULT = 0
-    const val PERMISSION_REQUEST_ALLOW = 1
-    const val PERMISSION_REQUEST_DENY = 2
+class RustWebChromeClient(appActivity: WryActivity) : WebChromeClient() {
+  private interface PermissionListener {
+    fun onPermissionSelect(isGranted: Boolean?)
+  }
+
+  private interface ActivityResultListener {
+    fun onActivityResult(result: ActivityResult?)
+  }
+
+  private val activity: WryActivity
+  private var permissionLauncher: ActivityResultLauncher<Array<String>>
+  private var activityLauncher: ActivityResultLauncher<Intent>
+  private var permissionListener: PermissionListener? = null
+  private var activityListener: ActivityResultListener? = null
+
+  init {
+    activity = appActivity
+    val permissionCallback =
+      ActivityResultCallback { isGranted: Map<String, Boolean> ->
+        if (permissionListener != null) {
+          var granted = true
+          for ((_, value) in isGranted) {
+            if (!value) granted = false
+          }
+          permissionListener!!.onPermissionSelect(granted)
+        }
+      }
+    permissionLauncher =
+      activity.registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions(), permissionCallback)
+    activityLauncher = activity.registerForActivityResult(
+      ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+      if (activityListener != null) {
+        activityListener!!.onActivityResult(result)
+      }
+    }
   }
 
   /**
@@ -58,77 +92,31 @@ class RustWebChromeClient(private val activity: WryActivity, private val webView
   }
 
   override fun onPermissionRequest(request: PermissionRequest) {
-    val requestedResources = request.resources
-    if (requestedResources.isEmpty()) {
-      request.deny()
-      return
-    }
-
-    val allowedResources = ArrayList<String>()
-    val defaultResources = ArrayList<String>()
-
-    for (resource in requestedResources) {
-      when (onPermissionRequestNative(webViewId, resource)) {
-        PERMISSION_REQUEST_DENY -> {}
-        PERMISSION_REQUEST_ALLOW -> allowedResources.add(resource)
-        PERMISSION_REQUEST_DEFAULT -> defaultResources.add(resource)
-      }
-    }
-
-    val resources =
-      allowedResources.plus(filterKnownPermissions(defaultResources)).toList().toTypedArray()
-    grantPermissionRequest(request, resources)
-  }
-
-  private fun grantPermissionRequest(request: PermissionRequest, resources: Array<String>) {
-    if (resources.isEmpty()) {
-      request.deny()
-      return
-    }
-
     val isRequestPermissionRequired = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
-    val permissionList = androidPermissionsForResources(resources)
-    if (permissionList.isNotEmpty() && isRequestPermissionRequired) {
-      val permissions = permissionList.toTypedArray()
-      activity.requestPermissions(permissions) { isGranted ->
-        if (isGranted == true) {
-          request.grant(resources)
-        } else {
-          request.deny()
-        }
-      }
-    } else {
-      request.grant(resources)
-    }
-  }
-
-  private fun androidPermissionsForResources(resources: Array<String>): MutableList<String> {
     val permissionList: MutableList<String> = ArrayList()
-    if (resources.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)) {
+    if (listOf(*request.resources).contains("android.webkit.resource.VIDEO_CAPTURE")) {
       permissionList.add(Manifest.permission.CAMERA)
     }
-    if (resources.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)) {
+    if (listOf(*request.resources).contains("android.webkit.resource.AUDIO_CAPTURE")) {
       permissionList.add(Manifest.permission.MODIFY_AUDIO_SETTINGS)
       permissionList.add(Manifest.permission.RECORD_AUDIO)
     }
-    return permissionList
+    if (permissionList.isNotEmpty() && isRequestPermissionRequired) {
+      val permissions = permissionList.toTypedArray()
+      permissionListener = object : PermissionListener {
+        override fun onPermissionSelect(isGranted: Boolean?) {
+          if (isGranted == true) {
+            request.grant(request.resources)
+          } else {
+            request.deny()
+          }
+        }
+      }
+      permissionLauncher.launch(permissions)
+    } else {
+      request.grant(request.resources)
+    }
   }
-
-  /**
-   * @return one of the PERMISSION_REQUEST_* constants.
-   */
-  private external fun onPermissionRequestNative(webviewId: String, resource: String): Int
-
-  override fun getDefaultVideoPoster(): Bitmap {
-    // Return a transparent bitmap so Chromium doesn't paint its default gray play-button placeholder on <video> elements.
-    // Matches react-native-webview's approach — see https://github.com/react-native-webview/react-native-webview/blob/58daac9e2e532ca1dcb49003b86568218b9b2b1d/android/src/main/java/com/reactnativecommunity/webview/RNCWebViewManager.kt
-    return Bitmap.createBitmap(50, 50, Bitmap.Config.ARGB_8888)
-  }
-
-  /**
-   * @return true when Rust denies geolocation; false continues the normal Android permission flow.
-   */
-  private external fun onGeolocationPermissionRequestNative(webviewId: String, origin: String): Boolean
 
   /**
    * Show the browser alert modal
@@ -252,59 +240,33 @@ class RustWebChromeClient(private val activity: WryActivity, private val webView
     callback: GeolocationPermissions.Callback
   ) {
     super.onGeolocationPermissionsShowPrompt(origin, callback)
-    if (onGeolocationPermissionRequestNative(webViewId, origin)) {
-      callback.invoke(origin, false, false)
-      return
-    }
-
     Logger.debug("onGeolocationPermissionsShowPrompt: DOING IT HERE FOR ORIGIN: $origin")
-    val geoPermissions = definedGeolocationPermissions()
-    if (geoPermissions.isEmpty()) {
-      callback.invoke(origin, false, false)
-      return
-    }
-
+    val geoPermissions =
+      arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION)
     if (!PermissionHelper.hasPermissions(activity, geoPermissions)) {
-      activity.requestPermissions(geoPermissions) { isGranted ->
-        if (isGranted == true) {
-          callback.invoke(origin, true, false)
-        } else {
-          val coarsePermission =
-            arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION)
-          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            PermissionHelper.hasPermissions(activity, coarsePermission)
-          ) {
+      permissionListener = object : PermissionListener {
+        override fun onPermissionSelect(isGranted: Boolean?) {
+          if (isGranted == true) {
             callback.invoke(origin, true, false)
           } else {
-            callback.invoke(origin, false, false)
+            val coarsePermission =
+              arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+              PermissionHelper.hasPermissions(activity, coarsePermission)
+            ) {
+              callback.invoke(origin, true, false)
+            } else {
+              callback.invoke(origin, false, false)
+            }
           }
         }
       }
+      permissionLauncher.launch(geoPermissions)
     } else {
       // permission is already granted
       callback.invoke(origin, true, false)
       Logger.debug("onGeolocationPermissionsShowPrompt: has required permission")
     }
-  }
-
-  private fun filterKnownPermissions(resources: List<String>): Array<String> {
-    return resources.filter {
-      it == PermissionRequest.RESOURCE_AUDIO_CAPTURE ||
-        it == PermissionRequest.RESOURCE_VIDEO_CAPTURE ||
-        it == PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID ||
-        it == PermissionRequest.RESOURCE_MIDI_SYSEX
-    }.toTypedArray()
-  }
-
-  private fun definedGeolocationPermissions(): Array<String> {
-    val permissions = ArrayList<String>()
-    if (PermissionHelper.hasDefinedPermission(activity, Manifest.permission.ACCESS_COARSE_LOCATION)) {
-      permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
-    }
-    if (PermissionHelper.hasDefinedPermission(activity, Manifest.permission.ACCESS_FINE_LOCATION)) {
-      permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
-    }
-    return permissions.toTypedArray()
   }
 
   override fun onShowFileChooser(
@@ -320,15 +282,18 @@ class RustWebChromeClient(private val activity: WryActivity, private val webView
       if (isMediaCaptureSupported) {
         showMediaCaptureOrFilePicker(filePathCallback, fileChooserParams, captureVideo)
       } else {
-        val camPermission = arrayOf(Manifest.permission.CAMERA)
-        activity.requestPermissions(camPermission) { isGranted ->
-          if (isGranted == true) {
-            showMediaCaptureOrFilePicker(filePathCallback, fileChooserParams, captureVideo)
-          } else {
-            Logger.warn(Logger.tags("FileChooser"), "Camera permission not granted")
-            filePathCallback.onReceiveValue(null)
+        permissionListener = object : PermissionListener {
+          override fun onPermissionSelect(isGranted: Boolean?) {
+            if (isGranted == true) {
+              showMediaCaptureOrFilePicker(filePathCallback, fileChooserParams, captureVideo)
+            } else {
+              Logger.warn(Logger.tags("FileChooser"), "Camera permission not granted")
+              filePathCallback.onReceiveValue(null)
+            }
           }
         }
+        val camPermission = arrayOf(Manifest.permission.CAMERA)
+        permissionLauncher.launch(camPermission)
       }
     } else {
       showFilePicker(filePathCallback, fileChooserParams)
@@ -375,13 +340,16 @@ class RustWebChromeClient(private val activity: WryActivity, private val webView
       return false
     }
     takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, imageFileUri)
-    activity.launchActivityForResult(takePictureIntent) { result ->
-      var res: Array<Uri?>? = null
-      if (result?.resultCode == Activity.RESULT_OK) {
-        res = arrayOf(imageFileUri)
+    activityListener = object : ActivityResultListener {
+      override fun onActivityResult(result: ActivityResult?) {
+        var res: Array<Uri?>? = null
+        if (result?.resultCode == Activity.RESULT_OK) {
+          res = arrayOf(imageFileUri)
+        }
+        filePathCallback.onReceiveValue(res)
       }
-      filePathCallback.onReceiveValue(res)
     }
+    activityLauncher.launch(takePictureIntent)
     return true
   }
 
@@ -390,13 +358,16 @@ class RustWebChromeClient(private val activity: WryActivity, private val webView
     if (takeVideoIntent.resolveActivity(activity.packageManager) == null) {
       return false
     }
-    activity.launchActivityForResult(takeVideoIntent) { result ->
-      var res: Array<Uri?>? = null
-      if (result?.resultCode == Activity.RESULT_OK) {
-        res = arrayOf(result.data!!.data)
+    activityListener = object : ActivityResultListener {
+      override fun onActivityResult(result: ActivityResult?) {
+        var res: Array<Uri?>? = null
+        if (result?.resultCode == Activity.RESULT_OK) {
+          res = arrayOf(result.data!!.data)
+        }
+        filePathCallback.onReceiveValue(res)
       }
-      filePathCallback.onReceiveValue(res)
     }
+    activityLauncher.launch(takeVideoIntent)
     return true
   }
 
@@ -416,23 +387,26 @@ class RustWebChromeClient(private val activity: WryActivity, private val webView
       }
     }
     try {
-      activity.launchActivityForResult(intent) { result ->
-        val res: Array<Uri?>?
-        val resultIntent = result?.data
-        if (result?.resultCode == Activity.RESULT_OK && resultIntent!!.clipData != null) {
-          val numFiles = resultIntent.clipData!!.itemCount
-          res = arrayOfNulls(numFiles)
-          for (i in 0 until numFiles) {
-            res[i] = resultIntent.clipData!!.getItemAt(i).uri
+      activityListener = object : ActivityResultListener {
+        override fun onActivityResult(result: ActivityResult?) {
+          val res: Array<Uri?>?
+          val resultIntent = result?.data
+          if (result?.resultCode == Activity.RESULT_OK && resultIntent!!.clipData != null) {
+            val numFiles = resultIntent.clipData!!.itemCount
+            res = arrayOfNulls(numFiles)
+            for (i in 0 until numFiles) {
+              res[i] = resultIntent.clipData!!.getItemAt(i).uri
+            }
+          } else {
+            res = FileChooserParams.parseResult(
+              result?.resultCode ?: 0,
+              resultIntent
+            )
           }
-        } else {
-          res = FileChooserParams.parseResult(
-            result?.resultCode ?: 0,
-            resultIntent
-          )
+          filePathCallback.onReceiveValue(res)
         }
-        filePathCallback.onReceiveValue(res)
       }
+      activityLauncher.launch(intent)
     } catch (e: ActivityNotFoundException) {
       filePathCallback.onReceiveValue(null)
     }

@@ -6,7 +6,7 @@ use crate::{Result, Update, UpdaterExt};
 
 use http::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
-use tauri::{Manager, Resource, ResourceId, Runtime, Webview, ipc::Channel};
+use tauri::{ipc::Channel, Manager, Resource, ResourceId, Runtime, Webview};
 
 use std::{str::FromStr, time::Duration};
 use url::Url;

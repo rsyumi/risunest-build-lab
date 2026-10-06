@@ -10,10 +10,10 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2024"
-rust-version = "1.90"
+edition = "2021"
+rust-version = "1.77.2"
 name = "tauri-plugin-http"
-version = "2.8.0"
+version = "2.6.1"
 authors = ["Tauri Programme within The Commons Conservancy"]
 build = "build.rs"
 links = "tauri-plugin-http"
@@ -33,7 +33,6 @@ description = "Access an HTTP client written in Rust."
 readme = "README.md"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/tauri-apps/plugins-workspace"
-resolver = "2"
 
 [package.metadata.platforms.support.windows]
 level = "full"
@@ -127,11 +126,11 @@ features = ["derive"]
 version = "1"
 
 [dependencies.tauri]
-version = "2.12"
+version = "2.10"
 default-features = false
 
 [dependencies.tauri-plugin-fs]
-version = "2.6.0"
+version = "2.5.2"
 
 [dependencies.thiserror]
 version = "2"
@@ -164,7 +163,7 @@ version = "1"
 features = ["derive"]
 
 [build-dependencies.tauri-plugin]
-version = "2.7"
+version = "2.5"
 features = ["build"]
 
 [build-dependencies.url]

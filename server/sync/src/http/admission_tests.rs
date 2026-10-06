@@ -75,11 +75,13 @@ impl Fixture {
     }
 
     fn request(&self, path: &str) -> tokio::task::JoinHandle<reqwest::Response> {
+        let built = std::time::Instant::now();
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
+        eprintln!("ADMISSION-PROBE build {path} {:?}", built.elapsed());
         let request = if path == "/uploads/frames" {
             client.post(format!("{}{path}", self.endpoint))
         } else {
@@ -121,10 +123,16 @@ async fn queued_bulk_bodies_do_not_block_control_requests() {
         jobs.push(fixture.request("/uploads/frames"));
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
+    let t0 = std::time::Instant::now();
+    let mark = |label: &str| eprintln!("ADMISSION-PROBE {label} {:?}", t0.elapsed());
     let controls = async {
         assert_eq!(fixture.request("/head").await.unwrap().status(), 200);
+        mark("head");
         assert_eq!(fixture.request("/time").await.unwrap().status(), 200);
-        let response = reqwest::Client::new()
+        mark("time");
+        let client = reqwest::Client::new();
+        mark("client-new");
+        let response = client
             .post(format!("{}/ack", fixture.endpoint))
             .bearer_auth(&fixture.token)
             .header("x-risu-library", &fixture.library)
@@ -133,6 +141,7 @@ async fn queued_bulk_bodies_do_not_block_control_requests() {
             .await
             .unwrap();
         assert_eq!(response.status(), 204);
+        mark("ack");
         let mut request = format!("{}/notify", fixture.endpoint.replace("http://", "ws://"))
             .into_client_request()
             .unwrap();
@@ -144,16 +153,19 @@ async fn queued_bulk_bodies_do_not_block_control_requests() {
             .headers_mut()
             .insert("x-risu-library", fixture.library.parse().unwrap());
         let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        mark("ws-connect");
         assert_eq!(
             socket.next().await.unwrap().unwrap().into_text().unwrap(),
             r#"{"type":"seq","seq":"0"}"#
         );
         socket.close(None).await.unwrap();
         while socket.next().await.is_some() {}
+        mark("ws-closed");
     };
     let completed = tokio::time::timeout(Duration::from_secs(1), controls)
         .await
         .is_ok();
+    mark(if completed { "completed" } else { "TIMEOUT" });
     drop(cpu);
     fixture.release.add_permits(12);
     for job in jobs {

@@ -6,7 +6,7 @@
 
 use std::{
     path::PathBuf,
-    sync::{Mutex, mpsc::Receiver},
+    sync::{mpsc::Receiver, Mutex},
 };
 
 use cookie_store::{CookieStore, RawCookie, RawCookieParseError};

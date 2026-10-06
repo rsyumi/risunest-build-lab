@@ -165,14 +165,14 @@
     {
       "path": "benchmarks/ios/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 187409,
-      "sha256": "1813654389c339c8dbd85cbadf123eaaa1ed4ed15d271f6f529725068b5b95c1"
+      "bytes": 188313,
+      "sha256": "54a8383c71ced692d27c9ad39c2cf788bc07e07c7c8de89c969881f17c37390f"
     },
     {
       "path": "benchmarks/ios/native/Cargo.toml",
       "mode": "100644",
-      "bytes": 1198,
-      "sha256": "b8286dd02b3d420693c5a23d9def8aa0c3527de4a2b80d8760797a92ad49b0f8"
+      "bytes": 1115,
+      "sha256": "d41d1de5cccd558e5607845c2ebc0112013bf1b26ae013fa662ee298c0c72a25"
     },
     {
       "path": "benchmarks/ios/native/build.rs",
@@ -501,14 +501,14 @@
     {
       "path": "benchmarks/macos/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 187239,
-      "sha256": "ce7c851667f458606ebb5526526648efb9437f03e672de700121633864f5f36f"
+      "bytes": 188000,
+      "sha256": "1488876813d1f5addbeace59630aa94f2c33afec05208b683251d9f8b1aaafd8"
     },
     {
       "path": "benchmarks/macos/native/Cargo.toml",
       "mode": "100644",
       "bytes": 1189,
-      "sha256": "28f7d3fb8576d8292a9443d24285249d8da594d7753ebd05d06ce11737b800ab"
+      "sha256": "1674eed39039e3bbf53da4f97e9d0ebe4e48bc58935b86803bd1d44286c59eee"
     },
     {
       "path": "benchmarks/macos/native/build.rs",
@@ -1636,7 +1636,7 @@
       "path": "crates/tauri-plugin-barcode-scanner/Cargo.toml",
       "mode": "100644",
       "bytes": 2011,
-      "sha256": "17a09f31dd47d1372929a0a958f7bd1af5552bdf0412d640d97a365fd3e0634e"
+      "sha256": "a1b654e15f336b359c1c72b233d75a7a5fcb18b06a898b709671e1cd4cf3d0e3"
     },
     {
       "path": "crates/tauri-plugin-barcode-scanner/LICENSE.spdx",
@@ -1665,8 +1665,8 @@
     {
       "path": "crates/tauri-plugin-barcode-scanner/android/build.gradle.kts",
       "mode": "100644",
-      "bytes": 1401,
-      "sha256": "bdcd32aaf1a3bbf0bfb25a53c0a4f37473d201b160fa0147803193110676a27c"
+      "bytes": 1325,
+      "sha256": "2956395b294bbb9d7aec2c04687aabfa56201968de97a72e4b8a4ad4d225c475"
     },
     {
       "path": "crates/tauri-plugin-barcode-scanner/android/consumer-rules.pro",
@@ -1719,14 +1719,14 @@
     {
       "path": "crates/tauri-plugin-barcode-scanner/api-iife.js",
       "mode": "100644",
-      "bytes": 1096,
-      "sha256": "44f5e7b70212f193c70d04547d63b1fc5ecba6adea8b475bbded8c04ac7a09b7"
+      "bytes": 1261,
+      "sha256": "d7a3d068357c30b8cb187b2b759542093f6cda25150bdb8023c32e5ea86c8e66"
     },
     {
       "path": "crates/tauri-plugin-barcode-scanner/build.rs",
       "mode": "100644",
-      "bytes": 915,
-      "sha256": "933a6e0da7a1a50d8da9a45d54db70abbccd95a27d7c213f41a09869ad328de7"
+      "bytes": 741,
+      "sha256": "b174ab151535f9f88167c7c7a26733d0a71ba22beaf38d696ac33478a55859a0"
     },
     {
       "path": "crates/tauri-plugin-barcode-scanner/ios/.gitignore",
@@ -1815,14 +1815,14 @@
     {
       "path": "crates/tauri-plugin-barcode-scanner/src/error.rs",
       "mode": "100644",
-      "bytes": 1023,
-      "sha256": "0866cc439a0947830513eeb0bec2bd8e83e65ca4a6e585fa13862987b5ca9516"
+      "bytes": 679,
+      "sha256": "e314f581e68206a37b323880cb00c050408bcedf3de44706de8a478f1c66d89b"
     },
     {
       "path": "crates/tauri-plugin-barcode-scanner/src/lib.rs",
       "mode": "100644",
-      "bytes": 1736,
-      "sha256": "310ee8752be93dcb54d28231d050156a4cea6100ca7779031d2aa328e9d349dd"
+      "bytes": 1559,
+      "sha256": "3a993856077c611b2dc6e2a227e73958588992c7708f14bfd99f66a7396f206a"
     },
     {
       "path": "crates/tauri-plugin-barcode-scanner/src/mobile.rs",
@@ -1846,25 +1846,25 @@
       "path": "crates/tauri-plugin-http/.cargo_vcs_info.json",
       "mode": "100644",
       "bytes": 106,
-      "sha256": "964088edc23282860171f8fb982b70e736ef60d417f8414ceabcbce0b0cc2c78"
+      "sha256": "3dfae637626492ce34211103d23b4bad6393775f0c20ea8dd871be8490b405b1"
     },
     {
       "path": "crates/tauri-plugin-http/Cargo.lock",
       "mode": "100644",
-      "bytes": 120282,
-      "sha256": "3ccd80a12e45b72690fab923dc017f3af398a5c0c1d667d95fb147cb969db83c"
+      "bytes": 116682,
+      "sha256": "6e8210f1563b194ce1275abcc6a43495f353f378274227035a05ad0611be9e00"
     },
     {
       "path": "crates/tauri-plugin-http/Cargo.toml",
       "mode": "100644",
-      "bytes": 3625,
-      "sha256": "3b8970acec941d5a4bb5f192e1f3cfd6265a27fac4af6d5c3498078bcc1add37"
+      "bytes": 3612,
+      "sha256": "0d08cce770183bb98fd34a50e3e36b1caff900d8444da280fafacd99a0ddd4ee"
     },
     {
       "path": "crates/tauri-plugin-http/Cargo.toml.orig",
       "mode": "100644",
       "bytes": 2515,
-      "sha256": "a26e8d5addc75669752eca865a227b2b0bd0207648ae2e0aabfc500bb907a351"
+      "sha256": "e71ef194d8991ac881d1b319fa9da48abef6751d8675a5163be1663b14cf18cc"
     },
     {
       "path": "crates/tauri-plugin-http/LICENSE.spdx",
@@ -1887,8 +1887,8 @@
     {
       "path": "crates/tauri-plugin-http/api-iife.js",
       "mode": "100644",
-      "bytes": 2138,
-      "sha256": "6bf31818081f6d3507b8ef13e2d5c5ba7d9f83954e37d95a0e137fea99c43285"
+      "bytes": 2206,
+      "sha256": "41f8d9ec5cf9a11204ae6ec17a1d5f11a3d04aca7e34ee21dfe4177e66e5af7c"
     },
     {
       "path": "crates/tauri-plugin-http/build.rs",
@@ -1941,38 +1941,32 @@
     {
       "path": "crates/tauri-plugin-http/src/commands.rs",
       "mode": "100644",
-      "bytes": 25371,
-      "sha256": "17214722c2ecf2554e667bef9401cd2512d7e29d84f070359a664f93f852d334"
-    },
-    {
-      "path": "crates/tauri-plugin-http/src/config.rs",
-      "mode": "100644",
-      "bytes": 2118,
-      "sha256": "ce8265e452716d33e225f37e8ce0e2d4deaa06018d31e0bdc809cb2b170bf52e"
+      "bytes": 17366,
+      "sha256": "0a9b0b4b8a4f599cd3c0dd2282f207d8826a1e726f4d812ee604dac1c94ef9c6"
     },
     {
       "path": "crates/tauri-plugin-http/src/error.rs",
       "mode": "100644",
-      "bytes": 3689,
-      "sha256": "77010b6ddc4843b560fc76cab157d3474ca526665aec2497da52e24bdba7c482"
+      "bytes": 1960,
+      "sha256": "80c9d95f35457f747d243d22fc7930a1c787364eb15181445f63af88023a832f"
     },
     {
       "path": "crates/tauri-plugin-http/src/lib.rs",
       "mode": "100644",
-      "bytes": 6715,
-      "sha256": "39acac6f701aabcedd4fc063b271813c3505e95a9ffc89b486ef0f0fc8009ec5"
+      "bytes": 5714,
+      "sha256": "24a534ed69c2cef893304fcc8000c61006cf44d6fbd5e38b0717edb69a3afc9d"
     },
     {
       "path": "crates/tauri-plugin-http/src/reqwest_cookie_store.rs",
       "mode": "100644",
       "bytes": 4073,
-      "sha256": "7002930784674386fc6ee1b5ae370161c4ae4bfdeb0c0a0e9402f6798e7ab4db"
+      "sha256": "c247f8226da1a2b33205b1cbc1730b727ed2fe605019fa6948ef34b238ad5b4a"
     },
     {
       "path": "crates/tauri-plugin-http/src/scope.rs",
       "mode": "100644",
-      "bytes": 8559,
-      "sha256": "b12dce1c917b3482995672a57a110ac899a9a498e16fd5a203382827772eb9f6"
+      "bytes": 8592,
+      "sha256": "07e3fb7ec23f6b43d01fb48f1a594da389f78e0eefafddd6c5018dbc6d66c676"
     },
     {
       "path": "crates/tauri-plugin-ios-native/.gitignore",
@@ -1984,7 +1978,7 @@
       "path": "crates/tauri-plugin-ios-native/Cargo.toml",
       "mode": "100644",
       "bytes": 275,
-      "sha256": "3ca46e741894512b3732fd95c02f53948e550a4ac9807395865372a0f71d266a"
+      "sha256": "224b4beb7983ffa43e0b67e035026db4fa51950bda13332153b0d45eb477c2be"
     },
     {
       "path": "crates/tauri-plugin-ios-native/build.rs",
@@ -2044,25 +2038,25 @@
       "path": "crates/tauri-plugin-updater/.cargo_vcs_info.json",
       "mode": "100644",
       "bytes": 109,
-      "sha256": "2e8831bad3b3730c1737ee5213a99ae7cdcc1be7d8cb23f8f62d1737a93c2d00"
+      "sha256": "2ff00a15cf330da46249d23cc234a3093c0645246fcf8646e0da3b04702551d3"
     },
     {
       "path": "crates/tauri-plugin-updater/Cargo.lock",
       "mode": "100644",
-      "bytes": 111255,
-      "sha256": "1a852f27518d844237c1457e4ddcb2e7e5f892826c2d6d94b15b4dfb6826576e"
+      "bytes": 109577,
+      "sha256": "4ffc2426bfd79a2fc98cba4f687aa9e4c13ced5403e2eca3e143c537515952a8"
     },
     {
       "path": "crates/tauri-plugin-updater/Cargo.toml",
       "mode": "100644",
-      "bytes": 3684,
-      "sha256": "dbaebe2e59752c137c893ed4f4befa47da2deac66ccd3b14dd1608da5532e398"
+      "bytes": 3686,
+      "sha256": "9d5cf5eef492501f6b3b5705297e11645f5f12234c87c588e2a82b044e9507f4"
     },
     {
       "path": "crates/tauri-plugin-updater/Cargo.toml.orig",
       "mode": "100644",
       "bytes": 2280,
-      "sha256": "b58d607e116b978b1978fc1329fa8163ead4bded61ad6f5712e116586b7b9862"
+      "sha256": "15e018bf046380e50fc064fd71384bff1d962262f6299570c229a3d257efc5bf"
     },
     {
       "path": "crates/tauri-plugin-updater/LICENSE.spdx",
@@ -2085,8 +2079,8 @@
     {
       "path": "crates/tauri-plugin-updater/api-iife.js",
       "mode": "100644",
-      "bytes": 1246,
-      "sha256": "7d09adaf320aa8b059dca5ffa0f0fce28e107e878b092600730d552016d704d2"
+      "bytes": 2769,
+      "sha256": "ee4315489b17e03f42e409067a77413703e0870a8b00de77e3de1daafb069d96"
     },
     {
       "path": "crates/tauri-plugin-updater/banner.png",
@@ -2103,14 +2097,14 @@
     {
       "path": "crates/tauri-plugin-updater/guest-js/index.ts",
       "mode": "100644",
-      "bytes": 8699,
-      "sha256": "a2406b786f2f38791a1f1b8c21451854692e1c1bedbcc113fcd44650f1fafed5"
+      "bytes": 4804,
+      "sha256": "46d3646d9aa704384242ee3025427f862914811b9ddcf59341fe94f7a2d4186a"
     },
     {
       "path": "crates/tauri-plugin-updater/package.json",
       "mode": "100644",
       "bytes": 659,
-      "sha256": "d118669b278238f0678cd84a0705fc403d38d70cebd4e590148f216fdde2d888"
+      "sha256": "eeac57937da90bdaa8151cf029ccad8dd048e24adc178d0cb5b9a80f9747e8f9"
     },
     {
       "path": "crates/tauri-plugin-updater/permissions/autogenerated/commands/check.toml",
@@ -2164,25 +2158,25 @@
       "path": "crates/tauri-plugin-updater/src/commands.rs",
       "mode": "100644",
       "bytes": 5967,
-      "sha256": "c7b7393c0368b1856e128ddd817bc79d15def8f746faba0e3dbb3db7d1caad67"
+      "sha256": "7fd191f086ebb389a6d8d0921cf54752d50307a5feeda11c002b1edf7bb464f9"
     },
     {
       "path": "crates/tauri-plugin-updater/src/config.rs",
       "mode": "100644",
-      "bytes": 8925,
-      "sha256": "d5a44026e76b0f06d489eb6f460a674cf9d13efd57b64debf7f31d81289469a4"
+      "bytes": 8833,
+      "sha256": "05b68a4810335dbfde0c379d3a28bfd9ce64b0fc4da8aaf81ec3ebbfb69c49fb"
     },
     {
       "path": "crates/tauri-plugin-updater/src/error.rs",
       "mode": "100644",
-      "bytes": 5960,
-      "sha256": "b86eb8bdd43d90d00f18766808ef7659f124f364e85cfe25a01845495a8403a3"
+      "bytes": 5112,
+      "sha256": "b6254544c662ddc0783d4667f4a101a02d39727e2983c9229d50ae92e2a350cd"
     },
     {
       "path": "crates/tauri-plugin-updater/src/lib.rs",
       "mode": "100644",
-      "bytes": 10807,
-      "sha256": "62ecfbe453b4b40796b5da77865e82edb77de355875ff8f2ba5e9fb10be2fa38"
+      "bytes": 8447,
+      "sha256": "abdffac58b976d8ac1457d7001b8424f0e0006700414949c62f14234fc814ff6"
     },
     {
       "path": "crates/tauri-plugin-updater/src/macos_bundle.rs",
@@ -2193,8 +2187,8 @@
     {
       "path": "crates/tauri-plugin-updater/src/updater.rs",
       "mode": "100644",
-      "bytes": 78492,
-      "sha256": "ef379655b14b31da5b7da073a5e8fee1e288cfd88b9df8149772eda7b7f46ec8"
+      "bytes": 72469,
+      "sha256": "314fdfe5bde6b0ea5a15efc7ed1661d6ab7c8df7bfa72216e108f55b49de3812"
     },
     {
       "path": "crates/tauri-plugin-updater/tsconfig.json",
@@ -2212,25 +2206,25 @@
       "path": "crates/tauri-plugin-window-state/.cargo_vcs_info.json",
       "mode": "100644",
       "bytes": 114,
-      "sha256": "7340832d363f8a804e741f389611ea68f34843a716ed2b045968612ce36a9975"
+      "sha256": "d6723eca5287c6f75f7a875a81244893e1055460ade72940e970444ff56fedc3"
     },
     {
       "path": "crates/tauri-plugin-window-state/Cargo.lock",
       "mode": "100644",
-      "bytes": 98714,
-      "sha256": "32c7f64518950c32e6bc98afb4463764f7e70cf8b66ff62120fdcabd9e07ba9a"
+      "bytes": 101239,
+      "sha256": "fda37ae5238835f2bc7c19770815672078adeabca7416a2084423734ae740c8f"
     },
     {
       "path": "crates/tauri-plugin-window-state/Cargo.toml",
       "mode": "100644",
-      "bytes": 1882,
-      "sha256": "21eb7374c8128e519911d2128ff0a0e8574147d0ad014a7f77ede94a9151484a"
+      "bytes": 1749,
+      "sha256": "c6e65c2ca5b5483136afffaea9ab61ec99e8679450b056d685363eea72a578e2"
     },
     {
       "path": "crates/tauri-plugin-window-state/Cargo.toml.orig",
       "mode": "100644",
-      "bytes": 959,
-      "sha256": "f53da0af647a9c95d0dba78b273582eb781495da6b52c5f38dada1d46c945784"
+      "bytes": 851,
+      "sha256": "84c89548bdbf02da7920ccd77b2b0f002dc0a36816990f538393fe8375693468"
     },
     {
       "path": "crates/tauri-plugin-window-state/LICENSE.spdx",
@@ -2253,14 +2247,32 @@
     {
       "path": "crates/tauri-plugin-window-state/api-iife.js",
       "mode": "100644",
-      "bytes": 859,
-      "sha256": "53e57416c05b32aa9124ce995134037bba629f5e09e200ffdc1b47f6dc11f576"
+      "bytes": 15577,
+      "sha256": "2db5c5c470ce5203a54a0d89f55880a84a69542373d0cf97a210faa56d2358be"
+    },
+    {
+      "path": "crates/tauri-plugin-window-state/banner.png",
+      "mode": "100644",
+      "bytes": 46441,
+      "sha256": "d87c76246c54044551884c2add6641b5aa4556322161a4efd99c10339892d626"
     },
     {
       "path": "crates/tauri-plugin-window-state/build.rs",
       "mode": "100644",
       "bytes": 344,
       "sha256": "fe5d16d272b78c052ba4005ace21cf952f501d9f57ce18a7fc082a485223d95e"
+    },
+    {
+      "path": "crates/tauri-plugin-window-state/guest-js/index.ts",
+      "mode": "100644",
+      "bytes": 1348,
+      "sha256": "d6e9fc4ee3d8c6a8580cce6b1a55f8a355bd0bb90e150803d428bfa3af372d95"
+    },
+    {
+      "path": "crates/tauri-plugin-window-state/package.json",
+      "mode": "100644",
+      "bytes": 757,
+      "sha256": "03a9537fbd7a52ce9fba933762c3a2c296274a64daa958658f4216b8370229e2"
     },
     {
       "path": "crates/tauri-plugin-window-state/permissions/autogenerated/commands/filename.toml",
@@ -2293,22 +2305,28 @@
       "sha256": "913fcbbd4419370e7ee8976c69bf4dcdef24b8f4410cbcacb5b09b7693c23714"
     },
     {
+      "path": "crates/tauri-plugin-window-state/rollup.config.js",
+      "mode": "100644",
+      "bytes": 234,
+      "sha256": "4c957e83a7aaf66a84d2c96d544e6f65ccc9d39ba76f593dd1bc1ebd8c0420c5"
+    },
+    {
       "path": "crates/tauri-plugin-window-state/src/cmd.rs",
       "mode": "100644",
       "bytes": 1398,
-      "sha256": "2a5065839eaef2830948af2a6436555b56c803aff254628590e44cd298702e7c"
+      "sha256": "f4692d7b69adae06c4733a4bfd2926e44b9fbf2c03890377c8026de750277a64"
     },
     {
       "path": "crates/tauri-plugin-window-state/src/lib.rs",
       "mode": "100644",
-      "bytes": 22493,
-      "sha256": "4352c86b8848e4d3da08cae2a432f4bbeeda7b7f27764865175932c27542a224"
+      "bytes": 20798,
+      "sha256": "ed3bf2eca679b7383374db2b8e704666159295707fc5dcf5a42e9becd79880f3"
     },
     {
-      "path": "crates/wry/.cargo/audit.toml",
+      "path": "crates/tauri-plugin-window-state/tsconfig.json",
       "mode": "100644",
-      "bytes": 323,
-      "sha256": "26f5e627f768cce1687f4460d56a18b4725817d5ae392dfd154541ef39c40e3b"
+      "bytes": 76,
+      "sha256": "fd1a3f4fa7dac93a35b46e97e8cae61a7d12cbefbcbb0e294d6705c29303cff8"
     },
     {
       "path": "crates/wry/.cargo/config.toml",
@@ -2331,20 +2349,20 @@
     {
       "path": "crates/wry/Cargo.lock",
       "mode": "100644",
-      "bytes": 109232,
-      "sha256": "3a58ebd77fd1bbdd00e8a1df35e972e0fb89682cae57b791071fe9ceb0380988"
+      "bytes": 109107,
+      "sha256": "af619c25400de25d1a86a70186d1a850cd62012f06530eab1dd5fecf06a33e1a"
     },
     {
       "path": "crates/wry/Cargo.toml",
       "mode": "100644",
-      "bytes": 9721,
-      "sha256": "e67fe2036ffcbe811b4c682181efc8a8005ee51ab5b5f254d51639d00a8ee4fb"
+      "bytes": 9524,
+      "sha256": "bd17f58e514f6099a7f1e0cfa6aedf414102d1fe8fa130beca81e7030b705588"
     },
     {
       "path": "crates/wry/Cargo.toml.orig",
       "mode": "100644",
-      "bytes": 5594,
-      "sha256": "46225e1e42004bd3ab17155d4abb236c94d9feed78b39fdaf18600db695d993a"
+      "bytes": 5463,
+      "sha256": "606420fd1c8cd695cc820d309f97ff4c9f5f71c8591c478587c23ab6db5da310"
     },
     {
       "path": "crates/wry/LICENSE-APACHE",
@@ -2367,14 +2385,14 @@
     {
       "path": "crates/wry/build.rs",
       "mode": "100644",
-      "bytes": 4429,
-      "sha256": "689c618b57d95f2d9e4578744c8126615d93c5624d9b3747af20650e577ccb1b"
+      "bytes": 4031,
+      "sha256": "3c3153deae92302ed707b06ecfafffbf256f0ef4157b813c3120887c8010d7db"
     },
     {
       "path": "crates/wry/examples/async_custom_protocol.rs",
       "mode": "100644",
-      "bytes": 2790,
-      "sha256": "7fcc3cb22197f41da43b18550a705690cac5fa4f07942f4cb36dcd279a7903b8"
+      "bytes": 3168,
+      "sha256": "679e6c09f54c8d284665f52c4a13b726db58583eb27b96975f5fe543cee1052d"
     },
     {
       "path": "crates/wry/examples/cookies.rs",
@@ -2385,8 +2403,8 @@
     {
       "path": "crates/wry/examples/custom_protocol.rs",
       "mode": "100644",
-      "bytes": 2723,
-      "sha256": "a36b0a6f50f23a09e3a452f21688ea6372f525f2bcf90a4228aea369a429613d"
+      "bytes": 3101,
+      "sha256": "a369505817b3de906d210ff08e3a30bf393a625ac83ac32fd7b2cbbe87bb09c1"
     },
     {
       "path": "crates/wry/examples/custom_protocol/index.html",
@@ -2427,8 +2445,8 @@
     {
       "path": "crates/wry/examples/gtk_opengl.rs",
       "mode": "100644",
-      "bytes": 6645,
-      "sha256": "c9f9e1319709264c90a98bd2238294b743537857dc2cb4d6df22c92c59aa30d5"
+      "bytes": 6648,
+      "sha256": "50772b28bf657afddfbf56fb0b0f7a3b8a1a4a2a03b32531f6ae957bc4c3a372"
     },
     {
       "path": "crates/wry/examples/multiwebview.rs",
@@ -2441,12 +2459,6 @@
       "mode": "100644",
       "bytes": 3478,
       "sha256": "86a8dbe10e1913c5b67b0667998ca005886323cce13edc3ac65261b5c5d87723"
-    },
-    {
-      "path": "crates/wry/examples/permission_handler.rs",
-      "mode": "100644",
-      "bytes": 1804,
-      "sha256": "4ce919e92462170937ef0b1f20f18e7e91f68c85160aad021b1449e00f19fc25"
     },
     {
       "path": "crates/wry/examples/reparent.rs",
@@ -2463,8 +2475,8 @@
     {
       "path": "crates/wry/examples/streaming.rs",
       "mode": "100644",
-      "bytes": 7900,
-      "sha256": "ab7e7e1559ebb22d2f40e06e98ccc40adbd209a2281facb36d56646a3bba36c3"
+      "bytes": 8551,
+      "sha256": "14e006096b01e283e237b9362a8e81842b520710f280eb909d1b8e69d53c4ac5"
     },
     {
       "path": "crates/wry/examples/streaming/index.html",
@@ -2475,8 +2487,8 @@
     {
       "path": "crates/wry/examples/transparent.rs",
       "mode": "100644",
-      "bytes": 2076,
-      "sha256": "0f1f428e5ae771725b886108fa595892b5d3303146d761e86c31d700920eee08"
+      "bytes": 2143,
+      "sha256": "6e0b349c5b56f2a0312f32e738b1dc282c5cd11fe0fbcabe9b855d2c5cc47e4f"
     },
     {
       "path": "crates/wry/examples/wgpu.rs",
@@ -2511,8 +2523,8 @@
     {
       "path": "crates/wry/src/android/binding.rs",
       "mode": "100644",
-      "bytes": 18631,
-      "sha256": "8118f973f9f8ba6ed771e768a1f689aa2801ab1a0d801b9e3babbac194be0002"
+      "bytes": 16474,
+      "sha256": "676270dcc4557259007bf1c5d51b7ad56e1ea865dc6af14ffbbe0309a0949a50"
     },
     {
       "path": "crates/wry/src/android/kotlin/Ipc.kt",
@@ -2535,8 +2547,8 @@
     {
       "path": "crates/wry/src/android/kotlin/Rust.kt",
       "mode": "100644",
-      "bytes": 2085,
-      "sha256": "41513f47e971cd5bf2831014ce4b42474d561186c638950f78f856b4583c54fb"
+      "bytes": 2097,
+      "sha256": "28f97e67936a70b0e005f6feefc5d62c65287e36ec7d73ae37368bd10a01d158"
     },
     {
       "path": "crates/wry/src/android/kotlin/RustResponseStream.kt",
@@ -2547,8 +2559,8 @@
     {
       "path": "crates/wry/src/android/kotlin/RustWebChromeClient.kt",
       "mode": "100644",
-      "bytes": 17024,
-      "sha256": "5e225fc1a85e769e4a666b7cd47946356e742190060803ecb31a12a68bf1ce06"
+      "bytes": 16156,
+      "sha256": "651701cbaeee1d88032cd2b1a9cf47d36bf6c02509ff11541cef80b21a536093"
     },
     {
       "path": "crates/wry/src/android/kotlin/RustWebView.kt",
@@ -2559,14 +2571,14 @@
     {
       "path": "crates/wry/src/android/kotlin/RustWebViewClient.kt",
       "mode": "100644",
-      "bytes": 3772,
-      "sha256": "1e5ec43b3ae2315aeaa4d5721435076c3a26b84276ac9e83fe3b331f4277f4f8"
+      "bytes": 3685,
+      "sha256": "deeb93a0960d7c9f2268bef4f43d220aa7bb0e981826372f0120ec9c514b2c2b"
     },
     {
       "path": "crates/wry/src/android/kotlin/WryActivity.kt",
       "mode": "100644",
-      "bytes": 6572,
-      "sha256": "585a83565bfdf924600d0f0b40eda26bce76d2947653a4fec9a87b09e21dc11d"
+      "bytes": 5371,
+      "sha256": "07067830f2356858527ad8cf93d467246875c3bd15ee578af9ccacd534b83845"
     },
     {
       "path": "crates/wry/src/android/kotlin/proguard-wry.pro",
@@ -2577,14 +2589,14 @@
     {
       "path": "crates/wry/src/android/main_pipe.rs",
       "mode": "100644",
-      "bytes": 20172,
-      "sha256": "91fc22673bb0cb54cc1b6a192c306a7f861ac566bd27f949b9d4d0b587473766"
+      "bytes": 19247,
+      "sha256": "01058b3d6651e47c67328a991e0e103cd287473328583185f8078edc3d2b2c45"
     },
     {
       "path": "crates/wry/src/android/mod.rs",
       "mode": "100644",
-      "bytes": 15918,
-      "sha256": "3ba4aeba837c80f7d294d7070a1a733f0323b9ae53052b334d313c26c7146826"
+      "bytes": 15284,
+      "sha256": "f2d05e19ea1d4f1c1d7da1972842890c28a7750c32a6cfe6020c1615bd1a2a6d"
     },
     {
       "path": "crates/wry/src/android/response_bodies.rs",
@@ -2595,8 +2607,8 @@
     {
       "path": "crates/wry/src/custom_protocol_workaround.rs",
       "mode": "100644",
-      "bytes": 2081,
-      "sha256": "509ab2ad8c8aadc5746f277d97ae5588bbdd701a6f0bca32f674328d466768b5"
+      "bytes": 2079,
+      "sha256": "6910a753ea354938168b91b6d7985e9cc4a1de76ce57b90f76d42fa695e96e25"
     },
     {
       "path": "crates/wry/src/error.rs",
@@ -2613,14 +2625,8 @@
     {
       "path": "crates/wry/src/lib.rs",
       "mode": "100644",
-      "bytes": 102979,
-      "sha256": "f5c9e28fbb1b6a4ddfed7ddface796a9e91689e8663457ed69b651ad00149ba7"
-    },
-    {
-      "path": "crates/wry/src/permissions.rs",
-      "mode": "100644",
-      "bytes": 5892,
-      "sha256": "4d933418850508a0423cdbe45fd091d0f8eeb3ccab06c9ee70dbf354032552ea"
+      "bytes": 98205,
+      "sha256": "b62771e8fd3a0cb4afc681a4c0812a2d883946995fc46570712375b22fe96972"
     },
     {
       "path": "crates/wry/src/proxy.rs",
@@ -2649,8 +2655,8 @@
     {
       "path": "crates/wry/src/webkitgtk/mod.rs",
       "mode": "100644",
-      "bytes": 40597,
-      "sha256": "20a4064b352747b46d7e15ae6962922dfa85017660e109e87e255219c6ee2017"
+      "bytes": 36948,
+      "sha256": "276f4449a1c5e7c7ee8ca67cbde44f8a5605c75fd5529cc597f6ac2d3b41afa5"
     },
     {
       "path": "crates/wry/src/webkitgtk/synthetic_mouse_events.rs",
@@ -2673,8 +2679,8 @@
     {
       "path": "crates/wry/src/webview2/mod.rs",
       "mode": "100644",
-      "bytes": 59539,
-      "sha256": "4800257d9d251c59b5aa464814ade5f8f041a854f0e4498afbdb036eba5307b8"
+      "bytes": 56449,
+      "sha256": "f8abc032e2f0acdb04d865e5e88d0ec11e2841944e24dc7089cd4b55f140af20"
     },
     {
       "path": "crates/wry/src/webview2/util.rs",
@@ -2697,8 +2703,8 @@
     {
       "path": "crates/wry/src/wkwebview/class/url_scheme_handler.rs",
       "mode": "100644",
-      "bytes": 12090,
-      "sha256": "09a55a1804dbf40c0bc2ed2e19a53199136c53cc143c393bb6d0123736aa2af4"
+      "bytes": 12841,
+      "sha256": "1cc38a32613b6f281f94aa54e45ac1be0bab78b083990ef09112256e3d263e94"
     },
     {
       "path": "crates/wry/src/wkwebview/class/wry_download_delegate.rs",
@@ -2733,8 +2739,8 @@
     {
       "path": "crates/wry/src/wkwebview/class/wry_web_view_ui_delegate.rs",
       "mode": "100644",
-      "bytes": 11368,
-      "sha256": "931ad3ca6e303963e4d2c4267e2cd9fb94a0eef1ac8af8e6602b30cdcc324cc3"
+      "bytes": 9706,
+      "sha256": "f9bab65e7ff279786b28935725321a1ee6fe8804c5ca3072d042198f6562c497"
     },
     {
       "path": "crates/wry/src/wkwebview/download.rs",
@@ -2763,8 +2769,8 @@
     {
       "path": "crates/wry/src/wkwebview/mod.rs",
       "mode": "100644",
-      "bytes": 52193,
-      "sha256": "a466a6d6a5fa75013876492a2074c3693601bcac63716de0c9cc54bceab5bf6b"
+      "bytes": 51287,
+      "sha256": "686ef932c341c2a5a7317419f7be36af557c4fe262ee7de2f819d01510299cad"
     },
     {
       "path": "crates/wry/src/wkwebview/navigation.rs",
@@ -2800,13 +2806,13 @@
       "path": "package.json",
       "mode": "100644",
       "bytes": 10260,
-      "sha256": "743888873435880980e4b42a6a44c26c14238d9517606b1bd653563fe4b46183"
+      "sha256": "4b5cc92382a70954fd23b0ac8522f33cefdd2e53a17b2f27f84a78b27a9ff0c4"
     },
     {
-      "path": "patches/@tauri-apps__plugin-http@2.8.0.patch",
+      "path": "patches/@tauri-apps__plugin-http@2.6.1.patch",
       "mode": "100644",
-      "bytes": 6875,
-      "sha256": "6e69e33621ae986740e834d294155e18a5e94391f03321c724b0b10fd581f1e2"
+      "bytes": 6871,
+      "sha256": "e4c2ba214440e82a70f3fbd5df9201afcabf077edd80953c7330abcf414dadd7"
     },
     {
       "path": "patches/playwright-core@1.63.0.patch",
@@ -2824,13 +2830,13 @@
       "path": "pnpm-lock.yaml",
       "mode": "100644",
       "bytes": 151917,
-      "sha256": "38d59aea9d0d789fec53abb2c464725d819fedc24444b466582eadb5699e1b5c"
+      "sha256": "a33912b5f8b5a97c1f7a83f6b54304a2a4aaf0a6bb524db558463c5e9c43eefe"
     },
     {
       "path": "pnpm-workspace.yaml",
       "mode": "100644",
       "bytes": 425,
-      "sha256": "468f9489e3a5f0832e9049850187a8bc51b10754c769efd489f710293b19edcf"
+      "sha256": "5741e97f1b1b7aceb744466188ee52329340b933795e871507a93d5261d83edd"
     },
     {
       "path": "public/assets/bergamot-translator-worker.js",
@@ -3592,25 +3598,25 @@
       "path": "server/manager/gui/package.json",
       "mode": "100644",
       "bytes": 865,
-      "sha256": "557210124a704a95069a76ffb4e8162493f579b7a5bb85cc9f7482407ba350a7"
+      "sha256": "54fdb165ce03cef93563f48c1e851c52f2dd62b74961d78e684692459f2c47c9"
     },
     {
       "path": "server/manager/gui/pnpm-lock.yaml",
       "mode": "100644",
       "bytes": 38407,
-      "sha256": "f018df260ff3fc39318d60f7c117b3d5570b39589f48bd8d41d609200217a4bb"
+      "sha256": "228cce264be7f20df71b66411af7bad440245530d77d219fc386861d45dcf1b2"
     },
     {
       "path": "server/manager/gui/src-tauri/Cargo.lock",
       "mode": "100644",
-      "bytes": 142442,
-      "sha256": "ef35fe04829175cb5d0aee7e47bb2d662d0d7c5b1491c33bea99330591b1bd10"
+      "bytes": 146063,
+      "sha256": "ce017e8c8e531071787fa9c5c8f498813124eaca0e3738e9e0cac61f2cc899ff"
     },
     {
       "path": "server/manager/gui/src-tauri/Cargo.toml",
       "mode": "100644",
       "bytes": 972,
-      "sha256": "e74c0d79e45165216b4cadba81a2604e295abf63a4fc8ba2f1b2a42309aad926"
+      "sha256": "c9631a4efc2a4a57632f462902f740f52935c2625e378dd94ed89b9ec9f74542"
     },
     {
       "path": "server/manager/gui/src-tauri/build.rs",
@@ -4047,8 +4053,8 @@
     {
       "path": "server/sync/src/http/admission_tests.rs",
       "mode": "100644",
-      "bytes": 16087,
-      "sha256": "6a7af040e3d1006a00c361f92e12685021926a9949479863413b23f878ec02b7"
+      "bytes": 16569,
+      "sha256": "2f1d1e3dad5350ee94c889d42679fa7fcaf6f2c0e8d888adcda45a8fa6c7c8b3"
     },
     {
       "path": "server/sync/src/http/lww.rs",
@@ -4419,14 +4425,14 @@
     {
       "path": "src-tauri/Cargo.lock",
       "mode": "100644",
-      "bytes": 191887,
-      "sha256": "2d3690874cbf4d07725eb124d394ec81458453e4d9beba92f646709fb1901302"
+      "bytes": 192648,
+      "sha256": "446c1644fda5a803d76f422600dc3d83782656086f4ec40e4ce226c05e4fb511"
     },
     {
       "path": "src-tauri/Cargo.toml",
       "mode": "100644",
       "bytes": 6933,
-      "sha256": "80e85b25f43a19d4a8193ae878d7a038c77f8ee911c431d3717b49736fc2b1f9"
+      "sha256": "a4f796508898adee5dae33be33a9a6a8f8bf09489dda4f718337f676909c3142"
     },
     {
       "path": "src-tauri/Info.plist",
@@ -6406,7 +6412,7 @@
       "path": "src-tauri/src/ipc_read_guard.test.ts",
       "mode": "100644",
       "bytes": 11802,
-      "sha256": "c7cb65d7ded1232137d833dfeeb8873fdddac1b3630770473f293e6a1428c435"
+      "sha256": "5b1bf01519dd03fd6651884473fa20ea56428d68986fd210f47485bc0f51ed50"
     },
     {
       "path": "src-tauri/src/lib.rs",
@@ -16723,19 +16729,19 @@
       "sha256": "ca60038a340dc642812f75abaf79eb5e75dd8df06869597853da9a6756a438df"
     },
     {
-      "path": "tests/fixtures/tauri-2.12.1/core.js",
+      "path": "tests/fixtures/tauri-2.11.6/core.js",
       "mode": "100644",
       "bytes": 2981,
       "sha256": "71056442a732cca1f03572ccae96d68e16104c3a591c64de9618cd304e063070"
     },
     {
-      "path": "tests/fixtures/tauri-2.12.1/ipc-protocol.js",
+      "path": "tests/fixtures/tauri-2.11.6/ipc-protocol.js",
       "mode": "100644",
       "bytes": 3390,
       "sha256": "68ae690606006f733bde75dd8bb6748464954a22c7e83914a93b1abc221d7072"
     },
     {
-      "path": "tests/fixtures/tauri-2.12.1/process-ipc-message-fn.js",
+      "path": "tests/fixtures/tauri-2.11.6/process-ipc-message-fn.js",
       "mode": "100644",
       "bytes": 1187,
       "sha256": "d51917f89e4d3d318d63f1f4f5a7ac7ea1399a5b85c81a840c4d606597f29132"
@@ -16797,14 +16803,14 @@
     {
       "path": "tests/native/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 187217,
-      "sha256": "8192337cb28caac043aadbcfe09ec5f4c7631ea7594390f17c8385e545725ba5"
+      "bytes": 187978,
+      "sha256": "44d8074ce4cbc1f3bf97f60b5d6e30fb4097920c46699e8010140cccc7a16734"
     },
     {
       "path": "tests/native/native/Cargo.toml",
       "mode": "100644",
       "bytes": 1159,
-      "sha256": "0466bef13fb4192e5333773645132802a5ab1813de980ceb309015f93517681d"
+      "sha256": "ffd59d0c50652a1d44c036ba91ad2d9eb49b6b9d990e8272d77b869d583efcf7"
     },
     {
       "path": "tests/native/native/build.rs",
@@ -17387,8 +17393,8 @@
     {
       "path": "crates/tauri-plugin-barcode-scanner/RISUNEST-PATCH.md",
       "mode": "100644",
-      "bytes": 1166,
-      "sha256": "dd25b82cd7e2e0998bfd0dfde7202500d9f9087e7761488d34f1a55dc312724a",
+      "bytes": 673,
+      "sha256": "f587ab177282546ed67be24a72e52a6b2395ef988be69fefef84e57ee4166af1",
       "reason": "explanatory-document"
     },
     {
@@ -17401,15 +17407,15 @@
     {
       "path": "crates/tauri-plugin-http/CHANGELOG.md",
       "mode": "100644",
-      "bytes": 21519,
-      "sha256": "88f8604a0c86de28ceb2cdd58d8b85e0d9aa85ee81f701623d59fdd803ae2883",
+      "bytes": 19428,
+      "sha256": "a06d68b28a395a9ea58834ccdf7af8da66a11a7c8f782c9853ed4454413e6caf",
       "reason": "explanatory-document"
     },
     {
       "path": "crates/tauri-plugin-http/README.md",
       "mode": "100644",
-      "bytes": 2557,
-      "sha256": "048f4407f06f3b338f120ffa35063710846dada041dcc6c1d305253cc56730ba",
+      "bytes": 2559,
+      "sha256": "2b86001c6b29b584b45a23839401264f11ebea323dc3c49ad9e27522a79ea3c4",
       "reason": "explanatory-document"
     },
     {
@@ -17429,15 +17435,15 @@
     {
       "path": "crates/tauri-plugin-updater/CHANGELOG.md",
       "mode": "100644",
-      "bytes": 27839,
-      "sha256": "1b06e5d7bd113d3bf808134a19b27c426160092498c8e1eb65ab0106b1fe869a",
+      "bytes": 25037,
+      "sha256": "de96303ff1faff15eb27422a31afdcf8a97f6e44f946c0d1ec5660fd12c4a159",
       "reason": "explanatory-document"
     },
     {
       "path": "crates/tauri-plugin-updater/README.md",
       "mode": "100644",
-      "bytes": 1200,
-      "sha256": "2d11f5daf23228f233494cc426ac566c1639eecb908fa0516e4131bac2114852",
+      "bytes": 885,
+      "sha256": "ba548c857525706c0d73b07cf8558a68313c1b2e197230b1f77e36084162e5be",
       "reason": "explanatory-document"
     },
     {
@@ -17457,15 +17463,15 @@
     {
       "path": "crates/tauri-plugin-window-state/CHANGELOG.md",
       "mode": "100644",
-      "bytes": 13087,
-      "sha256": "5fe670c9a5f40b274b6de8415cadfaa25c1af54309cd91c7dd31f38acbcf9cc1",
+      "bytes": 12150,
+      "sha256": "a201fcb4ae70cb1ab845d4bcc6f8a14197f16a8ef3951df3a1f4623ecdd19122",
       "reason": "explanatory-document"
     },
     {
       "path": "crates/tauri-plugin-window-state/README.md",
       "mode": "100644",
-      "bytes": 3605,
-      "sha256": "ea267e741c341778e52411ab9671c038a27e6bc5a52434986fce37b9d7833285",
+      "bytes": 3607,
+      "sha256": "de5db738468ed689982384fd1d887c2c6f2a24e3fb281762897de2507bbff403",
       "reason": "explanatory-document"
     },
     {
@@ -17485,8 +17491,8 @@
     {
       "path": "crates/wry/CHANGELOG.md",
       "mode": "100644",
-      "bytes": 154537,
-      "sha256": "0a90dc50dd6a32964a8a60f1693b0ca294285b99966d3627c56defe154592401",
+      "bytes": 145469,
+      "sha256": "e0ed6ecfaf5ef9b76acc2f63ee397dd3933c87c9b269f2d5b22b9589c9b05208",
       "reason": "explanatory-document"
     },
     {
@@ -17499,8 +17505,8 @@
     {
       "path": "crates/wry/README.md",
       "mode": "100644",
-      "bytes": 10518,
-      "sha256": "cfa18c4d0e5a72d02b71e28c381de76d870d2adac8acf7b077071a5431ee536d",
+      "bytes": 10988,
+      "sha256": "cc68c09fb277bacf4d61ae79d9bd0e7763e5f39719f9239ec8444602f3d59485",
       "reason": "explanatory-document"
     },
     {
