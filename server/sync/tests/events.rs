@@ -151,7 +151,9 @@ async fn notification_connections_have_no_count_cap_and_remain_drainable() {
         .headers_mut()
         .insert("x-risu-library", server.device.library_id.parse().unwrap());
     let (mut extra, _) = tokio::time::timeout(Duration::from_secs(5), connect_async(request))
-        .await.expect("notification connection waited behind existing sockets").unwrap();
+        .await
+        .expect("notification connection waited behind existing sockets")
+        .unwrap();
     assert!(next(&mut extra).await.is_text());
     sockets.push(extra);
     let response = server

@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({ trigger: vi.fn(), generate: vi.fn(), process: 
     bounded: false, appended: [] as any[], acquireComplete: vi.fn(), flush: vi.fn(async () => {}),
     historyLimit: false, openWindow: vi.fn(), notify: vi.fn(async () => {}), scope: { finish: vi.fn(), release: vi.fn() }, createScope: vi.fn(),
     translate: vi.fn(), chatsProps: null as any, confirm: vi.fn(async () => false),
+    viewport: { jumpTo: async () => true, jumpToTop: vi.fn(async () => true), jumpToBottom: vi.fn(async () => true), navigateMessage: vi.fn(async () => true) },
     target: { characterId: 'character', conversationId: 'chat', navigationGeneration: 1, storeRevision: 1, sessionToken: 'windowed' },
 }))
 vi.mock('src/lang', () => ({ language: languageEnglish }))
@@ -58,7 +59,7 @@ vi.mock('src/ts/parser/parser.svelte', () => ({}))
 vi.mock('./Suggestion.svelte', () => ({ default: () => {} }))
 vi.mock('./Chats.svelte', () => ({ default: (_anchor: unknown, props: unknown) => {
     mocks.chatsProps = props
-    return { jumpTo: async () => true }
+    return mocks.viewport
 } }))
 vi.mock('./AssetInput.svelte', () => ({ default: () => {} }))
 vi.mock('./InlayFilePreview.svelte', () => ({ default: () => {} }))
@@ -112,6 +113,40 @@ afterEach(async () => {
     if (instance) await unmount(instance)
     instance = undefined
     document.body.replaceChildren()
+})
+
+it('shows the scroll buttons for a while after the chat scrolls and runs each move', async () => {
+    const nav = document.querySelector<HTMLElement>('[data-chat-scroll-nav]')!
+    const button = (label: string) => nav.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!
+    expect(nav.classList.contains('invisible')).toBe(true)
+    vi.useFakeTimers()
+    try {
+        mocks.chatsProps.onScrollMove()
+        await tick()
+        expect(nav.classList.contains('invisible')).toBe(false)
+        await vi.advanceTimersByTimeAsync(1_000)
+        button('Scroll Up').click()
+        await vi.advanceTimersByTimeAsync(1_499)
+        expect(nav.classList.contains('invisible')).toBe(false)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(nav.classList.contains('invisible')).toBe(true)
+    } finally {
+        vi.useRealTimers()
+    }
+    button('Scroll Down').click()
+    button('Scroll to Top').click()
+    button('Scroll to Bottom').click()
+    expect(mocks.viewport.navigateMessage.mock.calls).toEqual([['previous', 0], ['next', 0]])
+    expect(mocks.viewport.jumpToTop).toHaveBeenCalledOnce()
+    expect(mocks.viewport.jumpToBottom).toHaveBeenCalledOnce()
+})
+
+it('keeps the scroll buttons hidden while the chat menu is open', async () => {
+    const nav = document.querySelector<HTMLElement>('[data-chat-scroll-nav]')!
+    document.querySelector<HTMLButtonElement>('.button-icon-send')!.nextElementSibling!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    mocks.chatsProps.onScrollMove()
+    await tick()
+    expect(nav.classList.contains('invisible')).toBe(true)
 })
 
 it('admits only one send while input processing is pending', async () => {

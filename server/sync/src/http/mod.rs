@@ -1,6 +1,6 @@
-mod lww;
 #[cfg(test)]
 mod admission_tests;
+mod lww;
 use crate::{
     store::{Device, Store},
     workload::{WorkKind, Workload},
@@ -224,7 +224,10 @@ pub fn router_with_shutdown(
     };
     Router::new()
         .route("/session", get(session))
-        .route("/session/claim-writer", post(lww::claim_writer).get(lww::writer_claim))
+        .route(
+            "/session/claim-writer",
+            post(lww::claim_writer).get(lww::writer_claim),
+        )
         .route("/devices/{id}/status", get(device_status))
         .route("/head", get(head))
         .route("/time", get(lww::time))
@@ -591,9 +594,12 @@ async fn media(
     method: axum::http::Method,
     headers: HeaderMap,
 ) -> Result<Response> {
-    let response = resolve_media_response(app.store.clone(), token.clone(), headers.clone()).await?;
+    let response =
+        resolve_media_response(app.store.clone(), token.clone(), headers.clone()).await?;
     let mut response = if method != axum::http::Method::HEAD && media_has_body(&response) {
-        if *app.shutdown.borrow() { return Err(Error::new("server-updating", 503)); }
+        if *app.shutdown.borrow() {
+            return Err(Error::new("server-updating", 503));
+        }
         let (response, permit) = match app.media_slots.clone().try_acquire_owned() {
             Ok(permit) => (response, permit),
             Err(_) => {
@@ -601,7 +607,10 @@ async fn media(
                 // the capability after admission for expiry and revocation.
                 drop(response);
                 let permit = app.wait_slot(app.media_slots.clone()).await?;
-                (resolve_media_response(app.store.clone(), token, headers).await?, permit)
+                (
+                    resolve_media_response(app.store.clone(), token, headers).await?,
+                    permit,
+                )
             }
         };
         if media_has_body(&response) {
@@ -637,7 +646,11 @@ fn media_has_body(response: &Response) -> bool {
         .is_some_and(|length| length > 0)
 }
 
-async fn resolve_media_response(store: Arc<Store>, token: String, headers: HeaderMap) -> Result<Response> {
+async fn resolve_media_response(
+    store: Arc<Store>,
+    token: String,
+    headers: HeaderMap,
+) -> Result<Response> {
     use crate::store::MediaResponse;
     let resolved = blocking(move || store.resolve_media(&token)).await?;
     Ok(match resolved {

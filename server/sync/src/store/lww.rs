@@ -25,9 +25,7 @@ pub(super) fn parents(key: &UnitKey) -> Result<Vec<UnitKey>> {
     let c = key.components();
     let mut result = Vec::new();
     match c[0].as_str() {
-        "character" | "archive" => {
-            result.push(UnitKey::new(&["exists", "character", &c[1]])?)
-        }
+        "character" | "archive" => result.push(UnitKey::new(&["exists", "character", &c[1]])?),
         "preset" | "persona" => result.push(UnitKey::new(&["exists", &c[0], &c[1]])?),
         "conversation" | "messages" => {
             result.push(UnitKey::new(&["exists", "character", &c[1]])?);

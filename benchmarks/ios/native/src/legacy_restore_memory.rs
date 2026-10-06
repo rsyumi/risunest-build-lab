@@ -12,14 +12,14 @@ pub(crate) fn ios_bench_peak_rss() -> Result<serde_json::Value, String> {
         }
         let peak = unsafe { usage.assume_init() }.ru_maxrss;
         if peak <= 0 { return Err("Native peak RSS unavailable".into()); }
-        let mut info = std::mem::MaybeUninit::<libc::mach_task_basic_info>::zeroed();
-        let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
+        use mach2::task_info::{mach_task_basic_info, task_info_t, MACH_TASK_BASIC_INFO, MACH_TASK_BASIC_INFO_COUNT};
+        let mut info = std::mem::MaybeUninit::<mach_task_basic_info>::zeroed();
+        let mut count = MACH_TASK_BASIC_INFO_COUNT;
         // task_info fills the current resident size, which the restore gate compares against its start.
-        #[allow(deprecated)]
         let status = unsafe {
-            libc::task_info(libc::mach_task_self(), libc::MACH_TASK_BASIC_INFO, info.as_mut_ptr() as libc::task_info_t, &mut count)
+            mach2::task::task_info(mach2::traps::mach_task_self(), MACH_TASK_BASIC_INFO, info.as_mut_ptr() as task_info_t, &mut count)
         };
-        if status != libc::KERN_SUCCESS { return Err(format!("task_info failed: {status}")); }
+        if status != mach2::kern_return::KERN_SUCCESS { return Err(format!("task_info failed: {status}")); }
         let resident = unsafe { info.assume_init() }.resident_size;
         if resident == 0 { return Err("Native resident size unavailable".into()); }
         Ok(serde_json::json!({"peakRssBytes": peak, "residentBytes": resident, "source": "darwin-task-resident-and-getrusage-lifetime-bytes"}))
