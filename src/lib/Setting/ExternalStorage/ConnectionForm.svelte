@@ -19,6 +19,7 @@
         buildProviderSecret,
         externalProviderDefinitions,
         getExternalProviderDefinition,
+        type ExternalProviderField,
     } from 'src/ts/storage/sync/external/providerRegistry'
     import type {
         ExternalConnectionResult,
@@ -64,7 +65,7 @@
         tone = 'settings',
     }: Props = $props()
     const bridge = getExternalStorageBridge()
-    const FOLDER_NAME_ID = 'external-storage-folder-name'
+    const FIELD_ID = 'external-storage-field-'
     const platform = isTauriAndroid
         ? 'android'
         : isTauriIOS
@@ -100,7 +101,7 @@
     let cancellationPromise: Promise<boolean> | null = null
     let folder = $state<ExternalFolderSelection | null>(null)
     let folderError = $state('')
-    let folderNameError = $state('')
+    let fieldErrors = $state<Record<string, string>>({})
     let selectingFolder = $state(false)
     let reselectRequired = $state(false)
     let folderSelector = $state<{ selectionId: string; accountHint?: string } | null>(null)
@@ -258,7 +259,7 @@
             profile: next.profiles[0]?.value ?? '',
         }
         accepted = []
-        folderNameError = ''
+        fieldErrors = {}
         resetPrepared()
     }
 
@@ -324,7 +325,7 @@
 
     function updateValue(key: string, value: string): void {
         values[key] = value
-        if (key === 'folderName') folderNameError = ''
+        clearFieldError(key)
         resetPrepared()
     }
 
@@ -337,17 +338,31 @@
         return { ...values, folderName: folderNameField ? (values.folderName ?? '').trim() : '' }
     }
 
-    async function focusFolderName(): Promise<void> {
+    async function focusField(key: string): Promise<void> {
         await tick()
-        document.getElementById(FOLDER_NAME_ID)?.focus()
+        document.getElementById(FIELD_ID + key)?.focus()
+    }
+
+    function clearFieldError(key: string): void {
+        if (fieldErrors[key]) fieldErrors = Object.fromEntries(Object.entries(fieldErrors).filter(([item]) => item !== key))
+    }
+
+    /** Reports required fields left empty beside each one, before any request. */
+    function reportMissingFields(fields: ExternalProviderField[], endpoint = false): boolean {
+        const missing = [
+            ...(endpoint && !(values.endpoint || definition.defaultEndpoint).trim() ? ['endpoint'] : []),
+            ...fields.filter(field => field.required && field.type !== 'select' && !(values[field.key] ?? '').trim())
+                .map(field => field.key),
+        ]
+        if (!missing.length) return false
+        fieldErrors = Object.fromEntries(missing.map(key => [key,
+            ['folderName', 'root', 'rootFolderName'].includes(key) ? strings.folderNameRequired : strings.fieldRequired]))
+        void focusField(missing[0])
+        return true
     }
 
     async function prepare(): Promise<void> {
-        if (folderNameField && !(values.folderName ?? '').trim()) {
-            folderNameError = strings.folderNameRequired
-            await focusFolderName()
-            return
-        }
+        if (reportMissingFields(visibleFields, definition.customEndpoint)) return
         busy = true
         error = ''
         let request: ReturnType<typeof buildPrepareConnectionRequest>
@@ -520,6 +535,8 @@
     async function connect(): Promise<void> {
         if (!prepared || !endpointConfirmed) return
         if (folderSelection && !folder) return
+        if (!folderSelection && !prepared.requiresOAuth && !fromTransfer
+            && reportMissingFields(definition.secretFields)) return
         busy = true
         error = ''
         try {
@@ -607,8 +624,8 @@
             }
             if (mode === 'create' && externalErrorKind(reason) === 'folderNameConflict') {
                 clearPrepared()
-                folderNameError = strings.folderNameConflict
-                await focusFolderName()
+                fieldErrors = { folderName: strings.folderNameConflict }
+                await focusField('folderName')
                 return
             }
             error = externalErrorMessage(strings, reason)
@@ -693,7 +710,9 @@
         <h3 class="sub-title">{strings.connectionInfo}</h3>
         <div class="fields two">
             {#if definition.customEndpoint}
-                <label class="field span2"><span>{strings.endpoint}</span><TextInput className="disabled:opacity-50" fullwidth value={values.endpoint ?? definition.defaultEndpoint} onchange={event => updateValue('endpoint', event.currentTarget.value)} placeholder={definition.defaultEndpoint || 'https://…'} /></label>
+                <label class="field span2"><span>{strings.endpoint}</span><TextInput id="{FIELD_ID}endpoint" className="disabled:opacity-50" fullwidth value={values.endpoint ?? definition.defaultEndpoint} oninput={() => clearFieldError('endpoint')} onchange={event => updateValue('endpoint', event.currentTarget.value)} placeholder={definition.defaultEndpoint || 'https://…'} />
+                    {#if fieldErrors.endpoint}<small class="field-error" role="alert">{fieldErrors.endpoint}</small>{/if}
+                </label>
             {/if}
             {#if definition.profiles.length > 1}
                 <label class="field"><span>{strings.profile}</span>
@@ -710,12 +729,10 @@
                         <SelectInput value={values[field.key] ?? field.options?.[0] ?? ''} className="w-full disabled:opacity-50" onchange={event => updateValue(field.key, event.currentTarget.value)}>
                             {#each field.options ?? [] as option (option)}<OptionInput value={option}>{externalOptionLabel(strings, providerId, field.key, option)}</OptionInput>{/each}
                         </SelectInput>
-                    {:else if field.createOnly}
-                        <TextInput id={FOLDER_NAME_ID} className="disabled:opacity-50" fullwidth value={values[field.key] ?? ''} oninput={() => folderNameError = ''} onchange={event => updateValue(field.key, event.currentTarget.value)} placeholder={field.placeholder ?? ''} />
                     {:else}
-                        <TextInput className="disabled:opacity-50" fullwidth value={values[field.key] ?? ''} onchange={event => updateValue(field.key, event.currentTarget.value)} placeholder={field.placeholder ?? ''} />
+                        <TextInput id="{FIELD_ID}{field.key}" className="disabled:opacity-50" fullwidth value={values[field.key] ?? ''} oninput={() => clearFieldError(field.key)} onchange={event => updateValue(field.key, event.currentTarget.value)} placeholder={field.placeholder ?? ''} />
                     {/if}
-                    {#if field.createOnly && folderNameError}<small class="field-error" role="alert">{folderNameError}</small>{/if}
+                    {#if fieldErrors[field.key]}<small class="field-error" role="alert">{fieldErrors[field.key]}</small>{/if}
                     {#if help}<small>{help}</small>{/if}
                     {#if locationHelp && (field.key === 'space' || field.key === 'accountType')}<small>{locationHelp}</small>{/if}
                 </label>
@@ -796,10 +813,11 @@
                                     {#each field.options ?? [] as option (option)}<OptionInput value={option}>{externalOptionLabel(strings, providerId, field.key, option)}</OptionInput>{/each}
                                 </SelectInput>
                             {:else if field.type === 'datetime-local'}
-                                <input type="datetime-local" class="datetime rounded-md border border-darkborderc bg-transparent px-4 py-2 text-textcolor shadow-xs transition-colors duration-200 focus:border-borderc focus:ring-2 focus:ring-borderc focus:outline-hidden disabled:opacity-50" bind:value={values[field.key]} />
+                                <input id="{FIELD_ID}{field.key}" type="datetime-local" oninput={() => clearFieldError(field.key)} class="datetime rounded-md border border-darkborderc bg-transparent px-4 py-2 text-textcolor shadow-xs transition-colors duration-200 focus:border-borderc focus:ring-2 focus:ring-borderc focus:outline-hidden disabled:opacity-50" bind:value={values[field.key]} />
                             {:else}
-                                <TextInput className="disabled:opacity-50" fullwidth hideText={field.secret} bind:value={values[field.key]} />
+                                <TextInput id="{FIELD_ID}{field.key}" className="disabled:opacity-50" fullwidth hideText={field.secret} bind:value={values[field.key]} oninput={() => clearFieldError(field.key)} />
                             {/if}
+                            {#if fieldErrors[field.key]}<small class="field-error" role="alert">{fieldErrors[field.key]}</small>{/if}
                             {#if help}<small>{help}</small>{/if}
                         </label>
                     {/each}

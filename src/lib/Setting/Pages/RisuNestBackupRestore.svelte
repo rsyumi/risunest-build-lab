@@ -173,7 +173,7 @@
     <SettingRow
         data-backup-group="restore"
         label={language.risuNest.backup.groupRestore}
-        help={language.risuNest.backup.restoreHelp}
+        help={isTauri ? language.risuNest.backup.restoreHelp : language.risuNest.backup.restoreHelpWeb}
     >
         {#if !isTauri}
         <SettingButton

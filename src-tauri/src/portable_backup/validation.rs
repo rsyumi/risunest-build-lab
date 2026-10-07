@@ -511,11 +511,7 @@ impl LibraryView<'_> {
         if !report.running() {
             return Ok(counts);
         }
-        let selected = selected_row(
-            self.db,
-            "SELECT value FROM bot_presets ORDER BY configured_index LIMIT 1 OFFSET ?1",
-            root.get("botPresetsId"),
-        )?;
+        let selected = selected_preset(self.db, root.get("botPresetsId"))?;
         self.validate_fragment(
             PortableFragment::Root {
                 value: &root,
@@ -896,19 +892,29 @@ mod tests {
     }
 }
 
-fn selected_row(
-    db: &rusqlite::Connection,
-    sql: &str,
-    index: Option<&Value>,
-) -> Result<Option<Value>> {
-    let Some(index) = index
-        .and_then(Value::as_u64)
-        .and_then(|n| i64::try_from(n).ok())
-    else {
-        return Ok(None);
+/// The stored root selects a preset by its `id`; an index selects by configured order.
+fn selected_preset(db: &rusqlite::Connection, selection: Option<&Value>) -> Result<Option<Value>> {
+    let row = match selection {
+        Some(Value::String(id)) => db.query_row(
+            "SELECT value FROM bot_presets WHERE preset_id=?1",
+            [id],
+            |r| r.get::<_, String>(0),
+        ),
+        selection => {
+            let Some(index) = selection
+                .and_then(Value::as_u64)
+                .and_then(|n| i64::try_from(n).ok())
+            else {
+                return Ok(None);
+            };
+            db.query_row(
+                "SELECT value FROM bot_presets ORDER BY configured_index LIMIT 1 OFFSET ?1",
+                [index],
+                |r| r.get::<_, String>(0),
+            )
+        }
     };
-    Ok(db
-        .query_row(sql, [index], |r| r.get::<_, String>(0))
+    Ok(row
         .optional()?
         .map(|v| serde_json::from_str(&v))
         .transpose()?)

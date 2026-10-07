@@ -273,7 +273,7 @@ fn short_device_connections_leave_the_wal_files_of_the_open_store() {
     kept("the plugin GC fence check");
     drop(store.device_store().unwrap().acquire_plugin_gc_barrier(&fence).unwrap());
     kept("the plugin GC barrier");
-    store.device_store_mut().unwrap().capture_backup_sections(&[SectionKind::LocalSettings]).unwrap();
+    store.device_store_mut().unwrap().capture_backup_sections(&[SectionKind::LocalSettings], &std::env::temp_dir()).unwrap();
     kept("the section capture");
     let (lease, _) = store.lww_acquire_backup_capture(store.revision().unwrap()).unwrap();
     store.release_revision(&lease.lease).unwrap();

@@ -1484,7 +1484,7 @@ mod section_exchange {
 
     #[test]
     fn backup_spool_rejects_duplicate_keys_before_restore() {
-        let mut spool = SectionSpoolBuilder::new_backup(SectionKind::LocalPlugins).unwrap();
+        let mut spool = SectionSpoolBuilder::new_backup(SectionKind::LocalPlugins, &std::env::temp_dir()).unwrap();
         let row = plugin_row("duplicate", "one", 0, "");
         spool.push_backup_row(row.clone()).unwrap();
         assert!(spool.push_backup_row(row).is_err());
@@ -1574,7 +1574,7 @@ mod section_exchange {
             .unwrap()
         };
         let push = |entry: SectionEntry, body: &[u8]| {
-            let mut spool = SectionSpoolBuilder::new_backup(entry.kind).unwrap();
+            let mut spool = SectionSpoolBuilder::new_backup(entry.kind, &std::env::temp_dir()).unwrap();
             spool.push_backup_entry(entry, |_| Ok(body.to_vec()))
         };
         let refused = |result: crate::persistent_store::StoreResult<()>| {
@@ -1635,7 +1635,7 @@ mod section_exchange {
                     )
                     .expect("write setting");
             }
-            match store.capture_backup_sections(&[kind]).err().expect("capture refused") {
+            match store.capture_backup_sections(&[kind], &std::env::temp_dir()).err().expect("capture refused") {
                 StoreError::Validation { message } => {
                     assert!(!message.contains("secret"), "{message}");
                     message

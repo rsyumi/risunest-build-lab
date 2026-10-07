@@ -467,7 +467,7 @@ pub(crate) fn hydrate_registered_many(root:&Path,digests:&[String],priority:&BTr
     use crate::server_sync::residency::HydrationOutcome;
     let cancel=cancellation.map(Cancellation::with_external_flag).unwrap_or_default();
     let cas=crate::asset_repository::PayloadCas::new(root)?;
-    let scratch=tempfile::tempdir()?;
+    let scratch=super::leftovers::local_scratch(root,"asset-hydration-")?;
     #[cfg(test)]
     hydration_tests::observe("scratch",root,scratch.path());
     let created_at_ms=i64::try_from(super::runtime::now_ms()).map_err(hydration_error)?;

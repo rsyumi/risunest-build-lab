@@ -899,8 +899,15 @@ export function createPersistentDataRuntime(
                 activeCharacterIds,
                 options?.forceScalableProjection ?? true,
             )
-            if (activatedLibraryGuard) dependencies.state.afterRemoteApply?.()
-            workingSet.installCommittedWorkingSet(projected.database, revision, projected.windowedMetadata)
+            let installed = projected.database
+            if (activatedLibraryGuard) {
+                // The activated library has no resident character to keep selected,
+                // and its derived identity mirrors belong to the installed baseline.
+                dependencies.state.restoreSelection?.(null, null)
+                dependencies.state.afterRemoteApply?.()
+                installed = dependencies.state.captureWorkingSetDatabase?.() ?? installed
+            }
+            workingSet.installCommittedWorkingSet(installed, revision, projected.windowedMetadata)
             applyInstalledRootChanges(rootBefore)
             deferredContentPending = projected.deferred
             if (!projected.deferred) await commitContentCursor(revision, activatedLibraryGuard !== null)
@@ -1181,8 +1188,9 @@ export function createPersistentDataRuntime(
             const rootBefore = canonicalClone(dependencies.state.captureRoot())
             workingSet.invalidateNavigation()
             dependencies.state.replaceDatabase(projected.database, new Set(), true)
+            dependencies.state.restoreSelection?.(null, null)
             dependencies.state.afterRemoteApply?.()
-            workingSet.installCommittedWorkingSet(projected.database, latest.revision, projected.windowedMetadata)
+            workingSet.installCommittedWorkingSet(dependencies.state.captureWorkingSetDatabase?.() ?? projected.database, latest.revision, projected.windowedMetadata)
             applyInstalledRootChanges(rootBefore)
             await commitContentCursor(latest.revision, true)
             guard.ready = true

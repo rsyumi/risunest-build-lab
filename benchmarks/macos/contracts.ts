@@ -225,4 +225,4 @@ async function regex() {
   return { passed: true, samples };
 }
 
-export { persistence, reload, regex, guard, check, pause };
+export { persistence, reload, regex, guard, check, pause, initialize };

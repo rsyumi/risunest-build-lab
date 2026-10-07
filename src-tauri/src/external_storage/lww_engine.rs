@@ -924,7 +924,7 @@ impl ExternalLwwEngine {
                         .is_none_or(|age|age>super::leases::CACHE_REUSE_LIMIT_MS) {
                         super::snapshot_restore::revalidate_catalog(
                             &proof.catalog,risunest_external_storage_format::snapshot::CatalogKind::Records,
-                            &self.root_key,self.provider.as_ref(),&self.repository,cancel,
+                            &self.root_key,self.provider.as_ref(),&self.repository,&root,cancel,
                         ).await?;
                     }
                 }
@@ -936,7 +936,7 @@ impl ExternalLwwEngine {
                             AssetReference::Catalog(catalog)=>{
                                 if checked_assets.insert(hex::encode(catalog.ciphertext_sha256)) {
                                     super::snapshot_restore::revalidate_catalog(catalog,risunest_external_storage_format::snapshot::CatalogKind::Assets,
-                                        &self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
+                                        &self.root_key,self.provider.as_ref(),&self.repository,&root,cancel).await?;
                                 }
                             }
                             AssetReference::Standalone(body)=>{
@@ -958,11 +958,11 @@ impl ExternalLwwEngine {
                     .is_none_or(|age|age>super::leases::CACHE_REUSE_LIMIT_MS) {
                     for catalog in &publication.data_catalogs {
                         super::snapshot_restore::revalidate_catalog(catalog,risunest_external_storage_format::snapshot::CatalogKind::Records,
-                            &self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
+                            &self.root_key,self.provider.as_ref(),&self.repository,&root,cancel).await?;
                     }
                     for catalog in &publication.asset_catalogs {
                         super::snapshot_restore::revalidate_catalog(catalog,risunest_external_storage_format::snapshot::CatalogKind::Assets,
-                            &self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
+                            &self.root_key,self.provider.as_ref(),&self.repository,&root,cancel).await?;
                     }
                     for body in publication.bodies.iter().filter(|body|body.complete) {
                         let intent=ObjectIntent{job_id:self.library.clone(),repository_id:self.repository.repository_id.clone(),
@@ -1848,7 +1848,7 @@ impl ExternalLwwEngine {
         inspection: &str,
         cancel: &Cancellation,
     ) -> Result<crate::persistent_store::lww::BindingUnitStage> {
-        let directory=tempfile::tempdir().map_err(transient)?;
+        let directory=super::leftovers::managed_scratch(store.repository_root(),"lww-published-")?;
         let mut published=self.published_state(store,directory.path(),cancel).await?;
         published.require_complete()?;
         self.stage_published_objects(store,&mut published,directory.path(),cancel).await?;
@@ -1884,7 +1884,7 @@ impl ExternalLwwEngine {
         cancel: &Cancellation,
     ) -> Result<crate::persistent_store::lww::NewDevicePreparation> {
         self.settle_publication(store, cancel).await?;
-        let directory=tempfile::tempdir().map_err(transient)?;
+        let directory=super::leftovers::managed_scratch(store.repository_root(),"lww-published-")?;
         self.published_state(store,directory.path(),cancel).await?.require_complete()?;
         let preparation = store
             .prepare_lww_new_device(header, staging)
@@ -2027,7 +2027,7 @@ impl ExternalLwwEngine {
         offered: &mut Vec<String>,
         cancel: &Cancellation,
     ) -> Result<()> {
-        let directory=tempfile::tempdir().map_err(transient)?;
+        let directory=super::leftovers::managed_scratch(store.repository_root(),"lww-published-")?;
         let mut state=self.published_state(store,directory.path(),cancel).await?;
         self.stage_published_objects(store,&mut state,directory.path(),cancel).await?;
         let target = self.target_scope();

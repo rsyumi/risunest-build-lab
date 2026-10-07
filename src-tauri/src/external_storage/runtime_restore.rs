@@ -820,8 +820,9 @@ fn prepare_local_restore_in_store(
 
     // Preparing every selected section before touching the device file keeps a
     // bundle with a missing object from installing half of itself.
+    let scratch=super::leftovers::scratch_directory(&root).map_err(runtime::local_error)?;
     let prepared_sections =
-        super::sections::prepare_received_backup_sections(&sections, &cancel)?;
+        super::sections::prepare_received_backup_sections(&sections, &scratch, &cancel)?;
     let intent=if let Some(intent)=previous_intent {intent} else {
     let header = crate::persistent_store::lww::Header {
         binding_authority:store.lww_binding_authority().map_err(pds_error)?,
@@ -1026,7 +1027,7 @@ pub(super) mod tests {
         let source_dir=tempfile::tempdir().unwrap();
         let mut source=PersistentStore::open(source_dir.path()).unwrap();
         source.device_store_mut().unwrap().write_setting("accountst",&json!("synthetic restored setting")).unwrap();
-        let sections=source.device_store_mut().unwrap().capture_backup_sections(&[SectionKind::Hypa,SectionKind::LocalPlugins,SectionKind::LocalSettings]).unwrap();
+        let sections=source.device_store_mut().unwrap().capture_backup_sections(&[SectionKind::Hypa,SectionKind::LocalPlugins,SectionKind::LocalSettings],source_dir.path()).unwrap();
         let stage=store.replace_begin().unwrap();
         store.replace_put_root(&stage.staging_id,&json!({"language":"synthetic restored language"})).unwrap();
         let header=crate::persistent_store::lww::Header {binding_authority:store.lww_binding_authority().unwrap(),request_id:format!("external-backup-restore:{}",job.id)};
@@ -1037,6 +1038,37 @@ pub(super) mod tests {
         store.lww_commit_replacement_with_device_sections(&intent.header,&intent.staging_id,Some(&Default::default()),&sections.iter().collect::<Vec<_>>()).unwrap();
         assert_eq!(store.device_store().unwrap().read_setting("accountst").unwrap(),Some(json!("synthetic restored setting")));
         pending
+    }
+
+    /// A data root of `length` characters, as a user name of a different
+    /// length would make it.
+    pub(crate) fn padded_root(base:&Path,length:usize)->std::path::PathBuf {
+        let label=length.to_string();
+        let used=base.to_string_lossy().chars().count()+1+label.len();
+        let root=base.join(format!("{label}{}","r".repeat(length.saturating_sub(used))));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// Both databases sit below the job directory, where Windows still limits
+    /// the path SQLite opens to MAX_PATH.
+    #[test]
+    fn restore_staging_and_transfer_receipts_open_below_a_long_data_root() {
+        let base=tempfile::tempdir().unwrap();
+        for length in [47,90] {
+            let root=padded_root(base.path(),length);
+            let input=serde_json::from_value(json!({"connectionId":"synthetic-connection","kind":"restore","snapshotId":"synthetic-snapshot","targetRevision":"0"})).unwrap();
+            let job=DurableJob::new(input,1,identity());
+            let staging=staging_directory(&root,&job).join("external-storage");
+            let mut content=super::super::content_store::ContentStore::open(&staging).expect("open restore staging below a long root");
+            content.put(&hex::encode(risunest_external_storage_format::content_identity::hash(b"synthetic")),b"synthetic").unwrap();
+            content.commit().unwrap();
+            super::super::journal::TransferJournal::open(&runtime::job_directory(&root,&job.request.connection_id,&job.id),
+                super::super::journal::JobIdentity{job_id:job.id.clone(),connection_id:job.request.connection_id.clone(),
+                    repository_id:"synthetic-repository".into(),capture_id:"synthetic-capture".into(),capture:identity()})
+                .expect("open transfer receipts below a long root")
+                .record_parent(&[]).expect("record the parent below a long root");
+        }
     }
 
     #[test]

@@ -280,6 +280,26 @@ describe('paged profile projections', () => {
         expect(fullClone).not.toHaveBeenCalled()
     })
 
+    it('projects stored preset and persona ids as working-set indexes', async () => {
+        const fixture = {
+            ...fixtureDatabase(),
+            botPresetsId: 'preset-active',
+            personas: [{ id: 'persona-a', name: 'A' }, { id: 'persona-b', name: 'B' }],
+            selectedPersona: 'persona-b',
+        } as unknown as Database
+
+        const result = await projectPinnedScalableWorkingSet(createReader(fixture), {
+            selectedCharacterId: null,
+            selectedConversationId: null,
+            activeCharacterIds: new Set(),
+        })
+
+        expect(result.botPresetsId).toBe(1)
+        expect(result.botPresets[result.botPresetsId].mainPrompt).toBe('active preset body')
+        expect(result.selectedPersona).toBe(1)
+        expect(result.personas[result.selectedPersona].id).toBe('persona-b')
+    })
+
     it('releases scalable revision leases on success and read failure', async () => {
         const successRelease = vi.fn()
             .mockRejectedValueOnce(new Error('transient lease cleanup failure'))

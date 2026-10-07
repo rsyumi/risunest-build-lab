@@ -217,7 +217,7 @@ fn device_sections() -> Vec<crate::persistent_store::device_store::sections::Pre
         .unwrap();
     device.write_setting("accountst", &json!("golden")).unwrap();
     device
-        .capture_backup_sections(&[SectionKind::Hypa, SectionKind::LocalPlugins, SectionKind::LocalSettings])
+        .capture_backup_sections(&[SectionKind::Hypa, SectionKind::LocalPlugins, SectionKind::LocalSettings], &std::env::temp_dir())
         .unwrap()
 }
 

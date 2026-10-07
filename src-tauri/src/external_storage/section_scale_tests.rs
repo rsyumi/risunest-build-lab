@@ -72,7 +72,7 @@ fn e4_section_capture_scale() {
         let prepared = store.device_store_mut().unwrap().capture_backup_sections(&[
             SectionKind::Hypa,
             SectionKind::LocalPlugins,
-        ]).unwrap();
+        ], &std::env::temp_dir()).unwrap();
         capture_prepared_backup_sections(&prepared, spool.path(), &Cancellation::default())
             .expect("capture scale sections")
     });
@@ -103,7 +103,7 @@ fn e4_section_capture_scale() {
         let prepared = store.device_store_mut().unwrap().capture_backup_sections(&[
             SectionKind::Hypa,
             SectionKind::LocalPlugins,
-        ]).unwrap();
+        ], &std::env::temp_dir()).unwrap();
         let mut count = 0usize;
         for section in &prepared {
             section.visit_entries(|_, _| {

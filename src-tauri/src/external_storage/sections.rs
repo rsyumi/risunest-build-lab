@@ -59,17 +59,32 @@ pub(crate) struct CapturedSection {
 }
 
 struct SectionBodySpool {
-    staging: tempfile::NamedTempFile,
+    staging: fs::File,
+    staged: StagedFile,
     path: PathBuf,
     length: u64,
     offsets: BTreeMap<String, u64>,
     digest: sha2::Sha256,
 }
 
+/// Removed on drop unless it was published.
+struct StagedFile {
+    path: PathBuf,
+    published: bool,
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        if !self.published { let _ = fs::remove_file(&self.path); }
+    }
+}
+
 impl SectionBodySpool {
     fn new(spool: &Path) -> Result<Self> {
+        let staged = spool.join(format!(".section-bodies-{}.partial", uuid::Uuid::new_v4()));
         Ok(Self {
-            staging: tempfile::NamedTempFile::new_in(spool).map_err(transient)?,
+            staging: fs::OpenOptions::new().write(true).create_new(true).open(&staged).map_err(transient)?,
+            staged: StagedFile { path: staged, published: false },
             path: spool.join(format!("section-bodies-{}", uuid::Uuid::new_v4())),
             length: 0,
             offsets: BTreeMap::new(),
@@ -93,7 +108,7 @@ impl SectionBodySpool {
         };
         Ok((digest, self.path.clone(), Some(offset)))
     }
-    fn finish(self) -> Result<PathBuf> {
+    fn finish(mut self) -> Result<PathBuf> {
         let digest = hex::encode(sha2::Digest::finalize(self.digest));
         let path = self.path.parent().unwrap().join(format!("section-bodies-{digest}"));
         if path.exists() {
@@ -105,8 +120,12 @@ impl SectionBodySpool {
             }
             return Ok(path);
         }
-        self.staging.as_file().sync_all().map_err(transient)?;
-        self.staging.persist(&path).map_err(|error| transient(error.error))?;
+        self.staging.sync_all().map_err(transient)?;
+        drop(self.staging);
+        // tempfile's persist passes the path to Windows unprefixed, which
+        // fails past MAX_PATH; std's rename does not.
+        fs::rename(&self.staged.path, &path).map_err(transient)?;
+        self.staged.published = true;
         crate::trust_boundary::sync_directory(path.parent().unwrap()).map_err(transient)?;
         Ok(path)
     }
@@ -265,9 +284,10 @@ pub(crate) fn capture_backup_sections(
     spool: &Path,
     cancel: &Cancellation,
 ) -> Result<Vec<CapturedSection>> {
+    let scratch = super::leftovers::scratch_directory(store.repository_root()).map_err(transient)?;
     let device = store.device_store_mut().map_err(device_error)?;
     let kinds = [SectionKind::Hypa, SectionKind::LocalPlugins, SectionKind::LocalSettings];
-    let prepared = device.capture_backup_sections(&kinds).map_err(device_error)?;
+    let prepared = device.capture_backup_sections(&kinds, &scratch).map_err(device_error)?;
     capture_prepared_backup_sections(&prepared, spool, cancel)
 }
 
@@ -417,6 +437,7 @@ fn prepare_section_source_rows(
 /// device rows. Each returned spool is versionless and replaces only its kind.
 pub(crate) fn prepare_received_backup_sections(
     sources: &[CapturedSection],
+    scratch: &Path,
     cancel: &Cancellation,
 ) -> Result<Vec<PreparedSectionRows>> {
     let zero = Sequence::from(0u64);
@@ -433,7 +454,7 @@ pub(crate) fn prepare_received_backup_sections(
         }
         prepared.push(prepare_section_source_rows(
             source,
-            SectionSpoolBuilder::new_backup(source.kind).map_err(transient)?,
+            SectionSpoolBuilder::new_backup(source.kind, scratch).map_err(transient)?,
             false,
             cancel,
         )?);
@@ -787,7 +808,7 @@ mod tests {
         assert_eq!(objects(SectionKind::LocalSettings), BTreeSet::from([stored_setting.len() as u64]));
         assert!(objects(SectionKind::Hypa).is_empty());
 
-        let prepared = prepare_received_backup_sections(&captured, &Cancellation::default())
+        let prepared = prepare_received_backup_sections(&captured, root.path(), &Cancellation::default())
             .expect("prepare captured backup sections");
         let mut target = PersistentStore::open(&root.path().join("target")).expect("open target store");
         let stage = target.replace_begin().expect("begin replacement");
@@ -812,6 +833,33 @@ mod tests {
             "SELECT value FROM device_settings WHERE key='risuNestDeviceSettings'", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(restored_setting, stored_setting);
+    }
+
+    /// A section body lands about 200 characters below the data root, past
+    /// the Windows MAX_PATH when the user name is long.
+    #[test]
+    fn backup_sections_are_captured_below_a_deep_job_directory() {
+        let base = tempfile::tempdir().expect("create base");
+        for length in [47, 120] {
+            let root = crate::external_storage::runtime_restore::tests::padded_root(base.path(), length);
+            let mut store = PersistentStore::open(&root).expect("open store");
+            store.device_store_mut().expect("open device store").write_setting(
+                "risuNestDeviceSettings", &serde_json::json!({"startup": "restore"}),
+            ).expect("write setting");
+            let spool = crate::external_storage::runtime::job_directory(
+                &root, "synthetic-connection", "synthetic-job",
+            ).join("sections");
+            let captured = capture_backup_sections(&mut store, &spool, &Cancellation::default())
+                .expect("capture sections below a deep job directory");
+            let source = captured.iter().flat_map(|section| &section.sources).next()
+                .expect("captured setting source");
+            assert!(length < 120 || source.path.to_string_lossy().chars().count() > 260);
+            let scratch = crate::external_storage::leftovers::scratch_directory(&root)
+                .expect("create app scratch");
+            let prepared = prepare_received_backup_sections(&captured, &scratch, &Cancellation::default())
+                .expect("read sections back");
+            assert_eq!(prepared.len(), 3);
+        }
     }
 
     #[test]
@@ -847,7 +895,7 @@ mod tests {
         )
         .expect("capture backup settings section");
         let sources = [plugin, settings];
-        let prepared = prepare_received_backup_sections(&sources, &Cancellation::default())
+        let prepared = prepare_received_backup_sections(&sources, spool.path(), &Cancellation::default())
             .expect("prepare every backup section");
         assert_eq!(prepared.iter().map(PreparedSectionRows::kind).collect::<Vec<_>>(), [
             SectionKind::LocalPlugins,
@@ -856,7 +904,7 @@ mod tests {
 
         let mut corrupt = sources.clone();
         corrupt[1].content_fingerprint[0] ^= 1;
-        assert!(prepare_received_backup_sections(&corrupt, &Cancellation::default()).is_err());
+        assert!(prepare_received_backup_sections(&corrupt, spool.path(), &Cancellation::default()).is_err());
     }
 
     #[test]

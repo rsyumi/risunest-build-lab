@@ -755,9 +755,9 @@ impl<'de> Visitor<'de> for MessagesVisitor<'_> {
     }
 }
 
-fn create_restore_staging(connection: &Connection) -> StoreResult<tempfile::NamedTempFile> {
-    let staging = tempfile::NamedTempFile::new()?;
-    connection.execute("ATTACH DATABASE ?1 AS archive_restore", [staging.path().to_string_lossy().as_ref()])?;
+fn create_restore_staging(connection: &Connection, scratch_root: &std::path::Path) -> StoreResult<tempfile::TempDir> {
+    let staging = crate::external_storage::leftovers::local_scratch(scratch_root, "archive-restore-")?;
+    connection.execute("ATTACH DATABASE ?1 AS archive_restore", [staging.path().join("restore.sqlite").to_string_lossy().as_ref()])?;
     let created = (|| -> StoreResult<()> {
     connection.execute_batch("PRAGMA archive_restore.journal_mode=OFF; PRAGMA archive_restore.synchronous=OFF; PRAGMA archive_restore.cache_size=-2048;")?;
     connection.execute_batch(&format!(
@@ -1015,7 +1015,7 @@ pub(super) fn restore_character_with_cancellation_lww(
             "Archived character {character_id} is missing its stored data"
         ));
     };
-    let _staging = create_restore_staging(connection)?;
+    let _staging = create_restore_staging(connection, cas.repository_root())?;
     let result = (|| {
         let mut payload = stage_payload(connection, file, is_cancelled)?;
         for remap in &archived.identity_remap {

@@ -500,7 +500,13 @@ async fn until(mut done: impl FnMut() -> bool) {
 #[tokio::test]
 async fn encoded_bodies_wait_for_a_codec_permit_before_decoding() {
     let mut fixture = Fixture::new(4).await;
-    let held = fixture.app.codecs.clone().acquire_many_owned(4).await.unwrap();
+    let held = fixture
+        .app
+        .codecs
+        .clone()
+        .acquire_many_owned(4)
+        .await
+        .unwrap();
     let encoded = body::encode("synthetic codec body ".repeat(512).as_bytes())
         .unwrap()
         .unwrap();
@@ -559,7 +565,13 @@ async fn a_registration_revoked_during_a_codec_wait_cannot_run_after_it() {
     let encoded = body::encode("synthetic codec body ".repeat(512).as_bytes())
         .unwrap()
         .unwrap();
-    let held = fixture.app.codecs.clone().acquire_many_owned(4).await.unwrap();
+    let held = fixture
+        .app
+        .codecs
+        .clone()
+        .acquire_many_owned(4)
+        .await
+        .unwrap();
     let jobs = [
         fixture.client.get(format!(
             "{}/objects/{hash}/part?offset=0&length=10",
@@ -586,5 +598,8 @@ async fn a_registration_revoked_during_a_codec_wait_cannot_run_after_it() {
     for job in jobs {
         assert_eq!(job.await.unwrap().status(), 401);
     }
-    assert!(fixture.entered.try_recv().is_err(), "the route ran for a revoked device");
+    assert!(
+        fixture.entered.try_recv().is_err(),
+        "the route ran for a revoked device"
+    );
 }

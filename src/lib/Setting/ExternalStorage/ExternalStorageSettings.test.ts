@@ -207,6 +207,23 @@ describe('the storage usage tab', () => {
         expect(target.textContent).toContain(strings.stateChanged)
     })
 
+    it('shows a manual backup that stopped on a failure with its retry', async () => {
+        const job = { id: 'manual', connectionId: 'connection-1', kind: 'backup', state: 'waiting', phase: 'paused',
+            reason: 'manual', targetRevision: '8', completedBytes: '0', completedItems: '0', startedAtMs: '1', updatedAtMs: '2',
+            error: { code: 'transient', message: 'The operation could not complete.', action: 'retry', retryable: true } }
+        vi.mocked(requestExternalStorageNow).mockImplementation(async () => {
+            state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0', paused: false },
+                connections: [connection(10, 30)], jobs: [job] })
+            return { kind: 'blocked', reason: 'transient', error: job.error, job } as never
+        })
+        const backup = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.runBackup)!
+        backup.click()
+        await settle()
+        expect(requestExternalStorageNow).toHaveBeenCalledWith('connection-1', 'backup')
+        expect([...target.querySelectorAll('[role="status"]')].some(item => item.textContent === strings.retry)).toBe(true)
+        expect([...target.querySelectorAll('button')].some(button => button.textContent?.trim() === strings.retryAction)).toBe(true)
+    })
+
     it('retries the retained automatic operation and persists its pause choice', async () => {
         const job = { id: 'retained', connectionId: 'connection-1', kind: 'backup', state: 'waiting', phase: 'paused',
             reason: 'automatic', targetRevision: '8', completedBytes: '0', completedItems: '0', startedAtMs: '1', updatedAtMs: '1',

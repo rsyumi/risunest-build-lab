@@ -23,6 +23,7 @@ import {
     releasePersistentRevisionLease,
 } from './persistentRecordIterator'
 import { defineOwnEnumerableProperty } from './ownEnumerableProperty'
+import { projectSelectionIndexes } from './persistentSelectionBoundary'
 import type { WorkingSetResidencyRegistry } from './workingSetResidency'
 
 type CompleteCharacter = character
@@ -535,7 +536,7 @@ export async function projectPinnedScalableWorkingSet(
             : createPinnedDetailOnlyCharacter(summary, detail))
     }
 
-    return {
+    return projectSelectionIndexes({
         ...root.value,
         pluginCustomStorage: {},
         botPresets: createCatalogPresetWorkingSet(
@@ -543,7 +544,7 @@ export async function projectPinnedScalableWorkingSet(
             presets.active,
         ),
         characters,
-    } as Database
+    } as Database)
 }
 
 export async function projectScalableWorkingSetAtRevision(

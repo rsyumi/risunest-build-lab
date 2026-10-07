@@ -621,6 +621,8 @@ async function main() {
     await invoke("macos_bench_repeat_native_quit");
     await pause(15_000);
     throw new Error("a repeated native quit did not end the app");
+  } else if (/^sync-(publish|receive|pull)$/.test(phase)) {
+    await (await import("./sync")).syncPhase(phase);
   } else if (phase === "streaming") {
     document.getElementById("benchmark")!.remove();
     await import("../streaming/main");

@@ -983,11 +983,13 @@ pub(crate) fn connection_directory(root: &std::path::Path, connection: &str) -> 
         risunest_external_storage_format::content_identity::hash(connection.as_bytes()),
     ))
 }
+/// The name is a short hash prefix because SQLite opens the databases below it
+/// with paths Windows still limits to MAX_PATH.
 pub(crate) fn job_directory(root: &std::path::Path, connection: &str, job: &str) -> PathBuf {
     connection_directory(root, connection)
         .join("jobs")
         .join(hex::encode(
-            risunest_external_storage_format::content_identity::hash(job.as_bytes()),
+            &risunest_external_storage_format::content_identity::hash(job.as_bytes())[..8],
         ))
 }
 /// The transfer spool as `job_id` sees it when it seals another object: every

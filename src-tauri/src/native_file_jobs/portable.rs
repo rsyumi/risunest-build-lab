@@ -622,8 +622,9 @@ fn restore_portable_inner(
             .stage_portable_records(&archive.db, &probe)
             .map_err(error)?;
         store.stage_portable_units(&stage.staging_id,&archive.db,&probe).map_err(error)?;
+        let scratch = crate::external_storage::leftovers::scratch_directory(store.repository_root()).map_err(error)?;
         let prepared_device =
-            prepare_native_sections(&archive, &selection.device_sections, &probe).map_err(error)?;
+            prepare_native_sections(&archive, &selection.device_sections, &scratch, &probe).map_err(error)?;
         let mut committed = false;
         let activated = (|| {
             let counts = store.portable_staged_counts(&stage.staging_id).map_err(error)?;
