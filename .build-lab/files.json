@@ -999,8 +999,8 @@
     {
       "path": "benchmarks/sync-ui/driver.ts",
       "mode": "100644",
-      "bytes": 23940,
-      "sha256": "fd15ed6661041be1397157f13450000c72c4ece45c5c02217bff853b3dbfd506"
+      "bytes": 26041,
+      "sha256": "be2cc5a66be43e90c753ddcf67653653ec90b180d85e00b1945d73ffc99ec094"
     },
     {
       "path": "benchmarks/sync-ui/roundTrip.ts",

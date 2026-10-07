@@ -37,8 +37,18 @@ export const redact = (text: string) => text.replace(/[A-Za-z0-9_+/=-]{32,}/g, "
 const frames = (stack: string | undefined) => (stack ?? "").split(/\r?\n/).slice(0, 4)
   .map((frame) => frame.trim().replace(/[A-Za-z0-9_-]{32,}/g, "<redacted>").slice(0, 200)).filter(Boolean);
 
+// The shape of a field, never its value.
+const shapeOf = (owner: unknown, field: string) => {
+  if (!owner || typeof owner !== "object" || !Object.hasOwn(owner, field)) return "missing";
+  const value = (owner as Record<string, unknown>)[field];
+  return Array.isArray(value) ? `array:${value.length}` : typeof value;
+};
+
 export class SyncDriver {
   private readonly errors: string[] = [];
+  private current = "start";
+  private readonly orderEvents: Record<string, unknown>[] = [];
+  private syncController: Awaited<ReturnType<typeof import("../../src/ts/storage/sync/serverSyncProduction").getServerSyncController>> | undefined;
 
   constructor(readonly phase: string, private readonly sink: SyncReport, private readonly show: (step: string) => void = () => {}) {
     // Errors the page logs are attached, redacted, to a failed step so it can be attributed.
@@ -56,15 +66,17 @@ export class SyncDriver {
 
   async step<T extends Record<string, unknown>>(label: SyncLabel, name: string, run: () => Promise<T>): Promise<T> {
     this.show(name);
+    this.current = name;
     try {
       const result = await run();
-      await this.sink(`${label}:${name}`, { label, phase: this.phase, step: name, passed: true, ...result });
+      await this.sink(`${label}:${name}`, { label, phase: this.phase, step: name, passed: true, ...result, characterOrder: await this.orderShapes() });
       return result;
     } catch (error) {
       const failure = error instanceof SyncStepError ? error
         : new SyncStepError(label, name, error instanceof Error ? redact(error.message) : "failed",
           { errorName: error instanceof Error ? error.name : typeof error });
       failure.detail.consoleErrors = this.errors.slice(-8);
+      failure.detail.characterOrder = { ...(await this.orderShapes()), events: this.orderEvents };
       throw failure;
     }
   }
@@ -105,7 +117,35 @@ export class SyncDriver {
         return false;
       }
     }, 90_000, "mount", "product app did not initialize");
+    await this.watchOrder();
     return { rendered: true };
+  }
+
+  /** Records each change in the shape of the character order the sidebar iterates, with the step and sync stages. */
+  private async watchOrder() {
+    const { DBState } = await import("../../src/ts/stores.svelte");
+    let last = shapeOf(DBState.db, "characterOrder");
+    this.orderEvents.push({ step: this.current, shape: last });
+    setInterval(() => {
+      const shape = shapeOf(DBState.db, "characterOrder");
+      if (shape === last || this.orderEvents.length >= 16) return;
+      last = shape;
+      const view = this.syncController?.snapshot();
+      this.orderEvents.push({ step: this.current, shape, running: view?.running ?? null, stages: view?.progress?.stages ?? null });
+    }, 50);
+  }
+
+  /** The character order's shape in the working set and in the stored root. */
+  private async orderShapes() {
+    try {
+      const { DBState } = await import("../../src/ts/stores.svelte");
+      const { getPersistentDataRuntime } = await import("../../src/ts/storage/persistentDataRuntime.svelte");
+      const live = shapeOf(DBState.db, "characterOrder");
+      const store = getPersistentDataRuntime().store;
+      return { live, stored: store ? shapeOf((await store.readRoot()).value, "characterOrder") : "unavailable" };
+    } catch {
+      return { live: "unavailable", stored: "unavailable" };
+    }
   }
 
   /** Searches every conversation in the native store for a marker. */
@@ -189,7 +229,7 @@ export class SyncDriver {
 
   private async controller() {
     const { getServerSyncController } = await import("../../src/ts/storage/sync/serverSyncProduction");
-    return getServerSyncController();
+    return this.syncController = getServerSyncController();
   }
 
   private async state() {
