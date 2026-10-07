@@ -216,6 +216,13 @@ jobs:
           if [[ "$CHECK_SCOPE" == full || "$CHECK_SCOPE" == harness ]]; then
             node ../control/scripts/verify-unicode-results.mjs macos artifacts/wkwebview
           fi
+      - name: Persistence boundary
+        if: inputs.scope == 'full' || inputs.scope == 'harness'
+        run: |
+          set -euo pipefail
+          boundary_tmp="$(mktemp -d "$RUNNER_TEMP/risunest-boundary.XXXXXX")"
+          export TMPDIR="$(cd "$boundary_tmp" && pwd -P)"
+          pnpm desktop:test-boundary:agent 2>&1 | tee artifacts/boundary.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

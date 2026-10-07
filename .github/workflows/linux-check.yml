@@ -10,7 +10,7 @@ on:
       scope:
         type: choice
         default: full
-        options: [full, packages, appearance-light, appearance-dark, appearance-codec]
+        options: [full, harness, packages, appearance-light, appearance-dark, appearance-codec]
 permissions:
   contents: read
 concurrency:
@@ -38,7 +38,7 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
-          case "$CHECK_SCOPE" in full|packages|appearance-light|appearance-dark|appearance-codec) ;; *) exit 1;; esac
+          case "$CHECK_SCOPE" in full|harness|packages|appearance-light|appearance-dark|appearance-codec) ;; *) exit 1;; esac
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
@@ -98,6 +98,7 @@ jobs:
           workspaces: source/src-tauri -> target
           cache-workspace-crates: true
           cache-on-failure: true
+          save-if: ${{ inputs.scope != 'harness' }}
           key: linux-ubuntu-24.04-${{ runner.arch }}-${{ steps.environment.outputs.target }}
       - name: Install locked frontend inputs
         run: pnpm install --frozen-lockfile
@@ -115,6 +116,7 @@ jobs:
           dbus-run-session -- cargo test --manifest-path crates/wry/Cargo.toml --package wry --release --locked --target x86_64-unknown-linux-gnu --lib -- --test-threads=1 2>&1 | tee artifacts/wry-contracts.log
           dbus-run-session -- bash scripts/linux-native-tests.sh --package tauri-plugin-updater --release --target x86_64-unknown-linux-gnu --lib -- --test-threads=1 2>&1 | tee artifacts/updater-contracts.log
       - name: Build agent packages
+        if: inputs.scope != 'harness'
         run: |
           set -euo pipefail
           printf '%s\n' '{"build":{"beforeBuildCommand":"test -f dist/index.html"}}' > "$RUNNER_TEMP/linux-prebuilt.json"
@@ -122,6 +124,7 @@ jobs:
             --config src-tauri/tauri.agent.conf.json \
             --config "$RUNNER_TEMP/linux-prebuilt.json" -- --locked 2>&1 | tee artifacts/native-build.log
       - name: Inspect and archive packages
+        if: inputs.scope != 'harness'
         run: |
           set -euo pipefail
           bundle="$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/bundle"
@@ -141,6 +144,7 @@ jobs:
           cp "$package" artifacts/
           cat artifacts/binary.txt artifacts/packages.sha256
       - name: Verify packaged product is not the harness entry
+        if: inputs.scope != 'harness'
         run: |
           python3 - <<'PY'
           import os
@@ -171,15 +175,20 @@ jobs:
           grep -qa 'io.github.rsyumi.risunest.linux.bench' "$harness"
           printf 'HARNESS_BINARY=%s\n' "$harness" >> "$GITHUB_ENV"
       - name: Actual WebKitGTK contracts and desktop lifecycle
-        if: inputs.scope == 'full'
+        if: inputs.scope == 'full' || inputs.scope == 'harness'
         run: |
           set -euo pipefail
-          for phase in persistence reload regex; do
+          for phase in persistence reload regex app app-restart streaming; do
             dbus-run-session -- xvfb-run -a python3 benchmarks/linux/run.py \
               --binary "$HARNESS_BINARY" --output artifacts/webkitgtk --phase "$phase" 2>&1 | tee -a artifacts/webkitgtk.log
           done
           node benchmarks/linux/summarize.mjs artifacts/webkitgtk 2>&1 | tee artifacts/webkitgtk-summary.txt
           node ../control/scripts/verify-unicode-results.mjs linux artifacts/webkitgtk
+      - name: Persistence boundary
+        if: inputs.scope == 'full' || inputs.scope == 'harness'
+        run: |
+          set -euo pipefail
+          xvfb-run -a dbus-run-session -- bash scripts/linux-native-tests.sh --boundary 2>&1 | tee artifacts/boundary.log
       - name: Capture owned desktop startup appearance
         if: startsWith(inputs.scope, 'appearance-')
         run: dbus-run-session -- bash ../control/scripts/linux-appearance.sh 2>&1 | tee artifacts/appearance.log
