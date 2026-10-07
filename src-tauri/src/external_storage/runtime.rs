@@ -15,7 +15,7 @@ use crate::native_log::logged;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -28,14 +28,14 @@ pub(crate) fn now_ms() -> u64 {
 pub(crate) fn local_error(error: impl std::fmt::Display) -> ProviderError {
     ProviderError::new(ErrorKind::Transient).caused(&error)
 }
-pub(crate) fn root(app: &AppHandle) -> Result<PathBuf> {
+pub(crate) fn root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
     app.state::<JobCommandState>()
         .root
         .get()
         .cloned()
         .ok_or_else(|| ProviderError::new(ErrorKind::Transient))
 }
-pub(crate) fn native_store(app: &AppHandle) -> Result<PersistentStore> {
+pub(crate) fn native_store<R: Runtime>(app: &AppHandle<R>) -> Result<PersistentStore> {
     persistent_store::commands::with_store_mut(app.state(), |store| store.open_native_job_store())
         .map_err(local_error)
 }
@@ -145,7 +145,7 @@ pub(crate) fn external_storage_capture_exit_target(app: AppHandle) -> Result<Val
     })())
 }
 #[tauri::command]
-pub(crate) fn external_storage_get_state(app: AppHandle) -> Result<Value> {
+pub(crate) fn external_storage_get_state<R: Runtime>(app: AppHandle<R>) -> Result<Value> {
     logged("external_storage_get_state", (|| {
         let root = root(&app)?;
         let connection_store = ConnectionStore::open(&root)?;
@@ -232,7 +232,7 @@ pub(crate) fn external_storage_set_automatic_backup_paused(app: AppHandle, conne
     logged("external_storage_set_automatic_backup_paused", (|| ConnectionStore::open(&root(&app)?)?.set_automatic_backup_paused(&connection_id, paused))())
 }
 #[tauri::command]
-pub(crate) fn external_storage_get_job(app: AppHandle, job_id: String) -> Result<Value> {
+pub(crate) fn external_storage_get_job<R: Runtime>(app: AppHandle<R>, job_id: String) -> Result<Value> {
     logged("external_storage_get_job", (|| {
         let directory = root(&app)?;
         let job = reconcile_job(&app, JobStore::open(&directory)?.read(&job_id)?)?;
@@ -604,13 +604,18 @@ pub(crate) fn require_admitted_library(
     Ok(())
 }
 
-fn reconcile_job(app: &AppHandle, mut job: DurableJob) -> Result<DurableJob> {
-    if job.request.kind==JobKind::Restore && !job.terminal() {
-        if let Some(result)=super::runtime_restore::confirmed_restore_activation(app,&job)? {
-            job.summary["result"]=result;
-        } else {job.summary.as_object_mut().unwrap().remove("result");}
-    }
+fn reconcile_job<R: Runtime>(app: &AppHandle<R>, mut job: DurableJob) -> Result<DurableJob> {
     let state = app.state::<JobCommandState>();
+    if job.request.kind==JobKind::Restore && !job.terminal() {
+        match super::runtime_restore::confirmed_restore_activation(app,&job) {
+            Ok(Some(result))=>{job.summary["result"]=result;}
+            Ok(None)=>{job.summary.as_object_mut().unwrap().remove("result");}
+            // A commit's device maintenance refuses the store, and meanwhile the
+            // running worker's record stands.
+            Err(error) if error.kind==ErrorKind::Transient && state.job_is_active(&job.id)? => {}
+            Err(error)=>return Err(error),
+        }
+    }
     let active = state.active.lock().map_err(local_error)?;
     if active.contains_key(&job.id) {
         return Ok(job);
@@ -619,7 +624,7 @@ fn reconcile_job(app: &AppHandle, mut job: DurableJob) -> Result<DurableJob> {
 }
 
 // The caller either holds the active-jobs mutex or owns the cleanup claim.
-fn reconcile_stopped_job(app: &AppHandle, mut job: DurableJob) -> Result<DurableJob> {
+fn reconcile_stopped_job<R: Runtime>(app: &AppHandle<R>, mut job: DurableJob) -> Result<DurableJob> {
     let before = job.clone();
     let mut pds = native_store(app)?;
     let complete = if job.request.kind == JobKind::Restore {
@@ -811,9 +816,13 @@ pub(crate) fn wake_job(app: AppHandle, id: String) -> Result<()> {
                         &error,
                         std::panic::Location::caller(),
                     );
-                    let mut pds = native_store(&app)?;
-                    let authoritative = pds.external_job(&job.id).map_err(local_error)?;
                     let local_application = super::runtime_restore::application_started(&job);
+                    // A restore past its commit is pending either way, without reading the store.
+                    let mut pds = if local_application { None } else { Some(native_store(&app)?) };
+                    let authoritative = match pds.as_mut() {
+                        Some(pds) => pds.external_job(&job.id).map_err(local_error)?,
+                        None => None,
+                    };
                     let pending = local_application || authoritative.iter().any(|item| {
                         item.id == id
                             && ["publishing", "publicationUnknown", "applying"]
@@ -837,10 +846,10 @@ pub(crate) fn wake_job(app: AppHandle, id: String) -> Result<()> {
                             | ErrorKind::LocalPermissionDenied
                     );
                     if !pending && !retryable {
-                        if let Some(item) = authoritative.iter().find(|item| {
+                        if let (Some(pds), Some(item)) = (pds.as_mut(), authoritative.iter().find(|item| {
                             item.id == id
                                 && ["preparing", "ready", "stale"].contains(&item.phase.as_str())
-                        }) {
+                        })) {
                             pds.external_cancel_prepared(&item.id).map_err(local_error)?;
                         }
                     }

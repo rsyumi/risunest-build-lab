@@ -179,19 +179,19 @@ export class SyncDriver {
   }
 
   /** Opens Settings on the RisuNest page the way the product's own sync link does, then the sync tab. */
-  async openSyncSettings() {
+  async openSyncSettings(step = "settings-open") {
     const { openRisuNestSettingsTab } = await import("../../src/ts/setting/risuNestSettingsTabs");
     const { SettingsMenuIndex, settingsOpen } = await import("../../src/ts/stores.svelte");
-    await this.waitForNoDialog("settings-open");
+    await this.waitForNoDialog(step);
     openRisuNestSettingsTab("settings");
     SettingsMenuIndex.set(17);
     settingsOpen.set(true);
     const tab = await until(() => document.querySelector<HTMLButtonElement>('[data-risunest-tab="sync"]'),
-      30_000, "settings-open", "RisuNest settings tabs did not render");
+      30_000, step, "RisuNest settings tabs did not render");
     tab.click();
     await tick();
-    await until(() => document.querySelector('[data-risunest-panel="sync"]'), 15_000, "settings-open", "sync tab did not open");
-    await until(() => this.section(), 30_000, "settings-open", "Sync server settings did not render");
+    await until(() => document.querySelector('[data-risunest-panel="sync"]'), 15_000, step, "sync tab did not open");
+    await until(() => this.section(), 30_000, step, "Sync server settings did not render");
     return { tab: "sync" };
   }
 

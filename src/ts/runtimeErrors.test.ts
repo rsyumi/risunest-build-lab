@@ -32,6 +32,26 @@ describe('runtime error handling', () => {
         expect(h.showError).toHaveBeenCalledWith('Synthetic script failure')
     })
 
+    it.each([
+        'ResizeObserver loop completed with undelivered notifications.',
+        'ResizeObserver loop limit exceeded',
+    ])('ignores the browser ResizeObserver loop notice: %s', (message) => {
+        const h = harness()
+        h.target.dispatchEvent(new ErrorEvent('error', { message }))
+        expect(h.showError).not.toHaveBeenCalled()
+        expect(h.recordError).not.toHaveBeenCalled()
+        h.target.dispatchEvent(new ErrorEvent('error', { message: 'Synthetic script failure' }))
+        expect(h.showError).toHaveBeenCalledExactlyOnceWith('Synthetic script failure')
+        expect(h.recordError).toHaveBeenCalledExactlyOnceWith('Uncaught error: Synthetic script failure')
+    })
+
+    it('still presents an Error object that carries a ResizeObserver loop message', () => {
+        const h = harness()
+        const error = new Error('ResizeObserver loop completed with undelivered notifications.')
+        h.target.dispatchEvent(new ErrorEvent('error', { error, message: error.message }))
+        expect(h.showError).toHaveBeenCalledExactlyOnceWith(error)
+    })
+
     it('records uncaught errors and rejected errors with their kind and name', () => {
         const h = harness()
         const error = new TypeError('Synthetic render failure')

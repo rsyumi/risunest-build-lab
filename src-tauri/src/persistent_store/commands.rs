@@ -259,6 +259,24 @@ impl PersistentStoreState {
         Ok(Some(maintenance))
     }
 
+    /// Opens the renderer store again while `maintenance` still keeps renderer
+    /// operations out, for a native commit that the renderer adopts in place.
+    pub(crate) fn reopen_under_maintenance(
+        &self,
+        maintenance: &DeviceMaintenanceGuard,
+        app_data_dir: &Path,
+    ) -> StoreResult<()> {
+        if !Arc::ptr_eq(&maintenance.gate, &self.renderer_gate) {
+            return Err(StoreError::Validation {
+                message: "device maintenance guard belongs to another persistent store".to_owned(),
+            });
+        }
+        let mut store = self.store.lock().map_err(|error| StoreError::Store {
+            message: format!("persistent store mutex poisoned: {error}"),
+        })?;
+        open_persistent_store(app_data_dir, &mut store).map(|_| ())
+    }
+
     pub(crate) fn reset_renderer_session(&self) -> StoreResult<()> {
         let Some(_maintenance) = self.try_acquire_renderer_maintenance()? else {
             return Ok(());
@@ -501,7 +519,7 @@ pub(crate) fn pds_open(
 }
 
 #[cfg(test)]
-fn open_renderer_persistent_store(
+pub(crate) fn open_renderer_persistent_store(
     state: &PersistentStoreState,
     app_data_dir: &Path,
 ) -> StoreResult<PersistentStoreOpenResult> {

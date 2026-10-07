@@ -62,6 +62,8 @@
     /** Which action is running, so only the button that started it shows a spinner. */
     let activeAction = $state('')
     let error = $state('')
+    /** A failed background refresh, which the next successful refresh clears. */
+    let pollError = $state('')
     let expanded = $state<Record<string, 'history' | 'quota' | ''>>({})
     let history = $state<Record<string, ExternalHistoryItem[]>>({})
     let historyCursor = $state<Record<string, string | undefined>>({})
@@ -76,7 +78,8 @@
     let connectionSettingsQr = $state('')
     /** The history entry whose restore scope is open, and what is ticked in it. */
     let exportRun = $state<{ id: string; connectionId: string; progress?: ExternalSnapshotExportProgress } | null>(null)
-    const pendingPins = new Map<string, string>()
+    /** Jobs that add or change history rows, by job ID, so the open history reloads when they finish. */
+    const historyJobs = new Map<string, string>()
     let pollTimer: ReturnType<typeof setTimeout> | undefined
 
     async function setSyncBinding(connection: ExternalConnectionSummary, enabled: boolean): Promise<void> {
@@ -125,22 +128,35 @@
         }
         try {
             storageState = await bridge.getState()
-            for (const [connectionId, jobId] of pendingPins) {
+            for (const job of storageState.jobs) {
+                if (job.kind === 'backup' && externalJobIsActive(job)) historyJobs.set(job.id, job.connectionId)
+            }
+            for (const [jobId, connectionId] of historyJobs) {
                 const completed = storageState.jobs.find(job => job.id === jobId)
                 if (!completed || externalJobIsActive(completed)) continue
-                pendingPins.delete(connectionId)
+                historyJobs.delete(jobId)
                 const connection = storageState.connections.find(item => item.id === connectionId)
-                if (completed.state === 'succeeded' && connection) await loadHistory(connection, false)
+                if (completed.state === 'succeeded' && connection && expanded[connectionId] === 'history') {
+                    await loadHistory(connection, false)
+                }
             }
             if (!silent) error = ''
+            pollError = ''
         } catch (reason) {
-            error = externalErrorMessage(strings, reason)
+            if (silent) pollError = externalErrorMessage(strings, reason)
+            else error = externalErrorMessage(strings, reason)
         } finally {
             if (!silent) {
                 busy = false
                 activeAction = ''
             }
         }
+    }
+
+    async function refreshWithHistory(): Promise<void> {
+        await refresh()
+        const open = storageState?.connections.filter(connection => expanded[connection.id] === 'history') ?? []
+        await Promise.all(open.map(connection => loadHistory(connection, false)))
     }
 
     function schedulePoll(whileBusy = false): void {
@@ -224,6 +240,7 @@
                 const operation = requestExternalStorageNow(connection.id, job)
                 schedulePoll(true)
                 const result = await operation
+                if (job === 'backup' && result.kind === 'complete') historyJobs.set(result.job.id, connection.id)
                 if (result.kind === 'blocked' && !result.job) {
                     error = externalErrorMessage(strings, result.error ?? result.cause ?? { code: result.reason })
                 }
@@ -247,7 +264,7 @@
                 })
                 if (job === 'pin-history') {
                     if (started.state === 'succeeded') await loadHistory(connection, false)
-                    else pendingPins.set(connection.id, started.id)
+                    else historyJobs.set(started.id, connection.id)
                 }
             }
             await refresh(true)
@@ -703,7 +720,7 @@
 <SettingGroup id="risunest-external-storage" title={strings.title} description={strings.help}>
     {#snippet actions()}
         {#if storageState?.supported && !adding && !renewalConnection}<SettingButton disabled={busy} onclick={() => adding = true}>{strings.add}</SettingButton>{/if}
-        {#if storageState?.supported !== false}<SettingButton variant="secondary" busy={activeAction === 'refresh'} disabled={busy} onclick={() => refresh()}>{strings.refresh}</SettingButton>{/if}
+        {#if storageState?.supported !== false}<SettingButton variant="secondary" busy={activeAction === 'refresh'} disabled={busy} onclick={refreshWithHistory}>{strings.refresh}</SettingButton>{/if}
     {/snippet}
 
     {#if !storageState && busy}<p class="p-4 text-sm text-textcolor2">{strings.loading}</p>
@@ -876,7 +893,7 @@
             </article>
         {/each}
     {/if}
-    {#if error}<p class="px-4 py-3 text-sm text-danger-400" role="alert">{error}</p>{/if}
+    {#if error || pollError}<p class="px-4 py-3 text-sm text-danger-400" role="alert">{error || pollError}</p>{/if}
 </SettingGroup>
 
 {#if recoveryKey}

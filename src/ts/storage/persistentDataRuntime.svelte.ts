@@ -22,7 +22,7 @@ import type { ConversationViewportSource } from '../conversationViewportSource'
 import type { Chat, Database, botPreset, character } from './database.svelte'
 import { getDatabase, setDatabase, setEffectivePresetOverride } from './database.svelte'
 import { getEffectivePresetOverride } from './effectiveIdentityState'
-import { prepareDatabaseForPersistence } from './databasePreparation'
+import { prepareDatabaseForPersistence, preparePersistentRootForWorkingSet } from './databasePreparation'
 import { getPersistentDataStore, getPersistentStorageAuthority } from './persistentDataStoreFactory'
 import type {
     CharacterDetail,
@@ -480,6 +480,7 @@ export function getPersistentDataRuntime(): PersistentDataRuntime {
             onWorkingSetRefreshRequired: (revision) => workingSetRefreshRevision.set(revision),
             onDestructiveReplacementFenceChanged: (active) => destructiveReplacementActive.set(active),
             prepareDatabase: prepareDatabaseForPersistence,
+            prepareRoot: (root) => preparePersistentRootForWorkingSet(root),
         })
     }
     return productionRuntime

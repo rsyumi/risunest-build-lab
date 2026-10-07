@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { get } from 'svelte/store'
-import { modalNavigation } from 'src/ts/ui/modalNavigation'
+import { handleRootBack, modalNavigation } from 'src/ts/ui/modalNavigation'
 import { alertStore } from 'src/ts/stores.svelte'
 
 const branchMocks = vi.hoisted(() => ({
@@ -157,6 +157,27 @@ describe('AlertComp branch view', () => {
         unsubscribe()
         history.replaceState(null, '')
         navigation.destroy()
+    })
+    it('dismisses a confirmation shown outside any modal host on the Android root Back', async () => {
+        // App.svelte listens for the Back that MainActivity offers when no history entry is left.
+        window.addEventListener('risunest-root-back', handleRootBack)
+        alertStore.set({ type: 'ask', msg: 'Synthetic confirmation' })
+        const target = document.createElement('div')
+        document.body.append(target)
+        mounted = mount(AlertComp, { target })
+        await tick()
+        expect(target.textContent).toContain('Synthetic confirmation')
+        let settlements = 0
+        const unsubscribe = alertStore.subscribe(value => { if (value.type === 'none') settlements++ })
+        const back = new Event('risunest-root-back', { cancelable: true })
+        window.dispatchEvent(back)
+        await tick()
+        expect(back.defaultPrevented).toBe(true)
+        expect(get(alertStore)).toEqual({ type: 'none', msg: '' })
+        expect(settlements).toBe(1)
+        expect(target.textContent).not.toContain('Synthetic confirmation')
+        unsubscribe()
+        window.removeEventListener('risunest-root-back', handleRootBack)
     })
     it('cancels its branch scan on close and exposes retry after failure', async () => {
         branchMocks.getChatBranches.mockRejectedValueOnce(new Error('synthetic scan')).mockResolvedValueOnce([])

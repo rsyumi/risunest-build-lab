@@ -121,7 +121,8 @@ export function keepFocusedInputVisible(node: HTMLElement, enabled: boolean) {
     const update = () => {
         animationFrame = null
         const focusedInput = getFocusedInput()
-        if (!focusedInput) {
+        // A keyboard that shrinks the whole page, as before Android 11, leaves the field to the browser.
+        if (!focusedInput || viewport.height > document.documentElement.clientHeight - 1) {
             setShift(null, 0)
             return
         }

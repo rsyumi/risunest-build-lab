@@ -782,6 +782,17 @@ describe('required connection fields', () => {
         }))
     })
 
+    it('describes the WebDAV folder as the one to create in or the one that holds the repository', async () => {
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+        await selectProvider('webdav')
+        const help = () => labelControl<HTMLInputElement>(strings.fields['webdav.root']).closest('label')?.textContent
+        expect(help()).toContain(strings.fieldHelp['webdav.root'])
+        await selectMode(strings.existing)
+        expect(help()).toContain(strings.existingFieldHelp['webdav.root'])
+        expect(help()).not.toContain(strings.fieldHelp['webdav.root'])
+    })
+
     it('reports each empty required field and leaves optional fields alone', async () => {
         component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
         await settle()

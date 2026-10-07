@@ -224,6 +224,43 @@ describe('the storage usage tab', () => {
         expect([...target.querySelectorAll('button')].some(button => button.textContent?.trim() === strings.retryAction)).toBe(true)
     })
 
+    it('clears a background poll failure once a later poll succeeds', async () => {
+        vi.useFakeTimers()
+        try {
+            const running = { id: 'job', connectionId: 'connection-1', kind: 'backup', state: 'running', phase: 'upload',
+                completedBytes: '4', totalBytes: '10', completedItems: '1', startedAtMs: '1', updatedAtMs: '1' }
+            state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+                connections: [connection(10, 30)], jobs: [running] })
+            state.jobStarted?.()
+            await settle()
+            const alerts = () => [...target.querySelectorAll('[role="alert"]')].map(item => item.textContent)
+            state.getState.mockRejectedValueOnce({ kind: 'transient', httpStatus: null, retryAtMs: null })
+            await vi.advanceTimersByTimeAsync(1_200)
+            await settle()
+            expect(alerts()).toEqual([strings.retry])
+            await vi.advanceTimersByTimeAsync(1_200)
+            await settle()
+            expect(alerts()).toEqual([])
+            expect(target.textContent).toContain(strings.jobActive.backup)
+        } finally { vi.useRealTimers() }
+    })
+
+    it('keeps an action failure through background refreshes', async () => {
+        vi.mocked(requestExternalStorageNow).mockResolvedValue({ kind: 'blocked', reason: 'preconditionFailed', cause: { kind: 'preconditionFailed' } })
+        const backup = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.runBackup)!
+        backup.click()
+        await settle()
+        const alerts = () => [...target.querySelectorAll('[role="alert"]')].map(item => item.textContent)
+        expect(alerts()).toEqual([strings.stateChanged])
+        state.getState.mockRejectedValueOnce({ kind: 'transient', httpStatus: null, retryAtMs: null })
+        state.jobStarted?.()
+        await settle()
+        expect(alerts()).toEqual([strings.stateChanged])
+        state.jobStarted?.()
+        await settle()
+        expect(alerts()).toEqual([strings.stateChanged])
+    })
+
     it('retries the retained automatic operation and persists its pause choice', async () => {
         const job = { id: 'retained', connectionId: 'connection-1', kind: 'backup', state: 'waiting', phase: 'paused',
             reason: 'automatic', targetRevision: '8', completedBytes: '0', completedItems: '0', startedAtMs: '1', updatedAtMs: '1',
@@ -355,6 +392,70 @@ describe('the storage usage tab', () => {
         await settle()
         expect(state.listHistory).toHaveBeenCalledTimes(2)
         expect(target.textContent).toContain(strings.pinned)
+    })
+
+    it('reloads the open history when a backup finishes', async () => {
+        const older = { id: 'older', snapshotId: 'older', kind: 'backup-point', createdAtMs: '1', logicalRevision: '1',
+            complete: true, verified: true, pinned: false, includedSections: [], sameDevice: true }
+        state.listHistory.mockResolvedValue({ items: [older] })
+        const tab = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.history)!
+        tab.click()
+        await settle()
+        const backup = { id: 'backup-job', connectionId: 'connection-1', kind: 'backup', state: 'running', phase: 'upload',
+            completedBytes: '4', totalBytes: '10', completedItems: '1', startedAtMs: '2', updatedAtMs: '2' }
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+            connections: [connection(10, 30)], jobs: [backup] })
+        state.jobStarted?.()
+        await settle()
+        expect(state.listHistory).toHaveBeenCalledTimes(1)
+        state.listHistory.mockResolvedValue({ items: [{ ...older, id: 'newer', snapshotId: 'newer', createdAtMs: '2' }, older] })
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+            connections: [connection(10, 30)], jobs: [{ ...backup, state: 'succeeded' }] })
+        state.jobStarted?.()
+        await settle()
+        expect(state.listHistory).toHaveBeenCalledTimes(2)
+        expect(state.listHistory).toHaveBeenLastCalledWith('connection-1', undefined)
+        expect(target.querySelectorAll('[role="tabpanel"] .item')).toHaveLength(2)
+    })
+
+    it('reloads the open history after a manual backup that finished between polls', async () => {
+        const tab = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.history)!
+        tab.click()
+        await settle()
+        const finished = { id: 'manual-job', connectionId: 'connection-1', kind: 'backup', state: 'succeeded' }
+        vi.mocked(requestExternalStorageNow).mockResolvedValue({ kind: 'complete', revision: '2', job: finished } as never)
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+            connections: [connection(10, 30)], jobs: [finished] })
+        const run = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.runBackup)!
+        run.click()
+        await settle()
+        await settle()
+        expect(state.listHistory).toHaveBeenCalledTimes(2)
+    })
+
+    it('leaves a closed history alone when a backup finishes', async () => {
+        const backup = { id: 'backup-job', connectionId: 'connection-1', kind: 'backup', state: 'running', phase: 'upload',
+            completedBytes: '4', totalBytes: '10', completedItems: '1', startedAtMs: '2', updatedAtMs: '2' }
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+            connections: [connection(10, 30)], jobs: [backup] })
+        state.jobStarted?.()
+        await settle()
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+            connections: [connection(10, 30)], jobs: [{ ...backup, state: 'succeeded' }] })
+        state.jobStarted?.()
+        await settle()
+        expect(state.listHistory).not.toHaveBeenCalled()
+    })
+
+    it('reloads the open history from its first page on refresh', async () => {
+        const tab = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.history)!
+        tab.click()
+        await settle()
+        const refresh = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.refresh)!
+        refresh.click()
+        await settle()
+        expect(state.listHistory).toHaveBeenCalledTimes(2)
+        expect(state.listHistory).toHaveBeenLastCalledWith('connection-1', undefined)
     })
 
 

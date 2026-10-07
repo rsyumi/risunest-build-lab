@@ -160,6 +160,65 @@ describe('production persistent working-set publication', () => {
         expect(commit).not.toHaveBeenCalled()
     })
 
+    it.each(['refresh', 'recovery'] as const)('installs an activated library with the root fields boot prepares (%s)', async (path) => {
+        const previousGlobals = {indexedDB: globalThis.indexedDB, IDBKeyRange: globalThis.IDBKeyRange}
+        vi.resetModules()
+        Object.assign(globalThis, {indexedDB: new IDBFactory(), IDBKeyRange})
+        try {
+            await import('../stores.svelte')
+            const databaseModule = await import('./database.svelte')
+            const runtimeModule = await import('./persistentDataRuntime.svelte')
+            const factory = await import('./persistentDataStoreFactory')
+            const preparation = await import('./databasePreparation')
+            const catalog = await import('./workingSetCatalog')
+            const { bootstrapPersistentDatabase } = await import('./persistentBootstrap')
+            const character = (chaId: string) => ({type: 'character', chaId, name: chaId, chatPage: 0, chatFolders: [], chats: [{id: `${chaId}-chat`, message: []}]})
+            // A stored root with neither field is valid input; only the working set receives them.
+            const library = (username: string, ids: string[]) => ({apiType: 'openrouter', username, formatversion: 5,
+                botPresets: [{id: 'preset-a', name: 'A'}], pluginCustomStorage: {}, characters: ids.map(character)}) as unknown as Database
+            const raw = factory.getRawPersistentDataStore()
+            await raw.open()
+            await raw.replaceFromDatabase(library('Local', ['owner']), 0)
+            const runtime = runtimeModule.getPersistentDataRuntime()
+            const local = await bootstrapPersistentDatabase({
+                store: runtime.store,
+                prepareDatabase: preparation.prepareDatabaseForBootstrap,
+                prepareRoot: preparation.preparePersistentRootForWorkingSet,
+                projectScalableWorkingSet: (input) => catalog.projectCatalogWorkingSet(input.root, input.characters,
+                    catalog.createCatalogPresetWorkingSet(input.presetCatalog, input.activePreset)),
+            })
+            databaseModule.setDatabase(local.database)
+            await runtime.initializeActiveWorkingSet(databaseModule.getDatabase())
+            expect(databaseModule.getDatabase().characterOrder).toEqual([])
+            expect(databaseModule.getDatabase().customSidebarItems).toEqual([])
+
+            const pause = runtime.withPausedPersistentWrites('activation', async (token) => {
+                const guard = runtime.beginActivatedLibraryGuard(token)
+                await raw.replaceFromDatabase(library('Activated', ['owner', 'server-only']), token.revision)
+                if (path === 'recovery') throw new Error('Synthetic activation result lost')
+                await runtime.refreshActivatedLibraryUnderPause(token)
+                guard.complete()
+            })
+            if (path === 'recovery') {
+                await expect(pause).rejects.toThrow('Synthetic activation result lost')
+                await expect(runtime.retryCommittedWorkingSetRefresh()).resolves.toMatchObject({projection: 'applied'})
+            } else await pause
+
+            const database = databaseModule.getDatabase()
+            expect(database.username).toBe('Activated')
+            expect(database.characters.map((value) => value.chaId)).toEqual(['owner', 'server-only'])
+            expect(database.characterOrder).toEqual([])
+            expect(database.customSidebarItems).toEqual([])
+            const commit = vi.spyOn(raw, 'commit')
+            await runtime.flushPendingDataLocally('activated-prepared-no-op')
+            expect(commit).not.toHaveBeenCalled()
+            expect((await raw.readRoot()).value).not.toHaveProperty('characterOrder')
+            expect((await raw.readRoot()).value).not.toHaveProperty('customSidebarItems')
+        } finally {
+            Object.assign(globalThis, previousGlobals)
+        }
+    })
+
     it.each([false, true])('retains explicit and concurrent root deltas without copying defaults (failure=%s)', async (fail) => {
         const initial = {username: 'Before', translator: 'Before', botPresets: [{id: 'preset', name: 'Preset'}], botPresetsId: 0, personas: [{id: 'persona', name: 'Persona', prompt: ''}], selectedPersona: 0, plugins: [],
             opaqueRoot: {before: true}, removedRoot: 'Remove', characters: [{type: 'character', chaId: 'owner', name: 'Owner', chats: []}]} as unknown as Database

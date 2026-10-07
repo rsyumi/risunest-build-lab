@@ -401,6 +401,8 @@ export interface PinnedScalableWorkingSetOptions {
     selectedCharacterId: string | null
     selectedConversationId?: string | null
     activeCharacterIds?: ReadonlySet<string>
+    /** Applies the root preparation boot gives a stored root before it enters the working set. */
+    prepareRoot?: (root: PersistentRoot) => Promise<PersistentRoot>
 }
 
 async function readPinnedConversationSummaries(
@@ -490,7 +492,8 @@ export async function projectPinnedScalableWorkingSet(
 ): Promise<Database> {
     const root = await reader.readRoot()
     assertPinnedRevision(reader.revision, root.revision, 'Root')
-    const presets = await readPinnedActivePreset(reader, root.value.botPresetsId)
+    const rootValue = options.prepareRoot ? await options.prepareRoot(root.value) : root.value
+    const presets = await readPinnedActivePreset(reader, rootValue.botPresetsId)
     const residentIds = new Set(options.activeCharacterIds)
     if (options.selectedCharacterId) residentIds.add(options.selectedCharacterId)
     let selectedDetail: CharacterDetail | null = null
@@ -537,7 +540,7 @@ export async function projectPinnedScalableWorkingSet(
     }
 
     return projectSelectionIndexes({
-        ...root.value,
+        ...rootValue,
         pluginCustomStorage: {},
         botPresets: createCatalogPresetWorkingSet(
             presets.catalog,

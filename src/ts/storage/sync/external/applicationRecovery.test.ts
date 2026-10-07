@@ -89,6 +89,31 @@ describe('external application outcome ownership', () => {
         expect(application.afterRefresh).toHaveBeenCalledOnce()
     })
 
+    it('reopens the store before every projection attempt but not before a confirmation retry', async () => {
+        const { recovery, application } = await fixture()
+        const events: string[] = []
+        const reopenStore = vi.fn(async () => { events.push('reopened') })
+        application.confirm.mockImplementationOnce(async () => {
+            events.push('confirm')
+            throw new Error('synthetic lost reply')
+        }).mockImplementation(async () => {
+            events.push('confirm')
+            return { kind: 'committed' as const, revision: 8 }
+        })
+        application.fence.refreshCommittedWorkingSet.mockImplementationOnce(async () => {
+            events.push('projected')
+            return { kind: 'committed', revision: 8, projection: 'refresh-required' }
+        }).mockImplementation(async () => {
+            events.push('projected')
+            return { kind: 'committed', revision: 8, projection: 'applied' }
+        })
+        await expect(recovery.runExternalApplication({ ...application, reopenStore })).rejects.toThrow('lost reply')
+        await expect(recovery.retryExternalApplication()).rejects.toThrow('read-only')
+        await recovery.retryExternalApplication()
+        expect(events).toEqual(['confirm', 'confirm', 'reopened', 'projected', 'reopened', 'projected'])
+        expect(application.settled).toHaveBeenCalledOnce()
+    })
+
     it('retries only plugin and routing refresh after projection succeeded', async () => {
         const { recovery, application } = await fixture()
         application.afterRefresh.mockRejectedValueOnce(new Error('synthetic plugin failure'))

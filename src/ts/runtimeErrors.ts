@@ -1,4 +1,10 @@
 const MAX_ERROR_CHARS = 2048
+// Browsers report a deferred ResizeObserver delivery as an error event without an
+// Error object; nothing failed, so it is neither logged nor shown.
+const BENIGN_ERROR_MESSAGES = new Set([
+    'ResizeObserver loop completed with undelivered notifications.',
+    'ResizeObserver loop limit exceeded',
+])
 
 function describeError(error: unknown): string {
     if (typeof error === 'string') return error.slice(0, MAX_ERROR_CHARS)
@@ -25,6 +31,7 @@ export function registerRuntimeErrorHandlers(
         }
     }
     const errorHandler = (event: ErrorEvent) => {
+        if (event.error == null && BENIGN_ERROR_MESSAGES.has(event.message)) return
         const error = event.error ?? (event.message || 'Unknown runtime error')
         report('Uncaught error', error)
         if (typeof Worker === 'undefined' || !(event.target instanceof Worker)) {

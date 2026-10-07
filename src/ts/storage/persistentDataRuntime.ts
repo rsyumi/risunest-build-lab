@@ -338,6 +338,8 @@ export interface PersistentDataRuntimeDependencies {
     onDestructiveReplacementFenceChanged?(active: boolean): void
     /** Detaches the input synchronously before any asynchronous preparation. */
     prepareDatabase(database: Database): Promise<Database>
+    /** Gives a stored root read by a refresh the same preparation boot applies. */
+    prepareRoot?(root: PersistentRoot): Promise<PersistentRoot>
 }
 
 export interface PersistentActivatedLibraryGuard {
@@ -816,6 +818,7 @@ export function createPersistentDataRuntime(
                             {
                                 ...pinned,
                                 keepConversation,
+                                prepareRoot: dependencies.prepareRoot,
                                 changeSet,
                                 deferredConversation,
                                 onPluginStorageChanged:
@@ -831,7 +834,11 @@ export function createPersistentDataRuntime(
                 }
             }
             return {
-                database: await projectPinnedScalableWorkingSet(lease, { ...pinned, keepConversation }),
+                database: await projectPinnedScalableWorkingSet(lease, {
+                    ...pinned,
+                    keepConversation,
+                    prepareRoot: dependencies.prepareRoot,
+                }),
                 deferred: false,
                 windowedMetadata,
             }
@@ -1600,6 +1607,7 @@ export function createPersistentDataRuntime(
                     selectedCharacterId,
                     selectedConversationId,
                     activeCharacterIds: workingSet.activeCharacterIds,
+                    prepareRoot: dependencies.prepareRoot,
                 },
             )
             const releaseAllowed = canRelease ? await canRelease() : true
