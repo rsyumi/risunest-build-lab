@@ -1,6 +1,7 @@
 import { resolvePinnedConversationPosition } from '../plugins/pinnedConversationPosition'
 import { registerGeneratingConversation } from '../storage/generatingConversationRegistry'
 import { openGenerationRequestPhase } from './generationRequestPhase'
+import { noteGenerationMessage, noteGenerationStarted } from './generationEnd'
 import { boundedGenerationFallbackReason } from './boundedGenerationAdmission'
 import { get, writable } from "svelte/store";
 import { type character, type MessageGenerationInfo, type Chat, type MessagePresetInfo, activatePresetOverride, setCurrentChat, type Message } from "../storage/database.svelte";
@@ -690,6 +691,7 @@ export async function sendChat(arg:{
         }
         if (!lifecycle.isTargetCurrent()) return false
         enteredGeneration = true
+        if (!arg.preview && !arg.previewPrompt) noteGenerationStarted(lifecycle.generationTarget)
         if (lifecycle.generationTarget) lifecycle.releaseGeneration = releaseGeneration = registerGeneratingConversation(lifecycle.generationTarget)
         generationKeepAliveAcquired = await beginAndroidGenerationKeepAlive()
         iosGeneration = await beginIOSGeneration(arg.signal)
@@ -888,7 +890,8 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 suffix,
                 appendMessage: m,
             })
-            if (!applied) alertError(error)
+            if (applied) noteGenerationMessage(lifecycle.generationTarget, chatRoom.message.at(-1)?.chatId)
+            else alertError(error)
             return
         }
         catch(e){
@@ -2478,6 +2481,10 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         ?? requestSourceCharacter.chats[requestSourceChatPage]
     let requestSourceShell = requestSourceCharacter.chats[requestSourceChatPage]
     let requestSourceMessages = requestSourceConversation.message
+    if (!arg.previewPrompt) {
+        noteGenerationMessage(lifecycle.generationTarget, generationId)
+        if (arg.continue) noteGenerationMessage(lifecycle.generationTarget, requestSourceMessages.at(-1)?.chatId)
+    }
     let requestSourceSession = getActiveConversationSession()
     let requestSourceSessionVersion = requestSourceSession?.version
     let requestSourceLost = false

@@ -19,7 +19,7 @@ vi.mock('src/ts/platform', () => ({ isTauri: false }))
 vi.mock('../lang', () => ({ language: {} }))
 
 import { alertStore } from './stores.svelte'
-import { alertClear, alertConfirm, alertError, alertSelect, alertToast, alertTOS, alertWait, waitAlert } from './alert'
+import { alertClear, alertConfirm, alertError, alertSelect, alertToast, alertTOS, alertWait, doingAlert, waitAlert } from './alert'
 
 async function answer(msg: string) {
     await vi.advanceTimersByTimeAsync(0)
@@ -78,6 +78,16 @@ describe('alerts on the queue', () => {
         await answer('yes')
         await expect(question).resolves.toBe(true)
         expect(get(alertStore).type).toBe('none')
+    })
+
+    it('counts the wait before the next queued dialog as an open alert', async () => {
+        void alertConfirm('One?')
+        void alertConfirm('Two?')
+        alertStore.set({ type: 'none', msg: 'yes' })
+        expect(get(alertStore).type).toBe('none')
+        expect(doingAlert()).toBe(true)
+        await answer('yes')
+        expect(doingAlert()).toBe(false)
     })
 
     it('waits for every queued dialog in waitAlert', async () => {

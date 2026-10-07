@@ -13,6 +13,7 @@
     import { type Chat as ChatRecord, type Database, type character, type Message } from "../../ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
     import { chatProcessStage, doingChat, sendChat, notifyGenerationCompletion, getSelectedBoundedGenerationFallbackReason, getHistoryWindowMemoryMode, openSelectedHistoryWindow } from "../../ts/process/index.svelte";
+    import { beginGenerationEndRun, type GenerationEndRun, type GenerationEndStatus } from "../../ts/process/generationEnd";
     import { getPersonaPrompt, parseKeyValue, sleep } from "../../ts/util";
     import { language } from "../../lang";
     import { isExpTranslator, translate } from "../../ts/translator/translator";
@@ -430,6 +431,19 @@
         return getHistoryWindowMemoryMode(true) !== null
     }
 
+    function generationEndStatus(
+        completed: boolean,
+        signal: AbortSignal,
+        target: { characterId: string, conversationId: string, navigationGeneration: number },
+    ): GenerationEndStatus {
+        if (completed) return 'completed'
+        return signal.aborted || !isSelectedConversationTarget(target) ? 'aborted' : 'failed'
+    }
+
+    function captureGeneration(run: GenerationEndRun | null, generate: () => Promise<boolean>): () => Promise<boolean> {
+        return run ? () => run.capture(generate) : generate
+    }
+
     function isSelectedConversationTarget(
         target: { characterId: string, conversationId: string, navigationGeneration: number },
     ): boolean {
@@ -604,11 +618,16 @@
         if ($doingChat || rerollBusy || sending) return
         rerollBusy = true
         abortController = new AbortController()
+        const signal = abortController.signal
+        const endTarget = persistentRuntime.captureSelectedConversationTarget()
+        const endRun = endTarget ? beginGenerationEndRun(endTarget, { reroll: true }) : null
+        const generate = captureGeneration(endRun, () => sendChat({ signal, historyLimit: true }))
+        let completed = false
         let windowed = false
         try {
             if (historyLimitApplies()) {
                 windowed = true
-                await rerollWindowed(abortController.signal, expectedLastMessage)
+                completed = await rerollWindowed(signal, generate, expectedLastMessage)
                 return
             }
             await runSelectedConversationOperation('reroll-response', async (context) => {
@@ -621,7 +640,7 @@
                     return navigation === persistentRuntime.getNavigationGeneration() &&
                         selected?.chaId === character.chaId && selected.chats[selected.chatPage]?.id === conversation.id
                 }
-                const completed = await generateResponseCandidate({
+                const candidateCompleted = await generateResponseCandidate({
                     chat: conversation,
                     currentChat: current,
                     session: () => {
@@ -631,10 +650,11 @@
                     isCurrent,
                     createId: v4,
                     flush: () => persistentRuntime.flushPendingData('reroll-candidate'),
-                    generate: () => sendChat({ signal: abortController!.signal, historyLimit: true }),
-                    aborted: () => abortController!.signal.aborted,
+                    generate,
+                    aborted: () => signal.aborted,
                 })
-                if (completed) {
+                if (candidateCompleted) {
+                    completed = true
                     await persistentRuntime.acknowledgeGenerationCompletion()
                     await notifyGenerationCompletion(current()?.message.at(-1)?.data ?? '')
                     if (DBState.db.playMessage) new Audio(sendSound).play().catch(() => {})
@@ -645,34 +665,39 @@
         } finally {
             rerollBusy = false
             $doingChat = false
+            if (endTarget) endRun?.finish(generationEndStatus(completed, signal, endTarget))
         }
     }
 
-    async function rerollWindowed(signal: AbortSignal, expectedLastMessage?: string) {
+    async function rerollWindowed(
+        signal: AbortSignal,
+        generate: () => Promise<boolean>,
+        expectedLastMessage?: string,
+    ): Promise<boolean> {
         const target = persistentRuntime.captureSelectedConversationTarget()
-        if (!target) return
+        if (!target) return false
         const result = await generateWindowedResponseCandidate({
             open: openResponseTailWindow,
             isCurrent: () => isSelectedConversationTarget(target),
             createId: v4,
             flush: () => persistentRuntime.flushPendingData('reroll-candidate'),
-            generate: () => sendChat({ signal, historyLimit: true }),
+            generate,
             aborted: () => signal.aborted,
             expectedLastMessage,
         })
         if (!result) {
             reportUnopenedHistoryWindow(target)
-            return
+            return false
         }
         if (result.reopenFailed) {
             if (!signal.aborted) reportUnopenedHistoryWindow(target, language.generationConversationChanged)
-            return
+            return false
         }
-        if (result.completed) {
-            await persistentRuntime.acknowledgeGenerationCompletion()
-            await notifyGenerationCompletion(result.lastMessage ?? '')
-            if (DBState.db.playMessage) new Audio(sendSound).play().catch(() => {})
-        }
+        if (!result.completed) return false
+        await persistentRuntime.acknowledgeGenerationCompletion()
+        await notifyGenerationCompletion(result.lastMessage ?? '')
+        if (DBState.db.playMessage) new Audio(sendSound).play().catch(() => {})
+        return true
     }
 
     async function moveCandidateWindowed(direction: -1 | 1) {
@@ -803,19 +828,23 @@
 
     async function sendChatMainRaw(continued: boolean, historyLimit = true) {
         abortController = new AbortController()
+        const signal = abortController.signal
+        const endTarget = persistentRuntime.captureSelectedConversationTarget()
+        const endRun = endTarget ? beginGenerationEndRun(endTarget) : null
         let completed = false
         try {
-            completed = await sendChat({
-                signal: abortController.signal,
+            completed = await captureGeneration(endRun, () => sendChat({
+                signal,
                 continue: continued,
                 historyLimit,
-            })
+            }))()
         } catch (error) {
             if (error instanceof SelectedConversationPromotionStaleError) return
             console.error(error)
             alertError(error)
         } finally {
             $doingChat = false
+            if (endTarget) endRun?.finish(generationEndStatus(completed, signal, endTarget))
         }
         if (completed && DBState.db.playMessage) {
             const audio = new Audio(sendSound)

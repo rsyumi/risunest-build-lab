@@ -156,3 +156,26 @@ fn cache_management_rejects_a_linked_cache_root_and_keeps_external_files() {
     }
     assert!(external.stat_derived(&hash).unwrap().is_some());
 }
+
+#[test]
+fn transfer_working_copies_are_reclaimable_and_a_cleanup_removes_them() {
+    let root = tempfile::tempdir().unwrap();
+    let copies = root.path().join("server-sync").join(super::super::lww_client::LWW_CACHE);
+    for (lane, seed) in [("send", 1u8), ("receive", 2)] {
+        let cache = super::super::cache::Cache::open(&copies.join(lane)).unwrap();
+        cache.put(&vec![seed; super::super::cache::SMALL_OBJECT_BYTES + 1]).unwrap();
+        cache.put(&[seed; 16]).unwrap();
+    }
+    let busy = Some("server-sync-busy");
+    let usage = cache_usage(root.path(), None, &BTreeSet::new(), busy, false).unwrap();
+    assert!(usage.cache_bytes > 2 * super::super::cache::SMALL_OBJECT_BYTES as u64);
+    assert_eq!((usage.reclaimable_bytes, usage.protected_bytes), (0, usage.cache_bytes));
+    assert!(cache_usage(root.path(), None, &BTreeSet::new(), busy, true).is_err());
+    assert!(copies.is_dir());
+    let usage = cache_usage(root.path(), None, &BTreeSet::new(), None, false).unwrap();
+    assert_eq!((usage.reclaimable_bytes, usage.protected_bytes), (usage.cache_bytes, 0));
+    assert!(usage.database_bytes > 0 && usage.database_bytes < usage.cache_bytes);
+    let cleaned = cache_usage(root.path(), None, &BTreeSet::new(), None, true).unwrap();
+    assert_eq!((cleaned.cache_bytes, cleaned.reclaimable_bytes), (0, 0));
+    assert!(!copies.exists());
+}

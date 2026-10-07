@@ -117,6 +117,28 @@ pub(crate) fn cache_usage(
             usage.ledger_bytes += metadata.len();
             continue;
         }
+        if name == super::lww_client::LWW_CACHE {
+            // Copies of library bodies that an unfinished operation left for
+            // its retry, so a cleanup removes all of them.
+            let reclaimable = blocked.is_none();
+            if reclaimable && clean {
+                fs::remove_dir_all(&cache)?;
+                continue;
+            }
+            visit_files(&cache, &mut |file, bytes| {
+                usage.cache_bytes += bytes;
+                if reclaimable {
+                    usage.reclaimable_bytes += bytes;
+                }
+                if file.parent().and_then(Path::parent) == Some(cache.as_path())
+                    && file.file_name().and_then(|name| name.to_str()).is_some_and(|name| OBJECT_DATABASE_FILES.contains(&name))
+                {
+                    usage.database_bytes += bytes;
+                }
+                Ok(())
+            })?;
+            continue;
+        }
         let staging = cache.join("staging");
         let transfers = if staging.is_dir() && cache.join("transfers.sqlite").is_file() {
             checked_metadata(&cache.join("transfers.sqlite"))?;

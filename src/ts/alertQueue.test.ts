@@ -4,8 +4,8 @@ import { createAlertQueue } from './alertQueue'
 
 const none = { type: 'none', msg: '' } as const
 
-function queue(gapMs = 0) {
-    const alerts = createAlertQueue({ ...none }, { gapMs })
+function queue(options: { gapMs?: number } = { gapMs: 0 }) {
+    const alerts = createAlertQueue({ ...none }, options)
     const published: string[] = []
     alerts.subscribe((value) => { published.push(`${value.type}:${value.msg}`) })
     published.length = 0
@@ -32,7 +32,7 @@ describe('alert queue', () => {
 
         alerts.set({ type: 'none', msg: 'yes' })
         await expect(first).resolves.toBe('yes')
-        expect(get(alerts)).toEqual({ type: 'none', msg: 'yes' })
+        expect(get(alerts)).toEqual({ type: 'none', msg: 'yes', dialogPending: true })
         await vi.advanceTimersByTimeAsync(0)
         expect(get(alerts)).toMatchObject({ type: 'tos', msg: 'tos' })
 
@@ -99,20 +99,21 @@ describe('alert queue', () => {
         expect(get(alerts)).toEqual({ type: 'none', msg: 'no' })
     })
 
-    it('waits for the gap before showing a dialog queued behind a closed one', async () => {
-        const { alerts, published } = queue(250)
+    it('waits for the gap, marked as pending, before showing a dialog queued behind a closed one', async () => {
+        const { alerts, published } = queue({})
         const first = alerts.open({ type: 'ask', msg: 'first' })
         const second = alerts.open({ type: 'ask', msg: 'second' })
         alerts.set({ type: 'wait', msg: 'Loading' })
         alerts.set({ type: 'none', msg: 'yes' })
         await expect(first).resolves.toBe('yes')
+        expect(get(alerts)).toEqual({ type: 'none', msg: 'yes', dialogPending: true })
         expect(alerts.dialogVisible()).toBe(false)
         expect(alerts.hasDialogs()).toBe(true)
 
         alerts.set({ type: 'none', msg: 'yes' })
         alerts.set({ type: 'toast', msg: 'Copied' })
-        await vi.advanceTimersByTimeAsync(249)
-        expect(get(alerts)).toEqual({ type: 'none', msg: 'yes' })
+        await vi.advanceTimersByTimeAsync(149)
+        expect(get(alerts)).toEqual({ type: 'none', msg: 'yes', dialogPending: true })
         expect(await settled(second)).toBeUndefined()
 
         await vi.advanceTimersByTimeAsync(1)
@@ -124,7 +125,7 @@ describe('alert queue', () => {
     })
 
     it('shows a dialog opened after the queue emptied without a gap', async () => {
-        const { alerts } = queue(250)
+        const { alerts } = queue({})
         const first = alerts.open({ type: 'ask', msg: 'first' })
         alerts.set({ type: 'none', msg: 'yes' })
         await first

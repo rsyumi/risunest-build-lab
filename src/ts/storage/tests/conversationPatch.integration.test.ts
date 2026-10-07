@@ -135,6 +135,7 @@ async function setup(database = makeDatabase()) {
         patchAccess: access,
         hostTools: { listTools: vi.fn(), callTool: vi.fn() },
         chatView: { register: vi.fn(), unregister: vi.fn(), dispose: vi.fn() },
+        generationEnd: { register: vi.fn(), unregister: vi.fn(), dispose: vi.fn() },
         hasDatabasePermission: async () => true,
         lifetimeSignal: new AbortController().signal,
     })

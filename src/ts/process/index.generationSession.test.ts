@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
 import { createConversationOperationContext, type ConversationCommitObserver } from './conversationOperationContext'
 
@@ -193,6 +193,7 @@ import { PersistentMutationFencedError } from '../storage/saveCoordinator'
 import { DBState, selectedCharID } from '../stores.svelte'
 import { doingChat, sendChat } from './index.svelte'
 import { isGenerationRequestPhaseOpen, trackConversationPatch } from './generationRequestPhase'
+import { beginGenerationEndRun, subscribeGenerationEnd, type GenerationEndRecord, type GenerationEndStatus } from './generationEnd'
 
 function deferred<T>() {
     let resolve!: (value: T) => void
@@ -1641,4 +1642,67 @@ describe('sendChat generation session integration', () => {
         mocks.iosDependencies = undefined
     })
 
+    describe('generation end notes', () => {
+        const target = { characterId: 'character-a', conversationId: 'chat-a' }
+        const stopListening: Array<() => void> = []
+        afterEach(() => {
+            while (stopListening.length) stopListening.pop()!()
+        })
+
+        async function runGeneration(status: GenerationEndStatus, generate: () => Promise<boolean>) {
+            const records: GenerationEndRecord[] = []
+            stopListening.push(subscribeGenerationEnd((record) => records.push(record)))
+            const run = beginGenerationEndRun(target)
+            const result = await run.capture(generate)
+            run.finish(status)
+            return { result, records }
+        }
+
+        it('collects an auto-continue chain into one generation that names the message it wrote', async () => {
+            installDatabase()
+            DBState.db.autoContinueChat = true
+            mocks.modelResponse = () => streamingResponse('answer')
+            mocks.outputTrigger = () => null
+            mocks.lastCharPunctuation = false
+            mocks.listeners.add(() => {
+                if (mocks.modelRequestCount === 2) mocks.lastCharPunctuation = true
+            })
+
+            const { result, records } = await runGeneration('completed', () => sendChat())
+
+            expect(result).toBe(true)
+            expect(mocks.modelRequestCount).toBe(2)
+            const written = DBState.db.characters[0].chats[0].message.at(-1)!
+            expect(written.role).toBe('char')
+            expect(records).toHaveLength(1)
+            expect(records[0].messageIds).toHaveLength(2)
+            expect(records[0].messageIds).toContain(written.chatId)
+        })
+
+        it.each([
+            { name: 'appended after a user tail', messages: [{ role: 'user', data: 'prompt', chatId: 'user-1' }] as Message[] },
+            { name: 'added to the character tail', messages: [{ role: 'char', data: 'partial', chatId: 'response-1' }] as Message[] },
+        ])('names the inlay error $name', async ({ messages }) => {
+            const { chat } = installDatabase(makeChat(messages))
+            DBState.db.inlayErrorResponse = true
+            mocks.modelResponse = { type: 'fail', result: 'request failed' }
+
+            const { result, records } = await runGeneration('failed', () => sendChat())
+
+            expect(result).toBe(false)
+            const written = chat.message.at(-1)!
+            expect(written.data).toContain('request failed')
+            expect(records).toHaveLength(1)
+            expect(records[0].messageIds).toContain(written.chatId)
+        })
+
+        it('reports nothing for a prompt preview', async () => {
+            installDatabase()
+
+            const { result, records } = await runGeneration('completed', () => sendChat({ preview: true }))
+
+            expect(result).toBe(true)
+            expect(records).toEqual([])
+        })
+    })
 })

@@ -59,8 +59,13 @@
 
     let restored = $state<ChatEditorDraft | undefined>()
 
-    export function updateViewportBinding(state: { viewportRow: { absoluteIndex: number } }) {
+    export function updateViewportBinding(state: { viewportRow: { key: string; absoluteIndex: number } }) {
         idx = state.viewportRow.absoluteIndex
+        chatMountProbe.viewportBindings.push({
+            instanceId,
+            index: idx,
+            rowKey: state.viewportRow.key,
+        })
     }
     export function updatePresentation(state: ChatPresentationRefresh) {
         img = state.img

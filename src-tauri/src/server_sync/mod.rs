@@ -22,6 +22,8 @@ pub(crate) mod notification;
 #[cfg(test)]
 pub(crate) mod lww_tests;
 #[cfg(test)]
+pub(crate) mod body_encoding_tests;
+#[cfg(test)]
 mod lww_large_unit_tests;
 #[cfg(test)]
 mod media_admission_tests;

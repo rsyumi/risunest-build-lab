@@ -885,7 +885,7 @@ impl<'a> Transfer<'a> {
         (bins, oversized)
     }
 
-    fn download_with_hints(
+    pub(crate) fn download_with_hints(
         &self,
         hashes: &[String],
         base_candidates: &[String],
@@ -1439,20 +1439,17 @@ impl<'a> Transfer<'a> {
                             let end = offset + length - 1;
                             let reply = client.request(
                                 Method::GET,
-                                &format!("objects/{target}"),
-                                &[],
+                                &format!("objects/{target}/part"),
+                                &[("offset", offset.to_string()), ("length", length.to_string())],
                                 None,
-                                &[
-                                    ("range", format!("bytes={offset}-{end}")),
-                                    ("if-range", format!("\"{target}\"")),
-                                ],
+                                &[],
                                 CHUNK,
                             )?;
-                            if reply.status != 206 {
+                            if reply.status != 200 {
                                 return Err(response_error(reply));
                             }
-                            if reply.content_range.as_deref()
-                                != Some(&format!("bytes {offset}-{end}/{size}"))
+                            if reply.object_range.as_deref()
+                                != Some(&format!("{offset}-{end}/{size}"))
                                 || reply.body.len() as u64 != length
                             {
                                 return Err(SyncError::new("invalid-object-range", 502));

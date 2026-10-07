@@ -10,6 +10,7 @@ import {
 import type { ConversationPatchAccess } from '../conversationPatchAccess'
 import { normalizeHostToolCallInput, type HostToolAccess, type HostToolList } from '../hostToolBridge'
 import type { ChatViewEvent, ChatViewListenerAccess } from '../chatViewEvents'
+import type { GenerationEndEvent, GenerationEndListenerAccess } from '../generationEndEvents'
 import type { RPCToolCallContent } from '../../process/mcp/mcplib'
 import { linkPluginQueryAbortSignals, type PluginDatabaseAccess } from '../pluginDatabaseAccess'
 
@@ -21,6 +22,7 @@ export interface RisunestPrivateApiDependencies {
     patchAccess: ConversationPatchAccess
     hostTools: HostToolAccess
     chatView: ChatViewListenerAccess
+    generationEnd: GenerationEndListenerAccess
     /** The periodic `db` permission, the one `getDatabase` asks for. */
     hasDatabasePermission(): Promise<boolean>
     lifetimeSignal: AbortSignal
@@ -42,7 +44,10 @@ function inputSignal(input: unknown): AbortSignal | undefined {
 
 export function createRisunestPrivateApi(dependencies: RisunestPrivateApiDependencies) {
     const patchLedger = createConversationPatchLedger(dependencies.now)
-    dependencies.lifetimeSignal.addEventListener('abort', () => dependencies.chatView.dispose(), { once: true })
+    dependencies.lifetimeSignal.addEventListener('abort', () => {
+        dependencies.chatView.dispose()
+        dependencies.generationEnd.dispose()
+    }, { once: true })
     async function requireDatabasePermission(): Promise<void> {
         if (!(await dependencies.hasDatabasePermission())) throw new Error('Host tools require the db permission')
     }
@@ -101,9 +106,16 @@ export function createRisunestPrivateApi(dependencies: RisunestPrivateApiDepende
             throwIfAborted(dependencies.lifetimeSignal)
             return dependencies.chatView.register(callback as (event: ChatViewEvent) => unknown)
         },
+        onGenerationEnd(callback?: unknown): { id: string } {
+            if (typeof callback !== 'function') throw new TypeError('callback must be a function')
+            throwIfAborted(dependencies.lifetimeSignal)
+            return dependencies.generationEnd.register(callback as (event: GenerationEndEvent) => unknown)
+        },
         /** The part of `unregisterUIPart` these methods own. */
         unregisterUIPart(id: unknown): void {
-            if (typeof id === 'string') dependencies.chatView.unregister(id)
+            if (typeof id !== 'string') return
+            dependencies.chatView.unregister(id)
+            dependencies.generationEnd.unregister(id)
         },
     }
 }

@@ -12,15 +12,17 @@ function setup(granted: boolean | Promise<boolean> = true) {
     const listTools = vi.fn(async () => ({ scope: 'scope', tools: [] }))
     const callTool = vi.fn(async (_request: unknown, _signal?: AbortSignal) => [{ type: 'text' as const, text: 'done' }])
     const chatView = { register: vi.fn(() => ({ id: 'view-1' })), unregister: vi.fn(), dispose: vi.fn() }
+    const generationEnd = { register: vi.fn(() => ({ id: 'end-1' })), unregister: vi.fn(), dispose: vi.fn() }
     const api = createRisunestPrivateApi({
         databaseAccess: { readConversationContext },
         patchAccess: { patchConversation },
         hostTools: { listTools, callTool },
         chatView,
+        generationEnd,
         hasDatabasePermission,
         lifetimeSignal: lifetime.signal,
     })
-    return { api, context, readConversationContext, hasDatabasePermission, lifetime, patchConversation, listTools, callTool, chatView }
+    return { api, context, readConversationContext, hasDatabasePermission, lifetime, patchConversation, listTools, callTool, chatView, generationEnd }
 }
 
 describe('risunestReadConversationContext', () => {
@@ -203,5 +205,29 @@ describe('risunestOnChatView', () => {
         expect(chatView.dispose).toHaveBeenCalledTimes(1)
         expect(() => api.onChatView(vi.fn())).toThrow(expect.objectContaining({ name: 'AbortError' }))
         expect(chatView.register).not.toHaveBeenCalled()
+    })
+})
+
+describe('risunestOnGenerationEnd', () => {
+    it('registers without asking for a permission and unregisters through unregisterUIPart', () => {
+        const { api, chatView, generationEnd, hasDatabasePermission } = setup()
+        const callback = vi.fn()
+
+        expect(api.onGenerationEnd(callback)).toEqual({ id: 'end-1' })
+        expect(generationEnd.register).toHaveBeenCalledWith(callback)
+        expect(hasDatabasePermission).not.toHaveBeenCalled()
+        api.unregisterUIPart('end-1')
+        expect(generationEnd.unregister).toHaveBeenCalledWith('end-1')
+        expect(chatView.unregister).toHaveBeenCalledWith('end-1')
+        expect(() => api.onGenerationEnd('not a function')).toThrow(TypeError)
+    })
+
+    it("drops the plugin's listeners on unload and refuses new ones", () => {
+        const { api, generationEnd, lifetime } = setup()
+        lifetime.abort()
+
+        expect(generationEnd.dispose).toHaveBeenCalledTimes(1)
+        expect(() => api.onGenerationEnd(vi.fn())).toThrow(expect.objectContaining({ name: 'AbortError' }))
+        expect(generationEnd.register).not.toHaveBeenCalled()
     })
 })
