@@ -1390,6 +1390,9 @@ pub(in crate::persistent_store) fn refresh_orders(
             }),
             "record" => Some(unit_key(&["order", &p[1]])?),
             "plugin" => Some(unit_key(&["order", "plugin-storage", &p[1]])?),
+            "character" if p.get(2).is_some_and(|field| field == "trashTime") => {
+                Some(unit_key(&["order", "characters"])?)
+            }
             _ => None,
         };
         if let Some(scope) = scope {
@@ -1523,7 +1526,22 @@ pub(in crate::persistent_store) fn refresh_orders(
             .collect::<Vec<_>>();
         let ids = risunest_sync_wire::order::read_order(&ordered, &live, &BTreeSet::new());
         if p[1] == "characters" {
-            let valid = ids.iter().cloned().collect::<BTreeSet<_>>();
+            // Trashed characters keep their configured index for the trash
+            // view but stay out of the order the sidebar shows.
+            let trashed: BTreeSet<String> = {
+                let mut s = tx.prepare(
+                    "SELECT character_id FROM characters WHERE generation=?1 AND trashed=1",
+                )?;
+                let v = s
+                    .query_map([generation], |r| r.get(0))?
+                    .collect::<Result<_, _>>()?;
+                v
+            };
+            let valid = ids
+                .iter()
+                .filter(|id| !trashed.contains(*id))
+                .cloned()
+                .collect::<BTreeSet<_>>();
             let mut seen = BTreeSet::new();
             let mut projected = Vec::new();
             for entry in order {
@@ -1544,7 +1562,7 @@ pub(in crate::persistent_store) fn refresh_orders(
                 }
             }
             for id in &ids {
-                if seen.insert(id.clone()) {
+                if valid.contains(id) && seen.insert(id.clone()) {
                     projected.push(json!(id));
                 }
             }

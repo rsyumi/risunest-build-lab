@@ -15,6 +15,12 @@ import {
     registerCommittedWorkingSetContinuation,
     retryCommittedWorkingSetRefreshWithContinuation,
 } from './committedWorkingSetContinuation'
+import {
+    hasPendingExternalApplication,
+    retryExternalApplication,
+    runExternalApplication,
+    type ExternalApplicationConfirmation,
+} from './sync/external/applicationRecovery'
 
 async function createHarness(officialPublisher?: OfficialRevisionPublisher, captureWorkingSet = false) {
     let database = makeDatabase()
@@ -234,6 +240,38 @@ describe('upstream import activation pause', () => {
         harness.nativeCommit(replacement('Activated library'))
         await expect(uncertain.abortUnchanged(proof)).rejects.toThrow(PersistentMutationFencedError)
         expect(() => harness.runtime.markPersistentDataDirty(1)).toThrow(PersistentMutationFencedError)
+    })
+
+    it.each(['not-applied', 'committed'] as const)('settles a %s external application after an unknown outcome without fencing the library', async (outcome) => {
+        const harness = await createHarness()
+        const pause = await acquireUpstreamImportPause(harness.runtime, 'external-storage-restore')
+        const proof = vi.fn(async () => {})
+        const confirm = vi.fn(async (): Promise<ExternalApplicationConfirmation> => outcome === 'committed'
+            ? { kind: 'committed', revision: harness.nativeCommit(replacement('Restored library')) }
+            : { kind: 'not-applied', error: new Error('Restore stopped') })
+        confirm.mockRejectedValueOnce(new Error('Restore outcome unknown'))
+        await expect(runExternalApplication({
+            jobId: 'synthetic-restore',
+            fence: pause.fence,
+            confirm,
+            refreshReleased: async () => { throw new Error('Unexpected released refresh') },
+            afterRefresh: async () => { pause.complete() },
+            settled: () => outcome === 'committed' ? pause.finish() : pause.abortUnchanged(proof),
+        })).rejects.toThrow('outcome unknown')
+        expect(() => harness.runtime.markPersistentDataDirty(1)).toThrow(PersistentMutationFencedError)
+
+        const retry = retryExternalApplication()
+        if (outcome === 'committed') await retry
+        else await expect(retry).rejects.toThrow('Restore stopped')
+        expect(hasPendingExternalApplication()).toBe(false)
+        expect(harness.onBackgroundError).not.toHaveBeenCalled()
+        expect(harness.onWorkingSetRefreshRequired).not.toHaveBeenCalledWith(expect.any(Number))
+        expect(harness.runtime.pendingWorkingSetRefreshRevision).toBeNull()
+        expect(harness.database.username).toBe(outcome === 'committed' ? 'Restored library' : 'Fixture')
+        const allowed = vi.fn(async (revision: number) => revision)
+        await harness.runtime.runStorageOnlyMutation(allowed)
+        expect(allowed).toHaveBeenCalledOnce()
+        await (await acquireUpstreamImportPause(harness.runtime, 'next-activation')).abortUnchanged(proof)
     })
 })
 

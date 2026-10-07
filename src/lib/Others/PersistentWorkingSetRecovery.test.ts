@@ -115,6 +115,23 @@ describe('committed working-set recovery', () => {
         expect(mocks.retryExternal).toHaveBeenCalledOnce()
     })
 
+    it('does not carry the failure of an operation that settled as not applied into the next recovery', async () => {
+        external.set({ jobId: 'synthetic', confirmationPending: true })
+        mocks.retryExternal.mockImplementationOnce(async () => {
+            external.set(null)
+            throw new Error('stopped before applying')
+        })
+        await setup(null)
+        target.querySelector('button')!.click()
+        await vi.waitFor(() => expect(target.querySelector('[role="dialog"]')).toBeNull())
+        await tick()
+        external.set({ jobId: 'synthetic-next', confirmationPending: true })
+        await tick()
+        await tick()
+        expect(target.querySelector('[role="dialog"]')).not.toBeNull()
+        expect(target.querySelector('[role="alert"]')).toBeNull()
+    })
+
     it('keeps plugin-only recovery available after the runtime guard has cleared', async () => {
         external.set({ jobId: 'synthetic', confirmationPending: false })
         mocks.retryExternal.mockImplementation(async () => { external.set(null) })

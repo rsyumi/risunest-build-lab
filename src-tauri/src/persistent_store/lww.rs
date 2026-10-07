@@ -857,6 +857,23 @@ impl PersistentStore {
     ) -> StoreResult<Option<RevisionResult>> {
         completed_device_replacement_receipt(&self.connection, self.device_store()?.connection(), header, staging_id)
     }
+    /// Whether neither store holds an intent, a receipt or a written unit of `request_id`, so
+    /// nothing under it was applied and nothing can be recovered from it.
+    pub(crate) fn lww_request_unreserved(&self, request_id: &str) -> StoreResult<bool> {
+        let device = self.device_store()?.connection();
+        let reserved: bool = device.query_row(
+            "SELECT EXISTS(SELECT 1 FROM lww_intents WHERE request_id=?1)", [request_id], |row| row.get(0),
+        )?;
+        if reserved || self.lww_request_recorded(request_id)? { return Ok(false); }
+        for db in [&self.connection, device] {
+            let written: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM lww_units WHERE version=?1) OR EXISTS(SELECT 1 FROM lww_outbox WHERE version=?1)",
+                [request_id], |row| row.get(0),
+            )?;
+            if written { return Ok(false); }
+        }
+        Ok(true)
+    }
     pub(crate) fn lww_acquire_backup_capture(
         &mut self,
         revision: i64,
@@ -2976,6 +2993,12 @@ fn replacement_changes(
         }
         let value = source_value.clone().or_else(|| staged.cloned()).unwrap_or(UnitValue::Deleted);
         if !matches!(value, UnitValue::Deleted) && parent_status(tx, &key)? == "retired" {
+            // The identity remap moved every record the stage holds, so a
+            // source unit still under a retired ID belongs to no restored
+            // record and stays covered by its tombstone.
+            if staged.is_none() {
+                return Ok(());
+            }
             return Err(error("retired-record-id"));
         }
         let prior = read_unit(tx, &key)?

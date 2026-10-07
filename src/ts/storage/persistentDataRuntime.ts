@@ -1019,6 +1019,30 @@ export function createPersistentDataRuntime(
         }
     }
     const generating = () => [...(dependencies.state.getGeneratingConversations?.() ?? generatingConversations.snapshot())]
+    /// Keeps the selection on the same character and conversation after applied
+    /// units moved or removed them. A removed character clears the selection and a
+    /// removed conversation falls back to the first remaining one, as local removal
+    /// does. Returns the conversation that still has to be opened.
+    const reconcileAppliedSelection = (
+        database: Database,
+        pinned: { characterId: string | null; conversationId: string | null },
+    ): string | null => {
+        if (!pinned.characterId) return null
+        const character = database.characters.find((value) => value.chaId === pinned.characterId)
+        if (!character) {
+            dependencies.state.restoreSelection?.(null, null)
+            workingSet.invalidateNavigation()
+            workingSet.reconcileActiveCharacterIds(database, null)
+            coordinator.releaseRemovedSelectedConversation(true)
+            return null
+        }
+        dependencies.state.restoreSelection?.(pinned.characterId, pinned.conversationId)
+        if (!pinned.conversationId || character.chats.some((value) => value.id === pinned.conversationId)) return null
+        character.chatPage = 0
+        workingSet.invalidateNavigation()
+        coordinator.releaseRemovedSelectedConversation(false)
+        return character.chats[0]?.id ?? null
+    }
     const projectAppliedUnits = async (result: LwwApplyResult, baseline?: ReturnType<typeof captureLwwWorkingSetBaseline>, localIntent = false, preserveWindowMetadata = false, projectionObserver?: PersistentUnitIntentProjectionObserver): Promise<void> => {
         if (!localIntent && result.affectedKeys.length === 0) {
             // Nothing reached the library, so the working set and its mirrors stay untouched.
@@ -1059,6 +1083,13 @@ export function createPersistentDataRuntime(
         }))]
         const rootValue = (field: string) => canonicalJson({ value: (database as unknown as Record<string, unknown>)[field] })
         let rootBefore: string[] = []
+        // Membership and order units can move the selected entries away from their indexes.
+        const reselect = result.affectedKeys.some((key) => {
+            const [kind, id] = JSON.parse(key) as string[]
+            return kind === 'exists' ? id === 'character' || id === 'conversation' : kind === 'order' && id === 'conversations'
+        })
+        let pinnedSelection: { characterId: string | null; conversationId: string | null } | null = null
+        let reopenConversation: string | null = null
         let applied: ReturnType<typeof captureLwwWorkingSetBaseline>
         let adoptWindowedMetadata = () => {}
         let windowedConversation: { characterId: string; conversationId: string; totalMessages: number } | undefined
@@ -1072,8 +1103,14 @@ export function createPersistentDataRuntime(
                 if (dependencies.state.captureWorkingSetDatabase?.() !== database) throw new Error('Persistent working set changed during unit projection')
                 dependencies.state.beforeCapture?.()
                 rootBefore = rootFields.map(rootValue)
+                if (reselect) pinnedSelection = {
+                    characterId: dependencies.state.getSelectedCharacterId() ?? null,
+                    conversationId: dependencies.state.getSelectedConversationId?.() ?? null,
+                }
                 projectionObserver?.beforeProjection()
             }, () => {
+                // Corrected in the same turn as the projection, before any view reads the indexes.
+                if (pinnedSelection) reopenConversation = reconcileAppliedSelection(database, pinnedSelection)
                 const canonicalCapture = dependencies.state.canonicalCapture
                 const beforeDerive = canonicalCapture?.root() ?? canonicalJson(dependencies.state.captureRoot())
                 dependencies.state.afterRemoteApply?.()
@@ -1132,6 +1169,10 @@ export function createPersistentDataRuntime(
             }
         }
         await commitContentCursor(result.revision)
+        // Activation flushes first, so it waits for the operation that applied these units.
+        const reopened = reopenConversation
+        if (reopened) void Promise.resolve().then(() => workingSet.activateConversation(reopened))
+            .catch((error) => dependencies.onBackgroundError?.(error))
     }
     const drainLwwDeferred = async (authorityEpoch = coordinator.storageAuthorityEpoch): Promise<void> => {
         coordinator.assertPersistentMutationAllowed(authorityEpoch)

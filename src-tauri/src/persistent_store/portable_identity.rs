@@ -55,6 +55,8 @@ impl IdentityRemap {
                     self.order(data, kind, owner);
                 }
             }
+        } else if let Some(ids) = value.get_mut("ids") {
+            self.order(ids, kind, owner);
         }
     }
     pub(crate) fn character(&self, value: &mut Value) {
@@ -414,25 +416,39 @@ impl PersistentStore {
                 tx.execute(&format!("UPDATE {table} SET character_id=?4,conversation_id=?5 WHERE generation=?1 AND character_id=?2 AND conversation_id=?3"),params![staging,owner,id,map.id("character",&owner),map.conversation(&owner,&id)])?;
             }
         }
-        let heads = json_rows(
-            &tx,
-            "SELECT owner_locator,owner_locator FROM asset_owner_heads WHERE generation=?1",
-            staging,
-        )?;
-        for (raw, mut locator) in heads {
-            if let Some(owner) = locator
-                .get("characterId")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-            {
-                if let Some(id) = locator.get("conversationId").and_then(Value::as_str) {
-                    locator["conversationId"] = Value::String(map.conversation(&owner, id));
+        let heads = {
+            let mut q = tx.prepare(
+                "SELECT owner_kind,owner_locator FROM asset_owner_heads WHERE generation=?1",
+            )?;
+            let rows = q
+                .query_map([staging], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (kind, raw) in heads {
+            use super::AssetOwnerLocator as Owner;
+            let owner = match Owner::from_storage(&kind, &raw)? {
+                Owner::CharacterAdditionalAssets { character_id } => {
+                    Owner::CharacterAdditionalAssets {
+                        character_id: map.id("character", &character_id),
+                    }
                 }
+                Owner::RootModuleAssets { module_id } => Owner::RootModuleAssets {
+                    module_id: map.id("modules", &module_id),
+                },
+                Owner::PersonaEmbeddedModuleAssets { persona_id, module_id } => {
+                    Owner::PersonaEmbeddedModuleAssets {
+                        persona_id: map.id("persona", &persona_id),
+                        module_id: map.id("modules", &module_id),
+                    }
+                }
+            };
+            let (_, locator) = owner.storage_identity();
+            if locator != raw {
+                tx.execute("UPDATE asset_owner_heads SET owner_locator=?4 WHERE generation=?1 AND owner_kind=?2 AND owner_locator=?3",params![staging,kind,raw,locator])?;
             }
-            map.field(&mut locator, "characterId", "character");
-            map.field(&mut locator, "moduleId", "modules");
-            map.field(&mut locator, "personaId", "persona");
-            tx.execute("UPDATE asset_owner_heads SET owner_locator=?3 WHERE generation=?1 AND owner_locator=?2",params![staging,raw,serde_json::to_string(&locator)?])?;
         }
         tx.execute(
             "INSERT INTO app_kv(key,value) VALUES(?1,?2)",

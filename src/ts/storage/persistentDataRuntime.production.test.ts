@@ -22,7 +22,7 @@ import {
 } from '../plugins/pluginStorageStore'
 import { getV2PluginAPIs } from '../plugins/plugins.svelte'
 import type { Database } from './database.svelte'
-import type { PersistentDataStore } from './persistentDataStore'
+import type { PersistentDataStore, PersistentUnitMutation } from './persistentDataStore'
 import { getDatabase, getEffectivePresetId, normalizeDatabaseDefaults, setDatabase, setDatabaseLite, setEffectivePresetOverride } from './database.svelte'
 import {
     configurePersistentDataRuntime,
@@ -796,6 +796,31 @@ describe('production persistent working-set publication', () => {
         expect(workingSetResidency.isCharacterReleased('char-b')).toBe(true)
     })
 
+    it.each([
+        { released: 'char-b', eviction: true, selectedAfter: -1, stub: true },
+        { released: 'char-a', eviction: true, selectedAfter: 1, stub: true },
+        { released: 'char-b', eviction: false, selectedAfter: 1, stub: false },
+    ])('never leaves the selection on a released character ($released, eviction=$eviction)', ({ released, eviction, selectedAfter, stub }) => {
+        const character = (chaId: string) => ({
+            type: 'character', chaId, name: chaId, chatPage: 0, chatFolders: [],
+            chats: [{ id: `${chaId}-chat`, name: 'Chat', note: '', localLore: [], message: [] }],
+        })
+        setDatabaseLite({
+            botPresets: [],
+            plugins: [],
+            characters: [character('char-a'), character('char-b')],
+        } as unknown as Database)
+        selectedCharID.set(1)
+        workingSetResidency.setEvictionAllowed(eviction)
+
+        createProductionStateAdapter().releaseInactiveCharacter!(released)
+
+        const releasedCharacter = getDatabase().characters.find((value) => value.chaId === released)!
+        expect(isCatalogCharacterStub(releasedCharacter)).toBe(stub)
+        expect(get(selectedCharID)).toBe(selectedAfter)
+        expect(workingSetResidency.isCharacterReleased(released)).toBe(stub)
+    })
+
     it('reports selected lifecycle policy, operation and viewport budget', () => {
         setDatabaseLite({
             botPresets: [],
@@ -962,5 +987,171 @@ describe('preset chain override across a whole working-set replacement', () => {
         replacement.botPresets.pop()
         createProductionStateAdapter().replaceDatabase(replacement, new Set(), false)
         expect(getEffectivePresetId()).toBe('preset-a')
+    })
+})
+
+describe('received removal of the selected character or conversation', () => {
+    const chat = (id: string) => ({ id, name: id, note: '', localLore: [], message: [{ role: 'char', data: `${id} message`, chatId: `${id}-message` }] })
+    const character = (chaId: string, chats: string[]) => ({ type: 'character', chaId, name: chaId, chatPage: 0, chatFolders: [], chats: chats.map(chat) })
+
+    async function receiveRuntime(windowed: boolean, selected: number, chatPage = 0, conversations = ['b-chat-1', 'b-chat-2']) {
+        workingSetResidency.setEvictionAllowed(windowed)
+        const initial = normalizeDatabaseDefaults({} as Database)
+        initial.botPresets[0].id = 'preset'
+        initial.personas[0].id = 'persona'
+        initial.characters = [character('char-a', ['a-chat']), character('char-b', conversations)] as unknown as Database['characters']
+        initial.characters[1].chatPage = chatPage
+        const store = new IndexedDbPersistentDataStore(`received-selection-removal-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange) as PersistentDataStore
+        await store.open()
+        const { revision } = await store.replaceFromDatabase(initial)
+        const selectedId = initial.characters[selected].chaId
+        setDatabaseLite(projectCompleteScalableWorkingSet(initial, selectedId, revision, new Set([selectedId])))
+        selectedCharID.set(selected)
+        const saveFailures: unknown[] = []
+        const state = createProductionStateAdapter()
+        const runtime = createPersistentDataRuntime({
+            store, state, prepareDatabase: async (value) => value,
+            onLocalSaveFailure: (error) => { if (error !== null) saveFailures.push(error) },
+        })
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        await runtime.flushPendingDataLocally('received-selection-removal-settle')
+        expect(runtime.getSelectedConversationMode()).toBe(windowed ? 'windowed' : 'complete')
+        // Mirror derivation runs in the same turn as the projection, before any view can render it.
+        const atProjection: { selected: number; character: string | undefined; conversation: string | undefined }[] = []
+        const deriveMirrors = state.afterRemoteApply!
+        state.afterRemoteApply = () => {
+            const current = getDatabase().characters[get(selectedCharID)]
+            atProjection.push({ selected: get(selectedCharID), character: current?.chaId, conversation: current?.chats[current.chatPage ?? 0]?.id })
+            deriveMirrors()
+        }
+        const receive = async (units: (string | PersistentUnitMutation)[]) => {
+            const mutations = units.map((unit): PersistentUnitMutation => typeof unit === 'string' ? { key: unit, type: 'delete' } : unit)
+            store.lwwStageReceive = async () => undefined
+            store.lwwFinishReceive = async () => undefined
+            store.lwwApplyReceive = async () => {
+                const result = mutations.length === 0
+                    ? { revision: runtime.revision }
+                    : await store.commit({ expectedRevision: runtime.revision, unitMutations: mutations })
+                return { ...result, affectedKeys: mutations.map((value) => value.key), heldKeys: [], deferredKeys: [] }
+            }
+            await runtime.applyLwwReceive({ bindingAuthority: '1', requestId: crypto.randomUUID(), changes: [], progress: { kind: 'server', cursor: '1' }, admittedTimeUpperMs: '100' })
+        }
+        return { store, runtime, receive, saveFailures, atProjection }
+    }
+
+    it.each([true, false])('returns to no selection when the selected character is removed (windowed=%s)', async (windowed) => {
+        const { store, runtime, receive, saveFailures, atProjection } = await receiveRuntime(windowed, 1)
+        await receive(['["exists","character","char-b"]'])
+
+        expect(atProjection[0]).toEqual({ selected: -1, character: undefined, conversation: undefined })
+        flushSync()
+        expect(get(selectedCharID)).toBe(-1)
+        expect(getDatabase().characters.map((value) => value.chaId)).toEqual(['char-a'])
+        expect(runtime.captureSelectedConversationTarget()).toBeNull()
+        expect(runtime.getSelectedConversationMode()).toBeNull()
+        const commit = vi.spyOn(store, 'commit')
+        runtime.markPersistentDataDirty(1)
+        await runtime.flushPendingDataLocally('after-selected-character-removal')
+        await receive([])
+        expect(saveFailures).toEqual([])
+        expect(JSON.stringify(commit.mock.calls)).not.toContain('char-b')
+        expect(await store.readCharacterSummary('char-b')).toBeNull()
+    })
+
+    it.each([true, false])('keeps the selected character when an earlier one is removed (windowed=%s)', async (windowed) => {
+        const { store, runtime, receive, saveFailures, atProjection } = await receiveRuntime(windowed, 1)
+        await receive(['["exists","character","char-a"]'])
+
+        expect(atProjection[0]).toEqual({ selected: 0, character: 'char-b', conversation: 'b-chat-1' })
+        expect(runtime.captureSelectedConversationTarget()).toMatchObject({ characterId: 'char-b', conversationId: 'b-chat-1' })
+        expect(runtime.getSelectedConversationMode()).toBe(windowed ? 'windowed' : 'complete')
+        const commit = vi.spyOn(store, 'commit')
+        runtime.markPersistentDataDirty(1)
+        await runtime.flushPendingDataLocally('after-earlier-character-removal')
+        expect(saveFailures).toEqual([])
+        expect(commit).not.toHaveBeenCalled()
+    })
+
+    it.each([true, false])('keeps the open conversation when an earlier one is removed (windowed=%s)', async (windowed) => {
+        const { store, runtime, receive, saveFailures, atProjection } = await receiveRuntime(windowed, 1, 1)
+        await receive(['["exists","conversation","char-b","b-chat-1"]'])
+
+        expect(atProjection[0]).toEqual({ selected: 1, character: 'char-b', conversation: 'b-chat-2' })
+        expect(getDatabase().characters[1].chatPage).toBe(0)
+        expect(runtime.captureSelectedConversationTarget()).toMatchObject({ characterId: 'char-b', conversationId: 'b-chat-2' })
+        expect(runtime.getSelectedConversationMode()).toBe(windowed ? 'windowed' : 'complete')
+        const commit = vi.spyOn(store, 'commit')
+        await runtime.flushPendingDataLocally('after-earlier-conversation-removal')
+        expect(saveFailures).toEqual([])
+        // Only the local position of the open conversation follows it.
+        expect(commit.mock.calls.flatMap(([input]) => input.unitMutations ?? [])).toEqual([{ key: '["character","char-b","chatPage"]', type: 'set', value: 0 }])
+    })
+
+    it.each([true, false])('keeps the open conversation when a received order moves it (windowed=%s)', async (windowed) => {
+        const { store, runtime, receive, saveFailures, atProjection } = await receiveRuntime(windowed, 1)
+        await receive([{ key: '["order","conversations","char-b"]', type: 'set', value: { ids: ['b-chat-2', 'b-chat-1'], folders: [] } }])
+
+        expect(atProjection[0]).toEqual({ selected: 1, character: 'char-b', conversation: 'b-chat-1' })
+        expect(getDatabase().characters[1].chats.map((value) => value.id)).toEqual(['b-chat-2', 'b-chat-1'])
+        expect(runtime.captureSelectedConversationTarget()).toMatchObject({ characterId: 'char-b', conversationId: 'b-chat-1' })
+        expect(runtime.getSelectedConversationMode()).toBe(windowed ? 'windowed' : 'complete')
+        await runtime.flushPendingDataLocally('after-conversation-order')
+        expect(saveFailures).toEqual([])
+    })
+
+    it.each([true, false])('opens the first remaining conversation when the open one is removed (windowed=%s)', async (windowed) => {
+        const { store, runtime, receive, saveFailures, atProjection } = await receiveRuntime(windowed, 1, 1, ['b-chat-1', 'b-chat-2', 'b-chat-3'])
+        const remaining = (await store.readConversation('char-b', 'b-chat-1'))!.value
+        const commit = vi.spyOn(store, 'commit')
+        await receive(['["exists","conversation","char-b","b-chat-2"]'])
+
+        expect(atProjection[0]).toEqual({ selected: 1, character: 'char-b', conversation: 'b-chat-1' })
+        await vi.waitFor(() => {
+            expect(runtime.captureSelectedConversationTarget()).toMatchObject({ characterId: 'char-b', conversationId: 'b-chat-1' })
+        })
+        expect(runtime.getSelectedConversationMode()).toBe(windowed ? 'windowed' : 'complete')
+        await runtime.flushPendingDataLocally('after-open-conversation-removal')
+        await receive([])
+        expect(saveFailures).toEqual([])
+        expect((await store.readConversation('char-b', 'b-chat-1'))!.value.message).toEqual(remaining.message)
+        expect(await store.readConversationMetadata('char-b', 'b-chat-2')).toBeNull()
+        // Besides the received removal, only the local position of the newly opened conversation is written.
+        expect(commit.mock.calls.map(([input]) => input.unitMutations)).toEqual([
+            [{ key: '["exists","conversation","char-b","b-chat-2"]', type: 'delete' }],
+            [{ key: '["character","char-b","chatPage"]', type: 'set', value: 0 }],
+        ])
+    })
+
+    it.each([
+        ['character', '["exists","character","char-b"]', -1, undefined],
+        ['conversation', '["exists","conversation","char-b","b-chat-1"]', 1, 'b-chat-2'],
+    ] as const)('installs a valid selection when a committed refresh removes the selected %s', async (_scope, key, selected, conversation) => {
+        for (const [windowed, targeted] of [[true, true], [true, false], [false, true], [false, false]]) {
+            const { store, runtime, saveFailures } = await receiveRuntime(windowed, 1)
+            // A targeted pass patches only a working set that a refresh projected.
+            const projection = await runtime.acquireCommittedWorkingSetRefreshFence()
+            try {
+                await projection.refreshCommittedWorkingSet(runtime.revision)
+            } finally {
+                projection.release()
+            }
+            const { revision } = await store.commit({ expectedRevision: runtime.revision, unitMutations: [{ key, type: 'delete' }] })
+            const fence = await runtime.acquireCommittedWorkingSetRefreshFence()
+            try {
+                // Without a change set this store has no change window, so the working set is reprojected.
+                const changeSet = { root: false, presets: false, pluginStorage: false, wholeLibrary: false, characterIds: ['char-b'], conversations: [] }
+                await expect(fence.refreshCommittedWorkingSet(revision, targeted ? { changeSet } : undefined)).resolves.toMatchObject({ projection: 'applied' })
+            } finally {
+                fence.release()
+            }
+
+            expect(get(selectedCharID)).toBe(selected)
+            const current = getDatabase().characters[get(selectedCharID)]
+            expect(current?.chats[current.chatPage ?? 0]?.id).toBe(conversation)
+            expect(runtime.captureSelectedConversationTarget()?.conversationId).toBe(conversation)
+            await runtime.flushPendingDataLocally('after-refresh-removal')
+            expect(saveFailures).toEqual([])
+            workingSetResidency.clear()
+        }
     })
 })

@@ -474,6 +474,82 @@ describe('runtime chat identity', () => {
         expect(mocks.activateCharacter).toHaveBeenCalledWith(character.chaId)
     })
 
+    describe('when releasing the selected character clears the selection', () => {
+        beforeEach(() => {
+            mocks.deactivateActiveWorkingSet.mockImplementation(async () => {
+                selectedCharID.set(-1)
+                return true
+            })
+            mocks.activateCharacter.mockImplementation(async (id) => {
+                selectedCharID.set(mocks.database.characters.findIndex((candidate) => candidate.chaId === id))
+                return true
+            })
+        })
+
+        it('reopens the character when the trash mutation does not commit', async () => {
+            const character = createBlankChar()
+            mocks.database.characters.push(createBlankChar(), character)
+            selectedCharID.set(1)
+            mocks.mutatePersistentCharacterDetail.mockResolvedValueOnce(false)
+
+            await removeChar(character.chaId, character.name, 'normal')
+
+            expect(mocks.activateCharacter).toHaveBeenCalledExactlyOnceWith(character.chaId)
+            expect(get(selectedCharID)).toBe(1)
+            expect(mocks.database.characters[1].trashTime).toBeUndefined()
+        })
+
+        it('reconciles the empty selection when reopening fails', async () => {
+            const character = createBlankChar()
+            mocks.database.characters.push(character)
+            selectedCharID.set(0)
+            mocks.mutatePersistentCharacterDetail.mockResolvedValueOnce(false)
+            mocks.activateCharacter.mockResolvedValue(false)
+
+            await removeChar(character.chaId, character.name, 'normal')
+
+            expect(mocks.activateCharacter).toHaveBeenCalledWith(character.chaId)
+            expect(get(selectedCharID)).toBe(-1)
+            expect(mocks.reconcilePersistentActiveCharacterIds).toHaveBeenCalledWith(
+                mocks.database,
+                null,
+            )
+        })
+
+        it('does not reopen the character after navigation moved on', async () => {
+            const character = createBlankChar()
+            mocks.database.characters.push(character)
+            selectedCharID.set(0)
+            const mutation = deferred<boolean>()
+            mocks.mutatePersistentCharacterDetail.mockReturnValueOnce(mutation.promise)
+
+            const removal = removeChar(character.chaId, character.name, 'normal')
+            await vi.waitFor(() => expect(mocks.mutatePersistentCharacterDetail).toHaveBeenCalledOnce())
+            mocks.navigationGeneration++
+            mutation.resolve(false)
+            await removal
+
+            expect(mocks.activateCharacter).not.toHaveBeenCalled()
+            expect(get(selectedCharID)).toBe(-1)
+        })
+
+        it('keeps the selection empty after the trash mutation commits', async () => {
+            const character = createBlankChar()
+            mocks.database.characters.push(character)
+            selectedCharID.set(0)
+
+            await removeChar(character.chaId, character.name, 'normal')
+
+            expect(mocks.database.characters[0].trashTime).toEqual(expect.any(Number))
+            expect(mocks.activateCharacter).not.toHaveBeenCalled()
+            expect(get(selectedCharID)).toBe(-1)
+            expect(mocks.reconcilePersistentActiveCharacterIds).toHaveBeenCalledWith(
+                mocks.database,
+                null,
+            )
+        })
+    })
+
     it('deselects a released stub when busy generation blocks failure restoration', async () => {
         const character = createBlankChar()
         mocks.database.characters.push(character)
