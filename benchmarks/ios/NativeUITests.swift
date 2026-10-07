@@ -417,6 +417,68 @@ final class NativeUITests: XCTestCase {
         runSync(phase: "sync-restart", environment: ["RISUNEST_IOS_SYNC_MARKER": inputs.marker])
     }
 
+    private func externalInputs() throws -> [String: String] {
+        let environment = ProcessInfo.processInfo.environment
+        let names = ["RISUNEST_IOS_WEBDAV_URL", "RISUNEST_IOS_WEBDAV_USER", "RISUNEST_IOS_WEBDAV_PASSWORD",
+                     "RISUNEST_IOS_WEBDAV_ROOT", "RISUNEST_IOS_EXTERNAL_BEFORE", "RISUNEST_IOS_EXTERNAL_AFTER"]
+        var inputs: [String: String] = [:]
+        for name in names {
+            guard let value = environment[name], !value.isEmpty else { throw XCTSkip("WebDAV server not supplied") }
+            inputs[name] = value
+        }
+        return inputs
+    }
+
+    /// Reaches the WebDAV server from the device before the app does. It must refuse an unauthenticated request.
+    private func webDavPreflight(_ endpoint: String, phase: String) {
+        guard let url = URL(string: endpoint) else {
+            syncEnvironment(["phase": phase, "stage": "webdav-preflight", "passed": false, "reason": "url-unreadable"])
+            XCTFail("sync-env: the WebDAV URL could not be read")
+            return
+        }
+        // A loopback server on the simulator host is plain HTTP, which the runner's URLSession refuses.
+        guard url.scheme == "https" else {
+            syncEnvironment(["phase": phase, "stage": "webdav-preflight", "passed": true, "skipped": "loopback"])
+            return
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 30
+        let session = URLSession(configuration: configuration)
+        let observed = SyncPreflight()
+        let received = expectation(description: "WebDAV endpoint preflight")
+        session.dataTask(with: url) { _, response, error in
+            observed.status = (response as? HTTPURLResponse)?.statusCode
+            observed.errorCode = error.map { ($0 as NSError).code }
+            received.fulfill()
+        }.resume()
+        wait(for: [received], timeout: 40)
+        session.invalidateAndCancel()
+        let reachable = observed.status == 401
+        syncEnvironment([
+            "phase": phase, "stage": "webdav-preflight", "passed": reachable, "https": url.scheme == "https",
+            "status": observed.status as Any? ?? NSNull(), "errorCode": observed.errorCode as Any? ?? NSNull(),
+        ])
+        XCTAssertTrue(reachable, "sync-env: the WebDAV server is not reachable from the device")
+    }
+
+    /// Connects a new WebDAV backup repository, backs up, changes the library and restores the backup.
+    func testExternalStorageBackupRestore() throws {
+        continueAfterFailure = false
+        let inputs = try externalInputs()
+        webDavPreflight(inputs["RISUNEST_IOS_WEBDAV_URL"]!, phase: "external-storage")
+        runSync(phase: "external-storage", environment: inputs)
+    }
+
+    /// Runs after testExternalStorageBackupRestore in the same installation and relaunches without the password.
+    func testExternalStorageRestart() throws {
+        continueAfterFailure = false
+        let inputs = try externalInputs()
+        webDavPreflight(inputs["RISUNEST_IOS_WEBDAV_URL"]!, phase: "external-storage-restart")
+        runSync(phase: "external-storage-restart",
+                environment: ["RISUNEST_IOS_EXTERNAL_BEFORE": inputs["RISUNEST_IOS_EXTERNAL_BEFORE"]!])
+    }
+
     func testOAuthCallbackReturn() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "io.github.rsyumi.risunest.ios.bench")

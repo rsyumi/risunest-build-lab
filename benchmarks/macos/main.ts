@@ -623,6 +623,8 @@ async function main() {
     throw new Error("a repeated native quit did not end the app");
   } else if (/^sync-(publish|receive|pull)$/.test(phase)) {
     await (await import("./sync")).syncPhase(phase);
+  } else if (phase === "external-storage" || phase === "external-storage-restart") {
+    await (await import("./externalStorage")).externalStoragePhase(phase);
   } else if (phase === "streaming") {
     document.getElementById("benchmark")!.remove();
     await import("../streaming/main");
