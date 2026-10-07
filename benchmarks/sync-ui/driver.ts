@@ -33,6 +33,9 @@ async function until<T>(read: () => T | Promise<T>, timeoutMs: number, step: str
 
 // Long identifiers and encoded values never leave the device in a report.
 export const redact = (text: string) => text.replace(/[A-Za-z0-9_+/=-]{32,}/g, "<redacted>").slice(0, 300);
+// Bundle frames name the chunk and position, which a rebuild of the same snapshot maps back to source.
+const frames = (stack: string | undefined) => (stack ?? "").split(/\r?\n/).slice(0, 4)
+  .map((frame) => frame.trim().replace(/[A-Za-z0-9_-]{32,}/g, "<redacted>").slice(0, 200)).filter(Boolean);
 
 export class SyncDriver {
   private readonly errors: string[] = [];
@@ -40,8 +43,10 @@ export class SyncDriver {
   constructor(readonly phase: string, private readonly sink: SyncReport, private readonly show: (step: string) => void = () => {}) {
     // Errors the page logs are attached, redacted, to a failed step so it can be attributed.
     const record = (values: unknown[]) => {
-      if (this.errors.length < 50)
-        this.errors.push(redact(values.map((value) => value instanceof Error ? `${value.name}: ${value.message}` : String(value)).join(" ")));
+      if (this.errors.length >= 50) return;
+      this.errors.push(redact(values.map((value) => value instanceof Error ? `${value.name}: ${value.message}` : String(value)).join(" ")));
+      const stack = values.find((value): value is Error => value instanceof Error)?.stack;
+      if (stack) this.errors.push(`stack: ${frames(stack).join(" | ")}`);
     };
     const original = console.error.bind(console);
     console.error = (...values: unknown[]) => { record(values); original(...values); };
@@ -203,7 +208,7 @@ export class SyncDriver {
   }
 
   /** Names a dialog by its type and the product string key of its message, never by its text. */
-  private async describeDialog(value: { type: string; msg?: string; checkboxConfirm?: { title: string } }) {
+  private async describeDialog(value: { type: string; msg?: string; stackTrace?: string; checkboxConfirm?: { title: string } }) {
     const { language } = await import("../../src/lang");
     const text = value.checkboxConfirm?.title ?? value.msg ?? "";
     const find = (node: unknown, path: string, depth: number): string | undefined => {
@@ -217,7 +222,11 @@ export class SyncDriver {
     };
     const messageKey = text ? find(language, "", 0) ?? "unrecognized" : "empty";
     // A message the string table does not hold is an error or a filled template; long values are redacted.
-    return { alertType: value.type, messageKey, ...(messageKey === "unrecognized" ? { message: redact(text) } : {}) };
+    return {
+      alertType: value.type, messageKey,
+      ...(messageKey === "unrecognized" ? { message: redact(text) } : {}),
+      ...(value.stackTrace ? { stack: frames(value.stackTrace) } : {}),
+    };
   }
 
   private async waitForNoDialog(step: string) {
