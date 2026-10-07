@@ -298,6 +298,154 @@ async function startupAppearance(seed: boolean, theme: "light" | "dark") {
   };
 }
 
+async function until(predicate: () => boolean | Promise<boolean>, message: string) {
+  const deadline = performance.now() + 60_000;
+  while (!(await predicate())) {
+    check(performance.now() < deadline, message);
+    await pause(100);
+  }
+}
+
+const productMarker = "linux-synthetic-ui-edit 🐿️";
+
+// The product mounts into #app; the synthetic profile has already accepted the terms.
+async function mountProduct() {
+  const { createNativeDeviceSettings } = await import("../../src/ts/storage/nativeDeviceSettings");
+  await createNativeDeviceSettings().set("risunest_tos_v1", "true");
+  document.getElementById("benchmark")!.remove();
+  const product = await import("../../src/main");
+  await product.default;
+  const { getPersistentDataRuntime } = await import(
+    "../../src/ts/storage/persistentDataRuntime.svelte"
+  );
+  await until(() => {
+    try {
+      return (
+        Boolean(getPersistentDataRuntime().store) &&
+        performance.getEntriesByName("boot:interactive").length > 0 &&
+        document.getElementById("app")!.textContent!.length > 100
+      );
+    } catch {
+      return false;
+    }
+  }, "product Svelte app did not initialize");
+  const { DBState } = await import("../../src/ts/stores.svelte");
+  const { changeChar } = await import("../../src/ts/characters");
+  const index = DBState.db.characters.findIndex(
+    (character) => character.chaId === "char-a",
+  );
+  check(
+    index >= 0 && (await changeChar(index)),
+    "open synthetic character in product UI",
+  );
+  return { runtime: getPersistentDataRuntime(), DBState, index };
+}
+
+async function app() {
+  await initialize();
+  const opened = await invoke<{ revision: number }>("pds_open");
+  await invoke("pds_commit", {
+    commit: {
+      expectedRevision: opened.revision,
+      rootMutations: [{ type: "set", key: "didFirstSetup", value: true }],
+    },
+    assetAliases: [],
+  });
+  const { runtime, DBState, index } = await mountProduct();
+  const { tick } = await import("svelte");
+  const lease = await runtime.acquireCompleteConversation("edit-message");
+  let conversationId: string;
+  try {
+    const { captureChatMessageTarget, saveCapturedChatMessage } = await import(
+      "../../src/ts/chatMessageUi"
+    );
+    const context = {
+      captureCurrent: () => {
+        const character = DBState.db.characters[index];
+        return { character, conversation: character.chats[character.chatPage] };
+      },
+      getCurrentSession: () => runtime.getActiveConversationSession(),
+    };
+    conversationId = lease.session.conversationId;
+    const target = captureChatMessageTarget({
+      ...context,
+      absoluteIndex: lease.session.totalMessages - 1,
+    });
+    check(target, "capture product message edit target");
+    check(
+      saveCapturedChatMessage(target, context, productMarker).saved,
+      "product message edit accepted",
+    );
+  } finally {
+    lease.release();
+  }
+  await tick();
+  await runtime.flushPendingData("linux-ui-smoke");
+  await until(
+    () => document.getElementById("app")!.textContent!.includes(productMarker),
+    "edited synthetic message did not render in product chat",
+  );
+  const persisted = await invoke<{
+    revision: number;
+    value: { message: { data: string }[] };
+  }>("pds_read_conversation", { characterId: "char-a", conversationId });
+  check(
+    persisted.value.message.at(-1)?.data === productMarker,
+    "product edit persisted through Rust: " +
+      JSON.stringify({ revision: persisted.revision, last: persisted.value.message.at(-1)?.data }),
+  );
+  return {
+    passed: true,
+    conversationId,
+    revision: persisted.revision,
+    renderedTextLength: document.getElementById("app")!.textContent!.length,
+  };
+}
+
+// The controller hands over the saved result; WebKit may drop storage written just before the process ends.
+async function appRestart(expected: { conversationId: string; revision: number }) {
+  await guard();
+  await invoke("pds_open");
+  const saved = await invoke<{ revision: number; value: { message: { data: string }[] } }>(
+    "pds_read_conversation",
+    { characterId: "char-a", conversationId: expected.conversationId },
+  );
+  const actual = { revision: saved.revision, messages: saved.value.message.length, last: saved.value.message.at(-1)?.data };
+  check(
+    actual.last === productMarker && Number.isSafeInteger(saved.revision) && saved.revision >= expected.revision,
+    "product edit survives process restart: " + JSON.stringify({ expected, actual }),
+  );
+  await mountProduct();
+  await until(
+    () => document.getElementById("app")!.textContent!.includes(productMarker),
+    "restored synthetic edit did not render in product chat",
+  );
+  return { passed: true, revision: saved.revision };
+}
+
+async function streaming() {
+  await guard();
+  document.getElementById("benchmark")!.remove();
+  await import("../streaming/main");
+  const api = (
+    window as unknown as {
+      __streamingSmoke: {
+        run(): Promise<{
+          passed: boolean;
+          assertion?: string;
+          diagnostics?: Record<string, unknown>;
+        }>;
+      };
+    }
+  ).__streamingSmoke;
+  const result = await api.run();
+  check(
+    result.passed,
+    `streaming suite: ${result.assertion ?? "failed"} ${JSON.stringify(result.diagnostics ?? {})}`,
+  );
+  return result;
+}
+
 Object.assign(window, {
-  __RISUNEST_LINUX_BENCHMARK__: { persistence, reload, regex, startupAppearance },
+  __RISUNEST_LINUX_BENCHMARK__: { persistence, reload, regex, startupAppearance, app, appRestart, streaming },
 });

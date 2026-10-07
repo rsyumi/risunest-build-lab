@@ -15,7 +15,7 @@ export const nodeTestExceptions = [
 ]
 export const separateRunnerPaths = ['tests/browser/**', 'tests/native/**', ...nodeTestExceptions]
 export const ignoredDirectories = new Set([
-  'node_modules', 'dist', '.git', '.tmp', '.worktrees', '.superpowers',
+  'node_modules', 'dist', '.git', '.tmp', '.worktrees', '.claude', '.superpowers',
   'target', 'build', '.gradle', '.svelte-kit', 'coverage', 'graft', 'docs',
 ])
 export const testExcludes = [...ignoredDirectories].map(name => `**/${name}/**`)

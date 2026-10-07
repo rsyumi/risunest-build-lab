@@ -273,20 +273,20 @@
     {
       "path": "benchmarks/linux/index.html",
       "mode": "100644",
-      "bytes": 435,
-      "sha256": "57cc945025a04a24c24be7b406c99d365b7c31385fa36ee2f099fa3ad362733c"
+      "bytes": 632,
+      "sha256": "4c0e607803f079438578f851a60294e2165eaf5852a49e2bbc841cb5ad455d99"
     },
     {
       "path": "benchmarks/linux/main.ts",
       "mode": "100644",
-      "bytes": 11737,
-      "sha256": "48d3775d94087f7958272d477a636d77f5cfc3e19703502f5caff708f92f3fd0"
+      "bytes": 17036,
+      "sha256": "c76819c2d7ddd4d14299ab3c2b4d6307f7ab909dbcef5f72119217980743c281"
     },
     {
       "path": "benchmarks/linux/run.py",
       "mode": "100644",
-      "bytes": 18613,
-      "sha256": "178a85fcb295c9709ea7ac9b76e10b8689ce63217181ade963394b3907913b42"
+      "bytes": 19249,
+      "sha256": "5228ee095f6ace4d862da402cb12b48292f35e74890eaaf962ffb5d561c27531"
     },
     {
       "path": "benchmarks/linux/summarize.mjs",
@@ -2835,8 +2835,8 @@
     {
       "path": "pnpm-workspace.yaml",
       "mode": "100644",
-      "bytes": 484,
-      "sha256": "c5bc17db624145601b3e96fbe05d44c6246d314289dab119a7f1b9d06c6e74f8"
+      "bytes": 526,
+      "sha256": "847f71237d9a493f98e693b60a1d3b42e86e2b73ee5451205c111fd97e9dccc5"
     },
     {
       "path": "public/assets/bergamot-translator-worker.js",
@@ -4053,8 +4053,8 @@
     {
       "path": "server/sync/src/http/admission_tests.rs",
       "mode": "100644",
-      "bytes": 20012,
-      "sha256": "f7a06d4144e671931dad1a2f236187941cc5b7751310c5e9efced650e7f73dbc"
+      "bytes": 20142,
+      "sha256": "5699b20069b19323e780dac15139340f92d886d01acb22c8b8cabae9095c2596"
     },
     {
       "path": "server/sync/src/http/lww.rs",
@@ -4065,8 +4065,8 @@
     {
       "path": "server/sync/src/http/mod.rs",
       "mode": "100644",
-      "bytes": 46868,
-      "sha256": "10348a9cec72b2fcba6b7b8e4559587bc57e23ebd95c358df1e36f0371c8363d"
+      "bytes": 46919,
+      "sha256": "4afbc163d93222c412fff6243764b227195432985d3567eddf3fffc75693604f"
     },
     {
       "path": "server/sync/src/lib.rs",
@@ -4347,8 +4347,8 @@
     {
       "path": "server/sync/tests/http.rs",
       "mode": "100644",
-      "bytes": 49001,
-      "sha256": "b75c1934d0c6a54f0d148b7fb12aa99ce3b2617ecb98de4bd27d55980fd6efb1"
+      "bytes": 49266,
+      "sha256": "355db5282c179bf8b2ccb1aad52099bf6b157f4300572074467c9c4ac92440a0"
     },
     {
       "path": "server/sync/tests/inline_unit_bound.rs",
@@ -17085,8 +17085,8 @@
     {
       "path": "tests/suiteOwnership.mjs",
       "mode": "100644",
-      "bytes": 4027,
-      "sha256": "b1050a666b406fa724250ed0e1cfd617ca52bd70d368ea16a87ea4c51d8de964"
+      "bytes": 4038,
+      "sha256": "fa3d25e6f39bd193be1b95fcdce5ddec04f451a0e4e32426f3ec5997f3cdd6b5"
     },
     {
       "path": "tests/support/loadFailureReporter.mjs",
@@ -17355,8 +17355,8 @@
     {
       "path": "benchmarks/linux/README.md",
       "mode": "100644",
-      "bytes": 1460,
-      "sha256": "4cf52766010cefef5c5ea82d510b32105adaf22bde41883572d861a537baf575",
+      "bytes": 1702,
+      "sha256": "1cdd2b5ad6318d1d230d7d0080e6340958d38c7fde959b48374f20689fe72e3b",
       "reason": "explanatory-document"
     },
     {

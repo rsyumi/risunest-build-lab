@@ -353,7 +353,8 @@ fn mark_encoded(response: &mut Response) {
 fn raw_body_limit(path: &str) -> usize {
     if path.contains("/chunks/") {
         transfer::UPLOAD_CHUNK_BYTES
-    } else if path == "/uploads/frames" || (path.starts_with("/uploads/") && path.ends_with("/delta"))
+    } else if path == "/uploads/frames"
+        || (path.starts_with("/uploads/") && path.ends_with("/delta"))
     {
         transfer::MAX_BATCH_BYTES
     } else {
@@ -421,10 +422,12 @@ async fn encode_response(app: &App, accepts: bool, response: Response) -> Result
     } else {
         // The raw reply is dropped inside the job once it is encoded.
         codec(app, move || {
-            Ok(match body::encode(&raw).map_err(|_| Error::new("body-encoding-failed", 500))? {
-                Some(encoded) => (Bytes::from(encoded), true),
-                None => (raw, false),
-            })
+            Ok(
+                match body::encode(&raw).map_err(|_| Error::new("body-encoding-failed", 500))? {
+                    Some(encoded) => (Bytes::from(encoded), true),
+                    None => (raw, false),
+                },
+            )
         })
         .await?
     };
