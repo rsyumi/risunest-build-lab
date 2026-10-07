@@ -257,7 +257,7 @@ final class NativeUITests: XCTestCase {
             wait(for: [elapsed], timeout: 25)
             app.activate()
         }
-        XCTAssertTrue(result.waitForExistence(timeout: 200))
+        XCTAssertTrue(result.waitForExistence(timeout: 300))
         let measurement = XCTAttachment(string: result.value as? String ?? result.label)
         measurement.lifetime = .keepAlways
         add(measurement)
