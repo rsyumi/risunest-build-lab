@@ -50,9 +50,6 @@ for app in apple.rglob('*.app'):
 assert len(apps)==1, apps
 app=apps[0]
 print(run(['codesign','--force','--deep','--sign','-',str(app)]))
-entitlements=artifacts/'ios-bench-simulator.entitlements'
-entitlements.write_bytes(plistlib.dumps({'application-identifier':'RISUNESTSM.'+identifier,'keychain-access-groups':['RISUNESTSM.'+identifier]}))
-print(run(['codesign','--force','--sign','-','--entitlements',str(entitlements),str(app)]))
 runtimes=json.loads(run(['xcrun','simctl','list','runtimes','--json']))['runtimes']
 runtime=sorted([x for x in runtimes if x['isAvailable'] and '.iOS-' in x['identifier']],key=lambda x:tuple(map(int,x['version'].split('.'))))[-1]
 types=json.loads(run(['xcrun','simctl','list','devicetypes','--json']))['devicetypes']
