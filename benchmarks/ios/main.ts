@@ -83,7 +83,9 @@ async function main() {
     phase !== "app" &&
     phase !== "app-restart" &&
     phase !== "onboarding" &&
-    phase !== "settings"
+    phase !== "settings" &&
+    phase !== "sync" &&
+    phase !== "sync-restart"
   ) {
     // Product CSS gives the empty app root a full viewport of height.
     // Keep native-contract status/results visible to older WebKit accessibility.
@@ -167,6 +169,11 @@ async function main() {
   }
   if (phase === "ui") {
     await installPickerContracts();
+    return;
+  }
+  if (phase === "sync" || phase === "sync-restart") {
+    const { syncContract } = await import("./syncContracts");
+    await syncContract(phase);
     return;
   }
   installIOSPersistenceLifecycle(async () => {

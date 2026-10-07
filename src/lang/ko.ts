@@ -2361,9 +2361,9 @@ export const languageKorean = {
                 '임시 파일 크기를 계산하지 못했습니다. 정보를 새로 고친 뒤 다시 시도하세요.',
             tempUsage: '{size} 사용 중',
             gcSeparation:
-                '데이터 점검에서 끊어진 연결을 지워도 파일은 삭제되지 않으므로, 필요한 경우 사용하지 않는 파일를 찾아서 삭제해주세요.',
-            gcSearching: '사용하지 않는 파일를 찾는 중',
-            gcDeleting: '사용하지 않는 파일를 삭제하는 중',
+                '데이터 점검에서 끊어진 연결을 지워도 파일은 삭제되지 않으므로, 필요한 경우 사용하지 않는 파일을 찾아서 삭제해주세요.',
+            gcSearching: '사용하지 않는 파일을 찾는 중',
+            gcDeleting: '사용하지 않는 파일을 삭제하는 중',
             gcListTitle: '삭제할 파일',
             gcListKept: '남겨두는 파일 {0}개',
             gcListKeptHelp: '아직 사용 중이거나 최근에 저장된 파일은 삭제하지 않습니다.',
@@ -2378,7 +2378,7 @@ export const languageKorean = {
             gcHeldMigration: '진행 중인 이동에 사용 중',
             gcHeldJob: '실행 중인 작업에서 사용 중',
             gcTitle: '사용하지 않는 파일',
-            gcHelp: '어디에서도 쓰지 않는 파일를 찾아 지웁니다.',
+            gcHelp: '어디에서도 쓰지 않는 파일을 찾아 지웁니다.',
             gcRun: '찾기',
             gcRunConfirm: '지금 삭제',
             gcResult: '삭제 가능: {0}개 ({1})',
@@ -2410,6 +2410,7 @@ export const languageKorean = {
         dataHealth: {
             saveFailed: '결과를 저장하지 못했습니다. 다른 위치를 선택해주세요.',
             loadFailed: "데이터 점검 결과를 불러오지 못했습니다.",
+            outdated: '검사한 뒤 데이터가 바뀌었습니다. 다시 검사해주세요.',
             openFailed: "DB를 열지 못했습니다.",
             repairFailed: "데이터를 수정하지 못했습니다. 다시 시도해주세요.",
             undoFailed: "되돌리지 못했습니다. 다시 시도해주세요.",
@@ -2419,7 +2420,7 @@ export const languageKorean = {
 
             title: '데이터 점검',
             description:
-                '저장된 데이터와 DB를 검사하여 잘못되거나 손상된 부분이 있는지 검사합니다.',
+                '저장된 데이터와 DB에 잘못되거나 손상된 부분이 있는지 검사합니다.',
             quickScan: '빠른 검사',
             quickScanHelp:
                 '저장된 기록과 미디어 파일의 연결 상태를 점검합니다.',
@@ -2542,7 +2543,9 @@ export const languageKorean = {
             exportFile: '내보내기',
             groupRestore: '복원',
             restoreHelp:
-                '다른 앱의 백업으로 되돌립니다. 이 기기에 보관된 스냅샷은 저장 공간의 스냅샷 목록에서 되돌릴 수 있습니다.',
+                '계정 동기화 충돌 백업으로 데이터를 복원하며, 이 기기에 보관된 스냅샷은 저장 공간의 스냅샷 목록에서 되돌릴 수 있습니다.',
+            restoreHelpWeb:
+                'PocketRisu 백업이나 계정 동기화 충돌 백업으로 데이터를 복원합니다.',
             groupAccount: '공식 계정',
             accountHelp:
                 'RisuAI 계정 서버에 백업을 올리거나 내려받습니다. 채팅 첨부 파일은 포함되지 않습니다.',

@@ -471,7 +471,7 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
         &Never,
     )
     .unwrap();
-    let prepared = prepare_native_sections(&archive, &selected, &Never).unwrap();
+    let prepared = prepare_native_sections(&archive, &selected, root.path(), &Never).unwrap();
 
     let mut target = crate::persistent_store::PersistentStore::open(&target_root).unwrap();
     {
@@ -608,7 +608,7 @@ fn selected_empty_native_sections_clear_device_data_and_keep_coordination_settin
         &Never,
     )
     .unwrap();
-    let prepared = prepare_native_sections(&archive, &selected, &Never).unwrap();
+    let prepared = prepare_native_sections(&archive, &selected, root.path(), &Never).unwrap();
     let mut target =
         crate::persistent_store::PersistentStore::open(&root.path().join("target")).unwrap();
     {

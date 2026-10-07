@@ -121,6 +121,45 @@ describe('production persistent working-set publication', () => {
         expect((await store.readRoot()).value).not.toHaveProperty('translatorMaxResponse')
     })
 
+    it.each(['refresh', 'recovery'] as const)('installs an activated library with index selections and no stale character selection (%s)', async (path) => {
+        const initial = normalizeDatabaseDefaults({} as Database)
+        initial.personas = [{...initial.personas[0], id: 'persona-a', name: 'A'}, {...initial.personas[0], id: 'persona-b', name: 'B'}]
+        initial.selectedPersona = 1
+        initial.botPresets = [{...initial.botPresets[0], id: 'preset-a', name: 'A'}, {...initial.botPresets[0], id: 'preset-b', name: 'B'}]
+        initial.botPresetsId = 1
+        const character = (chaId: string) => ({type: 'character', chaId, name: chaId, chatPage: 0, chatFolders: [], chats: [{id: `${chaId}-chat`, message: []}]})
+        initial.characters = [character('first'), character('owner')] as unknown as Database['characters']
+        const store = new IndexedDbPersistentDataStore(`activated-selection-${path}`, new IDBFactory(), IDBKeyRange)
+        await store.open()
+        await store.replaceFromDatabase(initial)
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(1)
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        const activated = {...structuredClone(initial), characters: [character('owner'), character('server-only')]} as unknown as Database
+        const pause = runtime.withPausedPersistentWrites('activation', async (token) => {
+            const guard = runtime.beginActivatedLibraryGuard(token)
+            await store.replaceFromDatabase(activated, token.revision)
+            if (path === 'recovery') throw new Error('Synthetic activation result lost')
+            await runtime.refreshActivatedLibraryUnderPause(token)
+            guard.complete()
+        })
+        if (path === 'recovery') {
+            await expect(pause).rejects.toThrow('Synthetic activation result lost')
+            await expect(runtime.retryCommittedWorkingSetRefresh()).resolves.toMatchObject({projection: 'applied'})
+        } else await pause
+        const database = getDatabase()
+        expect(typeof database.selectedPersona).toBe('number')
+        expect(database.personas[database.selectedPersona].id).toBe('persona-b')
+        expect(typeof database.botPresetsId).toBe('number')
+        expect(database.botPresets[database.botPresetsId].id).toBe('preset-b')
+        expect(database.characters.map((value) => value.chaId)).toEqual(['owner', 'server-only'])
+        expect(get(selectedCharID)).toBe(-1)
+        const commit = vi.spyOn(store, 'commit')
+        await runtime.flushPendingDataLocally('activated-no-op')
+        expect(commit).not.toHaveBeenCalled()
+    })
+
     it.each([false, true])('retains explicit and concurrent root deltas without copying defaults (failure=%s)', async (fail) => {
         const initial = {username: 'Before', translator: 'Before', botPresets: [{id: 'preset', name: 'Preset'}], botPresetsId: 0, personas: [{id: 'persona', name: 'Persona', prompt: ''}], selectedPersona: 0, plugins: [],
             opaqueRoot: {before: true}, removedRoot: 'Remove', characters: [{type: 'character', chaId: 'owner', name: 'Owner', chats: []}]} as unknown as Database

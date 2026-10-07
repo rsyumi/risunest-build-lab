@@ -3,9 +3,25 @@ use crate::data_health::{codes, Findings, Severity};
 use crate::local_backup::NeverCancelled;
 
 fn healthy_fixture() -> (tempfile::TempDir, PersistentStore) {
+    stored(fixture())
+}
+
+/// The root keeps the selected preset and persona the way the app stores them, and the personas
+/// it selects from.
+fn selection_fixture(preset: Value, persona: Value) -> (tempfile::TempDir, PersistentStore) {
+    let mut database = fixture();
+    database["botPresetsId"] = preset;
+    database["selectedPersona"] = persona;
+    database["personas"] = json!([
+        {"id": "persona-a", "name": "Persona A", "personaPrompt": "", "icon": ""},
+        {"id": "persona-b", "name": "Persona B", "personaPrompt": "", "icon": ""}
+    ]);
+    stored(database)
+}
+
+fn stored(database: Value) -> (tempfile::TempDir, PersistentStore) {
     let directory = tempfile::tempdir().expect("create temporary directory");
     let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
-    let database = fixture();
     let staging = store.replace_begin().expect("begin staged replacement");
     store
         .replace_put_root(&staging.staging_id, &staged_root(&database))
@@ -158,4 +174,41 @@ fn a_conversation_whose_character_is_gone_is_reported_as_an_orphan() {
         .expect("a conversation with no character is reported");
     assert_eq!(finding.severity, Severity::Blocking);
     assert_eq!(finding.owner.kind, "conversations");
+}
+
+fn dangling_selections(findings: &Findings) -> Vec<String> {
+    findings
+        .items
+        .iter()
+        .filter(|finding| finding.code == codes::REFERENCE_MISSING)
+        .filter_map(|finding| finding.locator.as_ref())
+        .map(|locator| locator.source_path.clone())
+        .filter(|path| path == "$.botPresetsId" || path == "$.selectedPersona")
+        .collect()
+}
+
+#[test]
+fn a_preset_and_persona_selected_by_id_are_not_reported() {
+    let (_directory, mut store) = selection_fixture(json!("preset-alpha"), json!("persona-b"));
+    assert_eq!(dangling_selections(&scan(&mut store)), Vec::<String>::new());
+}
+
+#[test]
+fn a_preset_and_persona_selected_by_index_are_not_reported() {
+    let (_directory, mut store) = selection_fixture(json!(1), json!(1));
+    assert_eq!(dangling_selections(&scan(&mut store)), Vec::<String>::new());
+}
+
+#[test]
+fn a_selected_preset_or_persona_that_is_gone_is_still_reported() {
+    for (preset, persona) in [
+        (json!("preset-gone"), json!("persona-gone")),
+        (json!(5), json!(5)),
+    ] {
+        let (_directory, mut store) = selection_fixture(preset, persona);
+        assert_eq!(
+            dangling_selections(&scan(&mut store)),
+            ["$.botPresetsId", "$.selectedPersona"]
+        );
+    }
 }

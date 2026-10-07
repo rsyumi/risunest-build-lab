@@ -63,6 +63,22 @@ fn ios_bench_cloud_key() -> Result<String, &'static str> {
     std::env::var("RISUNEST_IOS_CLOUD_KEY").map_err(|_| "Live credential unavailable")
 }
 
+#[tauri::command]
+fn ios_bench_sync_input() -> Result<serde_json::Value, &'static str> {
+    let read = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    let marker = read("RISUNEST_IOS_SYNC_MARKER").ok_or("Sync inputs unavailable")?;
+    match ios_bench_phase().as_str() {
+        "sync" => Ok(serde_json::json!({
+            "registration": read("RISUNEST_IOS_SYNC_REGISTRATION").ok_or("Sync inputs unavailable")?,
+            "expect": read("RISUNEST_IOS_SYNC_EXPECT").ok_or("Sync inputs unavailable")?,
+            "marker": marker,
+        })),
+        // A relaunch reconnects from the stored credential, never from a registration.
+        "sync-restart" => Ok(serde_json::json!({ "marker": marker })),
+        _ => Err("Sync verification phase required"),
+    }
+}
+
 fn benchmark_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         ios_bench_phase,
@@ -70,6 +86,7 @@ fn benchmark_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send
         ios_bench_report,
         ios_bench_stream_url,
         ios_bench_cloud_key,
+        ios_bench_sync_input,
         ios_bench_network_probe,
         ios_bench_authenticate
     ]

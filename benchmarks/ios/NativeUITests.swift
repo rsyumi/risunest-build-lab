@@ -267,6 +267,129 @@ final class NativeUITests: XCTestCase {
     func testLiveCloudTransition() throws { try liveCloud(cancel: false) }
     func testLiveCloudCancellation() throws { try liveCloud(cancel: true) }
 
+    private final class SyncPreflight {
+        var status: Int?
+        var error: String?
+        var errorCode: Int?
+    }
+
+    private func syncInputs() throws -> (registration: String, expect: String, marker: String) {
+        let environment = ProcessInfo.processInfo.environment
+        guard let registration = environment["RISUNEST_IOS_SYNC_REGISTRATION"], !registration.isEmpty,
+              let expect = environment["RISUNEST_IOS_SYNC_EXPECT"], !expect.isEmpty,
+              let marker = environment["RISUNEST_IOS_SYNC_MARKER"], !marker.isEmpty else {
+            throw XCTSkip("Sync registration not supplied")
+        }
+        return (registration, expect, marker)
+    }
+
+    private func syncEnvironment(_ outcome: [String: Any]) {
+        let data = try! JSONSerialization.data(withJSONObject: outcome, options: [.sortedKeys])
+        let line = "sync-env: " + String(data: data, encoding: .utf8)!
+        print(line)
+        let attachment = XCTAttachment(string: line)
+        attachment.name = "sync-env"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// Reaches the registration endpoint from the device before the app does. Only the status is recorded.
+    private func syncPreflight(_ registration: String, phase: String) {
+        let prefix = "risunestlocal://sync-server/register#"
+        var url: URL?
+        if registration.hasPrefix(prefix) {
+            var encoded = String(registration.dropFirst(prefix.count))
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            encoded += String(repeating: "=", count: (4 - encoded.count % 4) % 4)
+            if let data = Data(base64Encoded: encoded),
+               let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let endpoint = payload["endpoint"] as? String {
+                url = URL(string: endpoint + "/head")
+            }
+        }
+        guard let url else {
+            syncEnvironment(["phase": phase, "stage": "preflight", "passed": false, "reason": "registration-unreadable"])
+            XCTFail("sync-env: the registration could not be read")
+            return
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 30
+        let session = URLSession(configuration: configuration)
+        let observed = SyncPreflight()
+        let received = expectation(description: "Sync endpoint preflight")
+        session.dataTask(with: url) { data, response, error in
+            observed.status = (response as? HTTPURLResponse)?.statusCode
+            observed.errorCode = error.map { ($0 as NSError).code }
+            if let data, let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                observed.error = body["error"] as? String
+            }
+            received.fulfill()
+        }.resume()
+        wait(for: [received], timeout: 40)
+        session.invalidateAndCancel()
+        // An unauthenticated request reaching the server is refused with this exact error.
+        let reachable = observed.status == 401 && observed.error == "unauthorized"
+        syncEnvironment([
+            "phase": phase, "stage": "preflight", "passed": reachable, "https": url.scheme == "https",
+            "status": observed.status as Any? ?? NSNull(), "errorCode": observed.errorCode as Any? ?? NSNull(),
+        ])
+        XCTAssertTrue(reachable, "sync-env: the registration endpoint is not reachable from the device")
+    }
+
+    private func runSync(phase: String, environment: [String: String]) {
+        let app = XCUIApplication(bundleIdentifier: "io.github.rsyumi.risunest.ios.bench")
+        app.launchEnvironment["RISUNEST_IOS_PHASE"] = phase
+        for (key, value) in environment {
+            app.launchEnvironment[key] = value
+        }
+        app.launch()
+        let texts = app.webViews.staticTexts
+        let result = texts.containing(NSPredicate(format: "label BEGINSWITH %@", "sync-result:")).firstMatch
+        let failure = texts.containing(NSPredicate(format: "label BEGINSWITH %@", "verification-error:")).firstMatch
+        let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in result.exists || failure.exists }, object: nil)
+        let outcome = XCTWaiter().wait(for: [settled], timeout: 600)
+        attachScreenshot(app, name: "\(phase)-final")
+        guard outcome == .completed else {
+            let step = texts.containing(NSPredicate(format: "label BEGINSWITH %@", "sync-step:")).firstMatch
+            let last = step.exists ? step.label : "sync-step:unknown"
+            let attachment = XCTAttachment(string: last)
+            attachment.name = "\(phase)-last-step"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            print(last)
+            XCTFail("\(phase) did not finish; last \(last)")
+            return
+        }
+        let evidence = result.exists ? result.label : failure.label
+        let attachment = XCTAttachment(string: evidence)
+        attachment.name = "\(phase)-result"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        print(evidence)
+        XCTAssertTrue(evidence.hasPrefix("sync-result:passed"), evidence)
+    }
+
+    func testSyncConnect() throws {
+        continueAfterFailure = false
+        let inputs = try syncInputs()
+        syncPreflight(inputs.registration, phase: "sync")
+        runSync(phase: "sync", environment: [
+            "RISUNEST_IOS_SYNC_REGISTRATION": inputs.registration,
+            "RISUNEST_IOS_SYNC_EXPECT": inputs.expect,
+            "RISUNEST_IOS_SYNC_MARKER": inputs.marker,
+        ])
+    }
+
+    /// Runs after testSyncConnect in the same installation and relaunches without the registration.
+    func testSyncRestart() throws {
+        continueAfterFailure = false
+        let inputs = try syncInputs()
+        syncPreflight(inputs.registration, phase: "sync-restart")
+        runSync(phase: "sync-restart", environment: ["RISUNEST_IOS_SYNC_MARKER": inputs.marker])
+    }
+
     func testOAuthCallbackReturn() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "io.github.rsyumi.risunest.ios.bench")
@@ -328,14 +451,21 @@ final class NativeUITests: XCTestCase {
     private func cancelPicker(_ app: XCUIApplication, step: Int) {
         // On iOS 26, export subfolders show a Back button; Cancel is at the root.
         let cancel = app.buttons["Cancel"]
+        // Earlier iOS titles a folder's back button with its parent and gives it no BackButton identifier.
+        let parentTitles = ["Back", "Browse", "Locations", "On My iPhone", "On My iPad", "RisuNest iOS Bench"]
+        let titledBack = app.navigationBars.buttons.matching(NSPredicate(format: "label IN %@", parentTitles)).firstMatch
         for _ in 0..<4 {
             if cancel.waitForExistence(timeout: 2) {
                 cancel.tap()
                 return
             }
             let back = app.navigationBars.buttons.matching(identifier: "BackButton").firstMatch
-            guard back.waitForExistence(timeout: 15) else { break }
-            back.tap()
+            if back.waitForExistence(timeout: 15) {
+                back.tap()
+                continue
+            }
+            guard titledBack.waitForExistence(timeout: 2) else { break }
+            titledBack.tap()
         }
         let back = app.navigationBars.buttons.matching(identifier: "BackButton").firstMatch
         let close = app.buttons["Close"]
@@ -345,7 +475,10 @@ final class NativeUITests: XCTestCase {
         let backHittable = backExists && back.isHittable
         let closeExists = close.exists
         let closeHittable = closeExists && close.isHittable
-        print("RISUNEST_CR228_PICKER_CAPABILITY step=\(step) cancel_exists=\(cancelExists ? 1 : 0) cancel_hittable=\(cancelHittable ? 1 : 0) back_exists=\(backExists ? 1 : 0) back_hittable=\(backHittable ? 1 : 0) close_exists=\(closeExists ? 1 : 0) close_hittable=\(closeHittable ? 1 : 0)")
+        print("RISUNEST_CR228_PICKER_CAPABILITY step=\(step) cancel_exists=\(cancelExists ? 1 : 0) cancel_hittable=\(cancelHittable ? 1 : 0) back_exists=\(backExists ? 1 : 0) back_hittable=\(backHittable ? 1 : 0) close_exists=\(closeExists ? 1 : 0) close_hittable=\(closeHittable ? 1 : 0) titled_back_exists=\(titledBack.exists ? 1 : 0)")
+        let navigation = app.navigationBars.buttons.allElementsBoundByIndex.prefix(8)
+            .map { "\($0.identifier)/\($0.label)" }.joined(separator: ",")
+        print("RISUNEST_CR228_PICKER_NAVIGATION step=\(step) bars=\(app.navigationBars.count) buttons=\(navigation)")
         if closeExists && closeHittable {
             close.tap()
             return

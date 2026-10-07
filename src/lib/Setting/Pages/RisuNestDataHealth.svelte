@@ -282,7 +282,7 @@
         if (!snapshotTouched) keepSnapshot = view.preview?.proposesSnapshot ?? false
     })
     let showRepair = $derived(
-        Boolean(view.result) && (view.groups.length > 0 || view.journals.length > 0),
+        Boolean(view.result) && !view.outdated && (view.groups.length > 0 || view.journals.length > 0),
     )
 
     function findingLabel(index: number): string {
@@ -391,6 +391,7 @@
                 <p class="mt-1 text-sm text-danger-400" role="alert">{strings.openFailed}</p><SettingButton class="mt-2" onclick={initialize}>{language.retry}</SettingButton>
             {/if}
             {#if view.applied}<p class="mt-1 text-sm" role="status">{strings.repairApplied.replace('{0}', count(view.applied.remaining))}</p>{/if}
+            {#if view.outdated}<p class="mt-1 text-sm">{strings.outdated}</p>{/if}
             {#if view.failure}
                 <p class="mt-1 text-sm text-danger-400" role="alert">{failureMessages[view.failure]}</p>
             {/if}

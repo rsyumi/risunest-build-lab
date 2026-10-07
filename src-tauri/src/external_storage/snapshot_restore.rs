@@ -1719,11 +1719,11 @@ pub(crate) async fn download_control_catalogs(
 
 pub(crate) async fn revalidate_catalog(
     catalog:&wire::StoredObject,kind:wire::CatalogKind,root_key:&[u8;32],provider:&dyn Provider,
-    repository:&RepositoryHandle,cancel:&Cancellation,
+    repository:&RepositoryHandle,scratch_root:&Path,cancel:&Cancellation,
 ) -> Result<()> {
     if !matches!(kind,wire::CatalogKind::Records|wire::CatalogKind::Assets)
         || catalog.header.repository_id!=repository.repository_id || catalog.header.role!=wire::ObjectRole::Catalog {return Err(corrupt("dependency catalog scope differs"));}
-    let stage=tempfile::tempdir().map_err(transient)?;
+    let stage=super::leftovers::managed_scratch(scratch_root,"catalog-check-")?;
     let remote=RemoteObject::from_stored(catalog,repository)?;
     let (entries,packs,_)=read_catalog(&remote,kind,root_key,stage.path(),provider,repository,cancel).await?;
     if entries.iter().any(|entry|entry.kind!=wire::CatalogEntryKind::Object) {return Err(corrupt("dependency catalog contains unit records"));}
@@ -1740,7 +1740,7 @@ pub(crate) async fn admit_data_catalogs(
     provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation,
 ) -> Result<Vec<String>> {
     if catalogs.is_empty() {return Ok(Vec::new());}
-    let stage=tempfile::tempdir().map_err(transient)?;
+    let stage=super::leftovers::managed_scratch(store.repository_root(),"data-catalogs-")?;
     let mut hashes=BTreeSet::new();let mut roots=BTreeMap::new();
     for (index,catalog) in catalogs.iter().enumerate() {
         cancel.check()?;

@@ -2947,6 +2947,55 @@ describe('Chats imperative mount lifecycle', () => {
         expect(chatMountProbe.unmounts).toHaveLength(priorUnmounts)
     })
 
+    test('updates the response candidate position of a retained source row refreshed in place', async () => {
+        const messages = Array.from({ length: 5 }, (_, index) => makeMessage(index))
+        const currentCharacter = makeCharacter(messages)
+        const { session, source } = makeViewportSource(currentCharacter)
+        const resolver: LiveChatParserProjectionResolver = {
+            resolve: vi.fn(async ({ row }) =>
+                boundedProjection(currentCharacter, row.absoluteIndex),
+            ),
+        }
+        mounted = mount(ChatsHarness, {
+            target,
+            props: {
+                initialMessages: messages,
+                initialCharacter: currentCharacter,
+                initialViewportSource: source,
+                parserProjectionResolver: resolver,
+            },
+        })
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(5))
+        const tail = probeElements(target).find((node) => node.dataset.message === 'message-4')!
+        const tailInstance = Number(tail.dataset.chatProbe)
+        expect(tail.dataset.candidatePage).toBe('1')
+        expect(tail.dataset.candidateTotal).toBe('1')
+
+        // A new candidate is stored with the same text, so only its position changes.
+        const { chatId: _generatedId, ...snapshot } = messages[4]
+        session.edit(session.locate(4), {
+            ...messages[4],
+            chatId: 'response-group',
+            responseVariants: {
+                groupId: 'response-group',
+                selectedId: 'candidate-b',
+                candidates: [
+                    { id: 'candidate-a', messages: [{ ...snapshot, data: 'earlier candidate' }] },
+                    { id: 'candidate-b', messages: [snapshot] },
+                ],
+            },
+        })
+        await vi.waitFor(() => expect(
+            chatMountProbe.displayUpdates.some((update) => update.instanceId === tailInstance),
+        ).toBe(true))
+        await tick()
+
+        expect(probeElements(target).find((node) => node.dataset.message === 'message-4')).toBe(tail)
+        expect(chatMountProbe.unmounts).not.toContain(tailInstance)
+        expect(tail.dataset.candidatePage).toBe('2')
+        expect(tail.dataset.candidateTotal).toBe('2')
+    })
+
     test.each(['balanced', 'strong'] as const)(
         'refreshes the retained %s streaming row with a live parser signal on every session update',
         async (mode) => {

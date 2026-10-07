@@ -203,6 +203,21 @@ fn frozen_stage_reopens_retries_exactly_and_rejects_changed_source_or_projection
 }
 
 #[test]
+fn staging_database_lives_in_app_scratch_beside_a_crash_leftover_and_is_removed() {
+    let dir=tempfile::tempdir().unwrap(); let mut store=PersistentStore::open(dir.path()).unwrap();
+    let scratch_root=dir.path().join("external-storage").join("scratch");
+    let leftover=scratch_root.join("binding-stage-leftover");
+    std::fs::create_dir_all(&leftover).unwrap(); std::fs::write(leftover.join("incoming.sqlite"),b"synthetic crash leftover").unwrap();
+    let (header,inspection)=context(&store);
+    STAGE_SCRATCH.with(|scratch| scratch.replace(None));
+    store.lww_stage_binding_units(&header,&inspection,&[change(&["root","language"],json!("remote"))],7.into()).unwrap();
+    let staged=STAGE_SCRATCH.with(|scratch| scratch.take()).expect("binding stage scratch");
+    assert!(staged.starts_with(&scratch_root),"{staged:?}");
+    assert!(!staged.exists());
+    assert_eq!(std::fs::read_dir(&scratch_root).unwrap().count(),1);
+}
+
+#[test]
 fn crash_after_atomic_copy_retains_exact_receipt_before_caller_registration() {
     let dir=tempfile::tempdir().unwrap(); let mut store=PersistentStore::open(dir.path()).unwrap();
     let (header,inspection)=context(&store); let incoming=vec![change(&["character","missing","name"],json!("held"))];

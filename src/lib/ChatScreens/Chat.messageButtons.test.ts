@@ -273,3 +273,30 @@ describe('plugin message buttons in the message action row', () => {
         expect(pluginButtons()).toEqual([])
     })
 })
+
+describe('response candidate controls in the message row', () => {
+    test('follow a candidate position update on the mounted row', async () => {
+        installCharacter({ id: 'conversation-a', message: messages, isStreaming: false })
+        const target = document.createElement('div')
+        document.body.append(target)
+        const instance = mount(Chat, {
+            target,
+            props: { name: 'Live Character', isLastMemory: false, message: 'answer', role: 'char', idx: 1, totalLength: 2, rerollIcon: 'dynamic' },
+        }) as unknown as { updateCandidatePosition(page: number, total: number): void }
+        try {
+            await tick()
+            const previous = target.querySelector<HTMLButtonElement>('.button-icon-unreroll')!
+            const counter = () => target.querySelector('.tabular-nums')?.textContent ?? null
+            expect(previous.disabled).toBe(true)
+            expect(counter()).toBeNull()
+
+            instance.updateCandidatePosition(2, 2)
+            await tick()
+            expect(previous.disabled).toBe(false)
+            expect(counter()).toBe('2/2')
+        } finally {
+            await unmount(instance)
+            document.body.replaceChildren()
+        }
+    })
+})

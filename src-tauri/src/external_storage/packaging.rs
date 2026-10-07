@@ -4785,6 +4785,7 @@ mod tests {
         if !versioned {
             crate::external_storage::sections::prepare_received_backup_sections(
                 std::slice::from_ref(source),
+                &std::env::temp_dir(),
                 &Cancellation::default(),
             )
             .unwrap();
@@ -5400,12 +5401,12 @@ mod tests {
             assert_eq!(decoded,body);
             let pack=packs.values().next().unwrap();let name=&pack.receipt.locator.object;
             let reads=provider.read_attempts(name);
-            assert_eq!(snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Records,&key,&provider,&repository,&Cancellation::default()).await.unwrap_err().kind,ErrorKind::Corrupt);
+            assert_eq!(snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Records,&key,&provider,&repository,root.path(),&Cancellation::default()).await.unwrap_err().kind,ErrorKind::Corrupt);
             assert_eq!(provider.read_attempts(name),reads,"wrong-kind metadata refuses before Asset pack reads");
-            snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Assets,&key,&provider,&repository,&Cancellation::default()).await.unwrap();
+            snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Assets,&key,&provider,&repository,root.path(),&Cancellation::default()).await.unwrap();
             assert!(provider.read_attempts(name)>reads,"aged prepared Asset roots authenticate their pack closure");
             let uploads=provider.upload_attempts(&pack.object_id);provider.forget(name);
-            assert_eq!(snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Assets,&key,&provider,&repository,&Cancellation::default()).await.unwrap_err().kind,ErrorKind::NotFound);
+            assert_eq!(snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Assets,&key,&provider,&repository,root.path(),&Cancellation::default()).await.unwrap_err().kind,ErrorKind::NotFound);
             assert_eq!(provider.upload_attempts(&pack.object_id),uploads,"aged prepared verification never repairs a saved Asset pack");
         });
     }
@@ -5437,15 +5438,15 @@ mod tests {
             assert!(snapshot_restore::read_catalog(&remote,wire::CatalogKind::Assets,&key,&root.path().join("wrong-kind"),&provider,&repository,&Cancellation::default()).await.is_err());
             let packs=completed.referenced.iter().filter(|object|object.role==ObjectRole::Pack).collect::<Vec<_>>();
             let reads=packs.iter().map(|pack|provider.read_attempts(&pack.receipt.locator.object)).collect::<Vec<_>>();
-            snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Records,&key,&provider,&repository,&Cancellation::default()).await.unwrap();
+            snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Records,&key,&provider,&repository,root.path(),&Cancellation::default()).await.unwrap();
             for (pack,reads) in packs.iter().zip(reads) {assert!(provider.read_attempts(&pack.receipt.locator.object)>reads,"aged proof authenticates every required pack despite local controls");}
             let pack=packs[0];let name=&pack.receipt.locator.object;
             let uploads=provider.upload_attempts(&pack.object_id);
             let mut damaged=provider.state.lock().unwrap().objects[name].0.clone();let last=damaged.len()-1;damaged[last]^=1;
             provider.seed(name,ObjectRole::Pack,damaged);
-            assert_eq!(snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Records,&key,&provider,&repository,&Cancellation::default()).await.unwrap_err().kind,ErrorKind::Corrupt);
+            assert_eq!(snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Records,&key,&provider,&repository,root.path(),&Cancellation::default()).await.unwrap_err().kind,ErrorKind::Corrupt);
             provider.forget(name);
-            assert_eq!(snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Records,&key,&provider,&repository,&Cancellation::default()).await.unwrap_err().kind,ErrorKind::NotFound);
+            assert_eq!(snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Records,&key,&provider,&repository,root.path(),&Cancellation::default()).await.unwrap_err().kind,ErrorKind::NotFound);
             assert_eq!(provider.upload_attempts(&pack.object_id),uploads,"aged immutable verification never repairs or replaces the captured source");
         });
     }

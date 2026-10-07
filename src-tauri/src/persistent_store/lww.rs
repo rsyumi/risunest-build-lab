@@ -904,6 +904,7 @@ impl PersistentStore {
             let sections = if let Some(snapshot) = snapshot {
                 let sections = device_store::sections::capture_backup_sections_snapshot(
                     &snapshot, &[SectionKind::Hypa, SectionKind::LocalPlugins, SectionKind::LocalSettings],
+                    &crate::external_storage::leftovers::scratch_directory(&self.repository_root)?,
                 )?;
                 snapshot.execute_batch("COMMIT;")?;
                 sections
