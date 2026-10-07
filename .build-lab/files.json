@@ -112,7 +112,7 @@
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
       "bytes": 43335,
-      "sha256": "25d67ef7a695ba4e891086a0361cd20d819abb77b040d5219e4fefcf9f86e7e1"
+      "sha256": "3c535ad11b649f68813bacd781f741e416c8786a80971b5e35610aa613de2164"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -130,7 +130,7 @@
       "path": "benchmarks/ios/cloudContracts.ts",
       "mode": "100644",
       "bytes": 6298,
-      "sha256": "8e844555e86e61999600c0df7873d01f097960319c0083d7cc1210a117321d22"
+      "sha256": "5aa0bbafaf3a86cd5eaeddb22420dff39192195fac7d1a2f68bdd3afb3f81067"
     },
     {
       "path": "benchmarks/ios/contracts.test.ts",
@@ -1023,8 +1023,8 @@
     {
       "path": "benchmarks/sync-ui/externalStorage.ts",
       "mode": "100644",
-      "bytes": 10231,
-      "sha256": "27376f22cc98dc18bbdde75016cb2fe723101031c950d398907a0d3dfb14589e"
+      "bytes": 10883,
+      "sha256": "da443b9f37cd23a0909d47895bff87a5b9f43792ad3140b0d3a5c398eef3c0d9"
     },
     {
       "path": "benchmarks/sync-ui/roundTrip.ts",

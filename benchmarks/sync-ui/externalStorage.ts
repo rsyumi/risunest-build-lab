@@ -147,12 +147,22 @@ export async function webDavBackupRestore(driver: SyncDriver, input: {
     return { persisted: true };
   });
   const restored = await driver.step("sync-result", "restored", async () => {
-    const { production, scope } = await modules();
+    const { bridge, production, scope } = await modules();
     const areas = scope.externalRestoreAreas(restorable!, []);
+    // The request resolves once the library is replaced; the native job settles after the app adopts it.
     const job = await guarded("restored", () => production.requestExternalStorageRestore(connectionId, snapshotId, areas));
-    if (job.state !== "succeeded" || job.applicationStarted !== true)
+    const receivedRevision = job.result?.receivedRevision;
+    if (job.applicationStarted !== true || receivedRevision === undefined)
       missing("restored", "the restore did not apply", { jobState: job.state, applicationStarted: job.applicationStarted ?? null, error: errorShape(job.error) });
-    return { jobState: job.state, areas, receivedRevision: job.result?.receivedRevision ?? null };
+    let settled = job;
+    const deadline = Date.now() + 120_000;
+    while (!["succeeded", "failed", "cancelled", "uncertain", "conflict"].includes(settled.state) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      settled = await guarded("restored", () => bridge.getJob(job.id));
+    }
+    if (settled.state !== "succeeded")
+      missing("restored", "the restore job did not settle as succeeded", { jobState: settled.state, error: errorShape(settled.error) });
+    return { jobState: settled.state, areas, receivedRevision };
   });
   const location = await driver.step("sync-result", "library-restored", async () => {
     const found = await markerState(driver, input.before, input.after, "library-restored");
