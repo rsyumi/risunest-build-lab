@@ -111,8 +111,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 39166,
-      "sha256": "cbfd3cfb6f0f6bc5f940339933fdba550fa16f50b2a11f6b4f55aeda52324659"
+      "bytes": 43044,
+      "sha256": "2c1d55ffae715d5f51fece5372590f0d518438d1e2c0e3ea64a01288bd03a799"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -145,6 +145,12 @@
       "sha256": "c7415c37b3f85c847e0513350a95dad39c6ec45787f6436e64d0c798dd52dc37"
     },
     {
+      "path": "benchmarks/ios/externalStorageContracts.ts",
+      "mode": "100644",
+      "bytes": 2321,
+      "sha256": "075096f4e60a64aeb63715693e1a769c4f72a59f5a77316557cc2381fc7722f6"
+    },
+    {
       "path": "benchmarks/ios/index.html",
       "mode": "100644",
       "bytes": 487,
@@ -153,8 +159,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 15315,
-      "sha256": "9f37ea7e0637771b48e9a7393ea01930c0e33550fc9c680442db2d4d666f03ab"
+      "bytes": 15675,
+      "sha256": "0fdb6c9c4ff7a44f4ea3d0c17ff94f713d2855a645c639bc5c033b31786a8a97"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -195,8 +201,8 @@
     {
       "path": "benchmarks/ios/native/src/lib.rs",
       "mode": "100644",
-      "bytes": 5804,
-      "sha256": "3c04e8c0c1a5a8934b9da3b5bd9b26d22fda3ce78feaff64ac67106fa4ebd557"
+      "bytes": 7090,
+      "sha256": "20e8dcd1c14b26ec59ae2bc40c5bcda9422df73c36be4f34f882cd7adf1e5366"
     },
     {
       "path": "benchmarks/ios/native/src/network_probe.rs",
@@ -237,8 +243,8 @@
     {
       "path": "benchmarks/ios/syncContracts.ts",
       "mode": "100644",
-      "bytes": 2151,
-      "sha256": "c4d84abd3d416f635a2944e40ae6100d24a8c3700675caf9cabfad8c1a916cfc"
+      "bytes": 2427,
+      "sha256": "4b16fc6b6f954f13f5b2b9c1c499cfd92a56dda0e036bc29fcb0d0717adebde9"
     },
     {
       "path": "benchmarks/ios/vite.config.ts",
@@ -493,6 +499,18 @@
       "sha256": "c6dd64b5558da7917e7345d36587ab3008b8b0964ebd2ce46e335f2598506778"
     },
     {
+      "path": "benchmarks/macos/externalStorage.ts",
+      "mode": "100644",
+      "bytes": 1712,
+      "sha256": "b6ec1943020921926a7d858d1049af10cd0fb4c36b25a8269d512fe8bea190a9"
+    },
+    {
+      "path": "benchmarks/macos/external_controller.py",
+      "mode": "100644",
+      "bytes": 4583,
+      "sha256": "6b6cbabf2f52a7e145893405522a0576265b1edd2cba61cb168a7646831329a3"
+    },
+    {
       "path": "benchmarks/macos/index.html",
       "mode": "100644",
       "bytes": 657,
@@ -501,8 +519,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 27935,
-      "sha256": "dc5ca9643a3c08144ed97fede647fc2f30aadcbaac0e303923682570bbc0f42b"
+      "bytes": 28095,
+      "sha256": "ea47dfe019d75f00b98d4302d4021ad8b3decd8870f7bb7a40f77dd290409710"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -549,8 +567,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 30609,
-      "sha256": "c6dfffa7d63c37733d3064e768e75ad4cc900a5a6b854aaf22842cb61eb9b1ec"
+      "bytes": 31707,
+      "sha256": "11b8fd4639d4ff0ca393b49fb1c7655130625dc285c324525a02fbaca71c3def"
     },
     {
       "path": "benchmarks/macos/sync.ts",
@@ -1001,6 +1019,12 @@
       "mode": "100644",
       "bytes": 26019,
       "sha256": "46dcc384934c4f995865b7a6773d7896a55298db2fbb3fc0b96e406882e4083b"
+    },
+    {
+      "path": "benchmarks/sync-ui/externalStorage.ts",
+      "mode": "100644",
+      "bytes": 10231,
+      "sha256": "27376f22cc98dc18bbdde75016cb2fe723101031c950d398907a0d3dfb14589e"
     },
     {
       "path": "benchmarks/sync-ui/roundTrip.ts",

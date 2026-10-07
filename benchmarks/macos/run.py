@@ -11,6 +11,7 @@ import tempfile
 import time
 
 from sync_controller import DEPENDENCIES as SYNC_DEPENDENCIES, PHASES as SYNC_PHASES, SyncEnvironmentError, SyncSession
+from external_controller import DEPENDENCIES as EXTERNAL_DEPENDENCIES, PHASES as EXTERNAL_PHASES, ExternalStorageSession
 
 
 def records(path):
@@ -198,7 +199,7 @@ def run_phase(app, phase, artifacts, fixtures, expected=None):
                         if phase.startswith('session-dispatch-') else
                         {phase} if phase.startswith('appearance-') else
                         {'session-upgrade': {'session-deadline-started', 'session-deadline-reply', 'session-deadline-exit'}, 'session-deadline': {'session-deadline-started', 'session-deadline-reply', 'session-deadline-exit'}, 'termination-probe': {'termination-probe-cancel', 'termination-probe-reload', 'termination-probe-approved'}, 'contracts': {'persistence', 'regex', 'tokenizer', 'reload', 'closed', 'reopened', 'finder', 'quit-cancelled', 'quit-saved'}, 'restart': {'restart'}, 'app': {'app', 'app-native-saving', 'app-native-reload-cancelled', 'app-native-stale-rejected', 'app-native-saved', 'app-native-exit'}, 'app-restart': {'app-restart'}, 'streaming': {'streaming'}, 'quit-escape': {'quit-escape-delivered', 'quit-escape-exit'},
-                         **{name: {name} for name in SYNC_PHASES}}[phase])
+                         **{name: {name} for name in (*SYNC_PHASES, *EXTERNAL_PHASES)}}[phase])
             stages = {entry['stage'] for entry in result}
             if not required <= stages or 'failure' in stages:
                 raise RuntimeError(f'{phase}: incomplete results {stages}')
@@ -275,6 +276,7 @@ def main():
     parser.add_argument('--capture-input')
     parser.add_argument('--system-theme', choices=['light', 'dark'])
     parser.add_argument('--sync-server', type=Path)
+    parser.add_argument('--webdav-server', type=Path)
     args = parser.parse_args()
     if args.appearance and args.capture_codec_experiment:
         parser.error('Select appearance capture or the paired codec experiment')
@@ -399,7 +401,7 @@ def main():
     allowed_phases = {'session-upgrade', 'session-deadline', 'termination-probe', 'contracts', 'restart', 'app', 'app-restart', 'streaming', 'quit-escape',
                       'session-dispatch-initial', 'session-dispatch-local', 'session-dispatch-drain', 'session-dispatch-dialog',
                       'appearance-seed-light', 'appearance-app-light', 'appearance-seed-dark', 'appearance-app-dark',
-                      *SYNC_PHASES}
+                      *SYNC_PHASES, *EXTERNAL_PHASES}
     if not phases or any(phase not in allowed_phases for phase in phases):
         raise RuntimeError('invalid RISUNEST_MACOS_PHASES')
     if any(phase in SYNC_PHASES for phase in phases):
@@ -410,13 +412,21 @@ def main():
             raise RuntimeError('The Sync round trip is restricted to a fresh hosted CI user')
         if not args.sync_server:
             parser.error('Sync phases require --sync-server')
+    if any(phase in EXTERNAL_PHASES for phase in phases):
+        if [phase for phase in phases if phase in EXTERNAL_PHASES] != list(EXTERNAL_PHASES):
+            raise RuntimeError('External storage phases run together and in order')
+        if os.environ.get('GITHUB_ACTIONS') != 'true':
+            raise RuntimeError('The external storage round trip is restricted to a fresh hosted CI user')
+        if not args.webdav_server:
+            parser.error('External storage phases require --webdav-server')
     # A failed phase skips only the phases that read the data it leaves; the rest still run.
     dependencies = {'restart': 'contracts', 'app': 'contracts', 'app-restart': 'app',
                     'appearance-app-light': 'appearance-seed-light', 'appearance-app-dark': 'appearance-seed-dark',
-                    **SYNC_DEPENDENCIES}
+                    **SYNC_DEPENDENCIES, **EXTERNAL_DEPENDENCIES}
     results = {}
     failures = {}
     sync = None
+    external = None
     try:
         for phase in phases:
             if dependencies.get(phase) in failures:
@@ -435,6 +445,11 @@ def main():
                         sync = SyncSession(args.sync_server, artifacts)
                         sync.start()
                     expected = sync.before(phase)
+                if phase in EXTERNAL_PHASES:
+                    if external is None:
+                        external = ExternalStorageSession(args.webdav_server, artifacts)
+                        external.start()
+                    expected = external.before(phase)
                 launched = True
                 results[phase] = run_phase(app, phase, artifacts, fixtures, expected)
             except SyncEnvironmentError as error:
@@ -456,6 +471,8 @@ def main():
     finally:
         if sync is not None:
             sync.close()
+        if external is not None:
+            external.close()
     if failures:
         raise RuntimeError(f'Failed phases: {json.dumps(failures, indent=2)}')
     print('Mac WKWebView contracts, restart and product app passed', flush=True)
