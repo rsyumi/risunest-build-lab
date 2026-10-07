@@ -282,10 +282,12 @@ final class NativeUITests: XCTestCase {
               let marker = environment["RISUNEST_IOS_SYNC_MARKER"], !marker.isEmpty else {
             throw XCTSkip("Sync registration not supplied")
         }
-        // Test Lab regenerates the xctestrun it runs, so the registration payload may be supplied without its URI prefix.
-        let prefix = Self.registrationPrefix
-        let registration = supplied.contains("://") ? supplied : prefix + supplied
-        return (registration, expect, marker)
+        return (Self.registrationURI(supplied), expect, marker)
+    }
+
+    // Test Lab regenerates the xctestrun it runs, so the registration payload may be supplied without its URI prefix.
+    private static func registrationURI(_ supplied: String) -> String {
+        supplied.contains("://") ? supplied : registrationPrefix + supplied
     }
 
     private func syncEnvironment(_ outcome: [String: Any]) {
@@ -388,6 +390,22 @@ final class NativeUITests: XCTestCase {
             "RISUNEST_IOS_SYNC_REGISTRATION": inputs.registration,
             "RISUNEST_IOS_SYNC_EXPECT": inputs.expect,
             "RISUNEST_IOS_SYNC_MARKER": inputs.marker,
+        ])
+    }
+
+    /// Publishes a seeded library with `RISUNEST_IOS_SYNC_PUBLISH` in a message to an empty server library.
+    func testSyncPublish() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard let supplied = environment["RISUNEST_IOS_SYNC_REGISTRATION"], !supplied.isEmpty,
+              let marker = environment["RISUNEST_IOS_SYNC_PUBLISH"], !marker.isEmpty else {
+            throw XCTSkip("Sync publication not requested")
+        }
+        let registration = Self.registrationURI(supplied)
+        syncPreflight(registration, phase: "sync-publish")
+        runSync(phase: "sync-publish", environment: [
+            "RISUNEST_IOS_SYNC_REGISTRATION": registration,
+            "RISUNEST_IOS_SYNC_PUBLISH": marker,
         ])
     }
 

@@ -65,16 +65,24 @@ fn ios_bench_cloud_key() -> Result<String, &'static str> {
 
 #[tauri::command]
 fn ios_bench_sync_input() -> Result<serde_json::Value, &'static str> {
-    let read = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-    let marker = read("RISUNEST_IOS_SYNC_MARKER").ok_or("Sync inputs unavailable")?;
+    let read = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .ok_or("Sync inputs unavailable")
+    };
     match ios_bench_phase().as_str() {
         "sync" => Ok(serde_json::json!({
-            "registration": read("RISUNEST_IOS_SYNC_REGISTRATION").ok_or("Sync inputs unavailable")?,
-            "expect": read("RISUNEST_IOS_SYNC_EXPECT").ok_or("Sync inputs unavailable")?,
-            "marker": marker,
+            "registration": read("RISUNEST_IOS_SYNC_REGISTRATION")?,
+            "expect": read("RISUNEST_IOS_SYNC_EXPECT")?,
+            "marker": read("RISUNEST_IOS_SYNC_MARKER")?,
+        })),
+        "sync-publish" => Ok(serde_json::json!({
+            "registration": read("RISUNEST_IOS_SYNC_REGISTRATION")?,
+            "marker": read("RISUNEST_IOS_SYNC_PUBLISH")?,
         })),
         // A relaunch reconnects from the stored credential, never from a registration.
-        "sync-restart" => Ok(serde_json::json!({ "marker": marker })),
+        "sync-restart" => Ok(serde_json::json!({ "marker": read("RISUNEST_IOS_SYNC_MARKER")? })),
         _ => Err("Sync verification phase required"),
     }
 }

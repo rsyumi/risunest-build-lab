@@ -1512,6 +1512,62 @@ fn order_preserves_folders_filters_retired_ids_and_appends_concurrent_additions(
     );
 }
 
+fn character_order(store: &PersistentStore) -> Value {
+    store.read_root(None).unwrap().value["characterOrder"].clone()
+}
+
+#[test]
+fn trashed_characters_stay_out_of_the_character_order() {
+    let (_, mut store) = store();
+    save(&mut store, vec![
+        mutation(&["exists", "character", "a"], serde_json::json!({"type":"character"})),
+        mutation(&["exists", "character", "b"], serde_json::json!({"type":"character"})),
+        mutation(&["exists", "character", "c"], serde_json::json!({"type":"character"})),
+        mutation(&["order", "characters"], serde_json::json!([{"name":"folder","data":["c"]},"a","b"])),
+    ]);
+    assert_eq!(character_order(&store), serde_json::json!([{"name":"folder","data":["c"]},"a","b"]));
+    // The renderer trashes a character by dropping it from the order.
+    save(&mut store, vec![
+        mutation(&["character", "b", "trashTime"], serde_json::json!(1)),
+        mutation(&["order", "characters"], serde_json::json!([{"name":"folder","data":["c"]},"a"])),
+    ]);
+    assert_eq!(character_order(&store), serde_json::json!([{"name":"folder","data":["c"]},"a"]));
+    // A trashed character the order still lists stays out as well.
+    save(&mut store, vec![mutation(&["character", "c", "trashTime"], serde_json::json!(2))]);
+    assert_eq!(character_order(&store), serde_json::json!([{"name":"folder","data":[]},"a"]));
+    // Restoring from the trash brings the character back.
+    save(&mut store, vec![
+        UnitMutation::Delete { key: unit_key(&["character", "b", "trashTime"]).unwrap() },
+        mutation(&["order", "characters"], serde_json::json!([{"name":"folder","data":["c"]},"a","b"])),
+    ]);
+    assert_eq!(character_order(&store), serde_json::json!([{"name":"folder","data":[]},"a","b"]));
+    let trash = store.query_characters(&crate::persistent_store::CharacterQuery {
+        search: None, order: crate::persistent_store::QueryOrder::Configured, trash: true, limit: 10, cursor: None,
+    }, None).unwrap();
+    assert_eq!(trash.items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), ["c"]);
+}
+
+#[test]
+fn a_received_trash_leaves_the_character_order() {
+    let (_, mut store) = store();
+    receive(&mut store, "library", vec![
+        change(&["exists", "character", "a"], 1, serde_json::json!({"type":"character"})),
+        change(&["exists", "character", "b"], 2, serde_json::json!({"type":"character"})),
+        change(&["exists", "character", "c"], 3, serde_json::json!({"type":"character"})),
+        change(&["order", "characters"], 4, serde_json::json!(["a", "b", "c"])),
+    ], vec![]);
+    assert_eq!(character_order(&store), serde_json::json!(["a", "b", "c"]));
+    receive(&mut store, "trash", vec![
+        change(&["character", "c", "trashTime"], 5, serde_json::json!(5)),
+        change(&["order", "characters"], 5, serde_json::json!(["a", "b"])),
+    ], vec![]);
+    assert_eq!(character_order(&store), serde_json::json!(["a", "b"]));
+    receive(&mut store, "trash-listed", vec![
+        change(&["character", "b", "trashTime"], 6, serde_json::json!(6)),
+    ], vec![]);
+    assert_eq!(character_order(&store), serde_json::json!(["a"]));
+}
+
 #[test]
 fn local_and_opaque_fields_persist_without_publication() {
     let (_, mut store) = store();

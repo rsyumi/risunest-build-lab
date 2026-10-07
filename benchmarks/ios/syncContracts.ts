@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { SyncDriver, SyncStepError, redact } from "../sync-ui/driver";
-import { receiveAndPush, reconnectAndPull } from "../sync-ui/roundTrip";
+import { publishLibrary, receiveAndPush, reconnectAndPull } from "../sync-ui/roundTrip";
 import { initialize } from "./contracts";
 
 interface SyncInput {
@@ -12,11 +12,12 @@ interface SyncInput {
 const report = (stage: string, result: unknown) => invoke("ios_bench_report", { stage, result });
 
 /**
- * Joins the library behind the supplied registration (`sync`), or reconnects from the stored
- * credential after a relaunch (`sync-restart`). XCTest reads the outcome from a fixed overlay,
- * since the product replaces the harness page.
+ * Publishes a seeded library to an empty server (`sync-publish`), joins the library behind the
+ * supplied registration (`sync`), or reconnects from the stored credential after a relaunch
+ * (`sync-restart`). XCTest reads the outcome from a fixed overlay, since the product replaces
+ * the harness page.
  */
-export async function syncContract(phase: "sync" | "sync-restart") {
+export async function syncContract(phase: "sync" | "sync-restart" | "sync-publish") {
   const overlay = document.createElement("pre");
   overlay.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:2147483647;margin:0;padding:4px 8px;"
     + "font:12px monospace;white-space:pre-wrap;pointer-events:none;background:#000;color:#fff";
@@ -31,7 +32,9 @@ export async function syncContract(phase: "sync" | "sync-restart") {
     }
     const result = phase === "sync"
       ? await receiveAndPush(driver, { seed: initialize, registration: input.registration!, expect: input.expect!, marker: input.marker })
-      : await reconnectAndPull(driver, { expect: input.marker });
+      : phase === "sync-publish"
+        ? await publishLibrary(driver, { seed: initialize, registration: input.registration!, marker: input.marker, characterId: "char-a" })
+        : await reconnectAndPull(driver, { expect: input.marker });
     await report(phase, { passed: true, label: "sync-result", ...result });
     overlay.textContent = `sync-result:passed:${JSON.stringify({ phase, ...result })}`;
   } catch (error) {
