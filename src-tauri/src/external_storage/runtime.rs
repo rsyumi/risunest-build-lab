@@ -87,18 +87,17 @@ pub(crate) fn read_job_session(app: &AppHandle, id: &str) -> Result<()> {
     require_session(&job.request, &current)
 }
 
-pub(crate) async fn require_connection_idle(app: &AppHandle, connection: &str) -> Result<()> {
-    let state = app.state::<JobCommandState>();
-    if state
-        .active
-        .lock()
-        .map_err(local_error)?
-        .values()
-        .any(|(id, _)| id == connection)
-    {
-        return Err(ProviderError::new(ErrorKind::PreconditionFailed));
-    }
-    Ok(())
+/// Ends the jobs of a connection being removed. A job whose remote outcome is
+/// unknown, or a restore already applying on this device, keeps its row until
+/// that is resolved.
+pub(crate) fn end_removed_connection_jobs(root: &std::path::Path, connection: &str) -> Result<()> {
+    JobStore::open(root)?.end_connection_jobs(connection, |job| {
+        if job.summary["state"] == "uncertain" || super::runtime_restore::application_started(job) {
+            return false;
+        }
+        settle_invalidated(job, "cancelled");
+        true
+    })
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -950,6 +949,8 @@ pub(crate) fn error_dto(error: &ProviderError) -> Value {
         ErrorKind::DeviceVaultUnavailable => ("Unlock the device credential store and retry.", "retry", false),
         ErrorKind::ClockSkew => ("Correct the device clock and retry.", "retry", false),
         ErrorKind::LocationOccupied => ("Choose an empty repository folder.", "check-endpoint", false),
+        ErrorKind::RepositoryMismatch => ("This location holds a different repository.", "check-endpoint", false),
+        ErrorKind::RecoveryKeyMismatch => ("The recovery key does not match this repository.", "unlock-key", false),
         ErrorKind::LocalStorageFull => ("This device has insufficient space.", "free-space", false),
         ErrorKind::LocalPermissionDenied => ("Allow access to the local files and retry.", "retry", false),
         ErrorKind::LocalFailure => ("This device could not complete the operation.", "retry", true),
@@ -1771,6 +1772,59 @@ mod tests {
         incoming.target_revision = Some("2".into());
         assert!(!same_requested_operation(&existing, &incoming));
     }
+    /// A removed connection keeps no job that would wait to run again. A job
+    /// whose remote outcome is unknown, or a restore applying on this device,
+    /// keeps its row, and other connections' jobs are untouched.
+    #[test]
+    fn removing_a_connection_ends_its_waiting_jobs_and_keeps_unresolved_ones() {
+        let job = |request: Value, state: &str| {
+            let mut job = DurableJob::new(serde_json::from_value(request).unwrap(), 1, persistent_store::sync_selection::CaptureIdentity {
+                store_id: "store".into(), library_epoch: "library".into(), generation: "generation".into(),
+                selection_epoch: "selection".into(), revision: 1,
+            });
+            job.summary["state"] = json!(state);
+            job
+        };
+        let backup = json!({"connectionId":"removed","kind":"backup","reason":"automatic"});
+        let restore = json!({"connectionId":"removed","kind":"restore","snapshotId":"snapshot"});
+        for (request, state, applying, ended) in [
+            (&backup, "queued", false, true),
+            (&backup, "waiting", false, true),
+            (&backup, "running", false, true),
+            (&backup, "uncertain", false, false),
+            (&restore, "waiting", false, true),
+            (&restore, "running", true, false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let store = JobStore::open(root.path()).unwrap();
+            let finished = job(backup.clone(), "succeeded");
+            store.put(&finished).unwrap();
+            let mut live = job(request.clone(), state);
+            if applying {
+                live.summary["applicationStarted"] = json!(true);
+            }
+            store.put(&live).unwrap();
+            let other = job(json!({"connectionId":"kept","kind":"backup","reason":"automatic"}), "waiting");
+            store.put(&other).unwrap();
+
+            end_removed_connection_jobs(root.path(), "removed").unwrap();
+
+            let after = store.read(&live.id).unwrap();
+            if ended {
+                assert_eq!(after.summary["state"], "cancelled", "{state}");
+                assert_eq!(after.summary["error"]["code"], error_dto(&ProviderError::new(ErrorKind::Cancelled))["code"]);
+            } else {
+                assert_eq!(after.summary, live.summary, "{state}");
+            }
+            assert_eq!(
+                store.list_pending().unwrap().iter().any(|job| job.request.connection_id == "removed"),
+                !ended
+            );
+            assert_eq!(store.read(&other.id).unwrap().summary, other.summary);
+            assert_eq!(store.read(&finished.id).unwrap().summary, finished.summary);
+        }
+    }
+
     fn automatic_job() -> DurableJob {
         let request = serde_json::from_value(json!({
             "connectionId":"x", "kind":"backup", "reason":"automatic", "targetRevision":"1"

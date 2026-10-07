@@ -16,6 +16,9 @@
 //!   service shares its request quota by. It keys the durable budget and is not
 //!   part of the repository identity, so a second device may use its own key
 //!   for the same bucket.
+//! - The repository identity is the bucket and prefix. The profile and
+//!   endpoint only say how to reach them, so a repository stays the same one
+//!   when its endpoint changes.
 //! - `location` accepts exactly `bucket`, `prefix`, `region` and `addressing`.
 //!   `prefix` may be absent or empty for the bucket root. `region` is required
 //!   unless the preset fixes one (`us-east-1` for Hugging Face). `addressing`

@@ -179,14 +179,13 @@ async fn open_snapshot(
 /// document, so the screen never guesses the coverage from the connection.
 fn item(
     document: &control::SnapshotView,
-    reference: &RemoteObject,
     kind: &str,
     pinned: bool,
     store_id: &str,
 ) -> Value {
     let same_device =
         !store_id.is_empty() && document.captured_by_device.as_deref() == Some(store_id);
-    json!({"id":document.snapshot_id,"snapshotId":document.snapshot_id,"kind":kind,"createdAtMs":document.created_at_ms.to_string(),"logicalRevision":document.revision,"storedBytes":reference.receipt.byte_length.to_string(),"pinned":pinned,"complete":true,"verified":true,
+    json!({"id":document.snapshot_id,"snapshotId":document.snapshot_id,"kind":kind,"createdAtMs":document.created_at_ms.to_string(),"logicalRevision":document.revision,"pinned":pinned,"complete":true,"verified":true,
         "includedSections":document.sections.keys().collect::<Vec<_>>(),"sameDevice":same_device})
 }
 fn remember_item(items: &mut BTreeMap<String, Value>, id: String, mut next: Value) {
@@ -249,7 +248,7 @@ pub(crate) async fn external_storage_list_history(
                         &document.snapshot_id,
                         &reference,
                     )?;
-                    let mut value = item(&document, &reference, kind, pinned, &store_id);
+                    let mut value = item(&document, kind, pinned, &store_id);
                     let row_id = point.document.point_id.clone();
                     value["id"] = json!(row_id);
                     value["pointId"] = json!(point.document.point_id.clone());
@@ -295,7 +294,7 @@ pub(crate) async fn external_storage_list_history(
                 remember_item(
                     &mut items,
                     document.snapshot_id.clone(),
-                    item(&document, &reference, "recovery-candidate", false, &store_id),
+                    item(&document, "recovery-candidate", false, &store_id),
                 );
             }
             match page.next_cursor {
@@ -355,6 +354,68 @@ mod tests {
         assert_eq!(fresh.into_iter().collect::<Vec<_>>(), vec!["c".to_owned()]);
     }
 
+    /// A history row carries no size: the only one at hand is the snapshot
+    /// document's, which is neither what the backup holds nor what it sent.
+    #[test]
+    fn a_history_item_carries_the_document_fields_and_no_size() {
+        let repository = super::super::fake::repository();
+        let catalog = |id: &str| {
+            let header = wire::PublicObjectHeader::new(
+                repository.repository_id.clone(),
+                id.into(),
+                wire::ObjectRole::Catalog,
+                1,
+            )
+            .unwrap();
+            let mut locator = super::super::fake::locator();
+            locator.object = id.into();
+            RemoteObject {
+                repository_id: repository.repository_id.clone(),
+                object_id: id.into(),
+                role: ObjectRole::Catalog,
+                receipt: ObjectReceipt {
+                    locator,
+                    byte_length: wire::envelope_length(&header).unwrap(),
+                    version: None,
+                    checksum: None,
+                    complete: true,
+                },
+                ciphertext_sha256: "11".repeat(32),
+                plaintext_length: 1,
+                plaintext_sha256: "22".repeat(32),
+            }
+            .stored(&repository)
+            .unwrap()
+        };
+        let document = control::SnapshotView {
+            snapshot_id: "snapshot".into(),
+            parent_snapshot_id: None,
+            library_id: "library".into(),
+            created_at_ms: 5,
+            revision: "3".into(),
+            library: wire::LibrarySnapshotRef {
+                record_catalog: catalog("records"),
+                asset_catalog: catalog("assets"),
+                content_fingerprint: [2; 32],
+            },
+            original_units: None,
+            sections: BTreeMap::new(),
+            is_state: false,
+            captured_by_device: Some("store".into()),
+        };
+        let value = item(&document, "backup-point", true, "store");
+        let mut fields: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            [
+                "complete", "createdAtMs", "id", "includedSections", "kind", "logicalRevision",
+                "pinned", "sameDevice", "snapshotId", "verified",
+            ]
+        );
+        assert_eq!(value["createdAtMs"], "5");
+        assert_eq!(value["sameDevice"], true);
+    }
     #[test]
     fn duplicate_snapshot_keeps_pinning_and_backup_point_evidence() {
         let mut items = BTreeMap::new();

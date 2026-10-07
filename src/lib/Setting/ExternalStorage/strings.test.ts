@@ -11,6 +11,12 @@ describe('externalErrorMessage', () => {
             .toBe(strings.corrupted)
     })
 
+    it('tells a wrong recovery key apart from another repository at the location', () => {
+        expect(externalErrorMessage(strings, { kind: 'recoveryKeyMismatch' })).toBe(strings.recoveryKeyMismatch)
+        expect(externalErrorMessage(strings, { code: 'repositoryMismatch', message: 'x', action: 'none', retryable: false }))
+            .toBe(strings.repositoryMismatch)
+    })
+
     it('names a repository this device has already connected', () => {
         expect(externalErrorMessage(strings, { kind: 'alreadyConnected' }))
             .toBe(strings.connectionAlreadyAdded)

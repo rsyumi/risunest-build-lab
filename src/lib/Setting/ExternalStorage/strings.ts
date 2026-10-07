@@ -106,6 +106,8 @@ const english = {
     requestBudget: 'The service request limit was reached. Try again later.',
     objectTooLarge: 'A file is larger than this service allows.',
     corrupted: 'The stored data did not pass verification. Choose another backup or connect the repository again.',
+    recoveryKeyMismatch: 'The recovery key does not match this repository. Check the key.',
+    repositoryMismatch: 'This location holds a different repository. Check the folder, bucket and address.',
     unsupportedOperation: 'This repository cannot do that.',
     interrupted: 'This stopped before it finished. Try again.',
     endpointRejected: 'The server address was rejected. Check the address.',
@@ -282,6 +284,8 @@ const korean: typeof english = {
     requestBudget: '서비스의 요청 한도에 걸렸습니다. 잠시 뒤 다시 시도하세요.',
     objectTooLarge: '이 서비스가 허용하는 크기보다 큰 파일이 있습니다.',
     corrupted: '저장된 데이터가 검증을 통과하지 못했습니다. 다른 백업을 고르거나 저장소를 다시 연결하세요.',
+    recoveryKeyMismatch: '복구 키가 이 저장소와 맞지 않습니다. 복구 키를 확인하세요.',
+    repositoryMismatch: '이 위치에 다른 저장소가 있습니다. 폴더·버킷과 주소를 확인하세요.',
     unsupportedOperation: '이 저장소에서는 할 수 없는 작업입니다.',
     interrupted: '끝나기 전에 멈췄습니다. 다시 시도하세요.',
     endpointRejected: '서버 주소를 사용할 수 없습니다. 주소를 확인하세요.',
@@ -457,6 +461,8 @@ export function externalErrorMessage(
         case 'storageFull': return strings.freeSpace
         case 'fileTooLarge': return strings.objectTooLarge
         case 'corrupt': return strings.corrupted
+        case 'recoveryKeyMismatch': return strings.recoveryKeyMismatch
+        case 'repositoryMismatch': return strings.repositoryMismatch
         case 'unsupported': return strings.unsupportedOperation
         case 'cancelled': return strings.interrupted
         case 'transient': return strings.retry

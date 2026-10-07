@@ -7,7 +7,8 @@
 //!   endpoint.
 //! - `endpoint` is the DAV base URL, `https` (`http` only for `127.0.0.1`),
 //!   without credentials, query or fragment. Trailing slashes are normalised
-//!   away so two devices derive the same connection identity.
+//!   away. The endpoint is not part of the connection identity, so a
+//!   repository stays the same one when the address used to reach it changes.
 //! - `account_id` is the WebDAV user name, sent as the Basic credentials
 //!   user-id, so it may not contain a colon.
 //! - `location` holds exactly one key, `root`: the collection path below the
@@ -195,11 +196,7 @@ impl RepositoryContext {
         let credentials = Zeroizing::new(format!("{}:{password}", settings.account_id));
         Ok(Self {
             base: paths::object_url(&settings.endpoint, &settings.root),
-            identity: paths::connection_identity(
-                &settings.endpoint,
-                &settings.account_id,
-                &settings.root,
-            ),
+            identity: paths::connection_identity(&settings.account_id, &settings.root),
             account: super::super::quota::AccountKey::new(
                 PROVIDER_ID,
                 &settings.endpoint,

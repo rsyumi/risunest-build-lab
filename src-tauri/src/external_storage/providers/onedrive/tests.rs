@@ -2231,3 +2231,23 @@ fn setup_folder_exposes_decoded_path_once_and_sync_fails_closed_without_it() {
         assert_eq!(selected.sync_root_path().is_ok(), accepted);
     }
 }
+
+/// The external LWW opening admits its clock from the listing it requests.
+#[test]
+fn segment_listing_yields_a_usable_clock_sample() {
+    runtime().block_on(async {
+        let date = httpdate::fmt_http_date(std::time::UNIX_EPOCH + std::time::Duration::from_millis(NOW_MS));
+        let dated = |body: String| Reply::Http { status: 200, body: body.into_bytes(),
+            headers: vec![("Content-Type".to_owned(), "application/json".to_owned()), ("Date".to_owned(), date.clone())] };
+        let server = WireServer::start(vec![dated(root_folder()), dated(descriptor_page()), dated(children_page(&[]))]);
+        let harness = harness(NOW_MS);
+        let provider = create(harness.dependencies.clone()).unwrap();
+        let cancel = Cancellation::default();
+        let (repository, _) = open(&provider, &config_for(&server, "personal"), OpenMode::Existing, &cancel).await.unwrap();
+        let started = std::time::Instant::now();
+        provider.list_objects(&repository, Collection::Segments, None, 1, &cancel).await.unwrap();
+        assert!(harness.dependencies.requests.clock_sample_after(&repository.account, started).unwrap().is_some());
+        let records = server.requests.lock().unwrap();
+        assert!(line(&records[2]).starts_with("GET "));
+    });
+}
