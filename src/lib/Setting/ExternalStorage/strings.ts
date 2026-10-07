@@ -2,6 +2,7 @@ import { externalErrorKind } from 'src/ts/storage/sync/external/connection'
 export { externalErrorKind } from 'src/ts/storage/sync/external/connection'
 import type {
     ExternalConnectionSummary,
+    ExternalOpenMode,
     ExternalProviderId,
 } from 'src/ts/storage/sync/external/types'
 
@@ -182,6 +183,9 @@ const english = {
         'webdav.password': 'An application password created in the service settings, not your account password.',
         'github_releases.token': 'Needs read and write access to the contents of the backup repository.',
         'gitlab_packages.token': 'Use a personal or project access token with api scope and Maintainer or Owner access to this project.',
+    },
+    existingFieldHelp: {
+        'webdav.root': 'The folder that holds the repository.',
     },
     options: {
         's3.addressing.': 'Service default', 's3.addressing.path': 'Path style', 's3.addressing.virtual': 'Virtual host style',
@@ -371,6 +375,9 @@ const korean: typeof english = {
         'github_releases.token': '백업 저장소의 콘텐츠 읽기·쓰기 권한이 필요합니다.',
         'gitlab_packages.token': 'api 범위와 이 프로젝트의 Maintainer 이상 권한이 있는 개인 또는 프로젝트 액세스 토큰을 입력하세요.',
     },
+    existingFieldHelp: {
+        'webdav.root': '저장소가 있는 폴더입니다.',
+    },
     options: {
         's3.addressing.': '서비스 기본', 's3.addressing.path': '경로 방식', 's3.addressing.virtual': '가상 호스트 방식',
         'google_drive.space.drive': '보이는 Drive 폴더', 'google_drive.space.appDataFolder': '숨겨진 앱 데이터',
@@ -395,8 +402,15 @@ export function externalFieldLabel(strings: ExternalStorageStrings, providerId: 
     return (strings.fields as Record<string, string>)[`${providerId}.${key}`] ?? key
 }
 
-export function externalFieldHelp(strings: ExternalStorageStrings, providerId: ExternalProviderId, key: string): string | undefined {
-    return (strings.fieldHelp as Record<string, string>)[`${providerId}.${key}`]
+export function externalFieldHelp(
+    strings: ExternalStorageStrings,
+    providerId: ExternalProviderId,
+    key: string,
+    mode: ExternalOpenMode = 'create',
+): string | undefined {
+    const field = `${providerId}.${key}`
+    return (mode === 'existing' ? (strings.existingFieldHelp as Record<string, string>)[field] : undefined)
+        ?? (strings.fieldHelp as Record<string, string>)[field]
 }
 
 export function externalOptionLabel(strings: ExternalStorageStrings, providerId: ExternalProviderId, key: string, value: string): string {

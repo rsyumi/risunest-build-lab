@@ -1,8 +1,15 @@
+import { readFileSync } from 'node:fs'
 import { afterEach, expect, it, vi } from 'vitest'
 vi.mock('../stores.svelte', async () => ({ alertStore: (await import('../alertQueue')).createAlertQueue({ type: 'none', msg: '' }, { gapMs: 0 }) }))
 import { alertStore } from '../stores.svelte'
 import { get } from 'svelte/store'
-import { modalNavigation, backNavigationLayer } from './modalNavigation'
+import { modalNavigation, backNavigationLayer, handleRootBack } from './modalNavigation'
+
+const rootBack = () => {
+    const event = new Event('risunest-root-back', { cancelable: true })
+    handleRootBack(event)
+    return event.defaultPrevented
+}
 
 afterEach(() => {
     alertStore.set({ type: "none", msg: "" })
@@ -179,4 +186,111 @@ it('leaves Escape to content that asks for it without closing the modal below', 
     expect(closeLower).not.toHaveBeenCalled()
     upperAction.destroy()
     lowerAction.destroy()
+})
+it('cancels a confirmation shown outside every layer on the Android root Back', async () => {
+    const confirmation = alertStore.open({ type: 'ask', msg: 'confirm' })
+    expect(rootBack()).toBe(true)
+    expect(get(alertStore)).toEqual({ type: 'none', msg: '' })
+    await expect(confirmation).resolves.toBe('')
+    expect(rootBack()).toBe(false)
+})
+it('holds the root Back while the next queued confirmation waits to show', async () => {
+    const first = alertStore.open({ type: 'ask', msg: 'confirm' })
+    const second = alertStore.open({ type: 'ask', msg: 'confirm again' })
+    expect(rootBack()).toBe(true)
+    await expect(first).resolves.toBe('')
+    expect(rootBack()).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(get(alertStore)).toMatchObject({ type: 'ask', msg: 'confirm again' })
+    expect(rootBack()).toBe(true)
+    await expect(second).resolves.toBe('')
+})
+it('leaves the root Back to the app for status alerts and RisuNest terms', async () => {
+    alertStore.set({ type: 'wait', msg: 'loading' })
+    expect(rootBack()).toBe(false)
+    expect(get(alertStore)).toMatchObject({ type: 'wait' })
+    alertStore.set({ type: 'none', msg: '' })
+    const terms = alertStore.open({ type: 'tos', msg: 'tos' })
+    expect(rootBack()).toBe(false)
+    expect(get(alertStore)).toMatchObject({ type: 'tos' })
+    alertStore.set({ type: 'none', msg: 'yes' })
+    await expect(terms).resolves.toBe('yes')
+})
+it('closes the top layer through the page when the WebView skips its entry', async () => {
+    const close = vi.fn()
+    const sidebar = document.createElement('div')
+    document.body.append(sidebar)
+    const action = backNavigationLayer(sidebar, { close })
+    expect(history.state?.risunestModal).toHaveLength(1)
+    expect(rootBack()).toBe(true)
+    expect(close).toHaveBeenCalledOnce()
+    action.update({ close, enabled: false })
+    await Promise.resolve()
+    expect(rootBack()).toBe(false)
+    action.destroy()
+})
+it('leaves the root Back to the app when only stale layer entries remain', async () => {
+    const go = vi.spyOn(history, 'go').mockImplementation(() => {})
+    const close = vi.fn()
+    const action = backNavigationLayer(document.createElement('div'), { close })
+    action.destroy()
+    expect(history.state?.risunestModal).toHaveLength(1)
+    expect(rootBack()).toBe(false)
+    expect(close).not.toHaveBeenCalled()
+    await Promise.resolve()
+    expect(go).toHaveBeenCalledWith(-1)
+})
+it('cancels a dialog before the layer below it and keeps the terms over a layer', async () => {
+    const back = vi.spyOn(history, 'back')
+    const close = vi.fn()
+    const action = backNavigationLayer(document.createElement('div'), { close })
+    const confirmation = alertStore.open({ type: 'ask', msg: 'confirm' })
+    expect(rootBack()).toBe(true)
+    await expect(confirmation).resolves.toBe('')
+    expect(back).not.toHaveBeenCalled()
+    const terms = alertStore.open({ type: 'tos', msg: 'tos' })
+    expect(rootBack()).toBe(false)
+    expect(back).not.toHaveBeenCalled()
+    expect(close).not.toHaveBeenCalled()
+    alertStore.set({ type: 'none', msg: 'yes' })
+    await expect(terms).resolves.toBe('yes')
+    action.destroy()
+})
+it('receives the root Back event that MainActivity sends', () => {
+    const activity = readFileSync('src-tauri/gen/android/app/src/main/java/io/github/rsyumi/risunest/MainActivity.kt', 'utf8')
+    const app = readFileSync('src/App.svelte', 'utf8')
+    expect(activity).toContain('private const val ROOT_BACK_EVENT = "risunest-root-back"')
+    expect(app).toContain("window.addEventListener('risunest-root-back', handleRootBack)")
+})
+it('lets a Back-only layer close on Back while Escape stays with its content', async () => {
+    const go = vi.spyOn(history, 'go').mockImplementation(() => {})
+    const sidebar = document.createElement('div')
+    sidebar.innerHTML = '<textarea></textarea>'
+    document.body.append(sidebar)
+    const close = vi.fn()
+    const options = { enabled: false, close, leaveEscape: () => true }
+    const action = backNavigationLayer(sidebar, options)
+    expect(history.state).toBeNull()
+    action.update({ ...options, enabled: true })
+    const field = sidebar.querySelector('textarea')!
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    field.dispatchEvent(escape)
+    expect(escape.defaultPrevented).toBe(false)
+    expect(close).not.toHaveBeenCalled()
+
+    const confirmation = alertStore.open({ type: 'ask', msg: 'confirm' })
+    const overAlert = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    field.dispatchEvent(overAlert)
+    expect(overAlert.defaultPrevented).toBe(true)
+    expect(get(alertStore)).toEqual({ type: 'none', msg: '' })
+    await expect(confirmation).resolves.toBe('')
+    expect(close).not.toHaveBeenCalled()
+
+    history.replaceState(null, '')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    expect(close).toHaveBeenCalledOnce()
+    action.update({ ...options, enabled: false })
+    await Promise.resolve()
+    expect(go).not.toHaveBeenCalled()
+    action.destroy()
 })

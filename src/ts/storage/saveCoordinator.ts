@@ -986,6 +986,17 @@ export class SaveCoordinator {
         this.pendingCharacterRecency = null
     }
 
+    /** Applied units removed the selected conversation, or its character, so the ownership adopted for it has nothing left to persist. */
+    releaseRemovedSelectedConversation(characterRemoved: boolean): void {
+        this.windowedCharacterBaseline = null
+        this.pendingWindowedActivationChange = null
+        this.pendingWindowedChatListChange = null
+        this.pendingCharacterRecency = null
+        if (!characterRemoved) return
+        this.characterBaseline = null
+        this.characterBaselineId = null
+    }
+
     advanceWindowedSelectedConversationRevision(
         revision: DataRevision,
         authority: WindowedConversationPersistenceAuthority,

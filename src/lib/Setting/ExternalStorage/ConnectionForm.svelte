@@ -722,7 +722,7 @@
                 </label>
             {/if}
             {#each visibleFields as field (field.key)}
-                {@const help = externalFieldHelp(strings, providerId, field.key)}
+                {@const help = externalFieldHelp(strings, providerId, field.key, mode)}
                 <label class="field">
                     <span>{fieldLabel(field.key)}{field.required ? '' : strings.optional}</span>
                     {#if field.type === 'select'}

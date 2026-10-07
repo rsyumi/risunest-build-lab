@@ -89,6 +89,7 @@ export async function receiveAndPush(driver: SyncDriver, input: { seed: Seed; re
     await driver.editLastMessage(location.characterId, input.marker, "sync-receive");
     return { persisted: true };
   });
+  await driver.step("sync-result", "settings-reopen", () => driver.openSyncSettings("settings-reopen"));
   const pushed = await driver.step("sync-result", "pushed", () => driver.syncNow("pushed"));
   return { replacementShown: connected.replacementShown, rendered: shown.rendered, pushStages: pushed.stages };
 }

@@ -86,6 +86,7 @@ beforeEach(() => {
     animationFrames = []
     visualViewport = new TestVisualViewport()
     Object.defineProperty(window, 'visualViewport', { configurable: true, value: visualViewport })
+    Object.defineProperty(document.documentElement, 'clientHeight', { configurable: true, value: 800 })
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
         animationFrames.push(callback)
         return animationFrames.length
@@ -95,6 +96,7 @@ beforeEach(() => {
 
 afterEach(() => {
     document.body.replaceChildren()
+    delete (document.documentElement as { clientHeight?: number }).clientHeight
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
 
@@ -158,6 +160,21 @@ describe('IME visibility', () => {
         visualViewport.dispatchEvent(new Event('resize'))
         flushAnimationFrames()
         expect(app.style.translate ?? '').toContain('-288px')
+
+        action.destroy()
+    })
+
+    it('leaves the field to the browser when the keyboard shrinks the whole page', () => {
+        const { app, input } = createApp(489, 620)
+        const action = keepFocusedInputVisible(app, true)
+
+        input.focus()
+        visualViewport.height = 439.6
+        Object.defineProperty(document.documentElement, 'clientHeight', { configurable: true, value: 440 })
+        visualViewport.dispatchEvent(new Event('resize'))
+        flushAnimationFrames()
+
+        expect(app.style.translate ?? '').toBe('')
 
         action.destroy()
     })

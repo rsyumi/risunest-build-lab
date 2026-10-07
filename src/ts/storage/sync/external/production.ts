@@ -1,4 +1,4 @@
-import { externalJobIsPaused } from './connection'
+import { externalErrorKind, externalJobIsPaused } from './connection'
 import { isTauriDesktop } from '../../../platform'
 import { get } from 'svelte/store'
 import { selectedCharID } from '../../../stores.svelte'
@@ -429,6 +429,7 @@ export async function requestExternalStorageRestore(
                     }
                     let job = await getExternalStorageBridge().startJob(request, jobId)
                     let retries = 0
+                    let unreadable = 0
                     let stopping = false
                     while (true) {
                         if (job.id !== jobId) throw new Error('External restore job identity changed')
@@ -454,10 +455,19 @@ export async function requestExternalStorageRestore(
                             throw restoreFailure(job)
                         }
                         await new Promise(resolve => setTimeout(resolve, job.state === 'waiting' ? 5_000 : 500))
-                        job = await readBackgroundJob(jobId, background)
+                        try {
+                            job = await readBackgroundJob(jobId, background)
+                            unreadable = 0
+                        } catch (error) {
+                            // The local commit briefly closes the store the job is read through.
+                            if (externalErrorKind(error) !== 'transient' || ++unreadable > 10) throw error
+                            continue
+                        }
                         background.progress(measuredTaskPercent(Number(job.completedBytes), Number(job.totalBytes)))
                     }
                 },
+                // Opens the store if the native commit could not reopen it.
+                reopenStore: () => getPersistentDataRuntime().store.open(),
                 refreshReleased: refreshActiveWorkingSetFromStore,
                 afterRefresh: async () => {
                     if (adoptionComplete) return

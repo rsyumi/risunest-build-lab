@@ -33,20 +33,51 @@ async function until<T>(read: () => T | Promise<T>, timeoutMs: number, step: str
 
 // Long identifiers and encoded values never leave the device in a report.
 export const redact = (text: string) => text.replace(/[A-Za-z0-9_+/=-]{32,}/g, "<redacted>").slice(0, 300);
+// Bundle frames name the chunk and position, which a rebuild of the same snapshot maps back to source.
+const frames = (stack: string | undefined) => (stack ?? "").split(/\r?\n/).slice(0, 4)
+  .map((frame) => frame.trim().replace(/[A-Za-z0-9_-]{32,}/g, "<redacted>").slice(0, 200)).filter(Boolean);
+
+// The shape of a field, never its value.
+const shapeOf = (owner: unknown, field: string) => {
+  if (!owner || typeof owner !== "object" || !Object.hasOwn(owner, field)) return "missing";
+  const value = (owner as Record<string, unknown>)[field];
+  return Array.isArray(value) ? `array:${value.length}` : typeof value;
+};
 
 export class SyncDriver {
-  constructor(readonly phase: string, private readonly sink: SyncReport, private readonly show: (step: string) => void = () => {}) {}
+  private readonly errors: string[] = [];
+  private current = "start";
+  private readonly orderEvents: Record<string, unknown>[] = [];
+  private syncController: Awaited<ReturnType<typeof import("../../src/ts/storage/sync/serverSyncProduction").getServerSyncController>> | undefined;
+
+  constructor(readonly phase: string, private readonly sink: SyncReport, private readonly show: (step: string) => void = () => {}) {
+    // Errors the page logs are attached, redacted, to a failed step so it can be attributed.
+    const record = (values: unknown[]) => {
+      if (this.errors.length >= 50) return;
+      this.errors.push(redact(values.map((value) => value instanceof Error ? `${value.name}: ${value.message}` : String(value)).join(" ")));
+      const stack = values.find((value): value is Error => value instanceof Error)?.stack;
+      if (stack) this.errors.push(`stack: ${frames(stack).join(" | ")}`);
+    };
+    const original = console.error.bind(console);
+    console.error = (...values: unknown[]) => { record(values); original(...values); };
+    addEventListener("error", (event) => record([event.error ?? event.message]));
+    addEventListener("unhandledrejection", (event) => record(["unhandled rejection", event.reason]));
+  }
 
   async step<T extends Record<string, unknown>>(label: SyncLabel, name: string, run: () => Promise<T>): Promise<T> {
     this.show(name);
+    this.current = name;
     try {
       const result = await run();
-      await this.sink(`${label}:${name}`, { label, phase: this.phase, step: name, passed: true, ...result });
+      await this.sink(`${label}:${name}`, { label, phase: this.phase, step: name, passed: true, ...result, characterOrder: await this.orderShapes() });
       return result;
     } catch (error) {
-      if (error instanceof SyncStepError) throw error;
-      throw new SyncStepError(label, name, error instanceof Error ? redact(error.message) : "failed",
-        { errorName: error instanceof Error ? error.name : typeof error });
+      const failure = error instanceof SyncStepError ? error
+        : new SyncStepError(label, name, error instanceof Error ? redact(error.message) : "failed",
+          { errorName: error instanceof Error ? error.name : typeof error });
+      failure.detail.consoleErrors = this.errors.slice(-8);
+      failure.detail.characterOrder = { ...(await this.orderShapes()), events: this.orderEvents };
+      throw failure;
     }
   }
 
@@ -86,7 +117,35 @@ export class SyncDriver {
         return false;
       }
     }, 90_000, "mount", "product app did not initialize");
+    await this.watchOrder();
     return { rendered: true };
+  }
+
+  /** Records each change in the shape of the character order the sidebar iterates, with the step and sync stages. */
+  private async watchOrder() {
+    const { DBState } = await import("../../src/ts/stores.svelte");
+    let last = shapeOf(DBState.db, "characterOrder");
+    this.orderEvents.push({ step: this.current, shape: last });
+    setInterval(() => {
+      const shape = shapeOf(DBState.db, "characterOrder");
+      if (shape === last || this.orderEvents.length >= 16) return;
+      last = shape;
+      const view = this.syncController?.snapshot();
+      this.orderEvents.push({ step: this.current, shape, running: view?.running ?? null, stages: view?.progress?.stages ?? null });
+    }, 50);
+  }
+
+  /** The character order's shape in the working set and in the stored root. */
+  private async orderShapes() {
+    try {
+      const { DBState } = await import("../../src/ts/stores.svelte");
+      const { getPersistentDataRuntime } = await import("../../src/ts/storage/persistentDataRuntime.svelte");
+      const live = shapeOf(DBState.db, "characterOrder");
+      const store = getPersistentDataRuntime().store;
+      return { live, stored: store ? shapeOf((await store.readRoot()).value, "characterOrder") : "unavailable" };
+    } catch {
+      return { live: "unavailable", stored: "unavailable" };
+    }
   }
 
   /** Searches every conversation in the native store for a marker. */
@@ -120,19 +179,19 @@ export class SyncDriver {
   }
 
   /** Opens Settings on the RisuNest page the way the product's own sync link does, then the sync tab. */
-  async openSyncSettings() {
+  async openSyncSettings(step = "settings-open") {
     const { openRisuNestSettingsTab } = await import("../../src/ts/setting/risuNestSettingsTabs");
     const { SettingsMenuIndex, settingsOpen } = await import("../../src/ts/stores.svelte");
-    await this.waitForNoDialog("settings-open");
+    await this.waitForNoDialog(step);
     openRisuNestSettingsTab("settings");
     SettingsMenuIndex.set(17);
     settingsOpen.set(true);
     const tab = await until(() => document.querySelector<HTMLButtonElement>('[data-risunest-tab="sync"]'),
-      30_000, "settings-open", "RisuNest settings tabs did not render");
+      30_000, step, "RisuNest settings tabs did not render");
     tab.click();
     await tick();
-    await until(() => document.querySelector('[data-risunest-panel="sync"]'), 15_000, "settings-open", "sync tab did not open");
-    await until(() => this.section(), 30_000, "settings-open", "Sync server settings did not render");
+    await until(() => document.querySelector('[data-risunest-panel="sync"]'), 15_000, step, "sync tab did not open");
+    await until(() => this.section(), 30_000, step, "Sync server settings did not render");
     return { tab: "sync" };
   }
 
@@ -170,7 +229,7 @@ export class SyncDriver {
 
   private async controller() {
     const { getServerSyncController } = await import("../../src/ts/storage/sync/serverSyncProduction");
-    return getServerSyncController();
+    return this.syncController = getServerSyncController();
   }
 
   private async state() {
@@ -188,9 +247,31 @@ export class SyncDriver {
     return { visible: alertStore.dialogVisible(), value };
   }
 
+  /** Names a dialog by its type and the product string key of its message, never by its text. */
+  private async describeDialog(value: { type: string; msg?: string; stackTrace?: string; checkboxConfirm?: { title: string } }) {
+    const { language } = await import("../../src/lang");
+    const text = value.checkboxConfirm?.title ?? value.msg ?? "";
+    const find = (node: unknown, path: string, depth: number): string | undefined => {
+      if (typeof node === "string") return node === text ? path : undefined;
+      if (!node || typeof node !== "object" || depth > 6) return undefined;
+      for (const [key, child] of Object.entries(node)) {
+        const found = find(child, path ? `${path}.${key}` : key, depth + 1);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    const messageKey = text ? find(language, "", 0) ?? "unrecognized" : "empty";
+    // A message the string table does not hold is an error or a filled template; long values are redacted.
+    return {
+      alertType: value.type, messageKey,
+      ...(messageKey === "unrecognized" ? { message: redact(text) } : {}),
+      ...(value.stackTrace ? { stack: frames(value.stackTrace) } : {}),
+    };
+  }
+
   private async waitForNoDialog(step: string) {
     await until(async () => !(await this.alertState()).visible, 30_000, step, "a product dialog stayed open",
-      () => ({ alertType: "unknown" }));
+      async () => this.describeDialog((await this.alertState()).value));
   }
 
   /** Pastes the registration and reads it into the review the product shows before connecting. */
@@ -256,7 +337,7 @@ export class SyncDriver {
     outcome: { replacementShown: boolean; replacementGatedByCheckbox: boolean | null; previousFilesShown: boolean }) {
     const { language } = await import("../../src/lang");
     if (value.type !== "checkboxConfirm" || !value.checkboxConfirm)
-      fail("connect", "unexpected product dialog", { alertType: value.type, message: redact(String(value.msg ?? "")) });
+      fail("connect", "unexpected product dialog", await this.describeDialog(value));
     const dialog = await until(() => document.querySelector<HTMLElement>('[role="dialog"][aria-labelledby="checkbox-confirm-title"]'),
       5000, "connect", "confirmation dialog did not render");
     const title = value.checkboxConfirm.title;
@@ -277,7 +358,7 @@ export class SyncDriver {
       if (action.length !== 1 || action[0].disabled) fail("connect", "previous files dialog action unavailable");
       action[0].click();
     } else {
-      fail("connect", "unexpected confirmation dialog", { alertType: value.type });
+      fail("connect", "unexpected confirmation dialog", await this.describeDialog(value));
     }
     await until(async () => (await this.alertState()).value !== value, 10_000, "connect", "confirmation dialog did not close");
   }
@@ -370,9 +451,15 @@ export class SyncDriver {
     return { persisted: true, conversationId };
   }
 
-  /** Opens the character holding a marker and waits until the product shows it, when it is the selected conversation. */
+  /**
+   * Leaves Settings, opens the character holding a marker and waits until the chat shows it, when it is
+   * the selected conversation.
+   */
   async renderMarker(location: { characterId: string; conversationId: string }, marker: string) {
-    const { DBState } = await import("../../src/ts/stores.svelte");
+    const { DBState, settingsOpen } = await import("../../src/ts/stores.svelte");
+    await this.waitForNoDialog("render");
+    settingsOpen.set(false);
+    await tick();
     const { changeChar } = await import("../../src/ts/characters");
     const { getPersistentDataRuntime } = await import("../../src/ts/storage/persistentDataRuntime.svelte");
     const index = DBState.db.characters.findIndex((character) => character.chaId === location.characterId);

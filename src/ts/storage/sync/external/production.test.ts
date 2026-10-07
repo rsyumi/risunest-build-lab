@@ -37,6 +37,7 @@ const mocks = vi.hoisted(() => ({
         kind: 'committed', revision, projection: 'applied',
     })),
     releaseFence: vi.fn(),
+    openStore: vi.fn(async () => {}),
     reloadPlugins: vi.fn(async () => {}),
     fencePlugins: vi.fn(async () => {}),
     bindingFence: vi.fn(async () => {}),
@@ -182,6 +183,7 @@ async function installActualRestorePause() {
     database.characters = []
     let actual: ReturnType<typeof createPersistentDataRuntime>
     Object.assign(mocks.persistentRuntime, {
+        store: { open: mocks.openStore },
         async withPausedPersistentWrites(reason: string, operation: (token: unknown) => Promise<unknown>) {
             const store = {
                 open: async () => undefined,
@@ -390,6 +392,7 @@ describe('external storage production integration', () => {
         }))
         delete (mocks.persistentRuntime as { revision?: number }).revision
         mocks.releaseFence.mockReset()
+        mocks.openStore.mockReset().mockResolvedValue(undefined)
         mocks.flush.mockReset().mockResolvedValue(undefined)
         mocks.reloadPlugins.mockReset().mockResolvedValue(undefined)
         mocks.fencePlugins.mockReset().mockResolvedValue(undefined)
@@ -624,6 +627,78 @@ describe('external storage production integration', () => {
         expect(mocks.reloadPlugins).toHaveBeenCalledOnce()
         expect(mocks.releaseFence).toHaveBeenCalledOnce()
         expect(events).toEqual(['plugins-reloaded', 'fence-released'])
+    })
+
+    it('reopens the store the native commit closed before projecting the restored library', async () => {
+        const { installExternalStorageProduction, requestExternalStorageRestore } = await import('./production')
+        await installExternalStorageProduction()
+        mocks.bridge.startJob.mockImplementation(async (_request, id) => ({
+            ...succeeded('old-sync', '8'), id, kind: 'restore', applicationStarted: true,
+            result: { snapshotId: 'snapshot-1', receivedRevision: '9' },
+        }))
+        const events: string[] = []
+        mocks.openStore.mockImplementation(async () => { events.push('store-opened') })
+        mocks.refreshWorkingSet.mockImplementation(async revision => {
+            events.push('projected')
+            return { kind: 'committed', revision, projection: 'applied' }
+        })
+        await expect(requestExternalStorageRestore('old-sync', 'snapshot-1', ['library'])).resolves.toMatchObject({ state: 'succeeded' })
+        expect(events).toEqual(['store-opened', 'projected'])
+        expect(mocks.bridge.confirmRestoreAdoption).toHaveBeenCalledWith(expect.any(String), '9', undefined)
+    })
+
+    it('keeps confirming a restore whose job read fails while its commit holds the store', async () => {
+        const { installExternalStorageProduction, requestExternalStorageRestore } = await import('./production')
+        const recovery = await import('./applicationRecovery')
+        await installExternalStorageProduction()
+        vi.useFakeTimers()
+        try {
+            const running = (id: string): ExternalJobSummary => ({
+                ...succeeded('old-sync', '8'), id, kind: 'restore', state: 'running', phase: 'applying-local',
+                applicationStarted: true, result: undefined,
+            })
+            mocks.bridge.startJob.mockImplementation(async (_request, id) => running(id))
+            mocks.bridge.getJob
+                .mockRejectedValueOnce({ kind: 'transient', httpStatus: null, retryAtMs: null })
+                .mockImplementationOnce(async id => ({
+                    ...running(id), phase: 'awaiting-adoption', result: { snapshotId: 'snapshot-1', receivedRevision: '9' },
+                }))
+            const operation = requestExternalStorageRestore('old-sync', 'snapshot-1', ['library'])
+            await vi.advanceTimersByTimeAsync(1_100)
+            await expect(operation).resolves.toMatchObject({ result: { receivedRevision: '9' } })
+            expect(mocks.bridge.getJob).toHaveBeenCalledTimes(2)
+            expect(mocks.openStore).toHaveBeenCalledOnce()
+            expect(mocks.refreshWorkingSet).toHaveBeenCalledWith(9)
+            expect(mocks.releaseFence).toHaveBeenCalledOnce()
+            expect(recovery.hasPendingExternalApplication()).toBe(false)
+        } finally { vi.useRealTimers() }
+    })
+
+    it('stops confirming a restore whose job stays unreadable or fails for another reason', async () => {
+        const { installExternalStorageProduction, requestExternalStorageRestore } = await import('./production')
+        const recovery = await import('./applicationRecovery')
+        await installExternalStorageProduction()
+        vi.useFakeTimers()
+        try {
+            const transient = { kind: 'transient', httpStatus: null, retryAtMs: null }
+            mocks.bridge.startJob.mockImplementation(async (_request, id) => ({
+                ...succeeded('old-sync', '8'), id, kind: 'restore', state: 'running', phase: 'downloading',
+            }))
+            mocks.bridge.getJob.mockRejectedValue(transient)
+            const unreadable = expect(requestExternalStorageRestore('old-sync', 'snapshot-1', ['library'])).rejects.toEqual(transient)
+            await vi.advanceTimersByTimeAsync(6_000)
+            await unreadable
+            expect(mocks.bridge.getJob).toHaveBeenCalledTimes(11)
+            expect(recovery.hasPendingExternalApplication()).toBe(true)
+            const corrupt = { kind: 'corrupt', httpStatus: null, retryAtMs: null }
+            mocks.bridge.getJob.mockReset().mockRejectedValue(corrupt)
+            const refused = expect(recovery.retryExternalApplication()).rejects.toEqual(corrupt)
+            await vi.advanceTimersByTimeAsync(600)
+            await refused
+            expect(mocks.bridge.getJob).toHaveBeenCalledOnce()
+            expect(mocks.openStore).not.toHaveBeenCalled()
+            expect(mocks.releaseFence).not.toHaveBeenCalled()
+        } finally { vi.useRealTimers() }
     })
 
     it('continues a committed restore once after read-only recovery without reactivation', async () => {
