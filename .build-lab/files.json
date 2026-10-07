@@ -4053,8 +4053,8 @@
     {
       "path": "server/sync/src/http/admission_tests.rs",
       "mode": "100644",
-      "bytes": 20012,
-      "sha256": "f7a06d4144e671931dad1a2f236187941cc5b7751310c5e9efced650e7f73dbc"
+      "bytes": 20142,
+      "sha256": "5699b20069b19323e780dac15139340f92d886d01acb22c8b8cabae9095c2596"
     },
     {
       "path": "server/sync/src/http/lww.rs",
@@ -4065,8 +4065,8 @@
     {
       "path": "server/sync/src/http/mod.rs",
       "mode": "100644",
-      "bytes": 46868,
-      "sha256": "10348a9cec72b2fcba6b7b8e4559587bc57e23ebd95c358df1e36f0371c8363d"
+      "bytes": 46919,
+      "sha256": "4afbc163d93222c412fff6243764b227195432985d3567eddf3fffc75693604f"
     },
     {
       "path": "server/sync/src/lib.rs",
@@ -4347,8 +4347,8 @@
     {
       "path": "server/sync/tests/http.rs",
       "mode": "100644",
-      "bytes": 49001,
-      "sha256": "b75c1934d0c6a54f0d148b7fb12aa99ce3b2617ecb98de4bd27d55980fd6efb1"
+      "bytes": 49266,
+      "sha256": "355db5282c179bf8b2ccb1aad52099bf6b157f4300572074467c9c4ac92440a0"
     },
     {
       "path": "server/sync/tests/inline_unit_bound.rs",
