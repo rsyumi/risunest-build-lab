@@ -14,7 +14,7 @@ on:
       scope:
         type: choice
         default: full
-        options: [full, harness, streaming, termination-probe, termination-dispatch, build-termination-dispatch, appearance-runtime, appearance-light, appearance-dark, appearance-codec-experiment, appearance-bgra-experiment]
+        options: [full, harness, sync, streaming, termination-probe, termination-dispatch, build-termination-dispatch, appearance-runtime, appearance-light, appearance-dark, appearance-codec-experiment, appearance-bgra-experiment]
 permissions:
   contents: read
 concurrency:
@@ -44,7 +44,7 @@ jobs:
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
           case "$RUNNER_LABEL" in macos-15|macos-14|macos-15-intel|macos-26) ;; *) exit 1;; esac
-          case "$CHECK_SCOPE" in full|harness|streaming|termination-probe|termination-dispatch|build-termination-dispatch|appearance-runtime|appearance-light|appearance-dark|appearance-codec-experiment|appearance-bgra-experiment) ;; *) exit 1;; esac
+          case "$CHECK_SCOPE" in full|harness|sync|streaming|termination-probe|termination-dispatch|build-termination-dispatch|appearance-runtime|appearance-light|appearance-dark|appearance-codec-experiment|appearance-bgra-experiment) ;; *) exit 1;; esac
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
@@ -152,6 +152,12 @@ jobs:
               assert marker not in data, f'Harness marker in product: {marker!r}'
           print('Native product contains no Mac harness commands or controller entry')
           PY
+      - name: Build loopback sync server
+        if: inputs.scope == 'sync'
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path server/sync/Cargo.toml --locked 2>&1 | tee artifacts/sync-server-build.log
+          test -x "$CARGO_TARGET_DIR/debug/risunest-sync-server"
       - name: Build isolated Mac WKWebView harness
         run: |
           set -euo pipefail
@@ -188,7 +194,12 @@ jobs:
           if [[ "$CHECK_SCOPE" == termination-dispatch || "$CHECK_SCOPE" == build-termination-dispatch ]]; then
             export RISUNEST_MACOS_PHASES=session-dispatch-initial,session-dispatch-local,session-dispatch-drain,session-dispatch-dialog,quit-escape,session-deadline,session-upgrade
           fi
-          if [[ "$CHECK_SCOPE" == appearance-runtime ]]; then
+          if [[ "$CHECK_SCOPE" == sync ]]; then
+            export RISUNEST_MACOS_PHASES=sync-publish,sync-receive,sync-pull
+            sync_tmp="$(mktemp -d "$RUNNER_TEMP/risunest-sync-app.XXXXXX")"
+            export TMPDIR="$(cd "$sync_tmp" && pwd -P)"
+            python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview --sync-server "$CARGO_TARGET_DIR/debug/risunest-sync-server"
+          elif [[ "$CHECK_SCOPE" == appearance-runtime ]]; then
             export RISUNEST_MACOS_PHASES=appearance-seed-light,appearance-app-light,appearance-seed-dark,appearance-app-dark
             python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview 2>&1 | tee artifacts/wkwebview.log
           elif [[ "$CHECK_SCOPE" == appearance-* ]]; then
