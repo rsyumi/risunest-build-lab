@@ -121,6 +121,8 @@ jobs:
           start=$SECONDS
           if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
           if ! command -v idevice_id >/dev/null; then brew install libimobiledevice; fi
+          command -v rclone >/dev/null || brew install rclone
+          rclone version | head -1 | tee artifacts/rclone.txt
           xcodegen --version | tee artifacts/xcodegen.txt
           idevice_id --version >> artifacts/environment.txt
           printf 'tool_setup_seconds=%s\n' "$((SECONDS-start))" >> artifacts/environment.txt
