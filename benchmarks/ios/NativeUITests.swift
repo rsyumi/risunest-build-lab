@@ -273,13 +273,18 @@ final class NativeUITests: XCTestCase {
         var errorCode: Int?
     }
 
+    private static let registrationPrefix = "risunestlocal://sync-server/register#"
+
     private func syncInputs() throws -> (registration: String, expect: String, marker: String) {
         let environment = ProcessInfo.processInfo.environment
-        guard let registration = environment["RISUNEST_IOS_SYNC_REGISTRATION"], !registration.isEmpty,
+        guard let supplied = environment["RISUNEST_IOS_SYNC_REGISTRATION"], !supplied.isEmpty,
               let expect = environment["RISUNEST_IOS_SYNC_EXPECT"], !expect.isEmpty,
               let marker = environment["RISUNEST_IOS_SYNC_MARKER"], !marker.isEmpty else {
             throw XCTSkip("Sync registration not supplied")
         }
+        // Test Lab regenerates the xctestrun it runs, so the registration payload may be supplied without its URI prefix.
+        let prefix = Self.registrationPrefix
+        let registration = supplied.contains("://") ? supplied : prefix + supplied
         return (registration, expect, marker)
     }
 
@@ -295,7 +300,7 @@ final class NativeUITests: XCTestCase {
 
     /// Reaches the registration endpoint from the device before the app does. Only the status is recorded.
     private func syncPreflight(_ registration: String, phase: String) {
-        let prefix = "risunestlocal://sync-server/register#"
+        let prefix = Self.registrationPrefix
         var url: URL?
         if registration.hasPrefix(prefix) {
             var encoded = String(registration.dropFirst(prefix.count))
@@ -309,7 +314,11 @@ final class NativeUITests: XCTestCase {
             }
         }
         guard let url else {
-            syncEnvironment(["phase": phase, "stage": "preflight", "passed": false, "reason": "registration-unreadable"])
+            syncEnvironment([
+                "phase": phase, "stage": "preflight", "passed": false, "reason": "registration-unreadable",
+                "length": registration.count, "prefixed": registration.hasPrefix(prefix),
+                "hasFragment": registration.contains("#"),
+            ])
             XCTFail("sync-env: the registration could not be read")
             return
         }

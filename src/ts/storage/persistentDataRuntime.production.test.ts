@@ -796,6 +796,31 @@ describe('production persistent working-set publication', () => {
         expect(workingSetResidency.isCharacterReleased('char-b')).toBe(true)
     })
 
+    it.each([
+        { released: 'char-b', eviction: true, selectedAfter: -1, stub: true },
+        { released: 'char-a', eviction: true, selectedAfter: 1, stub: true },
+        { released: 'char-b', eviction: false, selectedAfter: 1, stub: false },
+    ])('never leaves the selection on a released character ($released, eviction=$eviction)', ({ released, eviction, selectedAfter, stub }) => {
+        const character = (chaId: string) => ({
+            type: 'character', chaId, name: chaId, chatPage: 0, chatFolders: [],
+            chats: [{ id: `${chaId}-chat`, name: 'Chat', note: '', localLore: [], message: [] }],
+        })
+        setDatabaseLite({
+            botPresets: [],
+            plugins: [],
+            characters: [character('char-a'), character('char-b')],
+        } as unknown as Database)
+        selectedCharID.set(1)
+        workingSetResidency.setEvictionAllowed(eviction)
+
+        createProductionStateAdapter().releaseInactiveCharacter!(released)
+
+        const releasedCharacter = getDatabase().characters.find((value) => value.chaId === released)!
+        expect(isCatalogCharacterStub(releasedCharacter)).toBe(stub)
+        expect(get(selectedCharID)).toBe(selectedAfter)
+        expect(workingSetResidency.isCharacterReleased(released)).toBe(stub)
+    })
+
     it('reports selected lifecycle policy, operation and viewport budget', () => {
         setDatabaseLite({
             botPresets: [],

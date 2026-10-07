@@ -111,8 +111,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 38674,
-      "sha256": "4738b1b7a1b78ead8ca60c64e69747bcfa40771d783f9d5db2a979621be64a2f"
+      "bytes": 39166,
+      "sha256": "cbfd3cfb6f0f6bc5f940339933fdba550fa16f50b2a11f6b4f55aeda52324659"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -8715,14 +8715,14 @@
     {
       "path": "src/lib/Others/PersistentWorkingSetRecovery.svelte",
       "mode": "100644",
-      "bytes": 2922,
-      "sha256": "991cc2222185108d34315d29175497bccb063e4c62a11168a0728ff7a86ac635"
+      "bytes": 3022,
+      "sha256": "49d661ead47dbc138ea05c14f0e9ef7c057e27cb850e4516eaa2e06529f22a22"
     },
     {
       "path": "src/lib/Others/PersistentWorkingSetRecovery.test.ts",
       "mode": "100644",
-      "bytes": 6209,
-      "sha256": "43c4573683a74d92637419a887ecb524f6b663ebafe3fa2dff959231cd5de71f"
+      "bytes": 7011,
+      "sha256": "b1c3d5eb898a0b68d55d07cb066a0f21d8615893f59afd6dbb1798c4db45ec43"
     },
     {
       "path": "src/lib/Others/PluginDefinedIcon.svelte",
@@ -9835,6 +9835,18 @@
       "sha256": "8336238b1e7c41eb5cc1189d75c69e55f202310f8ad0161cfd5905f0679143ad"
     },
     {
+      "path": "src/lib/SideBars/SelectedCharacterNoteHarness.test.svelte",
+      "mode": "100644",
+      "bytes": 515,
+      "sha256": "9be042d77bb90152b9fd384b036586f4089fe7d591f96f498ec5b73bfd2632fc"
+    },
+    {
+      "path": "src/lib/SideBars/SelectedCharacterNoteReader.test.svelte",
+      "mode": "100644",
+      "bytes": 753,
+      "sha256": "5a57e1e058f1784c4a8d09c2c72d773ff0302e59ee840022ac88aaf810947201"
+    },
+    {
       "path": "src/lib/SideBars/SelectedConversationEditor.persistence.test.ts",
       "mode": "100644",
       "bytes": 8149,
@@ -10539,14 +10551,20 @@
     {
       "path": "src/ts/characters.navigation.test.ts",
       "mode": "100644",
-      "bytes": 61505,
-      "sha256": "e5068721aef427b2852378c8127431243a4059b19a83218716cca303df621577"
+      "bytes": 64815,
+      "sha256": "043be331326c49909a95949835eeefd7a6384dc954b16683680c10ced3de6ef2"
+    },
+    {
+      "path": "src/ts/characters.selectedRemoval.test.ts",
+      "mode": "100644",
+      "bytes": 6751,
+      "sha256": "6e64d52360a6b2f51f8b79e4debc11f2e2283daa482943e13b21c7229660ad00"
     },
     {
       "path": "src/ts/characters.ts",
       "mode": "100644",
-      "bytes": 43494,
-      "sha256": "55c6f56168c3613544d677f5f7b94bed8a479caa629b8006469cff009cd1fdc2"
+      "bytes": 43710,
+      "sha256": "9ab79b4a01f19c6e1acfa69518041adebbe2cfa0a99e70a8eaf4e9c012e43e97"
     },
     {
       "path": "src/ts/chatBindings.svelte.ts",
@@ -14811,20 +14829,20 @@
     {
       "path": "src/ts/storage/persistentDataRuntime.committedApply.test.ts",
       "mode": "100644",
-      "bytes": 40212,
-      "sha256": "6a84558e644339c8f2c299484a12296e9930c347ea2a85c3d2b6e2ce03b25427"
+      "bytes": 42518,
+      "sha256": "21e0c1fbd4cac74f57d80a1dc6880aae89ffcd1ab721eca0fe0501d945625c1d"
     },
     {
       "path": "src/ts/storage/persistentDataRuntime.production.test.ts",
       "mode": "100644",
-      "bytes": 65801,
-      "sha256": "0b8dde7c84d634e76f576d190403eba775075aac22ed180599a869d8d2a60c59"
+      "bytes": 67091,
+      "sha256": "238d5a71868e29ead06576537288537c6b620b3ef8daec16e8bef4e0cf57d69e"
     },
     {
       "path": "src/ts/storage/persistentDataRuntime.svelte.ts",
       "mode": "100644",
-      "bytes": 36402,
-      "sha256": "2ac7b99d56189d0835321fb8fea479c3a8cdc0329b8507fb982365606897375d"
+      "bytes": 36772,
+      "sha256": "f7b216ca326c5eca0148e56b57881d7ea4493e7a2056b6f5216a7851a3ce61cc"
     },
     {
       "path": "src/ts/storage/persistentDataRuntime.test.ts",
@@ -15453,8 +15471,8 @@
     {
       "path": "src/ts/storage/sync/external/applicationRecovery.ts",
       "mode": "100644",
-      "bytes": 3809,
-      "sha256": "df2a6706557f25fd3380d884c18236d7881ed174ad10e945315f997ca73bc46f"
+      "bytes": 3966,
+      "sha256": "2dd958fc1677dd878dd55531d54b4b414061e2102048f936c163a9d46825fb9c"
     },
     {
       "path": "src/ts/storage/sync/external/bridge.test.ts",
@@ -15519,8 +15537,8 @@
     {
       "path": "src/ts/storage/sync/external/production.test.ts",
       "mode": "100644",
-      "bytes": 38551,
-      "sha256": "916db82508bc9c766b2a8d6023a60036669e1b8a78fcf5fcc418c2538c70077c"
+      "bytes": 38730,
+      "sha256": "b27ba14ae8557223ca1692445d4d3a24b0ea757cb580590d52557e420249b580"
     },
     {
       "path": "src/ts/storage/sync/external/production.ts",

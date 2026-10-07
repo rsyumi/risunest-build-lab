@@ -37,12 +37,16 @@ export function hasPendingExternalApplication(): boolean {
 }
 
 async function settle(current: PendingApplication): Promise<void> {
-    current.fence?.release()
-    current.fence = undefined
-    if (pending !== current) return
-    await current.application.settled()
-    pending = undefined
-    recovery.set(null)
+    // The owner settles its guard first; releasing a pause that still holds one fences the library.
+    try {
+        if (pending !== current) return
+        await current.application.settled()
+        pending = undefined
+        recovery.set(null)
+    } finally {
+        current.fence?.release()
+        current.fence = undefined
+    }
 }
 
 async function resume(current: PendingApplication): Promise<void> {

@@ -46,6 +46,7 @@ const mocks = vi.hoisted(() => ({
     completeGuard: vi.fn(),
     pendingContinuation: undefined as undefined | (() => void | Promise<void>),
     registerContinuation: vi.fn(),
+    persistentBackgroundError: vi.fn(),
 }))
 
 vi.mock('../../../mobileBackgroundTask', async original => {
@@ -204,6 +205,7 @@ async function installActualRestorePause() {
                     replaceDatabase: () => {}, publishCharacter: () => {}, publishConversation: () => {},
                 }, prepareDatabase: async value => value,
                 clock: { setTimeout: () => 1, clearTimeout: () => {} },
+                onBackgroundError: mocks.persistentBackgroundError,
             })
             await actual.initializeActiveWorkingSet(database)
             return actual.withPausedPersistentWrites(reason, operation).finally(() => mocks.releaseFence())
@@ -596,6 +598,7 @@ describe('external storage production integration', () => {
         expect(recovery.hasPendingExternalApplication()).toBe(false)
         expect(mocks.releaseFence).toHaveBeenCalledOnce()
         expect(mocks.refreshWorkingSet).not.toHaveBeenCalled()
+        expect(mocks.persistentBackgroundError).not.toHaveBeenCalled()
     })
 
     it('retains the replacement fence through authoritative restore plugin reload and adoption', async () => {

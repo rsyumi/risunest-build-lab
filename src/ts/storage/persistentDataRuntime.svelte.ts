@@ -424,7 +424,12 @@ export function createProductionStateAdapter(options: {
             return !character?.chats.some((chat) => chat.isStreaming || isConversationStreaming(chat.id))
         },
         releaseInactiveCharacter(id) {
-            workingSetResidency.releaseCharacterToCatalog(getDatabase(), id)
+            const database = getDatabase()
+            if (!workingSetResidency.canReleaseCharacterToCatalog(database, id)) return
+            // A released character has no chats loaded, so views of the
+            // selection must leave it in the same update that releases it.
+            if (database.characters[get(selectedCharID)]?.chaId === id) selectedCharID.set(-1)
+            workingSetResidency.releaseCharacterToCatalog(database, id)
         },
     }
 }

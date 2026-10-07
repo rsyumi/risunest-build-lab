@@ -804,11 +804,13 @@ export async function removeChar(identifier:string|number,name:string, type:'nor
     const selectedCharacterId = selected?.chaId ?? null
     if (!await deactivateActiveWorkingSet()) return
     const deactivatedGeneration = getPersistentNavigationGeneration()
+    // Releasing the selected character clears the selection, so an empty
+    // selection still belongs to this removal unless navigation moved on.
     const restoreSelectionAfterFailedMutation = async () => {
         const currentSelectedId = DBState.db.characters[get(selectedCharID)]?.chaId ?? null
         if (
             !selectedCharacterId ||
-            currentSelectedId !== selectedCharacterId ||
+            (currentSelectedId !== selectedCharacterId && currentSelectedId !== null) ||
             getPersistentNavigationGeneration() !== deactivatedGeneration
         ) return
         const beforeActivationGeneration = getPersistentNavigationGeneration()
@@ -822,7 +824,7 @@ export async function removeChar(identifier:string|number,name:string, type:'nor
         const afterActivationGeneration = getPersistentNavigationGeneration()
         const selectedAfterFailure = DBState.db.characters[get(selectedCharID)]?.chaId ?? null
         if (
-            selectedAfterFailure === selectedCharacterId &&
+            (selectedAfterFailure === selectedCharacterId || selectedAfterFailure === null) &&
             (
                 afterActivationGeneration === beforeActivationGeneration ||
                 afterActivationGeneration === beforeActivationGeneration + 1
