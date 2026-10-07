@@ -277,6 +277,7 @@ def main():
     parser.add_argument('--system-theme', choices=['light', 'dark'])
     parser.add_argument('--sync-server', type=Path)
     parser.add_argument('--webdav-server', type=Path)
+    parser.add_argument('--webdav-scheme', choices=['https', 'http'], default='https')
     args = parser.parse_args()
     if args.appearance and args.capture_codec_experiment:
         parser.error('Select appearance capture or the paired codec experiment')
@@ -447,7 +448,7 @@ def main():
                     expected = sync.before(phase)
                 if phase in EXTERNAL_PHASES:
                     if external is None:
-                        external = ExternalStorageSession(args.webdav_server, artifacts)
+                        external = ExternalStorageSession(args.webdav_server, artifacts, args.webdav_scheme)
                         external.start()
                     expected = external.before(phase)
                 launched = True

@@ -436,6 +436,11 @@ final class NativeUITests: XCTestCase {
             XCTFail("sync-env: the WebDAV URL could not be read")
             return
         }
+        // A loopback server on the simulator host is plain HTTP, which the runner's URLSession refuses.
+        guard url.scheme == "https" else {
+            syncEnvironment(["phase": phase, "stage": "webdav-preflight", "passed": true, "skipped": "loopback"])
+            return
+        }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 20
         configuration.timeoutIntervalForResource = 30

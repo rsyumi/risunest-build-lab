@@ -111,8 +111,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 43044,
-      "sha256": "2c1d55ffae715d5f51fece5372590f0d518438d1e2c0e3ea64a01288bd03a799"
+      "bytes": 43335,
+      "sha256": "25d67ef7a695ba4e891086a0361cd20d819abb77b040d5219e4fefcf9f86e7e1"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -507,8 +507,8 @@
     {
       "path": "benchmarks/macos/external_controller.py",
       "mode": "100644",
-      "bytes": 4583,
-      "sha256": "6b6cbabf2f52a7e145893405522a0576265b1edd2cba61cb168a7646831329a3"
+      "bytes": 7784,
+      "sha256": "0114bb99845f6ea879c5ce2a7fd63804366e20664cfcc0a20c087025baf5c855"
     },
     {
       "path": "benchmarks/macos/index.html",
@@ -567,8 +567,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 31707,
-      "sha256": "11b8fd4639d4ff0ca393b49fb1c7655130625dc285c324525a02fbaca71c3def"
+      "bytes": 31814,
+      "sha256": "5e539ecab184a184618e940e71eaed842afc16dc4cd3932a8167995dbb05b5e4"
     },
     {
       "path": "benchmarks/macos/sync.ts",
