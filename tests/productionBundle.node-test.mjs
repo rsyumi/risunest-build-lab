@@ -206,7 +206,7 @@ test("rejects isolated persistence probes in product chunks, workers and source 
 
 const monacoBundle = () => [
   chunk(Object.fromEntries([
-    "editor/edcore.main.js", "basic-languages/markdown/markdown.contribution.js", "basic-languages/lua/lua.contribution.js",
+    "editor/editor.api.js", "languages/definitions/markdown/register.js", "languages/definitions/lua/register.js",
   ].map(id => [`/node_modules/monaco-editor/esm/vs/${id}`, {}]))),
   { type: "asset", fileName: "assets/editor.worker-123.js", source: "self.onmessage = () => {};" },
 ];
@@ -218,7 +218,7 @@ test("Monaco bundle retains core, markdown, Lua and its editor worker", () => {
 });
 
 test("Monaco bundle rejects unused contributions in chunks and worker maps", () => {
-  for (const path of ["language/json/jsonMode.js", "language/typescript/ts.worker.js", "language/css/cssMode.js", "language/html/htmlMode.js", "basic-languages/python/python.js", "editor/editor.main.js"]) {
+  for (const path of ["language/json/jsonMode.js", "language/typescript/ts.worker.js", "languages/features/json/register.js", "languages/features/typescript/register.js", "languages/features/css/register.js", "languages/features/html/register.js", "languages/definitions/python/register.js", "editor/editor.main.js", "index.js"]) {
     const id = `/node_modules/monaco-editor/esm/vs/${path}`;
     assert.throws(() => assertMonacoBundle([...monacoBundle(), chunk({ [id]: {} })]), /Monaco/);
     assert.throws(() => assertMonacoBundle([...monacoBundle(), map([id])]), /Monaco/);

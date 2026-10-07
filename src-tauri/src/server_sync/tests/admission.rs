@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
 fn only_upload_delta_cache_quota_falls_back_to_full_chunks() {
-    let base = vec![23; risunest_sync_wire::delta::MAX_TARGET_BYTES + 1024 * 1024];
+    let base = crate::server_sync::body_encoding_tests::noise(risunest_sync_wire::delta::MAX_TARGET_BYTES + 1024 * 1024);
     let mut target = base.clone();
-    target[12345] = 24;
+    target[12345] ^= 1;
     for (status, code, fallback) in [
         (429, "delta-cache-quota", true),
         (429, "unknown-quota", false),

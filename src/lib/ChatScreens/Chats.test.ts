@@ -1922,6 +1922,67 @@ describe('Chats imperative mount lifecycle', () => {
         await vi.waitFor(() => expect(probeElements(target).find((row) => row.dataset.message === 'message-35')?.dataset.index).toBe('36'))
     })
 
+    test.each(['editor', 'media'] as const)(
+        'moves a retained %s row to its new index when an earlier message is deleted',
+        async (retention) => {
+            const messages = Array.from({ length: 8 }, (_, index) => makeMessage(index))
+            const currentCharacter = makeCharacter(messages)
+            const { session, source } = makeViewportSource(currentCharacter)
+            const resolver: LiveChatParserProjectionResolver = {
+                resolve: vi.fn(async ({ row }) => boundedProjection(currentCharacter, row.absoluteIndex)),
+            }
+            mounted = mount(ChatsHarness, {
+                target,
+                props: {
+                    initialMessages: messages,
+                    initialCharacter: currentCharacter,
+                    initialViewportSource: source,
+                    parserProjectionResolver: resolver,
+                },
+            })
+            await vi.waitFor(() => expect(probeElements(target)).toHaveLength(8))
+            const retainedRow = probeElements(target).find(
+                (element) => element.dataset.message === 'message-6',
+            )!
+            const retainedInstance = Number(retainedRow.dataset.chatProbe)
+            const rowKey = retainedRow.closest<HTMLElement>('[data-chat-render-key]')!.dataset.chatRenderKey
+            expect(retainedRow.dataset.index).toBe('6')
+            if (retention === 'editor') {
+                chatMountProbe.activeEditors.add(retainedInstance)
+            } else {
+                const media = document.createElement('audio')
+                retainedRow.append(media)
+                media.dispatchEvent(new Event('play'))
+            }
+
+            session.replaceRange(session.positionAt(0), 1, [])
+
+            await vi.waitFor(() => expect(retainedRow.dataset.index).toBe('5'))
+            expect(probeIdForMessage(target, 'message-6')).toBe(retainedInstance)
+            expect(chatMountProbe.unmounts).not.toContain(retainedInstance)
+            expect(chatMountProbe.viewportBindings).toContainEqual({
+                instanceId: retainedInstance,
+                index: 5,
+                rowKey,
+            })
+            if (retention === 'media') return
+
+            // The open editor also receives the live parser lease for its new position.
+            await vi.waitFor(() => expect(chatMountProbe.displayUpdates.some((update) =>
+                update.instanceId === retainedInstance &&
+                update.index === 5 &&
+                update.signal?.aborted === false,
+            )).toBe(true))
+
+            chatMountProbe.activeEditors.delete(retainedInstance)
+            session.edit(session.locate(5), { ...messages[6], data: 'saved draft' })
+
+            await vi.waitFor(() => expect(probeElements(target).find(
+                (element) => element.dataset.message === 'saved draft',
+            )?.dataset.index).toBe('5'))
+        },
+    )
+
     test('keeps the source-key wrapper when an insertion shifts its absolute index', async () => {
         const messages = Array.from({ length: 100 }, (_, index) => makeMessage(index))
         const currentCharacter = makeCharacter(messages)

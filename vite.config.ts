@@ -94,6 +94,20 @@ export default defineConfig(({command, mode}) => {
       port: 5174,
       strictPort: true,
       // hmr: false,
+      // The watcher crawls everything under the root except node_modules and
+      // .git. The shared Cargo target, the generated Android project with its
+      // Gradle output, local scratch output in .tmp and worktree checkouts add
+      // about 100k directories, enough to push the dev server past the default
+      // heap limit before the crawl ends. None of them hold app sources.
+      watch: {
+        ignored: [
+          '**/src-tauri/target/**',
+          '**/src-tauri/gen/**',
+          '**/.tmp/**',
+          '**/.worktrees/**',
+          '**/.claude/worktrees/**',
+        ],
+      },
     },
     // to make use of `TAURI_ENV_DEBUG` and other env variables
     // https://v2.tauri.app/reference/environment-variables/
@@ -109,6 +123,11 @@ export default defineConfig(({command, mode}) => {
     },
     
     optimizeDeps:{
+      // Without this the dependency scan treats every HTML file under the root
+      // as an entry, including Tauri codegen copies of built pages and Cargo
+      // and Gradle reports in the build trees. Other HTML pages are still served;
+      // their dependencies are discovered on first request instead.
+      entries: ['index.html'],
       exclude: [
         "@browsermt/bergamot-translator"
       ],

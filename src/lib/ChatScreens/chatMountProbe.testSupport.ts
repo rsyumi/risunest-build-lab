@@ -29,6 +29,11 @@ export const chatMountProbe = {
         message: string
         signal?: AbortSignal
     }[],
+    viewportBindings: [] as {
+        instanceId: number
+        index: number
+        rowKey: string
+    }[],
     throwNextMount: false,
     activeEditors: new Set<number>(),
     closeEditors: new Map<number, () => void>(),
@@ -42,6 +47,7 @@ export function resetChatMountProbe() {
     chatMountProbe.unmounts = []
     chatMountProbe.streamingUpdates = []
     chatMountProbe.displayUpdates = []
+    chatMountProbe.viewportBindings = []
     chatMountProbe.throwNextMount = false
     chatMountProbe.activeEditors = new Set()
     chatMountProbe.closeEditors = new Map()

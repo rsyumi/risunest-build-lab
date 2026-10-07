@@ -4,7 +4,8 @@ import type { alertData } from './alert'
 const STATUS_TYPES: ReadonlySet<alertData['type']> = new Set(['wait', 'progress', 'toast'])
 /** Notices without an answer, where an identical copy in a row adds nothing. */
 const REPEATABLE_TYPES: ReadonlySet<alertData['type']> = new Set(['normal', 'error', 'markdown', 'wait2'])
-const NEXT_DIALOG_GAP_MS = 250
+/** The next queued dialog waits this long, so a double click or a repeated key cannot answer it unseen. */
+const NEXT_DIALOG_GAP_MS = 150
 
 interface Dialog {
     data: alertData
@@ -50,7 +51,7 @@ export function createAlertQueue(initial: alertData, options: { gapMs?: number }
     }
     function publish(closedMsg = '') {
         if (headVisible) show(dialogs[0].data)
-        else if (gapTimer) show({ type: 'none', msg: closedMsg })
+        else if (gapTimer) show({ type: 'none', msg: closedMsg, dialogPending: true })
         else show(status ?? { type: 'none', msg: closedMsg })
     }
     function showHead() {

@@ -1289,9 +1289,13 @@
                     parserProjectionState.needsRemount = false
                     refreshedDisplay = true
                 }
-                if (deferRemountForEditor && parserProjectionState?.needsRemount) {
-                    // The replacement projection aborted the retained lease. Keep the
-                    // previous signature so the row still remounts after the editor closes.
+                if (
+                    (deferRemountForEditor || (preserveMountedRuntime && hasActiveEditor(key))) &&
+                    parserProjectionState?.needsRemount
+                ) {
+                    // The replacement projection aborted the retained lease, including when
+                    // an open editor's row only moved. Keep the previous signature so the
+                    // row still refreshes after the editor closes.
                     untrack(() =>
                         instance?.refreshMessageDisplay?.({
                             message: message.data,

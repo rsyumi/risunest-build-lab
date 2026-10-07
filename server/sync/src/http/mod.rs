@@ -15,7 +15,7 @@ use axum::{
     routing::{get, post, put},
     Extension, Json, Router,
 };
-use risunest_sync_wire::{canonical, transfer, Sequence, MAX_METADATA_BYTES};
+use risunest_sync_wire::{body, canonical, transfer, Sequence, MAX_METADATA_BYTES};
 use serde::Deserialize;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
@@ -28,6 +28,8 @@ struct App {
     buffers: Arc<Semaphore>,
     materializers: Arc<Semaphore>,
     media_slots: Arc<Semaphore>,
+    /// Bounds concurrent zstd work, with its input and output buffers.
+    codecs: Arc<Semaphore>,
     workload: Workload,
     shutdown: tokio::sync::watch::Receiver<bool>,
     _lifetime: Arc<()>,
@@ -57,6 +59,14 @@ impl App {
 #[derive(Clone)]
 struct BufferedRequest {
     _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+}
+/// Set by routes whose successful replies are bounded and already in memory,
+/// so `authorize` may encode them.
+#[derive(Clone)]
+struct Compressible;
+async fn compressible(mut response: Response) -> Response {
+    response.extensions_mut().insert(Compressible);
+    response
 }
 pub fn router(store: Arc<Store>) -> Router {
     router_with_workload(store, Workload::new())
@@ -218,10 +228,15 @@ pub fn router_with_shutdown(
         buffers: Arc::new(Semaphore::new(4)),
         materializers: Arc::new(Semaphore::new(1)),
         media_slots: Arc::new(Semaphore::new(16)),
+        codecs: Arc::new(Semaphore::new(4)),
         workload,
         shutdown,
         _lifetime: lifetime,
     };
+    // Object reads stream from storage; their part route encodes for itself.
+    let objects = Router::new()
+        .route("/objects/{hash}", get(object))
+        .route("/objects/{hash}/part", get(object_part));
     Router::new()
         .route("/session", get(session))
         .route(
@@ -244,7 +259,6 @@ pub fn router_with_shutdown(
         .route("/objects/retention/release", post(release_retained_objects))
         .route("/media/access", post(media_access))
         .route("/objects/missing", post(missing))
-        .route("/objects/{hash}", get(object))
         .route("/uploads/frames", post(upload_frames))
         .route("/objects/transfer", post(transfer_objects))
         .route("/uploads", post(begin_upload))
@@ -260,6 +274,8 @@ pub fn router_with_shutdown(
         .route("/operations/{id}", get(lww::operation))
         .route("/operations/{id}/cancel", post(lww::cancel_operation))
         .route("/ack", post(lww::ack))
+        .route_layer(middleware::map_response(compressible))
+        .merge(objects)
         .layer(DefaultBodyLimit::max(transfer::MAX_BATCH_BYTES))
         .route_layer(middleware::from_fn_with_state(app.clone(), authorize))
         // Notification streams authenticate without entering request maintenance work.
@@ -310,6 +326,113 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         return None;
     }
     headers.get(name)?.to_str().ok()
+}
+fn values<'a>(headers: &'a HeaderMap, name: &str) -> impl Iterator<Item = &'a [u8]> {
+    headers.get_all(name).iter().map(|value| value.as_bytes())
+}
+/// Runs zstd work on the blocking pool under a codec permit. The job owns the
+/// permit, so a request whose deadline expires still counts until it returns.
+async fn codec<T: Send + 'static>(
+    app: &App,
+    job: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let permit = app.wait_slot(app.codecs.clone()).await?;
+    blocking(move || {
+        let _permit = permit;
+        job()
+    })
+    .await
+}
+fn mark_encoded(response: &mut Response) {
+    let headers = response.headers_mut();
+    headers.insert(body::ENCODING_HEADER, body::ZSTD.parse().unwrap());
+    headers.insert("content-type", "application/octet-stream".parse().unwrap());
+    headers.remove("content-length");
+}
+/// The decoded size a request body may reach on its path.
+fn raw_body_limit(path: &str) -> usize {
+    if path.contains("/chunks/") {
+        transfer::UPLOAD_CHUNK_BYTES
+    } else if path == "/uploads/frames" || (path.starts_with("/uploads/") && path.ends_with("/delta"))
+    {
+        transfer::MAX_BATCH_BYTES
+    } else {
+        MAX_METADATA_BYTES
+    }
+}
+async fn read_body(stream: axum::body::Body, limit: usize) -> Result<Vec<u8>> {
+    use futures_util::StreamExt;
+    let mut stream = stream.into_data_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| Error::new("incomplete-body", 400))?;
+        if bytes.len() + chunk.len() > limit {
+            return Err(Error::new("body-too-large", 413));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+/// Hands the route a raw body. An encoded one is read under the raw limit of
+/// its path and decoded under a codec permit.
+async fn decode_request(app: &App, request: Request) -> Result<Request> {
+    if !body::marked(values(request.headers(), body::ENCODING_HEADER))
+        .map_err(|_| Error::new("invalid-body-encoding", 400))?
+    {
+        return Ok(request);
+    }
+    let limit = raw_body_limit(request.uri().path());
+    let device = request
+        .extensions()
+        .get::<Device>()
+        .cloned()
+        .ok_or(Error::new("unauthorized", 401))?;
+    let (mut parts, stream) = request.into_parts();
+    let encoded = read_body(stream, limit).await?;
+    let store = app.store.clone();
+    let raw = codec(app, move || {
+        // Registration can be revoked while a request waits for a codec permit.
+        store.require_registered(&device)?;
+        body::decode(&encoded, limit).map_err(|error| match error.0 {
+            "body-too-large" => Error::new("body-too-large", 413),
+            _ => Error::new("invalid-body-encoding", 400),
+        })
+    })
+    .await?;
+    parts.headers.remove(body::ENCODING_HEADER);
+    parts.headers.insert("content-length", raw.len().into());
+    Ok(Request::from_parts(parts, axum::body::Body::from(raw)))
+}
+/// Encodes a successful reply its route marked compressible, when the client
+/// accepts encoded replies and encoding saves enough.
+async fn encode_response(app: &App, accepts: bool, response: Response) -> Result<Response> {
+    if !accepts
+        || response.status() != StatusCode::OK
+        || response.extensions().get::<Compressible>().is_none()
+    {
+        return Ok(response);
+    }
+    let (parts, reply) = response.into_parts();
+    let raw = axum::body::to_bytes(reply, transfer::MAX_BATCH_BYTES)
+        .await
+        .map_err(|_| Error::new("response-too-large", 500))?;
+    let (bytes, encoded) = if raw.len() < body::MIN_ENCODED_BYTES {
+        (raw, false)
+    } else {
+        // The raw reply is dropped inside the job once it is encoded.
+        codec(app, move || {
+            Ok(match body::encode(&raw).map_err(|_| Error::new("body-encoding-failed", 500))? {
+                Some(encoded) => (Bytes::from(encoded), true),
+                None => (raw, false),
+            })
+        })
+        .await?
+    };
+    let mut response = Response::from_parts(parts, axum::body::Body::from(bytes));
+    if encoded {
+        mark_encoded(&mut response);
+    }
+    Ok(response)
 }
 fn retain_guard_until_body_eof<T: Send + 'static>(
     body: axum::body::Body,
@@ -362,6 +485,7 @@ async fn authorize(State(app): State<App>, request: Request, next: Next) -> Resp
         if app.workload.status()?.state != "open" {
             return Err(Error::new("server-updating", 503));
         }
+        let accepts = body::accepted(values(request.headers(), body::ACCEPT_HEADER));
         // Reserve bounded body/response memory before consuming any bulk body.
         // A worker clone retains the reservation even if its HTTP future times out.
         let path = request.uri().path();
@@ -394,17 +518,28 @@ async fn authorize(State(app): State<App>, request: Request, next: Next) -> Resp
         };
         // The task owns every admission permit. If the HTTP deadline expires,
         // blocking work continues to hold admission until it actually returns.
+        let codecs = app.clone();
         let task = tokio::spawn(async move {
-            let response = next.run(request).await;
+            let response = match decode_request(&codecs, request).await {
+                Ok(request) => encode_response(&codecs, accepts, next.run(request).await)
+                    .await
+                    .unwrap_or_else(IntoResponse::into_response),
+                Err(error) => error.into_response(),
+            };
             (response, (buffered, work))
         });
         let (mut response, permits) = tokio::time::timeout(Duration::from_secs(deadline), task)
             .await
             .map_err(|_| Error::new("request-timeout", 408))?
             .map_err(|_| Error::new("worker-unavailable", 503))?;
+        let cache = if response.headers().contains_key(body::ENCODING_HEADER) {
+            "no-store, no-transform"
+        } else {
+            "no-store"
+        };
         response
             .headers_mut()
-            .insert("cache-control", "no-store".parse().unwrap());
+            .insert("cache-control", cache.parse().unwrap());
         // A slow response must retain its slot until the stream is consumed or
         // disconnected, not just until response headers are ready.
         let (parts, body) = response.into_parts();
@@ -485,6 +620,68 @@ async fn object(
         headers,
     )
     .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PartQuery {
+    offset: u64,
+    length: u64,
+}
+/// One part of an object in raw offsets. Unlike an HTTP range, the reply may
+/// be encoded, so its position travels in `x-risu-object-range`.
+async fn object_part(
+    State(app): State<App>,
+    Extension(device): Extension<Device>,
+    Path(digest): Path<String>,
+    Query(PartQuery { offset, length }): Query<PartQuery>,
+    headers: HeaderMap,
+) -> Result<Response> {
+    if length == 0 || length > transfer::UPLOAD_CHUNK_BYTES as u64 {
+        return Err(Error::new("invalid-object-range", 400));
+    }
+    let accepts = body::accepted(values(&headers, body::ACCEPT_HEADER));
+    let store = app.store.clone();
+    // The raw part is in memory only under a codec permit.
+    let (bytes, total, encoded) = codec(&app, move || {
+        use std::io::{Read, Seek};
+        store.require_registered(&device)?;
+        let (mut object, total) = store.open_object(&digest)?;
+        if offset.checked_add(length).is_none_or(|end| end > total) {
+            return Err(Error::new("invalid-object-range", 400));
+        }
+        object.seek(std::io::SeekFrom::Start(offset))?;
+        let mut raw = Vec::with_capacity(length as usize);
+        object.take(length).read_to_end(&mut raw)?;
+        if raw.len() as u64 != length {
+            return Err(Error::new("corrupt-object", 503));
+        }
+        let encoded = if accepts {
+            body::encode(&raw).map_err(|_| Error::new("body-encoding-failed", 500))?
+        } else {
+            None
+        };
+        Ok(match encoded {
+            Some(encoded) => (encoded, total, true),
+            None => (raw, total, false),
+        })
+    })
+    .await?;
+    let mut response = (
+        [("content-type", "application/octet-stream")],
+        Bytes::from(bytes),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        "x-risu-object-range",
+        format!("{offset}-{}/{total}", offset + length - 1)
+            .parse()
+            .unwrap(),
+    );
+    if encoded {
+        mark_encoded(&mut response);
+    }
+    Ok(response)
 }
 
 async fn object_response(

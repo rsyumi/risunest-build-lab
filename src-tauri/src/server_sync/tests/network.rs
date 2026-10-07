@@ -245,7 +245,7 @@ async fn proxy(State(state): State<Arc<Faults>>, request: Request, next: Next) -
         state.upload_gate.as_ref()
     } else if request.method().as_str() == "GET"
         && request.uri().path().starts_with("/objects/")
-        && request.headers().contains_key("range")
+        && request.uri().path().ends_with("/part")
     {
         state.download_gate.as_ref()
     } else {
@@ -265,16 +265,16 @@ async fn proxy(State(state): State<Arc<Faults>>, request: Request, next: Next) -
             return Response::builder().status(code).header("retry-after", "0").body(body).unwrap();
         }
     }
-    if path.starts_with("/objects/") && request.method().as_str() == "GET" {
-        if let Some(range) = request.headers().get("range") {
-            let range = range.to_str().unwrap().to_owned();
+    if path.starts_with("/objects/") && path.ends_with("/part") && request.method().as_str() == "GET" {
+        if let Some(range) = request.uri().query() {
+            let range = range.to_owned();
             *state
                 .ranges
                 .lock()
                 .unwrap()
                 .entry(range.clone())
                 .or_default() += 1;
-            if range.starts_with("bytes=0-") {
+            if range.starts_with("offset=0&") {
                 let code = state.range_code.swap(0, Ordering::Relaxed);
                 if code > 0 {
                     return Response::builder()
@@ -469,11 +469,11 @@ fn run_case(
     }
     if download_failure > 0 {
         let ranges = faults.ranges.lock().unwrap();
-        assert_eq!(ranges.get("bytes=0-1048575"), Some(&2));
+        assert_eq!(ranges.get("offset=0&length=1048576"), Some(&2));
         // The second parallel response was persisted even though the first
         // request failed, and is reused after reopening the native journal.
-        assert_eq!(ranges.get("bytes=1048576-2097151"), Some(&1));
-        assert_eq!(ranges.get("bytes=4194304-4194320"), Some(&1));
+        assert_eq!(ranges.get("offset=1048576&length=1048576"), Some(&1));
+        assert_eq!(ranges.get("offset=4194304&length=17"), Some(&1));
     }
     let result = (
         bytes.load(Ordering::Relaxed),

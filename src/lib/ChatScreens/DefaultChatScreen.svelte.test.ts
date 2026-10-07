@@ -1,14 +1,16 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
-import { writable } from 'svelte/store'
+import { get, writable } from 'svelte/store'
 import { languageEnglish } from 'src/lang/en'
 import { DBState } from 'src/ts/stores.svelte'
 import DefaultChatScreen from './DefaultChatScreen.svelte'
 import { chatScreenState } from '../../ts/ui/chatScreenState.svelte'
+import { doingChat } from 'src/ts/process/index.svelte'
+import { noteGenerationMessage, noteGenerationStarted, subscribeGenerationEnd, type GenerationEndRecord } from 'src/ts/process/generationEnd'
 
 const mocks = vi.hoisted(() => ({ trigger: vi.fn(), generate: vi.fn(), process: vi.fn(), error: vi.fn(), postFile: vi.fn(),
     bounded: false, appended: [] as any[], acquireComplete: vi.fn(), flush: vi.fn(async () => {}),
-    historyLimit: false, openWindow: vi.fn(), notify: vi.fn(async () => {}), scope: { finish: vi.fn(), release: vi.fn() }, createScope: vi.fn(),
+    historyLimit: false, targetCaptures: 0, openWindow: vi.fn(), notify: vi.fn(async () => {}), scope: { finish: vi.fn(), release: vi.fn() }, createScope: vi.fn(),
     translate: vi.fn(), chatsProps: null as any, confirm: vi.fn(async () => false),
     viewport: { jumpTo: async () => true, jumpToTop: vi.fn(async () => true), jumpToBottom: vi.fn(async () => true), navigateMessage: vi.fn(async () => true) },
     target: { characterId: 'character', conversationId: 'chat', navigationGeneration: 1, storeRevision: 1, sessionToken: 'windowed' },
@@ -34,7 +36,7 @@ vi.mock('src/ts/globalApi.svelte', () => ({ aiLawApplies: false, chatFoldedState
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
     getActiveConversationSession: () => null,
     getPersistentDataRuntime: () => ({
-        captureSelectedConversationTarget: () => mocks.bounded || mocks.historyLimit ? mocks.target : null, getActiveConversationSession: () => null,
+        captureSelectedConversationTarget: () => mocks.bounded || mocks.historyLimit || mocks.targetCaptures-- > 0 ? mocks.target : null, getActiveConversationSession: () => null,
         acknowledgeGenerationCompletion: async () => {},
         captureSelectedConversationAuthority: () => ({ totalMessages: 1500 }),
         acquireCompleteConversation: mocks.acquireComplete,
@@ -85,6 +87,8 @@ beforeEach(async () => {
     mocks.translate.mockResolvedValue('')
     mocks.bounded = false
     mocks.historyLimit = false
+    mocks.targetCaptures = 0
+    mocks.target = { characterId: 'character', conversationId: 'chat', navigationGeneration: 1, storeRevision: 1, sessionToken: 'windowed' }
     mocks.createScope.mockReturnValue(mocks.scope)
     mocks.appended = []
     mocks.trigger.mockImplementation(() => new Promise(resolve => { finishTrigger = () => resolve(null) }))
@@ -110,6 +114,7 @@ it('sends plain input through the bounded controller without complete-history ac
     expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('')
 })
 afterEach(async () => {
+    while (stopListening.length) stopListening.pop()!()
     if (instance) await unmount(instance)
     instance = undefined
     document.body.replaceChildren()
@@ -469,4 +474,139 @@ it('does not send or reroll from composing keyboard events', async () => {
     expect(mocks.trigger).not.toHaveBeenCalled()
     expect(mocks.generate).not.toHaveBeenCalled()
     expect(input.value).toBe('Composition draft')
+})
+
+const stopListening: Array<() => void> = []
+function listenGenerationEnd() {
+    const records: Array<GenerationEndRecord & { busy: boolean }> = []
+    stopListening.push(subscribeGenerationEnd((record) => records.push({ ...record, busy: get(doingChat) })))
+    return records
+}
+// Stands in for sendChat: it holds the busy flag, which a thrown generation leaves set for the caller to clear.
+function generation(outcome: boolean | Error, during?: () => void | Promise<void>) {
+    return async () => {
+        doingChat.set(true)
+        noteGenerationStarted(mocks.target)
+        noteGenerationMessage(mocks.target, 'gen-1')
+        await during?.()
+        if (outcome instanceof Error) throw outcome
+        doingChat.set(false)
+        return outcome
+    }
+}
+const endOf = (status: string, reroll = false) => ({
+    characterId: 'character', conversationId: 'chat', status, reroll, messageIds: ['gen-1'], busy: false,
+})
+
+it('reports a completed send once the chat is no longer busy', async () => {
+    mocks.bounded = true
+    const records = listenGenerationEnd()
+    mocks.generate.mockImplementation(generation(true))
+    type('Hello')
+    send()
+    await vi.waitFor(() => expect(records).toEqual([endOf('completed')]))
+})
+
+it('reports a failed send after the error, once the chat is no longer busy', async () => {
+    mocks.bounded = true
+    const records = listenGenerationEnd()
+    const failure = new Error('Synthetic provider failure')
+    mocks.generate.mockImplementation(generation(failure))
+    type('Hello')
+    send()
+    await vi.waitFor(() => expect(records).toEqual([endOf('failed')]))
+    expect(mocks.error).toHaveBeenCalledWith(failure)
+})
+
+it('reports a send that ended without completing as failed', async () => {
+    mocks.bounded = true
+    const records = listenGenerationEnd()
+    mocks.generate.mockImplementation(generation(false))
+    type('Hello')
+    send()
+    await vi.waitFor(() => expect(records).toEqual([endOf('failed')]))
+})
+
+it('reports a send the user stopped as aborted', async () => {
+    mocks.bounded = true
+    const records = listenGenerationEnd()
+    mocks.generate.mockImplementation(async (options: { signal: AbortSignal }) => generation(false, async () => {
+        await tick()
+        document.querySelector<HTMLButtonElement>('button[aria-labelledby="cancel"]')!.click()
+        expect(options.signal.aborted).toBe(true)
+    })())
+    type('Hello')
+    send()
+    await vi.waitFor(() => expect(records).toEqual([endOf('aborted')]))
+})
+
+it('reports a send dropped by a conversation change as aborted', async () => {
+    mocks.bounded = true
+    const records = listenGenerationEnd()
+    mocks.generate.mockImplementation(generation(false, () => {
+        mocks.target = { ...mocks.target, navigationGeneration: 2 }
+    }))
+    type('Hello')
+    send()
+    await vi.waitFor(() => expect(records).toEqual([endOf('aborted')]))
+})
+
+it('reports nothing for a send that never entered generation', async () => {
+    mocks.bounded = true
+    const records = listenGenerationEnd()
+    mocks.generate.mockResolvedValue(false)
+    type('Hello')
+    send()
+    await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
+    await tick()
+    expect(records).toEqual([])
+})
+
+it('reports a completed reroll after its candidate is stored and announced', async () => {
+    mocks.historyLimit = true
+    const records = listenGenerationEnd()
+    const store: any[] = stored(40)
+    mocks.openWindow.mockImplementation(async ({ tailStart }) => windowOver(store, tailStart(store.length)))
+    mocks.generate.mockImplementation(generation(true, () => {
+        store.push({ role: 'char', data: 'new', chatId: 'gen-1' })
+    }))
+    mocks.notify.mockImplementation(async () => {
+        expect(records).toEqual([])
+    })
+    type('').dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true }))
+    await vi.waitFor(() => expect(records).toEqual([endOf('completed', true)]))
+    expect(store.at(-1).responseVariants.candidates).toHaveLength(2)
+    expect(mocks.notify).toHaveBeenCalledWith('new')
+})
+
+it('reports a completed reroll of the resident conversation after its candidate is stored and announced', async () => {
+    // Only the reroll's own capture sees a target, so the candidate is generated on the resident conversation.
+    mocks.targetCaptures = 1
+    const records = listenGenerationEnd()
+    const chat = DBState.db.characters[0].chats[0]
+    chat.message = [{ role: 'user', data: 'question', chatId: 'question' }, { role: 'char', data: 'old', chatId: 'old' }]
+    mocks.generate.mockImplementation(generation(true, () => {
+        chat.message.push({ role: 'char', data: 'new', chatId: 'gen-1' })
+    }))
+    mocks.notify.mockImplementation(async () => {
+        expect(records).toEqual([])
+    })
+    type('').dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true }))
+    await vi.waitFor(() => expect(records).toEqual([endOf('completed', true)]))
+    expect(chat.message.at(-1)?.responseVariants?.candidates).toHaveLength(2)
+    expect(mocks.notify).toHaveBeenCalledWith('new')
+})
+
+it('reports a reroll whose tail could not be reopened as failed', async () => {
+    mocks.historyLimit = true
+    const records = listenGenerationEnd()
+    const store: any[] = stored(40)
+    let opens = 0
+    mocks.openWindow.mockImplementation(async ({ tailStart }) => ++opens > 1 ? null : windowOver(store, tailStart(store.length)))
+    mocks.generate.mockImplementation(generation(true, () => {
+        store.push({ role: 'char', data: 'new', chatId: 'gen-1' })
+    }))
+    type('').dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true }))
+    await vi.waitFor(() => expect(records).toEqual([endOf('failed', true)]))
+    expect(mocks.error).toHaveBeenCalledWith(languageEnglish.generationConversationChanged)
 })

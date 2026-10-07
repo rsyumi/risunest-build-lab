@@ -1001,6 +1001,9 @@ export class SandboxHost {
         this.iframe.style.border = "none";
 
         this.iframe.style.backgroundColor = "transparent";
+        // A frame whose color scheme differs from its document's is painted opaque, so keep the
+        // plugin document's default scheme instead of inheriting the app theme's.
+        this.iframe.style.colorScheme = "normal";
         this.iframe.setAttribute('allowTransparency', 'true');
         this.iframe.setAttribute('data-risu-plugin-frame', '');
 

@@ -1,3 +1,4 @@
+use super::body_encoding_tests::random_text;
 use super::lww_tests::{drain_publications, header, local, publish_cycle, receive_available, save, LocalServerFixture};
 use crate::persistent_store::PersistentStore;
 use risunest_sync_wire::{descriptor::RecordDescriptor, unit::{UnitValue, MAX_INLINE_UNIT_BYTES}, MAX_METADATA_BYTES};
@@ -79,4 +80,126 @@ fn a_rejected_single_entry_push_reports_unit_too_large_and_keeps_the_entry() {
     let error = ca.push(&mut a, &request, &[]).unwrap_err();
     assert_eq!((error.code.as_str(), error.retryable), ("unit-too-large", false));
     assert_eq!(pending(&a), 1);
+}
+
+type Routes = std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>;
+
+fn recording_server(fail_push: std::sync::Arc<std::sync::atomic::AtomicBool>) -> (LocalServerFixture, Routes) {
+    let routes = Routes::default();
+    let seen = routes.clone();
+    let server = LocalServerFixture::with_router(move |router| {
+        router.layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let seen = seen.clone();
+                let fail_push = fail_push.clone();
+                async move {
+                    let path = request.uri().path();
+                    if path == "/push" && fail_push.load(std::sync::atomic::Ordering::Relaxed) {
+                        return axum::response::Response::builder()
+                            .status(503)
+                            .body(axum::body::Body::from("{\"error\":\"unavailable\"}"))
+                            .unwrap();
+                    }
+                    seen.lock().unwrap().push(super::body_encoding_tests::route(path));
+                    next.run(request).await
+                }
+            },
+        ))
+    });
+    (server, routes)
+}
+
+fn lane(store: &PersistentStore, name: &str) -> std::path::PathBuf {
+    store.repository_root().join("server-sync/lww-cache").join(name)
+}
+
+fn raw_bytes(client: &super::lww_client::LwwClient) -> (u64, u64) {
+    let counters = client.client.test_io.as_ref().unwrap();
+    let load = |value: &std::sync::atomic::AtomicU64| value.load(std::sync::atomic::Ordering::Relaxed);
+    (load(&counters.request_raw_bytes), load(&counters.response_raw_bytes))
+}
+
+/// Pushes a large root field from one store, receives it in another, then
+/// edits it and returns the raw bytes and routes of the edit's round trip.
+fn edit_round_trip(size: usize, expire_base: bool) -> ((u64, u64), Vec<&'static str>) {
+    let (server, routes) = recording_server(Default::default());
+    let (_a, mut a) = local();
+    let (_b, mut b) = local();
+    let ca = server.client(&a);
+    let cb = server.client(&b);
+    let original = random_text(size, 1);
+    save(&mut a, &["root", "customCSS"], json!(original));
+    drain_publications(&ca, &mut a, &[]).unwrap();
+    receive_available(&cb, &mut b, &[]).unwrap();
+    let mut edited = original;
+    edited.insert_str(size / 2, &random_text(64 * 1024, 2));
+    save(&mut a, &["root", "customCSS"], json!(edited));
+    routes.lock().unwrap().clear();
+    for client in [&ca, &cb] {
+        client.client.test_io.as_ref().unwrap().reset();
+    }
+    drain_publications(&ca, &mut a, &[]).unwrap();
+    if expire_base {
+        // The receiver comes back after the leases and upload sessions that kept
+        // the replaced body ran out and maintenance collected it.
+        let db = rusqlite::Connection::open(server.root().join("metadata.sqlite")).unwrap();
+        db.execute_batch("DELETE FROM object_leases; UPDATE uploads SET expires=0;").unwrap();
+        drop(db);
+        assert!(server.server.maintain().unwrap().objects_removed > 0);
+    }
+    receive_available(&cb, &mut b, &[]).unwrap();
+    let digest = |value: &Value| risunest_sync_wire::hash(value.to_string().as_bytes());
+    assert!(digest(&b.read_root(None).unwrap().value["customCSS"]) == digest(&json!(edited)));
+    for (store, name) in [(&a, "send"), (&b, "receive")] {
+        assert!(!lane(store, name).exists(), "{name}");
+    }
+    let sent = raw_bytes(&ca).0;
+    let received = raw_bytes(&cb).1;
+    let routes = routes.lock().unwrap().clone();
+    ((sent, received), routes)
+}
+
+#[test]
+fn an_edited_large_unit_moves_as_a_delta_in_both_directions() {
+    const MIB: u64 = 1024 * 1024;
+    // Below the inline delta limit, as one frame each way.
+    let ((sent, received), routes) = edit_round_trip(6 * MIB as usize, false);
+    eprintln!("6 MiB edit: sent {sent} received {received} routes {routes:?}");
+    assert!(sent < MIB && received < MIB, "{sent} {received}");
+    assert!(routes.contains(&"frames") && routes.contains(&"transfer"), "{routes:?}");
+    assert!(!routes.contains(&"chunk") && !routes.contains(&"part"), "{routes:?}");
+    // Above it, through the streamed delta jobs.
+    let ((sent, received), routes) = edit_round_trip(17 * MIB as usize, false);
+    eprintln!("17 MiB edit: sent {sent} received {received} routes {routes:?}");
+    assert!(sent < MIB && received < MIB, "{sent} {received}");
+    assert!(routes.contains(&"upload-delta") && routes.contains(&"object-delta"), "{routes:?}");
+    assert!(!routes.contains(&"chunk") && !routes.contains(&"part"), "{routes:?}");
+}
+
+#[test]
+fn a_receiver_whose_base_the_server_collected_downloads_the_whole_body() {
+    const MIB: u64 = 1024 * 1024;
+    let ((sent, received), routes) = edit_round_trip(6 * MIB as usize, true);
+    assert!(sent < MIB, "{sent}");
+    assert!(received > 6 * MIB, "{received}");
+    assert!(routes.contains(&"part"), "{routes:?}");
+}
+
+#[test]
+fn a_failed_push_keeps_its_copies_for_the_retry_and_a_finished_one_removes_them() {
+    let fail_push = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (server, _) = recording_server(fail_push.clone());
+    let (_a, mut a) = local();
+    let ca = server.client(&a);
+    let value = Value::String(random_text(2 * MAX_METADATA_BYTES, 3));
+    save(&mut a, &["root", "customCSS"], value.clone());
+    let hash = risunest_sync_wire::hash(&risunest_sync_wire::payload_value::encode(&value).unwrap());
+    let request = header(&a);
+    assert!(ca.push(&mut a, &request, &[]).is_err());
+    let copies = crate::asset_repository::PayloadCas::new(&lane(&a, "send")).unwrap();
+    assert!(copies.stat_object(&hash).unwrap().is_some());
+    fail_push.store(false, std::sync::atomic::Ordering::Relaxed);
+    drain_publications(&ca, &mut a, &[]).unwrap();
+    assert_eq!(pending(&a), 0);
+    assert!(!lane(&a, "send").exists());
 }

@@ -18,6 +18,8 @@ export interface alertData{
     checkboxConfirm?: AlertCheckboxConfirmOptions
     onCheckboxConfirm?: (result: AlertCheckboxConfirmResult) => void
     onSelect?: (index: number) => void
+    /** Set on `none` while the next queued dialog waits to show. */
+    dialogPending?: boolean
 }
 
 export type AlertGenerationInfoStoreData = {
@@ -148,6 +150,7 @@ export function alertMd(msg:string){
 }
 
 export function doingAlert(){
+    if (get(alertStoreImported).dialogPending) return true
     return get(alertStoreImported).type !== 'none' && get(alertStoreImported).type !== 'toast' && get(alertStoreImported).type !== 'wait'
 }
 

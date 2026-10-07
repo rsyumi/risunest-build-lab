@@ -2,7 +2,7 @@
     import { onMount, onDestroy } from 'svelte';
     import * as monaco from 'monaco-editor';
     import { registerCBSMonaco } from 'src/ts/gui/codearea/cbsMonaco';
-    import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+    import EditorWorker from 'monaco-editor/editor/editor.worker?worker';
 
     // Set up workers once globally
     if (!('MonacoEnvironment' in self)) {
@@ -38,6 +38,7 @@
 
     let container: HTMLDivElement;
     let editor: monaco.editor.IStandaloneCodeEditor;
+    let compositionOffscreen = $state(false);
 
     onMount(() => {
         editor = monaco.editor.create(container, {
@@ -68,6 +69,14 @@
             value = newValue;
             onchange?.(newValue);
         });
+        // Monaco stops moving its composition textarea once the composed line leaves the viewport.
+        const trackCompositionLine = () => {
+            const position = editor.getPosition();
+            const visible = position && editor.getScrolledVisiblePosition(position);
+            compositionOffscreen = !visible || visible.top + visible.height <= 0 || visible.top >= editor.getLayoutInfo().height;
+        };
+        editor.onDidScrollChange(trackCompositionLine);
+        editor.onDidChangeCursorPosition(trackCompositionLine);
         onready?.(editor);
 
         return () => {
@@ -94,4 +103,14 @@
     });
 </script>
 
-<div bind:this={container} class="w-full h-full"></div>
+<div bind:this={container} class="w-full h-full" class:composition-offscreen={compositionOffscreen}></div>
+
+<style>
+    /* The app font reaches the rendered lines but not the composition textarea, whose font Monaco sets inline. */
+    div :global(.monaco-editor .inputarea.ime-input) {
+        font-family: var(--risu-font-family) !important;
+    }
+    .composition-offscreen :global(.monaco-editor .inputarea.ime-input) {
+        opacity: 0;
+    }
+</style>

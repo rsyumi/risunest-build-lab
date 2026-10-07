@@ -534,7 +534,12 @@ fn a_plugin_root_added_after_first_release_page_keeps_every_later_custody_proof(
                             axum::body::to_bytes(body, risunest_sync_wire::MAX_METADATA_BYTES)
                                 .await
                                 .unwrap();
-                        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        let raw = if parts.headers.contains_key(risunest_sync_wire::body::ENCODING_HEADER) {
+                            risunest_sync_wire::body::decode(&bytes, risunest_sync_wire::MAX_METADATA_BYTES).unwrap()
+                        } else {
+                            bytes.to_vec()
+                        };
+                        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
                         let hashes = value["objects"]
                             .as_array()
                             .unwrap()
