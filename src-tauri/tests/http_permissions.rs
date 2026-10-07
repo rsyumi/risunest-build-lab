@@ -163,3 +163,151 @@ fn caller_headers_reach_the_native_http_server() {
         );
     }
 }
+
+/// Serves one request with `response` and returns the `Accept-Encoding` values it carried.
+fn serve_once(
+    response: tiny_http::ResponseBox,
+) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    let listener = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/data", listener.server_addr().to_ip().unwrap());
+    let server = std::thread::spawn(move || {
+        let request = listener
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .expect("local HTTP fixture did not receive a request");
+        let accept_encoding = request
+            .headers()
+            .iter()
+            .filter(|header| header.field.equiv("Accept-Encoding"))
+            .map(|header| header.value.to_string())
+            .collect();
+        request.respond(response).unwrap();
+        accept_encoding
+    });
+    (url, server)
+}
+
+fn gzip_response(status: u16, body: &[u8]) -> tiny_http::ResponseBox {
+    use std::io::Write;
+
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(body).unwrap();
+    tiny_http::Response::from_data(encoder.finish().unwrap())
+        .with_status_code(status)
+        .with_header("Content-Type: application/json".parse::<tiny_http::Header>().unwrap())
+        .with_header("Content-Encoding: gzip".parse::<tiny_http::Header>().unwrap())
+        .boxed()
+}
+
+fn send(window: &WebviewWindow<MockRuntime>, url: &str, method: &str) -> Value {
+    let rid = invoke(
+        window,
+        "fetch",
+        json!({"clientConfig": {
+            "url": url, "method": method, "headers": [["Accept-Encoding", "br, zstd"]]
+        }}),
+    )
+    .unwrap()
+    .deserialize::<u32>()
+    .unwrap();
+    invoke(window, "fetch_send", json!({"rid": rid}))
+        .unwrap()
+        .deserialize::<Value>()
+        .unwrap()
+}
+
+fn read_body(window: &WebviewWindow<MockRuntime>, response: &Value) -> Vec<u8> {
+    let rid = response["rid"].as_u64().unwrap();
+    let mut body = Vec::new();
+    loop {
+        let chunk = match invoke(window, "fetch_read_body", json!({"rid": rid})) {
+            Ok(InvokeResponseBody::Raw(chunk)) => chunk,
+            other => panic!("unexpected body chunk: {other:?}"),
+        };
+        // A chunk ends in 0 when it carries data and is a lone 1 once the body is done.
+        match chunk.split_last() {
+            Some((0, data)) => body.extend_from_slice(data),
+            Some((1, [])) => return body,
+            _ => panic!("malformed body chunk: {chunk:?}"),
+        }
+    }
+}
+
+fn content_encoding(response: &Value) -> Option<&str> {
+    response["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|header| header[0].as_str().unwrap().eq_ignore_ascii_case("content-encoding"))
+        .map(|header| header[1].as_str().unwrap())
+}
+
+#[test]
+fn native_http_offers_gzip_itself_and_decodes_it() {
+    let json = br#"[[["synthetic translation","synthetic source"]],null,"en"]"#;
+    let (url, server) = serve_once(gzip_response(200, json));
+    let window = http_window(Target::Windows);
+
+    let response = send(&window, &url, "GET");
+
+    assert_eq!(server.join().unwrap(), ["gzip"]);
+    assert_eq!(response["status"], 200);
+    assert_eq!(content_encoding(&response), None);
+    assert_eq!(read_body(&window, &response), json);
+}
+
+#[test]
+fn native_http_accepts_empty_gzip_labelled_responses() {
+    for (method, status) in [("HEAD", 200), ("GET", 204), ("GET", 304)] {
+        let (url, server) = serve_once(gzip_response(status, b"{}"));
+        let window = http_window(Target::Windows);
+
+        let response = send(&window, &url, method);
+
+        assert_eq!(server.join().unwrap(), ["gzip"], "{method} {status}");
+        assert_eq!(response["status"], status, "{method} {status}");
+        assert_eq!(read_body(&window, &response), b"", "{method} {status}");
+    }
+}
+
+#[test]
+fn native_http_keeps_no_cookies_between_requests() {
+    let listener = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/session", listener.server_addr().to_ip().unwrap());
+    let server = std::thread::spawn(move || {
+        (0..2)
+            .map(|_| {
+                let request = listener
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap()
+                    .expect("local HTTP fixture did not receive a request");
+                let cookies = request
+                    .headers()
+                    .iter()
+                    .filter(|header| header.field.equiv("Cookie"))
+                    .map(|header| header.value.to_string())
+                    .collect::<Vec<_>>();
+                let response = tiny_http::Response::empty(204).with_header(
+                    "Set-Cookie: session=synthetic; Path=/"
+                        .parse::<tiny_http::Header>()
+                        .unwrap(),
+                );
+                request.respond(response).unwrap();
+                cookies
+            })
+            .collect::<Vec<_>>()
+    });
+    let window = http_window(Target::Windows);
+
+    let responses = [send(&window, &url, "GET"), send(&window, &url, "GET")];
+
+    // The caller still sees Set-Cookie, but nothing stores it for the next request.
+    for response in &responses {
+        assert!(response["headers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|header| header[0].as_str().unwrap().eq_ignore_ascii_case("set-cookie")));
+    }
+    assert_eq!(server.join().unwrap(), [Vec::<String>::new(), Vec::new()]);
+}

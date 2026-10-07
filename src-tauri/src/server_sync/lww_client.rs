@@ -26,7 +26,7 @@ use risunest_sync_wire::{
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -503,6 +503,20 @@ impl LwwClient {
         header: &Header,
         generating: &[MessageLocator],
     ) -> Result<Option<PushReceipt>> {
+        let cache = lane_cache(store.repository_root(), "send");
+        let result = self.push_through(store, header, generating, &cache);
+        if result.is_ok() {
+            discard_cache(&cache);
+        }
+        result
+    }
+    fn push_through(
+        &self,
+        store: &mut PersistentStore,
+        header: &Header,
+        generating: &[MessageLocator],
+        cache_root: &Path,
+    ) -> Result<Option<PushReceipt>> {
         self.fence(store)?;
         let lane = self.client.lane();
         lane.step(Step::Preparing);
@@ -537,8 +551,7 @@ impl LwwClient {
         };
         fit_push_page(&mut request, &mut entries)?;
         lane.plan_items(entries.len());
-        let cache = Cache::open(&store.repository_root().join("server-sync/lww-cache"))?
-            .with_library(store.repository_root())?;
+        let cache = Cache::open(cache_root)?.with_library(store.repository_root())?;
         let mut objects = BTreeSet::new();
         for entry in &entries {
             self.check()?;
@@ -628,14 +641,21 @@ impl LwwClient {
                 }
             }
         }
+        let mut hints = BTreeMap::new();
+        for entry in &entries {
+            if let UnitValue::Object { descriptor, .. } = &entry.value {
+                if large_unit(&entry.key) {
+                    let target = &descriptor.object_hash;
+                    let bases = delta_bases(store, &cache, &entry.key, target, header.binding_authority)?;
+                    if !bases.is_empty() {
+                        hints.insert(target.clone(), bases);
+                    }
+                }
+            }
+        }
         Transfer::new(&self.client, &cache)?
             .with_held(&previous)
-            .upload_with_hints(
-                &objects.into_iter().collect::<Vec<_>>(),
-                &[],
-                false,
-                &std::collections::BTreeMap::new(),
-            )?;
+            .upload_with_hints(&objects.into_iter().collect::<Vec<_>>(), &[], false, &hints)?;
         let config = self
             .access
             .clone()
@@ -1232,11 +1252,24 @@ impl LwwClient {
         changes: &[Change],
         upper: DecimalU64,
     ) -> Result<()> {
-        let cache = Cache::open(&store.repository_root().join("server-sync/lww-cache"))?
-            .with_library(store.repository_root())?;
+        let cache = lane_cache(store.repository_root(), "receive");
+        let result = self.prepare_bodies_through(store, changes, upper, &cache);
+        if result.is_ok() {
+            discard_cache(&cache);
+        }
+        result
+    }
+    fn prepare_bodies_through(
+        &self,
+        store: &mut PersistentStore,
+        changes: &[Change],
+        upper: DecimalU64,
+        cache_root: &Path,
+    ) -> Result<()> {
+        let cache = Cache::open(cache_root)?.with_library(store.repository_root())?;
         let transfer = Transfer::new(&self.client, &cache)?;
         let mut controls = BTreeSet::new();
-        let mut large = BTreeSet::new();
+        let mut large = BTreeMap::new();
         let mut remote = BTreeSet::new();
         let lane = self.client.lane();
         lane.step(Step::Downloading);
@@ -1265,8 +1298,8 @@ impl LwwClient {
                 store.lww_put_object(descriptor_hash, &body)?;
                 if matches!(change.key.components()[0].as_str(), "messages" | "archive") {
                     controls.insert(descriptor.object_hash.clone());
-                } else if crate::persistent_store::lww::lww_known_unit_key(&change.key) {
-                    large.insert(descriptor.object_hash.clone());
+                } else if large_unit(&change.key) {
+                    large.insert(descriptor.object_hash.clone(), change.key.clone());
                 } else {
                     remote.insert(descriptor.object_hash.clone());
                 }
@@ -1341,13 +1374,19 @@ impl LwwClient {
             let body = cache.read(&hash, MAX_METADATA_BYTES)?;
             store.lww_put_object(&hash, &body)?;
         }
+        let binding = store.lww_binding_authority()?;
         let mut required_large = Vec::new();
-        for hash in large {
+        let mut hints = BTreeMap::new();
+        for (hash, key) in large {
             if !store.lww_verified_object_present(&hash)? {
+                let bases = delta_bases(store, &cache, &key, &hash, binding)?;
+                if !bases.is_empty() {
+                    hints.insert(hash.clone(), bases);
+                }
                 required_large.push(hash);
             }
         }
-        transfer.download(&required_large, &[])?;
+        transfer.download_with_hints(&required_large, &[], &hints)?;
         for hash in required_large {
             let size = cache
                 .stat_object(&hash)?
@@ -1392,6 +1431,54 @@ impl LwwClient {
         }
         Ok(())
     }
+}
+
+pub(crate) const LWW_CACHE: &str = "lww-cache";
+
+/// Each lane works in its own copy, so removing one after a finished operation
+/// never takes bodies from another lane that is still running.
+fn lane_cache(root: &Path, lane: &str) -> std::path::PathBuf {
+    root.join("server-sync").join(LWW_CACHE).join(lane)
+}
+
+/// The library holds every body a finished operation copied here; a failed
+/// one keeps its copies for the retry.
+fn discard_cache(path: &Path) {
+    // A file the system still holds is removed by the next finished operation
+    // or a cache cleanup, so this never fails an operation that completed.
+    let _ = std::fs::remove_dir_all(path);
+}
+
+/// Units the library keeps as one body, where an edit mostly repeats the body
+/// it replaces.
+fn large_unit(key: &risunest_sync_wire::unit::UnitKey) -> bool {
+    !matches!(key.components()[0].as_str(), "messages" | "archive")
+        && crate::persistent_store::lww::lww_known_unit_key(key)
+}
+
+/// Earlier bodies of `key` this device can read, copied into `cache` so a
+/// transfer can build or apply a delta against them.
+fn delta_bases(
+    store: &PersistentStore,
+    cache: &Cache,
+    key: &risunest_sync_wire::unit::UnitKey,
+    target: &str,
+    binding: DecimalU64,
+) -> Result<Vec<String>> {
+    let mut bases = Vec::new();
+    for base in store.lww_unit_object_bases(key, binding)? {
+        if base == target {
+            continue;
+        }
+        if cache.stat_object(&base)?.is_none() {
+            let Some(body) = store.lww_object_body(&base)? else { continue };
+            if cache.put(&body)? != base {
+                continue;
+            }
+        }
+        bases.push(base);
+    }
+    Ok(bases)
 }
 
 /// Keeps the longest outbox prefix whose canonical push request stays below

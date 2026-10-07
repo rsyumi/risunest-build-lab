@@ -24,6 +24,7 @@ import { getPluginPermissionStore } from "src/ts/storage/nativePluginPermissions
 import { LLMFlags, LLMFormat, LLMProvider, LLMTokenizer, type LLMModel } from "src/ts/model/types";
 import { sendChat as processSendChat, doingChat } from "src/ts/process/index.svelte";
 import { reserveGeneration } from "src/ts/process/generationState";
+import { beginGenerationEndRun, type GenerationEndRun } from "src/ts/process/generationEnd";
 import { getModelInfo } from "src/ts/model/modellist";
 import type { ModelModeExtended } from "src/ts/process/request/shared";
 import { requestChatDataMain } from "src/ts/process/request/request";
@@ -70,6 +71,7 @@ import {
 } from "../pluginDatabaseAccess";
 import { createRisunestPrivateApi } from './risunestPrivateApi';
 import { chatViewEvents } from '../chatViewHost.svelte';
+import { generationEndEvents } from '../generationEndHost';
 import { conversationPatchAccess } from '../conversationPatchHost';
 import { hostToolBridge, registerOwnedPluginMCP } from '../hostToolHost';
 import { additionalMessageButtons, normalizeMessageButtonRoles, type MessageButtonDef, type MessageButtonTarget } from '../messageButtons.svelte';
@@ -779,6 +781,7 @@ const makeRisuaiAPIV3 = (
         patchAccess: conversationPatchAccess,
         hostTools: hostToolBridge.forPlugin(plugin.name),
         chatView: chatViewEvents.forOwner(plugin.name),
+        generationEnd: generationEndEvents.forOwner(plugin.name),
         hasDatabasePermission: () => getPluginPermission(permissionContext, 'db', 'periodically'),
         lifetimeSignal: pluginLifetime.signal,
     })
@@ -973,6 +976,8 @@ const makeRisuaiAPIV3 = (
             risunest.callHostTool(input),
         risunestOnChatView: (callback?: unknown) =>
             risunest.onChatView(callback),
+        risunestOnGenerationEnd: (callback?: unknown) =>
+            risunest.onGenerationEnd(callback),
 
         installPlugin: handlePluginInstallViaPlugin,
 
@@ -1589,6 +1594,8 @@ const makeRisuaiAPIV3 = (
             }
 
             let completeLease: CompleteConversationLease | null = null;
+            let endRun: GenerationEndRun | null = null;
+            let completed = false;
             const reservation = reserveGeneration();
             if(!reservation){
                 throw new Error("A chat is already in progress");
@@ -1656,7 +1663,10 @@ const makeRisuaiAPIV3 = (
                     });
                 }
 
-                const sent = await processSendChat({}, reservation);
+                endRun = target ? beginGenerationEndRun(target) : null;
+                const generate = () => processSendChat({}, reservation);
+                const sent = await (endRun ? endRun.capture(generate) : generate());
+                completed = sent;
                 assertPersistentMutationAllowed(authorityEpoch);
                 if(!sent){
                     rollbackAppendedMessage();
@@ -1670,6 +1680,7 @@ const makeRisuaiAPIV3 = (
                 // so release doingChat here on both success and failure.
                 reservation.release();
                 completeLease?.release();
+                endRun?.finish(completed ? 'completed' : isCurrentTarget() ? 'failed' : 'aborted');
             }
 
             return true;

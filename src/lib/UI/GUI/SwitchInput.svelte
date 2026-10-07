@@ -34,7 +34,7 @@
         <label for={id} class="cursor-pointer">{name}</label>
         {@render children?.()}
     </div>
-    <label class="shrink-0 inline-flex h-10 w-10 items-center justify-end cursor-pointer">
+    <label class="relative shrink-0 inline-flex h-10 w-10 items-center justify-end cursor-pointer">
         <input
             {id}
             type="checkbox"

@@ -12,6 +12,7 @@ import {
 } from './v3.svelte'
 import { additionalMessageButtons } from '../messageButtons.svelte'
 import { chatViewEvents } from '../chatViewHost.svelte'
+import { beginGenerationEndRun, noteGenerationStarted, type GenerationEndStatus } from '../../process/generationEnd'
 
 const mocks = vi.hoisted(() => ({
     database: null as any,
@@ -23,6 +24,7 @@ const mocks = vi.hoisted(() => ({
     listHostTools: vi.fn(async (_owner: string): Promise<unknown> => ({ scope: 'scope', tools: [] })),
     callHostTool: vi.fn(async (_owner: string, _request: unknown, _signal?: AbortSignal): Promise<unknown> => []),
     chatViewFrames: [] as Array<() => void>,
+    locateGenerationEnd: vi.fn(async () => ({ characterIndex: 1, chatIndex: 0, messageIndex: 3, messageId: 'gen-1' })),
 }))
 
 const ownedStorageStub = {
@@ -158,6 +160,18 @@ vi.mock('../chatViewHost.svelte', async () => {
             watchConversation: () => () => undefined,
             requestFrame: (callback) => { mocks.chatViewFrames.push(callback) },
             createId: () => `chat-view-${++nextId}`,
+        }),
+    }
+})
+vi.mock('../generationEndHost', async () => {
+    const { createGenerationEndEvents } = await import('../generationEndEvents')
+    const { subscribeGenerationEnd } = await import('../../process/generationEnd')
+    let nextId = 0
+    return {
+        generationEndEvents: createGenerationEndEvents({
+            subscribe: subscribeGenerationEnd,
+            locate: mocks.locateGenerationEnd,
+            createId: () => `generation-end-${++nextId}`,
         }),
     }
 })
@@ -715,6 +729,40 @@ function __postToParent(message) {
         } finally {
             reporter.dispose()
         }
+    })
+
+    it('delivers generation end events to the guest until unregisterUIPart or unload', async () => {
+        const name = 'generation-end'
+        await startFixture(name, `
+            globalThis.endEvents = [];
+            globalThis.rpcReady = (async () => {
+                globalThis.endId = (await risuai.risunestOnGenerationEnd((event) => { globalThis.endEvents.push(event); })).id;
+            })();
+        `)
+        const target = { characterId: 'char', conversationId: 'conv' }
+        const end = async (status: GenerationEndStatus) => {
+            const run = beginGenerationEndRun(target)
+            await run.capture(async () => noteGenerationStarted(target))
+            run.finish(status)
+        }
+        const received = async () => JSON.parse(String(await guest(name, 'return JSON.stringify(globalThis.endEvents)')))
+        mocks.locateGenerationEnd.mockClear()
+
+        await end('failed')
+        await vi.waitFor(async () => expect(await received()).toEqual([{
+            status: 'failed', characterId: 'char', conversationId: 'conv',
+            characterIndex: 1, chatIndex: 0, messageIndex: 3, messageId: 'gen-1',
+        }]))
+
+        await guest(name, 'await risuai.unregisterUIPart(globalThis.endId); return true')
+        await end('completed')
+        expect(mocks.locateGenerationEnd).toHaveBeenCalledOnce()
+        expect(await received()).toHaveLength(1)
+
+        await guest(name, 'await risuai.risunestOnGenerationEnd(() => {}); return true')
+        await loadV3Plugins([])
+        await end('completed')
+        expect(mocks.locateGenerationEnd).toHaveBeenCalledOnce()
     })
 
     it('does not log RPC request or response payloads when DEV is false', async () => {

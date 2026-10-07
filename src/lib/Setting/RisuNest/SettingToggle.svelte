@@ -16,7 +16,7 @@
     let { checked = $bindable(false), label, showLabel = false, indeterminate = false, disabled = false, id, onchange, ...rest }: Props = $props()
 </script>
 
-<label class="inline-flex min-w-0 items-center gap-2 rounded-md text-textcolor focus-within:outline focus-within:outline-2 focus-within:outline-darkborderc focus-within:outline-offset-2 {disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}">
+<label class="relative inline-flex min-w-0 items-center gap-2 rounded-md text-textcolor focus-within:outline focus-within:outline-2 focus-within:outline-darkborderc focus-within:outline-offset-2 {disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}">
     <input {...rest} {id} class="sr-only" type="checkbox" bind:checked {indeterminate} {disabled} onchange={(event) => onchange?.(event.currentTarget.checked)} />
     <span class="flex h-5 w-5 min-h-5 min-w-5 items-center justify-center rounded-md border-2 border-darkborderc transition-colors duration-200 {checked || indeterminate ? 'bg-primary-500 border-primary-500 text-primary-foreground' : 'bg-darkbutton'}" aria-hidden="true">
         {#if checked}

@@ -19,6 +19,8 @@ function scheduleCleanup() {
 }
 const alertVisible = () => !['none', 'toast', 'wait', 'progress'].includes(get(alertStore).type)
 function cancelVisibleAlert(): boolean {
+    // Escape or Back repeated before the next queued dialog shows stops here instead of closing the layer below.
+    if (get(alertStore).dialogPending) return true
     if (!alertVisible()) return false
     alertStore.set({ type: 'none', msg: '' })
     return true

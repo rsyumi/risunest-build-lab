@@ -1,4 +1,37 @@
+import { inflateSync } from 'node:zlib'
+import type { Page } from '@playwright/test'
 import { test, expect } from './fixture'
+
+// A single-pixel PNG row decodes to its raw bytes under every filter type.
+async function pixelAt(page: Page, x: number, y: number) {
+    const png = await page.screenshot({ clip: { x, y, width: 1, height: 1 } })
+    const data: Buffer[] = []
+    for (let offset = 8; offset < png.length; offset += png.readUInt32BE(offset) + 12) {
+        if (png.toString('ascii', offset + 4, offset + 8) === 'IDAT') data.push(png.subarray(offset + 8, offset + 8 + png.readUInt32BE(offset)))
+    }
+    return [...inflateSync(Buffer.concat(data)).subarray(1, 4)]
+}
+
+test('a fullscreen frame shows the host through its transparent areas on a dark color scheme', async ({ page }) => {
+    await page.goto('/')
+    await page.evaluate(() => {
+        document.documentElement.style.colorScheme = 'dark'
+        const backdrop = document.createElement('div')
+        backdrop.style.cssText = 'position:fixed;inset:0;background:rgb(12,34,56)'
+        document.body.append(backdrop)
+    })
+    await page.evaluate(() => window.boundary.load(`
+        const mark = document.createElement('div');
+        mark.style.cssText = 'position:fixed;left:0;top:0;width:10px;height:10px;background:rgb(200,0,0)';
+        document.body.append(mark);
+        await risuai.showContainer('fullscreen');
+        await risuai.pluginStorage.setItem('shown', true);
+    `))
+    await expect.poll(() => page.evaluate(() => window.boundary.state.writes)).toEqual([{ key: 'shown', value: true }])
+    await expect(page.locator('[data-risu-plugin-frame]')).toBeVisible()
+    expect(await pixelAt(page, 5, 5)).toEqual([200, 0, 0])
+    expect(await pixelAt(page, 40, 40)).toEqual([12, 34, 56])
+})
 
 test('real iframe clones payloads and delivers responses asynchronously', async ({ page }) => {
     await page.goto('/')

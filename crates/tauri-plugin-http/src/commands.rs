@@ -257,6 +257,11 @@ pub async fn fetch<R: Runtime>(
     let mut headers = HeaderMap::new();
     for (h, v) in headers_raw {
         let name = HeaderName::from_str(&h)?;
+        // RisuNest: the client offers only the codings it decodes. A caller's value could
+        // select one it does not, and that body would reach the page still encoded.
+        if name == header::ACCEPT_ENCODING {
+            continue;
+        }
         #[cfg(not(feature = "unsafe-headers"))]
         if is_unsafe_header(&name) {
             #[cfg(debug_assertions)]

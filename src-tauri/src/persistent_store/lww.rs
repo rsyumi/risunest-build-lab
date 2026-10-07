@@ -48,7 +48,7 @@ pub(crate) fn lww_known_unit_key(key: &UnitKey) -> bool {
 pub(super) const UNIT_SCHEMA: &str = r#"CREATE TABLE lww_units(key TEXT PRIMARY KEY,stamp TEXT NOT NULL,value TEXT NOT NULL,version TEXT NOT NULL,identity TEXT NOT NULL);
 CREATE TABLE lww_outbox(key TEXT PRIMARY KEY,stamp TEXT NOT NULL,value TEXT NOT NULL,version TEXT NOT NULL,identity TEXT NOT NULL,authority TEXT NOT NULL);
 CREATE TABLE lww_retired(key TEXT PRIMARY KEY,stamp TEXT NOT NULL);
-CREATE TABLE lww_publications(key TEXT NOT NULL,authority TEXT NOT NULL,version TEXT NOT NULL,stamp TEXT NOT NULL,identity TEXT NOT NULL,PRIMARY KEY(key,authority));
+CREATE TABLE lww_publications(key TEXT NOT NULL,authority TEXT NOT NULL,version TEXT NOT NULL,stamp TEXT NOT NULL,identity TEXT NOT NULL,object_hash TEXT,PRIMARY KEY(key,authority));
 CREATE TABLE lww_initialization_scopes(scope TEXT NOT NULL,authority TEXT NOT NULL,PRIMARY KEY(scope,authority));
 CREATE TABLE lww_requests(request_id TEXT PRIMARY KEY,digest TEXT NOT NULL,revision INTEGER NOT NULL,activated_generation TEXT);
 CREATE TABLE lww_receive_rows(request_id TEXT NOT NULL,key TEXT NOT NULL,stamp TEXT NOT NULL,value TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('staged','held','deferred','done')),PRIMARY KEY(request_id,key));
@@ -943,6 +943,17 @@ impl PersistentStore {
 
     pub(crate) fn lww_verified_object_present(&self, hash: &str) -> StoreResult<bool> {
         super::message_pages::retained_object_present(&self.connection, hash)
+    }
+    /// The bodies a new value of `key` most likely shares bytes with: the value
+    /// this device holds and the one last published under `binding`.
+    pub(crate) fn lww_unit_object_bases(&self, key: &UnitKey, binding: DecimalU64) -> StoreResult<Vec<String>> {
+        let db = if is_device(key) { self.device_store()?.connection() } else { &self.connection };
+        let mut statement = db.prepare(
+            "SELECT json_extract(value,'$.descriptor.objectHash') FROM lww_units WHERE key=?1 AND json_extract(value,'$.kind')='object'
+            UNION SELECT object_hash FROM lww_publications WHERE key=?1 AND authority=?2 AND object_hash IS NOT NULL",
+        )?;
+        let rows = statement.query_map(params![key.as_str(), binding.0.to_string()], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
     /// Device units are applied inside the device store, so their large bodies
     /// are copied there from the library store where receive placed them.
@@ -3387,7 +3398,7 @@ fn witness_exact(
     stamp: &Stamp,
     identity: &str,
 ) -> StoreResult<()> {
-    db.execute("INSERT INTO lww_publications SELECT key,?1,version,stamp,identity FROM lww_units WHERE key=?2 AND version=?3 AND stamp=?4 AND identity=?5 ON CONFLICT(key,authority) DO UPDATE SET version=excluded.version,stamp=excluded.stamp,identity=excluded.identity",params![binding.0.to_string(),key.as_str(),version,serde_json::to_string(stamp)?,identity])?;
+    db.execute("INSERT INTO lww_publications SELECT key,?1,version,stamp,identity,json_extract(value,'$.descriptor.objectHash') FROM lww_units WHERE key=?2 AND version=?3 AND stamp=?4 AND identity=?5 ON CONFLICT(key,authority) DO UPDATE SET version=excluded.version,stamp=excluded.stamp,identity=excluded.identity,object_hash=excluded.object_hash",params![binding.0.to_string(),key.as_str(),version,serde_json::to_string(stamp)?,identity])?;
     Ok(())
 }
 pub(super) fn witness_received(

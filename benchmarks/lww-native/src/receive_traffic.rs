@@ -42,7 +42,7 @@ fn own_publication(missing_body: bool) -> TestTraffic {
     assert_eq!(received.received_units, 3, "every published fixture unit must reconcile");
     assert_eq!(traffic.prepared_units, received.received_units as u64);
     assert_eq!(traffic.journal_requests, 1);
-    assert!(traffic.journal_response_bytes > traffic.journal_inline_decoded_bytes);
+    assert!(traffic.journal_response_raw_bytes > traffic.journal_inline_decoded_bytes);
     assert!(traffic.journal_inline_decoded_bytes > 0);
     assert!(store.lww_verified_object_present(&cached_hash).unwrap());
     assert!(store.lww_verified_object_present(&recovery_hash).unwrap());
@@ -50,11 +50,11 @@ fn own_publication(missing_body: bool) -> TestTraffic {
     assert_eq!(store.read_root(None).unwrap().value["customCSS"], cached);
     assert!(!store.lww_receive_progress(store.lww_binding_authority().unwrap()).unwrap().is_empty());
     if missing_body {
-        assert!(traffic.object_transfer_requests + traffic.object_get_requests > 0, "missing body is fetched through normal recovery");
-        assert!(traffic.object_transfer_response_bytes + traffic.object_get_response_bytes > 0);
+        assert!(traffic.object_transfer_requests + traffic.object_part_requests > 0, "missing body is fetched through normal recovery");
+        assert!(traffic.object_transfer_response_bytes + traffic.object_part_response_bytes > 0);
     } else {
-        assert_eq!((traffic.object_get_requests, traffic.object_transfer_requests), (0, 0), "verified cached bodies need neither GETs nor framed transfers");
-        assert_eq!((traffic.object_get_response_bytes, traffic.object_transfer_response_bytes), (0, 0));
+        assert_eq!((traffic.object_part_requests, traffic.object_transfer_requests), (0, 0), "verified cached bodies need neither GETs nor framed transfers");
+        assert_eq!((traffic.object_part_response_bytes, traffic.object_transfer_response_bytes), (0, 0));
     }
     traffic
 }

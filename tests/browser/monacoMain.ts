@@ -23,6 +23,30 @@ export const monacoDriver = {
         editContext: current()?.getOption(monaco.editor.EditorOption.editContext),
         languages: monaco.languages.getLanguages().map(language => language.id).sort(),
     }),
+    place(text: string, lineNumber: number, column: number) {
+        const editor = current()
+        editor.setValue(text)
+        editor.setPosition({ lineNumber, column })
+        editor.revealLineInCenter(lineNumber)
+        editor.focus()
+    },
+    moveTo(lineNumber: number, column: number) { current().setPosition({ lineNumber, column }) },
+    scrollBy(pixels: number) { current().setScrollTop(current().getScrollTop() + pixels) },
+    firstVisibleLine: () => current().getVisibleRanges()[0].startLineNumber,
+    composition(lineNumber: number) {
+        const editor = current()
+        const root = editor.getDomNode()!
+        const input = root.querySelector<HTMLTextAreaElement>('textarea.inputarea')!
+        const style = getComputedStyle(input)
+        const lineTop = root.getBoundingClientRect().top + editor.getTopForLineNumber(lineNumber) - editor.getScrollTop()
+        return {
+            composing: input.classList.contains('ime-input'),
+            background: style.backgroundColor,
+            fontMatchesLine: style.fontFamily === getComputedStyle(root.querySelector('.view-line span span')!).fontFamily,
+            visible: style.opacity !== '0',
+            onLine: Math.abs(input.getBoundingClientRect().top - lineTop) < 1,
+        }
+    },
     async diff() {
         const original = monaco.editor.createModel('alpha\nbeta\ngamma', 'markdown')
         const modified = monaco.editor.createModel('alpha\nchanged\ngamma', 'markdown')

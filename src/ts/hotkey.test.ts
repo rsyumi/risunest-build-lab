@@ -93,7 +93,7 @@ vi.mock('./process/index.svelte', () => ({
 vi.mock('./dragTypes', () => ({ RISU_SIDEBAR_DRAG_TYPE: 'character' }))
 
 import { initHotkey, initMobileGesture } from './hotkey'
-import { alertStore } from './stores.svelte'
+import { alertStore, settingsOpen } from './stores.svelte'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -209,19 +209,22 @@ describe('Escape', () => {
         expect(mocks.alertToast).toHaveBeenCalledExactlyOnceWith('Alert Closed')
     })
 
-    it('leaves the next dialog open when Escape arrives before it shows', async () => {
+    it('leaves the next dialog and the settings open when Escape arrives before it shows', async () => {
+        settingsOpen.set(true)
         const first = alertStore.open({ type: 'normal', msg: 'First' })
         const second = alertStore.open({ type: 'ask', msg: 'Second' })
 
         await escape()
         await escape()
         await expect(first).resolves.toBe('')
+        expect(get(settingsOpen)).toBe(true)
         await vi.advanceTimersByTimeAsync(0)
         expect(get(alertStore)).toMatchObject({ type: 'ask', msg: 'Second' })
         expect(alertStore.hasDialogs()).toBe(true)
         expect(mocks.alertToast).not.toHaveBeenCalled()
         alertStore.set({ type: 'none', msg: 'yes' })
         await expect(second).resolves.toBe('yes')
+        settingsOpen.set(false)
     })
 
     it('keeps a progress status, which is not a dialog', async () => {
