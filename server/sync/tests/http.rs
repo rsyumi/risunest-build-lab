@@ -6,7 +6,7 @@ use risunest_sync_server::{
     store::{DeviceCredential, Store},
 };
 use risunest_sync_wire::{
-    hash,
+    body, hash,
     lww::{PushReceipt, PushRequest},
     transfer::{self, Frame},
     RemoteHead,
@@ -1137,4 +1137,312 @@ async fn an_inline_object_is_served_whole_and_by_range_without_a_file() {
             .count(),
         0
     );
+}
+
+fn text(len: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(len);
+    let mut line = 0u64;
+    while bytes.len() < len {
+        bytes.extend_from_slice(format!("synthetic line {line} of a text-heavy object\n").as_bytes());
+        line += 1;
+    }
+    bytes.truncate(len);
+    bytes
+}
+fn noise(len: usize) -> Vec<u8> {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
+}
+fn encoded(raw: &[u8]) -> Vec<u8> {
+    body::encode(raw)
+        .unwrap()
+        .expect("synthetic text must compress")
+}
+fn marker(response: &reqwest::Response) -> Option<&str> {
+    response
+        .headers()
+        .get(body::ENCODING_HEADER)
+        .map(|value| value.to_str().unwrap())
+}
+async fn error_code(response: reqwest::Response) -> String {
+    response.json::<serde_json::Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn encoded_request_bodies_are_decoded_under_the_raw_limit_of_their_path() {
+    let s = Server::start().await;
+    let object = text(300 * 1024);
+    let response = s
+        .auth(s.client.post(format!("{}/uploads/frames", s.base)), &s.a)
+        .header(body::ENCODING_HEADER, body::ZSTD)
+        .body(encoded(&full_frames(&[&object])))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(!s.download_full(&s.b, &object).await);
+
+    let missing = serde_json::to_vec(
+        &serde_json::json!([{"hash":hash(&object),"size":object.len().to_string()}]),
+    )
+    .unwrap();
+    let mut trailing = encoded(&text(4096));
+    trailing.push(0);
+    for (values, payload) in [
+        (vec![""], missing.clone()),
+        (vec!["gzip"], missing.clone()),
+        (vec!["zstd", "zstd"], encoded(&text(4096))),
+        (vec!["zstd"], missing.clone()),
+        (vec!["zstd"], trailing),
+    ] {
+        let mut request = s.auth(s.client.post(format!("{}/objects/missing", s.base)), &s.a);
+        for value in &values {
+            request = request.header(body::ENCODING_HEADER, *value);
+        }
+        let response = request.body(payload).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{values:?}");
+        assert_eq!(error_code(response).await, "invalid-body-encoding");
+    }
+    let response = s
+        .auth(s.client.post(format!("{}/objects/missing", s.base)), &s.a)
+        .header("content-encoding", "zstd")
+        .body(encoded(&missing.repeat(64)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    // Metadata decodes to at most 1 MiB.
+    let response = s
+        .auth(s.client.post(format!("{}/push", s.base)), &s.a)
+        .header(body::ENCODING_HEADER, body::ZSTD)
+        .body(encoded(&text(2 * 1024 * 1024)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(error_code(response).await, "body-too-large");
+
+    // A chunk decodes to at most one chunk, tighter than the 8 MiB preflight.
+    let large = text(2 * 1024 * 1024);
+    let chunk = risunest_sync_server::store::UPLOAD_CHUNK_BYTES as usize;
+    let upload = s
+        .auth(s.client.post(format!("{}/uploads", s.base)), &s.a)
+        .json(&serde_json::json!({"hash":hash(&large),"size":large.len().to_string()}))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["uploadId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let put = |payload: Vec<u8>, encoded: bool| {
+        let mut request = s
+            .auth(
+                s.client.put(format!("{}/uploads/{upload}/chunks/0", s.base)),
+                &s.a,
+            )
+            .header("x-content-sha256", hash(&large[..chunk]));
+        if encoded {
+            request = request.header(body::ENCODING_HEADER, body::ZSTD);
+        }
+        request.body(payload).send()
+    };
+    for payload in [encoded(&large), noise(chunk + 1)] {
+        let response = put(payload, true).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(error_code(response).await, "body-too-large");
+    }
+    let response = put(encoded(&large[..chunk]), true).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn replies_are_encoded_only_for_accepting_clients_on_bounded_routes() {
+    use risunest_sync_connect::media::{MediaAccess, MediaObject, MediaRequest, MediaSigner};
+    let s = Server::start().await;
+    let object = text(600 * 1024);
+    let random = noise(300 * 1024);
+    s.upload(&s.a, &object).await;
+    s.upload(&s.a, &random).await;
+    let digest = hash(&object);
+    let send = |request: RequestBuilder, accepting: bool| {
+        let request = s.auth(request, &s.b);
+        if accepting {
+            request.header(body::ACCEPT_HEADER, body::ZSTD).send()
+        } else {
+            request.send()
+        }
+    };
+
+    let transfer_request = || {
+        s.client
+            .post(format!("{}/objects/transfer", s.base))
+            .json(&serde_json::json!([{"target":digest,"bases":[]}]))
+    };
+    let raw = send(transfer_request(), false).await.unwrap();
+    assert_eq!(marker(&raw), None);
+    assert_eq!(raw.headers()["cache-control"], "no-store");
+    let raw = raw.bytes().await.unwrap();
+    let response = send(transfer_request(), true).await.unwrap();
+    assert_eq!(marker(&response), Some("zstd"));
+    assert_eq!(response.headers()["content-type"], "application/octet-stream");
+    assert_eq!(response.headers()["cache-control"], "no-store, no-transform");
+    let wire = response.bytes().await.unwrap();
+    assert!(wire.len() * 4 < raw.len(), "{} of {}", wire.len(), raw.len());
+    assert_eq!(body::decode(&wire, transfer::MAX_BATCH_BYTES).unwrap(), raw);
+
+    // JSON replies too, decoded to the same document.
+    let absent = (0..200)
+        .map(|index| serde_json::json!({"hash":hash(format!("absent-{index}").as_bytes()),"size":"9"}))
+        .collect::<Vec<_>>();
+    let missing = || {
+        s.client
+            .post(format!("{}/objects/missing", s.base))
+            .header(body::ENCODING_HEADER, body::ZSTD)
+            .body(encoded(&serde_json::to_vec(&absent).unwrap()))
+    };
+    let raw = send(missing(), false).await.unwrap();
+    assert_eq!(marker(&raw), None);
+    let raw: serde_json::Value = raw.json().await.unwrap();
+    assert_eq!(raw["missing"].as_array().unwrap().len(), 200);
+    let response = send(missing(), true).await.unwrap();
+    assert_eq!(marker(&response), Some("zstd"));
+    let wire = response.bytes().await.unwrap();
+    let decoded = body::decode(&wire, risunest_sync_wire::MAX_METADATA_BYTES).unwrap();
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(), raw);
+    let short = send(s.client.get(format!("{}/session", s.base)), true).await.unwrap();
+    assert_eq!(short.status(), StatusCode::OK);
+    assert_eq!(marker(&short), None);
+
+    // Parts carry their raw position in a protocol header.
+    for accepting in [true, false] {
+        let response = send(
+            s.client
+                .get(format!("{}/objects/{digest}/part?offset=4096&length=65536", s.base)),
+            accepting,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["x-risu-object-range"],
+            format!("4096-69631/{}", object.len()).as_str()
+        );
+        assert!(response.headers().get("content-range").is_none());
+        assert_eq!(marker(&response), accepting.then_some("zstd"));
+        let encoded = marker(&response).is_some();
+        let wire = response.bytes().await.unwrap();
+        let part = if encoded {
+            body::decode(&wire, 65536).unwrap()
+        } else {
+            wire.to_vec()
+        };
+        assert_eq!(part, &object[4096..69632]);
+    }
+    let response = send(
+        s.client.get(format!(
+            "{}/objects/{}/part?offset=0&length=65536",
+            s.base,
+            hash(&random)
+        )),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(marker(&response), None);
+    assert_eq!(response.bytes().await.unwrap(), &random[..65536]);
+    for (target, query) in [
+        (digest.clone(), "offset=0&length=0".to_owned()),
+        (digest.clone(), format!("offset=0&length={}", 1024 * 1024 + 1)),
+        (digest.clone(), format!("offset={}&length=11", object.len() - 10)),
+        (digest.clone(), format!("offset={}&length=1", u64::MAX)),
+    ] {
+        let response = send(
+            s.client
+                .get(format!("{}/objects/{target}/part?{query}", s.base)),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(error_code(response).await, "invalid-object-range");
+    }
+    let response = send(
+        s.client.get(format!(
+            "{}/objects/{}/part?offset=0&length=1",
+            s.base,
+            hash(b"absent")
+        )),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Streamed object reads stay raw HTTP, ranges included.
+    let whole = send(s.client.get(format!("{}/objects/{digest}", s.base)), true)
+        .await
+        .unwrap();
+    assert_eq!(marker(&whole), None);
+    assert_eq!(whole.bytes().await.unwrap(), object);
+    let range = send(
+        s.client
+            .get(format!("{}/objects/{digest}", s.base))
+            .header("range", "bytes=0-99"),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        range.headers()["content-range"],
+        format!("bytes 0-99/{}", object.len()).as_str()
+    );
+    assert_eq!(marker(&range), None);
+    assert_eq!(range.bytes().await.unwrap(), &object[..100]);
+
+    let head = s.head(&s.a).await;
+    let media = MediaObject {
+        hash: digest.clone(),
+        size: (object.len() as u64).into(),
+        mime: "image/custom".into(),
+    };
+    let refresh = MediaSigner::new(&[3; 32])
+        .unwrap()
+        .refresh_url("http://127.0.0.1:12345", &media)
+        .unwrap();
+    let grants: Vec<MediaAccess> = s
+        .auth(s.client.post(format!("{}/media/access", s.base)), &s.a)
+        .json(&serde_json::json!({"epoch":head.epoch,"requests":[MediaRequest {object:media,refresh_url:refresh}]}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let response = s
+        .client
+        .get(format!("{}/media/{}", s.base, grants[0].token))
+        .header(body::ACCEPT_HEADER, body::ZSTD)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(marker(&response), None);
+    assert_eq!(response.bytes().await.unwrap(), object);
 }

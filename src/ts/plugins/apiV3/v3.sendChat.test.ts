@@ -1,8 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
 
 import { ActiveConversationSession } from '../../storage/activeConversationSession'
 import { doingChat as generationDoingChat } from '../../process/generationState'
+import {
+    noteGenerationMessage,
+    noteGenerationStarted,
+    subscribeGenerationEnd,
+    type GenerationEndRecord,
+} from '../../process/generationEnd'
 
 const mocks = vi.hoisted(() => ({
     authoritativeLoad: vi.fn(async()=>{}),
@@ -283,6 +289,121 @@ describe('Plugin v3 sendChat complete mutation gateway', () => {
         expect(chat.message.map((message: any) => message.data)).toEqual(['before'])
         expect(mocks.processSendChat).not.toHaveBeenCalled()
         expect(releaseCount).toBe(1)
+    })
+})
+
+describe('Plugin v3 sendChat generation end event', () => {
+    const target = { characterId: 'character-a', conversationId: 'chat-a' }
+    const stopListening: Array<() => void> = []
+    let releaseCount = 0
+
+    function listenGenerationEnd() {
+        const records: Array<GenerationEndRecord & { busy: boolean, released: number }> = []
+        stopListening.push(subscribeGenerationEnd((record) => records.push({
+            ...record,
+            busy: get(generationDoingChat),
+            released: releaseCount,
+        })))
+        return records
+    }
+
+    beforeEach(async () => {
+        vi.clearAllMocks()
+        generationDoingChat.set(false)
+        mocks.api = null
+        mocks.selectedId = 0
+        mocks.doingChat = false
+        releaseCount = 0
+        const chat = { id: 'chat-a', message: [{ role: 'char', data: 'before' }] }
+        const otherChat = { id: 'chat-b', message: [] }
+        const character = { type: 'character', chaId: 'character-a', chatPage: 0, chats: [chat, otherChat] }
+        mocks.database = { aiModel: 'test-model', plugins: [{ name: 'end-plugin', script: '' }], characters: [character] }
+        mocks.session = new ActiveConversationSession({
+            characterId: character.chaId,
+            conversationId: chat.id,
+            conversation: chat as any,
+            storeRevision: 1,
+        })
+        mocks.selectedTarget = target
+        mocks.acquireCompleteConversation.mockReset()
+        mocks.acquireCompleteConversation.mockImplementation(async () => ({
+            session: mocks.session,
+            target,
+            release() { releaseCount += 1 },
+        }))
+        mocks.processSendChat.mockReset()
+        await executePluginV3({ name: `end-plugin-${crypto.randomUUID()}`, script: '' } as any)
+    })
+
+    afterEach(() => {
+        for (const stop of stopListening.splice(0)) stop()
+    })
+
+    it('reports a completed generation once after releasing it', async () => {
+        const records = listenGenerationEnd()
+        mocks.processSendChat.mockImplementation(async () => {
+            noteGenerationStarted(target)
+            noteGenerationMessage(target, 'reply-1')
+            noteGenerationStarted(target)
+            noteGenerationMessage(target, 'reply-1')
+            return true
+        })
+
+        await expect(mocks.api.sendChat('hello')).resolves.toBe(true)
+
+        expect(records).toEqual([{
+            ...target,
+            status: 'completed',
+            reroll: false,
+            messageIds: ['reply-1'],
+            busy: false,
+            released: 1,
+        }])
+    })
+
+    it('reports failed when generation declines or throws', async () => {
+        const records = listenGenerationEnd()
+        const failure = new Error('provider failed')
+        mocks.processSendChat
+            .mockImplementationOnce(async () => {
+                noteGenerationStarted(target)
+                return false
+            })
+            .mockImplementationOnce(async () => {
+                noteGenerationStarted(target)
+                noteGenerationMessage(target, 'error-reply')
+                throw failure
+            })
+
+        await expect(mocks.api.sendChat('declined')).resolves.toBe(false)
+        await expect(mocks.api.sendChat('thrown')).rejects.toBe(failure)
+
+        expect(records.map(({ status, messageIds, busy }) => ({ status, messageIds, busy }))).toEqual([
+            { status: 'failed', messageIds: [], busy: false },
+            { status: 'failed', messageIds: ['error-reply'], busy: false },
+        ])
+    })
+
+    it('reports aborted when the selected conversation changes during generation', async () => {
+        const records = listenGenerationEnd()
+        mocks.processSendChat.mockImplementation(async () => {
+            noteGenerationStarted(target)
+            mocks.database.characters[0].chatPage = 1
+            return false
+        })
+
+        await expect(mocks.api.sendChat('hello')).resolves.toBe(false)
+
+        expect(records.map((record) => record.status)).toEqual(['aborted'])
+    })
+
+    it('does not report a send that never entered generation', async () => {
+        const records = listenGenerationEnd()
+        mocks.processSendChat.mockResolvedValue(false)
+
+        await expect(mocks.api.sendChat('hello')).resolves.toBe(false)
+
+        expect(records).toEqual([])
     })
 })
 

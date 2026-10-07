@@ -426,6 +426,9 @@
     {/if}
     {#if $alertStore.type !== 'none'}
         <AlertComp />
+    {:else if $alertStore.dialogPending}
+        <!-- Keeps the backdrop between queued dialogs and takes clicks meant for the closed one. -->
+        <div class="absolute w-full h-full z-modal bg-black/50"></div>
     {/if}
     {#if $showRealmInfoStore}
         <RealmPopUp bind:openedData={$showRealmInfoStore} />

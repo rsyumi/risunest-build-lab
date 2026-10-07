@@ -1,6 +1,6 @@
 use super::{Result, SyncError};
 use reqwest::{blocking::Client, Method, Url};
-use risunest_sync_wire::{canonical, RemoteHead, MAX_METADATA_BYTES};
+use risunest_sync_wire::{body as body_codec, canonical, RemoteHead, MAX_METADATA_BYTES};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     io::Read,
@@ -154,8 +154,16 @@ pub(crate) struct ServerClient {
 #[derive(Default)]
 pub(crate) struct TestIoCounters {
     pub requests: std::sync::atomic::AtomicU64,
+    /// Bytes on the wire, encoded when the body was.
     pub request_body_bytes: std::sync::atomic::AtomicU64,
     pub response_body_bytes: std::sync::atomic::AtomicU64,
+    /// The same bodies decoded.
+    pub request_raw_bytes: std::sync::atomic::AtomicU64,
+    pub response_raw_bytes: std::sync::atomic::AtomicU64,
+    /// Bodies whose wire form was longer than their raw form.
+    pub expanded_bodies: std::sync::atomic::AtomicU64,
+    /// Sends every body raw and asks for raw replies.
+    pub codec_disabled: std::sync::atomic::AtomicBool,
     pub traffic: std::sync::Mutex<TestTraffic>,
 }
 #[cfg(test)]
@@ -163,21 +171,27 @@ pub(crate) struct TestIoCounters {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TestTraffic {
     pub journal_requests: u64,
+    /// Wire bytes; each `*_raw_bytes` field counts the same replies decoded.
     pub journal_response_bytes: u64,
+    pub journal_response_raw_bytes: u64,
     /// Decoded inline values, not additional wire bytes.
     pub journal_inline_decoded_bytes: u64,
-    pub object_get_requests: u64,
-    pub object_get_response_bytes: u64,
+    pub object_part_requests: u64,
+    pub object_part_response_bytes: u64,
+    pub object_part_response_raw_bytes: u64,
     pub object_transfer_requests: u64,
     pub object_transfer_response_bytes: u64,
+    pub object_transfer_response_raw_bytes: u64,
     pub prepared_units: u64,
 }
 #[cfg(test)]
 impl TestTraffic {
-    fn response(&mut self, method: &Method, path: &str, bytes: &[u8]) {
+    fn response(&mut self, method: &Method, path: &str, wire: u64, bytes: &[u8]) {
+        let raw = bytes.len() as u64;
         if *method == Method::GET && path == "changes" {
             self.journal_requests += 1;
-            self.journal_response_bytes += bytes.len() as u64;
+            self.journal_response_bytes += wire;
+            self.journal_response_raw_bytes += raw;
             if let Ok(page) = risunest_sync_wire::canonical::decode::<risunest_sync_wire::lww::ChangesPage>(bytes, risunest_sync_wire::MAX_METADATA_BYTES) {
                 use base64::Engine;
                 for entry in page.items {
@@ -188,18 +202,20 @@ impl TestTraffic {
                     }
                 }
             }
-        } else if *method == Method::GET && path.strip_prefix("objects/").is_some_and(|hash| risunest_sync_wire::validate_hash(hash).is_ok()) {
-            self.object_get_requests += 1;
-            self.object_get_response_bytes += bytes.len() as u64;
+        } else if *method == Method::GET && path.strip_prefix("objects/").and_then(|rest| rest.strip_suffix("/part")).is_some_and(|hash| risunest_sync_wire::validate_hash(hash).is_ok()) {
+            self.object_part_requests += 1;
+            self.object_part_response_bytes += wire;
+            self.object_part_response_raw_bytes += raw;
         } else if *method == Method::POST && path == "objects/transfer" {
             self.object_transfer_requests += 1;
-            self.object_transfer_response_bytes += bytes.len() as u64;
+            self.object_transfer_response_bytes += wire;
+            self.object_transfer_response_raw_bytes += raw;
         }
     }
 }
 #[cfg(test)]
 impl TestIoCounters {
-    pub(crate) fn reset(&self) { *self.traffic.lock().unwrap() = TestTraffic::default(); for value in [&self.requests,&self.request_body_bytes,&self.response_body_bytes] {value.store(0,std::sync::atomic::Ordering::Relaxed);} }
+    pub(crate) fn reset(&self) { *self.traffic.lock().unwrap() = TestTraffic::default(); for value in [&self.requests,&self.request_body_bytes,&self.response_body_bytes,&self.request_raw_bytes,&self.response_raw_bytes,&self.expanded_bodies] {value.store(0,std::sync::atomic::Ordering::Relaxed);} }
     pub(crate) fn snapshot(&self) -> [u64;3] { [self.requests.load(std::sync::atomic::Ordering::Relaxed),self.request_body_bytes.load(std::sync::atomic::Ordering::Relaxed),self.response_body_bytes.load(std::sync::atomic::Ordering::Relaxed)] }
 }
 #[cfg(test)]
@@ -239,10 +255,20 @@ impl Drop for TransferActivity<'_> {
 }
 pub(crate) struct Reply {
     pub status: u16,
+    /// Always raw; an encoded reply is decoded before it is returned.
     pub body: Vec<u8>,
-    pub content_range: Option<String>,
+    /// `x-risu-object-range` of a part reply, in raw offsets.
+    pub object_range: Option<String>,
     pub retry_after: Option<Duration>,
     pub attempt_duration: Duration,
+}
+/// A request body ready to send: `wire` is what travels, encoded when the
+/// marker is set.
+pub(crate) struct PreparedBody {
+    wire: Vec<u8>,
+    encoded: bool,
+    #[cfg(test)]
+    raw_len: usize,
 }
 pub(crate) enum RequestAttempt {
     Response(Reply),
@@ -383,7 +409,13 @@ impl ServerClient {
         retry_budget: Arc<RetryBudget>,
     ) -> Result<Self> {
         let url = config.validate()?;
+        // Other crates enable reqwest's decoders, which would strip a
+        // Content-Encoding this client has to see and refuse.
         let http = crate::platform_tls::blocking_client_builder()
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
@@ -481,9 +513,10 @@ impl ServerClient {
         headers: &[(&str, String)],
         limit: usize,
     ) -> Result<RequestAttempt> {
+        let body = self.prepare_body(body)?;
         loop {
             let attempted = (self.retry_budget.clock)();
-            let result = self.request_once(method.clone(), path, &[], body.clone(), headers, limit);
+            let result = self.request_once(method.clone(), path, &[], body.as_ref(), headers, limit);
             let elapsed = (self.retry_budget.clock)().saturating_duration_since(attempted);
             match result {
                 Ok(mut reply) => {
@@ -534,10 +567,11 @@ impl ServerClient {
     ) -> Result<Reply> {
         let replay_safe = replay_safe(&method, path);
         let mut recovering = false;
+        let body = self.prepare_body(body)?;
         loop {
             let attempted = (self.retry_budget.clock)();
             let result =
-                self.request_once(method.clone(), path, query, body.clone(), headers, limit);
+                self.request_once(method.clone(), path, query, body.as_ref(), headers, limit);
             match result {
                 Ok(mut reply) => {
                     let elapsed = (self.retry_budget.clock)().saturating_duration_since(attempted);
@@ -586,12 +620,51 @@ impl ServerClient {
         }
     }
 
+    /// Tests turn the codec off to compare wire and raw traffic.
+    fn codec_enabled(&self) -> bool {
+        #[cfg(test)]
+        if self.test_io.as_ref().is_some_and(|counter| counter.codec_disabled.load(std::sync::atomic::Ordering::Relaxed)) {
+            return false;
+        }
+        true
+    }
+
+    /// Checks and encodes a request body once, before any attempt, so a retry
+    /// resends the same bytes.
+    fn prepare_body(&self, body: Option<Vec<u8>>) -> Result<Option<PreparedBody>> {
+        let Some(raw) = body else {
+            return Ok(None);
+        };
+        if raw.len() > 8 * 1024 * 1024 {
+            return Err(SyncError::new("request-too-large", 413));
+        }
+        let encoded = if self.codec_enabled() {
+            body_codec::encode(&raw).map_err(|error| SyncError::new(error.0, 500))?
+        } else {
+            None
+        };
+        Ok(Some(match encoded {
+            Some(wire) => PreparedBody {
+                wire,
+                encoded: true,
+                #[cfg(test)]
+                raw_len: raw.len(),
+            },
+            None => PreparedBody {
+                #[cfg(test)]
+                raw_len: raw.len(),
+                wire: raw,
+                encoded: false,
+            },
+        }))
+    }
+
     fn request_once(
         &self,
         method: Method,
         path: &str,
         query: &[(&str, String)],
-        body: Option<Vec<u8>>,
+        body: Option<&PreparedBody>,
         headers: &[(&str, String)],
         limit: usize,
     ) -> Result<Reply> {
@@ -601,7 +674,9 @@ impl ServerClient {
         #[cfg(test)]
         if let Some(counter)=&self.test_io {
             counter.requests.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
-            counter.request_body_bytes.fetch_add(body.as_ref().map_or(0,|b|b.len() as u64),std::sync::atomic::Ordering::Relaxed);
+            counter.request_body_bytes.fetch_add(body.map_or(0,|b|b.wire.len() as u64),std::sync::atomic::Ordering::Relaxed);
+            counter.request_raw_bytes.fetch_add(body.map_or(0,|b|b.raw_len as u64),std::sync::atomic::Ordering::Relaxed);
+            if body.is_some_and(|b| b.wire.len() > b.raw_len) { counter.expanded_bodies.fetch_add(1,std::sync::atomic::Ordering::Relaxed); }
         }
         if path.starts_with('/') || path.contains("..") || path.contains('?') || path.contains('#')
         {
@@ -640,15 +715,18 @@ impl ServerClient {
             .header("x-risu-library", &config.library_id)
             .header("accept-encoding", "identity")
             .timeout(timeout);
+        if self.codec_enabled() {
+            request = request.header(body_codec::ACCEPT_HEADER, body_codec::ZSTD);
+        }
         for (name, value) in headers {
             request = request.header(*name, value);
         }
-        let sent = body.as_ref().map_or(0, |body| body.len() as u64);
+        let sent = body.map_or(0, |body| body.wire.len() as u64);
         if let Some(body) = body {
-            if body.len() > 8 * 1024 * 1024 {
-                return Err(SyncError::new("request-too-large", 413));
+            if body.encoded {
+                request = request.header(body_codec::ENCODING_HEADER, body_codec::ZSTD);
             }
-            request = request.body(body);
+            request = request.body(body.wire.clone());
         }
         let response = request.send().map_err(|e| {
             SyncError::new(
@@ -662,9 +740,9 @@ impl ServerClient {
         })?;
         self.lane.wire(sent, 0);
         let status = response.status().as_u16();
-        let content_range = response
+        let object_range = response
             .headers()
-            .get("content-range")
+            .get("x-risu-object-range")
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
         let retry_after = response
@@ -679,6 +757,16 @@ impl ServerClient {
         {
             return Err(SyncError::new("unexpected-content-encoding", 502));
         }
+        let encoded = body_codec::marked(
+            response
+                .headers()
+                .get_all(body_codec::ENCODING_HEADER)
+                .iter()
+                .map(|value| value.as_bytes()),
+        )
+        .map_err(|_| SyncError::new("invalid-response-encoding", 502))?;
+        // A kept encoding is smaller than its raw body, so the raw limit also
+        // bounds the encoded one.
         if response.content_length().is_some_and(|v| v > limit as u64) {
             return Err(SyncError::new("response-too-large", 502));
         }
@@ -692,14 +780,32 @@ impl ServerClient {
             return Err(SyncError::new("response-too-large", 502));
         }
         #[cfg(test)]
+        let wire = bytes.len() as u64;
+        let bytes = if encoded {
+            body_codec::decode(&bytes, limit).map_err(|error| {
+                SyncError::new(
+                    if error.0 == "body-too-large" {
+                        "response-too-large"
+                    } else {
+                        "invalid-response-encoding"
+                    },
+                    502,
+                )
+            })?
+        } else {
+            bytes
+        };
+        #[cfg(test)]
         if let Some(counter)=&self.test_io {
-            counter.response_body_bytes.fetch_add(bytes.len() as u64,std::sync::atomic::Ordering::Relaxed);
-            counter.traffic.lock().unwrap().response(&observed_method, path, &bytes);
+            counter.response_body_bytes.fetch_add(wire,std::sync::atomic::Ordering::Relaxed);
+            counter.response_raw_bytes.fetch_add(bytes.len() as u64,std::sync::atomic::Ordering::Relaxed);
+            if wire > bytes.len() as u64 { counter.expanded_bodies.fetch_add(1,std::sync::atomic::Ordering::Relaxed); }
+            counter.traffic.lock().unwrap().response(&observed_method, path, wire, &bytes);
         }
         Ok(Reply {
             status,
             body: bytes,
-            content_range,
+            object_range,
             retry_after,
             attempt_duration: Duration::ZERO,
         })

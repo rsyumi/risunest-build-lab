@@ -147,6 +147,9 @@ pub fn init_with_client_builder<R: Runtime>(
             Ok(())
         })
         .on_event(|app, event| {
+            // RisuNest: without `cookies` there is no jar to save on exit.
+            #[cfg(not(feature = "cookies"))]
+            let _ = (app, event);
             #[cfg(feature = "cookies")]
             if let tauri::RunEvent::Exit = event {
                 let state = app.state::<Http>();

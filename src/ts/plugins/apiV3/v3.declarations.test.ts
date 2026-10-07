@@ -129,6 +129,7 @@ describe('plugin API declarations', () => {
             'risunestCallHostTool',
             'risunestListHostTools',
             'risunestOnChatView',
+            'risunestOnGenerationEnd',
             'risunestPatchConversation',
             'risunestReadConversationContext',
         ])

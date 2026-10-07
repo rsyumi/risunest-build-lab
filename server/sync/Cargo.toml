@@ -10,7 +10,7 @@ windows-background = []
 
 [dependencies]
 risunest-release-update = { path = "../../crates/release-update" }
-risunest-sync-wire = { path = "../../crates/sync-wire" }
+risunest-sync-wire = { path = "../../crates/sync-wire", features = ["body-codec"] }
 risunest-sync-connect = { path = "../../crates/sync-connect" }
 risunest-small-object-store = { path = "../../crates/small-object-store" }
 async-trait = "0.1"

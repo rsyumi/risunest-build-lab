@@ -313,6 +313,19 @@ function makeWindowedEditHarness() {
         messageEvidence: message,
     }
     const captureMessageEditIntent = vi.fn(() => intent)
+    // Like the real operation, a row whose message no longer matches the evidence keeps the intent.
+    const rebindMessageEditIntent = vi.fn((
+        retained: typeof intent,
+        input: Omit<typeof intent, 'selection' | 'messageEvidence'> & { message: Message },
+    ) => input.message.data === retained.messageEvidence.data
+        ? {
+            ...retained,
+            absoluteIndex: input.absoluteIndex,
+            sourceToken: input.sourceToken,
+            sourceVersion: input.sourceVersion,
+            rowKey: input.rowKey,
+        }
+        : retained)
     const acquireTarget = vi.fn(async () => {
         live.db.characters = [completeCharacter]
         runtime.activeSession = session
@@ -335,7 +348,7 @@ function makeWindowedEditHarness() {
     const withCompleteSelectedConversation = vi.fn()
     const operations = {
         captureMessageEditIntent,
-        rebindMessageEditIntent: (intent: unknown) => intent,
+        rebindMessageEditIntent,
         acquireMessageMutation: acquireTarget,
         acquireCompleteMessageTargetForIntent,
         acquireCompleteMessageTarget,
@@ -343,10 +356,12 @@ function makeWindowedEditHarness() {
     } as unknown as SelectedConversationOperations
     return {
         message,
+        intent,
         metadataCharacter,
         completeConversation,
         operations,
         captureMessageEditIntent,
+        rebindMessageEditIntent,
         acquireCompleteMessageTargetForIntent,
         acquireCompleteMessageTarget,
         completeCharacter,
@@ -1861,6 +1876,138 @@ describe('Chat frozen capture presentation', () => {
             }
         },
     )
+
+    async function openWindowedEditor(harness: ReturnType<typeof makeWindowedEditHarness>) {
+        live.db = {
+            ...live.db,
+            theme: 'cardboard',
+            characters: [harness.metadataCharacter],
+            translator: '',
+            useChatCopy: false,
+            enableBookmark: false,
+            clickToEdit: false,
+            risunestChatEditPopup: false,
+        }
+        mounted = mount(Chat, {
+            target,
+            props: {
+                message: harness.message.data,
+                name: 'Live Character',
+                role: 'char',
+                idx: 1,
+                totalLength: 2,
+                isLastMemory: false,
+                viewportRow: {
+                    key: 'row-1' as ConversationViewportKey,
+                    absoluteIndex: 1,
+                    message: harness.message,
+                    sourceVersion: 3,
+                },
+                viewportSourceToken: 'source-a',
+                selectedConversationOperations: harness.operations,
+                captureViewportTarget: () => null,
+            },
+        })
+        const editButton = await vi.waitFor(() => {
+            const button = target.querySelector<HTMLButtonElement>('.button-icon-edit')
+            expect(button).not.toBeNull()
+            return button!
+        })
+        editButton.click()
+        const editor = await vi.waitFor(() => {
+            const textarea = target.querySelector<HTMLTextAreaElement>('.message-edit-area')
+            expect(textarea).not.toBeNull()
+            return textarea!
+        })
+        editor.value = 'Draft across rebinding'
+        editor.dispatchEvent(new Event('input', { bubbles: true }))
+        return {
+            editButton,
+            chat: mounted as {
+                hasActiveEditor(): boolean
+                updateViewportBinding(state: {
+                    viewportRow: {
+                        key: ConversationViewportKey
+                        absoluteIndex: number
+                        message: Message
+                        sourceVersion: number
+                    }
+                    viewportSourceToken: string
+                    captureViewportTarget: () => null
+                    totalMessages: number
+                }): void
+            },
+        }
+    }
+
+    test('moves an open edit with its row and saves against the new position', async () => {
+        const harness = makeWindowedEditHarness()
+        const { editButton, chat } = await openWindowedEditor(harness)
+
+        chat.updateViewportBinding({
+            viewportRow: {
+                key: 'row-1' as ConversationViewportKey,
+                absoluteIndex: 0,
+                message: { ...harness.message },
+                sourceVersion: 4,
+            },
+            viewportSourceToken: 'source-a',
+            captureViewportTarget: () => null,
+            totalMessages: 1,
+        })
+
+        expect(harness.captureMessageEditIntent).toHaveBeenCalledOnce()
+        expect(harness.rebindMessageEditIntent).toHaveBeenCalledWith(harness.intent, {
+            absoluteIndex: 0,
+            sourceToken: 'source-a',
+            sourceVersion: 4,
+            rowKey: 'row-1',
+            message: harness.message,
+        })
+        expect(target.querySelector<HTMLTextAreaElement>('.message-edit-area')?.value)
+            .toBe('Draft across rebinding')
+
+        editButton.click()
+        await vi.waitFor(() => {
+            expect(harness.acquireCompleteMessageTargetForIntent).toHaveBeenCalledWith(
+                expect.objectContaining({ absoluteIndex: 0, messageEvidence: harness.message }),
+                'edit-message',
+            )
+            expect(harness.completeConversation.message[1].data).toBe('Draft across rebinding')
+        })
+        expect(chat.hasActiveEditor()).toBe(false)
+    })
+
+    test('keeps the original edit evidence when its row changes in place', async () => {
+        const harness = makeWindowedEditHarness()
+        harness.acquireCompleteMessageTargetForIntent.mockResolvedValueOnce(null as never)
+        const { editButton, chat } = await openWindowedEditor(harness)
+
+        chat.updateViewportBinding({
+            viewportRow: {
+                key: 'row-1' as ConversationViewportKey,
+                absoluteIndex: 1,
+                message: { ...harness.message, data: 'Changed elsewhere' },
+                sourceVersion: 4,
+            },
+            viewportSourceToken: 'source-a',
+            captureViewportTarget: () => null,
+            totalMessages: 2,
+        })
+
+        expect(harness.captureMessageEditIntent).toHaveBeenCalledOnce()
+        expect(harness.rebindMessageEditIntent).toHaveReturnedWith(harness.intent)
+
+        editButton.click()
+        await vi.waitFor(() => expect(
+            harness.acquireCompleteMessageTargetForIntent,
+        ).toHaveBeenCalledWith(harness.intent, 'edit-message'))
+        await tick()
+        expect(harness.completeConversation.message[1].data).toBe('Original viewport message')
+        expect(chat.hasActiveEditor()).toBe(true)
+        expect(target.querySelector<HTMLTextAreaElement>('.message-edit-area')?.value)
+            .toBe('Draft across rebinding')
+    })
 
     test.each(['cancel', 'unmount'] as const)('cleans up a pending partial edit scroll on %s', async (action) => {
         const harness = makeWindowedEditHarness()

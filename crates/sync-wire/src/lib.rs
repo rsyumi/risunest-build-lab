@@ -1,4 +1,6 @@
 //! Format-independent sync protocol. Content bytes are never JSON-normalized.
+#[cfg(feature = "body-codec")]
+pub mod body;
 pub mod canonical;
 pub mod changes;
 pub mod delta;

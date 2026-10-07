@@ -446,6 +446,11 @@ impl Store {
         id.map(|id| Device { id })
             .ok_or(Error::new("unauthorized", 401))
     }
+    /// Fails once the device's registration has been revoked.
+    pub fn require_registered(&self, device: &Device) -> Result<()> {
+        let db = self.reader()?;
+        Self::require_device(&db, device)
+    }
     pub(super) fn require_device(db: &Connection, device: &Device) -> Result<()> {
         let exists: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM devices WHERE id=?1 AND revoked=0)",

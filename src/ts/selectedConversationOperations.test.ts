@@ -577,6 +577,110 @@ describe('selected conversation complete-operation gateway', () => {
         expect(harness.acquireCompleteConversation).not.toHaveBeenCalled()
     })
 
+    function captureRowOneIntent(harness: ReturnType<typeof makeHarness>) {
+        const intent = harness.operations.captureMessageEditIntent({
+            absoluteIndex: 1,
+            sourceToken: 'persistent-source',
+            sourceVersion: 3,
+            rowKey: 'persistent-source|3|1' as ConversationViewportKey,
+            message: { role: 'char', data: 'one' },
+        })
+        expect(intent).not.toBeNull()
+        return intent!
+    }
+
+    function moveViewportRow(
+        harness: ReturnType<typeof makeHarness>,
+        absoluteIndex: number,
+        message: Message,
+    ) {
+        const row = {
+            key: 'persistent-source|3|1' as ConversationViewportKey,
+            absoluteIndex,
+            message,
+            sourceVersion: 4,
+        }
+        harness.setViewportRow(row)
+        harness.setViewportSnapshot({
+            sourceToken: 'persistent-source',
+            version: 4,
+            storeRevision: 7,
+            totalMessages: harness.current.session.totalMessages,
+            keyAt: (index) => index === absoluteIndex ? row.key : undefined,
+            indexOfKey: (key) => key === row.key ? absoluteIndex : -1,
+            rowAt: (index) => index === absoluteIndex ? row : undefined,
+        })
+        return {
+            absoluteIndex,
+            sourceToken: 'persistent-source',
+            sourceVersion: row.sourceVersion,
+            rowKey: row.key,
+            message,
+        }
+    }
+
+    it('moves an edit intent with its row after an earlier message is removed', async () => {
+        const harness = makeHarness()
+        const intent = captureRowOneIntent(harness)
+        const { session } = harness.current
+        session.replaceRange(session.positionAt(0), 1, [])
+        const position = moveViewportRow(harness, 0, { role: 'char', data: 'one' })
+
+        // The stale position now holds the neighboring message.
+        await expect(harness.operations.acquireCompleteMessageTargetForIntent(
+            intent,
+            'stale-position-edit',
+        )).resolves.toBeNull()
+
+        const rebound = harness.operations.rebindMessageEditIntent(intent, position)
+        expect(rebound).toMatchObject({ absoluteIndex: 0, sourceVersion: 4, rowKey: position.rowKey })
+        expect(rebound.messageEvidence).toBe(intent.messageEvidence)
+        expect(Object.isFrozen(rebound)).toBe(true)
+
+        const acquired = await harness.operations.acquireCompleteMessageTargetForIntent(
+            rebound,
+            'moved-edit',
+        )
+        expect(acquired?.target).toMatchObject({
+            absoluteIndex: 0,
+            message: { role: 'char', data: 'one' },
+        })
+        acquired?.release()
+    })
+
+    it('keeps the original intent so a moved edit refuses a concurrent change', async () => {
+        const harness = makeHarness()
+        const intent = captureRowOneIntent(harness)
+        const { session } = harness.current
+        const changed: Message = { role: 'char', data: 'changed elsewhere' }
+        session.replaceRange(session.positionAt(0), 2, [changed])
+        const position = moveViewportRow(harness, 0, changed)
+
+        expect(harness.operations.rebindMessageEditIntent(intent, position)).toBe(intent)
+
+        await expect(harness.operations.acquireCompleteMessageTargetForIntent(
+            intent,
+            'concurrently-changed-edit',
+        )).resolves.toBeNull()
+        expect(harness.current.conversation.message.map((message) => message.data)).toEqual([
+            'changed elsewhere',
+            'two',
+        ])
+    })
+
+    it.each([
+        ['source token', { sourceToken: 'other-source' }],
+        ['source version', { sourceVersion: 5 }],
+        ['row key', { rowKey: 'other-key' as ConversationViewportKey }],
+        ['absolute index', { absoluteIndex: 1 }],
+    ] as const)('does not rebind an edit intent to a stale viewport %s', (_label, change) => {
+        const harness = makeHarness()
+        const intent = captureRowOneIntent(harness)
+        const position = moveViewportRow(harness, 0, { role: 'char', data: 'one' })
+
+        expect(harness.operations.rebindMessageEditIntent(intent, { ...position, ...change })).toBe(intent)
+    })
+
     it('invokes the operation before a queued post-acquire navigation invalidates authority', async () => {
         const harness = makeHarness()
         const operation = vi.fn((context) => {
