@@ -14,7 +14,7 @@ on:
       scope:
         type: choice
         default: full
-        options: [full, harness, sync, streaming, termination-probe, termination-dispatch, build-termination-dispatch, appearance-runtime, appearance-light, appearance-dark, appearance-codec-experiment, appearance-bgra-experiment]
+        options: [full, harness, sync, external-storage, streaming, termination-probe, termination-dispatch, build-termination-dispatch, appearance-runtime, appearance-light, appearance-dark, appearance-codec-experiment, appearance-bgra-experiment]
 permissions:
   contents: read
 concurrency:
@@ -44,7 +44,7 @@ jobs:
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
           case "$RUNNER_LABEL" in macos-15|macos-14|macos-15-intel|macos-26) ;; *) exit 1;; esac
-          case "$CHECK_SCOPE" in full|harness|sync|streaming|termination-probe|termination-dispatch|build-termination-dispatch|appearance-runtime|appearance-light|appearance-dark|appearance-codec-experiment|appearance-bgra-experiment) ;; *) exit 1;; esac
+          case "$CHECK_SCOPE" in full|harness|sync|external-storage|streaming|termination-probe|termination-dispatch|build-termination-dispatch|appearance-runtime|appearance-light|appearance-dark|appearance-codec-experiment|appearance-bgra-experiment) ;; *) exit 1;; esac
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
@@ -158,6 +158,12 @@ jobs:
           set -euo pipefail
           cargo build --manifest-path server/sync/Cargo.toml --locked 2>&1 | tee artifacts/sync-server-build.log
           test -x "$CARGO_TARGET_DIR/debug/risunest-sync-server"
+      - name: Install loopback WebDAV server
+        if: inputs.scope == 'external-storage'
+        run: |
+          set -euo pipefail
+          command -v rclone >/dev/null || brew install rclone
+          rclone version | head -1 | tee artifacts/rclone.txt
       - name: Build isolated Mac WKWebView harness
         run: |
           set -euo pipefail
@@ -199,6 +205,11 @@ jobs:
             sync_tmp="$(mktemp -d "$RUNNER_TEMP/risunest-sync-app.XXXXXX")"
             export TMPDIR="$(cd "$sync_tmp" && pwd -P)"
             python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview --sync-server "$CARGO_TARGET_DIR/debug/risunest-sync-server"
+          elif [[ "$CHECK_SCOPE" == external-storage ]]; then
+            export RISUNEST_MACOS_PHASES=external-storage,external-storage-restart
+            storage_tmp="$(mktemp -d "$RUNNER_TEMP/risunest-external-app.XXXXXX")"
+            export TMPDIR="$(cd "$storage_tmp" && pwd -P)"
+            python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview --webdav-server "$(command -v rclone)"
           elif [[ "$CHECK_SCOPE" == appearance-runtime ]]; then
             export RISUNEST_MACOS_PHASES=appearance-seed-light,appearance-app-light,appearance-seed-dark,appearance-app-dark
             python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview 2>&1 | tee artifacts/wkwebview.log
