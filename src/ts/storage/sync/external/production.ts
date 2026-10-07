@@ -443,7 +443,7 @@ export async function requestExternalStorageRestore(
                             const resumed = await retryPausedJob(job, request, retries++, background)
                             if (resumed) { job = resumed; continue }
                             stopping = true
-                            job = await getExternalStorageBridge().cancelJob(jobId)
+                            job = await getExternalStorageBridge().cancelJob(jobId, !background.signal?.aborted)
                             continue
                         }
                         if (job.state === 'succeeded') throw new Error('External restore has no commit receipt')
@@ -460,7 +460,7 @@ export async function requestExternalStorageRestore(
                             unreadable = 0
                         } catch (error) {
                             // The local commit briefly closes the store the job is read through.
-                            if (externalErrorKind(error) !== 'transient' || ++unreadable > 10) throw error
+                            if (!['transient', 'localFailure'].includes(externalErrorKind(error) ?? '') || ++unreadable > 10) throw error
                             continue
                         }
                         background.progress(measuredTaskPercent(Number(job.completedBytes), Number(job.totalBytes)))

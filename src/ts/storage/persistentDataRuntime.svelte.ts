@@ -155,6 +155,11 @@ export function createProductionStateAdapter(options: {
         afterRemoteRootChange(fields) {
             void applyReceivedDisplaySettings(fields).catch((error) => console.error(error))
         },
+        afterRemotePluginChange() {
+            // The reload a local plugin toggle runs.
+            void import('../plugins/plugins.svelte').then(({ loadPlugins }) => loadPlugins())
+                .catch((error) => productionConfiguration.onBackgroundError?.(error))
+        },
         captureCharacterIndex: () => characterIndex,
         captureCharacters() {
             return residentCharacters()

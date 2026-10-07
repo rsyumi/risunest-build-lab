@@ -903,7 +903,6 @@ export const languageSpanish = {
     "webdeeplwarn": "Esta opción no se recomienda para su uso con la versión web, ya que puede causar errores de CORS.",
     "saveBackupLocal": "Guardar Respaldo Localmente",
     "loadBackupLocal": "Cargar Respaldo Localmente",
-    "restoreLocalSnapshotConfirm": "¿Reemplazar los datos actuales con esta instantánea local y reiniciar la aplicación?",
     "topP": "Top P",
     "genTimes": "Opciones de Generación",
     "cot": "Cadena de Pensamientos",

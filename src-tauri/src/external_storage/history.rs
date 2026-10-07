@@ -1,7 +1,7 @@
 //! User-requested discovery of authenticated history roots, including orphan snapshots.
 use super::{
     connection_commands::ConnectedRepository, connection_store::ConnectionStore, contract::*,
-    control, packaging::{self, RemoteObject}, runtime, transfer::SpoolSink,
+    control, gc_store::locator_key, packaging::{self, RemoteObject}, runtime, transfer::SpoolSink,
 };
 use crate::native_log::logged;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -10,11 +10,22 @@ use risunest_external_storage_format::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, io::Cursor};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Cursor,
+    sync::{LazyLock, Mutex},
+};
 use tauri::{AppHandle, Manager};
 
 const PAGE: u16 = 30;
 const MAX_CIPHERTEXT: u64 = 16 * 1024 * 1024;
+/// Snapshot pages read without downloading, beyond those the backup points'
+/// own snapshots can fill, while looking for one a backup point does not show.
+const READ_AHEAD_PAGES: usize = 4;
+/// Snapshot objects the backup points of each connection's current listing
+/// reference, so its snapshot pages leave them out.
+static COVERED: LazyLock<Mutex<BTreeMap<String, BTreeSet<String>>>> =
+    LazyLock::new(Default::default);
 fn corrupt() -> ProviderError {
     ProviderError::new(ErrorKind::Corrupt)
 }
@@ -54,6 +65,44 @@ fn decode_cursor(request: &HistoryRequest) -> Result<CursorState> {
         return Err(corrupt());
     }
     Ok(state)
+}
+fn covered_snapshots(
+    connection: &str,
+    restart: bool,
+    referenced: impl IntoIterator<Item = String>,
+) -> BTreeSet<String> {
+    let mut covered = COVERED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let entry = covered.entry(connection.to_owned()).or_default();
+    if restart {
+        entry.clear();
+    }
+    entry.extend(referenced);
+    entry.clone()
+}
+/// Where the next snapshot page holding an object no backup point references
+/// starts. `Some(None)` is the first page and `None` means none remain.
+async fn next_uncovered_page(
+    provider: &dyn Provider,
+    handle: &RepositoryHandle,
+    covered: &BTreeSet<String>,
+    mut cursor: Option<String>,
+    cancel: &Cancellation,
+) -> Result<Option<Option<String>>> {
+    for _ in 0..covered.len().div_ceil(usize::from(PAGE)) + READ_AHEAD_PAGES {
+        let page = provider
+            .list_objects(handle, Collection::Snapshots, cursor.as_deref(), PAGE, cancel)
+            .await?;
+        for object in &page.objects {
+            if !covered.contains(&locator_key(&object.locator)?) {
+                return Ok(Some(cursor));
+            }
+        }
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(cursor))
 }
 fn encode_cursor(state: CursorState) -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&state).map_err(runtime::local_error)?))
@@ -171,6 +220,11 @@ pub(crate) async fn external_storage_list_history(
         .map_err(runtime::local_error)?
         .store_id;
         let mut items = BTreeMap::new();
+        let snapshots_from = |provider: Option<String>| CursorState {
+            connection: request.connection_id.clone(),
+            phase: "snapshots".into(),
+            provider,
+        };
         let next = if state.phase == "points" {
             let page = control::list_connected_backup_points_page(
                 &connected,
@@ -179,6 +233,7 @@ pub(crate) async fn external_storage_list_history(
                 &cancel,
             )
             .await?;
+            let mut referenced = Vec::new();
             for point in page.points {
                 let kind = match point.document.kind {
                     control::BackupPointKind::RecoveryCandidate => "recovery-candidate",
@@ -186,6 +241,7 @@ pub(crate) async fn external_storage_list_history(
                 };
                 let pinned = point.document.kind == control::BackupPointKind::Manual;
                 for reference in point.document.bundles().into_iter().cloned() {
+                    referenced.push(locator_key(&reference.receipt.locator)?);
                     let document =
                         control::read_snapshot_document(&connected, &reference, &cancel).await?;
                     cache.remember_discovery(
@@ -207,19 +263,19 @@ pub(crate) async fn external_storage_list_history(
                     items.insert(row_id, value);
                 }
             }
+            let covered = covered_snapshots(&request.connection_id, state.provider.is_none(), referenced);
             match page.next_cursor {
                 Some(provider) => Some(CursorState {
                     connection: request.connection_id.clone(),
                     phase: "points".into(),
                     provider: Some(provider),
                 }),
-                None => Some(CursorState {
-                    connection: request.connection_id.clone(),
-                    phase: "snapshots".into(),
-                    provider: None,
-                }),
+                None => next_uncovered_page(
+                    connected.provider.as_ref(), &connected.handle, &covered, None, &cancel,
+                ).await?.map(snapshots_from),
             }
         } else {
+            let covered = covered_snapshots(&request.connection_id, false, []);
             let page = connected
                 .provider
                 .list_objects(
@@ -231,6 +287,9 @@ pub(crate) async fn external_storage_list_history(
                 )
                 .await?;
             for receipt in page.objects {
+                if covered.contains(&locator_key(&receipt.locator)?) {
+                    continue;
+                }
                 let (reference, document) = open_snapshot(&app, &connected, receipt, &cancel).await?;
                 cache.remember_discovery(&request.connection_id, &document.snapshot_id, &reference)?;
                 remember_item(
@@ -239,11 +298,12 @@ pub(crate) async fn external_storage_list_history(
                     item(&document, &reference, "recovery-candidate", false, &store_id),
                 );
             }
-            page.next_cursor.map(|provider| CursorState {
-                connection: request.connection_id.clone(),
-                phase: "snapshots".into(),
-                provider: Some(provider),
-            })
+            match page.next_cursor {
+                Some(provider) => next_uncovered_page(
+                    connected.provider.as_ref(), &connected.handle, &covered, Some(provider), &cancel,
+                ).await?.map(snapshots_from),
+                None => None,
+            }
         };
         let mut output = json!({"items":items.into_values().collect::<Vec<_>>()});
         if let Some(next) = next {
@@ -255,6 +315,46 @@ pub(crate) async fn external_storage_list_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn older_history_starts_at_the_first_snapshot_page_no_backup_point_covers() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let provider = super::super::fake::FakeProvider::new(false);
+            let handle = super::super::fake::repository();
+            let cancel = Cancellation::default();
+            let names: Vec<String> = (0..185).map(|index| format!("snapshot-{index:03}")).collect();
+            for name in &names {
+                provider.seed(name, ObjectRole::BackupBundle, vec![1; 8]);
+            }
+            let key = |name: &str| locator_key(&RemoteLocator {
+                connection_identity: handle.connection_identity.clone(),
+                collection: None,
+                object: name.into(),
+            }).unwrap();
+            let all: BTreeSet<String> = names.iter().map(|name| key(name)).collect();
+            assert_eq!(next_uncovered_page(&provider, &handle, &all, None, &cancel).await.unwrap(), None);
+
+            let mut covered = all.clone();
+            covered.remove(&key("snapshot-003"));
+            assert_eq!(next_uncovered_page(&provider, &handle, &covered, None, &cancel).await.unwrap(), Some(None));
+
+            let mut covered = all.clone();
+            covered.remove(&key("snapshot-184"));
+            let start = next_uncovered_page(&provider, &handle, &covered, None, &cancel).await.unwrap()
+                .expect("an uncovered snapshot remains").expect("past the first page");
+            let page = provider.list_objects(&handle, Collection::Snapshots, Some(&start), PAGE, &cancel).await.unwrap();
+            assert!(page.objects.iter().any(|object| object.locator.object == "snapshot-184"));
+        });
+    }
+
+    #[test]
+    fn a_new_history_listing_forgets_the_points_an_earlier_one_saw() {
+        assert_eq!(covered_snapshots("history-test", true, ["a".to_owned()]).len(), 1);
+        assert_eq!(covered_snapshots("history-test", false, ["b".to_owned()]).len(), 2);
+        assert_eq!(covered_snapshots("other-history-test", false, []).len(), 0);
+        let fresh = covered_snapshots("history-test", true, ["c".to_owned()]);
+        assert_eq!(fresh.into_iter().collect::<Vec<_>>(), vec!["c".to_owned()]);
+    }
+
     #[test]
     fn duplicate_snapshot_keeps_pinning_and_backup_point_evidence() {
         let mut items = BTreeMap::new();

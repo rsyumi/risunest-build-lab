@@ -29,7 +29,7 @@ function deleteButton() { return [...target.querySelectorAll('button')].find(but
 test('shows real usage, confirms deletion and refreshes to zero', async () => {
     await vi.waitFor(() => expect(target.textContent).toContain('2 embeddings · 4.0 KiB'))
     deleteButton().click()
-    await vi.waitFor(() => expect(target.textContent).toContain('0 embeddings · 0 bytes'))
+    await vi.waitFor(() => expect(target.textContent).toContain('0 embeddings · 0 B'))
     expect(mocks.confirm).toHaveBeenCalledWith(expect.stringContaining('Synced devices will also delete'))
     expect(deleteButton().disabled).toBe(true)
 })

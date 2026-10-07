@@ -1458,6 +1458,8 @@ export class SaveCoordinator {
                 presets,
             }
             const presetRootBaseline = canonicalClone(state.root)
+            // Operations edit `state.presets` in place, so the stored list is diffed from a copy.
+            const storedPresets = canonicalClone(presets)
             await mutate(state)
 
             const liveBeforeCommit = this.capture()
@@ -1471,8 +1473,8 @@ export class SaveCoordinator {
                 mutatedRoot,
             )
             const committedPresets = canonicalClone(state.presets)
-            const presetUnits = committedPresets.every((value) => typeof value['id'] === 'string') && presets.every((value) => typeof value['id'] === 'string')
-                ? this.diffPresets(presets, committedPresets) : null
+            const presetUnits = committedPresets.every((value) => typeof value['id'] === 'string') && storedPresets.every((value) => typeof value['id'] === 'string')
+                ? this.diffPresets(storedPresets, committedPresets) : null
             const presetRootMutations = diffRootMutations(rootValue.value, committedRoot)
             if (!presetRootMutations.length && presetUnits?.length === 0) return
             const committed = await this.commitRoutine({
@@ -3457,6 +3459,8 @@ export class SaveCoordinator {
                 this.setCharacterBaseline(published)
             }
         }
+        // A character kept in the catalog as a stub holds no detail to diff against.
+        if (result.kind !== 'delete') this.forgetMaterializedCharacter(result.characterId)
         if (
             options.committedSelectedCharacter !== undefined &&
             this.capture().character?.chaId === options.committedSelectedCharacter.id
@@ -4900,6 +4904,13 @@ export class SaveCoordinator {
             baselines.set(authority.characterId, shell as CompleteCharacter)
         }
         return [...baselines.values()].map((value) => ({...value, chats: value.chats.map((chat) => ({...chat}))} as CompleteCharacter))
+    }
+
+    /** Drops the baselines of a character the working set no longer holds; hydration captures new ones. */
+    forgetMaterializedCharacter(characterId: string): void {
+        if (this.dependencies.captureCharacter(characterId)) return
+        this.materializedBaselines.delete(characterId)
+        this.materializedCanonicalBaselines.delete(characterId)
     }
 
     capturePresetRecordBaseline(): botPreset[] {

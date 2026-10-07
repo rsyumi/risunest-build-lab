@@ -219,6 +219,7 @@ struct Sent {
     url: String,
     headers: BTreeMap<String, String>,
     body_length: u64,
+    control: bool,
 }
 
 #[derive(Default)]
@@ -249,6 +250,7 @@ impl crate::external_storage::http::HttpTransport for ScriptedTransport {
             let url = request.url.to_string();
             let headers = request.headers.clone();
             let declared = request.content_length;
+            let control = request.control;
             let mut body_length = 0u64;
             if let Some(mut body) = request.body {
                 let mut buffer = vec![0u8; 64 * 1024];
@@ -269,6 +271,7 @@ impl crate::external_storage::http::HttpTransport for ScriptedTransport {
                 url,
                 headers,
                 body_length,
+                control,
             });
             let reply = self
                 .replies
@@ -1139,6 +1142,8 @@ fn session_fragments_are_320_kib_aligned_and_sent_in_order_without_authorization
             assert_eq!(fragment.url, "https://sn3302.up.1drv.com/up/session");
             assert!(!fragment.headers.contains_key("authorization"));
             assert_eq!(fragment.body_length % graph::FRAGMENT_ALIGNMENT, 0);
+            // A fragment carries data, so the short control deadline must not cover it.
+            assert!(!fragment.control);
         }
         assert_eq!(
             fragments[0].headers["content-range"],

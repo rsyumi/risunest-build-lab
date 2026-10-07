@@ -48,8 +48,8 @@ describe('server sync progress view', () => {
         expect(view.detail).toBe('1 / 4 · 1.0 MiB / 4.0 MiB')
         expect(view.fraction).toBe(0.25)
         expect(view.counters.map(counter => [counter.key, counter.value])).toEqual([
-            ['bytes', '↑ 1.0 MiB · ↓ 0 bytes'],
-            ['rate', '512.0 KiB/s'],
+            ['bytes', '↑ 1.0 MiB · ↓ 0 B'],
+            ['rate', '512 KiB/s'],
             ['files', '1 / 4'],
             ['elapsed', '01:05'],
         ])
@@ -133,7 +133,7 @@ describe('server sync routine bar', () => {
         const full = serverSyncProgressView(state, text, 0)
         expect(full.fraction).toBe(0.5)
         expect(full.detail).toBe('65 / 130')
-        expect(full.counters.find(counter => counter.key === 'bytes')?.value).toBe('↑ 0 bytes · ↓ 1.0 KiB')
+        expect(full.counters.find(counter => counter.key === 'bytes')?.value).toBe('↑ 0 B · ↓ 1.0 KiB')
     })
     it('does not carry a completed asset peak into a later hydration or its discovery', () => {
         const scope = { id: 2, done: 1, total: 8, settled: false }

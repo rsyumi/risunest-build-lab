@@ -2,7 +2,8 @@ import {beforeEach, describe, expect, it, vi} from 'vitest'
 import type {SyncBindingState, SyncBindingTransport} from './bindingFlow'
 const native = vi.hoisted(()=>({state:vi.fn(),assertAuthority:vi.fn()}))
 vi.mock('./bindingNative',()=>({createNativeSyncBindingBridge:()=>native}))
-import {prepareBoundLibraryReplacement,registerSyncBindingTransport} from './bindingRegistry'
+import {bindSyncTarget,prepareBoundLibraryReplacement,registerSyncBindingFlow,registerSyncBindingTransport,unbindSyncTarget} from './bindingRegistry'
+import {subscribeSyncBindingChanges} from './bindingChanges'
 const state: SyncBindingState={target:{kind:'server',connectionId:'synthetic'},targetAuthority:'1',selectionEpoch:'2',libraryId:'synthetic-library',progress:null}
 beforeEach(()=>{native.state.mockReset().mockResolvedValue(state);native.assertAuthority.mockReset().mockResolvedValue(undefined)})
 function transport(receive=vi.fn(async()=>{})) {
@@ -64,5 +65,36 @@ describe('bound library replacement prerequisite',()=>{
         expect(prepared.bound).toBe(false)
         native.state.mockResolvedValue(state)
         await expect(prepared.assertAuthority()).rejects.toThrow('changed')
+    })
+})
+describe('sync target change notices',()=>{
+    const target={kind:'external' as const,connectionId:'synthetic-connection'}
+    function flow(bind:()=>Promise<unknown>,unbind:()=>Promise<unknown>=async()=>state) {
+        return registerSyncBindingFlow({bind,unbind} as unknown as Parameters<typeof registerSyncBindingFlow>[0])
+    }
+    it('tells every view once the change has settled, whatever its outcome',async()=>{
+        const seen=vi.fn()
+        const stop=subscribeSyncBindingChanges(seen)
+        const releaseTransport=registerSyncBindingTransport(target,transport())
+        let finish!:(value:unknown)=>void
+        const outcomes=[new Promise(resolve=>{finish=resolve}),Promise.resolve({kind:'cancelled'}),Promise.reject(new Error('inspect failed'))]
+        const release=flow(()=>outcomes.shift()!)
+        try {
+            const pending=bindSyncTarget(target)
+            await Promise.resolve();await Promise.resolve()
+            expect(seen).not.toHaveBeenCalled()
+            finish({kind:'bound'})
+            await pending
+            expect(seen).toHaveBeenCalledOnce()
+            await bindSyncTarget(target)
+            expect(seen).toHaveBeenCalledTimes(2)
+            await expect(bindSyncTarget(target)).rejects.toThrow('inspect failed')
+            expect(seen).toHaveBeenCalledTimes(3)
+            await unbindSyncTarget()
+            expect(seen).toHaveBeenCalledTimes(4)
+            stop()
+            await unbindSyncTarget()
+            expect(seen).toHaveBeenCalledTimes(4)
+        } finally {release();releaseTransport();stop()}
     })
 })

@@ -269,6 +269,8 @@ export interface PersistentDataRuntimeStateAdapter {
     afterRemoteApply?(): void
     /** Root fields whose working-set value changed when stored units were projected into it. */
     afterRemoteRootChange?(fields: ReadonlySet<string>): void
+    /** A received plugin record changed which plugins run or how they are loaded. */
+    afterRemotePluginChange?(): void
     canonicalCapture?: PersistenceCanonicalCapture
     captureRoot(): RootDatabase
     capturePluginStorage?(): Database['pluginCustomStorage'] | null
@@ -720,7 +722,12 @@ export function createPersistentDataRuntime(
             coordinator.pendingWorkingSetRefreshRevision === null &&
             dependencies.state.canDeactivateWorkingSet?.() !== false,
         canDeactivateCharacter: dependencies.state.canDeactivateCharacter,
-        releaseInactiveCharacter: dependencies.state.releaseInactiveCharacter,
+        releaseInactiveCharacter: dependencies.state.releaseInactiveCharacter
+            ? (id) => {
+                dependencies.state.releaseInactiveCharacter!(id)
+                coordinator.forgetMaterializedCharacter(id)
+            }
+            : undefined,
         shouldHydrateFullCharacter: dependencies.state.shouldHydrateFullCharacter,
         canReleaseConversation: dependencies.state.canReleaseConversation,
         canUseWindowedSelectedConversation:
@@ -1083,6 +1090,16 @@ export function createPersistentDataRuntime(
         }))]
         const rootValue = (field: string) => canonicalJson({ value: (database as unknown as Record<string, unknown>)[field] })
         let rootBefore: string[] = []
+        const receivedPlugins = localIntent ? [] : [...new Set(result.affectedKeys.flatMap((key) => {
+            const [kind, collection, name] = JSON.parse(key) as string[]
+            return kind === 'record' && collection === 'plugins' ? [name] : []
+        }))]
+        const pluginLoadInputs = () => canonicalJson(receivedPlugins.map((name) => {
+            const plugin = database.plugins?.find((value) => value.name === name)
+            return plugin ? [plugin.enabled, plugin.script, plugin.version, plugin.arguments, plugin.realArg] : null
+        }))
+        let pluginsBefore = ''
+        let pluginsChanged = false
         // Membership and order units can move the selected entries away from their indexes.
         const reselect = result.affectedKeys.some((key) => {
             const [kind, id] = JSON.parse(key) as string[]
@@ -1103,6 +1120,7 @@ export function createPersistentDataRuntime(
                 if (dependencies.state.captureWorkingSetDatabase?.() !== database) throw new Error('Persistent working set changed during unit projection')
                 dependencies.state.beforeCapture?.()
                 rootBefore = rootFields.map(rootValue)
+                if (receivedPlugins.length) pluginsBefore = pluginLoadInputs()
                 if (reselect) pinnedSelection = {
                     characterId: dependencies.state.getSelectedCharacterId() ?? null,
                     conversationId: dependencies.state.getSelectedConversationId?.() ?? null,
@@ -1111,6 +1129,7 @@ export function createPersistentDataRuntime(
             }, () => {
                 // Corrected in the same turn as the projection, before any view reads the indexes.
                 if (pinnedSelection) reopenConversation = reconcileAppliedSelection(database, pinnedSelection)
+                pluginsChanged = receivedPlugins.length > 0 && pluginLoadInputs() !== pluginsBefore
                 const canonicalCapture = dependencies.state.canonicalCapture
                 const beforeDerive = canonicalCapture?.root() ?? canonicalJson(dependencies.state.captureRoot())
                 dependencies.state.afterRemoteApply?.()
@@ -1158,6 +1177,10 @@ export function createPersistentDataRuntime(
         const changedRootFields = new Set(rootFields.filter((field, index) => rootValue(field) !== rootBefore[index]))
         if (changedRootFields.size > 0) {
             try { dependencies.state.afterRemoteRootChange?.(changedRootFields) }
+            catch (error) { dependencies.onBackgroundError?.(error) }
+        }
+        if (pluginsChanged) {
+            try { dependencies.state.afterRemotePluginChange?.() }
             catch (error) { dependencies.onBackgroundError?.(error) }
         }
         if (!projectionObserver) refreshSelectedSession()

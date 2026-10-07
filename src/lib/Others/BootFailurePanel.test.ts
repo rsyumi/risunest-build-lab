@@ -55,6 +55,16 @@ describe('BootFailurePanel', () => {
         expect(buttons()).toEqual([languageEnglish.risuNest.recovery.exportAction, boot.restart, boot.copyDetails])
     })
 
+    it('offers no original data copy when the app failed while preparing to start', async () => {
+        const recovery = languageEnglish.risuNest.recovery
+        await render({ kind: 'unknown', message: 'native startup failed', stage: 'native-setup' })
+        expect(document.body.textContent).toContain(boot.unknown)
+        expect(document.body.textContent).not.toContain(recovery.exportTitle)
+        expect(document.body.textContent).not.toContain(recovery.exportHelp)
+        expect(buttons()).toEqual([boot.restart, boot.copyDetails])
+        expect(document.querySelector('button:disabled')).toBeNull()
+    })
+
     it('leaves the folder line out when the data folder cannot be resolved', async () => {
         f.roots.mockRejectedValue(new Error('roots unavailable'))
         await render(schemaFailure)

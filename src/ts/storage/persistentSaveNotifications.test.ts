@@ -34,6 +34,27 @@ describe('installPersistentSaveNotifications', () => {
         expect(onSaveCommitted).toHaveBeenCalledTimes(1)
     })
 
+    it('leaves a save refused for a deleted record to the save failure notice', () => {
+        const reportError = vi.fn()
+        let callbacks: PersistentRuntimeNotificationCallbacks = {}
+        installPersistentSaveNotifications({
+            sessionId: 'session-a',
+            channel: null,
+            configureRuntime: (value) => {
+                callbacks = value
+            },
+            showForeignRevisionWarning: vi.fn(),
+            setSaving: vi.fn(),
+            reportError,
+        })
+
+        callbacks.onBackgroundError?.(Object.assign(new Error('retired-record-id'), { code: 'validation' }))
+        expect(reportError).not.toHaveBeenCalled()
+        const other = new Error('offline')
+        callbacks.onBackgroundError?.(other)
+        expect(reportError).toHaveBeenCalledExactlyOnceWith(other)
+    })
+
     it('warns once about a foreign revision and clears callbacks on dispose', () => {
         const channel = makeChannel()
         const showForeignRevisionWarning = vi.fn()

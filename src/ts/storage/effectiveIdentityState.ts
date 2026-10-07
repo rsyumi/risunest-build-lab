@@ -182,7 +182,12 @@ export function flushEffectiveToggleEdits(db: Database): void {
         if (key.startsWith('toggle_') && current.binding && !bound) continue
         const target = bound ? (bound.savedToggleValues ??= {}) : explicit
         if (value === undefined) delete target[key]
-        else defineOwnEnumerableProperty(target, key, value)
+        else {
+            // Assignment makes a state proxy report a new key to cached captures.
+            // Shadow inherited names first to avoid the __proto__ setter.
+            if (!Object.hasOwn(target, key) && key in target) defineOwnEnumerableProperty(target, key, value)
+            target[key] = value
+        }
     }
     current.variables = { ...db.globalChatVariables }
 }

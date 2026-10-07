@@ -328,19 +328,6 @@
         return Number.isFinite(time) ? new Date(time).toLocaleString() : '—'
     }
 
-    function externalSize(value?: string): string {
-        if (!value) return ''
-        const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
-        let amount = Number(value)
-        if (!Number.isFinite(amount)) return ''
-        let index = 0
-        while (index < units.length - 1 && amount >= 1024) {
-            amount /= 1024
-            index += 1
-        }
-        return `${index === 0 ? amount : Math.round(amount * 10) / 10} ${units[index]}`
-    }
-
 
     function resetExternal(): void {
         externalConnection = undefined
@@ -1011,8 +998,9 @@
                                                     value={item.id}
                                                     bind:group={externalSelected}
                                                 />
-                                                <span class="when">{externalWhen(item.createdAtMs)}</span>
-                                                <span class="dim">{externalSize(item.storedBytes)}</span>
+                                                <span class="pick-main">
+                                                    <span class="when">{externalWhen(item.createdAtMs)}</span>
+                                                </span>
                                             </label>
                                         {/each}
                                     </div>
@@ -1244,9 +1232,15 @@
     }
 
     /* ── brand panel ── */
+    /* The weave is painted in fixed dark colors, so the text on it stays light in every theme. */
     .brand {
+        --o-ink: #fff;
+        --o-soft: rgba(255, 255, 255, 0.72);
+        --o-faint: rgba(255, 255, 255, 0.5);
+
         position: relative;
         overflow: hidden;
+        color: var(--o-ink);
         padding: calc(18px + var(--o-safe-top)) 22px 30px;
         display: flex;
         flex-direction: column;
@@ -1969,9 +1963,13 @@
         flex: none;
         accent-color: var(--o-teal);
     }
-    .pick .when {
+    .pick-main {
+        display: grid;
+        flex: 1 1 0;
+        gap: 2px;
         min-width: 0;
-        flex: 1 1 auto;
+    }
+    .pick .when {
         font-variant-numeric: tabular-nums;
     }
     .found {

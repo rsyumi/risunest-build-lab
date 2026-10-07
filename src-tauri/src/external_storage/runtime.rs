@@ -26,7 +26,7 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 pub(crate) fn local_error(error: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Transient).caused(&error)
+    ProviderError::new(ErrorKind::LocalFailure).caused(&error)
 }
 pub(crate) fn root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
     app.state::<JobCommandState>()
@@ -305,7 +305,7 @@ fn refresh_transfer_counters(root: &std::path::Path, job: &mut DurableJob) {
     }
 }
 #[tauri::command]
-pub(crate) async fn external_storage_cancel_job(app: AppHandle, job_id: String) -> Result<Value> {
+pub(crate) async fn external_storage_cancel_job(app: AppHandle, job_id: String, stopped_by_app: Option<bool>) -> Result<Value> {
     logged("external_storage_cancel_job", async move {
         let store = JobStore::open(&root(&app)?)?;
         let state = app.state::<JobCommandState>();
@@ -342,14 +342,20 @@ pub(crate) async fn external_storage_cancel_job(app: AppHandle, job_id: String) 
             {
                 pds.external_cancel_prepared(&job_id).map_err(local_error)?;
             }
-            job.summary["state"] = json!("cancelled");
-            job.summary["phase"] = json!("cancelled");
-            job.summary["updatedAtMs"] = json!(now_ms().to_string());
+            settle_cancelled(&mut job, stopped_by_app == Some(true));
             store.put(&job)?;
         }
         super::runtime_restore::discard_finished_staging(&root(&app)?, &job);
         Ok(job.summary)
     }.await)
+}
+/// Settles a job as cancelled. A job the app gave up on after its own retries keeps that
+/// mark, so the renderer shows its error instead of a cancellation the user never made.
+fn settle_cancelled(job: &mut DurableJob, stopped_by_app: bool) {
+    job.summary["state"] = json!("cancelled");
+    job.summary["phase"] = json!("cancelled");
+    job.summary["updatedAtMs"] = json!(now_ms().to_string());
+    if stopped_by_app { job.summary["stoppedByApp"] = json!(true); }
 }
 #[tauri::command]
 pub(crate) async fn external_storage_stop_restore(app: AppHandle, job_id: String) -> Result<Value> {
@@ -612,7 +618,8 @@ fn reconcile_job<R: Runtime>(app: &AppHandle<R>, mut job: DurableJob) -> Result<
             Ok(None)=>{job.summary.as_object_mut().unwrap().remove("result");}
             // A commit's device maintenance refuses the store, and meanwhile the
             // running worker's record stands.
-            Err(error) if error.kind==ErrorKind::Transient && state.job_is_active(&job.id)? => {}
+            Err(error) if matches!(error.kind, ErrorKind::Transient | ErrorKind::LocalFailure)
+                && state.job_is_active(&job.id)? => {}
             Err(error)=>return Err(error),
         }
     }
@@ -844,6 +851,7 @@ pub(crate) fn wake_job(app: AppHandle, id: String) -> Result<()> {
                             | ErrorKind::ClockSkew
                             | ErrorKind::LocalStorageFull
                             | ErrorKind::LocalPermissionDenied
+                            | ErrorKind::LocalFailure
                     );
                     if !pending && !retryable {
                         if let (Some(pds), Some(item)) = (pds.as_mut(), authoritative.iter().find(|item| {
@@ -944,6 +952,7 @@ pub(crate) fn error_dto(error: &ProviderError) -> Value {
         ErrorKind::LocationOccupied => ("Choose an empty repository folder.", "check-endpoint", false),
         ErrorKind::LocalStorageFull => ("This device has insufficient space.", "free-space", false),
         ErrorKind::LocalPermissionDenied => ("Allow access to the local files and retry.", "retry", false),
+        ErrorKind::LocalFailure => ("This device could not complete the operation.", "retry", true),
         ErrorKind::StorageFull => (
             "The destination has insufficient space.",
             "free-space",
@@ -1695,6 +1704,16 @@ pub(crate) async fn external_storage_get_quota(
 mod tests {
     use super::*;
     #[test]
+    fn local_failures_name_the_device_and_stay_retryable() {
+        let error = local_error("synthetic local failure");
+        assert_eq!(error.kind, ErrorKind::LocalFailure);
+        let dto = error_dto(&error);
+        assert_eq!(dto["code"], "localFailure");
+        assert_eq!(dto["action"], "retry");
+        assert_eq!(dto["retryable"], true);
+    }
+
+    #[test]
     fn stopped_unknown_reconciliation_drops_the_stale_result_until_it_completes() {
         let mut job=automatic_job();
         job.summary["result"]=json!({"stopReason":"uncertain","reason":"publication-unknown"});
@@ -1720,6 +1739,22 @@ mod tests {
         apply_job_connection_status(&mut repaired,&jobs);
         assert_eq!(repaired["status"],"ready");
         assert!(repaired["lastError"].is_null());
+    }
+
+    #[test]
+    fn a_cancelled_job_carries_the_app_stop_only_when_the_app_stopped_it() {
+        let mut by_user = automatic_job();
+        by_user.summary["error"] = json!({"code":"transient","action":"retry","retryable":true});
+        let mut by_app = by_user.clone();
+        settle_cancelled(&mut by_user, false);
+        settle_cancelled(&mut by_app, true);
+        for job in [&by_user, &by_app] {
+            assert_eq!(job.summary["state"], "cancelled");
+            assert_eq!(job.summary["phase"], "cancelled");
+            assert_eq!(job.summary["error"]["code"], "transient");
+        }
+        assert!(by_user.summary.get("stoppedByApp").is_none());
+        assert_eq!(by_app.summary["stoppedByApp"], true);
     }
 
     #[test]

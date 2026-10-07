@@ -991,7 +991,11 @@ export async function changeChar(index: number, arg:{
         if (!activity.isCurrent()) return false
         return true
     } catch (error) {
-        alertError(error)
+        if (error instanceof PersistentMutationFencedError) {
+            alertToast(language.navigationBlockedWhileEditingPaused)
+        } else {
+            alertError(error)
+        }
         return false
     } finally {
         activity.finish()

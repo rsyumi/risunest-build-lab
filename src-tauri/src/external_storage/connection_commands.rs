@@ -2640,6 +2640,62 @@ mod tests {
     }
 
     #[test]
+    fn http_connections_prepare_and_list_only_for_user_configured_providers() {
+        let state = ConnectionCommandState::default();
+        let s3 = PrepareConnectionRequest {
+            config: super::super::contract::ConnectionConfig {
+                provider: "s3".into(),
+                profile: Some("generic".into()),
+                endpoint: "http://127.0.0.1:9000".into(),
+                account_id: String::new(),
+                location: BTreeMap::from([
+                    ("bucket".into(), "synthetic-bucket".into()),
+                    ("addressing".into(), "path".into()),
+                ]),
+                oauth_profile: None,
+            },
+            mode: ConnectionOpenMode::Create,
+            purpose: ConnectionPurpose::Backup,
+            recovery_key: None,
+            acknowledgements: Vec::new(),
+        };
+        assert_eq!(insert_preparation(&state, s3, None, None, false).unwrap().endpoint.authority,
+            "http://127.0.0.1:9000");
+
+        let mut stored = StoredConnection {
+            id: "http-webdav".into(),
+            config: super::super::contract::ConnectionConfig {
+                provider: "webdav".into(),
+                profile: None,
+                endpoint: "http://192.168.0.10:8080/dav".into(),
+                account_id: "synthetic".into(),
+                location: BTreeMap::from([("root".into(), "RisuNest".into())]),
+                oauth_profile: None,
+            },
+            descriptor: Descriptor::new("synthetic-repository".into(), None).unwrap(),
+            descriptor_locator: super::super::fake::locator(),
+            provider_repository_id: "synthetic-provider-root".into(),
+            credential_ref: "credential".into(),
+            root_key_ref: "root-key".into(),
+            recovery_key_ref: "recovery-key".into(),
+            retention_policy: None,
+            capabilities: super::super::fake::capabilities(false),
+            created_at_ms: 1,
+            verified_at_ms: 1,
+            last_sync_at_ms: None,
+            last_backup_at_ms: None,
+        };
+        assert!(summary(&stored).is_ok());
+        stored.config.provider = "mybox".into();
+        stored.config.account_id = String::new();
+        stored.config.location = BTreeMap::from([("rootFolderName".into(), "RisuNest".into())]);
+        stored.config.endpoint = "http://open-api.mybox.naver.com/v1".into();
+        assert!(summary(&stored).is_err());
+        stored.config.endpoint = "https://open-api.mybox.naver.com/v1".into();
+        assert!(summary(&stored).is_ok());
+    }
+
+    #[test]
     fn connection_settings_are_authenticated_before_endpoint_review() {
         let descriptor = Descriptor::new("synthetic-repository".into(), None).unwrap();
         let stored = StoredConnection {

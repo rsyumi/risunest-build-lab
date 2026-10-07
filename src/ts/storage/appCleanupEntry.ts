@@ -8,6 +8,22 @@ interface AppCleanupStatus {
     canCancel: boolean
 }
 
+/** A damaged record leaves this screen with nothing that can continue or cancel, so the user removes it outside the app. */
+function damagedRecordInstruction(ko: boolean): string {
+    const agent = navigator.userAgent
+    const lead = ko ? '삭제 기록이 손상되어 초기화를 진행할 수 없습니다. ' : 'The deletion record is damaged, so the reset cannot continue. '
+    if (/Android/i.test(agent)) return lead + (ko ? '앱 정보 > 저장공간에서 데이터를 삭제해주세요.' : 'Clear the data in App info > Storage.')
+    if (/iPad|iPhone|iPod/.test(agent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
+        return lead + (ko ? '앱을 삭제한 뒤 다시 설치해주세요.' : 'Delete the app and install it again.')
+    }
+    const folder = /Windows/i.test(agent) ? '%LOCALAPPDATA%\\RisuNest-cleanup'
+        : /Macintosh|Mac OS X/i.test(agent) ? '~/Library/Application Support/RisuNest-cleanup'
+            : '~/.local/share/risunest-cleanup'
+    return lead + (ko
+        ? `앱을 종료하고 ${folder} 폴더를 삭제한 뒤 RisuNest를 다시 시작하면 설정에서 초기화를 다시 진행할 수 있습니다.`
+        : `Quit the app, delete the ${folder} folder, and start RisuNest again. You can then run the reset again from the settings.`)
+}
+
 /** This entry must remain independent of application storage and plugins. */
 export async function appCleanupBeforeBootstrap(): Promise<void> {
     if (!(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return
@@ -45,7 +61,9 @@ export async function appCleanupBeforeBootstrap(): Promise<void> {
         message.textContent = cleanupNeedsWebViewUpdate(cause)
             ? ko ? 'Android System WebView를 업데이트한 후 로컬 데이터 삭제를 다시 시도해주세요.' : 'Update Android System WebView, then retry deleting local data.'
             : code === 'secret-index-corrupt' || code === 'cleanup-journal-corrupt'
-            ? ko ? '삭제 기록이 손상되어 초기화를 완료하지 못했습니다. 앱 데이터를 보존한 상태로 복구 지원을 요청해주세요.' : 'The deletion record is damaged. Preserve the app data and request recovery assistance.'
+            ? status?.canCancel === true
+                ? ko ? '삭제 기록이 손상되어 초기화를 완료하지 못했습니다. 초기화 취소를 눌러 앱을 시작해주세요.' : 'The deletion record is damaged, so the reset could not finish. Select Cancel reset to start the app.'
+                : damagedRecordInstruction(ko)
             : code === 'secret-cleanup-unavailable'
             ? ko ? '시스템 자격 증명 저장소를 열 수 없습니다. Linux에서는 키링을 실행하고 잠금을 해제한 후 다시 시도해주세요.' : 'The system credential store is unavailable. On Linux, start and unlock the keyring, then retry.'
             : code === 'secret-index-unavailable' || code === 'cleanup-journal-unavailable' || code === 'cleanup-files-busy-or-denied'

@@ -73,7 +73,7 @@ vi.mock('./alert', async () => {
         alertWait: vi.fn(),
     }
 })
-vi.mock('../lang', () => ({ language: { errors: {}, checkboxConfirmation: {
+vi.mock('../lang', () => ({ language: { errors: {}, navigationBlockedWhileEditingPaused: 'Synthetic paused copy', checkboxConfirmation: {
     characterDeletion: "Delete character",
     characterTrashDescription: "Moves to the trash.",
     characterDeletionDescription: "Deleted permanently.",
@@ -163,6 +163,7 @@ import {
 } from './characters'
 import { createMetadataOnlySelectedConversation } from './storage/selectedConversationLifecycle'
 import { SelectedConversationPromotionStaleError } from './storage/activeWorkingSet.svelte'
+import { PersistentMutationFencedError } from './storage/saveCoordinator'
 import { MobileGUIStack, OpenRealmStore, selectedCharID } from './stores.svelte'
 import { doingChat } from './process/index.svelte'
 import { createConversationSummaryStub } from './storage/conversationResidency'
@@ -348,6 +349,18 @@ describe('runtime chat identity', () => {
         ).resolves.toBe(false)
         expect(get(navigationActivity)).toBeNull()
         expect(mocks.activateCharacter).not.toHaveBeenCalled()
+    })
+
+    it('refuses with product copy while a data replacement pauses editing', async () => {
+        const character = createBlankChar()
+        mocks.database.characters.push(character)
+        mocks.activateCharacter.mockRejectedValueOnce(new PersistentMutationFencedError())
+
+        await expect(changeChar(0)).resolves.toBe(false)
+
+        expect(mocks.alertToast).toHaveBeenCalledWith('Synthetic paused copy')
+        expect(mocks.alertError).not.toHaveBeenCalled()
+        expect(get(navigationActivity)).toBeNull()
     })
 
     it('normalizes navigation metadata without enumerating the selected chat body', async () => {

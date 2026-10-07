@@ -1077,27 +1077,46 @@ impl ExternalLwwEngine {
                 byte_length: body.byte_length,
                 sha256: body.sha256.clone(),
             };
-            if publication.bodies[index].resume.is_none() {
-                publication.bodies[index].resume = self
-                    .provider
-                    .begin_upload(&self.repository, &intent, cancel)
-                    .await?
-                    .map(Self::saved);
+            let mut finished = None;
+            if let Some(saved) = publication.bodies[index].resume.as_ref() {
+                // An earlier attempt may have finished without its answer, or
+                // its session may have moved on or expired.
+                let saved = Self::resume(saved);
+                match self.provider.reconcile_upload(&self.repository, &intent, Some(&saved), cancel).await? {
+                    UploadResolution::Complete(receipt) => finished = Some(receipt),
+                    UploadResolution::Resumable(state) => publication.bodies[index].resume = Some(Self::saved(state)),
+                    UploadResolution::RestartRequired => publication.bodies[index].resume = None,
+                    UploadResolution::Conflict => return Err(segment::corrupt()),
+                }
                 store
                     .external_lww_persist(&publication, &sealed)
                     .map_err(store_error)?;
             }
-            let resume = publication.bodies[index].resume.as_ref().map(Self::resume);
-            let receipt = self
-                .provider
-                .create_object(
-                    &self.repository,
-                    &intent,
-                    &source,
-                    resume.as_ref(),
-                    cancel,
-                )
-                .await?;
+            let receipt = match finished {
+                Some(receipt) => receipt,
+                None => {
+                    if publication.bodies[index].resume.is_none() {
+                        publication.bodies[index].resume = self
+                            .provider
+                            .begin_upload(&self.repository, &intent, cancel)
+                            .await?
+                            .map(Self::saved);
+                        store
+                            .external_lww_persist(&publication, &sealed)
+                            .map_err(store_error)?;
+                    }
+                    let resume = publication.bodies[index].resume.as_ref().map(Self::resume);
+                    self.provider
+                        .create_object(
+                            &self.repository,
+                            &intent,
+                            &source,
+                            resume.as_ref(),
+                            cancel,
+                        )
+                        .await?
+                }
+            };
             Self::validate_receipt(&intent, &receipt)?;
             publication.bodies[index].locator = Some(receipt.locator);
             publication.bodies[index].complete = true;
@@ -1277,7 +1296,7 @@ impl ExternalLwwEngine {
     fn held_body_error(error: ProviderError) -> ProviderError {
         match error.kind {
             ErrorKind::Cancelled | ErrorKind::PreconditionFailed | ErrorKind::Corrupt
-                | ErrorKind::LocalStorageFull | ErrorKind::LocalPermissionDenied => error,
+                | ErrorKind::LocalStorageFull | ErrorKind::LocalPermissionDenied | ErrorKind::LocalFailure => error,
             _ => ProviderError { kind: ErrorKind::PreviousStorageUnavailable, http_status: None, retry_at_ms: None,
                 oauth_error: None, oauth_error_description: None, cause: error.cause },
         }

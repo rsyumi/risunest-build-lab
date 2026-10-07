@@ -219,7 +219,7 @@ impl PersistentStore {
         let prior: Option<String> = tx
             .query_row(
                 "SELECT value FROM app_kv WHERE key=?1",
-                [format!("lww-import-remap:{staging}")],
+                [remap_key(staging)],
                 |r| r.get(0),
             )
             .optional()?;
@@ -246,7 +246,7 @@ impl PersistentStore {
         for id in &presets {
             candidates.insert(("preset".to_owned(), id.clone()));
         }
-        for (_, root) in json_rows(&tx, "SELECT value FROM root WHERE generation=?1", staging)? {
+        for root in json_rows(&tx, "SELECT value FROM root WHERE generation=?1", staging)? {
             for (field, kind) in [
                 ("personas", "persona"),
                 ("modules", "modules"),
@@ -319,7 +319,7 @@ impl PersistentStore {
             return Ok(staged_source.then_some(STAGED_SOURCE));
         }
         let rows = json_rows(&tx, "SELECT value FROM root WHERE generation=?1", staging)?;
-        for (_, mut value) in rows {
+        for mut value in rows {
             map.root(&mut value);
             tx.execute(
                 "UPDATE root SET value=?2 WHERE generation=?1",
@@ -452,10 +452,7 @@ impl PersistentStore {
         }
         tx.execute(
             "INSERT INTO app_kv(key,value) VALUES(?1,?2)",
-            params![
-                format!("lww-import-remap:{staging}"),
-                serde_json::to_string(&map)?
-            ],
+            params![remap_key(staging), serde_json::to_string(&map)?],
         )?;
         let layer = remap_source(&tx, &map, staging, staged_source)?;
         tx.commit()?;
@@ -471,20 +468,22 @@ fn identity_rows(db: &Connection, sql: &str, generation: &str) -> StoreResult<Ve
     Ok(rows)
 }
 
-fn json_rows(db: &Connection, sql: &str, generation: &str) -> StoreResult<Vec<(String, Value)>> {
-    let mut q = db.prepare(sql)?;
-    let count = q.column_count();
-    let rows = q
-        .query_map([generation], |r| {
-            Ok((
-                if count == 1 { String::new() } else { r.get(0)? },
-                r.get::<_, String>(count - 1)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    rows.into_iter()
-        .map(|(id, raw)| Ok((id, serde_json::from_str(&raw)?)))
+fn json_rows(db: &Connection, sql: &str, generation: &str) -> StoreResult<Vec<Value>> {
+    identity_rows(db, sql, generation)?
+        .into_iter()
+        .map(|raw| Ok(serde_json::from_str(&raw)?))
         .collect()
+}
+
+fn remap_key(staging: &str) -> String {
+    format!("lww-import-remap:{staging}")
+}
+
+/// Forgets the identity remap of a stage that can no longer be committed,
+/// because it was activated, discarded or retired.
+pub(super) fn forget_identity_remap(db: &Connection, generation: &str) -> StoreResult<()> {
+    db.execute("DELETE FROM app_kv WHERE key=?1", [remap_key(generation)])?;
+    Ok(())
 }
 
 /// Rebuilds the remapped layer of the staged source units from the staged layer.
@@ -693,6 +692,50 @@ mod tests {
         assert!(store
             .lww_commit_replacement_units(&header, &incoming, Some(&altered))
             .is_err());
+    }
+    fn remap_records(store: &PersistentStore) -> i64 {
+        store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM app_kv WHERE key LIKE 'lww-import-remap:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+    #[test]
+    fn a_remap_record_ends_when_its_stage_is_activated_discarded_or_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(dir.path()).unwrap();
+        let initial = stage(&mut store);
+        store.replace_commit(&initial, None).unwrap();
+        retire(&mut store, &["exists", "character", "char"]);
+
+        let activated = stage(&mut store);
+        store.remap_retired_staging(&activated, false).unwrap();
+        assert_eq!(remap_records(&store), 1);
+        store.replace_commit(&activated, None).unwrap();
+        assert_eq!(remap_records(&store), 0);
+
+        let discarded = stage(&mut store);
+        store.remap_retired_staging(&discarded, false).unwrap();
+        assert_eq!(remap_records(&store), 1);
+        store.replace_abort(&discarded).unwrap();
+        assert_eq!(remap_records(&store), 0);
+
+        // A stage left behind when the app stopped is retired by the next open.
+        let abandoned = stage(&mut store);
+        store.remap_retired_staging(&abandoned, false).unwrap();
+        assert_eq!(remap_records(&store), 1);
+        drop(store);
+        let store = PersistentStore::open(dir.path()).unwrap();
+        assert_eq!(
+            super::super::commit::generation_state(&store.connection, &abandoned)
+                .unwrap()
+                .as_deref(),
+            Some("retired")
+        );
+        assert_eq!(remap_records(&store), 0);
     }
     #[test]
     fn archive_remap_survives_a_second_backup_without_opening_compressed_bodies() {

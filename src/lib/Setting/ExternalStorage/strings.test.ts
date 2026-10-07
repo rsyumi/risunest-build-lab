@@ -54,7 +54,7 @@ describe('externalErrorMessage', () => {
             'folderNotRepository', 'folderUnsupportedLocation',
             'endpointRejected', 'deviceVaultUnavailable', 'clockSkew', 'folderTooLarge',
             'repositoryBusy', 'locationOccupied', 'authorizationTimedOut', 'localStorageFull',
-            'localPermissionDenied', 'repositoryKeyUnavailable', 'authorizationUnavailable',
+            'localPermissionDenied', 'localFailure', 'repositoryKeyUnavailable', 'authorizationUnavailable',
         ]
         for (const kind of kinds) {
             expect(externalErrorMessage(korean, { kind })).not.toBe(korean.errorGeneric)

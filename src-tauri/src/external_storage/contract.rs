@@ -27,6 +27,8 @@ pub(crate) enum ErrorKind {
     RepositoryBusy,
     LocalStorageFull,
     LocalPermissionDenied,
+    /// Any other failure of a file, store or worker on this device.
+    LocalFailure,
     NotFound,
     PreconditionFailed,
     RateLimited,

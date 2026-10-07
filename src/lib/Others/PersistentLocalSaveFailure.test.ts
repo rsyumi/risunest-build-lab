@@ -47,6 +47,12 @@ it('offers storage recovery for quota failures', async () => {
     expect(document.body.textContent).toContain(languageEnglish.risuNest.localSaveFailure.storage)
     expect(document.body.textContent).not.toContain('private database')
 })
+it('names data deleted on another device instead of the refusal token', async () => {
+    failure.set(Object.assign(new Error('retired-record-id'), { code: 'validation' })); await tick()
+    expect(document.body.textContent).toContain(languageEnglish.risuNest.localSaveFailure.deleted)
+    expect(document.body.textContent).not.toContain('retired')
+    expect(document.querySelector('button')).not.toBeNull()
+})
 it('asks to remove what was just added when a save is too large', async () => {
     failure.set(new PayloadTooLargeError('commit', 70 * 1024 * 1024)); await tick()
     expect(document.body.textContent).toContain(languageEnglish.risuNest.localSaveFailure.tooLarge)

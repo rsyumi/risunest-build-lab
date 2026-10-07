@@ -6,7 +6,7 @@
     let saving = $state(false)
     const copy = $derived(language.risuNest.localSaveFailure)
     const error = $derived($persistentLocalSaveFailure && typeof $persistentLocalSaveFailure === 'object'
-        ? $persistentLocalSaveFailure as { code?: unknown; area?: unknown; name?: unknown } : null)
+        ? $persistentLocalSaveFailure as { code?: unknown; area?: unknown; name?: unknown; message?: unknown } : null)
     const area = $derived(typeof error?.area === 'string' ? ({
         root: copy.settings, character: language.character, conversation: copy.conversation,
         presets: copy.presets, 'plugin storage': copy.plugins, 'asset aliases': copy.assets,
@@ -15,7 +15,8 @@
         ? copy.invalid.replace('{0}', area)
         : error?.code === 'payload-too-large' ? copy.tooLarge
         : error?.name === 'QuotaExceededError' ? copy.storage
-        : error?.name === 'WindowedConversationSaveError' ? copy.currentChat : copy.failed)
+        : error?.name === 'WindowedConversationSaveError' ? copy.currentChat
+        : error?.message === 'retired-record-id' ? copy.deleted : copy.failed)
 
     async function retry() {
         if (saving) return

@@ -190,8 +190,9 @@ export class ExternalStorageBridge {
         })
     }
 
-    cancelJob(jobId: string): Promise<ExternalJobSummary> {
-        return this.native('external_storage_cancel_job', { jobId })
+    /** `stoppedByApp` marks a job the app gave up on, which the user did not cancel. */
+    cancelJob(jobId: string, stoppedByApp?: boolean): Promise<ExternalJobSummary> {
+        return this.native('external_storage_cancel_job', { jobId, ...(stoppedByApp === undefined ? {} : { stoppedByApp }) })
     }
 
     stopRestore(jobId: string): Promise<ExternalJobSummary> {

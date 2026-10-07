@@ -42,7 +42,7 @@ impl NativeHttpTransport {
         })
     }
     pub fn with_user_endpoint(mut self, config: &ConnectionConfig) -> Result<Self> {
-        if matches!(config.provider.as_str(), "webdav" | "s3" | "gitlab_packages") {
+        if accepts_user_http(&config.provider) {
             let endpoint = url::Url::parse(&config.endpoint).map_err(|_| ProviderError::new(ErrorKind::Unsupported))?;
             if !user_endpoint_allowed(&endpoint) { return Err(ProviderError::new(ErrorKind::Unsupported)); }
             if endpoint.scheme() == "http" {
@@ -68,6 +68,10 @@ impl NativeHttpTransport {
             loopback_http: true,
         }
     }
+}
+/// Providers whose endpoint the user types, and so may be a plain `http` server.
+pub(crate) fn accepts_user_http(provider: &str) -> bool {
+    matches!(provider, "webdav" | "s3" | "gitlab_packages")
 }
 pub(crate) fn user_endpoint_allowed(url: &url::Url) -> bool {
     matches!(url.scheme(), "https" | "http") && url.host_str().is_some()
