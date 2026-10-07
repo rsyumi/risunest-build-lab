@@ -16,6 +16,7 @@ import { subscribeLocalPersistentRevision } from '../persistentRevisionEvents'
 import { listen } from '@tauri-apps/api/event'
 import { generatingConversations } from '../generatingConversationRegistry'
 import { bindSyncTarget, unbindSyncTarget } from './bindingRegistry'
+import { subscribeSyncBindingChanges } from './bindingChanges'
 import type { ServerConfig } from './serverSync'
 import { get } from 'svelte/store'
 import { selectedCharID } from 'src/ts/stores.svelte'
@@ -340,6 +341,8 @@ export async function installServerSyncProduction(): Promise<void> {
     if (!isTauri || disposeServer) return
     const disposers = [registerSyncBindingTransport({ kind: 'server', connectionId: 'server' }, transport)]
     disposers.push(subscribeLocalPersistentRevision((_revision,cause) => scheduler.localChange(cause === 'generation-complete')))
+    // Another sync target taking over fences this one without a status read, so the server card reads it again.
+    disposers.push(subscribeSyncBindingChanges(() => { void controller.ensureStatus().catch(() => {}) }))
     // The source is renewed on every store revision; only a different conversation counts as opened.
     // The one open at startup is covered by the startup pull.
     const conversationIdentity = () => {

@@ -2,7 +2,7 @@
 //! into the job-owned sink while hashing, Retry-After parsing and the default
 //! HTTP status classification. A service that documents a different meaning
 //! for a status (403 as throttling, 409 as a precondition) overrides it locally.
-use crate::external_storage::{contract::*, http::HttpResponse};
+use crate::external_storage::contract::*;
 use std::{collections::BTreeMap, pin::Pin};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
@@ -30,6 +30,14 @@ fn io_error(cancel: &Cancellation) -> ProviderError {
     match cancel.check() {
         Err(cancelled) => cancelled,
         Ok(()) => ProviderError::new(ErrorKind::Transient),
+    }
+}
+
+/// The sink writes to this device, so its failures keep their local kind.
+fn write_error(error: std::io::Error, cancel: &Cancellation) -> ProviderError {
+    match cancel.check() {
+        Err(cancelled) => cancelled,
+        Ok(()) => crate::external_storage::packaging::transient(error),
     }
 }
 
@@ -99,9 +107,9 @@ pub(crate) async fn stream_to_sink(
         writer
             .write_all(&buffer[..read])
             .await
-            .map_err(|_| io_error(cancel))?;
+            .map_err(|error| write_error(error, cancel))?;
     }
-    writer.shutdown().await.map_err(|_| io_error(cancel))?;
+    writer.shutdown().await.map_err(|error| write_error(error, cancel))?;
     drop(writer);
     if expected_length.is_some_and(|length| length != received) {
         return Err(ProviderError::new(ErrorKind::Corrupt));
@@ -169,14 +177,6 @@ pub(crate) fn classify_status(
         oauth_error: None,
         oauth_error_description: None,
         cause: Default::default(),
-    }
-}
-
-pub(crate) fn require_status(response: &HttpResponse, allowed: &[u16], now_ms: u64) -> Result<()> {
-    if allowed.contains(&response.status) {
-        Ok(())
-    } else {
-        Err(classify_status(response.status, &response.headers, now_ms))
     }
 }
 
@@ -258,6 +258,93 @@ mod tests {
                     .kind,
                 ErrorKind::FileTooLarge
             );
+        });
+    }
+
+    struct FailingWriter(std::io::ErrorKind);
+    impl tokio::io::AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::from(self.0)))
+        }
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+    struct FailingSink(std::io::ErrorKind);
+    impl TransferSink for FailingSink {
+        fn open<'a>(
+            &'a mut self,
+            _: u64,
+            _: u64,
+            _: &'a Cancellation,
+        ) -> ProviderFuture<'a, Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
+            let kind = self.0;
+            Box::pin(async move {
+                Ok(Box::pin(FailingWriter(kind)) as Pin<Box<dyn tokio::io::AsyncWrite + Send>>)
+            })
+        }
+        fn finish<'a>(&'a mut self, _: u64, _: &'a str) -> ProviderFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+    struct BrokenBody;
+    impl AsyncRead for BrokenBody {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::ErrorKind::ConnectionReset.into()))
+        }
+    }
+
+    #[test]
+    fn a_local_write_failure_is_not_reported_as_a_connection_failure() {
+        runtime().block_on(async {
+            let cancel = Cancellation::default();
+            for (io, expected) in [
+                (std::io::ErrorKind::StorageFull, ErrorKind::LocalStorageFull),
+                (std::io::ErrorKind::PermissionDenied, ErrorKind::LocalPermissionDenied),
+            ] {
+                let error = stream_to_sink(&mut body(vec![7; 16]), &mut FailingSink(io), Some(16), 16, &cancel)
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.kind, expected);
+            }
+            let mut broken: Pin<Box<dyn AsyncRead + Send>> = Box::pin(BrokenBody);
+            let error = stream_to_sink(&mut broken, &mut FailingSink(std::io::ErrorKind::StorageFull), Some(16), 16, &cancel)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Transient);
+
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("read-only");
+            let mut sink = SpoolSink::create(&path, 16).unwrap();
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(&path, permissions.clone()).unwrap();
+            // A superuser may still open a read-only file for writing.
+            let refused = std::fs::OpenOptions::new().write(true).open(&path).is_err();
+            let result = stream_to_sink(&mut body(vec![7; 16]), &mut sink, Some(16), 16, &cancel).await;
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            std::fs::set_permissions(&path, permissions).unwrap();
+            if refused {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::LocalPermissionDenied);
+            }
         });
     }
 

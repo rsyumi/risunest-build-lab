@@ -886,18 +886,13 @@ impl OneDrive {
         for _ in 0..MAX_FRAGMENT_REQUESTS {
             cancel.check()?;
             let length = graph::fragment_length(offset, intent.byte_length)?;
-            let last = offset + length == intent.byte_length;
-            let operation = if last {
-                ProviderOperation::CompleteUpload
-            } else {
-                ProviderOperation::UploadChunk
-            };
             // The upload URL is pre-authorized; a bearer token on it is
-            // documented to fail with 401.
+            // documented to fail with 401. The last fragment commits the file
+            // but still carries data, so it is a chunk, not a control request.
             let mut request = self.request(
                 reqwest::Method::PUT,
                 upload_url.clone(),
-                operation,
+                ProviderOperation::UploadChunk,
                 &context.account,
                 None,
             );

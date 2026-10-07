@@ -94,6 +94,16 @@ describe('native external LWW adapter', () => {
         await vi.advanceTimersByTimeAsync(600_000); await settle()
         expect(receives()).toBe(corrupt)
     })
+    it('stops when the connection reaches another repository', async () => {
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        const receives = () => fixture.invoke.mock.calls.filter(call => call[0] === 'external_lww_receive').length
+        fixture.invoke.mockImplementation(async command => { if (command === 'external_lww_receive') throw { kind: 'repositoryMismatch' } })
+        await vi.advanceTimersByTimeAsync(20_000); await settle()
+        const refused = receives()
+        expect(refused).toBeGreaterThan(0)
+        await vi.advanceTimersByTimeAsync(600_000); await settle()
+        expect(receives()).toBe(refused)
+    })
     it('publishes the actual generation-complete revision cause immediately over a pending ordinary debounce', async () => {
         dispose = await installExternalLwwAdapters(state()); await settle()
         fixture.invoke.mockClear(); fixture.mobile.mockClear(); fixture.flush.mockClear()

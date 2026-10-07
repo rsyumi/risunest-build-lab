@@ -1,6 +1,6 @@
 <script lang="ts">
     import { onMount, onDestroy } from 'svelte'
-    import { CheckIcon, ChevronRightIcon, LoaderCircleIcon, TriangleAlertIcon } from '@lucide/svelte'
+    import { CheckIcon, ChevronRightIcon, CloudDownloadIcon, HardDriveIcon, LoaderCircleIcon } from '@lucide/svelte'
     import { language } from 'src/lang'
     import { alertCheckboxConfirm, alertConfirm } from 'src/ts/alert'
     import { isTauri } from 'src/ts/platform'
@@ -18,8 +18,9 @@
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingButton from '../RisuNest/SettingButton.svelte'
-    import SegmentedButtons from '../RisuNest/SegmentedButtons.svelte'
     import SettingProgress from '../RisuNest/SettingProgress.svelte'
+    import SettingNotice from '../RisuNest/SettingNotice.svelte'
+    import StatusBadge from '../RisuNest/StatusBadge.svelte'
 
     interface Props {
         connectTarget?: (config: ServerConfig, newDevice: boolean) => Promise<unknown>
@@ -148,14 +149,13 @@
 </script>
 
 {#snippet statusPill()}
-    <span class="status" data-tone={status.tone} aria-live="polite"><span class="status-dot" aria-hidden="true"></span>{status.label}</span>
+    <StatusBadge label={status.label} tone={status.tone} />
 {/snippet}
 
 {#snippet connection()}
     {#if !connected}
-        <div class="notice">
-            <TriangleAlertIcon size={16} class="mt-0.5 shrink-0" aria-hidden="true" />
-            <p>{language.lwwSync.concurrentEditNotice}</p>
+        <div class="sync-block">
+            <SettingNotice text={language.lwwSync.concurrentEditNotice} />
         </div>
     {/if}
     {#if view.bindingIncomplete}
@@ -171,8 +171,8 @@
         <div class="sync-block">
             {#if connected && (view.status.libraryId || view.status.deviceId || pending !== undefined)}
                 <dl class="kv">
-                    {#if view.status.libraryId}<dt>{copy.libraryId}</dt><dd>{view.status.libraryId}</dd>{/if}
-                    {#if view.status.deviceId}<dt>{copy.deviceId}</dt><dd>{view.status.deviceId}</dd>{/if}
+                    {#if view.status.libraryId}<dt>{copy.libraryId}</dt><dd class="mono">{view.status.libraryId}</dd>{/if}
+                    {#if view.status.deviceId}<dt>{copy.deviceId}</dt><dd class="mono">{view.status.deviceId}</dd>{/if}
                     {#if pending !== undefined}<dt>{copy.pendingChanges}</dt><dd>{copy.count.replace('{0}', pending.toLocaleString())}</dd>{/if}
                     {#if view.lastSuccessAt !== undefined && !progress}<dt>{copy.lastSuccess}</dt><dd>{new Date(view.lastSuccessAt).toLocaleString()}</dd>{/if}
                 </dl>
@@ -180,7 +180,7 @@
             {#if progressPlace === 'bound'}{@render progressPanel()}{/if}
             <div class="actions">
                 {#if !view.bindingIncomplete}<SettingButton onclick={() => void run(retryServerSync)} disabled={busy}>{copy.syncNow}</SettingButton>{/if}
-                <SettingButton variant="danger" onclick={() => void run(disconnect)} disabled={busy}>{copy.disconnect}</SettingButton>
+                <SettingButton variant="danger" class="ml-auto" onclick={() => void run(disconnect)} disabled={busy}>{copy.disconnect}</SettingButton>
             </div>
             {@render alert()}
         </div>
@@ -188,10 +188,10 @@
     {#if codeShown}
         <div class="sync-block">
             {#if candidate}
-                <p class="text-[15px]">{copy.reviewTitle}</p>
+                <p class="block-title">{copy.reviewTitle}</p>
                 <dl class="kv review">
                     <dt>{copy.endpoint}</dt><dd>{candidate.endpoint}</dd>
-                    <dt>{copy.libraryId}</dt><dd>{candidate.libraryId}</dd>
+                    <dt>{copy.libraryId}</dt><dd class="mono">{candidate.libraryId}</dd>
                 </dl>
                 <div class="actions">
                     <SettingButton onclick={() => void run(() => connect())} busy={busy} disabled={busy}>{copy.connect}</SettingButton>
@@ -200,8 +200,10 @@
                 </div>
                 {#if progressPlace === 'candidate'}{@render progressPanel()}{:else}<p class="help">{copy.connectHint}</p>{/if}
             {:else}
-                <label class="text-[15px]" for="server-registration">{copy.registrationCode}</label>
-                {#if tone === 'settings'}<p class="help">{canScanServerRegistration ? copy.connectRowHelpScan : copy.connectRowHelp}</p>{/if}
+                <div class="field-head">
+                    <label class="block-title" for="server-registration">{copy.registrationCode}</label>
+                    {#if tone === 'settings'}<p class="help">{canScanServerRegistration ? copy.connectRowHelpScan : copy.connectRowHelp}</p>{/if}
+                </div>
                 <textarea id="server-registration" class="code" rows="3" spellcheck="false" autocapitalize="none" bind:value={code} disabled={busy || scanning}></textarea>
                 <div class="actions">
                     <SettingButton onclick={readCode} disabled={busy || !code}>{copy.readRegistration}</SettingButton>
@@ -221,7 +223,7 @@
 {/snippet}
 
 {#snippet alert()}
-    {#if view.error || failure}<p role="alert" class="text-sm text-danger-400">{failure || message({ code: view.error })}</p>{/if}
+    {#if view.error || failure}<SettingNotice role="alert" text={failure || message({ code: view.error })} />{/if}
 {/snippet}
 
 {#snippet progressSteps(steps: ServerSyncProgressView)}
@@ -263,6 +265,13 @@
     {/if}
 {/snippet}
 
+{#snippet place(part: 'local' | 'server' | 'external' | 'missing', label: string, value: string)}
+    <div class="place" data-part={part}>
+        <span class="place-label"><i class="place-dot" aria-hidden="true"></i><span>{label}</span></span>
+        <span class="value">{value}</span>
+    </div>
+{/snippet}
+
 {#if isTauri}
     {#if tone === 'onboarding'}
         <div class="embedded">
@@ -275,14 +284,41 @@
         </SettingGroup>
     {/if}
     {#if residency && connected}
+        {@const externalBytes = residency.remoteObjects > residency.serverObjects ? residency.remoteBytes - residency.serverBytes : 0}
+        {@const shares = [
+            { part: 'local', bytes: residency.localBytes },
+            { part: 'server', bytes: residency.serverBytes },
+            { part: 'external', bytes: externalBytes },
+        ].filter(share => share.bytes > 0)}
         <SettingGroup title={copy.residency.title} description={copy.residency.description}>
             <div class="sync-block">
-                <SegmentedButtons bind:value={policy} options={residencyOptions} label={copy.residency.title} role="radiogroup" disabled={busy} onchange={choosePolicy} />
+                <div class="choices" role="radiogroup" aria-label={copy.residency.title} aria-disabled={busy ? 'true' : undefined}>
+                    {#each residencyOptions as option (option.value)}
+                        {@const checked = policy === option.value}
+                        <label class="choice" data-checked={checked} data-disabled={busy}>
+                            <input class="sr-only" type="radio" name="risunest-asset-residency" value={option.value} {checked} disabled={busy} onchange={() => { policy = option.value; choosePolicy(option.value) }} />
+                            <span class="choice-icon" aria-hidden="true">
+                                {#if option.value === 'full'}<HardDriveIcon size={18} />{:else}<CloudDownloadIcon size={18} />{/if}
+                            </span>
+                            <span class="choice-label">{option.label}</span>
+                            <span class="choice-radio" aria-hidden="true"></span>
+                        </label>
+                    {/each}
+                </div>
             </div>
-            <SettingRow inline label={copy.residency.local}><span class="value">{bytes(residency.localBytes)}</span></SettingRow>
-            <SettingRow inline label={copy.residency.remoteOnly}><span class="value">{bytes(residency.serverBytes)}</span></SettingRow>
-            {#if residency.remoteObjects > residency.serverObjects}<SettingRow inline label={copy.residency.externalOnly}><span class="value">{bytes(residency.remoteBytes - residency.serverBytes)}</span></SettingRow>{/if}
-            <SettingRow inline label={copy.residency.unavailable}><span class="value">{copy.count.replace('{0}', residency.unavailableObjects.toLocaleString())}</span></SettingRow>
+            <div class="sync-block">
+                {#if shares.length > 0}
+                    <div class="distribution" aria-hidden="true">
+                        {#each shares as share (share.part)}<span data-part={share.part} style:flex-grow={share.bytes}></span>{/each}
+                    </div>
+                {/if}
+                <div class="places">
+                    {@render place('local', copy.residency.local, bytes(residency.localBytes))}
+                    {@render place('server', copy.residency.remoteOnly, bytes(residency.serverBytes))}
+                    {#if residency.remoteObjects > residency.serverObjects}{@render place('external', copy.residency.externalOnly, bytes(externalBytes))}{/if}
+                    {@render place('missing', copy.residency.unavailable, copy.count.replace('{0}', residency.unavailableObjects.toLocaleString()))}
+                </div>
+            </div>
             <div class="sync-block">
                 <div class="actions">
                     {#if residency.policy === 'full' && residency.remoteObjects > 0}<SettingButton onclick={() => void run(downloadHeld)} busy={downloading} disabled={busy}>{copy.residency.download}</SettingButton>{/if}
@@ -313,9 +349,9 @@
 <style>
     .sync-block {
         display: grid;
-        gap: 0.625rem;
+        gap: 0.75rem;
         min-width: 0;
-        padding: 0.75rem 1rem;
+        padding: 0.875rem 1rem;
         overflow-wrap: anywhere;
     }
     .actions {
@@ -326,24 +362,21 @@
     }
     .help {
         max-width: 62ch;
-        font-size: 13px;
-        line-height: 1.5;
+        font-size: 12.5px;
+        line-height: 1.55;
         color: color-mix(in srgb, var(--risu-theme-textcolor2) 62%, var(--risu-theme-textcolor) 38%);
     }
-    .notice {
-        display: flex;
-        gap: 0.625rem;
-        margin: 0.75rem 1rem;
-        padding: 0.625rem 0.75rem;
-        border: 1px solid color-mix(in srgb, var(--risu-theme-danger-400) 40%, transparent);
-        border-radius: 0.5rem;
-        background: color-mix(in srgb, var(--risu-theme-danger-400) 7%, transparent);
-        color: var(--risu-theme-textcolor);
-        font-size: 13px;
-        line-height: 1.5;
+    .block-title {
+        font-size: 14px;
+        font-weight: 600;
     }
-    .notice :global(svg) {
-        color: var(--risu-theme-danger-400);
+    .field-head {
+        display: grid;
+        gap: 0.25rem;
+    }
+    .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12.5px;
     }
     .code {
         width: 100%;
@@ -369,12 +402,14 @@
     .kv {
         display: grid;
         grid-template-columns: auto minmax(0, 1fr);
-        gap: 0.25rem 1rem;
+        gap: 0.375rem 1.25rem;
         margin: 0;
         font-size: 13px;
+        line-height: 1.45;
     }
     .kv dt {
         color: var(--risu-theme-textcolor2);
+        white-space: nowrap;
     }
     .kv dd {
         margin: 0;
@@ -441,54 +476,128 @@
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
     }
-    .status {
+    .choices {
+        display: grid;
+        gap: 0.5rem;
+    }
+    @container (min-width: 36rem) {
+        .choices {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+    .choice {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        min-width: 0;
+        padding: 0.75rem 0.875rem;
+        border: 1px solid var(--risu-theme-darkborderc);
+        border-radius: 0.5rem;
+        background: var(--risu-theme-bgcolor);
+        cursor: pointer;
+        transition: border-color 0.2s, background-color 0.2s;
+    }
+    .choice:hover {
+        border-color: color-mix(in srgb, var(--risu-theme-textcolor2) 55%, var(--risu-theme-darkborderc));
+    }
+    .choice[data-checked='true'] {
+        border-color: var(--risu-theme-primary-500);
+        background: color-mix(in srgb, var(--risu-theme-primary-500) 9%, var(--risu-theme-bgcolor));
+    }
+    .choice[data-disabled='true'] {
+        cursor: not-allowed;
+        opacity: 0.6;
+    }
+    .choice:has(input:focus-visible) {
+        outline: 2px solid var(--risu-theme-selected);
+        outline-offset: 2px;
+    }
+    .choice-icon {
+        display: grid;
+        flex: none;
+        place-items: center;
+        width: 2.25rem;
+        height: 2.25rem;
+        border-radius: 0.5rem;
+        background: var(--risu-theme-darkbg);
+        color: var(--risu-theme-textcolor2);
+    }
+    .choice[data-checked='true'] .choice-icon {
+        background: color-mix(in srgb, var(--risu-theme-primary-500) 18%, var(--risu-theme-bgcolor));
+        color: var(--risu-theme-textcolor);
+    }
+    .choice-label {
+        flex: 1;
+        min-width: 0;
+        font-size: 14px;
+        line-height: 1.4;
+    }
+    .choice[data-checked='true'] .choice-label {
+        font-weight: 600;
+    }
+    .choice-radio {
+        flex: none;
+        width: 1.125rem;
+        height: 1.125rem;
+        border: 2px solid var(--risu-theme-darkborderc);
+        border-radius: 50%;
+    }
+    .choice[data-checked='true'] .choice-radio {
+        border-color: var(--risu-theme-primary-500);
+        box-shadow: inset 0 0 0 3px var(--risu-theme-bgcolor);
+        background: var(--risu-theme-primary-500);
+    }
+    .distribution {
+        display: flex;
+        gap: 2px;
+        height: 0.5rem;
+        overflow: hidden;
+        border-radius: 99px;
+        background: var(--risu-theme-darkbutton);
+    }
+    .distribution span {
+        flex-basis: 0;
+        min-width: 3px;
+    }
+    .places {
+        display: grid;
+        gap: 0.5rem;
+    }
+    .place {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 1rem;
+        min-width: 0;
+        font-size: 13.5px;
+    }
+    .place-label {
         display: inline-flex;
         align-items: center;
         gap: 0.5rem;
-        padding: 0.3rem 0.75rem;
-        border: 1px solid var(--risu-theme-darkborderc);
-        border-radius: 99px;
-        font-size: 0.75rem;
-        white-space: nowrap;
+        min-width: 0;
+        color: color-mix(in srgb, var(--risu-theme-textcolor2) 45%, var(--risu-theme-textcolor));
     }
-    .status[data-tone='attention'] {
-        color: var(--risu-theme-danger-400);
-        border-color: color-mix(in srgb, var(--risu-theme-danger-400) 50%, transparent);
+    .place-dot {
+        flex: none;
+        width: 0.625rem;
+        height: 0.625rem;
+        border-radius: 3px;
     }
-    .status-dot {
-        width: 0.45rem;
-        height: 0.45rem;
-        border-radius: 50%;
-        background: currentColor;
-        opacity: 0.35;
-    }
-    .status[data-tone='connected'] .status-dot {
-        background: var(--risu-theme-success-500);
-        opacity: 1;
-    }
-    .status[data-tone='attention'] .status-dot {
-        opacity: 1;
-    }
-    .status[data-tone='paused'] .status-dot {
-        background: transparent;
-        box-shadow: inset 0 0 0 1.5px currentColor;
-        opacity: 0.7;
-    }
-    .status[data-tone='working'] .status-dot {
+    .distribution [data-part='local'],
+    .place[data-part='local'] .place-dot {
         background: var(--risu-theme-primary-500);
-        opacity: 1;
-        animation: status-pulse 1.5s ease-in-out infinite;
     }
-    @keyframes status-pulse {
-        50% {
-            opacity: 0.3;
-        }
+    .distribution [data-part='server'],
+    .place[data-part='server'] .place-dot {
+        background: var(--risu-theme-primary-300);
     }
-    @media (prefers-reduced-motion: reduce) {
-        .status-dot,
-        .progress[data-mode='routine'] :global([role='progressbar'] > div) {
-            animation: none;
-        }
+    .distribution [data-part='external'],
+    .place[data-part='external'] .place-dot {
+        background: var(--risu-theme-success-500);
+    }
+    .place[data-part='missing'] .place-dot {
+        border: 1.5px dashed var(--risu-theme-textcolor2);
     }
     .embedded {
         display: grid;
@@ -499,10 +608,14 @@
         display: flex;
         padding: 0 0 0.25rem;
     }
-    .embedded .notice {
-        margin: 0 0 0.5rem;
-    }
     .embedded .sync-block {
         padding: 0.5rem 0;
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .choice,
+        .progress[data-mode='routine'] :global([role='progressbar'] > div) {
+            animation: none;
+            transition: none;
+        }
     }
 </style>

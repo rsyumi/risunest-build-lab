@@ -153,6 +153,23 @@ const catalogCharacterFields = [
     'trashTime',
     'lastInteraction',
 ] as const
+const catalogCharacterFieldSet: ReadonlySet<string> = new Set(catalogCharacterFields)
+
+/// Copies one stored field into a stub when the stub shows it; other fields stay out of the stub.
+export function patchCatalogCharacterField(
+    target: CompleteCharacter,
+    detail: CharacterDetail | CompleteCharacter,
+    field: string,
+): void {
+    if (!catalogCharacterFieldSet.has(field)) return
+    const targetRecord = target as unknown as Record<string, unknown>
+    const detailRecord = detail as unknown as Record<string, unknown>
+    if (Object.hasOwn(detailRecord, field) && detailRecord[field] !== undefined) {
+        targetRecord[field] = detailRecord[field]
+    } else {
+        delete targetRecord[field]
+    }
+}
 
 export function patchWorkingSetCharacterDetail(
     target: CompleteCharacter,
@@ -161,13 +178,7 @@ export function patchWorkingSetCharacterDetail(
     const targetRecord = target as unknown as Record<string, unknown>
     const detailRecord = detail as unknown as Record<string, unknown>
     if (isCatalogCharacterStub(target)) {
-        for (const key of catalogCharacterFields) {
-            if (Object.hasOwn(detailRecord, key) && detailRecord[key] !== undefined) {
-                targetRecord[key] = detailRecord[key]
-            } else {
-                delete targetRecord[key]
-            }
-        }
+        for (const key of catalogCharacterFields) patchCatalogCharacterField(target, detail, key)
         return
     }
     for (const key of Object.keys(targetRecord)) {

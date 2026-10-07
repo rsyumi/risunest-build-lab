@@ -6,8 +6,8 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, ReadBuf};
 
-fn io_error(error: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Transient).caused(&error)
+fn io_error(error: impl std::fmt::Display + 'static) -> ProviderError {
+    super::packaging::transient(error)
 }
 pub(crate) struct SpoolSource {
     path: PathBuf,

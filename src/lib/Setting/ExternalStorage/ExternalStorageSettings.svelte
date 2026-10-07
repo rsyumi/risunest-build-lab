@@ -8,11 +8,15 @@
     import SettingButton from '../RisuNest/SettingButton.svelte'
     import SettingProgress from '../RisuNest/SettingProgress.svelte'
     import SettingToggle from '../RisuNest/SettingToggle.svelte'
+    import SettingNotice from '../RisuNest/SettingNotice.svelte'
+    import StatusBadge from '../RisuNest/StatusBadge.svelte'
+    import { CloudIcon, DatabaseIcon, PackageIcon, PinIcon, ServerIcon } from '@lucide/svelte'
     import { alertConfirm, alertNormal, alertCheckboxConfirm } from 'src/ts/alert'
     import { DBState } from 'src/ts/stores.svelte'
     import { getExternalStorageBridge } from 'src/ts/storage/sync/external/bridge'
     import { bindSyncTarget, unbindSyncTarget } from 'src/ts/storage/sync/bindingRegistry'
     import { createNativeSyncBindingBridge } from 'src/ts/storage/sync/bindingNative'
+    import { subscribeSyncBindingChanges } from 'src/ts/storage/sync/bindingChanges'
     import { requestExternalLwwNow, subscribeExternalLwwFailures, supportsExternalLwwNewDevice } from 'src/ts/storage/sync/external/lwwProduction'
     import BindingTargetSwitch from 'src/ts/storage/sync/BindingTargetSwitch.svelte'
     import { PREVIOUS_FILES_DOWNLOAD_FAILED } from 'src/ts/storage/sync/bindingFlow'
@@ -40,6 +44,7 @@
     } from 'src/ts/storage/sync/external/types'
     import { externalRestoreAreas } from 'src/ts/storage/sync/external/restoreScope'
     import { downloadRemoteAssets, getAssetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency'
+    import { formatRisuNestStorageBytes } from 'src/ts/storage/risuNestStorageDashboard'
     import ConnectionForm from './ConnectionForm.svelte'
     import { externalConnectionTitle, externalErrorKind, externalErrorMessage, externalStorageStrings } from './strings'
 
@@ -81,18 +86,30 @@
     /** Jobs that add or change history rows, by job ID, so the open history reloads when they finish. */
     const historyJobs = new Map<string, string>()
     let pollTimer: ReturnType<typeof setTimeout> | undefined
+    /** The state a sync switch was set to while its change runs. Otherwise it shows the device's sync target. */
+    let syncRequest = $state<Record<string, boolean>>({})
+    let stopBindingChanges: (() => void) | undefined
 
     async function setSyncBinding(connection: ExternalConnectionSummary, enabled: boolean): Promise<void> {
         busy = true
+        syncRequest[connection.id] = enabled
         try {
             if (enabled) await bindSyncTarget({ kind: 'external', connectionId: connection.id })
-            else await unbindSyncTarget()
+            else {
+                // A switch left over from an older state must not stop another sync target.
+                const current = (await createNativeSyncBindingBridge().state()).target
+                if (current.kind === 'external' && current.connectionId === connection.id) await unbindSyncTarget()
+            }
             await refreshExternalStorageProductionState()
-            await refresh()
+            error = ''
         } catch (reason) {
             error = externalErrorKind(reason) === PREVIOUS_FILES_DOWNLOAD_FAILED ? language.lwwSync.downloadFailedNotConnected : externalErrorMessage(strings, reason)
         }
-        finally { busy = false }
+        finally {
+            await refresh(true)
+            delete syncRequest[connection.id]
+            busy = false
+        }
     }
     async function syncNow(connection: ExternalConnectionSummary): Promise<void> {
         busy = true
@@ -270,11 +287,21 @@
             await refresh(true)
             schedulePoll()
         } catch (reason) {
-            error = externalErrorMessage(strings, reason)
+            const message = externalErrorMessage(strings, reason)
+            if (job === 'restore') await refresh(true)
+            if (job !== 'restore' || !rowShowsStoppedRestore(connection.id, message)) error = message
         } finally {
             busy = false
             activeAction = ''
         }
+    }
+
+    /** A restore the app stopped shows its error on the connection row, which the section does not repeat. */
+    function rowShowsStoppedRestore(connectionId: string, message: string): boolean {
+        const current = storageState?.connections.find(item => item.id === connectionId)
+        const latest = current && activeJob(current)
+        return !!current && !current.lastError && latest?.state === 'cancelled' && latest.stoppedByApp === true
+            && jobLabel(latest) === message
     }
 
     async function deleteHistory(
@@ -458,19 +485,19 @@
         try {
             held = await remoteOnlyFiles(connection)
         } catch {}
-        let download = false
-        if (held !== 0) {
-            const choice = await alertCheckboxConfirm({
-                title: strings.removeRemoteOnlyTitle,
-                description: held === undefined ? strings.removeRemoteOnlyUnknown : strings.removeRemoteOnly,
-                checkboxLabel: strings.downloadThenRemove,
-                actionLabel: strings.remove,
-                cancelLabel: strings.cancel,
-                requireChecked: false,
-            })
-            if (!choice.confirmed) return
-            download = choice.checked
-        } else if (!(await alertConfirm(`${strings.remove}: ${externalConnectionTitle(strings, connection)}`))) return
+        const remoteOnly = held !== 0
+        // The card's own two lines tell apart connections to one service and account.
+        const name = `${externalConnectionTitle(strings, connection)}\n${connectionPlace(connection)}`
+        const choice = await alertCheckboxConfirm({
+            title: strings.removeTitle,
+            description: remoteOnly ? `${name}\n\n${held === undefined ? strings.removeRemoteOnlyUnknown : strings.removeRemoteOnly}` : name,
+            checkboxLabel: remoteOnly ? strings.downloadThenRemove : strings.remove,
+            actionLabel: strings.remove,
+            cancelLabel: strings.cancel,
+            requireChecked: !remoteOnly,
+        })
+        if (!choice.confirmed) return
+        const download = remoteOnly && choice.checked
         busy = true
         activeAction = `remove:${connection.id}`
         try {
@@ -571,17 +598,7 @@
     }
 
     function bytes(value?: string): string {
-        if (!value) return '—'
-        const amount = BigInt(value)
-        const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
-        let divisor = 1n
-        let index = 0
-        while (index < units.length - 1 && amount >= divisor * 1024n) {
-            divisor *= 1024n
-            index += 1
-        }
-        if (index === 0) return `${amount} B`
-        return `${Number((amount * 10n) / divisor) / 10} ${units[index]}`
+        return value ? formatRisuNestStorageBytes(Number(value)) : '—'
     }
 
     function jobLabel(job: ExternalJobSummary): string {
@@ -593,6 +610,7 @@
         if (job.state === 'queued') return strings.queued
         if (job.state === 'running') return strings.running
         if (job.state === 'conflict') return strings.resolveRequired
+        if (job.stoppedByApp) return errorLabel(job.error)
         return strings.cancelled
     }
 
@@ -635,10 +653,11 @@
         return 'attention'
     }
 
+    // The notice under the heading explains a paused job, so the badge names only the state.
     function connectionStatus(connection: ExternalConnectionSummary): string {
         const job = activeJob(connection)
         if (job?.state === 'uncertain') return strings.statusError
-        if (job && externalJobIsPaused(job)) return errorLabel(job.error)
+        if (job && externalJobIsPaused(job)) return ['reauth-required', 'key-locked'].includes(connection.status) ? connectionStatusLabel(connection.status) : strings.statusError
         if (job && externalJobIsActive(job)) return strings.jobActive[job.kind]
         return connectionStatusLabel(connection.status)
     }
@@ -670,13 +689,15 @@
         return value ? new Date(Number(value)).toLocaleString() : '—'
     }
 
-    function historyLine(item: ExternalHistoryItem): string {
-        return [
-            when(item.createdAtMs),
-            strings.historyKinds[item.kind],
-            item.deviceName,
-            item.storedBytes ? bytes(item.storedBytes) : undefined,
-        ].filter(Boolean).join(' · ')
+    function connectionPlace(connection: ExternalConnectionSummary): string {
+        return [connection.endpoint.authority, connection.endpoint.repositoryHint].join(' · ')
+    }
+
+    function providerIcon(providerId: ExternalConnectionSummary['providerId']) {
+        if (providerId === 'webdav') return ServerIcon
+        if (providerId === 's3') return DatabaseIcon
+        if (providerId === 'github_releases' || providerId === 'gitlab_packages') return PackageIcon
+        return CloudIcon
     }
 
     function atLeast(value: string): string {
@@ -692,6 +713,7 @@
 
     onMount(async () => {
         stopSyncFailures = subscribeExternalLwwFailures(value => syncFailures = value)
+        stopBindingChanges = subscribeSyncBindingChanges(() => { if (!destroyed) void refresh(true) })
         try {
             const stop = await bridge.onJobStarted(() => {
                 if (destroyed) return
@@ -710,6 +732,7 @@
         clearTimeout(pollTimer)
         stopJobEvents?.()
         stopSyncFailures?.()
+        stopBindingChanges?.()
         if (exportRun) void bridge.cancelExport(exportRun.id).catch(() => {})
     })
 </script>
@@ -723,177 +746,234 @@
         {#if storageState?.supported !== false}<SettingButton variant="secondary" busy={activeAction === 'refresh'} disabled={busy} onclick={refreshWithHistory}>{strings.refresh}</SettingButton>{/if}
     {/snippet}
 
-    {#if !storageState && busy}<p class="p-4 text-sm text-textcolor2">{strings.loading}</p>
-    {:else if storageState && !storageState.supported}<p class="p-4 text-sm text-textcolor2">{strings.unsupported}</p>
+    {#if !storageState && busy}<p class="placeholder">{strings.loading}</p>
+    {:else if storageState && !storageState.supported}<p class="placeholder">{strings.unsupported}</p>
     {:else if adding || renewalConnection}
         <ConnectionForm {renewalConnection} {strings} onconnected={onConnected} oncancel={() => { adding = false; renewalConnection = undefined }} onbusychange={value => busy = value} />
     {:else if storageState}
-        {#if !storageState.connections.length}<p class="p-4 text-sm text-textcolor2">{strings.noConnections}</p>{/if}
+        {#if !storageState.connections.length}
+            <div class="blank">
+                <span class="blank-icon" aria-hidden="true"><CloudIcon size={20} /></span>
+                <p>{strings.noConnections}</p>
+            </div>
+        {/if}
         {#each storageState.connections as connection (connection.id)}
             {@const job = activeJob(connection)}
+            {@const ProviderIcon = providerIcon(connection.providerId)}
+            {@const renewable = connection.status === 'reauth-required' || job?.error?.action === 'reauthenticate'}
+            {@const lockable = connection.status === 'key-locked' || job?.error?.action === 'unlock-key'}
+            {@const recheckable = job?.state === 'uncertain' && job.kind === 'backup'}
+            {@const retryable = !!job && externalJobIsPaused(job) && ['retry', 'wait', 'free-space'].includes(job.error?.action ?? '') && ['backup', 'cleanup', 'restore', 'check-repository', 'pin-history', 'delete-history'].includes(job.kind)}
+            {@const remedy = renewable || lockable || recheckable || retryable}
+            {@const syncTarget = storageState.selection.kind === 'external' && storageState.selection.connectionId === connection.id}
+            {@const backedUp = connection.purpose === 'backup' || !!connection.lastBackupAtMs}
             <article class="card">
-                <div class="card-head">
-                    <div class="min-w-0">
+                <header class="card-head">
+                    <span class="provider" aria-hidden="true"><ProviderIcon size={18} /></span>
+                    <div class="card-name">
                         <h3 class="card-title">{externalConnectionTitle(strings, connection)}</h3>
-                        <p class="card-sub">{[connection.endpoint.authority, connection.endpoint.repositoryHint].join(' · ')}</p>
+                        <p class="card-sub">{connectionPlace(connection)}</p>
                     </div>
-                    <div class="pills">
-                        <span class="status border border-darkborderc" data-tone={connectionTone(connection)} aria-live="polite"><span class="status-dot" aria-hidden="true"></span>{connectionStatus(connection)}</span>
-                    </div>
-                </div>
+                    <div class="card-status"><StatusBadge label={connectionStatus(connection)} tone={connectionTone(connection)} /></div>
+                </header>
 
-                {#if connection.lastError && !restoreReportsError(connection, job)}<p class="text-sm text-danger-400">{errorLabel(connection.lastError)}</p>{/if}
+                {#if connection.lastError && !restoreReportsError(connection, job)}<SettingNotice text={errorLabel(connection.lastError)} />{/if}
                 {#if syncFailures.has(connection.id)}
                     {@const failure = syncFailures.get(connection.id)}
-                    <p class="text-sm text-danger-400" role="status">{externalErrorKind(failure) === 'clockSkew' ? language.lwwSync.clockBlocked
+                    <SettingNotice role="status" text={externalErrorKind(failure) === 'clockSkew' ? language.lwwSync.clockBlocked
                         : externalErrorKind(failure) === 'previousStorageUnavailable' ? language.lwwSync.previousStorageUnavailable
-                        : externalErrorMessage(strings, failure)}</p>
+                        : externalErrorMessage(strings, failure)} />
                     {#if ['clockSkew', 'corrupt'].includes(externalErrorKind(failure) ?? '') && supportsExternalLwwNewDevice(connection.id)}
-                        <BindingTargetSwitch target={{kind:'external',connectionId:connection.id}} options={{mode:'new-device'}} label={language.lwwSync.newDeviceAction} onBound={() => refreshExternalStorageProductionState().then(() => refresh())} onError={reason => error = externalErrorMessage(strings, reason)} />
+                        <div class="actions">
+                            <BindingTargetSwitch target={{kind:'external',connectionId:connection.id}} options={{mode:'new-device'}} label={language.lwwSync.newDeviceAction} onBound={() => refreshExternalStorageProductionState().then(() => refresh())} onError={reason => error = externalErrorMessage(strings, reason)} />
+                        </div>
                     {/if}
                 {/if}
-                {#if job && (!externalJobIsActive(job) || externalJobIsPaused(job)) && job.state !== 'succeeded' && !connection.lastError && !unfinishedRestore(job)}<p class="text-sm text-danger-400" role="status">{jobLabel(job)}</p>{/if}
+                {#if job && (!externalJobIsActive(job) || externalJobIsPaused(job)) && job.state !== 'succeeded' && !connection.lastError && !unfinishedRestore(job)}<SettingNotice role="status" tone={job.state === 'cancelled' && !job.stoppedByApp ? 'info' : 'danger'} text={jobLabel(job)} />{/if}
 
                 {#if unfinishedRestore(job)}
-                    <p class="text-sm" role="status">{strings.restoreUnfinished}</p>
+                    <SettingNotice role="status" text={strings.restoreUnfinished} />
                 {:else if job?.state === 'uncertain'}
-                    <p class="text-sm" role="status">{strings.publicationDecision}</p>
+                    <SettingNotice role="status" text={strings.publicationDecision} />
                 {/if}
 
                 {#if exportRun?.connectionId === connection.id}
                     {@const amount = exportRun.progress}
-                    <SettingProgress label={strings.download} detail={amount ? `${bytes(amount.completedBytes)}${amount.totalBytes ? ` / ${bytes(amount.totalBytes)}` : ''}` : ''} fraction={amount?.totalBytes && Number(amount.totalBytes) > 0 ? Number(amount.completedBytes) / Number(amount.totalBytes) : null} />
-                    <SettingButton variant="secondary" onclick={() => exportRun && bridge.cancelExport(exportRun.id)}>{strings.cancel}</SettingButton>
+                    <div class="running">
+                        <SettingProgress label={strings.download} detail={amount ? `${bytes(amount.completedBytes)}${amount.totalBytes ? ` / ${bytes(amount.totalBytes)}` : ''}` : ''} fraction={amount?.totalBytes && Number(amount.totalBytes) > 0 ? Number(amount.completedBytes) / Number(amount.totalBytes) : null} />
+                        <div class="actions"><SettingButton variant="secondary" size="sm" onclick={() => exportRun && bridge.cancelExport(exportRun.id)}>{strings.cancel}</SettingButton></div>
+                    </div>
                 {/if}
-                <dl class="kv">
-                    <dt>{strings.lastBackup}</dt><dd>{when(connection.lastBackupAtMs)}</dd>
-                    {#if job && job.state === 'succeeded'}<dt>{strings.progress}</dt><dd role="status" aria-live="polite">{jobSummary(job)}</dd>{/if}
-                </dl>
-                {#if job && externalJobIsPaused(job) && job.error?.retryAtMs}<p class="text-sm">{strings.retryAt.replace('{0}', when(job.error.retryAtMs))}</p>{/if}
+                {#if backedUp || job?.state === 'succeeded'}
+                    <dl class="kv">
+                        {#if backedUp}<dt>{strings.lastBackup}</dt><dd>{when(connection.lastBackupAtMs)}</dd>{/if}
+                        {#if job && job.state === 'succeeded'}<dt>{strings.progress}</dt><dd role="status" aria-live="polite">{jobSummary(job)}</dd>{/if}
+                    </dl>
+                {/if}
+                {#if job && externalJobIsPaused(job) && job.error?.retryAtMs}<p class="note">{strings.retryAt.replace('{0}', when(job.error.retryAtMs))}</p>{/if}
                 {#if job && externalJobIsActive(job) && !externalJobIsPaused(job)}
                     {@const progress = externalJobProgress(job)}
                     <SettingProgress label={strings.jobActive[job.kind]} detail={jobSize(job)} fraction={progress} />
                 {/if}
 
-                {#if connection.purpose === 'backup'}
-                    <SettingToggle showLabel label={strings.automaticBackup} disabled={busy} checked={!connection.automaticBackupPaused} onchange={enabled => setAutomaticWork(connection, enabled)} />
-                {:else}
-                    <SettingToggle showLabel label={strings.sync} disabled={busy} checked={storageState.selection.kind === 'external' && storageState.selection.connectionId === connection.id} onchange={enabled => setSyncBinding(connection, enabled)} />
-                {/if}
                 {#if unlockConnection?.id === connection.id}
-                    <label>{strings.recoveryCode}<TextInput hideText bind:value={unlockKey} /></label>
-                    <SettingButton disabled={busy || !unlockKey.trim()} onclick={unlock}>{strings.unlock}</SettingButton>
-                    <SettingButton variant="secondary" disabled={busy} onclick={() => { unlockConnection = undefined; unlockKey = '' }}>{strings.cancel}</SettingButton>
+                    <div class="unlock">
+                        <label class="unlock-field"><span>{strings.recoveryCode}</span><TextInput hideText bind:value={unlockKey} /></label>
+                        <div class="actions">
+                            <SettingButton disabled={busy || !unlockKey.trim()} onclick={unlock}>{strings.unlock}</SettingButton>
+                            <SettingButton variant="secondary" disabled={busy} onclick={() => { unlockConnection = undefined; unlockKey = '' }}>{strings.cancel}</SettingButton>
+                        </div>
+                    </div>
                 {/if}
 
-
-                <div class="actions">
-                    {#if connection.status === 'reauth-required' || job?.error?.action === 'reauthenticate'}
-                        <SettingButton disabled={busy} onclick={() => renewalConnection = connection}>{strings.renew}</SettingButton>
+                <div class="controls">
+                    {#if connection.purpose === 'backup'}
+                        <SettingToggle showLabel label={strings.automaticBackup} disabled={busy} checked={!connection.automaticBackupPaused} onchange={enabled => setAutomaticWork(connection, enabled)} />
+                    {:else}
+                        <SettingToggle showLabel label={strings.makeSyncTarget} disabled={busy} checked={syncRequest[connection.id] ?? syncTarget} onchange={enabled => setSyncBinding(connection, enabled)} />
                     {/if}
-                    {#if connection.status === 'key-locked' || job?.error?.action === 'unlock-key'}
-                        <SettingButton disabled={busy} onclick={() => unlockConnection = connection}>{strings.unlock}</SettingButton>
-                    {/if}
-                    {#if job?.state === 'uncertain' && job.kind === 'backup'}
-                        <SettingButton disabled={busy} onclick={() => resumeJob(connection, job)}>{strings.recheckPublication}</SettingButton>
-                    {/if}
-                    {#if job && externalJobIsPaused(job) && ['retry', 'wait', 'free-space'].includes(job.error?.action ?? '') && ['backup', 'cleanup', 'restore', 'check-repository', 'pin-history', 'delete-history'].includes(job.kind)}
-                        <SettingButton disabled={busy || Number(job.error?.retryAtMs ?? 0) > Date.now()} onclick={() => resumeJob(connection, job)}>{strings.retryAction}</SettingButton>
-                    {/if}
-                    {#if connection.purpose === 'backup'}<SettingButton busy={activeAction === `backup:${connection.id}`} disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'backup')}>{strings.runBackup}</SettingButton>
-                    {:else if storageState.selection.kind === 'external' && storageState.selection.connectionId === connection.id}<SettingButton disabled={busy} onclick={() => syncNow(connection)}>{strings.sync}</SettingButton>{/if}
-                    {#if job && externalJobIsActive(job)}<SettingButton variant="secondary" onclick={() => cancelJob(job)}>{strings.cancel}</SettingButton>{/if}
-                    {#if job && unfinishedRestore(job)}<SettingButton variant="secondary" disabled={busy} onclick={() => stopRestore(job)}>{strings.stopRestore}</SettingButton>{/if}
+                    <div class="actions">
+                        {#if renewable}<SettingButton disabled={busy} onclick={() => renewalConnection = connection}>{strings.renew}</SettingButton>{/if}
+                        {#if lockable}<SettingButton disabled={busy} onclick={() => unlockConnection = connection}>{strings.unlock}</SettingButton>{/if}
+                        {#if recheckable && job}<SettingButton disabled={busy} onclick={() => resumeJob(connection, job)}>{strings.recheckPublication}</SettingButton>{/if}
+                        {#if retryable && job}<SettingButton disabled={busy || Number(job.error?.retryAtMs ?? 0) > Date.now()} onclick={() => resumeJob(connection, job)}>{strings.retryAction}</SettingButton>{/if}
+                        {#if connection.purpose === 'backup'}<SettingButton variant={remedy ? 'secondary' : 'primary'} busy={activeAction === `backup:${connection.id}`} disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'backup')}>{strings.runBackup}</SettingButton>
+                        {:else if syncTarget}<SettingButton variant={remedy ? 'secondary' : 'primary'} disabled={busy} onclick={() => syncNow(connection)}>{strings.runSync}</SettingButton>{/if}
+                        {#if job && externalJobIsActive(job)}<SettingButton variant="secondary" onclick={() => cancelJob(job)}>{strings.cancel}</SettingButton>{/if}
+                        {#if job && unfinishedRestore(job)}<SettingButton variant="secondary" disabled={busy} onclick={() => stopRestore(job)}>{strings.stopRestore}</SettingButton>{/if}
+                    </div>
                 </div>
 
-                <div class="tabs" role="tablist">
-                    {#each (['history', 'quota'] as const) as tab (tab)}
-                        <button type="button" role="tab" id="{connection.id}-{tab}-tab" aria-controls="{connection.id}-{tab}-panel" aria-selected={expanded[connection.id] === tab} class="tab" onclick={() => openDetails(connection, tab)}>{tab === 'history' ? strings.history : strings.quota}</button>
-                    {/each}
-                </div>
-
-                {#if expanded[connection.id] === 'history'}
-                    <div class="list" role="tabpanel" id="{connection.id}-history-panel" aria-labelledby="{connection.id}-history-tab">
-                        {#if historyLoading[connection.id]}<p class="empty">{strings.loading}</p>
-                        {:else if (history[connection.id] ?? []).length === 0}<p class="empty">{strings.noHistory}</p>{/if}
-                        {#each history[connection.id] ?? [] as item (item.id)}
-                            <div class="item">
-                                <div class="line">
-                                    <span>{historyLine(item)}</span>
-                                    <span class="item-actions">
-                                        <SettingButton variant="secondary" disabled={busy || (job && externalJobIsActive(job)) || !item.complete || !item.verified} onclick={() => beginRestore(connection, item)}>{strings.restore}</SettingButton>
-                                        <SettingButton variant="secondary" disabled={busy || (job && externalJobIsActive(job)) || !item.complete || !item.verified} onclick={() => exportSnapshot(connection.id, item.snapshotId)}>{strings.download}</SettingButton>
-                                        <SettingButton variant="secondary" disabled={busy || !item.complete || !item.verified} onclick={() => runJob(connection, 'check-repository', { snapshotId: item.snapshotId })}>{strings.check}</SettingButton>
-                                        {#if item.pinned}<SettingButton variant="secondary" disabled>{strings.pinned}</SettingButton>
-                                        {:else}<SettingButton variant="secondary" disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'pin-history', { snapshotId: item.snapshotId })}>{strings.pin}</SettingButton>{/if}
-                                        {#if item.deletable}<SettingButton variant="danger" disabled={busy} onclick={() => deleteHistory(connection, item)}>{strings.deleteHistory}</SettingButton>{/if}
-                                    </span>
-                                </div>
-
-                            </div>
+                <div class="details">
+                    <div class="tabs" role="tablist">
+                        {#each (['history', 'quota'] as const) as tab (tab)}
+                            <button type="button" role="tab" id="{connection.id}-{tab}-tab" aria-controls="{connection.id}-{tab}-panel" aria-selected={expanded[connection.id] === tab} class="tab" onclick={() => openDetails(connection, tab)}>{tab === 'history' ? strings.history : strings.quota}</button>
                         {/each}
-                        {#if historyCursor[connection.id]}<div><SettingButton variant="secondary" busy={historyLoading[connection.id]} onclick={() => loadHistory(connection, true)}>{strings.loadMore}</SettingButton></div>{/if}
                     </div>
-                {:else if expanded[connection.id] === 'quota'}
-                    {@const usage = quota[connection.id]}
-                    {@const retention = connection.retentionPolicy}
-                    <div class="usage" role="tabpanel" id="{connection.id}-quota-panel" aria-labelledby="{connection.id}-quota-tab">
-                        {#if usage || remoteOnly[connection.id] !== undefined}
-                            <dl class="kv">
-                                {#if usage}
-                                    <dt>{strings.usedByService}</dt>
-                                    <dd>{#if usage.storage.providerPhysicalKnown && usage.storage.providerPhysicalBytes !== null}{bytes(usage.storage.providerPhysicalBytes ?? undefined)}{:else}{strings.unknownUsage} <span class="text-textcolor2">({strings.unknownUsageHelp})</span>{/if}</dd>
-                                    <dt>{strings.uploadedLowerBound}</dt>
-                                    <dd>{atLeast(usage.storage.locallyUploadedBytesLowerBound)} · {strings.files.replace('{0}', usage.storage.locallyUploadedObjectCountLowerBound)}</dd>
-                                    {#if usage.storage.latestReachable}
-                                        <dt>{strings.latestReachable}</dt>
-                                        <dd>{atLeast(usage.storage.latestReachable.knownDirectBytes)}</dd>
-                                    {/if}
-                                {/if}
-                                {#if remoteOnly[connection.id] !== undefined}
-                                    <dt>{strings.remoteOnlyFiles}</dt>
-                                    <dd>{remoteOnly[connection.id] ?? strings.unknownUsage}</dd>
-                                {/if}
-                            </dl>
-                        {/if}
-                        {#if usage && usage.buckets.length > 0}
-                            <p>{strings.requestUsage}</p>
-                            <dl class="kv">
-                                {#each usage.buckets as bucket (bucket.id)}<dt>{bucket.id}</dt><dd>{bucket.used} / {bucket.limit} {bucket.unit}</dd>{/each}
-                            </dl>
-                        {/if}
-                        {#if connection.capabilities.snapshotDiscovery && connection.capabilities.leaseOperations && connection.capabilities.deleteObjects}
-                            <SettingButton busy={activeAction === `cleanup:${connection.id}`} disabled={busy || connection.status !== 'ready' || storageState.jobs.some(job => job.connectionId === connection.id && externalJobIsActive(job))} onclick={() => runJob(connection, 'cleanup')}>{strings.cleanup}</SettingButton>
-                        {/if}
-                        <p class="text-textcolor2">{strings.retentionHelp} {strings.retentionOtherDevices}</p>
-                        <p class="text-textcolor2">{strings.cleanupTrashNotice} {strings.providerCapacityHelp}</p>
-                        <label class="policy-row spread">
-                            <span>{strings.retentionCount}</span>
-                            <span class="amount">
-                                <NumberInput size="sm" className="w-20 text-right tabular-nums" disabled={busy} min={RETENTION_LIMITS.keepCount[0]} max={RETENTION_LIMITS.keepCount[1]} value={retention.keepCount} onChange={event => commitRetentionLimit(connection, 'keepCount', event.currentTarget)} />
-                            </span>
-                        </label>
-                        <label class="policy-row spread">
-                            <span>{strings.retentionDays}</span>
-                            <span class="amount">
-                                <NumberInput size="sm" className="w-20 text-right tabular-nums" disabled={busy} min={RETENTION_LIMITS.keepDays[0]} max={RETENTION_LIMITS.keepDays[1]} value={retention.keepDays} onChange={event => commitRetentionLimit(connection, 'keepDays', event.currentTarget)} />
-                                <span class="value">{strings.retentionDaysUnit}</span>
-                            </span>
-                        </label>
-                    </div>
-                {/if}
 
-                <div class="foot">
-                    <SettingButton variant="secondary" busy={activeAction === `settings:${connection.id}`} disabled={busy} onclick={() => createConnectionSettings(connection)}>{strings.connectionSettings}</SettingButton>
-                    <SettingButton variant="danger" busy={activeAction === `remove:${connection.id}`} disabled={busy} onclick={() => removeConnection(connection)}>{strings.remove}</SettingButton>
-                    {#if removalDownload?.connectionId === connection.id}
-                        <SettingButton variant="secondary" disabled={removalDownload.cancelling} onclick={() => { if (removalDownload) { removalDownload.cancelling = true; removalDownload.controller.abort() } }}>{strings.cancel}</SettingButton>
+                    {#if expanded[connection.id] === 'history'}
+                        {@const items = history[connection.id] ?? []}
+                        <div class="panel" role="tabpanel" id="{connection.id}-history-panel" aria-labelledby="{connection.id}-history-tab">
+                            {#if historyLoading[connection.id]}<p class="empty">{strings.loading}</p>
+                            {:else if items.length === 0}<p class="empty">{strings.noHistory}</p>{/if}
+                            {#if items.length > 0}
+                                <ul class="rows">
+                                    {#each items as item (item.id)}
+                                        {@const usable = item.complete && item.verified}
+                                        <li class="item">
+                                            <div class="item-head">
+                                                <span class="kind" data-kind={item.kind}>{strings.historyKinds[item.kind]}</span>
+                                                <span class="item-time">{when(item.createdAtMs)}</span>
+                                                {#if item.pinned}<span class="kept"><PinIcon size={12} aria-hidden="true" />{strings.pinned}</span>{/if}
+                                            </div>
+                                            {#if item.sameDevice}<p class="item-meta">{strings.thisDevice}</p>{/if}
+                                            <div class="item-actions">
+                                                <SettingButton size="sm" variant="secondary" disabled={busy || (job && externalJobIsActive(job)) || !usable} onclick={() => beginRestore(connection, item)}>{strings.restore}</SettingButton>
+                                                <SettingButton size="sm" variant="quiet" disabled={busy || (job && externalJobIsActive(job)) || !usable} onclick={() => exportSnapshot(connection.id, item.snapshotId)}>{strings.download}</SettingButton>
+                                                <SettingButton size="sm" variant="quiet" disabled={busy || !usable} onclick={() => runJob(connection, 'check-repository', { snapshotId: item.snapshotId })}>{strings.check}</SettingButton>
+                                                {#if !item.pinned}<SettingButton size="sm" variant="quiet" disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'pin-history', { snapshotId: item.snapshotId })}>{strings.pin}</SettingButton>{/if}
+                                                {#if item.deletable}<SettingButton size="sm" variant="danger" class="ml-auto" disabled={busy} onclick={() => deleteHistory(connection, item)}>{strings.deleteHistory}</SettingButton>{/if}
+                                            </div>
+                                        </li>
+                                    {/each}
+                                </ul>
+                            {/if}
+                            {#if historyCursor[connection.id]}<div class="more"><SettingButton variant="secondary" size="sm" busy={historyLoading[connection.id]} onclick={() => loadHistory(connection, true)}>{strings.loadMore}</SettingButton></div>{/if}
+                        </div>
+                    {:else if expanded[connection.id] === 'quota'}
+                        {@const usage = quota[connection.id]}
+                        {@const retention = connection.retentionPolicy}
+                        <div class="panel usage" role="tabpanel" id="{connection.id}-quota-panel" aria-labelledby="{connection.id}-quota-tab">
+                            {#if usage || remoteOnly[connection.id] !== undefined}
+                                <dl class="stats">
+                                    {#if usage}
+                                        {@const known = usage.storage.providerPhysicalKnown && usage.storage.providerPhysicalBytes !== null}
+                                        <div class="stat">
+                                            <dt>{strings.usedByService}</dt>
+                                            <dd class="stat-value" data-unknown={!known}>{known ? bytes(usage.storage.providerPhysicalBytes ?? undefined) : strings.unknownUsage}</dd>
+                                            {#if !known}<dd class="stat-note">{strings.unknownUsageHelp}</dd>{/if}
+                                        </div>
+                                        <div class="stat">
+                                            <dt>{strings.uploadedLowerBound}</dt>
+                                            <dd class="stat-value">{atLeast(usage.storage.locallyUploadedBytesLowerBound)}</dd>
+                                            <dd class="stat-note">{strings.files.replace('{0}', Number(usage.storage.locallyUploadedObjectCountLowerBound).toLocaleString())}</dd>
+                                        </div>
+                                        {#if usage.storage.latestReachable}
+                                            <div class="stat">
+                                                <dt>{strings.latestReachable}</dt>
+                                                <dd class="stat-value">{atLeast(usage.storage.latestReachable.knownDirectBytes)}</dd>
+                                            </div>
+                                        {/if}
+                                    {/if}
+                                    {#if remoteOnly[connection.id] !== undefined}
+                                        {@const count = remoteOnly[connection.id]}
+                                        <div class="stat">
+                                            <dt>{strings.remoteOnlyFiles}</dt>
+                                            <dd class="stat-value" data-unknown={count === null}>{count === null ? strings.unknownUsage : count.toLocaleString()}</dd>
+                                        </div>
+                                    {/if}
+                                </dl>
+                            {/if}
+                            {#if usage && usage.buckets.length > 0}
+                                <section class="usage-section">
+                                    <h4 class="section-title">{strings.requestUsage}</h4>
+                                    <ul class="buckets">
+                                        {#each usage.buckets as bucket (bucket.id)}
+                                            {@const share = Number(bucket.limit) > 0 ? Math.min(1, Number(bucket.used) / Number(bucket.limit)) : 0}
+                                            <li class="bucket">
+                                                <div class="bucket-line">
+                                                    <span class="bucket-name">{strings.quotaBuckets[bucket.id] ?? bucket.id}</span>
+                                                    <span class="bucket-count">{strings.requestCount.replace('{0}', Number(bucket.used).toLocaleString()).replace('{1}', Number(bucket.limit).toLocaleString())}</span>
+                                                </div>
+                                                <div class="meter" data-high={share >= 0.9} aria-hidden="true"><span style:width="{share * 100}%"></span></div>
+                                            </li>
+                                        {/each}
+                                    </ul>
+                                </section>
+                            {/if}
+                            <section class="usage-section">
+                                <div class="fields">
+                                    <label class="field">
+                                        <span>{strings.retentionCount}</span>
+                                        <span class="amount">
+                                            <NumberInput size="sm" className="w-20 text-right tabular-nums" disabled={busy} min={RETENTION_LIMITS.keepCount[0]} max={RETENTION_LIMITS.keepCount[1]} value={retention.keepCount} onChange={event => commitRetentionLimit(connection, 'keepCount', event.currentTarget)} />
+                                        </span>
+                                    </label>
+                                    <label class="field">
+                                        <span>{strings.retentionDays}</span>
+                                        <span class="amount">
+                                            <NumberInput size="sm" className="w-20 text-right tabular-nums" disabled={busy} min={RETENTION_LIMITS.keepDays[0]} max={RETENTION_LIMITS.keepDays[1]} value={retention.keepDays} onChange={event => commitRetentionLimit(connection, 'keepDays', event.currentTarget)} />
+                                            <span class="unit">{strings.retentionDaysUnit}</span>
+                                        </span>
+                                    </label>
+                                </div>
+                                <p class="help">{strings.retentionHelp} {strings.retentionOtherDevices}</p>
+                            </section>
+                            <section class="usage-section">
+                                {#if connection.capabilities.snapshotDiscovery && connection.capabilities.leaseOperations && connection.capabilities.deleteObjects}
+                                    <div class="actions">
+                                        <SettingButton variant="secondary" busy={activeAction === `cleanup:${connection.id}`} disabled={busy || connection.status !== 'ready' || storageState.jobs.some(job => job.connectionId === connection.id && externalJobIsActive(job))} onclick={() => runJob(connection, 'cleanup')}>{strings.cleanup}</SettingButton>
+                                    </div>
+                                {/if}
+                                <p class="help">{strings.cleanupTrashNotice} {strings.providerCapacityHelp}</p>
+                            </section>
+                        </div>
                     {/if}
                 </div>
+
+                <footer class="foot">
+                    <SettingButton variant="secondary" busy={activeAction === `settings:${connection.id}`} disabled={busy} onclick={() => createConnectionSettings(connection)}>{strings.connectionSettings}</SettingButton>
+                    <span class="foot-end">
+                        {#if removalDownload?.connectionId === connection.id}
+                            <SettingButton variant="secondary" disabled={removalDownload.cancelling} onclick={() => { if (removalDownload) { removalDownload.cancelling = true; removalDownload.controller.abort() } }}>{strings.cancel}</SettingButton>
+                        {/if}
+                        <SettingButton variant="danger" busy={activeAction === `remove:${connection.id}`} disabled={busy} onclick={() => removeConnection(connection)}>{strings.remove}</SettingButton>
+                    </span>
+                </footer>
             </article>
         {/each}
     {/if}
-    {#if error || pollError}<p class="px-4 py-3 text-sm text-danger-400" role="alert">{error || pollError}</p>{/if}
+    {#if error || pollError}<div class="group-alert"><SettingNotice role="alert" text={error || pollError} /></div>{/if}
 </SettingGroup>
 
 {#if recoveryKey}
@@ -938,110 +1018,99 @@
 {/if}
 
 <style>
+    .placeholder {
+        padding: 1rem;
+        font-size: 14px;
+        color: var(--risu-theme-textcolor2);
+    }
+    .blank {
+        display: grid;
+        justify-items: center;
+        gap: 0.625rem;
+        padding: 1.75rem 1.25rem;
+        text-align: center;
+    }
+    .blank-icon {
+        display: grid;
+        place-items: center;
+        width: 2.75rem;
+        height: 2.75rem;
+        border: 1px solid var(--risu-theme-darkborderc);
+        border-radius: 50%;
+        background: var(--risu-theme-bgcolor);
+        color: var(--risu-theme-textcolor2);
+    }
+    .blank p {
+        max-width: 46ch;
+        margin: 0;
+        font-size: 13px;
+        line-height: 1.55;
+        color: var(--risu-theme-textcolor2);
+    }
     .card {
         display: grid;
-        gap: 0.75rem;
-        padding: 0.75rem 1rem;
+        gap: 0.875rem;
         min-width: 0;
+        padding: 1rem;
     }
     .card-head {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: flex-start;
-        justify-content: space-between;
-        gap: 0.5rem 1rem;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        align-items: center;
+        gap: 0.5rem 0.75rem;
+    }
+    .card-status {
+        grid-column: 2;
+        min-width: 0;
+    }
+    @container (min-width: 36rem) {
+        .card-head {
+            grid-template-columns: auto minmax(0, 1fr) auto;
+        }
+        .card-status {
+            grid-column: auto;
+            justify-self: end;
+            max-width: 16rem;
+        }
+    }
+    .provider {
+        display: grid;
+        place-items: center;
+        width: 2.25rem;
+        height: 2.25rem;
+        border: 1px solid var(--risu-theme-darkborderc);
+        border-radius: 0.5rem;
+        background: var(--risu-theme-bgcolor);
+        color: var(--risu-theme-textcolor2);
+    }
+    .card-name {
+        min-width: 0;
     }
     .card-title {
         margin: 0;
-        font-size: 0.9375rem;
+        font-size: 15px;
         font-weight: 600;
+        line-height: 1.35;
         overflow-wrap: anywhere;
     }
     .card-sub {
-        margin: 0.15rem 0 0;
-        font-size: 0.8125rem;
+        margin: 0.125rem 0 0;
+        font-size: 12.5px;
+        line-height: 1.4;
         color: var(--risu-theme-textcolor2);
         overflow-wrap: anywhere;
-    }
-    .pills {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.4rem;
-    }
-    .policy-row {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        margin: 0;
-        font-size: 0.875rem;
-    }
-    .policy-row.spread {
-        justify-content: space-between;
-    }
-    .policy-row .value {
-        color: var(--risu-theme-textcolor2);
-    }
-    .empty {
-        margin: 0;
-        padding: 0.25rem 0;
-        font-size: 0.8125rem;
-        color: var(--risu-theme-textcolor2);
-    }
-    .status {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        border-radius: 99px;
-        padding: 0.35rem 0.75rem;
-        font-size: 0.75rem;
-        white-space: nowrap;
-    }
-    .status[data-tone="attention"] {
-        color: var(--risu-theme-danger-400);
-        border-color: color-mix(in srgb, var(--risu-theme-danger-400) 50%, transparent);
-    }
-    .status-dot {
-        width: 0.45rem;
-        height: 0.45rem;
-        border-radius: 50%;
-        background: currentColor;
-        opacity: 0.35;
-    }
-    .status[data-tone="connected"] .status-dot {
-        background: var(--risu-theme-success-500);
-        opacity: 1;
-    }
-    .status[data-tone="attention"] .status-dot {
-        opacity: 1;
-    }
-    .status[data-tone="paused"] .status-dot {
-        background: transparent;
-        box-shadow: inset 0 0 0 1.5px currentColor;
-        opacity: 0.7;
-    }
-    .status[data-tone="working"] .status-dot {
-        background: var(--risu-theme-primary-500);
-        opacity: 1;
-        animation: pulse 1.5s ease-in-out infinite;
-    }
-    .usage {
-        display: grid;
-        gap: 0.4rem;
-    }
-    .amount {
-        display: flex;
-        align-items: center;
-        gap: 0.35rem;
     }
     .kv {
         display: grid;
         grid-template-columns: auto minmax(0, 1fr);
-        gap: 0.25rem 1rem;
+        gap: 0.375rem 1.25rem;
         margin: 0;
-        font-size: 0.8125rem;
+        font-size: 13px;
+        line-height: 1.45;
     }
     .kv dt {
         color: var(--risu-theme-textcolor2);
+        white-space: nowrap;
     }
     .kv dd {
         margin: 0;
@@ -1049,61 +1118,323 @@
         overflow-wrap: anywhere;
         font-variant-numeric: tabular-nums;
     }
-    .actions,
-    .foot,
-    .item-actions {
-        display: flex;
-        flex-wrap: wrap;
+    .note {
+        margin: 0;
+        font-size: 13px;
+        color: var(--risu-theme-textcolor2);
+    }
+    .running {
+        display: grid;
         gap: 0.5rem;
     }
-    .foot {
-        padding-top: 0.75rem;
-        border-top: 1px solid color-mix(in srgb, var(--risu-theme-darkborderc) 55%, transparent);
+    .unlock {
+        display: grid;
+        gap: 0.625rem;
+        padding: 0.75rem;
+        border: 1px solid var(--risu-theme-darkborderc);
+        border-radius: 0.5rem;
+        background: var(--risu-theme-bgcolor);
+    }
+    .unlock-field {
+        display: grid;
+        gap: 0.25rem;
+        font-size: 13px;
+    }
+    .controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem 1rem;
+    }
+    .actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .details {
+        min-width: 0;
+        overflow: hidden;
+        border: 1px solid var(--risu-theme-darkborderc);
+        border-radius: 0.5rem;
+        background: var(--risu-theme-bgcolor);
     }
     .tabs {
         display: flex;
         gap: 0.25rem;
-        border-bottom: 1px solid color-mix(in srgb, var(--risu-theme-darkborderc) 55%, transparent);
+        padding: 0 0.5rem;
+        border-bottom: 1px solid var(--risu-theme-darkborderc);
+    }
+    .tabs:only-child {
+        border-bottom: 0;
     }
     .tab {
-        padding: 0.4rem 0.75rem;
         margin-bottom: -1px;
+        padding: 0.55rem 0.625rem;
         border: 0;
         border-bottom: 2px solid transparent;
         background: transparent;
-        font-size: 0.8125rem;
+        font-size: 13px;
         color: var(--risu-theme-textcolor2);
         cursor: pointer;
+    }
+    .tabs:only-child .tab {
+        margin-bottom: 0;
     }
     .tab:hover {
         color: var(--risu-theme-textcolor);
     }
-    .tab[aria-selected="true"] {
+    .tab[aria-selected='true'] {
+        border-bottom-color: var(--risu-theme-primary-500);
         color: var(--risu-theme-textcolor);
-        border-bottom-color: var(--risu-theme-textcolor);
+        font-weight: 600;
     }
     .tab:focus-visible {
         outline: 2px solid var(--risu-theme-selected);
         outline-offset: -2px;
     }
-    .list {
+    .panel {
         display: grid;
-        gap: 0.5rem;
+        gap: 0.75rem;
+        min-width: 0;
+        padding: 0.875rem;
+    }
+    .empty {
+        margin: 0;
+        font-size: 13px;
+        color: var(--risu-theme-textcolor2);
+    }
+    .rows {
+        display: grid;
+        margin: 0;
+        padding: 0;
+        list-style: none;
     }
     .item {
         display: grid;
-        gap: 0.35rem;
-        padding: 0.6rem 0.75rem;
-        border-radius: 0.5rem;
-        background: var(--risu-theme-bgcolor);
-        font-size: 0.8125rem;
+        gap: 0.375rem;
+        min-width: 0;
+        padding: 0.75rem 0;
     }
-    .line {
+    .item:first-child {
+        padding-top: 0;
+    }
+    .item:last-child {
+        padding-bottom: 0;
+    }
+    .item + .item {
+        border-top: 1px solid var(--risu-theme-darkborderc);
+    }
+    .item-head {
         display: flex;
         flex-wrap: wrap;
         align-items: center;
-        justify-content: space-between;
+        gap: 0.375rem 0.5rem;
+    }
+    .kind {
+        padding: 0.1rem 0.5rem;
+        border: 1px solid var(--risu-theme-darkborderc);
+        border-radius: 99px;
+        background: var(--risu-theme-darkbg);
+        font-size: 11.5px;
+        font-weight: 600;
+        line-height: 1.5;
+        color: var(--risu-theme-textcolor2);
+    }
+    .kind[data-kind='snapshot'] {
+        border-color: color-mix(in srgb, var(--risu-theme-primary-500) 45%, transparent);
+        background: color-mix(in srgb, var(--risu-theme-primary-500) 12%, var(--risu-theme-bgcolor));
+        color: var(--risu-theme-textcolor);
+    }
+    .kind[data-kind='conflict'] {
+        border-color: color-mix(in srgb, var(--risu-theme-danger-400) 50%, transparent);
+        background: color-mix(in srgb, var(--risu-theme-danger-400) 10%, var(--risu-theme-bgcolor));
+        color: color-mix(in srgb, var(--risu-theme-danger-400) 65%, var(--risu-theme-textcolor));
+    }
+    .kind[data-kind='recovery-candidate'] {
+        border-color: color-mix(in srgb, var(--risu-theme-secondary-500) 45%, transparent);
+        background: color-mix(in srgb, var(--risu-theme-secondary-500) 12%, var(--risu-theme-bgcolor));
+        color: var(--risu-theme-textcolor);
+    }
+    .item-time {
+        font-size: 14px;
+        font-weight: 500;
+        font-variant-numeric: tabular-nums;
+    }
+    .kept {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        font-size: 12px;
+        color: var(--risu-theme-textcolor2);
+    }
+    .item-meta {
+        margin: 0;
+        font-size: 12.5px;
+        color: var(--risu-theme-textcolor2);
+        overflow-wrap: anywhere;
+    }
+    .item-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.25rem 0.375rem;
+        margin-top: 0.125rem;
+    }
+    .more {
+        display: flex;
+        justify-content: center;
+        padding-top: 0.75rem;
+        border-top: 1px solid var(--risu-theme-darkborderc);
+    }
+    .usage {
+        gap: 1rem;
+    }
+    .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 7.5rem), 1fr));
         gap: 0.5rem;
+        margin: 0;
+    }
+    .stat {
+        display: grid;
+        align-content: start;
+        gap: 0.125rem;
+        min-width: 0;
+        padding: 0.625rem 0.75rem;
+        border: 1px solid var(--risu-theme-darkborderc);
+        border-radius: 0.5rem;
+        background: var(--risu-theme-darkbg);
+    }
+    .stat dt {
+        font-size: 12px;
+        line-height: 1.4;
+        color: var(--risu-theme-textcolor2);
+    }
+    .stat dd {
+        margin: 0;
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+    .stat-value {
+        font-size: 16px;
+        font-weight: 600;
+        line-height: 1.35;
+        font-variant-numeric: tabular-nums;
+    }
+    .stat-value[data-unknown='true'] {
+        font-size: 14px;
+        font-weight: 500;
+        color: var(--risu-theme-textcolor2);
+    }
+    .stat-note {
+        font-size: 12px;
+        line-height: 1.4;
+        color: var(--risu-theme-textcolor2);
+    }
+    .usage-section {
+        display: grid;
+        gap: 0.625rem;
+        min-width: 0;
+        padding-top: 1rem;
+        border-top: 1px solid var(--risu-theme-darkborderc);
+    }
+    .usage-section:first-child {
+        padding-top: 0;
+        border-top: 0;
+    }
+    .section-title {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 600;
+    }
+    .buckets {
+        display: grid;
+        gap: 0.625rem;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+    }
+    .bucket {
+        display: grid;
+        gap: 0.3rem;
+        min-width: 0;
+    }
+    .bucket-line {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 0.75rem;
+        font-size: 13px;
+    }
+    .bucket-name {
+        min-width: 0;
+    }
+    .bucket-count {
+        color: var(--risu-theme-textcolor2);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+    }
+    .meter {
+        height: 4px;
+        overflow: hidden;
+        border-radius: 99px;
+        background: var(--risu-theme-darkbutton);
+    }
+    .meter span {
+        display: block;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--risu-theme-primary-500);
+    }
+    .meter[data-high='true'] span {
+        background: var(--risu-theme-danger-400);
+    }
+    .fields {
+        display: grid;
+        gap: 0.5rem;
+    }
+    .field {
+        display: grid;
+        grid-template-columns: minmax(8rem, max-content) auto;
+        justify-content: start;
+        align-items: center;
+        gap: 0.75rem;
+        font-size: 14px;
+    }
+    .amount {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+    .unit {
+        font-size: 13px;
+        color: var(--risu-theme-textcolor2);
+    }
+    .help {
+        max-width: 62ch;
+        margin: 0;
+        font-size: 12.5px;
+        line-height: 1.55;
+        color: color-mix(in srgb, var(--risu-theme-textcolor2) 62%, var(--risu-theme-textcolor) 38%);
+    }
+    .foot {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem;
+        padding-top: 0.875rem;
+        border-top: 1px solid color-mix(in srgb, var(--risu-theme-darkborderc) 70%, transparent);
+    }
+    .foot-end {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-left: auto;
+    }
+    .group-alert {
+        padding: 0.75rem 1rem;
     }
     .dialog {
         display: grid;
@@ -1116,15 +1447,5 @@
         border-radius: 0.5rem;
         background: var(--risu-theme-bgcolor);
         color: var(--risu-theme-textcolor);
-    }
-    @keyframes pulse {
-        50% {
-            opacity: 0.3;
-        }
-    }
-    @media (prefers-reduced-motion: reduce) {
-        .status-dot {
-            animation: none;
-        }
     }
 </style>

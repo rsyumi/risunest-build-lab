@@ -903,7 +903,6 @@ export const languageGerman = {
     "webdeeplwarn": "Diese Option wird nicht für die Verwendung mit der Webversion empfohlen, da sie CORS-Fehler verursachen kann.",
     "saveBackupLocal": "Backup lokal speichern",
     "loadBackupLocal": "Backup lokal laden",
-    "restoreLocalSnapshotConfirm": "Die aktuellen Daten durch diesen lokalen Snapshot ersetzen und die App neu starten?",
     "topP": "Top P",
     "genTimes": "Generierungsauswahl",
     "cot": "Chain of Thoughts",

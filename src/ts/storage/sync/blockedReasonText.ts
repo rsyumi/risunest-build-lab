@@ -1,7 +1,7 @@
 import { language } from 'src/lang'
 
 /**
- * Turns a native blocked-reason token (`backup-in-use`, `server-sync-busy`, ...) into the
+ * Turns a native blocked-reason token such as `server-sync-busy` into the
  * sentence shown under a disabled backup or cleanup control. Unknown tokens get a generic
  * sentence so an internal identifier never reaches the screen.
  */

@@ -121,6 +121,19 @@ describe('production server LWW composition', () => {
         expect(f.resumeCurrent).toHaveBeenCalledExactlyOnceWith(state.target)
         expect(f.invoke.mock.calls.some(([command]) => command === 'server_sync_lww_activate')).toBe(false)
     })
+    it('reads the server status again once another sync target takes over', async () => {
+        const state = bindingContext().state
+        let target: { kind: string; connectionId?: string } = state.target
+        f.invoke.mockImplementation(async command => command === 'server_sync_status' ? { configured: true, writerId: 'writer', bindingAuthority: '0' } : command === 'pds_lww_binding_state' ? { ...state, target } : null)
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const bound: boolean[] = []
+        production.getServerSyncController().subscribe(view => { bound.push(view.status.bound) })
+        expect(bound.at(-1)).toBe(true)
+        target = { kind: 'external', connectionId: 'synthetic-connection' }
+        const { notifySyncBindingChanged } = await import('./bindingChanges')
+        notifySyncBindingChanged(); await settle()
+        expect(bound.at(-1)).toBe(false)
+    })
     it('resumes interrupted Full hydration on foreground after the cancelled lane settles', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
         let reject!: (error: unknown) => void

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { formatBytes } from '../gui/nativeFileJobDialogModel'
 import {
     createRisuNestStorageDashboard,
     formatRisuNestStorageBytes,
@@ -85,6 +86,14 @@ describe('RisuNest storage dashboard view model', () => {
         expect(rollup.counts).toEqual({ characters: 3, trashedCharacters: 1, conversations: 4, messages: 5 })
         expect(formatRisuNestStorageBytes(1024 * 1024)).toBe('1.0 MiB')
         expect(formatRisuNestStorageBytes(1024 * 1024 * 1024)).toBe('1.0 GiB')
+    })
+
+    it('prints sizes in the shared file size format', () => {
+        for (const value of [0, 512, 1536, 150 * 1024 * 1024, 2.5 * 1024 ** 4]) {
+            expect(formatRisuNestStorageBytes(value)).toBe(formatBytes(value))
+        }
+        expect(formatRisuNestStorageBytes(0)).toBe('0 B')
+        expect(formatRisuNestStorageBytes(-1)).toBe('0 B')
     })
 
     it('keeps the asset storage records apart from the temporary files but in the total', () => {

@@ -334,7 +334,7 @@ impl PersistentStoreState {
 
 /// Deletes retired libraries in the background for the life of the process,
 /// starting with whatever an earlier run left behind.
-fn start_retired_purge(app: &AppHandle, state: &PersistentStoreState) {
+fn start_retired_purge<R: tauri::Runtime>(app: &AppHandle<R>, state: &PersistentStoreState) {
     if state.retired_purge_started.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -364,6 +364,11 @@ fn start_retired_purge(app: &AppHandle, state: &PersistentStoreState) {
 impl PersistentStoreState {
     pub(crate) fn with_test_store(store: PersistentStore) -> Self {
         Self { store: Mutex::new(Some(store)), ..Self::default() }
+    }
+
+    /// A store the renderer has not opened yet, whose opening starts no purge.
+    pub(crate) fn unopened_without_purge() -> Self {
+        Self { retired_purge_started: AtomicBool::new(true), ..Self::default() }
     }
 }
 
@@ -509,13 +514,28 @@ pub(crate) fn pds_open(
     app: AppHandle,
     state: State<'_, PersistentStoreState>,
 ) -> Result<PersistentStoreOpenResult, StoreError> {
-    logged("pds_open", (|| {
-        let operation_guard = state.admit_renderer_operation()?;
-        let app_data_dir = crate::app_paths::data_root(&app).map_err(|message| StoreError::Store { message })?;
-        let opened = open_renderer_persistent_store_admitted(&state, &operation_guard, &app_data_dir)?;
-        start_retired_purge(&app, &state);
-        Ok(opened)
-    })())
+    logged("pds_open", open_for_renderer(&app, &state))
+}
+
+/// Opens the store the renderer works through and starts the work that waits for it.
+pub(crate) fn open_for_renderer<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &PersistentStoreState,
+) -> StoreResult<PersistentStoreOpenResult> {
+    let operation_guard = state.admit_renderer_operation()?;
+    let app_data_dir = crate::app_paths::data_root(app).map_err(|message| StoreError::Store { message })?;
+    let (opened, first_open) = open_renderer_persistent_store_admitted(state, &operation_guard, &app_data_dir)?;
+    start_retired_purge(app, state);
+    // A page that starts before the store opens cannot judge the asset journals
+    // whose owners only the store records, so they are judged again now.
+    if first_open {
+        if let Some(cas) = app.try_state::<crate::asset_repository::commands::DurableCasJobState>() {
+            if let Err(error) = cas.sweep_settled_jobs(app) {
+                crate::nlog!("warn", "Asset journals await cleanup after the store opened: {error}");
+            }
+        }
+    }
+    Ok(opened)
 }
 
 #[cfg(test)]
@@ -524,14 +544,15 @@ pub(crate) fn open_renderer_persistent_store(
     app_data_dir: &Path,
 ) -> StoreResult<PersistentStoreOpenResult> {
     let operation_guard = state.admit_renderer_operation()?;
-    open_renderer_persistent_store_admitted(state, &operation_guard, app_data_dir)
+    open_renderer_persistent_store_admitted(state, &operation_guard, app_data_dir).map(|(opened, _)| opened)
 }
 
+/// Also returns whether this call opened the store.
 fn open_renderer_persistent_store_admitted(
     state: &PersistentStoreState,
     operation_guard: &RendererOperationGuard,
     app_data_dir: &Path,
-) -> StoreResult<PersistentStoreOpenResult> {
+) -> StoreResult<(PersistentStoreOpenResult, bool)> {
     if !operation_guard.belongs_to(state) {
         return Err(StoreError::Validation {
             message: "renderer operation permit belongs to another persistent store".to_owned(),
@@ -540,7 +561,8 @@ fn open_renderer_persistent_store_admitted(
     let mut store = state.store.lock().map_err(|error| StoreError::Store {
         message: format!("persistent store mutex poisoned: {error}"),
     })?;
-    open_persistent_store(app_data_dir, &mut store)
+    let opening = store.is_none();
+    open_persistent_store(app_data_dir, &mut store).map(|opened| (opened, opening))
 }
 
 fn open_persistent_store(

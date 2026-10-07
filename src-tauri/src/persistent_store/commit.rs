@@ -2455,6 +2455,7 @@ pub(super) fn delete_generation(
         [generation],
     )?;
     transaction.execute("DELETE FROM generations WHERE id = ?1", [generation])?;
+    super::portable_identity::forget_identity_remap(transaction, generation)?;
     Ok(())
 }
 
@@ -2510,6 +2511,7 @@ fn activate_generation(
     if retired != 1 || activated != 1 {
         return Err(validation("Generation states differ from the active library"));
     }
+    super::portable_identity::forget_identity_remap(transaction, staging_id)?;
     Ok(())
 }
 
@@ -2520,6 +2522,7 @@ pub(super) fn retire_generation(transaction: &Transaction<'_>, generation: &str)
          ON CONFLICT(id) DO UPDATE SET state = 'retired' WHERE state = 'staging'",
         [generation],
     )?;
+    super::portable_identity::forget_identity_remap(transaction, generation)?;
     Ok(())
 }
 

@@ -431,7 +431,7 @@ fn insert_preparation(
         .take()
         .map(|value| {
             risunest_external_storage_format::crypto::RecoveryKey::parse(&value)
-                .map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
+                .map_err(|_| ProviderError::new(ErrorKind::RecoveryKeyMismatch))?;
             Ok(Zeroizing::new(value))
         })
         .transpose()?;
@@ -1020,7 +1020,7 @@ pub(crate) async fn external_storage_unlock_connection(
         let recovered = recovery::open_bootstrap(&root, provider.as_ref(), &handle, &recovery_key, &cancel).await?;
         if recovered.metadata.descriptor != stored.descriptor
             || recovered.metadata.descriptor_locator != stored.descriptor_locator {
-            return Err(ProviderError::new(ErrorKind::Corrupt));
+            return Err(ProviderError::new(ErrorKind::RepositoryMismatch));
         }
         descriptor::read(&root, provider.as_ref(), &handle, &stored.descriptor_locator,
             &stored.descriptor, &recovered.key, &cancel).await?;
@@ -1876,7 +1876,7 @@ async fn commit_preparation(
                                     expected != &recovered.metadata.descriptor.repository_id
                                 })
                             {
-                                return Err(ProviderError::new(ErrorKind::Corrupt).into());
+                                return Err(ProviderError::new(ErrorKind::RepositoryMismatch).into());
                             }
                             require_repository_strategy(
                                 &capabilities,
@@ -1978,12 +1978,12 @@ async fn commit_preparation(
         .as_ref()
         .is_some_and(|expected| expected != &handle.repository_id)
     {
-        return Err(ProviderError::new(ErrorKind::Corrupt).into());
+        return Err(ProviderError::new(ErrorKind::RepositoryMismatch).into());
     }
     // Nothing this attempt left behind can be promoted later, so it goes with
     // the refusal.
     if store
-        .identity_holder(&handle.connection_identity)?
+        .identity_holder(&pending.repository_id, &handle.connection_identity)?
         .is_some_and(|held| held != connection_id)
     {
         let _ = store.remove_pending(connection_id);
@@ -2046,7 +2046,7 @@ async fn commit_preparation(
                 recovery::open_bootstrap(&root, provider.as_ref(), &handle, &recovery_key, cancel)
                     .await?;
             if recovered.metadata.descriptor != *descriptor || *recovered.key != *root_key {
-                return Err(ProviderError::new(ErrorKind::Corrupt).into());
+                return Err(ProviderError::new(ErrorKind::RepositoryMismatch).into());
             }
             descriptor::read(
                 &root,
@@ -2159,7 +2159,7 @@ pub(crate) async fn open_connected_with_cancel(
         )
         .await?;
     if handle.repository_id != stored.provider_repository_id {
-        return Err(ProviderError::new(ErrorKind::Corrupt));
+        return Err(ProviderError::new(ErrorKind::RepositoryMismatch));
     }
     stored
         .descriptor
@@ -2210,7 +2210,9 @@ pub(crate) async fn external_storage_remove_connection(
     logged("external_storage_remove_connection", async move {
         let cleanup_state = app.state::<ConnectionCommandState>();
         let _cleanup_guard = cleanup_state.admit()?;
-        runtime::require_connection_idle(&app, &connection_id).await?;
+        let _removal = app
+            .state::<super::job_store::JobCommandState>()
+            .hold_connection_removal(&connection_id)?;
         let root = connection_root(&app)?;
         let file_jobs = app.state::<crate::native_file_jobs::NativeFileJobState>();
         let _permit = file_jobs
@@ -2221,6 +2223,7 @@ pub(crate) async fn external_storage_remove_connection(
         pds.external_prepare_connection_removal(&connection_id)
             .map_err(runtime::local_error)?;
         drop(pds);
+        runtime::end_removed_connection_jobs(&root, &connection_id)?;
         let mut store = ConnectionStore::open(&root)?;
         let stored = store.read(&connection_id)?;
         runtime::native_store(&app)?
@@ -2367,7 +2370,8 @@ pub(crate) async fn external_storage_save_connection_settings_file(
             &stored.recovery_key_ref,
         )
         .await?;
-        let imported = recovery::import_connection_settings(&verified, &recovery_key)?;
+        let imported = recovery::import_connection_settings(&verified, &recovery_key).map_err(|error|
+            if error.kind == ErrorKind::RecoveryKeyMismatch { ProviderError::new(ErrorKind::Corrupt) } else { error })?;
         if imported.repository_id != stored.descriptor.repository_id || imported.config != stored.config
         {
             return Err(ProviderError::new(ErrorKind::Corrupt));
@@ -2637,6 +2641,62 @@ mod tests {
             .clone();
         invalid.recovery_key = Some("not-a-recovery-key".into());
         assert!(insert_preparation(&state, invalid, None, None, false).is_err());
+    }
+
+    #[test]
+    fn http_connections_prepare_and_list_only_for_user_configured_providers() {
+        let state = ConnectionCommandState::default();
+        let s3 = PrepareConnectionRequest {
+            config: super::super::contract::ConnectionConfig {
+                provider: "s3".into(),
+                profile: Some("generic".into()),
+                endpoint: "http://127.0.0.1:9000".into(),
+                account_id: String::new(),
+                location: BTreeMap::from([
+                    ("bucket".into(), "synthetic-bucket".into()),
+                    ("addressing".into(), "path".into()),
+                ]),
+                oauth_profile: None,
+            },
+            mode: ConnectionOpenMode::Create,
+            purpose: ConnectionPurpose::Backup,
+            recovery_key: None,
+            acknowledgements: Vec::new(),
+        };
+        assert_eq!(insert_preparation(&state, s3, None, None, false).unwrap().endpoint.authority,
+            "http://127.0.0.1:9000");
+
+        let mut stored = StoredConnection {
+            id: "http-webdav".into(),
+            config: super::super::contract::ConnectionConfig {
+                provider: "webdav".into(),
+                profile: None,
+                endpoint: "http://192.168.0.10:8080/dav".into(),
+                account_id: "synthetic".into(),
+                location: BTreeMap::from([("root".into(), "RisuNest".into())]),
+                oauth_profile: None,
+            },
+            descriptor: Descriptor::new("synthetic-repository".into(), None).unwrap(),
+            descriptor_locator: super::super::fake::locator(),
+            provider_repository_id: "synthetic-provider-root".into(),
+            credential_ref: "credential".into(),
+            root_key_ref: "root-key".into(),
+            recovery_key_ref: "recovery-key".into(),
+            retention_policy: None,
+            capabilities: super::super::fake::capabilities(false),
+            created_at_ms: 1,
+            verified_at_ms: 1,
+            last_sync_at_ms: None,
+            last_backup_at_ms: None,
+        };
+        assert!(summary(&stored).is_ok());
+        stored.config.provider = "mybox".into();
+        stored.config.account_id = String::new();
+        stored.config.location = BTreeMap::from([("rootFolderName".into(), "RisuNest".into())]);
+        stored.config.endpoint = "http://open-api.mybox.naver.com/v1".into();
+        assert!(summary(&stored).is_err());
+        stored.config.endpoint = "https://open-api.mybox.naver.com/v1".into();
+        assert!(summary(&stored).is_ok());
     }
 
     #[test]

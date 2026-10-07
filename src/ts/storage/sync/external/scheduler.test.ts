@@ -219,8 +219,8 @@ describe('external storage scheduler', () => {
 
         expect(request).toHaveBeenCalledOnce()
     })
-    it('does not automatically retry a native action-required start rejection', async () => {
-        const request = vi.fn(async () => ({ kind: 'blocked' as const, reason: 'endpointRejected', cause: { kind: 'endpointRejected' } }))
+    it.each(['endpointRejected', 'repositoryMismatch'])('does not automatically retry a native %s start rejection', async kind => {
+        const request = vi.fn(async () => ({ kind: 'blocked' as const, reason: kind, cause: { kind } }))
         const scheduler = createExternalStorageScheduler({ request, cancel: vi.fn() } as unknown as ExternalStorageController, {
             available: () => true, destinations: () => [{ connectionId: 'backup', kind: 'backup' }],
             session: () => ({ kind: 'foreground', id: 'session' }),

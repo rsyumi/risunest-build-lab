@@ -27,6 +27,7 @@ const state = vi.hoisted(() => ({
     removeConnection: vi.fn(),
     residency: vi.fn(),
     downloadRemote: vi.fn(),
+    binding: { target: { kind: 'none' } } as { target: { kind: string; connectionId?: string } },
 }))
 
 vi.mock('src/ts/platform', () => ({ isTauri: true, isTauriAndroid: false, isTauriIOS: false }))
@@ -36,6 +37,7 @@ vi.mock('qrcode', () => ({ default: { toDataURL: vi.fn() } }))
 vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertNormal: vi.fn(), alertCheckboxConfirm: vi.fn() }))
 vi.mock('src/ts/storage/sync/external/lwwProduction', () => ({ requestExternalLwwNow: state.syncNow, supportsExternalLwwNewDevice: () => state.remedy, subscribeExternalLwwFailures(callback: (value: ReadonlyMap<string, unknown>) => void) { callback(new Map(state.failures)); return () => {} } }))
 vi.mock('src/ts/storage/sync/bindingRegistry', () => ({ bindSyncTarget: state.bind, unbindSyncTarget: state.unbind }))
+vi.mock('src/ts/storage/sync/bindingNative', () => ({ createNativeSyncBindingBridge: () => ({ state: async () => state.binding }) }))
 vi.mock('src/lang', () => ({ language: { lwwSync: { newDeviceAction: 'Connect as new device', clockBlocked: 'Correct the device clock and retry.', previousStorageUnavailable: 'The previous storage could not be reached.', downloadFailedNotConnected: 'The files could not be downloaded, so the connection was not made.' } } }))
 vi.mock('src/ts/storage/sync/serverAssetResidency', () => ({ getAssetResidencyStatus: state.residency, downloadRemoteAssets: state.downloadRemote }))
 vi.mock('src/ts/stores.svelte' , () => ({ DBState: { db: { language: 'en' } } }))
@@ -76,10 +78,11 @@ vi.mock('src/ts/storage/sync/external/bridge', () => ({
 
 import { alertConfirm, alertCheckboxConfirm } from 'src/ts/alert'
 import ExternalStorageSettings from './ExternalStorageSettings.svelte'
-import { requestExternalStorageNow, resumeExternalStorageJob, requestExternalStorageDeleteHistory, stopExternalStorageRestore } from 'src/ts/storage/sync/external/production'
+import { requestExternalStorageNow, resumeExternalStorageJob, requestExternalStorageDeleteHistory, requestExternalStorageRestore, stopExternalStorageRestore } from 'src/ts/storage/sync/external/production'
 import { externalStorageStrings } from './strings'
+import { notifySyncBindingChanged } from 'src/ts/storage/sync/bindingChanges'
 
-beforeEach(() => { state.failures.clear(); state.remedy = true })
+beforeEach(() => { state.failures.clear(); state.remedy = true; state.binding = { target: { kind: 'none' } } })
 const strings = externalStorageStrings('en')
 let target: HTMLDivElement
 let component: ReturnType<typeof mount> | undefined
@@ -345,6 +348,50 @@ describe('the storage usage tab', () => {
         expect(target.textContent).not.toContain(strings.restoreUnfinished)
     })
 
+    const stoppedRestore = { id: 'stopped-restore', connectionId: 'connection-1', kind: 'restore', state: 'cancelled',
+        phase: 'cancelled', reason: 'manual', completedBytes: '0', completedItems: '0', startedAtMs: '1', updatedAtMs: '2',
+        error: { code: 'transient', message: 'synthetic', action: 'retry', retryable: true } }
+    const statusNotices = () => [...target.querySelectorAll('[role="status"]')]
+        .map(item => [item.getAttribute('data-notice'), item.textContent?.trim()])
+
+    it('shows the error of a restore the app stopped and the cancellation of one the user stopped', async () => {
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+            connections: [connection(10, 30)], jobs: [{ ...stoppedRestore, stoppedByApp: true }] })
+        state.jobStarted?.()
+        await settle()
+        expect(statusNotices()).toContainEqual(['danger', strings.retry])
+        expect(statusNotices().map(([, text]) => text)).not.toContain(strings.cancelled)
+
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+            connections: [connection(10, 30)], jobs: [stoppedRestore] })
+        state.jobStarted?.()
+        await settle()
+        expect(statusNotices()).toContainEqual(['info', strings.cancelled])
+        expect(statusNotices().map(([, text]) => text)).not.toContain(strings.retry)
+    })
+
+    it('reports a restore the app stopped on its connection row without repeating it below the section', async () => {
+        state.listHistory.mockResolvedValue({ items: [{ id: 'point', snapshotId: 'snapshot', kind: 'backup-point',
+            createdAtMs: '1', logicalRevision: '1', complete: true, verified: true, pinned: false,
+            includedSections: ['hypa', 'local-plugins', 'local-settings'], sameDevice: true }] })
+        vi.mocked(alertCheckboxConfirm).mockResolvedValue({ confirmed: true, checked: true })
+        vi.mocked(requestExternalStorageRestore).mockImplementation(async () => {
+            state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+                connections: [connection(10, 30)], jobs: [{ ...stoppedRestore, stoppedByApp: true }] })
+            throw Object.assign(new Error('synthetic'), { name: 'transient', code: 'transient' })
+        })
+        const tab = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.history)!
+        tab.click()
+        await settle()
+        const restore = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.restore)!
+        restore.click()
+        await settle()
+        await settle()
+        expect(requestExternalStorageRestore).toHaveBeenCalledWith('connection-1', 'snapshot', expect.any(Array))
+        expect(statusNotices()).toContainEqual(['danger', strings.retry])
+        expect([...target.querySelectorAll('[role="alert"]')].map(item => item.textContent?.trim())).toEqual([])
+    })
+
     it('owns one snapshot export, reports progress and cancels that export ID', async () => {
         state.listHistory.mockResolvedValue({ items: [{ id: 'point', snapshotId: 'snapshot', kind: 'backup-point',
             createdAtMs: '1', logicalRevision: '1', complete: true, verified: true, pinned: false,
@@ -463,8 +510,8 @@ describe('the storage usage tab', () => {
         if (component) await unmount(component)
         state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0', paused: false }, connections: [{ ...connection(10, 30), providerId }], jobs: [] })
         component = mount(ExternalStorageSettings, { target }); await settle()
-        expect([...target.querySelectorAll('button')].some(item => item.textContent?.trim() === strings.sync)).toBe(false)
-        expect(target.textContent).not.toContain(strings.automaticSync)
+        expect([...target.querySelectorAll('button')].some(item => [strings.sync, strings.runSync].includes(item.textContent?.trim() ?? ''))).toBe(false)
+        expect(target.textContent).not.toContain(strings.makeSyncTarget)
     })
     it('offers actual native new-device recovery through the shared binding action', async () => {
         if (component) await unmount(component)
@@ -475,6 +522,16 @@ describe('the storage usage tab', () => {
         expect(recovery).toBeDefined(); recovery.click(); await settle()
         expect(state.bind).toHaveBeenCalledWith({ kind: 'external', connectionId: 'connection-1' }, { mode: 'new-device' })
         expect(alertConfirm).not.toHaveBeenCalled(); expect(alertCheckboxConfirm).not.toHaveBeenCalled()
+    })
+    it('labels the sync target switch apart from the button that syncs now', async () => {
+        if (component) await unmount(component)
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'external', connectionId: 'connection-1', selectionEpoch: '0', paused: false }, connections: [{ ...connection(10, 30), purpose: 'sync', strategy: 'sequential' }], jobs: [] })
+        component = mount(ExternalStorageSettings, { target }); await settle()
+        const toggle = [...target.querySelectorAll('label')].find(item => item.textContent?.trim() === strings.makeSyncTarget)?.querySelector('input')
+        expect(toggle?.checked).toBe(true)
+        const run = [...target.querySelectorAll('button')].find(item => item.textContent?.trim() === strings.runSync)!
+        expect(run).toBeDefined(); run.click(); await settle()
+        expect(state.syncNow).toHaveBeenCalledWith('connection-1')
     })
     it('combines both history deletion consequences into one checked confirmation', async () => {
         const item = { id: 'point', snapshotId: 'snapshot', pointId: 'point-id', pointObservation: 'observation', deletable: true, kind: 'backup-point', createdAtMs: '1', logicalRevision: '1', pinned: false, complete: true, verified: true, includedSections: [], sameDevice: false }
@@ -547,7 +604,7 @@ describe('the storage usage tab', () => {
         state.listHistory.mockResolvedValue({
             items: [{
                 id: 'snapshot', snapshotId: 'snapshot', kind: 'backup-point',
-                createdAtMs: '1', logicalRevision: 1, storedBytes: '1', pinned: false,
+                createdAtMs: '1', logicalRevision: 1, pinned: false,
                 complete: true, verified: true, includedSections: [], sameDevice: true,
                 warning: 'UNTRUSTED REMOTE WARNING',
             }],
@@ -560,6 +617,19 @@ describe('the storage usage tab', () => {
 
         expect(target.textContent).not.toContain('UNTRUSTED REMOTE WARNING')
         expect(target.textContent).toContain(strings.historyKinds['backup-point'])
+    })
+
+    it('marks the backups this device made and nothing else', async () => {
+        const row = (id: string, sameDevice: boolean, kind = 'backup-point') => ({
+            id, snapshotId: id, kind, createdAtMs: '1', logicalRevision: '1', pinned: false,
+            complete: true, verified: true, includedSections: [], sameDevice,
+        })
+        state.listHistory.mockResolvedValue({ items: [row('own', true), row('other', false), row('state', false, 'snapshot')] })
+        const tab = [...target.querySelectorAll('button')].find(item => item.textContent?.trim() === strings.history)
+        tab?.click()
+        await settle()
+        const meta = [...target.querySelectorAll('.item-meta')].map(item => item.textContent)
+        expect(meta).toEqual([strings.thisDevice])
     })
 
     it('sends a changed limit and leaves the other one alone', async () => {
@@ -744,6 +814,8 @@ describe('removing a connection', () => {
     const held = (entries: { connectionId: string, objects: number }[]) => ({ policy: 'remote', localBytes: 0, remoteBytes: 1, remoteObjects: 1,
         serverBytes: 0, serverObjects: 0, externalObjects: entries, unavailableObjects: 0, evictedBytes: 0 })
     const removeButton = () => [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.remove)!
+    const name = `${strings.providers.webdav.name}
+https://synthetic.invalid · RisuNest`
     beforeEach(async () => {
         state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0', paused: false },
             connections: [connection(10, 30)], jobs: [] })
@@ -764,18 +836,46 @@ describe('removing a connection', () => {
     it.each([
         { name: 'holds no file', status: () => state.residency.mockResolvedValue(held([])) },
         { name: 'is not the one holding files', status: () => state.residency.mockResolvedValue(held([{ connectionId: 'other', objects: 3 }])) },
-    ])('asks the plain confirmation when the status $name', async ({ status }) => {
+    ])('asks for a checked confirmation that names the connection when the status $name', async ({ status }) => {
         status()
-        vi.mocked(alertConfirm).mockResolvedValue(true)
+        vi.mocked(alertCheckboxConfirm).mockResolvedValue({ confirmed: true, checked: true })
         removeButton().click(); await settle()
-        expect(alertCheckboxConfirm).not.toHaveBeenCalled(); expect(alertConfirm).toHaveBeenCalledOnce()
+        expect(alertCheckboxConfirm).toHaveBeenCalledExactlyOnceWith({
+            title: strings.removeTitle, description: name, checkboxLabel: strings.remove,
+            actionLabel: strings.remove, cancelLabel: strings.cancel, requireChecked: true,
+        })
+        expect(alertConfirm).not.toHaveBeenCalled()
         expect(state.removeConnection).toHaveBeenCalledExactlyOnceWith('connection-1'); expect(state.downloadRemote).not.toHaveBeenCalled()
+    })
+    it('keeps the connection when the confirmation is cancelled', async () => {
+        state.residency.mockResolvedValue(held([]))
+        vi.mocked(alertCheckboxConfirm).mockResolvedValue({ confirmed: false, checked: false })
+        removeButton().click(); await settle()
+        expect(state.removeConnection).not.toHaveBeenCalled()
+    })
+    it('names two connections to one service and account apart', async () => {
+        if (component) await unmount(component)
+        const other = { ...connection(10, 30), id: 'connection-2', endpoint: { ...connection(10, 30).endpoint, repositoryHint: 'RisuNest-sync' } }
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0', paused: false }, connections: [connection(10, 30), other], jobs: [] })
+        state.residency.mockResolvedValue(held([]))
+        vi.mocked(alertCheckboxConfirm).mockResolvedValue({ confirmed: false, checked: false })
+        component = mount(ExternalStorageSettings, { target }); await settle()
+        for (const card of target.querySelectorAll('article')) {
+            [...card.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.remove)!.click()
+            await settle()
+        }
+        expect(vi.mocked(alertCheckboxConfirm).mock.calls.map(([options]) => options.description)).toEqual([
+            name, `${strings.providers.webdav.name}
+https://synthetic.invalid · RisuNest-sync`,
+        ])
     })
     it('offers a download with unknown wording when residency cannot be read', async () => {
         state.residency.mockRejectedValue({ code: 'local-storage' })
         vi.mocked(alertCheckboxConfirm).mockResolvedValue({ confirmed: false, checked: false })
         removeButton().click(); await settle()
-        expect(alertCheckboxConfirm).toHaveBeenCalledWith(expect.objectContaining({ description: strings.removeRemoteOnlyUnknown }))
+        expect(alertCheckboxConfirm).toHaveBeenCalledWith(expect.objectContaining({ description: `${name}
+
+${strings.removeRemoteOnlyUnknown}`, requireChecked: false }))
         expect(alertConfirm).not.toHaveBeenCalled()
         expect(state.removeConnection).not.toHaveBeenCalled()
     })
@@ -784,7 +884,9 @@ describe('removing a connection', () => {
         vi.mocked(alertCheckboxConfirm).mockResolvedValue({ confirmed: false, checked: false })
         removeButton().click(); await settle()
         expect(alertCheckboxConfirm).toHaveBeenCalledExactlyOnceWith({
-            title: strings.removeRemoteOnlyTitle, description: strings.removeRemoteOnly, checkboxLabel: strings.downloadThenRemove,
+            title: strings.removeTitle, description: `${name}
+
+${strings.removeRemoteOnly}`, checkboxLabel: strings.downloadThenRemove,
             actionLabel: strings.remove, cancelLabel: strings.cancel, requireChecked: false,
         })
         expect(alertConfirm).not.toHaveBeenCalled()
@@ -875,10 +977,143 @@ it('explains a connection not made because the files could not be downloaded fir
     target = document.createElement('div')
     document.body.append(target)
     component = mount(ExternalStorageSettings, { target }); await settle()
-    const toggle = [...target.querySelectorAll('label')].find(item => item.textContent?.trim() === strings.sync)?.querySelector('input')
+    const toggle = [...target.querySelectorAll('label')].find(item => item.textContent?.trim() === strings.makeSyncTarget)?.querySelector('input')
     expect(toggle).toBeDefined()
     toggle!.click(); await settle()
     expect(state.bind).toHaveBeenCalledWith({ kind: 'external', connectionId: 'connection-1' })
     expect(target.querySelector('[role="alert"]')?.textContent).toBe('The files could not be downloaded, so the connection was not made.')
     unmount(component); component = undefined; target.remove()
+})
+
+describe('the sync switch', () => {
+    const syncConnection = () => ({ ...connection(10, 30), purpose: 'sync' as const, strategy: 'sequential' as const })
+    const selection = (kind: 'none' | 'server' | 'external', connectionId?: string) => ({ kind, connectionId, selectionEpoch: '0', paused: false })
+    const view = (current: ReturnType<typeof selection>) => ({ supported: true, selection: current, connections: [syncConnection()], jobs: [] })
+    const toggle = () => [...target.querySelectorAll('label')].find(item => item.textContent?.trim() === strings.makeSyncTarget)!.querySelector('input')!
+    const drawnChecked = () => !!toggle().closest('label')!.querySelector('svg')
+    async function show(current: ReturnType<typeof selection>): Promise<void> {
+        state.getState.mockResolvedValue(view(current))
+        state.listHistory.mockResolvedValue({ items: [] })
+        target = document.createElement('div')
+        document.body.append(target)
+        component = mount(ExternalStorageSettings, { target })
+        await settle()
+    }
+    beforeEach(() => { vi.clearAllMocks(); state.bind.mockReset(); state.unbind.mockReset() })
+    afterEach(() => {
+        if (component) unmount(component)
+        component = undefined
+        target.remove()
+    })
+
+    it('shows the device sync target again after turning it on failed', async () => {
+        state.binding = { target: { kind: 'server', connectionId: 'server' } }
+        await show(selection('server', 'server'))
+        state.bind.mockRejectedValue({ kind: 'clockSkew' })
+        toggle().click(); await settle()
+        expect(state.bind).toHaveBeenCalledExactlyOnceWith({ kind: 'external', connectionId: 'connection-1' })
+        expect(toggle().checked).toBe(false)
+        expect(drawnChecked()).toBe(false)
+        expect(target.querySelector('[role="alert"]')?.textContent).toBe(strings.clockSkew)
+        toggle().click(); await settle()
+        expect(state.bind).toHaveBeenCalledTimes(2)
+        expect(state.unbind).not.toHaveBeenCalled()
+    })
+
+    it('stays off when the replacement is cancelled', async () => {
+        state.binding = { target: { kind: 'server', connectionId: 'server' } }
+        await show(selection('server', 'server'))
+        state.bind.mockResolvedValue({ kind: 'cancelled' })
+        toggle().click(); await settle()
+        expect(toggle().checked).toBe(false)
+        expect(drawnChecked()).toBe(false)
+        expect(target.querySelector('[role="alert"]')).toBeNull()
+        expect(state.unbind).not.toHaveBeenCalled()
+    })
+
+    it('turns on once the binding succeeds', async () => {
+        await show(selection('none'))
+        state.bind.mockImplementation(async () => {
+            state.getState.mockResolvedValue(view(selection('external', 'connection-1')))
+            return { kind: 'bound' }
+        })
+        toggle().click(); await settle()
+        expect(toggle().checked).toBe(true)
+        expect(drawnChecked()).toBe(true)
+    })
+
+    it('leaves another sync target alone when a switch drawn from an older state is turned off', async () => {
+        await show(selection('external', 'connection-1'))
+        expect(toggle().checked).toBe(true)
+        state.binding = { target: { kind: 'server', connectionId: 'server' } }
+        state.getState.mockResolvedValue(view(selection('server', 'server')))
+        toggle().click(); await settle()
+        expect(state.unbind).not.toHaveBeenCalled()
+        expect(toggle().checked).toBe(false)
+        expect(drawnChecked()).toBe(false)
+    })
+
+    it('stops sync with this repository when it is the sync target', async () => {
+        state.binding = { target: { kind: 'external', connectionId: 'connection-1' } }
+        await show(selection('external', 'connection-1'))
+        state.unbind.mockImplementation(async () => { state.getState.mockResolvedValue(view(selection('none'))) })
+        toggle().click(); await settle()
+        expect(state.unbind).toHaveBeenCalledOnce()
+        expect(toggle().checked).toBe(false)
+    })
+
+    it('shows a sync target chosen elsewhere without reopening settings', async () => {
+        await show(selection('external', 'connection-1'))
+        expect(toggle().checked).toBe(true)
+        state.getState.mockResolvedValue(view(selection('server', 'server')))
+        notifySyncBindingChanged(); await settle()
+        expect(toggle().checked).toBe(false)
+        expect(drawnChecked()).toBe(false)
+        expect([...target.querySelectorAll('button')].some(button => button.textContent?.trim() === strings.runSync)).toBe(false)
+    })
+})
+
+describe('the connection card text', () => {
+    async function show(connections: unknown[], jobs: unknown[] = []): Promise<void> {
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0', paused: false }, connections, jobs })
+        state.listHistory.mockResolvedValue({ items: [] })
+        target = document.createElement('div')
+        document.body.append(target)
+        component = mount(ExternalStorageSettings, { target })
+        await settle()
+    }
+    afterEach(() => {
+        if (component) unmount(component)
+        component = undefined
+        target.remove()
+        vi.clearAllMocks()
+    })
+    const occurrences = (text: string) => (target.querySelector('article')?.textContent ?? '').split(text).length - 1
+
+    it('shows no last backup on a sync connection that never made one', async () => {
+        await show([{ ...connection(10, 30), purpose: 'sync', strategy: 'sequential' }])
+        expect(target.textContent).not.toContain(strings.lastBackup)
+    })
+
+    it('keeps the last backup on a backup connection', async () => {
+        await show([{ ...connection(10, 30), lastBackupAtMs: '1000' }])
+        expect(occurrences(strings.lastBackup)).toBe(1)
+    })
+
+    it('shows the error of a paused job once on its card', async () => {
+        const job = { id: 'paused', connectionId: 'connection-1', kind: 'backup', state: 'waiting', phase: 'paused', reason: 'automatic',
+            completedBytes: '4', totalBytes: '10', completedItems: '1', startedAtMs: '1', updatedAtMs: '1',
+            error: { code: 'transient', action: 'retry', retryable: true } }
+        await show([connection(10, 30)], [job])
+        expect(occurrences(strings.retry)).toBe(1)
+        expect(occurrences(strings.statusError)).toBe(1)
+    })
+
+    it('shows a failed job that set the connection error once on its card', async () => {
+        const error = { code: 'storageFull', action: 'free-space', retryable: false }
+        const job = { id: 'failed', connectionId: 'connection-1', kind: 'backup', state: 'failed', phase: 'failed', reason: 'manual',
+            completedBytes: '4', totalBytes: '10', completedItems: '1', startedAtMs: '1', updatedAtMs: '1', error }
+        await show([{ ...connection(10, 30), status: 'error', lastError: error }], [job])
+        expect(occurrences(strings.freeSpace)).toBe(1)
+    })
 })

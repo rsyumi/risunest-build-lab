@@ -13,6 +13,8 @@ vi.mock('../parser/parser.svelte', () => ({
 }))
 const displaySettings = vi.hoisted(() => ({ apply: vi.fn(async () => undefined) }))
 vi.mock('../gui/receivedDisplaySettings', () => ({ applyReceivedDisplaySettings: displaySettings.apply }))
+const pluginRuntime = vi.hoisted(() => ({ load: vi.fn(async () => undefined) }))
+vi.mock('../plugins/plugins.svelte', async (importOriginal) => ({ ...await importOriginal<typeof import('../plugins/plugins.svelte')>(), loadPlugins: pluginRuntime.load }))
 import { selectedCharID } from '../stores.svelte'
 import { doingChat } from '../process/generationState'
 import { getRuntimePerformanceBudgets } from '../runtimePerformanceProfile'
@@ -22,8 +24,9 @@ import {
 } from '../plugins/pluginStorageStore'
 import { getV2PluginAPIs } from '../plugins/plugins.svelte'
 import type { Database } from './database.svelte'
-import type { PersistentDataStore, PersistentUnitMutation } from './persistentDataStore'
-import { getDatabase, getEffectivePresetId, normalizeDatabaseDefaults, setDatabase, setDatabaseLite, setEffectivePresetOverride } from './database.svelte'
+import type { PersistentDataStore, PersistentUnitMutation, WorkingSetCommit } from './persistentDataStore'
+import { captureCurrentPreset, getDatabase, getEffectivePresetId, normalizeDatabaseDefaults, setDatabase, setDatabaseLite, setEffectivePresetOverride, setPreset } from './database.svelte'
+import { createPresetWorkingSetController } from './presetWorkingSetOperations'
 import {
     configurePersistentDataRuntime,
     createProductionStateAdapter,
@@ -39,6 +42,7 @@ import { canonicalJson, SaveCoordinator } from './saveCoordinator'
 import { capturePersistentRoot, createPersistentDataRuntime } from './persistentDataRuntime'
 import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
 import { observePersistentSaveChanges } from './persistentSaveObserver.svelte'
+import { appendCharacterIdToOrder, removeCharacterIdFromOrder } from './characterOrderMutation'
 
 afterEach(() => {
     configurePersistentDataRuntime({ projectWorkingSet: undefined })
@@ -1153,5 +1157,399 @@ describe('received removal of the selected character or conversation', () => {
             expect(saveFailures).toEqual([])
             workingSetResidency.clear()
         }
+    })
+})
+
+describe('detail mutations of a catalog character', () => {
+    const character = (chaId: string, extra: Record<string, unknown> = {}) => ({ type: 'character', chaId, name: chaId, chatPage: 0, chatFolders: [], chats: [{ id: `${chaId}-chat`, name: 'Chat', note: '', localLore: [], message: [] }], ...extra })
+
+    async function catalogRuntime(eviction: boolean, resident: readonly string[] = ['live'], live: Record<string, unknown> = {}) {
+        workingSetResidency.setEvictionAllowed(eviction)
+        const initial = normalizeDatabaseDefaults({} as Database)
+        initial.botPresets[0].id = 'preset'
+        initial.personas[0].id = 'persona'
+        initial.characters = [
+            character('live', { creatorNotes: 'Live notes', ...live }),
+            character('trashed', { trashTime: 123, creatorNotes: 'Trashed notes', image: 'trashed-image' }),
+            character('other', { creatorNotes: 'Other notes' }),
+        ] as unknown as Database['characters']
+        initial.characterOrder = ['live', 'other']
+        const store = new IndexedDbPersistentDataStore(`catalog-detail-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange) as PersistentDataStore
+        await store.open()
+        const { revision } = await store.replaceFromDatabase(initial)
+        setDatabaseLite(projectCompleteScalableWorkingSet(initial, 'live', revision, new Set(resident)))
+        // Bootstrap marks every stub it installs as released.
+        for (const value of getDatabase().characters) if (isCatalogCharacterStub(value)) workingSetResidency.markCharacterReleased(value.chaId)
+        selectedCharID.set(0)
+        const saveFailures: unknown[] = []
+        const runtime = createPersistentDataRuntime({
+            store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value,
+            onLocalSaveFailure: (error) => { if (error !== null) saveFailures.push(error) },
+        })
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        await runtime.flushPendingDataLocally('catalog-detail-settle')
+        for (const value of getDatabase().characters) expect(isCatalogCharacterStub(value)).toBe(!resident.includes(value.chaId))
+        return { store, runtime, saveFailures }
+    }
+
+    async function receive(store: PersistentDataStore, runtime: Awaited<ReturnType<typeof catalogRuntime>>['runtime'], commit: Omit<WorkingSetCommit, 'expectedRevision'>, affectedKeys: string[]) {
+        store.lwwStageReceive = async () => undefined
+        store.lwwFinishReceive = async () => undefined
+        store.lwwApplyReceive = async () => ({ ...await store.commit({ expectedRevision: runtime.revision, ...commit }), affectedKeys, heldKeys: [], deferredKeys: [] })
+        await runtime.applyLwwReceive({ bindingAuthority: '1', requestId: crypto.randomUUID(), changes: [], progress: { kind: 'server', cursor: '1' }, admittedTimeUpperMs: '100' })
+    }
+
+    const editOther = (runtime: Awaited<ReturnType<typeof catalogRuntime>>['runtime']) =>
+        runtime.mutatePersistentCharacterDetail('other', 'character-removal', ({ root, character }) => {
+            removeCharacterIdFromOrder(root, 'other')
+            character.trashTime = 456
+            character.name = 'Renamed'
+            character.image = 'other-image'
+            character.creatorNotes = 'Edited notes'
+            character.desc = 'Detail only'
+        })
+
+    async function expectEditedCatalogCharacter(store: PersistentDataStore, runtime: Awaited<ReturnType<typeof catalogRuntime>>['runtime'], saveFailures: unknown[]) {
+        const edited = getDatabase().characters.find((value) => value.chaId === 'other')!
+        expect(edited).toMatchObject({ trashTime: 456, name: 'Renamed', image: 'other-image', creatorNotes: 'Edited notes' })
+        expect(edited).not.toHaveProperty('desc')
+        expect(isCatalogCharacterStub(edited)).toBe(true)
+        expect(getDatabase().characterOrder).toEqual(['live'])
+        const commit = vi.spyOn(store, 'commit')
+        await runtime.flushPendingDataLocally('after-catalog-edit')
+        expect(commit).not.toHaveBeenCalled()
+        expect(saveFailures).toEqual([])
+    }
+
+    it.each([true, false])('restores a trashed catalog character into the live list (eviction=%s)', async (eviction) => {
+        const { store, runtime, saveFailures } = await catalogRuntime(eviction)
+        await runtime.mutatePersistentCharacterDetail('trashed', 'character-restore', ({ root, character }) => {
+            delete character.trashTime
+            appendCharacterIdToOrder(root, 'trashed')
+        })
+
+        const restored = getDatabase().characters.find((value) => value.chaId === 'trashed')!
+        expect(restored).not.toHaveProperty('trashTime')
+        expect(isCatalogCharacterStub(restored)).toBe(true)
+        expect(getDatabase().characterOrder).toEqual(['live', 'other', 'trashed'])
+        expect((await store.readCharacter('trashed'))!.value).not.toHaveProperty('trashTime')
+        const commit = vi.spyOn(store, 'commit')
+        await runtime.flushPendingDataLocally('after-catalog-restore')
+        expect(commit).not.toHaveBeenCalled()
+        expect(saveFailures).toEqual([])
+    })
+
+    it.each([true, false])('publishes catalog fields of a detail edit to a catalog character (eviction=%s)', async (eviction) => {
+        const { store, runtime, saveFailures } = await catalogRuntime(eviction)
+        await editOther(runtime)
+
+        await expectEditedCatalogCharacter(store, runtime, saveFailures)
+    })
+
+    it('publishes only catalog fields to a released character that kept its baseline', async () => {
+        const { store, runtime, saveFailures } = await catalogRuntime(true, ['live', 'other'])
+        expect(workingSetResidency.releaseCharacterToCatalog(getDatabase(), 'other')).toBe(true)
+        await editOther(runtime)
+
+        await expectEditedCatalogCharacter(store, runtime, saveFailures)
+    })
+
+    it('patches a received trash restore into a catalog character', async () => {
+        const { store, runtime, saveFailures } = await catalogRuntime(true)
+        const key = '["character","trashed","trashTime"]'
+        await receive(store, runtime, { unitMutations: [{ key, type: 'delete' }] }, [key])
+
+        expect(getDatabase().characters.find((value) => value.chaId === 'trashed')).not.toHaveProperty('trashTime')
+        expect(saveFailures).toEqual([])
+    })
+
+    it('keeps received conversations and folders out of a character released to the catalog', async () => {
+        const { store, runtime, saveFailures } = await catalogRuntime(true, ['live'], { chatFolders: undefined })
+        expect(await runtime.activateCharacter('other')).toBe(true)
+        const released = () => getDatabase().characters.find((value) => value.chaId === 'live')!
+        expect(isCatalogCharacterStub(released())).toBe(true)
+        const folders = [{ id: 'folder', name: 'Folder', folded: false }]
+        await receive(store, runtime, {
+            conversations: [{ type: 'replace-range', characterId: 'live', conversationId: 'live-chat-2', start: 0, deleteCount: 0, messages: [],
+                conversation: { id: 'live-chat-2', name: 'Second', note: '', localLore: [] } as unknown as Omit<Database['characters'][number]['chats'][number], 'message'>, configuredIndex: 1 }],
+            unitMutations: [{ key: '["order","conversations","live"]', type: 'set', value: { ids: ['live-chat', 'live-chat-2'], folders } }],
+        }, ['["exists","conversation","live","live-chat-2"]', '["order","conversations","live"]'])
+
+        expect((await store.readCharacter('live'))!.value.chatFolders).toEqual(folders)
+        expect(await store.readConversationMetadata('live', 'live-chat-2')).not.toBeNull()
+        expect(isCatalogCharacterStub(released())).toBe(true)
+        expect(released().chats).toEqual([])
+        expect(released()).not.toHaveProperty('chatFolders')
+        const commit = vi.spyOn(store, 'commit')
+        await runtime.flushPendingDataLocally('after-released-receive')
+        expect(commit).not.toHaveBeenCalled()
+        expect(saveFailures).toEqual([])
+    })
+
+    it.each(['released', 'added'])('keeps no baseline for a character %s to the catalog', async (route) => {
+        const { runtime } = await catalogRuntime(true)
+        if (route === 'released') {
+            expect(await runtime.activateCharacter('other')).toBe(true)
+            expect(isCatalogCharacterStub(getDatabase().characters.find((value) => value.chaId === 'live')!)).toBe(true)
+        } else {
+            await runtime.upsertPersistentCompleteCharacter('added', 'add-catalog-character', () => character('added', { creatorNotes: 'Added notes' }) as unknown as Database['characters'][number])
+            expect(isCatalogCharacterStub(getDatabase().characters.find((value) => value.chaId === 'added')!)).toBe(true)
+        }
+        const materialized = vi.spyOn(SaveCoordinator.prototype, 'captureMaterializedBaseline')
+        try {
+            await runtime.mutatePersistentCharacterDetail('trashed', 'character-restore', ({ root, character }) => {
+                delete character.trashTime
+                appendCharacterIdToOrder(root, 'trashed')
+            })
+
+            expect(materialized).toHaveBeenCalled()
+            const resident = getDatabase().characters.filter((value) => !isCatalogCharacterStub(value)).map((value) => value.chaId)
+            expect(materialized.mock.results.at(-1)!.value.map((value: Database['characters'][number]) => value.chaId)).toEqual(resident)
+        } finally {
+            materialized.mockRestore()
+        }
+    })
+})
+
+describe('preset list operations', () => {
+    it.each([true, false])('stores whole presets added, copied, renamed and removed in place (catalog=%s)', async (catalog) => {
+        const initial = normalizeDatabaseDefaults({} as Database)
+        initial.botPresets[0].id = 'first-preset'
+        initial.botPresets[0].name = 'First'
+        initial.personas[0].id = 'persona'
+        const store = new IndexedDbPersistentDataStore(`preset-list-${catalog}-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange)
+        await store.open()
+        const {revision} = await store.replaceFromDatabase(initial)
+        setDatabaseLite(catalog ? projectCompleteScalableWorkingSet(initial, null, revision, new Set()) : structuredClone(initial))
+        selectedCharID.set(-1)
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        const controller = createPresetWorkingSetController({
+            getDatabase, captureCurrentPreset, getEffectivePresetId,
+            applyPreset: (root, preset) => setPreset(root as Database, preset),
+            mutatePersistentPresets: (reason, mutate) => runtime.mutatePersistentPresets(reason, mutate),
+        })
+        const stored = async () => (await store.queryPresets()).items.sort((a, b) => a.configuredIndex - b.configuredIndex).map((item) => item.name)
+        const live = () => getDatabase().botPresets.map((value) => value.name)
+
+        expect(await controller.addPreset({...structuredClone(initial.botPresets[0]), name: 'Added'})).toBe(1)
+        expect(await stored()).toEqual(['First', 'Added'])
+        expect(live()).toEqual(['First', 'Added'])
+        expect(await controller.copyPreset(1)).toBe(2)
+        expect(await stored()).toEqual(['First', 'Added', 'Added Copy'])
+        expect(live()).toEqual(['First', 'Added', 'Added Copy'])
+        await controller.renamePreset(2, 'Renamed')
+        expect(await stored()).toEqual(['First', 'Added', 'Renamed'])
+        expect(live()).toEqual(['First', 'Added', 'Renamed'])
+        await controller.removePreset(1)
+        expect(await stored()).toEqual(['First', 'Renamed'])
+        expect(live()).toEqual(['First', 'Renamed'])
+        expect(getDatabase().botPresetsId).toBe(0)
+        const ids = (await store.queryPresets()).items.map((item) => item.id)
+        expect(new Set(ids).size).toBe(2)
+        expect(ids).toContain('first-preset')
+
+        const commit = vi.spyOn(store, 'commit')
+        await runtime.flushPendingDataLocally('after-preset-list-operations')
+        expect(commit).not.toHaveBeenCalled()
+    })
+})
+
+async function receiveCommit(store: PersistentDataStore, runtime: ReturnType<typeof createPersistentDataRuntime>,
+    commit: Omit<WorkingSetCommit, 'expectedRevision'>, affectedKeys: string[], whileApplying?: () => void) {
+    store.lwwStageReceive = async () => undefined
+    store.lwwFinishReceive = async () => undefined
+    store.lwwApplyReceive = async () => {
+        whileApplying?.()
+        return { ...await store.commit({ expectedRevision: runtime.revision, ...commit }), affectedKeys, heldKeys: [], deferredKeys: [] }
+    }
+    await runtime.applyLwwReceive({ bindingAuthority: '1', requestId: crypto.randomUUID(), changes: [], progress: { kind: 'server', cursor: '1' }, admittedTimeUpperMs: '100' })
+}
+
+describe('received record deletions', () => {
+    async function recordRuntime() {
+        const initial = normalizeDatabaseDefaults({} as Database)
+        initial.botPresets[0].id = 'preset'
+        initial.personas = [{...initial.personas[0], id: 'persona-keep', name: 'Keep'}, {...initial.personas[0], id: 'persona-gone', name: 'Gone'}]
+        initial.selectedPersona = 0
+        initial.modules = [{id: 'module-keep', name: 'Keep', description: ''}, {id: 'module-gone', name: 'Gone', description: ''}]
+        initial.loadouts = [{id: 'loadout-keep', name: 'Keep'}, {id: 'loadout-gone', name: 'Gone'}] as unknown as Database['loadouts']
+        initial.customModels = [{id: 'model-keep', name: 'Keep'}, {id: 'model-gone', name: 'Gone'}] as unknown as Database['customModels']
+        const store = new IndexedDbPersistentDataStore(`record-deletions-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange) as PersistentDataStore
+        await store.open()
+        await store.replaceFromDatabase(initial)
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(-1)
+        const saveFailures: unknown[] = []
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value,
+            onLocalSaveFailure: (error) => { if (error !== null) saveFailures.push(error) }})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        await runtime.flushPendingDataLocally('record-deletions-settle')
+        return {store, runtime, saveFailures}
+    }
+
+    it.each([
+        ['modules', 'modules', 'module'], ['loadouts', 'loadouts', 'loadout'], ['customModels', 'customModels', 'model'], ['personas', 'persona', 'persona'],
+    ].flatMap(([collection, kind, prefix]) => [false, true].map((edited) => ({collection, kind, prefix, edited}))) as {
+        collection: 'modules' | 'loadouts' | 'customModels' | 'personas', kind: string, prefix: string, edited: boolean,
+    }[])('removes a $collection record deleted on another device from the working set (edited during receive=$edited)', async ({collection, kind, prefix, edited}) => {
+        const {store, runtime, saveFailures} = await recordRuntime()
+        const records = () => getDatabase()[collection] as unknown as {id: string, name: string}[]
+        const keys = [JSON.stringify(['exists', kind, `${prefix}-gone`]), JSON.stringify(['order', collection])]
+        await receiveCommit(store, runtime, {unitMutations: [{key: keys[0], type: 'delete'}, {key: keys[1], type: 'set', value: [`${prefix}-keep`]}]}, keys,
+            edited ? () => { records().find((value) => value.id === `${prefix}-gone`)!.name = 'Edited here' } : undefined)
+
+        expect(records().map((value) => value.id)).toEqual([`${prefix}-keep`])
+        const commit = vi.spyOn(store, 'commit')
+        records()[0].name = 'Later edit'
+        await runtime.flushPendingDataLocally('after-received-record-deletion')
+        expect(commit).toHaveBeenCalledOnce()
+        expect(JSON.stringify(commit.mock.calls[0][0])).not.toContain(`${prefix}-gone`)
+        expect(saveFailures).toEqual([])
+    })
+})
+
+describe('received fields the working set did not have', () => {
+    async function fieldRuntime() {
+        const initial = normalizeDatabaseDefaults({} as Database)
+        const preset = initial.botPresets[0]
+        initial.botPresets = [{...structuredClone(preset), id: 'preset-selected', name: 'Selected'}, {...structuredClone(preset), id: 'preset-other', name: 'Other'}]
+        delete initial.botPresets[1].globalNote
+        initial.botPresetsId = 0
+        const persona = {id: 'persona-selected', name: 'Selected', icon: '', personaPrompt: '', note: ''}
+        initial.personas = [persona, {...persona, id: 'persona-other', name: 'Other'}]
+        initial.selectedPersona = 0
+        const store = new IndexedDbPersistentDataStore(`received-new-fields-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange) as PersistentDataStore
+        await store.open()
+        await store.replaceFromDatabase(initial)
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(-1)
+        const saveFailures: unknown[] = []
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value,
+            onLocalSaveFailure: (error) => { if (error !== null) saveFailures.push(error) }})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        // A save reads every capture once, as the app does before any receive.
+        getDatabase().classicMaxWidth = true
+        await runtime.flushPendingDataLocally('received-new-fields-settle')
+        return {store, runtime, saveFailures}
+    }
+
+    it.each([
+        ['persona-selected', '["persona","persona-selected","largePortrait"]', true],
+        ['persona-other', '["persona","persona-other","largePortrait"]', true],
+        ['preset-other', '["preset","preset-other","globalNote"]', 'Received note'],
+    ] as const)('keeps a field %s received for the first time', async (id, key, value) => {
+        const {store, runtime, saveFailures} = await fieldRuntime()
+        const field = JSON.parse(key)[2] as string
+        const live = () => (id.startsWith('persona') ? getDatabase().personas : getDatabase().botPresets).find((item) => item.id === id) as unknown as Record<string, unknown>
+        expect(live()).not.toHaveProperty(field)
+        await receiveCommit(store, runtime, {unitMutations: [{key, type: 'set', value}]}, [key])
+
+        expect(live()[field]).toEqual(value)
+        const commit = vi.spyOn(store, 'commit')
+        getDatabase().classicMaxWidth = false
+        await runtime.flushPendingDataLocally('after-received-new-field')
+        expect(commit).toHaveBeenCalledOnce()
+        expect(commit.mock.calls[0][0].unitMutations ?? []).toEqual([])
+        expect(commit.mock.calls[0][0].rootMutations).toEqual([{type: 'set', key: 'classicMaxWidth', value: false}])
+        const stored = id.startsWith('persona')
+            ? (await store.readRoot()).value.personas!.find((item) => item.id === id) as unknown as Record<string, unknown>
+            : (await store.readPreset(id))!.value as unknown as Record<string, unknown>
+        expect(stored[field]).toEqual(value)
+        expect(saveFailures).toEqual([])
+    })
+})
+
+describe('local global toggle edits', () => {
+    it.each(['toggle_new', 'toggle_existing'])('stores %s', async (name) => {
+        const initial = normalizeDatabaseDefaults({} as Database)
+        initial.botPresets[0].id = 'preset'
+        initial.personas[0].id = 'persona'
+        initial.globalChatVariables = {toggle_existing: '1'}
+        initial.explicitGlobalChatVariables = {toggle_existing: '1'}
+        const store = new IndexedDbPersistentDataStore(`local-toggle-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange)
+        await store.open()
+        await store.replaceFromDatabase(initial)
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(-1)
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        // A save reads every capture once, as the app does before the toggle changes.
+        getDatabase().classicMaxWidth = true
+        await runtime.flushPendingDataLocally('local-toggle-settle')
+
+        getDatabase().globalChatVariables[name] = '2'
+        await runtime.flushPendingDataLocally('local-toggle')
+
+        expect((await store.readRoot()).value.explicitGlobalChatVariables?.[name]).toBe('2')
+    })
+})
+
+describe('received plugin records', () => {
+    const plugin = (name: string, extra: Record<string, unknown> = {}) => ({name, displayName: name, script: `// ${name}`,
+        arguments: {limit: 'int'}, realArg: {limit: 1}, version: '3.0', customLink: [], argMeta: {}, enabled: true, ...extra})
+    const record = (name: string, value?: ReturnType<typeof plugin>): PersistentUnitMutation =>
+        value ? {key: JSON.stringify(['record', 'plugins', name]), type: 'set', value} : {key: JSON.stringify(['record', 'plugins', name]), type: 'delete'}
+
+    async function pluginHarness() {
+        const initial = normalizeDatabaseDefaults({} as Database)
+        initial.botPresets[0].id = 'preset'
+        initial.personas[0].id = 'persona'
+        initial.plugins = [plugin('plugin-a'), plugin('plugin-b')] as unknown as Database['plugins']
+        const store = new IndexedDbPersistentDataStore(`received-plugins-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange) as PersistentDataStore
+        await store.open()
+        await store.replaceFromDatabase(initial)
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(-1)
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        await runtime.flushPendingDataLocally('received-plugins-settle')
+        pluginRuntime.load.mockClear()
+        return {store, runtime}
+    }
+
+    it.each([
+        ['an added plugin', [record('plugin-c', plugin('plugin-c'))], ['plugin-a', 'plugin-b', 'plugin-c']],
+        ['a removed plugin', [record('plugin-b')], ['plugin-a']],
+        ['a disabled plugin', [record('plugin-a', plugin('plugin-a', {enabled: false}))], ['plugin-a', 'plugin-b']],
+        ['a changed script', [record('plugin-a', plugin('plugin-a', {script: '// changed'}))], ['plugin-a', 'plugin-b']],
+        ['a changed API version', [record('plugin-a', plugin('plugin-a', {version: '2.1'}))], ['plugin-a', 'plugin-b']],
+        ['changed argument values', [record('plugin-a', plugin('plugin-a', {realArg: {limit: 2}}))], ['plugin-a', 'plugin-b']],
+        ['changed arguments', [record('plugin-a', plugin('plugin-a', {arguments: {limit: 'string'}}))], ['plugin-a', 'plugin-b']],
+    ] as const)('reloads plugins once after receiving %s', async (_, mutations, names) => {
+        const {store, runtime} = await pluginHarness()
+        await receiveCommit(store, runtime, {unitMutations: [...mutations]}, mutations.map((value) => value.key))
+        await vi.dynamicImportSettled()
+
+        expect(getDatabase().plugins.map((value) => value.name)).toEqual(names)
+        for (const mutation of mutations) if (mutation.type === 'set') expect(getDatabase().plugins.find((value) => value.name === (mutation.value as {name: string}).name)).toEqual(mutation.value)
+        expect(pluginRuntime.load).toHaveBeenCalledOnce()
+    })
+
+    it('does not reload plugins for receives that leave what plugins run unchanged', async () => {
+        const {store, runtime} = await pluginHarness()
+        const unchanged = async (commit: Omit<WorkingSetCommit, 'expectedRevision'>, keys: string[]) => {
+            await receiveCommit(store, runtime, commit, keys)
+            await vi.dynamicImportSettled()
+            expect(pluginRuntime.load).not.toHaveBeenCalled()
+        }
+
+        const renamed = record('plugin-a', plugin('plugin-a', {displayName: 'Renamed'}))
+        await unchanged({unitMutations: [renamed]}, [renamed.key])
+        expect(getDatabase().plugins[0].displayName).toBe('Renamed')
+        await unchanged({unitMutations: [{key: '["order","plugins"]', type: 'set', value: ['plugin-b', 'plugin-a']}]}, ['["order","plugins"]'])
+        expect(getDatabase().plugins.map((value) => value.name)).toEqual(['plugin-b', 'plugin-a'])
+        await unchanged({pluginStorage: [{type: 'set', owner: 'plugin-a', key: 'counter', value: 1}]}, ['["plugin","plugin-a","counter"]'])
+        await unchanged({unitMutations: [{key: '["root","classicMaxWidth"]', type: 'set', value: true}]}, ['["root","classicMaxWidth"]'])
+        expect(getDatabase().classicMaxWidth).toBe(true)
+    })
+
+    it('leaves a local plugin change to the toggle that made it', async () => {
+        const {runtime} = await pluginHarness()
+        getDatabase().plugins[0].enabled = false
+        await runtime.flushPendingDataLocally('local-plugin-toggle')
+        await vi.dynamicImportSettled()
+
+        expect(pluginRuntime.load).not.toHaveBeenCalled()
     })
 })

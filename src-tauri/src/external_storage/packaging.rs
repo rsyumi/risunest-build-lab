@@ -105,7 +105,7 @@ fn local_io_kind(kind: std::io::ErrorKind) -> ProviderError {
     ProviderError::new(match kind {
         IoKind::StorageFull => ErrorKind::LocalStorageFull,
         IoKind::PermissionDenied | IoKind::ReadOnlyFilesystem => ErrorKind::LocalPermissionDenied,
-        _ => ErrorKind::Transient,
+        _ => ErrorKind::LocalFailure,
     })
 }
 
@@ -4139,7 +4139,8 @@ mod tests {
             (std::io::ErrorKind::StorageFull, ErrorKind::LocalStorageFull),
             (std::io::ErrorKind::PermissionDenied, ErrorKind::LocalPermissionDenied),
             (std::io::ErrorKind::ReadOnlyFilesystem, ErrorKind::LocalPermissionDenied),
-            (std::io::ErrorKind::WouldBlock, ErrorKind::Transient),
+            (std::io::ErrorKind::WouldBlock, ErrorKind::LocalFailure),
+            (std::io::ErrorKind::NotFound, ErrorKind::LocalFailure),
         ] {
             assert_eq!(transient(std::io::Error::from(cause)).kind, expected);
             assert_eq!(format_error(std::io::Error::from(cause).into()).kind, expected);

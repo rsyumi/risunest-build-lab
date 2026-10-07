@@ -76,7 +76,7 @@ export const languageKorean = {
     },
     portableBackup: {
         preservedSourceHelp:
-            '복원한 라이브러리에 필요하지 않은 파일을 원본 보존 영역에 별도 보관했습니다. 자동 동기화되지 않으며 해당 보존 영역에서 삭제할 수 있습니다.',
+            '복원한 라이브러리에 필요하지 않은 파일을 원본 보존 영역에 별도 보관했으며, 이 영역에서 삭제할 수 있습니다.',
         export: 'RisuNest 전체 백업 (.risunest)',
         restore: '백업 파일 복원',
         localStorage: '플러그인 로컬 저장소',
@@ -87,6 +87,7 @@ export const languageKorean = {
         pocket: 'PocketRisu용 내보내기 (.bin)',
         report: '호환 내보내기 보고서',
         preserved: '보존',
+        preservedSummary: '보존한 파일 {0}개 · {1}',
         converted: '변환',
         excluded: '제외',
         unknown: '집계 불가',
@@ -136,7 +137,7 @@ export const languageKorean = {
     togglesUnbound: '토글 바인드가 해제되었습니다.',
     saveToggleChanges: '변경된 토글 값을 바인드에 저장',
     saveTogglesLabel: '저장',
-    toggleBindingDisabled: '토글 바인딩이 임시로 꺼져 있습니다. 저장된 값은 유지됩니다.',
+    toggleBindingDisabled: '토글 바인딩이 임시로 꺼져 있습니다.',
     localTogglePriority: '채팅 로컬 값이 우선 적용됩니다.',
     disableToggleBinding: '토글 바인딩 임시 비활성화',
     saveDefaultToggles: '현재 값을 새 채팅 기본값으로 저장',
@@ -863,14 +864,14 @@ export const languageKorean = {
     "risuSaveImportCommittedRefreshFailed": "RisuSave 가져오기는 반영되었지만 화면을 새로 고치지 못했습니다. 다른 변경을 하기 전에 화면 새로 고침을 선택해주세요.",
     "risuSaveImportComplete": "RisuSave 가져오기가 완료되었습니다.",
     "risuSaveExportComplete": "RisuSave 내보내기가 완료되었습니다.",
-    "risuSaveCleanupWarning": "작업은 완료되었지만 네이티브 임시 파일을 정리하지 못했습니다. 앱 시작 시 다시 정리합니다.",
+    "risuSaveCleanupWarning": "작업은 완료되었지만 임시 파일을 정리하지 못했습니다. 앱 시작 시 다시 정리합니다.",
     "risuSaveRevisionConflict": "작업을 시작하는 동안 데이터베이스가 변경되었습니다. 다시 시도해주세요.",
     accountUnmigration: {
         preparing: "계정 데이터를 로컬에 저장할 준비 중",
-        cold: "보관된 데이터 다운로드 및 검증 중",
-        assets: "자산 다운로드 및 검증 중",
+        cold: "보관된 데이터 다운로드 및 확인 중",
+        assets: "에셋 다운로드 및 확인 중",
         finishing: "로컬 저장소로 전환 마무리 중",
-        failed: "로컬 저장소로 전환을 완료하지 못했습니다. 작업 중 데이터가 변경되었다면 다른 작업이 끝난 후 다시 시도해주세요.",
+        failed: "로컬 저장소로 전환을 완료하지 못했습니다. 작업 중 데이터가 변경된 경우 다른 작업이 끝난 후 다시 시도해주세요.",
     },
     "cancelRisuSaveOperation": "RisuSave 작업 취소",
     "loadPocketRisuBackup": "PocketRisu 백업 가져오기",
@@ -891,7 +892,6 @@ export const languageKorean = {
     "syncBackupDatabaseOnly": "데이터베이스 전용, 에셋, 콜드 스토리지, 인레이 제외",
     "syncBackupSideLocal": "이 기기",
     "syncBackupSideRemote": "계정",
-    "exitSyncPendingWarning": "아직 계정에 동기화되지 않은 변경이 있습니다. 그래도 종료하시겠습니까?",
     "others": "기타",
     "presets": "프리셋",
     "imageGeneration": "이미지 생성",
@@ -1122,7 +1122,6 @@ export const languageKorean = {
     "webdeeplwarn": "이 옵션은 웹에서는 제대로 작동하지 않을 수 있습니다.",
     "saveBackupLocal": "로컬 백업 저장",
     "loadBackupLocal": "로컬 백업 불러오기",
-    "restoreLocalSnapshotConfirm": "현재 데이터를 이 로컬 스냅샷으로 교체하고 앱을 다시 시작하시겠습니까?",
     "topP": "Top P",
     "genTimes": "생성 횟수",
     "cot": "생각의 사슬",
@@ -1737,6 +1736,7 @@ export const languageKorean = {
             storage: '변경 사항을 저장하지 못했습니다. 저장 공간을 확보한 후 저장을 다시 시도해주세요.',
             tooLarge: '변경 사항이 너무 커서 저장할 수 없습니다. 방금 추가한 큰 대화나 데이터를 삭제한 후 저장을 다시 시도해주세요.',
             currentChat: '현재 대화의 변경 사항을 저장하지 못했습니다. 저장을 다시 시도해주세요. 계속 실패할 경우 앱을 다시 시작해야 하며, 저장하지 못한 변경 사항은 사라집니다.',
+            deleted: '다른 기기에서 삭제된 데이터의 변경 사항을 저장하지 못했습니다. 해당 데이터를 삭제한 후 저장을 다시 시도해주세요.',
             settings: '설정', conversation: '대화', presets: '프리셋', plugins: '플러그인', assets: '에셋', data: '앱',
         },
         account: {
@@ -1764,16 +1764,14 @@ export const languageKorean = {
         persistentData: {
             followupFailed: '복원 내용은 저장되었지만 후속 작업을 마치지 못했습니다. 백업을 다시 가져오지 말고 동기화 상태를 확인하거나 앱을 재시작해주세요.',
             confirmApplicationTitle: '외부 저장소 작업을 확인해야 합니다',
-            confirmApplicationHelp: '작업이 진행 중이거나 일부 데이터만 적용되었을 수 있어 편집을 잠시 멈췄습니다. 다시 확인하면 새 복원을 시작하지 않고 같은 작업을 확인하거나 이어서 처리합니다.',
+            confirmApplicationHelp: '작업이 진행 중이거나 일부 데이터만 적용되었을 수 있어 편집을 잠시 멈췄습니다. 다시 확인하면 같은 작업을 확인하거나 이어서 처리합니다.',
             confirmApplication: '같은 작업 다시 확인',
-            confirmApplicationFailed: '아직 결과를 확인하지 못했습니다. 연결과 저장 공간을 확인한 뒤 다시 시도해주세요. 데이터가 이전 상태로 돌아갔다고 확인된 것은 아닙니다.',
+            confirmApplicationFailed: '아직 결과를 확인하지 못했습니다. 연결과 저장 공간을 확인한 뒤 다시 시도해주세요.',
             refreshTitle: '저장은 완료되었지만 화면을 새로 고쳐야 합니다',
-            refreshHelp: '변경 사항은 저장되어 있습니다. 저장된 데이터를 화면에 다시 불러올 때까지 편집이 잠시 중단됩니다. 화면 새로 고침은 저장이나 가져오기를 다시 실행하지 않습니다.',
+            refreshHelp: '변경 사항은 저장되어 있습니다. 저장된 데이터를 화면에 다시 불러올 때까지 편집이 잠시 중단됩니다.',
             refresh: '화면 새로 고침',
             refreshFailed: '저장된 데이터를 화면에 표시하지 못했습니다. 새로 고침을 다시 시도하거나 앱을 재시작해주세요.',
         },
-        exitSaveFailedWarning:
-            '저장에 실패했습니다. 저장하지 않고 종료하려면 예를, 앱을 열어 두고 다시 시도하려면 아니오를 선택하세요.',
         archive: {
             tab: '보관함',
             action: '보관',
@@ -1784,7 +1782,7 @@ export const languageKorean = {
             archivedAt: '대화 {0}개 · {1}에 보관',
             confirmTitle: '캐릭터를 보관하시겠습니까?',
             confirmBody: '보관하면 대화를 압축해 차지하는 용량을 줄입니다. 캐릭터는 목록에 흑백으로 남고 언제든 되돌릴 수 있습니다. 보관 중에는 캐릭터를 사용하거나 조회할 수 없습니다.',
-            confirmCounts: '대화 {0}개 · 메시지 {1}개 · 이미지는 그대로 남습니다.',
+            confirmCounts: '대화 {0}개 · 메시지 {1}개',
             accountOnlyTitle: 'RisuAI 계정 백업에는 보관한 캐릭터가 저장되지 않습니다.',
             accountOnlyBody: '현재 RisuAI 계정만 연결되어 있어, 이 기기의 데이터를 잃을 경우 보관한 캐릭터를 복원할 수 없습니다. 파일로 백업하거나 동기화 서버·외부 저장소를 연결한 뒤 진행해주세요.',
             restoreTitle: '캐릭터를 복원하시겠습니까?',
@@ -1802,7 +1800,6 @@ export const languageKorean = {
             archivedHelp: '보관된 캐릭터를 함께 저장하려면 복원한 뒤 다시 진행해주세요.',
             collidingPluginValues: '이름이 겹치는 플러그인 값 {0}개',
             collidingHelp: '서로 다른 플러그인이 같은 이름을 씁니다. 플러그인이 동작하지 못하게 될 수 있으므로 백업에서 제외되었습니다. 플러그인을 확인하고 수동으로 백업해주세요.',
-            copyList: '목록 복사',
         },
         pluginData: {
             title: '플러그인 데이터',
@@ -1844,7 +1841,6 @@ export const languageKorean = {
             reassign: '다른 플러그인으로 바꾸기',
             prefixGroup: '{0}로 시작하는 {1}개 · {2}',
             ungrouped: '묶이지 않은 항목 {0}개 · {1}',
-            andMore: '그 외 {0}개',
             choosePlugin: '플러그인 선택',
             openValue: '값 열기',
             detailOwner: '플러그인',
@@ -1858,7 +1854,7 @@ export const languageKorean = {
                 warning: '잘못 할당하면 플러그인에서 오류가 발생할 수 있으므로 확인 후 할당하세요.',
                 summary: '{0}개 · {1}',
                 autoAssign: '할당하지 않은 값은 처음 요청하는 플러그인에 자동 할당',
-                autoAssignHelp: '가져오기를 마친 뒤 최초 로딩에만 적용됩니다. 그 이후에 설치한 플러그인에는 적용되지 않으며, 결과는 RisuNest 설정의 플러그인 데이터 탭에서 확인할 수 있습니다.',
+                autoAssignHelp: '가져오기를 마친 뒤 최초 로딩에만 적용되며, 그 이후에 설치한 플러그인에는 적용되지 않습니다. 결과는 RisuNest 설정의 플러그인 데이터 탭에서 확인할 수 있습니다.',
                 autoAssignOffNotice: '자동 할당을 껐습니다. 여기서 할당한 값만 적용되고 나머지는 RisuNest 설정의 플러그인 데이터에 남습니다. 나중에 할당할 수 있지만 그때는 플러그인을 다시 불러와야 합니다.',
                 skipAll: '모두 건너뛰고 계속',
                 applyAndContinue: '적용하고 계속',
@@ -1870,8 +1866,6 @@ export const languageKorean = {
                 confirmAction: '할당',
                 collisionTitle: '이름이 겹치는 값이 {0}개 있습니다',
                 collisionBody: '{0}에 같은 이름의 값이 이미 있습니다. 가져온 값을 어떻게 처리할지 선택하세요. 겹치지 않는 {1}개는 어느 쪽을 선택해도 {0}에 할당됩니다.',
-                collisionCurrent: '지금 {0}',
-                collisionIncoming: '가져온 값 {0}',
                 collisionReplace: '가져온 값으로 바꾸기',
                 collisionReplaceHelp: '지금 값은 사라집니다.',
                 collisionDiscard: '가져온 값 삭제',
@@ -1892,9 +1886,6 @@ export const languageKorean = {
             description:
                 '플러그인 로컬 데이터를 다른 기기와 동기화할지 선택할 수 있습니다. 동기화 서버와 외부 저장소에 동일하게 적용됩니다.',
             notConnected: '동기화 서버와 외부 저장소가 아직 연결되지 않았습니다.',
-            hypaTitle: '하이파 임베딩 데이터',
-            hypaDescription:
-                '하이파에서 쓰는 임베딩 데이터입니다. 동기화를 하면 다른 기기에서도 하이파 데이터가 그대로 유지되며, 동기화 하지 않을 경우 다시 계산을 위해 임베딩 API를 사용해야 합니다.',
             pluginTitle: '로컬 플러그인 데이터',
             pluginDescription:
                 '플러그인이 기기마다 저장하는 값입니다. 플러그인에 따라 동작에 차이가 있을 수 있으며, 동기화 도중에 설정을 변경하면 다른 기기의 플러그인 데이터를 덮어쓸 수 있습니다.',
@@ -1928,8 +1919,8 @@ export const languageKorean = {
             editBlockedTitle: '변경 작업이 끝나기를 기다리는 중',
             editBlocked: '다른 저장, 가져오기 또는 교체 작업이 라이브러리를 사용하고 있습니다. 계속 기다리거나 앱으로 돌아가세요.',
             saving: '앱을 닫기 전에 로컬 변경사항을 저장하고 있습니다.',
-            capturing: '종료할 때 게시할 저장 리비전을 고정하고 있습니다.',
-            syncing: '앱을 닫기 전에 저장된 변경사항을 게시하고 있습니다.',
+            capturing: '앱을 닫기 전에 동기화할 변경사항을 확인하고 있습니다.',
+            syncing: '앱을 닫기 전에 저장된 변경사항을 동기화하고 있습니다.',
             delayed: '동기화가 평소보다 오래 걸리고 있습니다. 사용자가 선택할 때까지 앱을 열어 둡니다.',
             blocked: '동기화를 마치려면 확인이 필요합니다. 다시 시도하거나, 동기화하지 않고 종료하거나, 앱으로 돌아갈 수 있습니다.',
             saveFailed: '로컬 변경사항을 저장하지 못했습니다. 다시 저장하거나, 저장하지 않고 종료하거나, 앱으로 돌아갈 수 있습니다.',
@@ -1947,7 +1938,7 @@ export const languageKorean = {
             title: '앱 업데이트',
             description: '서명된 RisuNest 릴리즈를 확인하고 설치 시점을 선택합니다.',
             automatic: '자동으로 확인',
-            automaticHelp: '앱 준비가 끝난 뒤 최대 6시간마다 확인합니다. 설치는 항상 사용자가 선택합니다.',
+            automaticHelp: '앱 준비가 끝난 뒤 최대 6시간마다 확인합니다.',
             currentVersion: '현재 버전',
             installMethod: '설치 방식',
             lastChecked: '마지막 확인',
@@ -1958,7 +1949,7 @@ export const languageKorean = {
             clearSkipped: '건너뛴 버전 해제',
             releasePage: '제품 릴리즈',
             openRelease: '릴리즈 페이지 열기',
-            settingsError: '저장된 업데이트 설정이 올바르지 않아 원문을 유지했습니다',
+            settingsError: '저장된 업데이트 설정이 올바르지 않습니다',
             dialogTitle: 'RisuNest 업데이트',
             current: '현재 최신 버전입니다.',
             notConfigured: '이 빌드에는 릴리즈 검증 키가 설정되지 않았습니다.',
@@ -1972,7 +1963,7 @@ export const languageKorean = {
             applying: '업데이트를 적용하는 중…',
             cancel: '취소',
             close: '닫기',
-            iosResign: '이 unsigned IPA는 실기기에 설치하기 전에 사용자의 인증서로 다시 서명해야 합니다.',
+            iosResign: '서명되지 않은 IPA입니다. 가지고 있는 인증서로 다시 서명한 뒤 기기에 설치하세요.',
             debReady: '서명된 DEB가 준비되었습니다. 경로나 명령을 복사하고 RisuNest를 종료한 뒤 터미널에서 설치하세요.',
             copyPath: '경로 복사',
             copyCommand: '명령 복사',
@@ -1980,7 +1971,7 @@ export const languageKorean = {
             exitApp: 'RisuNest 종료',
             strategies: {
                 'self-install': '자동 업데이트',
-                'stage-deb': '검증된 DEB 다운로드',
+                'stage-deb': '서명된 DEB 다운로드',
                 'open-link': '운영체제로 다운로드하여 설치',
                 disabled: '릴리즈 페이지 안내',
             },
@@ -2005,7 +1996,6 @@ export const languageKorean = {
             compatibility: '플러그인 호환 데이터 준비 중',
             plugins: '플러그인 준비 중',
             account: '계정 동기화 준비 중',
-            update: '업데이트 확인 중',
             serviceWorker: '오프라인 기능 준비 중',
             ui: '화면 준비 중',
             elapsed: (seconds: number) => `${seconds}초 경과`,
@@ -2013,35 +2003,21 @@ export const languageKorean = {
         },
         serverSync: {
             registrationCode: '등록 코드',
-            registrationCodeHelp:
-                '서버에서 발급한 등록 코드를 붙여넣으세요. 기기마다 별도의 등록 코드가 필요합니다.',
-            codeNote: '등록 코드는 기기마다 따로 만들어야 합니다.',
             readRegistration: '코드 읽기',
             scanRegistration: 'QR 코드 스캔',
-            scanRegistrationHelp: '등록 QR 코드가 카메라에 보이도록 맞춰 주세요.',
             cancelScan: '스캔 취소',
             registrationInvalid: '올바른 등록 코드가 아닙니다.',
             cameraDenied:
                 '카메라 권한이 허용되지 않았습니다. 다시 시도하거나 코드를 붙여넣으세요.',
             cameraUnavailable:
                 '카메라로 코드를 읽지 못했습니다. 다시 시도하거나 코드를 붙여넣어 주세요.',
-            registrationBlocked:
-                '새 등록 코드를 입력하려면 현재 서버 연결을 먼저 해제하세요.',
             discardRegistration: '입력 지우기',
-            directoryEnabled: '서버 주소 자동 찾기',
-            manualEntry: '직접 입력',
-            endpointPlaceholder: 'https://sync.example.com',
             reviewTitle: '서버 확인',
-            reviewLead: '등록 코드에서 읽은 서버 정보입니다. 확인한 뒤 연결하세요.',
-            otherCode: '다른 코드',
             connectHint:
                 '연결하면 동기화 서버의 라이브러리를 이 기기로 받아옵니다. 용량이 큰 경우 시간이 소요될 수 있습니다.',
-            connectRow: '서버 연결',
             connectRowHelp:
-                '서버에서 발급한 등록 코드를 붙여넣으세요. 기기마다 별도의 등록 코드가 필요합니다.',
+                '서버에서 만든 등록 코드를 붙여넣으세요. 기기마다 별도의 등록 코드가 필요합니다.',
             enterCode: '등록 코드 입력',
-            viewList: '목록 보기',
-            register: '등록',
             residency: {
                 title: '에셋 보관 방식',
                 description:
@@ -2053,68 +2029,34 @@ export const languageKorean = {
                 externalOnly: '외부 저장소에만 있는 파일',
                 unavailable: '찾을 수 없는 파일',
                 cleanupNote:
-                    '이미 다운로드한 파일은 유지됩니다. 정리하면 서버에 있는 파일의 기기 사본만 삭제되며, 스냅샷에 필요한 파일은 스냅샷을 삭제할 때까지 유지됩니다.',
+                    '정리하면 서버에 있는 파일 중 이 기기의 사본을 삭제합니다.',
                 clean: '이 기기의 사본 정리',
                 cancel: '취소',
                 working: '파일 처리 중… 현재 요청이 끝나면 취소됩니다.',
-                freed: '확보한 공간',
             
                 "download": '다운로드',
             },
             management: {
                 title: '동기화가 쓰는 저장 공간',
-                disk: '이 기기에서 쓰는 용량',
-                complete: '완성된 백업',
-                incomplete: '만들다 만 백업 (자동 정리 안 함)',
                 cache: '임시 파일',
                 protected: '아직 필요한 파일',
                 reclaimable: '정리 가능',
                 clean: '필요 없는 임시 파일 정리',
                 ledger: '에셋 보관 기록',
-                ledgerHelp: '에셋 보관 방식에 필요한 기록이며 정리되지 않습니다.',
-                more: '이전 백업',
-                refresh: '목록 새로고침',
+                ledgerHelp: '에셋 보관 방식에 필요한 기록입니다.',
                 blockedReasons: {
                     'server-sync-busy': '동기화가 진행 중입니다',
-                    'incomplete-preservation': '이 백업의 보관이 아직 끝나지 않았습니다',
-                    'backup-in-use': '이 백업을 사용 중입니다',
-                    'cache-references-unavailable': '임시 파일을 지금 확인할 수 없습니다',
                 },
                 blockedReasonUnknown: '지금은 사용할 수 없습니다',
-                restoreConfirm:
-                    '이 백업으로 복원하시겠습니까? 현재 라이브러리는 이 백업의 내용으로 교체되며, 동기화는 일시 중지됩니다. 자동 백업은 만들지 않습니다.',
-                deleteConfirm: '이 충돌 백업을 이 기기에서 삭제하시겠습니까?',
-                deleteCleanupPending:
-                    '로컬 백업은 삭제됐으며, 서버 정리는 나중에 계속됩니다.',
                 cleanConfirm:
-                    '필요 없는 임시 파일을 정리하시겠습니까? 진행 중인 작업에 필요한 파일과 이 기기의 라이브러리 파일은 그대로 둡니다.',
+                    '필요 없는 임시 파일을 정리하시겠습니까?',
             },
-            backups: '충돌 백업',
-            backupHelp:
-                '충돌이 발생하기 전의 백업으로 라이브러리를 복원할 수 있습니다. 복원하면 현재 라이브러리가 교체되며, 자동 백업은 만들지 않습니다.',
-            backupCount: '충돌 백업 {0}개',
-            noBackups: '충돌 백업이 없습니다.',
-            restoreLocalBackup: '이 기기 백업 복원',
-            restoreRemoteBackup: '서버 백업 복원',
-            exportLocalBackup: '이 기기 백업 저장',
-            exportRemoteBackup: '서버 백업 저장',
-            reregister: '새 기기로 등록',
-            reregisterHelp:
-                '서버에서 이 기기를 새로 등록한 뒤 새 등록 코드를 입력하세요. 이 기기에서 고친 내용은 그대로 두고 서버와 맞춥니다.',
-            reconcile: '복원된 서버와 비교',
-            reconcileHelp:
-                '서버가 다른 이력으로 복원되었습니다. 이 기기의 데이터를 백업하고 양쪽 내용을 비교한 뒤 진행합니다.',
-            activationHelp:
-                '편집하기 전에 저장이 끝났는지 확인해야 합니다. 화면 새로고침을 눌러 다시 확인하세요.',
             title: '개인 동기화 서버',
             description:
                 '여러 기기에서 같은 라이브러리를 동기화합니다. 편집 내용은 먼저 이 기기에 저장됩니다.',
             endpoint: '서버 주소',
             libraryId: '라이브러리 ID',
             deviceId: '기기 ID',
-            token: '기기 토큰',
-            credentialsHelp:
-                '서버 관리 화면에서 만든 주소와 이 기기의 인증 정보를 입력하세요. 기기마다 따로 만들어야 합니다.',
             credentialUnavailable:
                 '운영체제에서 이 기기의 인증 정보를 열 수 없습니다. 키 저장소 잠금을 해제하거나, 서버에서 이 기기를 새로 등록한 뒤 새 등록 코드를 입력하세요.',
             credentialUnavailableLinux:
@@ -2128,8 +2070,6 @@ export const languageKorean = {
             downloadFailedKeptConnection:
                 '파일을 다운로드하지 못해 연결을 해제하지 않았습니다. 다시 시도하거나 다운로드하지 않고 연결을 해제하세요.',
             syncNow: '지금 동기화',
-            pause: '일시 중지',
-            refresh: '화면 새로고침',
             disconnected: '연결 안 됨',
             ready: '연결됨',
             lastSuccess: '마지막 동기화',
@@ -2144,9 +2084,8 @@ export const languageKorean = {
             elapsed: '경과',
             count: '{0}개',
             itemsCount: '{0}개 항목',
-            activity: { enumerating: '항목 확인 중', preparing: '이 기기의 변경 내용 준비 중', downloadingMetadata: '캐릭터·채팅 등 라이브러리 데이터 다운로드 중', downloadingBackupMetadata: '충돌 백업용 라이브러리·에셋 정보 다운로드 중', downloading: '받을 데이터 다운로드 및 확인 중', preserving: '충돌 백업 저장 및 확인 중', syncingSections: '하이파·플러그인 데이터 다운로드 및 확인 중', verifying: '서버에 있는 항목 확인 중', uploading: '업로드 중', confirming: '서버 확인 대기 중', staging: '받은 내용 저장 중' },
+            activity: { enumerating: '항목 확인 중', preparing: '이 기기의 변경 내용 준비 중', downloading: '받을 데이터 다운로드 및 확인 중', verifying: '서버에 있는 항목 확인 중', uploading: '업로드 중', confirming: '서버 확인 대기 중', staging: '받은 내용 저장 중' },
             progress: {
-                saving: '이 기기의 변경 저장 중',
                 preparing: '이 기기와 서버의 변경 내용 비교 중',
                 downloading: '서버 내용 받는 중',
                 applying: '받은 내용 적용 중',
@@ -2156,49 +2095,11 @@ export const languageKorean = {
             },
             stage: { preparing: '변경 내용 비교', downloading: '서버 내용 다운로드', applying: '받은 내용 적용', refreshing: '화면 반영', publishing: '변경 내용 업로드', assets: '에셋 다운로드' },
             paused: '일시 중지됨',
-            pending: '동기화 완료 확인 중',
             registrationRequired: '새 등록 코드 필요',
-            refreshPending: '화면 새로고침 필요',
-            initialScan: '서버와 처음 전체 비교 대기 중',
             blocked: '자동 동기화 중지됨',
-            blockedHelp:
-                '서버가 이 기기의 변경을 받지 않아 자동 동기화를 멈췄습니다. 이 기기에서 고친 내용은 그대로 있습니다. 동기화를 다시 시도해도 같은 오류가 반복될 경우 서버와 앱을 최신 버전으로 업데이트하세요.',
-            incompatible: '서버와 앱 버전 불일치',
-            incompatibleHelp:
-                '서버와 앱의 버전이 서로 맞지 않아 동기화할 수 없습니다. 서버와 앱을 모두 최신 버전으로 업데이트한 후 다시 시도하세요.',
-            pendingHelp:
-                '진행 중이던 동기화를 마쳐야 연결을 해제할 수 있습니다. 지금 동기화를 누르세요.',
-            conflict: '충돌 확인 필요',
-            busyHelp: '다른 작업이 라이브러리를 사용하고 있습니다. 작업이 끝난 후 다시 시도하세요.',
             errorHelp:
                 '동기화를 마치지 못했습니다. 이 기기에서 고친 내용은 그대로 있습니다. 다시 시도하세요.',
-            refreshHelp:
-                '받은 변경 사항은 저장되었습니다. 화면을 새로고침하면 편집을 계속할 수 있습니다.',
-        
-            "retryStatus": '다시 시도',
-            "waitingForLocal": '이 기기의 변경 사항이 완료되기를 기다리고 있습니다.',
-            "storageFullHelp": '기기의 저장 공간이 부족합니다. 공간을 확보한 뒤 다시 동기화하세요.',
-            "conflictKinds": {
-                "root": '설정',
-                "preset": '프리셋',
-                "plugin": '플러그인 데이터',
-                "character": '캐릭터',
-                "conversation": '채팅',
-                "asset": '에셋',
-                "inlay": '인레이',
-                "cold": '콜드 스토리지',
-                "unknown": '항목',
-            },
-            "statusUnknown": '동기화 상태를 확인할 수 없습니다',
-            "registrationRefusedHelp": '서버가 이 기기의 등록을 받지 않습니다. 서버에서 새 등록 코드를 발급한 뒤 새 기기로 등록에 입력하세요. 서버를 새로 만든 경우 연결을 해제한 뒤 다시 연결하세요.',
-            "revokeBeforeRegistration": '서버에서 기존 기기의 등록을 해제한 뒤 새 등록 코드를 입력하세요.',
-            "conflictRefreshed": '충돌 항목이 변경되었습니다. 유지할 쪽을 다시 선택하세요.',
-            "continuingHelp": '남은 변경 사항은 다음 동기화에서 전송됩니다.',
-            "cameraBlocked": '카메라 권한이 차단되었습니다. 설정에서 카메라 권한을 허용하거나 코드를 붙여넣으세요.',
-            "cameraTimeout": 'QR 코드를 찾지 못했습니다. 다시 시도하거나 코드를 붙여넣으세요.',
-            "openCameraSettings": '설정 열기',
-            "registrationCodeHelpScan": '서버에서 발급한 등록 코드를 붙여넣거나 QR 코드를 스캔하세요. 기기마다 별도의 등록 코드가 필요합니다.',
-            "connectRowHelpScan": '서버에서 발급한 등록 코드를 붙여넣거나 QR 코드를 스캔하세요. 기기마다 별도의 등록 코드가 필요합니다.',
+            "connectRowHelpScan": '서버에서 만든 등록 코드를 붙여넣거나 QR 코드를 스캔하세요. 기기마다 별도의 등록 코드가 필요합니다.',
         },
         menuTitle: 'RisuNest',
         tabList: 'RisuNest 설정 탭',
@@ -2271,10 +2172,10 @@ export const languageKorean = {
             inventorySize: '용량',
             inventoryNoExtension: '확장자 없음',
             optimize: 'WebP로 최적화',
-            optimizeHelp: 'WebP가 아닌 이미지를 다시 저장해 용량을 줄입니다. 이미 WebP인 이미지와 바꿀 수 없는 이미지는 그대로 둡니다.',
+            optimizeHelp: 'WebP가 아닌 이미지를 WebP로 다시 저장해 용량을 줄입니다.',
             optimizeNone: '바꿀 이미지가 없습니다',
             optimizeConfirm: '이미지 {count}개({size})를 WebP로 바꿉니다. 원래 파일로 되돌릴 수 없으니 먼저 백업해 두세요.',
-            optimizeFormatNotice: '지금 저장 형식 설정은 WebP가 아니지만 이 작업은 WebP로 바꿉니다. 설정 자체는 그대로 둡니다.',
+            optimizeFormatNotice: '지금 저장 형식 설정은 WebP가 아니지만 이 작업은 WebP로 바꿉니다.',
             optimizeSyncNotice: '바뀐 이미지는 서버에 다시 올라갑니다.',
             optimizeRemoteNotice: '이 기기에 없는 파일을 서버에서 내려받습니다.',
             optimizeProgress: '{done} / {total} 처리 중',
@@ -2320,12 +2221,8 @@ export const languageKorean = {
             exportPartial: '사용 가능한 파일을 내보냈지만, 일부 원본 파일을 완전히 내보내지 못했습니다.',
             exportCancelled: '내보내기가 취소되었습니다.',
             exportFailed: '원본 파일을 내보내지 못했습니다.',
-            exportUnavailable: '네이티브 설정이 완료되지 않아 원본 데이터 내보내기를 사용할 수 없습니다.',
             startNormally: '그대로 시작',
-            keepTitle: '계속 꺼 두시겠습니까?',
             keepBody: '{0}을(를) 끈 채로 시작했습니다. 앞으로도 꺼 두시겠습니까?',
-            keepConfirm: '계속 끄기',
-            keptNothing: '다음 시작에는 모두 다시 켜집니다.',
         },
         storage: {
             snapshotSizeNote:
@@ -2335,8 +2232,6 @@ export const languageKorean = {
             total: '전체 데이터',
             media: '이미지·미디어',
             database: '데이터베이스',
-            inlays: '채팅 첨부',
-            plugins: '플러그인 데이터',
             snapshots: '스냅샷',
             conflictBackups: '충돌 백업',
             restoreSnapshot: '복원',
@@ -2353,13 +2248,6 @@ export const languageKorean = {
             createSnapshotHelp:
                 '지금 상태를 저장해 두고 나중에 되돌릴 수 있습니다.',
             createSnapshot: '지금 만들기',
-            tempTitle: '동기화 임시 파일',
-            cleanSyncTemp: '정리',
-            cleanSyncTempConfirm: '동기화 임시 파일을 정리하시겠습니까?',
-            calculateSize: '크기 계산',
-            calculateSizeFailed:
-                '임시 파일 크기를 계산하지 못했습니다. 정보를 새로 고친 뒤 다시 시도하세요.',
-            tempUsage: '{size} 사용 중',
             gcSeparation:
                 '데이터 점검에서 끊어진 연결을 지워도 파일은 삭제되지 않으므로, 필요한 경우 사용하지 않는 파일을 찾아서 삭제해주세요.',
             gcSearching: '사용하지 않는 파일을 찾는 중',
@@ -2389,18 +2277,12 @@ export const languageKorean = {
                 '이 스냅샷을 삭제하시겠습니까? 삭제하면 이 시점으로 되돌릴 수 없습니다.',
             deleteConflictBackupConfirm:
                 '이 충돌 백업을 삭제하시겠습니까? 삭제한 충돌 백업은 복구할 수 없습니다.',
-            syncBackups: '동기화 백업',
-            deleteSyncBackupConfirm:
-                '이 동기화 백업을 삭제하시겠습니까? 해당 작업 이전 상태로 되돌릴 수 없게 됩니다.',
-            syncBackupInUse:
-                '진행 중인 동기화가 사용하는 백업이라 삭제할 수 없습니다.',
             trashedCount: '(휴지통 {0}개)',
             loadFailed: '저장 공간 정보를 불러오지 못했습니다.',
             staleTotals:
                 '저장 공간 합계가 최신 정보가 아닐 수 있습니다. 정보를 새로 고친 뒤 다시 시도하세요.',
             emptyList: '아직 저장된 항목이 없습니다.',
             listSummary: '{0}개 · {1}',
-            retry: '다시 시도',
             actionFailed:
                 '작업을 완료하지 못했습니다. 일부 변경이 이미 적용되었을 수 있습니다. 정보를 새로 고친 뒤 다시 시도하세요.',
         
@@ -2496,7 +2378,7 @@ export const languageKorean = {
             codeIntentQuarantined: '복구를 완료하지 못한 기록',
             discardIntent: '복구 기록 폐기',
             discardIntentTitle: '복구 기록을 폐기하시겠습니까?',
-            discardIntentDescription: '선택한 복구 기록이 삭제되며, 다시 시도하지 않습니다. 현재 데이터는 유지됩니다.',
+            discardIntentDescription: '선택한 복구 기록이 삭제되며, 다시 시도하지 않습니다.',
             discardIntentAcknowledge: '선택한 복구 기록 삭제',
             discardIntentFailed: '복구 기록을 폐기하지 못했습니다. 데이터를 다시 검사해주세요.',
             completeIntent: '복구 완료',
@@ -2523,7 +2405,6 @@ export const languageKorean = {
             accountRestoreFailed: "계정 백업을 복원하지 못했습니다.",
             officialAssetsMissing: "계정 에셋 {count}개를 복원하지 못했습니다.",
             officialAssetsRestoreFailed: "계정의 일부 에셋을 복원하지 못했습니다. 앱을 다시 시작하여 다시 시도해주세요.",
-            officialPublishCancelled: "백업 업로드를 취소했습니다.",
 
             generationBusy:
                 '응답을 생성하고 있습니다. 생성이 끝나거나 중단 처리가 끝난 뒤 백업·복원을 다시 실행해주세요.',
@@ -2543,7 +2424,7 @@ export const languageKorean = {
             exportFile: '내보내기',
             groupRestore: '복원',
             restoreHelp:
-                '계정 동기화 충돌 백업으로 데이터를 복원하며, 이 기기에 보관된 스냅샷은 저장 공간의 스냅샷 목록에서 되돌릴 수 있습니다.',
+                '계정 동기화 충돌 백업으로 데이터를 복원합니다.',
             restoreHelpWeb:
                 'PocketRisu 백업이나 계정 동기화 충돌 백업으로 데이터를 복원합니다.',
             groupAccount: '공식 계정',
@@ -2551,16 +2432,12 @@ export const languageKorean = {
                 'RisuAI 계정 서버에 백업을 올리거나 내려받습니다. 채팅 첨부 파일은 포함되지 않습니다.',
             officialPublish: '백업 만들기',
             officialRestore: '백업 복원',
-            officialCancel: '백업 업로드 취소',
-            officialRestoreConfirm:
-                '공식 계정 백업으로 이 기기의 데이터를 교체하시겠습니까? 자동 백업은 만들지 않으므로, 기존 데이터를 보관하려면 먼저 직접 백업하세요.',
             officialRestoreInlayWarning:
-                '공식 스냅샷에는 별도로 저장된 채팅 첨부가 포함되지 않습니다. 연결된 이미지, 오디오, 동영상, 서명은 복원되지 않을 수 있습니다. 백업을 복원한 뒤 앱이 다시 시작됩니다. 계속하시겠습니까?',
+                '공식 계정 백업에는 별도로 저장된 채팅 첨부가 포함되지 않습니다. 연결된 이미지, 오디오, 동영상, 서명은 복원되지 않을 수 있습니다. 백업을 복원한 뒤 앱이 다시 시작됩니다. 계속하시겠습니까?',
             officialMissing:
                 '공식 계정 백업을 찾지 못했습니다. 이 기기의 데이터는 변경되지 않았습니다.',
             officialPublishConfirm:
                 '현재 이 기기의 데이터로 공식 계정 백업을 덮어쓰시겠습니까?',
-            officialPublished: '공식 계정 백업을 만들었습니다.',
             actionFailed:
                 '백업 작업을 완료하지 못했습니다. 일부 변경이 이미 적용되었을 수 있습니다.',
             progressPreparing: '준비 중',
@@ -2572,11 +2449,9 @@ export const languageKorean = {
             sourcePreserved:
                 '원본 DB와 파일을 보존했습니다. 이 보존용 백업으로 라이브러리를 교체하려면 데이터 점검에서 문제를 수정해야 합니다.',
             sourcePreservationConfirm:
-                '데이터를 복구해야 하며, 보존용 백업에 계정 정보가 포함될 수 있습니다. 보존용 백업을 저장하시겠습니까?',
+                '데이터를 복구해야 합니다. 보존용 백업에 계정 정보가 포함될 수 있습니다. 보존용 백업을 저장하시겠습니까?',
             originalDataAccountConfirm:
                 '원본 DB와 파일을 변경 없이 내보내며, 계정 정보가 포함될 수 있습니다. 원본 데이터를 내보내시겠습니까?',
-            sourceRepairRequired:
-                '원본 보존 백업을 검증했지만 라이브러리를 교체하려면 데이터 점검에서 문제를 수정해야 합니다. 현재 데이터는 변경하지 않았습니다.',
         
             "restoreInterrupted": '복원이 중단되었습니다. 다시 시도하려면 백업을 다시 선택하세요.',
         },
@@ -2656,7 +2531,6 @@ export const languageKorean = {
             titleExport: '내보내기',
             titleExportRisuSave: 'RisuSave 내보내기',
             titleExportBackup: 'RisuNest 백업 내보내기',
-            titleExportLocalBackup: '로컬 백업 내보내기',
             titleExportCompatible: '호환 백업 내보내기',
             stagePreparingExport: '데이터 준비 중',
             stageWritingExport: '백업 파일 쓰는 중',
@@ -2701,7 +2575,7 @@ export const languageKorean = {
             webViewUpdateRequired: 'Android System WebView를 업데이트한 후 로컬 데이터 삭제를 다시 시도해주세요.',
             cancel: '취소',
             title: '초기화',
-            scope: '이 기기의 대화, 캐릭터, 설정, 플러그인, 연결 정보, 내부 백업과 캐시를 삭제하며, 원격 데이터와 내보낸 백업은 유지됩니다.',
+            scope: '이 기기의 대화, 캐릭터, 설정, 플러그인, 연결 정보, 내부 백업과 캐시를 삭제합니다.',
             resetHelp: '로컬 데이터를 삭제한 후 온보딩으로 돌아갑니다.',
             prepareRemoval: '앱 제거 준비',
             removalHelp: '로컬 데이터 폴더를 삭제하고 앱을 종료합니다. 프로그램은 운영체제에서 제거해주세요.',
@@ -2732,8 +2606,6 @@ export const languageKorean = {
                 '알림이 꺼져 있으면 이 기능이 동작하지 않습니다.',
             operatingSystem: '운영체제',
             webView: 'WebView',
-        
-            "backgroundExpired": '앱 전환 또는 화면 잠금 후 작업이 중단되었습니다. 다시 시도하세요.',
             "iosBackgroundLabel": '백그라운드 작업',
         },
         boot: {
@@ -2821,27 +2693,6 @@ export const languageKorean = {
                 lead: '동기화 서버의 기기 관리에서 이 기기용 등록 코드를 만들고 아래에 붙여넣어주세요.',
                 leadScan:
                     '동기화 서버의 기기 관리에서 이 기기용 등록 코드를 만들고 QR 코드를 스캔하거나 아래에 붙여넣어주세요.',
-                stepLink:
-                    '동기화 서버의 기기 관리에서 새 기기 등록 코드를 만들 수 있습니다.',
-                stepPaste:
-                    '코드를 아래에 붙여넣습니다. 모바일에서는 QR 코드를 스캔할 수 있습니다.',
-                stepReview: '서버 정보를 확인한 뒤 연결합니다.',
-                unsupported: '동기화 서버 연결은 Android 및 데스크톱 앱에서 사용할 수 있습니다.',
-                linkHint: '등록 링크를 열어도 여기로 이어집니다.',
-                reviewLead: '등록 코드에서 읽은 서버 정보입니다. 확인한 뒤 연결해주세요.',
-                serverTag: '동기화 서버',
-                syncingLead: '끝날 때까지 앱을 닫지 말아주세요.',
-                pauseNote: '멈춰도 나중에 설정에서 이어서 동기화할 수 있습니다.',
-                pausedSummary: '동기화를 일시 중지했습니다.',
-                pausedReason:
-                    '지금 이어서 할 수 있으며, RisuNest를 시작한 뒤 설정에서 이어서 동기화할 수도 있습니다.',
-                resume: '이어서 하기',
-                errorSummary: '동기화를 마치지 못했습니다.',
-                errorReason:
-                    '이 기기의 데이터는 그대로입니다. 인터넷 연결을 확인하고 다시 시도해주세요.',
-                pendingReason:
-                    '서버가 아직 처리 중입니다. 잠시 뒤 다시 시도해주세요.',
-                retry: '다시 시도',
             },
             external: {
                 title: '외부 저장소 연결',
@@ -2850,10 +2701,6 @@ export const languageKorean = {
                 stepCode: '저장한 복구 키를 입력합니다.',
                 stepPick: '서비스와 폴더를 확인한 뒤 로그인하고 연결합니다.',
                 unsupported: '외부 저장소는 Android 및 데스크톱 앱에서 사용할 수 있습니다.',
-                syncTitle: '저장소 내용 가져오기',
-                syncDesc:
-                    '이 기기를 저장소에 참여시키고, 저장소에 있는 캐릭터·대화와 첨부 파일을 받아옵니다.',
-                syncStart: '내용 가져오기',
                 syncingLead: '끝날 때까지 앱을 닫지 말아주세요.',
                 restoreTitle: '백업 선택',
                 restoreLead: '저장소에 있는 백업입니다. 최근 것부터 보여드리니 복원할 백업을 골라주세요.',
@@ -2865,13 +2712,8 @@ export const languageKorean = {
                 restoreRestartNote:
                     '이 기기의 내용은 백업 내용으로 모두 바뀝니다. 복원이 끝나면 앱이 다시 시작됩니다.',
                 restoring: '복원 중',
-                conflictTitle: '저장소에 다른 내용이 이미 있습니다',
-                conflictLead:
-                    '이 기기에도 시작 데이터가 있어서 저장소를 바로 열지 못했습니다. 저장소 내용을 가져오면 이 기기의 내용은 저장소 내용으로 바뀝니다.',
-                conflictReceive: '저장소 내용 읽어오기',
-                conflictTake: '저장소 내용 사용',
                 errorSummary: '작업을 마치지 못했습니다.',
-                errorReason: '이 기기의 데이터는 그대로입니다. 인터넷 연결을 확인하고 다시 시도해주세요.',
+                errorReason: '인터넷 연결을 확인하고 다시 시도해주세요.',
                 retry: '다시 시도',
                 other: '다른 방법',
             },
@@ -2880,7 +2722,7 @@ export const languageKorean = {
                 lead: 'RisuAI 계정으로 로그인하여 계정 서버의 백업본을 불러옵니다. 로그인 창은 앱 안에서 열립니다.',
                 login: 'RisuAI 계정으로 로그인',
                 closeLogin: '로그인 창 닫기',
-                hint: '계정이 없다면 백업 파일이나 동기화를 사용해 주세요.',
+                hint: '계정이 없는 경우 백업 파일이나 동기화를 사용해주세요.',
                 signedIn: '{0}로 로그인됨',
                 cont: '계속',
             },
@@ -2891,7 +2733,7 @@ export const languageKorean = {
                 note: '채팅 첨부 파일이나 인레이 이미지 등은 포함되지 않습니다. 복원이 끝나면 앱이 다시 시작됩니다.',
                 restore: '복원하고 시작',
                 other: '다른 방법',
-                notRestored: '계정 백업을 적용하지 않았습니다. 로컬 데이터는 유지되었으므로 다시 시도하거나 다른 방법을 선택할 수 있습니다.',
+                notRestored: '계정 백업을 적용하지 않았습니다. 다시 시도하거나 다른 방법을 선택할 수 있습니다.',
             },
             done: {
                 title: '준비 완료',
@@ -2938,4 +2780,5 @@ export const languageKorean = {
         registrationRevoked: "서버에서 이 기기의 등록이 해제되어 동기화할 수 없습니다. 서버에서 이 기기를 새로 등록한 뒤 새 등록 코드를 입력하세요.",
         bindingIncomplete: "연결이 완료되지 않았습니다. 연결하고 동기화를 눌러 연결을 마치세요.",
     },
+    navigationBlockedWhileEditingPaused: "편집이 잠시 중단되어 캐릭터를 선택할 수 없습니다.",
 } satisfies DeepPartial<typeof import('./en').languageEnglish>

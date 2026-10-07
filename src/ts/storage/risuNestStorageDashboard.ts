@@ -1,3 +1,4 @@
+import { formatBytes } from '../gui/nativeFileJobDialogModel'
 import type {
     NativeAssetGcResult,
     NativePersistentStorageStats,
@@ -47,12 +48,7 @@ export interface RisuNestStorageDashboardDependencies {
 }
 
 export function formatRisuNestStorageBytes(bytes: number): string {
-    const mib = 1024 * 1024
-    const gib = 1024 * mib
-    if (bytes >= gib) return `${(bytes / gib).toFixed(1)} GiB`
-    if (bytes >= mib) return `${(bytes / mib).toFixed(1)} MiB`
-    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`
-    return `${Math.max(0, Math.round(bytes))} bytes`
+    return formatBytes(Math.max(0, bytes))
 }
 
 function isInlay(

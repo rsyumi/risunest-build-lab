@@ -537,7 +537,9 @@ pub(crate) fn validate_config_shape(config: &ConnectionConfig) -> Result<()> {
         config.endpoint.as_str()
     };
     let url = url::Url::parse(endpoint).map_err(|_| invalid())?;
-    if url.scheme() != "https"
+    let scheme_allowed = url.scheme() == "https"
+        || (url.scheme() == "http" && super::http::accepts_user_http(&config.provider));
+    if !scheme_allowed
         || url.host_str().is_none_or(str::is_empty)
         || !url.username().is_empty()
         || url.password().is_some()
@@ -1304,6 +1306,52 @@ mod tests {
             .acknowledgements
             .push(GITHUB_ACKNOWLEDGEMENT.into());
         assert!(validate_preparation(&github).is_ok());
+    }
+
+    #[test]
+    fn user_configured_http_endpoints_prepare_only_for_self_hosted_providers() {
+        let mut webdav = request("webdav", ConnectionPurpose::Sync);
+        webdav.config.endpoint = "http://192.168.0.10:8080/dav".into();
+        assert_eq!(validate_preparation(&webdav).unwrap().authority, "http://192.168.0.10:8080");
+        assert!(validate_config_shape(&webdav.config).is_ok());
+
+        let mut s3 = request("s3", ConnectionPurpose::Sync);
+        s3.config.profile = Some("generic".into());
+        s3.config.account_id.clear();
+        s3.config.endpoint = "http://127.0.0.1:9000".into();
+        s3.config.location = BTreeMap::from([
+            ("bucket".into(), "synthetic-bucket".into()),
+            ("prefix".into(), "risunest".into()),
+            ("addressing".into(), "path".into()),
+        ]);
+        assert_eq!(validate_preparation(&s3).unwrap().authority, "http://127.0.0.1:9000");
+        assert!(validate_config_shape(&s3.config).is_ok());
+
+        let mut gitlab = request("gitlab_packages", ConnectionPurpose::Backup);
+        gitlab.config.endpoint = "http://gitlab.synthetic.invalid".into();
+        gitlab.config.location = BTreeMap::from([
+            ("projectId".into(), "42".into()),
+            ("packageName".into(), "risunest".into()),
+        ]);
+        assert!(validate_preparation(&gitlab).is_ok());
+
+        let mut mybox = request("mybox", ConnectionPurpose::Backup);
+        mybox.config.endpoint = "http://open-api.mybox.naver.com/v1".into();
+        mybox.config.location = BTreeMap::from([("rootFolderName".into(), "RisuNest".into())]);
+        assert!(validate_preparation(&mybox).is_err());
+        let mut github = request("github_releases", ConnectionPurpose::Backup);
+        github.config.endpoint = "http://api.github.com".into();
+        github.config.location = BTreeMap::from([
+            ("uploadEndpoint".into(), "https://uploads.github.com".into()),
+            ("owner".into(), "synthetic-owner".into()),
+            ("repo".into(), "synthetic-repository".into()),
+            ("tagPrefix".into(), "risunest".into()),
+        ]);
+        github.acknowledgements.push(GITHUB_ACKNOWLEDGEMENT.into());
+        assert!(validate_preparation(&github).is_err());
+        let mut ftp = request("webdav", ConnectionPurpose::Backup);
+        ftp.config.endpoint = "ftp://192.168.0.10/dav".into();
+        assert!(validate_preparation(&ftp).is_err());
     }
 
     #[test]

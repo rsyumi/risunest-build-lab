@@ -1,7 +1,7 @@
 //! Connection settings, credential payload and the remote key layout.
 use super::{
     profiles::{self, Addressing, Profile},
-    sigv4::{host_header, uri_encode, Credentials},
+    sigv4::{uri_encode, Credentials},
 };
 use crate::external_storage::{
     auth::SecretVault,
@@ -150,11 +150,7 @@ pub(crate) fn validate(config: &ConnectionConfig, secret: &SecretRef) -> Result<
     }
     let prefix = normalize_prefix(config.location.get("prefix").map(String::as_str))?;
     let region = region(config.location.get("region").map(String::as_str), profile)?;
-    let connection_identity = format!(
-        "{PROVIDER_ID}/{}/{origin_text}{base_path}/{bucket}/{prefix}",
-        profile.id,
-        origin_text = origin_text(&origin)?
-    );
+    let connection_identity = format!("{PROVIDER_ID}/{bucket}/{prefix}");
     let account = crate::external_storage::quota::AccountKey::new(PROVIDER_ID, &origin, &config.account_id)?;
     Ok(RepositoryContext {
         profile,
@@ -168,10 +164,6 @@ pub(crate) fn validate(config: &ConnectionConfig, secret: &SecretRef) -> Result<
         connection_identity,
         secret: secret.clone(),
     })
-}
-
-fn origin_text(origin: &url::Url) -> Result<String> {
-    Ok(format!("{}://{}", origin.scheme(), host_header(origin)?))
 }
 
 fn endpoint(endpoint: &str, profile: &Profile) -> Result<(url::Url, String)> {

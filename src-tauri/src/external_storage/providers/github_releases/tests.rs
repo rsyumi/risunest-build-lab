@@ -1274,6 +1274,37 @@ fn primary_and_secondary_limits_become_rate_limited_with_a_retry_instant() {
 }
 
 #[test]
+fn listing_and_lookup_failures_keep_the_github_classification() {
+    runtime().block_on(async {
+        let cases = [
+            (403, vec![("x-ratelimit-remaining".to_owned(), "0".to_owned()), ("x-ratelimit-reset".to_owned(), "1200".to_owned())],
+                ErrorKind::RateLimited, Some(1_200_000)),
+            (429, vec![("x-ratelimit-remaining".to_owned(), "0".to_owned()), ("x-ratelimit-reset".to_owned(), "1200".to_owned())],
+                ErrorKind::RateLimited, Some(1_200_000)),
+            (401, Vec::new(), ErrorKind::ReauthRequired, None),
+            (403, Vec::new(), ErrorKind::Unauthorized, None),
+        ];
+        for (status, headers, kind, retry_at_ms) in cases {
+            let failure = || Reply::Http { status, headers: headers.clone(), body: Vec::new() };
+            let mut replies = existing_repository_replies();
+            replies.push(failure());
+            replies.push(failure());
+            let server = github_server(replies);
+            let test = dependencies();
+            let provider = super::GithubReleases { dependencies: test.dependencies };
+            let handle = open(&provider, &server, OpenMode::Existing).await.unwrap();
+            let cancel = Cancellation::default();
+            let listed = provider.list_objects(&handle, Collection::Snapshots, None, 10, &cancel).await.unwrap_err();
+            assert_eq!((listed.kind, listed.retry_at_ms), (kind, retry_at_ms), "list {status}");
+            let locator = provider.context(&handle).unwrap().locator(&job_tag("synthetic-job", 0), 7, 9);
+            let intent = object_intent(&handle, ObjectRole::BackupBundle, "snapshot-synthetic", b"body");
+            let looked = provider.lookup_metadata(&handle, &intent, Some(&locator), &cancel).await.unwrap_err();
+            assert_eq!(looked.kind, kind, "lookup {status}");
+        }
+    });
+}
+
+#[test]
 fn head_publication_is_unsupported_and_sends_nothing() {
     runtime().block_on(async {
         let server = github_server(vec![repository_reply(true), reply(200, json!([]))]);

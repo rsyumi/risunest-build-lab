@@ -80,8 +80,28 @@ pub(crate) fn generate_key() -> Result<Zeroizing<String>> {
         .map_err(|_| ProviderError::new(ErrorKind::Transient))
 }
 
+fn key_mismatch() -> ProviderError {
+    ProviderError::new(ErrorKind::RecoveryKeyMismatch)
+}
+
+/// Parses a key this device generated or already holds.
 fn parse_key(value: &str) -> Result<RecoveryKey> {
     RecoveryKey::parse(value).map_err(|_| corrupt())
+}
+
+/// Parses a key the user entered.
+fn parse_entered_key(value: &str) -> Result<RecoveryKey> {
+    RecoveryKey::parse(value).map_err(|_| key_mismatch())
+}
+
+/// A key generated for this repository that does not open it was not
+/// mistyped, so the failure is the stored data's.
+fn generated_key_failure(error: ProviderError) -> ProviderError {
+    if error.kind == ErrorKind::RecoveryKeyMismatch {
+        corrupt()
+    } else {
+        error
+    }
 }
 
 fn bootstrap_identity(repository: &RepositoryHandle) -> String {
@@ -157,12 +177,15 @@ async fn scan_bootstrap(
                 continue;
             };
             let identity = bootstrap_identity(repository);
-            if found.is_some() || envelope.repository_id != identity {
+            if found.is_some() {
                 return Err(corrupt());
+            }
+            if envelope.repository_id != identity {
+                return Err(ProviderError::new(ErrorKind::RepositoryMismatch));
             }
             let recovered = envelope
                 .recover(&identity, code)
-                .map_err(|_| corrupt())?;
+                .map_err(|_| key_mismatch())?;
             let metadata: BootstrapMetadata =
                 serde_json::from_str(&recovered.connection_metadata).map_err(|_| corrupt())?;
             metadata.descriptor.validate().map_err(|_| corrupt())?;
@@ -195,7 +218,7 @@ pub(crate) async fn open_bootstrap(
     recovery_key: &str,
     cancel: &Cancellation,
 ) -> Result<ImportedBootstrap> {
-    let code = parse_key(recovery_key)?;
+    let code = parse_entered_key(recovery_key)?;
     scan_bootstrap(root, provider, repository, &code, cancel)
         .await?
         .1
@@ -214,7 +237,9 @@ pub(crate) async fn publish_bootstrap(
     metadata.descriptor.validate().map_err(|_| corrupt())?;
     metadata.descriptor_locator.validate_for(repository)?;
     let code = parse_key(recovery_key)?;
-    let (count, existing) = scan_bootstrap(root, provider, repository, &code, cancel).await?;
+    let (count, existing) = scan_bootstrap(root, provider, repository, &code, cancel)
+        .await
+        .map_err(generated_key_failure)?;
     if let Some(existing) = existing {
         return if existing.metadata == *metadata && *existing.key == *root_key {
             Ok(())
@@ -274,7 +299,9 @@ pub(crate) async fn publish_bootstrap(
     if !receipt.complete || receipt.byte_length != intent.byte_length {
         return Err(corrupt());
     }
-    let opened = open_bootstrap(root, provider, repository, recovery_key, cancel).await?;
+    let opened = open_bootstrap(root, provider, repository, recovery_key, cancel)
+        .await
+        .map_err(generated_key_failure)?;
     if opened.metadata != *metadata || *opened.key != *root_key {
         return Err(corrupt());
     }
@@ -312,11 +339,11 @@ pub(crate) fn import_connection_settings(
     bytes: &[u8],
     recovery_key: &str,
 ) -> Result<ImportedConnectionSettings> {
-    let code = parse_key(recovery_key)?;
+    let code = parse_entered_key(recovery_key)?;
     let envelope = ConnectionSettingsEnvelope::decode(bytes).map_err(|_| corrupt())?;
     let plaintext = envelope
         .open(&envelope.repository_id, &code)
-        .map_err(|_| corrupt())?;
+        .map_err(|_| key_mismatch())?;
     let payload: ConnectionSettingsPayload =
         serde_json::from_slice(&plaintext).map_err(|_| corrupt())?;
     if payload.repository_id != envelope.repository_id
@@ -378,7 +405,10 @@ mod tests {
         assert!(imported.config == connection.config);
         assert_eq!(imported.repository_id, "repository");
         assert_eq!(imported.credential.unwrap().as_slice(), b"secret");
-        assert!(import_connection_settings(&bytes, &generate_key().unwrap()).is_err());
+        assert_eq!(
+            import_connection_settings(&bytes, &generate_key().unwrap()).err().expect("refused").kind,
+            ErrorKind::RecoveryKeyMismatch
+        );
         let mut damaged = bytes;
         let last = damaged.len() - 1;
         damaged[last] ^= 1;
@@ -446,28 +476,23 @@ mod tests {
             assert_eq!(opened.metadata, metadata);
             assert_eq!(*opened.key, root_key);
 
-            assert!(open_bootstrap(
-                root.path(),
-                &provider,
-                &repository,
-                &generate_key().unwrap(),
-                &cancel,
-            )
-            .await
-            .is_err());
+            let refused = |result: Result<ImportedBootstrap>| result.err().expect("refused").kind;
+            assert_eq!(
+                refused(open_bootstrap(root.path(), &provider, &repository, &generate_key().unwrap(), &cancel).await),
+                ErrorKind::RecoveryKeyMismatch
+            );
+            assert_eq!(
+                refused(open_bootstrap(root.path(), &provider, &repository, "0000-0000", &cancel).await),
+                ErrorKind::RecoveryKeyMismatch
+            );
             assert_eq!(provider.uploaded_ids(), uploads);
 
             let mut other_repository = fake::repository();
             other_repository.repository_id = "another-provider-repository".into();
-            assert!(open_bootstrap(
-                root.path(),
-                &provider,
-                &other_repository,
-                &recovery_key,
-                &cancel,
-            )
-            .await
-            .is_err());
+            assert_eq!(
+                refused(open_bootstrap(root.path(), &provider, &other_repository, &recovery_key, &cancel).await),
+                ErrorKind::RepositoryMismatch
+            );
             assert_eq!(provider.uploaded_ids(), uploads);
 
             let code = parse_key(&recovery_key).unwrap();
@@ -484,27 +509,17 @@ mod tests {
             tampered[last] ^= 1;
             let damaged = fake::FakeProvider::new(true);
             damaged.seed(BOOTSTRAP_OBJECT_ID, ObjectRole::Descriptor, tampered);
-            assert!(open_bootstrap(
-                root.path(),
-                &damaged,
-                &repository,
-                &recovery_key,
-                &cancel,
-            )
-            .await
-            .is_err());
+            assert_eq!(
+                refused(open_bootstrap(root.path(), &damaged, &repository, &recovery_key, &cancel).await),
+                ErrorKind::NotFound
+            );
             assert!(damaged.uploaded_ids().is_empty());
 
             let missing = fake::FakeProvider::new(true);
-            assert!(open_bootstrap(
-                root.path(),
-                &missing,
-                &repository,
-                &recovery_key,
-                &cancel,
-            )
-            .await
-            .is_err());
+            assert_eq!(
+                refused(open_bootstrap(root.path(), &missing, &repository, &recovery_key, &cancel).await),
+                ErrorKind::NotFound
+            );
             assert!(missing.uploaded_ids().is_empty());
         });
     }

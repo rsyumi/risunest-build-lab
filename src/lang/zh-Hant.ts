@@ -921,7 +921,6 @@ export const languageChineseTraditional = {
     "webdeeplwarn": "網頁版不建議使用此功能，以免發生 CORS 錯誤。",
     "saveBackupLocal": "本機儲存備份",
     "loadBackupLocal": "載入本機備份",
-    "restoreLocalSnapshotConfirm": "要使用此本機快照取代目前資料並重新啟動應用程式嗎？",
     "topP": "Top P",
     "genTimes": "生成次數",
     "cot": "思維鏈（CoT）",

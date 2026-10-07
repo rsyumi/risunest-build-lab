@@ -206,6 +206,8 @@ export interface ExternalJobSummary {
     id: string
     applicationStarted?: boolean
     restoreStopped?: boolean
+    /** The app cancelled the job after it kept failing; the user did not. */
+    stoppedByApp?: boolean
     reason?: 'automatic' | 'manual'
     targetRevision?: DecimalString
     restoreRequest?: {
@@ -283,7 +285,6 @@ export interface ExternalHistoryItem {
     kind: 'snapshot' | 'backup-point' | 'conflict' | 'recovery-candidate'
     createdAtMs: DecimalString
     logicalRevision: DecimalString
-    storedBytes?: DecimalString
     pinned: boolean
     complete: boolean
     verified: boolean
@@ -291,7 +292,6 @@ export interface ExternalHistoryItem {
     includedSections: ExternalRestoreSection[]
     /** Whether these values are the ones this device wrote. */
     sameDevice: boolean
-    deviceName?: string
 }
 
 export interface ExternalHistoryDeletePreparation {

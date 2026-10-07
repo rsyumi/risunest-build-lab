@@ -154,6 +154,9 @@ async fn connect_with(
 }
 async fn open(app: &AppHandle, id: &str, session: &mut Session) -> Result<()> {
     connect(app, id, session).await?;
+    admit_clock(session).await
+}
+async fn admit_clock(session: &mut Session) -> Result<()> {
     let engine = session.engine.as_mut().ok_or_else(lww_segment::corrupt)?;
     if engine.admitted_upper().is_err() {
         let requests = &session
@@ -798,6 +801,66 @@ mod tests {
             connect_with(root.path(), &stored, &mut session, open_fixture(&stored, &opens)).await.unwrap();
             assert_eq!(opens.get(), 1);
         });
+    }
+
+    fn webdav_collection(href: &str) -> String {
+        format!("<D:response><D:href>{href}</D:href><D:propstat><D:prop>\
+            <D:resourcetype><D:collection/></D:resourcetype></D:prop>\
+            <D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>")
+    }
+    fn webdav_listing(date: &str, hrefs: &[String]) -> super::super::wire_fixture::Reply {
+        let body = format!("<?xml version=\"1.0\" encoding=\"utf-8\"?><D:multistatus xmlns:D=\"DAV:\">{}</D:multistatus>",
+            hrefs.iter().map(|href| webdav_collection(href)).collect::<String>());
+        super::super::wire_fixture::Reply::Http {
+            status: 207,
+            headers: vec![("Content-Type".into(), "application/xml".into()), ("Date".into(), date.into())],
+            body: body.into_bytes(),
+        }
+    }
+
+    /// The external LWW opening admits its clock from the first fresh response.
+    /// WebDAV answers that listing with PROPFIND, which no HTTP cache stores.
+    #[test]
+    fn webdav_listing_admits_the_server_clock_and_a_skewed_server_still_reports_clock_skew() {
+        for (offset_ms, skewed) in [(0, false), (20 * 60 * 1000, true)] {
+            tauri::async_runtime::block_on(async move {
+                let now = runtime::now_ms();
+                let date = httpdate::fmt_http_date(std::time::UNIX_EPOCH + std::time::Duration::from_millis(now + offset_ms));
+                let server = super::super::wire_fixture::WireServer::start(vec![
+                    webdav_listing(&date, &["/synthetic/sync/".into(), "/synthetic/sync/descriptors/".into()]),
+                    webdav_listing(&date, &["/synthetic/sync/segments/".into()]),
+                ]);
+                let test = super::super::fake::loopback_dependencies(
+                    super::super::fake::MemoryVault::with("synthetic-credential", b"app-password"), now);
+                let provider = super::super::providers::webdav::create(test.dependencies.clone()).unwrap();
+                let mut stored = stored_connection();
+                stored.config.endpoint = server.url.as_str().into();
+                let cancel = Cancellation::default();
+                let mut session = Session::new();
+                let (handle, _) = provider.open_repository(&stored.config,
+                    &SecretRef(stored.credential_ref.clone()), OpenMode::Existing, &cancel).await.unwrap();
+                let root = tempfile::tempdir().unwrap();
+                let connected = connection_commands::ConnectedRepository {
+                    stored: stored.clone(), provider, handle,
+                    dependencies: test.dependencies.clone(), root_key: zeroize::Zeroizing::new([7; 32]),
+                };
+                connect_with(root.path(), &stored, &mut session, async { Ok(connected) }).await.unwrap();
+                // A later response replaces the opening's own sample, so the
+                // admission has to come from the listing it requests itself.
+                session.fresh_after = Instant::now();
+                let admitted = admit_clock(&mut session).await;
+                if skewed {
+                    assert_eq!(admitted.unwrap_err().kind, ErrorKind::ClockSkew);
+                    assert!(session.engine.as_ref().unwrap().admission.is_none());
+                } else {
+                    admitted.unwrap();
+                    assert!(session.engine.as_ref().unwrap().admission.is_some());
+                }
+                let requests = server.requests.lock().unwrap();
+                assert_eq!(requests.len(), 2);
+                assert!(requests[1].headers.starts_with("PROPFIND /synthetic/sync/segments/ "), "{}", requests[1].headers.lines().next().unwrap_or_default());
+            });
+        }
     }
 
     #[test]

@@ -148,7 +148,8 @@
         strings.devicePlugins,
         strings.deviceSettings,
     ].join(', '))
-    const providerWarning = $derived('warningTitle' in providerStrings
+    // The Google Drive warning concerns the hidden app data space only.
+    const providerWarning = $derived('warningTitle' in providerStrings && (providerId !== 'google_drive' || !visibleLocation)
         ? { title: providerStrings.warningTitle, body: providerStrings.warning }
         : null)
     const connectLabel = $derived(prepared?.requiresOAuth && !folderSelection
@@ -644,7 +645,6 @@
     {#if !renewalConnection}
     <fieldset disabled={prepared !== null} class="contents">
     <section class="sub">
-        <h3 class="sub-title">{strings.provider}</h3>
         <div class="fields two">
             <label class="field">
                 <span>{strings.provider}</span>

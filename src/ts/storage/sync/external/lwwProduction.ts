@@ -77,7 +77,8 @@ function createAdapter(connectionId: string): Adapter {
         maintain: async () => { const current = await context(); current.signal.throwIfAborted(); await invoke('external_lww_maintenance', { request: header(connectionId, current) }) },
         failed: error => {
             reportFailure(connectionId, error)
-            if ((error as { kind?: string })?.kind === 'corrupt') scheduler.stop()
+            const kind = (error as { kind?: string })?.kind
+            if (kind === 'corrupt' || kind === 'repositoryMismatch') scheduler.stop()
         },
     })
     const transport: SyncBindingTransport & { receiveAvailableChanges(context: BindingContext): Promise<void> } = {

@@ -451,8 +451,8 @@ pub(crate) async fn prepare_database_first_backup(
     Ok((database,sections))
 }
 
-pub(crate) async fn run_restore(
-    app: &AppHandle,
+pub(crate) async fn run_restore<R: Runtime>(
+    app: &AppHandle<R>,
     connected: &ConnectedRepository,
     job: &DurableJob,
     cancel: &Cancellation,
@@ -463,10 +463,14 @@ pub(crate) async fn run_restore(
     if let Some(result) = completed_restore(app, job)? {
         return Ok(result);
     }
+    let root = runtime::root(app)?;
     let store=runtime::native_store(app)?;
     if let Some(result)=completed_restore_in_store(&store,job)? {
         return finish_restore_bodies(app,connected,job,result,None,store,cancel).await;
     }
+    // A commit the library never received is withdrawn before the download, so
+    // a download that fails leaves the restore not applied.
+    withdraw_unreserved_commit(&store,&root,&job.id)?;
     drop(store);
     let permit=app.state::<crate::native_file_jobs::NativeFileJobState>().admission.staging().map_err(runtime::local_error)?;
     let expected_revision = job
@@ -476,7 +480,6 @@ pub(crate) async fn run_restore(
         .ok_or_else(corrupt)?
         .parse::<i64>()
         .map_err(|_| corrupt())?;
-    let root = runtime::root(app)?;
     let (database,sections)=prepare_database_first_backup(&root,connected,job,cancel).await?;
     let snapshot=database.snapshot;
     let original_units=database.original_units;
@@ -732,8 +735,8 @@ fn stage_original_units(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_local_restore(
-    app: &AppHandle,
+fn prepare_local_restore<R: Runtime>(
+    app: &AppHandle<R>,
     job: &DurableJob,
     expected_revision: i64,
     snapshot: PreparedRemoteSnapshot,
@@ -1823,6 +1826,24 @@ pub(super) mod tests {
             assert!(unapplied(root,&job));
             assert!(store.lww_request_unreserved(&request_id(&job)).unwrap());
             assert_eq!(store.revision().unwrap(),revision);
+        });
+    }
+
+    #[test]
+    fn a_rejected_restore_commit_is_withdrawn_before_a_resumed_download_fails() {
+        run(async {
+            let backup=packaged_backup(&[vec![51;4096]]).await;
+            let directory=tempfile::tempdir().unwrap();
+            let root=directory.path();
+            let app=restore_app(root);
+            let job=interrupted_before_commit(root,&runtime::native_store(app.handle()).unwrap(),&backup);
+            assert_eq!(job.summary["applicationStarted"],true);
+            backup.provider.fail_read(backup.restore_source["locator"]["object"].as_str().unwrap(),ErrorKind::Transient);
+
+            let failed=run_restore(app.handle(),&backup.connected,&job,&Cancellation::default()).await.unwrap_err();
+
+            assert_eq!(failed.kind,ErrorKind::Transient);
+            assert!(unapplied(root,&job));
         });
     }
 

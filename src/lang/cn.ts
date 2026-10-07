@@ -903,7 +903,6 @@ export const languageChinese = {
     "webdeeplwarn": "此功能不不建议于网页版使用，避免出现 CORS 错误。",
     "saveBackupLocal": "本地保存备份",
     "loadBackupLocal": "本机读取备份",
-    "restoreLocalSnapshotConfirm": "要用此本地快照替换当前数据并重启应用吗？",
     "topP": "Top P",
     "genTimes": "生成次数",
     "cot": "思维链（CoT）",

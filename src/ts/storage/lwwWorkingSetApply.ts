@@ -5,7 +5,8 @@ import type { Chat, Database, botPreset, character } from './database.svelte'
 import type { PersistentRevisionReader, PersistentRoot } from './persistentDataStore'
 import { canonicalClone, canonicalJson, clonePersistentRootFields } from './saveCoordinatorHelpers'
 import { captureMaterializedCharacter, CHARACTER_SHARED_FIELDS, CONVERSATION_SHARED_FIELDS } from './persistentUnitCapture'
-import { isWorkingSetCharacterStub } from './workingSetCatalog'
+import { isWorkingSetCharacterStub, patchCatalogCharacterField } from './workingSetCatalog'
+import { defineOwnEnumerableProperty } from './ownEnumerableProperty'
 
 type CompleteCharacter = character
 
@@ -27,7 +28,9 @@ function patchField(live: object, baseline: object, remote: object, field: strin
     const unchanged = canonicalJson({ value: current[field] }) === canonicalJson({ value: before[field] })
     const write = (value: Record<string, unknown>) => {
         if (!Object.hasOwn(next, field)) delete value[field]
-        else Object.defineProperty(value, field, { value: canonicalClone(next[field]), enumerable: true, configurable: true, writable: true })
+        // Only assignment makes a state proxy report a new key to cached captures.
+        else if (field === '__proto__') defineOwnEnumerableProperty(value, field, canonicalClone(next[field]))
+        else value[field] = canonicalClone(next[field])
     }
     if (unchanged) write(current)
     write(before)
@@ -37,7 +40,11 @@ export async function applyLwwWorkingSetUnits(
     database: Database, baseline: LwwWorkingSetBaseline, store: PersistentRevisionReader, affectedKeys: readonly string[], liveIndex?: ReadonlyMap<string, CompleteCharacter>, allowLocalFields = false, beforeProjection?: () => void, afterProjection?: () => void,
 ): Promise<LwwWorkingSetBaseline> {
     const charactersById = liveIndex ?? new Map(database.characters.map((value) => [value.chaId,value]))
-    const baselineById = new Map(baseline.characters.map((value) => [value.chaId,value]))
+    // A stub holds only catalog fields, so no baseline describes it.
+    const baselineById = new Map(baseline.characters.filter((value) => {
+        const live = charactersById.get(value.chaId)
+        return !live || !isWorkingSetCharacterStub(live)
+    }).map((value) => [value.chaId,value]))
     const keys = affectedKeys.map((key) => JSON.parse(key) as string[])
         .filter(([kind, , field, metadataField]) => allowLocalFields || (kind !== 'character' || CHARACTER_SHARED_FIELDS.has(field)) && (kind !== 'conversation' || CONVERSATION_SHARED_FIELDS.has(metadataField)))
         .sort((a, b) => Number(a[0] === 'root' && ['botPresetsId', 'selectedPersona'].includes(a[1])) - Number(b[0] === 'root' && ['botPresetsId', 'selectedPersona'].includes(b[1])))
@@ -125,7 +132,13 @@ export async function applyLwwWorkingSetUnits(
             const live = charactersById.get(id)
             const before = baselineById.get(id)
             const remote = details.get(id)
-            if (!live || !before || !remote) continue
+            if (!live || !remote) continue
+            // A stub takes its catalog fields from the stored record.
+            if (isWorkingSetCharacterStub(live)) {
+                patchCatalogCharacterField(live, remote, field)
+                continue
+            }
+            if (!before) continue
             for (const key of [field]) {
                 if (key !== 'statics' || allowLocalFields) { patchField(live, before, remote, key); continue }
                 const sharedStatics = (value: unknown) => value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'messages')) : value
@@ -161,7 +174,8 @@ export async function applyLwwWorkingSetUnits(
             const before = baseline.root.personas ?? [], live = database.personas ?? []
             const previous = before.find((value) => value.id === field), current = live.find((value) => value.id === field), remote = root.personas?.find((value) => value.id === field)
             const replace = (values: typeof live) => remote ? [...values.filter((value) => value.id !== field), canonicalClone(remote)] : values.filter((value) => value.id !== field)
-            if (canonicalJson(previous ?? null) === canonicalJson(current ?? null)) {
+            // A deleted ID is retired, so a local edit under it could never be saved.
+            if (!remote || canonicalJson(previous ?? null) === canonicalJson(current ?? null)) {
                 const selectedId = live[database.selectedPersona]?.id
                 database.personas = replace(live)
                 const index = database.personas.findIndex((value) => value.id === selectedId)
@@ -175,7 +189,7 @@ export async function applyLwwWorkingSetUnits(
             const before = baseline.root.personas?.find((value) => value.id === id)
             const remote = root.personas?.find((value) => value.id === id)
             if (live && before && remote) patchField(live, before, remote, field)
-        } else if (root && kind === 'record') {
+        } else if (root && (kind === 'record' || kind === 'exists' && ['modules', 'loadouts', 'customModels'].includes(id))) {
             const identity = id === 'plugins' ? 'name' : 'id'
             const live = database as unknown as Record<string, unknown[]>, before = baseline.root as unknown as Record<string, unknown[]>, remote = root as unknown as Record<string, unknown[]>
             const itemId = (value: unknown) => (value as Record<string, unknown>)[identity]
@@ -189,7 +203,8 @@ export async function applyLwwWorkingSetUnits(
                 else values.push(canonicalClone(next))
                 return values
             }
-            if (canonicalJson(current ?? null) === canonicalJson(original ?? null)) live[id] = replace(live[id])
+            // A deleted ID is retired, so a local edit under it could never be saved.
+            if ((kind === 'exists' && next === undefined) || canonicalJson(current ?? null) === canonicalJson(original ?? null)) live[id] = replace(live[id])
             before[id] = replace(before[id])
         } else if (root && ['variable', 'toggle', 'preset-protected'].includes(kind)) {
             const rootField = kind === 'preset-protected' ? 'protectedPresetValues' : 'explicitGlobalChatVariables'

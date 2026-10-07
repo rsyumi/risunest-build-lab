@@ -201,6 +201,49 @@ afterEach(async () => {
     target.remove()
 })
 
+describe('choosing a service', () => {
+    it('names the service once, as the label of its select', async () => {
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+
+        const headings = [...target.querySelectorAll('h1, h2, h3, h4, h5, h6')].map(item => item.textContent?.trim())
+        expect(headings).not.toContain(strings.provider)
+        const named = [...target.querySelectorAll('*')]
+            .filter(item => item.children.length === 0 && item.textContent?.trim() === strings.provider)
+        expect(named).toHaveLength(1)
+        expect(named[0].closest('label')?.querySelector('select')).not.toBeNull()
+    })
+
+    it('warns about the hidden app data space only while it is the chosen Google Drive location', async () => {
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+        const google = strings.providers.google_drive
+        const space = labelControl<HTMLSelectElement>(strings.fields['google_drive.space'])
+        expect(space.value).toBe('drive')
+        expect(target.textContent).not.toContain(google.warningTitle)
+        expect(target.textContent).not.toContain(google.warning)
+
+        space.value = 'appDataFolder'
+        space.dispatchEvent(new Event('change', { bubbles: true }))
+        await settle()
+        expect(target.textContent).toContain(google.warningTitle)
+        expect(target.textContent).toContain(google.warning)
+
+        const visible = labelControl<HTMLSelectElement>(strings.fields['google_drive.space'])
+        visible.value = 'drive'
+        visible.dispatchEvent(new Event('change', { bubbles: true }))
+        await settle()
+        expect(target.textContent).not.toContain(google.warningTitle)
+    })
+
+    it('keeps the GitLab cleanup policy warning for every GitLab connection', async () => {
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+        await selectProvider('gitlab_packages')
+        expect(target.textContent).toContain(strings.providers.gitlab_packages.warningTitle)
+    })
+})
+
 describe('opening an existing repository', () => {
     it('authenticates imported connection settings with the recovery key before review', async () => {
         state.prepareConnectionSettingsImport.mockResolvedValue({
@@ -732,7 +775,6 @@ describe('what a connection stores', () => {
         })
         await settle()
         await selectProvider('s3')
-        expect(target.textContent).not.toContain(strings.scopeHelp)
         await fillRequiredFields()
         button(strings.prepare).click()
         await settle()
