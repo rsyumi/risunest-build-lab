@@ -1143,7 +1143,9 @@ fn text(len: usize) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(len);
     let mut line = 0u64;
     while bytes.len() < len {
-        bytes.extend_from_slice(format!("synthetic line {line} of a text-heavy object\n").as_bytes());
+        bytes.extend_from_slice(
+            format!("synthetic line {line} of a text-heavy object\n").as_bytes(),
+        );
         line += 1;
     }
     bytes.truncate(len);
@@ -1251,7 +1253,8 @@ async fn encoded_request_bodies_are_decoded_under_the_raw_limit_of_their_path() 
     let put = |payload: Vec<u8>, encoded: bool| {
         let mut request = s
             .auth(
-                s.client.put(format!("{}/uploads/{upload}/chunks/0", s.base)),
+                s.client
+                    .put(format!("{}/uploads/{upload}/chunks/0", s.base)),
                 &s.a,
             )
             .header("x-content-sha256", hash(&large[..chunk]));
@@ -1298,10 +1301,21 @@ async fn replies_are_encoded_only_for_accepting_clients_on_bounded_routes() {
     let raw = raw.bytes().await.unwrap();
     let response = send(transfer_request(), true).await.unwrap();
     assert_eq!(marker(&response), Some("zstd"));
-    assert_eq!(response.headers()["content-type"], "application/octet-stream");
-    assert_eq!(response.headers()["cache-control"], "no-store, no-transform");
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/octet-stream"
+    );
+    assert_eq!(
+        response.headers()["cache-control"],
+        "no-store, no-transform"
+    );
     let wire = response.bytes().await.unwrap();
-    assert!(wire.len() * 4 < raw.len(), "{} of {}", wire.len(), raw.len());
+    assert!(
+        wire.len() * 4 < raw.len(),
+        "{} of {}",
+        wire.len(),
+        raw.len()
+    );
     assert_eq!(body::decode(&wire, transfer::MAX_BATCH_BYTES).unwrap(), raw);
 
     // JSON replies too, decoded to the same document.
@@ -1322,16 +1336,23 @@ async fn replies_are_encoded_only_for_accepting_clients_on_bounded_routes() {
     assert_eq!(marker(&response), Some("zstd"));
     let wire = response.bytes().await.unwrap();
     let decoded = body::decode(&wire, risunest_sync_wire::MAX_METADATA_BYTES).unwrap();
-    assert_eq!(serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(), raw);
-    let short = send(s.client.get(format!("{}/session", s.base)), true).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(),
+        raw
+    );
+    let short = send(s.client.get(format!("{}/session", s.base)), true)
+        .await
+        .unwrap();
     assert_eq!(short.status(), StatusCode::OK);
     assert_eq!(marker(&short), None);
 
     // Parts carry their raw position in a protocol header.
     for accepting in [true, false] {
         let response = send(
-            s.client
-                .get(format!("{}/objects/{digest}/part?offset=4096&length=65536", s.base)),
+            s.client.get(format!(
+                "{}/objects/{digest}/part?offset=4096&length=65536",
+                s.base
+            )),
             accepting,
         )
         .await
@@ -1366,8 +1387,14 @@ async fn replies_are_encoded_only_for_accepting_clients_on_bounded_routes() {
     assert_eq!(response.bytes().await.unwrap(), &random[..65536]);
     for (target, query) in [
         (digest.clone(), "offset=0&length=0".to_owned()),
-        (digest.clone(), format!("offset=0&length={}", 1024 * 1024 + 1)),
-        (digest.clone(), format!("offset={}&length=11", object.len() - 10)),
+        (
+            digest.clone(),
+            format!("offset=0&length={}", 1024 * 1024 + 1),
+        ),
+        (
+            digest.clone(),
+            format!("offset={}&length=11", object.len() - 10),
+        ),
         (digest.clone(), format!("offset={}&length=1", u64::MAX)),
     ] {
         let response = send(

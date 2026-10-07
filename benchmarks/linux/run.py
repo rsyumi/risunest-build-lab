@@ -17,7 +17,7 @@ import urllib.error
 parser = argparse.ArgumentParser()
 parser.add_argument('--binary', required=True)
 parser.add_argument('--output', required=True)
-parser.add_argument('--phase', choices=['persistence', 'reload', 'regex', 'appearance-seed', 'appearance-app'], required=True)
+parser.add_argument('--phase', choices=['persistence', 'reload', 'regex', 'app', 'app-restart', 'streaming', 'appearance-seed', 'appearance-app'], required=True)
 parser.add_argument('--app-theme', choices=['light', 'dark'])
 parser.add_argument('--system-theme', choices=['light', 'dark'])
 parser.add_argument('--capture-size')
@@ -37,6 +37,13 @@ if args.phase.startswith('appearance-') and (not args.app_theme or not args.syst
     raise RuntimeError('Appearance phase requires app and system theme labels')
 out = Path(args.output).resolve()
 out.mkdir(parents=True, exist_ok=True)
+app_saved = None
+if args.phase == 'app-restart':
+    saved_path = out / 'app.json'
+    if not saved_path.exists():
+        raise RuntimeError('app-restart requires the app phase result')
+    saved = json.loads(saved_path.read_text())
+    app_saved = {'conversationId': saved['conversationId'], 'revision': saved['revision']}
 if args.capture_codec_experiment:
     if any(out.iterdir()):
         raise RuntimeError('Paired codec diagnostic requires an empty output directory')
@@ -276,8 +283,12 @@ try:
         time.sleep(0.1)
     thread = threading.Thread(target=monitor, daemon=True)
     thread.start()
-    operation = (f"startupAppearance({str(args.phase == 'appearance-seed').lower()},{json.dumps(args.app_theme)})"
-                 if args.phase.startswith('appearance-') else f"{args.phase}()")
+    if args.phase.startswith('appearance-'):
+        operation = f"startupAppearance({str(args.phase == 'appearance-seed').lower()},{json.dumps(args.app_theme)})"
+    elif args.phase == 'app-restart':
+        operation = f"appRestart({json.dumps(app_saved)})"
+    else:
+        operation = f"{args.phase}()"
     current_stage = 'operation'
     diagnostic('operation-enter')
     execute(f"window.__linuxResult=null; window.__RISUNEST_LINUX_BENCHMARK__.{operation}.then(result=>window.__linuxResult={{result}},error=>window.__linuxResult={{error:String(error)}})")
@@ -313,6 +324,8 @@ try:
         raise RuntimeError('No process memory samples collected')
     result['memorySamples'] = memory
     result['environment'] = {'display': 'Xvfb/X11', 'backend': 'WebKitGTK', 'storage': 'synthetic /var/tmp', 'memoryScope': 'WebDriver descendants; sampled every 200ms, not per-mode attribution'}
+    if args.phase in ('app', 'app-restart', 'streaming') and result.get('passed') is not True:
+        raise RuntimeError(f'{args.phase}: passing result required')
     if args.phase == 'reload':
         previous = json.loads((out / 'persistence.json').read_text())
         if result['revision'] != previous['revision'] or result['finalHash'] != previous['finalHash']:
