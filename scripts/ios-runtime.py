@@ -1,4 +1,4 @@
-import json, os, pathlib, plistlib, secrets, shutil, socket, subprocess, sys, tempfile, time, threading, urllib.error, urllib.request
+import json, os, pathlib, plistlib, secrets, shutil, socket, ssl, subprocess, sys, tempfile, time, threading, urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 root = pathlib.Path.cwd()
@@ -111,6 +111,17 @@ def start_webdav():
     base=pathlib.Path(tempfile.mkdtemp(prefix='risunest-webdav-',dir=os.environ.get('RUNNER_TEMP'))).resolve()
     served=base/'served'
     served.mkdir()
+    tag=secrets.token_hex(4)
+    (base/'ca.cnf').write_text('[req]\ndistinguished_name=dn\nx509_extensions=v3_ca\nprompt=no\n[dn]\nCN=RisuNest synthetic loopback CA '+tag+'\n'
+                               '[v3_ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n')
+    (base/'server.ext').write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n'
+                                   'extendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n')
+    run(['openssl','req','-x509','-new','-newkey','rsa:2048','-nodes','-sha256','-days','30','-keyout','ca.key','-out','ca.pem','-config','ca.cnf'],cwd=base)
+    run(['openssl','req','-new','-newkey','rsa:2048','-nodes','-sha256','-keyout','server.key','-out','server.csr','-subj','/CN=127.0.0.1 '+tag],cwd=base)
+    run(['openssl','x509','-req','-in','server.csr','-CA','ca.pem','-CAkey','ca.key','-set_serial',str(secrets.randbits(63)),'-days','30','-sha256','-extfile','server.ext','-out','server.pem'],cwd=base)
+    (base/'ca.key').unlink()
+    print(run(['xcrun','simctl','keychain',device,'add-root-cert',str(base/'ca.pem')]))
+    probe_context=ssl.create_default_context(cafile=str(base/'ca.pem'))
     with socket.socket() as probe:
         probe.bind(('127.0.0.1',0))
         port=probe.getsockname()[1]
@@ -119,15 +130,16 @@ def start_webdav():
     if os.environ.get('GITHUB_ACTIONS')=='true':
         print('::add-mask::'+password,flush=True)
     log=(artifacts/'webdav-server.log').open('w')
-    process=subprocess.Popen([rclone,'serve','webdav',str(served),'--addr','127.0.0.1:'+str(port),'--config',str(base/'rclone.conf')],
+    process=subprocess.Popen([rclone,'serve','webdav',str(served),'--addr','127.0.0.1:'+str(port),'--config',str(base/'rclone.conf'),
+                              '--cert',str(base/'server.pem'),'--key',str(base/'server.key')],
                              env={**os.environ,'RCLONE_USER':user,'RCLONE_PASS':password},stdout=log,stderr=subprocess.STDOUT)
-    endpoint='http://127.0.0.1:'+str(port)
+    endpoint='https://127.0.0.1:'+str(port)
     deadline=time.monotonic()+60
     while True:
         assert process.poll() is None, 'WebDAV server exited'
         assert time.monotonic()<deadline, 'WebDAV server did not listen'
         try:
-            urllib.request.urlopen(endpoint+'/',timeout=5)
+            urllib.request.urlopen(endpoint+'/',timeout=5,context=probe_context)
             raise RuntimeError('WebDAV server accepted an unauthenticated request')
         except urllib.error.HTTPError as error:
             assert error.code==401, error.code
