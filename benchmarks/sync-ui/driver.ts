@@ -35,7 +35,19 @@ async function until<T>(read: () => T | Promise<T>, timeoutMs: number, step: str
 export const redact = (text: string) => text.replace(/[A-Za-z0-9_+/=-]{32,}/g, "<redacted>").slice(0, 300);
 
 export class SyncDriver {
-  constructor(readonly phase: string, private readonly sink: SyncReport, private readonly show: (step: string) => void = () => {}) {}
+  private readonly errors: string[] = [];
+
+  constructor(readonly phase: string, private readonly sink: SyncReport, private readonly show: (step: string) => void = () => {}) {
+    // Errors the page logs are attached, redacted, to a failed step so it can be attributed.
+    const record = (values: unknown[]) => {
+      if (this.errors.length < 50)
+        this.errors.push(redact(values.map((value) => value instanceof Error ? `${value.name}: ${value.message}` : String(value)).join(" ")));
+    };
+    const original = console.error.bind(console);
+    console.error = (...values: unknown[]) => { record(values); original(...values); };
+    addEventListener("error", (event) => record([event.error ?? event.message]));
+    addEventListener("unhandledrejection", (event) => record(["unhandled rejection", event.reason]));
+  }
 
   async step<T extends Record<string, unknown>>(label: SyncLabel, name: string, run: () => Promise<T>): Promise<T> {
     this.show(name);
@@ -44,9 +56,11 @@ export class SyncDriver {
       await this.sink(`${label}:${name}`, { label, phase: this.phase, step: name, passed: true, ...result });
       return result;
     } catch (error) {
-      if (error instanceof SyncStepError) throw error;
-      throw new SyncStepError(label, name, error instanceof Error ? redact(error.message) : "failed",
-        { errorName: error instanceof Error ? error.name : typeof error });
+      const failure = error instanceof SyncStepError ? error
+        : new SyncStepError(label, name, error instanceof Error ? redact(error.message) : "failed",
+          { errorName: error instanceof Error ? error.name : typeof error });
+      failure.detail.consoleErrors = this.errors.slice(-8);
+      throw failure;
     }
   }
 
@@ -188,9 +202,27 @@ export class SyncDriver {
     return { visible: alertStore.dialogVisible(), value };
   }
 
+  /** Names a dialog by its type and the product string key of its message, never by its text. */
+  private async describeDialog(value: { type: string; msg?: string; checkboxConfirm?: { title: string } }) {
+    const { language } = await import("../../src/lang");
+    const text = value.checkboxConfirm?.title ?? value.msg ?? "";
+    const find = (node: unknown, path: string, depth: number): string | undefined => {
+      if (typeof node === "string") return node === text ? path : undefined;
+      if (!node || typeof node !== "object" || depth > 6) return undefined;
+      for (const [key, child] of Object.entries(node)) {
+        const found = find(child, path ? `${path}.${key}` : key, depth + 1);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    const messageKey = text ? find(language, "", 0) ?? "unrecognized" : "empty";
+    // A message the string table does not hold is an error or a filled template; long values are redacted.
+    return { alertType: value.type, messageKey, ...(messageKey === "unrecognized" ? { message: redact(text) } : {}) };
+  }
+
   private async waitForNoDialog(step: string) {
     await until(async () => !(await this.alertState()).visible, 30_000, step, "a product dialog stayed open",
-      () => ({ alertType: "unknown" }));
+      async () => this.describeDialog((await this.alertState()).value));
   }
 
   /** Pastes the registration and reads it into the review the product shows before connecting. */
@@ -256,7 +288,7 @@ export class SyncDriver {
     outcome: { replacementShown: boolean; replacementGatedByCheckbox: boolean | null; previousFilesShown: boolean }) {
     const { language } = await import("../../src/lang");
     if (value.type !== "checkboxConfirm" || !value.checkboxConfirm)
-      fail("connect", "unexpected product dialog", { alertType: value.type, message: redact(String(value.msg ?? "")) });
+      fail("connect", "unexpected product dialog", await this.describeDialog(value));
     const dialog = await until(() => document.querySelector<HTMLElement>('[role="dialog"][aria-labelledby="checkbox-confirm-title"]'),
       5000, "connect", "confirmation dialog did not render");
     const title = value.checkboxConfirm.title;
@@ -277,7 +309,7 @@ export class SyncDriver {
       if (action.length !== 1 || action[0].disabled) fail("connect", "previous files dialog action unavailable");
       action[0].click();
     } else {
-      fail("connect", "unexpected confirmation dialog", { alertType: value.type });
+      fail("connect", "unexpected confirmation dialog", await this.describeDialog(value));
     }
     await until(async () => (await this.alertState()).value !== value, 10_000, "connect", "confirmation dialog did not close");
   }
