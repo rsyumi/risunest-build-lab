@@ -999,14 +999,14 @@
     {
       "path": "benchmarks/sync-ui/driver.ts",
       "mode": "100644",
-      "bytes": 23229,
-      "sha256": "9237d6ed4ec640d910003f5ea08e68d3123fc8d7574420b178c1389ef6a6a754"
+      "bytes": 23359,
+      "sha256": "4f282ee4981a512de71af13f92440101e90cae0ce94cb6fbd5611ede0082b39c"
     },
     {
       "path": "benchmarks/sync-ui/roundTrip.ts",
       "mode": "100644",
-      "bytes": 6850,
-      "sha256": "12cc9ad96c9f1424d1e8166ffdda20fd7b456f2917ba453a171adcf90b43febb"
+      "bytes": 6938,
+      "sha256": "0917789c26d4d88e96efb92db4cfbf1df1792477dff31f434daad58b5bb45239"
     },
     {
       "path": "benchmarks/tokenizer/corpus.mjs",

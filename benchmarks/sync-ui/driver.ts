@@ -402,9 +402,15 @@ export class SyncDriver {
     return { persisted: true, conversationId };
   }
 
-  /** Opens the character holding a marker and waits until the product shows it, when it is the selected conversation. */
+  /**
+   * Leaves Settings, opens the character holding a marker and waits until the chat shows it, when it is
+   * the selected conversation.
+   */
   async renderMarker(location: { characterId: string; conversationId: string }, marker: string) {
-    const { DBState } = await import("../../src/ts/stores.svelte");
+    const { DBState, settingsOpen } = await import("../../src/ts/stores.svelte");
+    await this.waitForNoDialog("render");
+    settingsOpen.set(false);
+    await tick();
     const { changeChar } = await import("../../src/ts/characters");
     const { getPersistentDataRuntime } = await import("../../src/ts/storage/persistentDataRuntime.svelte");
     const index = DBState.db.characters.findIndex((character) => character.chaId === location.characterId);
