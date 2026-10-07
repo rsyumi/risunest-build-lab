@@ -1,4 +1,4 @@
-import json, os, pathlib, plistlib, secrets, shutil, socket, ssl, subprocess, sys, tempfile, time, threading, urllib.error, urllib.request
+import json, os, pathlib, plistlib, subprocess, sys, time, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 root = pathlib.Path.cwd()
@@ -105,63 +105,6 @@ class StreamHandler(BaseHTTPRequestHandler):
 server=ThreadingHTTPServer(('127.0.0.1',0),StreamHandler)
 threading.Thread(target=server.serve_forever,daemon=True).start()
 
-def start_webdav():
-    rclone=shutil.which('rclone')
-    assert rclone, 'rclone unavailable'
-    base=pathlib.Path(tempfile.mkdtemp(prefix='risunest-webdav-',dir=os.environ.get('RUNNER_TEMP'))).resolve()
-    served=base/'served'
-    served.mkdir()
-    tag=secrets.token_hex(4)
-    (base/'ca.cnf').write_text('[req]\ndistinguished_name=dn\nx509_extensions=v3_ca\nprompt=no\n[dn]\nCN=RisuNest synthetic loopback CA '+tag+'\n'
-                               '[v3_ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n')
-    (base/'server.ext').write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n'
-                                   'extendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n')
-    run(['openssl','req','-x509','-new','-newkey','rsa:2048','-nodes','-sha256','-days','30','-keyout','ca.key','-out','ca.pem','-config','ca.cnf'],cwd=base)
-    run(['openssl','req','-new','-newkey','rsa:2048','-nodes','-sha256','-keyout','server.key','-out','server.csr','-subj','/CN=127.0.0.1 '+tag],cwd=base)
-    run(['openssl','x509','-req','-in','server.csr','-CA','ca.pem','-CAkey','ca.key','-set_serial',str(secrets.randbits(63)),'-days','30','-sha256','-extfile','server.ext','-out','server.pem'],cwd=base)
-    (base/'ca.key').unlink()
-    print(run(['xcrun','simctl','keychain',device,'add-root-cert',str(base/'ca.pem')]))
-    probe_context=ssl.create_default_context(cafile=str(base/'ca.pem'))
-    with socket.socket() as probe:
-        probe.bind(('127.0.0.1',0))
-        port=probe.getsockname()[1]
-    user='synthetic-'+secrets.token_hex(4)
-    password=secrets.token_urlsafe(24)
-    if os.environ.get('GITHUB_ACTIONS')=='true':
-        print('::add-mask::'+password,flush=True)
-    log=(artifacts/'webdav-server.log').open('w')
-    process=subprocess.Popen([rclone,'serve','webdav',str(served),'--addr','127.0.0.1:'+str(port),'--config',str(base/'rclone.conf'),
-                              '--cert',str(base/'server.pem'),'--key',str(base/'server.key')],
-                             env={**os.environ,'RCLONE_USER':user,'RCLONE_PASS':password},stdout=log,stderr=subprocess.STDOUT)
-    endpoint='https://127.0.0.1:'+str(port)
-    deadline=time.monotonic()+60
-    while True:
-        assert process.poll() is None, 'WebDAV server exited'
-        assert time.monotonic()<deadline, 'WebDAV server did not listen'
-        try:
-            urllib.request.urlopen(endpoint+'/',timeout=5,context=probe_context)
-            raise RuntimeError('WebDAV server accepted an unauthenticated request')
-        except urllib.error.HTTPError as error:
-            assert error.code==401, error.code
-            break
-        except (urllib.error.URLError,ConnectionError,TimeoutError):
-            time.sleep(.3)
-    inputs={'URL':endpoint,'USER':user,'PASSWORD':password,'ROOT':'RisuNest'}
-    runner={'TEST_RUNNER_RISUNEST_IOS_WEBDAV_'+key:value for key,value in inputs.items()}
-    runner['TEST_RUNNER_RISUNEST_IOS_EXTERNAL_BEFORE']='webdav-before-'+secrets.token_hex(6)
-    runner['TEST_RUNNER_RISUNEST_IOS_EXTERNAL_AFTER']='webdav-after-'+secrets.token_hex(6)
-    def stop():
-        files=[path for path in served.rglob('*') if path.is_file()]
-        shape={'folders':sorted({path.relative_to(served).parts[0] for path in files}),'files':len(files),'bytes':sum(path.stat().st_size for path in files)}
-        (artifacts/'webdav-store.json').write_text(json.dumps(shape,indent=2))
-        print('webdav-store:',json.dumps(shape),flush=True)
-        process.terminate()
-        try: process.wait(timeout=10)
-        except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=10)
-        log.close()
-        shutil.rmtree(base,ignore_errors=True)
-    return runner,stop
-
 def launch(phase):
     global current_pid
     child=os.environ.copy();child['SIMCTL_CHILD_RISUNEST_IOS_PHASE']=phase
@@ -203,9 +146,7 @@ try:
     }
     (uitests/'project.json').write_text(json.dumps(spec))
     print(run(['xcodegen','generate','--spec','project.json'],cwd=uitests))
-    webdav,stop_webdav=start_webdav()
-    try:
-        output=run(['xcodebuild','test','-project','RisuNestUITests.xcodeproj','-scheme','RisuNestUITests',
+    print(run(['xcodebuild','test','-project','RisuNestUITests.xcodeproj','-scheme','RisuNestUITests',
                '-destination','platform=iOS Simulator,id='+device,'-derivedDataPath',str(uitests/'DerivedData'),
                '-resultBundlePath',str(artifacts/'ios-ui.xcresult'),
                '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore100Raw',
@@ -214,10 +155,7 @@ try:
                '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore300Gzip',
                '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore600Raw',
                '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore600Gzip',
-               'CODE_SIGNING_ALLOWED=NO'],cwd=uitests,env={**os.environ,**webdav})
-    finally:
-        stop_webdav()
-    print(output)
+               'CODE_SIGNING_ALLOWED=NO'],cwd=uitests))
     product=pathlib.Path((artifacts/'app-path.txt').read_text())
     print(run(['codesign','--force','--deep','--sign','-',str(product)]))
     print(run(['xcrun','simctl','install',device,str(product)]))
