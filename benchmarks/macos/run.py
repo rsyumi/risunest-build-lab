@@ -11,7 +11,10 @@ import tempfile
 import time
 
 from sync_controller import DEPENDENCIES as SYNC_DEPENDENCIES, PHASES as SYNC_PHASES, SyncEnvironmentError, SyncSession
-from external_controller import DEPENDENCIES as EXTERNAL_DEPENDENCIES, PHASES as EXTERNAL_PHASES, ExternalStorageSession
+from external_controller import (DEPENDENCIES as EXTERNAL_DEPENDENCIES, FILE_PHASES, GROUPS as EXTERNAL_GROUPS,
+                                 ExternalStorageSession, file_markers)
+
+EXTERNAL_PHASES = tuple(phase for group in EXTERNAL_GROUPS for phase in group)
 
 
 def records(path):
@@ -413,12 +416,13 @@ def main():
             raise RuntimeError('The Sync round trip is restricted to a fresh hosted CI user')
         if not args.sync_server:
             parser.error('Sync phases require --sync-server')
-    if any(phase in EXTERNAL_PHASES for phase in phases):
-        if [phase for phase in phases if phase in EXTERNAL_PHASES] != list(EXTERNAL_PHASES):
-            raise RuntimeError('External storage phases run together and in order')
+    external_phases = [phase for phase in phases if phase in EXTERNAL_PHASES]
+    if external_phases:
+        if not any(external_phases == list(group) for group in EXTERNAL_GROUPS):
+            raise RuntimeError('External storage phases run as one group, together and in order')
         if os.environ.get('GITHUB_ACTIONS') != 'true':
             raise RuntimeError('The external storage round trip is restricted to a fresh hosted CI user')
-        if not args.webdav_server:
+        if not args.webdav_server and external_phases[0] not in FILE_PHASES:
             parser.error('External storage phases require --webdav-server')
     # A failed phase skips only the phases that read the data it leaves; the rest still run.
     dependencies = {'restart': 'contracts', 'app': 'contracts', 'app-restart': 'app',
@@ -428,6 +432,7 @@ def main():
     failures = {}
     sync = None
     external = None
+    backup_file = file_markers()
     try:
         for phase in phases:
             if dependencies.get(phase) in failures:
@@ -446,7 +451,9 @@ def main():
                         sync = SyncSession(args.sync_server, artifacts)
                         sync.start()
                     expected = sync.before(phase)
-                if phase in EXTERNAL_PHASES:
+                if phase in FILE_PHASES:
+                    expected = backup_file
+                elif phase in EXTERNAL_PHASES:
                     if external is None:
                         external = ExternalStorageSession(args.webdav_server, artifacts, args.webdav_scheme)
                         external.start()

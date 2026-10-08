@@ -581,6 +581,66 @@ describe('native file jobs', () => {
         },
     )
 
+    it('adopts a running portable activation before the native job copies missing bodies and completes', async () => {
+        const calls: string[] = []
+        const committed = {revision: 4, sourceBytes: 128, sourceFingerprintKind: 'portable-catalog-sha256' as const, sourceSha256: 'b'.repeat(64), characterCount: 1, presetCount: 0, warningCodes: []}
+        const receipt = {kind: 'restore-portable-backup' as const, activationRevision: 4, activationAuthority: '1', deviceSessionId: 'device-session'}
+        // The native worker blocks after activation until adoption is confirmed, and confirms
+        // only a device session the renderer has already completed.
+        let phase: 'selection' | 'activation' | 'activated' | 'bodies' | 'complete' = 'selection'
+        let deviceRecovered = false
+        const invoke = async (command: string) => {
+            calls.push(command)
+            if (command === 'native_file_job_start') return {jobId: 'job-1'}
+            if (command === 'native_file_job_status') {
+                if (phase === 'selection') return {...status('waitingForInput'), kind: 'restore-portable-backup', phase: 'awaiting-backup-selection', restorePreview: {libraryIncluded: true, repairRequired: false, deviceSections: ['hypa','local-plugins','local-settings']}}
+                if (phase === 'activation') return {...status('waitingForInput'), kind: 'restore-portable-backup', phase: 'awaiting-activation'}
+                if (phase === 'activated') return {...status('running'), ...receipt, phase: 'activating-database'}
+                if (phase === 'bodies') { phase = 'complete'; return {...status('running'), ...receipt, phase: 'copying-missing-bodies', restoreAdoptionConfirmed: true} }
+                return {...status('succeeded', committed), ...receipt, restoreAdoptionConfirmed: true}
+            }
+            if (command === 'native_portable_select_sections') { phase = 'activation'; return undefined }
+            if (command === 'native_file_job_finalize') { phase = 'activated'; return undefined }
+            if (command === 'native_device_backup_recovery_complete') {
+                if (phase !== 'activated' || deviceRecovered) throw new Error('Device recovery is outside the activated job')
+                deviceRecovered = true
+                return undefined
+            }
+            if (command === 'pds_open') return {revision: 4}
+            if (command === 'native_portable_confirm_restore_adoption') {
+                if (!deviceRecovered) throw new Error('Portable device recovery has not completed')
+                phase = 'bodies'
+                return undefined
+            }
+            if (command === 'native_file_job_forget') return true
+            throw new Error(`Unexpected command: ${command}`)
+        }
+        const refresh = vi.fn()
+        const adopted = vi.fn()
+        await expect(runNativeArchiveRestore(
+            restoreRuntime(3, {refresh}),
+            {type: 'desktopPath', path: 'C:\\synthetic\\portable.risunest'},
+            {
+                choosePortableSections: async () => ({library: true, deviceSections: ['hypa','local-plugins','local-settings']}),
+                afterPortableAdoption: async () => { adopted(calls.length) },
+            },
+            {isTauri: () => true, invoke, wait: async () => undefined},
+        )).resolves.toEqual(committed)
+        expect(refresh).toHaveBeenCalledExactlyOnceWith(4)
+        const native = calls.filter(command => command !== 'native_file_job_status')
+        expect(native).toEqual([
+            'native_file_job_start',
+            'native_portable_select_sections',
+            'native_file_job_finalize',
+            'native_device_backup_recovery_complete',
+            'pds_open',
+            'native_portable_confirm_restore_adoption',
+            'native_file_job_forget',
+        ])
+        expect(adopted).toHaveBeenCalledOnce()
+        expect(calls.slice(adopted.mock.calls[0][0]).filter(command => command === 'native_file_job_status')).toHaveLength(2)
+    })
+
     it.each(['chooser', 'fence'])(
         'keeps portable selection outside the replacement fence when aborted during %s',
         async (point) => {

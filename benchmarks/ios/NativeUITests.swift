@@ -359,18 +359,32 @@ final class NativeUITests: XCTestCase {
         let texts = app.webViews.staticTexts
         let result = texts.containing(NSPredicate(format: "label BEGINSWITH %@", "sync-result:")).firstMatch
         let failure = texts.containing(NSPredicate(format: "label BEGINSWITH %@", "verification-error:")).firstMatch
-        let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in result.exists || failure.exists }, object: nil)
+        let step = texts.containing(NSPredicate(format: "label BEGINSWITH %@", "sync-step:")).firstMatch
+        var lastStep = "sync-step:unknown"
+        // An app that stops running ends the wait at once, with the last step it showed.
+        let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            if result.exists || failure.exists || app.state == .notRunning { return true }
+            if step.exists { lastStep = step.label }
+            return false
+        }, object: nil)
         let outcome = XCTWaiter().wait(for: [settled], timeout: 600)
-        attachScreenshot(app, name: "\(phase)-final")
-        guard outcome == .completed else {
-            let step = texts.containing(NSPredicate(format: "label BEGINSWITH %@", "sync-step:")).firstMatch
-            let last = step.exists ? step.label : "sync-step:unknown"
-            let attachment = XCTAttachment(string: last)
+        if app.state == .notRunning {
+            let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            attachment.name = "\(phase)-final"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        } else {
+            attachScreenshot(app, name: "\(phase)-final")
+        }
+        guard outcome == .completed, result.exists || failure.exists else {
+            let stopped = app.state == .notRunning
+            let last = step.exists ? step.label : lastStep
+            let attachment = XCTAttachment(string: "\(stopped ? "app-stopped" : "timeout") \(last)")
             attachment.name = "\(phase)-last-step"
             attachment.lifetime = .keepAlways
             add(attachment)
             print(last)
-            XCTFail("\(phase) did not finish; last \(last)")
+            XCTFail(stopped ? "\(phase) stopped running; last \(last)" : "\(phase) did not finish; last \(last)")
             return
         }
         let evidence = result.exists ? result.label : failure.label
@@ -477,6 +491,55 @@ final class NativeUITests: XCTestCase {
         webDavPreflight(inputs["RISUNEST_IOS_WEBDAV_URL"]!, phase: "external-storage-restart")
         runSync(phase: "external-storage-restart",
                 environment: ["RISUNEST_IOS_EXTERNAL_BEFORE": inputs["RISUNEST_IOS_EXTERNAL_BEFORE"]!])
+    }
+
+    private func suppliedInputs(_ names: [String], otherwise reason: String) throws -> [String: String] {
+        let environment = ProcessInfo.processInfo.environment
+        var inputs: [String: String] = [:]
+        for name in names {
+            guard let value = environment[name], !value.isEmpty else { throw XCTSkip(reason) }
+            inputs[name] = value
+        }
+        return inputs
+    }
+
+    private static let externalSyncInputs = ["RISUNEST_IOS_WEBDAV_URL", "RISUNEST_IOS_WEBDAV_USER", "RISUNEST_IOS_WEBDAV_PASSWORD",
+                                             "RISUNEST_IOS_WEBDAV_SYNC_ROOT", "RISUNEST_IOS_EXTERNAL_SYNC_FIRST",
+                                             "RISUNEST_IOS_EXTERNAL_SYNC_SECOND"]
+
+    /// Connects a new WebDAV sync repository, turns sync on, changes a message and publishes it.
+    func testExternalSyncPublish() throws {
+        continueAfterFailure = false
+        let inputs = try suppliedInputs(Self.externalSyncInputs, otherwise: "WebDAV sync repository not supplied")
+        webDavPreflight(inputs["RISUNEST_IOS_WEBDAV_URL"]!, phase: "external-sync")
+        runSync(phase: "external-sync", environment: inputs)
+    }
+
+    /// Runs after testExternalSyncPublish in the same installation and relaunches without the password.
+    func testExternalSyncRestart() throws {
+        continueAfterFailure = false
+        let inputs = try suppliedInputs(Self.externalSyncInputs, otherwise: "WebDAV sync repository not supplied")
+        webDavPreflight(inputs["RISUNEST_IOS_WEBDAV_URL"]!, phase: "external-sync-restart")
+        runSync(phase: "external-sync-restart", environment: [
+            "RISUNEST_IOS_EXTERNAL_SYNC_FIRST": inputs["RISUNEST_IOS_EXTERNAL_SYNC_FIRST"]!,
+            "RISUNEST_IOS_EXTERNAL_SYNC_SECOND": inputs["RISUNEST_IOS_EXTERNAL_SYNC_SECOND"]!,
+        ])
+    }
+
+    private static let backupFileInputs = ["RISUNEST_IOS_BACKUP_FILE_BEFORE", "RISUNEST_IOS_BACKUP_FILE_AFTER"]
+
+    /// Exports a RisuNest backup to a temporary file, changes a message and restores the file in the same app.
+    func testBackupFileRestore() throws {
+        continueAfterFailure = false
+        let inputs = try suppliedInputs(Self.backupFileInputs, otherwise: "Backup file markers not supplied")
+        runSync(phase: "backup-file", environment: inputs)
+    }
+
+    /// Runs after testBackupFileRestore in the same installation and checks the restored library after a relaunch.
+    func testBackupFileRestoreRestart() throws {
+        continueAfterFailure = false
+        let inputs = try suppliedInputs(Self.backupFileInputs, otherwise: "Backup file markers not supplied")
+        runSync(phase: "backup-file-restart", environment: inputs)
     }
 
     func testOAuthCallbackReturn() throws {

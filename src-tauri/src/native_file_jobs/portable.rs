@@ -696,6 +696,8 @@ fn restore_portable_inner(
             };
             job.publish_portable_activation(final_revision, store.lww_binding_authority().map_err(error)?.0.to_string()).map_err(error)?;
             job.wait_for_portable_adoption().map_err(error)?;
+            // Device recovery leaves a journal this job still holds, so the job releases it itself.
+            journal_owned = false;
             let retained=job.requires_restore_finalization && context.is_some();
             if retained {
                 job.prepare_portable_body_retry(&stage.staging_id,&source_sha256,archive.source_identity_guard().map_err(error)?).map_err(error)?;
@@ -1131,7 +1133,7 @@ mod tests {
         let revision = activated.activation_revision.unwrap();
         let authority = activated.activation_authority.unwrap();
         let session = activated.device_session_id.unwrap();
-        coordinator.recovery_complete(&session).unwrap();
+        crate::device_backup::complete_native_recovery_command_for_test(&coordinator, &session).unwrap();
         state.confirm_portable_restore_adoption(&coordinator, &job.id(), &revision.to_string(), &authority, &session).unwrap();
         coordinator.cleanup(&session).unwrap();
         let failed = wait(&|status| status.portable_body_retry.as_ref().is_some_and(|receipt| receipt.available));
@@ -1163,6 +1165,7 @@ mod tests {
             } else {state.begin_cleanup().unwrap();}
             assert_eq!(completion.recv_timeout(Duration::from_secs(30)).unwrap().unwrap_err(), "portable-body-source-required");
             worker.join().unwrap();
+            assert_eq!(DurableCasJob::open(&target, &job.id()).err().map(|error| error.kind()), Some(std::io::ErrorKind::NotFound));
             assert!(state.cleanup_drained());
             state.close_for_cleanup().unwrap();
             let restarted = NativeFileJobState::initialize(target.join("native-file-jobs"));
@@ -1193,6 +1196,135 @@ mod tests {
 
     #[test]
     fn portable_body_retry_changed_source_retires_without_reactivation() {portable_body_retry_case(true, true);}
+
+    /// A library restore driven through its worker up to the activation receipt the renderer adopts.
+    struct ActivatedPortableRestore {
+        _directory: tempfile::TempDir,
+        target: std::path::PathBuf,
+        hash: String,
+        state: std::sync::Arc<super::super::NativeFileJobState>,
+        coordinator: std::sync::Arc<DeviceBackupState>,
+        job: std::sync::Arc<JobControl>,
+        _admission: std::sync::Arc<std::sync::Mutex<Option<super::super::admission::Permit>>>,
+        worker: std::thread::JoinHandle<()>,
+        completion: std::sync::mpsc::Receiver<Result<i64, String>>,
+        revision: i64,
+        authority: String,
+        session: String,
+    }
+
+    fn wait_for_job(job: &JobControl, ready: impl Fn(&super::super::JobStatus) -> bool) -> super::super::JobStatus {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let status = job.status();
+            if ready(&status) {break status;}
+            assert!(std::time::Instant::now() < deadline, "portable worker did not reach required phase: {status:?}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn activate_portable_restore() -> ActivatedPortableRestore {
+        use super::super::{JobKind, NativeFileJobState, WorkerPermit};
+        use std::sync::{Arc, mpsc};
+        let directory = tempfile::tempdir().unwrap();
+        let (path, bytes, hash) = test_archive(directory.path(), true);
+        let target = directory.path().join("target");
+        drop(library(&target));
+        let state = Arc::new(NativeFileJobState::initialize(target.join("native-file-jobs")));
+        let coordinator = Arc::new(DeviceBackupState::initialize(target.join("device-backup")));
+        portable_backup::source_io::reset_source_io();
+        let (job, admission) = state.create_portable_restore_fixture(1).unwrap();
+        let owned = directory.path().join("restore-job");
+        fs::create_dir(&owned).unwrap();
+        let source = OpenedJobSource {file: File::open(&path).unwrap(), custody: None, total_bytes: bytes};
+        let worker_job = job.clone();
+        let worker_coordinator = coordinator.clone();
+        let worker_target = target.clone();
+        let permit = WorkerPermit::acquire(state.active_workers.clone(), state.max_concurrent_jobs).unwrap();
+        let (done, completion) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _permit = permit;
+            let persistent = crate::persistent_store::commands::PersistentStoreState::default();
+            let context = NativePortableRestoreContext {persistent: &persistent, coordinator: &worker_coordinator};
+            let result = restore_portable_with_context(source, true, 1, &owned, PersistentStore::open(&worker_target).unwrap(), &worker_job, Some((&context, None)));
+            let receipt = result.as_ref().map(|result| result.revision).map_err(|error| error.code.clone());
+            super::super::finish_worker_outcome(&worker_job, JobKind::RestorePortableBackup, result, vec![]);
+            done.send(receipt).unwrap();
+        });
+        wait_for_job(&job, |status| status.phase == JobPhase::AwaitingBackupSelection);
+        state.select_portable_restore_fixture(&job.id(), PortableSelection::default()).unwrap();
+        wait_for_job(&job, |status| status.phase == JobPhase::AwaitingActivation);
+        state.finalize(&job.id(), Some(1)).unwrap();
+        let activated = wait_for_job(&job, |status| status.activation_revision.is_some());
+        assert!(PayloadCas::new(&target).unwrap().stat_object(hash.as_ref().unwrap()).unwrap().is_none());
+        ActivatedPortableRestore {
+            _directory: directory,
+            target,
+            hash: hash.unwrap(),
+            state,
+            coordinator,
+            job,
+            _admission: admission,
+            worker,
+            completion,
+            revision: activated.activation_revision.unwrap(),
+            authority: activated.activation_authority.unwrap(),
+            session: activated.device_session_id.unwrap(),
+        }
+    }
+
+    fn assert_restored_body_settled(target: &Path, job_id: &str, hash: &str, revision: i64) {
+        assert!(PayloadCas::new(target).unwrap().stat_object(hash).unwrap().is_some());
+        let catalog = rusqlite::Connection::open(target.join("persistent/persistent.sqlite")).unwrap();
+        let registered: i64 = catalog.query_row("SELECT count(*) FROM asset_objects WHERE object_hash=?1", [hash], |row| row.get(0)).unwrap();
+        assert_eq!(registered, 1);
+        drop(catalog);
+        assert_eq!(DurableCasJob::open(target, job_id).err().map(|error| error.kind()), Some(std::io::ErrorKind::NotFound));
+        assert_eq!(PersistentStore::open(target).unwrap().revision().unwrap(), revision);
+    }
+
+    #[test]
+    fn portable_restore_completes_device_recovery_before_its_missing_body_transfer() {
+        let restore = activate_portable_restore();
+        assert!(crate::asset_repository::job_pins::durable_cas_job_held(&restore.target, &restore.job.id()).unwrap());
+        crate::device_backup::complete_native_recovery_command_for_test(&restore.coordinator, &restore.session).unwrap();
+        assert!(!restore.coordinator.is_blocking().unwrap());
+        restore.state.confirm_portable_restore_adoption(&restore.coordinator, &restore.job.id(), &restore.revision.to_string(), &restore.authority, &restore.session).unwrap();
+        let completed = restore.completion.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+        assert_eq!(completed, Ok(restore.revision), "{:?}", restore.job.status());
+        restore.worker.join().unwrap();
+        let status = restore.job.status();
+        assert_eq!(status.state, super::super::JobState::Succeeded);
+        assert!(status.restore_adoption_confirmed);
+        assert_restored_body_settled(&restore.target, &restore.job.id(), &restore.hash, restore.revision);
+        assert!(restore.state.cleanup_drained());
+    }
+
+    #[test]
+    fn portable_restore_stopped_after_activation_completes_recovery_at_next_start() {
+        let restore = activate_portable_restore();
+        restore.state.begin_cleanup().unwrap();
+        assert!(restore.completion.recv_timeout(std::time::Duration::from_secs(30)).unwrap().is_err());
+        restore.worker.join().unwrap();
+        let job_id = restore.job.id();
+        let left = DurableCasJob::open(&restore.target, &job_id).unwrap();
+        assert!(!left.is_sealed() && !left.is_released());
+        drop(left);
+        assert!(restore.coordinator.is_blocking().unwrap());
+        drop(restore.coordinator);
+
+        let restarted = DeviceBackupState::initialize(restore.target.join("device-backup"));
+        restarted.attach_maintenance_guard(crate::persistent_store::commands::PersistentStoreState::default().acquire_device_maintenance().unwrap()).unwrap();
+        let decision = restarted.bootstrap_for_entry().unwrap();
+        let session = decision.session.unwrap();
+        assert_eq!((decision.mode, session.phase.as_str(), session.action.as_str()), ("maintenance", "committed", "native-complete"));
+        assert_eq!(session.session_id, restore.session);
+        crate::device_backup::complete_native_recovery_command_for_test(&restarted, &session.session_id).unwrap();
+        assert!(!restarted.is_blocking().unwrap());
+        assert_eq!(restarted.bootstrap_for_entry().unwrap().mode, "normal");
+        assert_eq!(DurableCasJob::open(&restore.target, &job_id).err().map(|error| error.kind()), Some(std::io::ErrorKind::NotFound));
+        assert_eq!(PersistentStore::open(&restore.target).unwrap().revision().unwrap(), restore.revision);
+    }
 
     #[test]
     fn portable_disk_full_keeps_its_classification_through_wrappers() {

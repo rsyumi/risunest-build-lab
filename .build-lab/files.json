@@ -111,8 +111,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 43335,
-      "sha256": "3c535ad11b649f68813bacd781f741e416c8786a80971b5e35610aa613de2164"
+      "bytes": 46763,
+      "sha256": "7f5d6408fe5c76e3c20a927aaaab66375c7334c75a728d7dfe33864cab570078"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -147,8 +147,8 @@
     {
       "path": "benchmarks/ios/externalStorageContracts.ts",
       "mode": "100644",
-      "bytes": 2321,
-      "sha256": "075096f4e60a64aeb63715693e1a769c4f72a59f5a77316557cc2381fc7722f6"
+      "bytes": 3372,
+      "sha256": "41feaf59f358c6c39d5982704f427d0d3e974a32ecd1e944ad741c64b013a8ab"
     },
     {
       "path": "benchmarks/ios/index.html",
@@ -159,8 +159,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 15675,
-      "sha256": "0fdb6c9c4ff7a44f4ea3d0c17ff94f713d2855a645c639bc5c033b31786a8a97"
+      "bytes": 15727,
+      "sha256": "0055c895a301485f1c5b8328ec6d4b64e4d61e4da2fb8dc7122ab2ce313edf55"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -201,8 +201,8 @@
     {
       "path": "benchmarks/ios/native/src/lib.rs",
       "mode": "100644",
-      "bytes": 7090,
-      "sha256": "20e8dcd1c14b26ec59ae2bc40c5bcda9422df73c36be4f34f882cd7adf1e5366"
+      "bytes": 7991,
+      "sha256": "21102f3880a3fef8b70f22b7694c57f6e456af085b0c83cb55eeb2f8abb474f3"
     },
     {
       "path": "benchmarks/ios/native/src/network_probe.rs",
@@ -501,14 +501,14 @@
     {
       "path": "benchmarks/macos/externalStorage.ts",
       "mode": "100644",
-      "bytes": 1712,
-      "sha256": "b6ec1943020921926a7d858d1049af10cd0fb4c36b25a8269d512fe8bea190a9"
+      "bytes": 2707,
+      "sha256": "a40a9d4b43151f79094cf8d9bbbd0d61e8ed7388e4c10139d692d1ebc15e1796"
     },
     {
       "path": "benchmarks/macos/external_controller.py",
       "mode": "100644",
-      "bytes": 7784,
-      "sha256": "0114bb99845f6ea879c5ce2a7fd63804366e20664cfcc0a20c087025baf5c855"
+      "bytes": 8324,
+      "sha256": "feee6e84e2516227f6f657037b9ae23b29d74e02d5d908414ad2f009c13b1945"
     },
     {
       "path": "benchmarks/macos/index.html",
@@ -519,8 +519,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 28095,
-      "sha256": "ea47dfe019d75f00b98d4302d4021ad8b3decd8870f7bb7a40f77dd290409710"
+      "bytes": 28098,
+      "sha256": "b8f8c05508d8803c9f0857d6cc79c8ef0ced3e8194630aac4320e615618c3dcd"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -567,8 +567,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 31814,
-      "sha256": "5e539ecab184a184618e940e71eaed842afc16dc4cd3932a8167995dbb05b5e4"
+      "bytes": 32163,
+      "sha256": "6d5e583c25cf8c3ed72d362bae05a475a297b1b2444df2136a6a1dfbe1c52106"
     },
     {
       "path": "benchmarks/macos/sync.ts",
@@ -1017,14 +1017,26 @@
     {
       "path": "benchmarks/sync-ui/driver.ts",
       "mode": "100644",
-      "bytes": 26019,
-      "sha256": "46dcc384934c4f995865b7a6773d7896a55298db2fbb3fc0b96e406882e4083b"
+      "bytes": 26136,
+      "sha256": "bfc6ec6f7a189238905c2d8d9a880a4b903c450ddfcf2493e9a3db949e3eaf7c"
     },
     {
       "path": "benchmarks/sync-ui/externalStorage.ts",
       "mode": "100644",
-      "bytes": 10883,
-      "sha256": "da443b9f37cd23a0909d47895bff87a5b9f43792ad3140b0d3a5c398eef3c0d9"
+      "bytes": 10897,
+      "sha256": "057c2bdb9da1b1de27ebf0d8a9db09e9e86460dd49c1ec8b11827e6bb31f76cf"
+    },
+    {
+      "path": "benchmarks/sync-ui/externalSync.ts",
+      "mode": "100644",
+      "bytes": 11222,
+      "sha256": "e6c1f0bdba93c6841d85a4a657b780e2fc2f9a795243b7c564fde5de5517c01d"
+    },
+    {
+      "path": "benchmarks/sync-ui/portableBackup.ts",
+      "mode": "100644",
+      "bytes": 10555,
+      "sha256": "bdd3df8a21c5126061b263bcd1baa61486ab52846a8aad116fae9d901a731761"
     },
     {
       "path": "benchmarks/sync-ui/roundTrip.ts",
@@ -5571,8 +5583,8 @@
     {
       "path": "src-tauri/src/app_update/commands.rs",
       "mode": "100644",
-      "bytes": 21518,
-      "sha256": "e9e9ba4b273934cf9b16924781bcc8e98a4d4769377f81c74dcc53779f3fc04c"
+      "bytes": 21548,
+      "sha256": "1098137a2b1273a3bd62ea6898ed454ed86f1b6a45c8e386f2ea01cbd57fde15"
     },
     {
       "path": "src-tauri/src/app_update/mod.rs",
@@ -5683,6 +5695,12 @@
       "sha256": "0daaf91a57d5b8342fc81d5e8b4e203fd07f58f7f2f1c5d9badc5b42b6c147cd"
     },
     {
+      "path": "src-tauri/src/command_future_size.rs",
+      "mode": "100644",
+      "bytes": 11623,
+      "sha256": "69dac584c91e3715b74d5ee205485ed141fcf9ff7509503241701f09967dceac"
+    },
+    {
       "path": "src-tauri/src/data_health/journal.rs",
       "mode": "100644",
       "bytes": 5859,
@@ -5745,8 +5763,8 @@
     {
       "path": "src-tauri/src/device_backup/commands.rs",
       "mode": "100644",
-      "bytes": 5308,
-      "sha256": "379a6d041bca4ae05eb20941f84d68bd5c4883847faa47e41a58d7edcc484cbe"
+      "bytes": 6544,
+      "sha256": "4fd1a97cea74832427c0e2bcb6a1ec669ca914c71cc30e1ecbf5ce6f5c98acd3"
     },
     {
       "path": "src-tauri/src/device_backup/mod.rs",
@@ -5763,8 +5781,8 @@
     {
       "path": "src-tauri/src/device_backup/tests.rs",
       "mode": "100644",
-      "bytes": 43530,
-      "sha256": "c99cec103c7c8fc857aac056b8b72c286d555d8f1883bf918225c7f8a3d34b77"
+      "bytes": 45421,
+      "sha256": "ebd8e937431a4b64d0bf9a9b48c5b0a9e2006fe37fedd9f9a804100f401eccc3"
     },
     {
       "path": "src-tauri/src/external_storage/address_change_tests.rs",
@@ -5817,8 +5835,8 @@
     {
       "path": "src-tauri/src/external_storage/connection_commands.rs",
       "mode": "100644",
-      "bytes": 117796,
-      "sha256": "d924228c0bdf6291f894f2ad8b8fb1e7d28901191f159e2d58568b000795e766"
+      "bytes": 117886,
+      "sha256": "83f84910742f0323c9cb7e9f07515e0251c3df79fafc8e7c5dfb766f0d5f0787"
     },
     {
       "path": "src-tauri/src/external_storage/connection_store.rs",
@@ -5883,8 +5901,8 @@
     {
       "path": "src-tauri/src/external_storage/history_deletion.rs",
       "mode": "100644",
-      "bytes": 7438,
-      "sha256": "755ab89545c2f0f083295fe71b4e259f39dee9de75f62635d4c6cb23de24368f"
+      "bytes": 7448,
+      "sha256": "224aa89b7007a3729449b81e685b7d2da935d6fc4e6b2d0953ac2d2e6554d2b9"
     },
     {
       "path": "src-tauri/src/external_storage/history_jobs.rs",
@@ -5943,8 +5961,8 @@
     {
       "path": "src-tauri/src/external_storage/lww_commands.rs",
       "mode": "100644",
-      "bytes": 41694,
-      "sha256": "fc664d27b55006fc9fae466ccd9b61ce409ceba82de77c14cf278d492a995725"
+      "bytes": 41764,
+      "sha256": "222f24822266305c6c6528604e5ccc796746ca3bdcb9ec91a31c34708af1d294"
     },
     {
       "path": "src-tauri/src/external_storage/lww_compaction.rs",
@@ -6321,8 +6339,8 @@
     {
       "path": "src-tauri/src/external_storage/runtime.rs",
       "mode": "100644",
-      "bytes": 98183,
-      "sha256": "8914e84e47a95b1945d8f54bbbd7bcdf727af630d5c6b48c1efec397ade318a5"
+      "bytes": 98193,
+      "sha256": "4b7477a46294f3f88235dc43426be9054dc3f4f72f3f8c4bdbb145e8d9acfb64"
     },
     {
       "path": "src-tauri/src/external_storage/runtime_restore.rs",
@@ -6357,8 +6375,8 @@
     {
       "path": "src-tauri/src/external_storage/snapshot_export_commands.rs",
       "mode": "100644",
-      "bytes": 21000,
-      "sha256": "8f927226d0cfb57f03626d282c247f59f22d0c053c07cc75ba003849c11b110e"
+      "bytes": 21014,
+      "sha256": "c694f7c7724baab25958e029df8a5343908c2de995b8677b43cdc753d1cc6fc7"
     },
     {
       "path": "src-tauri/src/external_storage/snapshot_restore.rs",
@@ -6477,8 +6495,8 @@
     {
       "path": "src-tauri/src/lib.rs",
       "mode": "100644",
-      "bytes": 56425,
-      "sha256": "a26e132add8991263961969ce0748003a89818621f87bd3536f1d88651b4d404"
+      "bytes": 56463,
+      "sha256": "39610ab5364fc0b90f4d9a9fa1bafa45992f81c4b7b1698d9a722e02816c74c1"
     },
     {
       "path": "src-tauri/src/linux_session.rs",
@@ -6711,8 +6729,8 @@
     {
       "path": "src-tauri/src/native_file_jobs/portable.rs",
       "mode": "100644",
-      "bytes": 90883,
-      "sha256": "3f92f6a158766a58a278b830169213e36a3eca3ec8b01b9b2606b6e9e4906dc7"
+      "bytes": 98906,
+      "sha256": "f96ab241dc5285e54b5e4e4a6751d82594d05bd945281b6786ce2a29c0a878c3"
     },
     {
       "path": "src-tauri/src/native_file_jobs/portable_source_custody.rs",
@@ -14115,14 +14133,14 @@
     {
       "path": "src/ts/storage/deviceBackup/entry.startupFailure.test.ts",
       "mode": "100644",
-      "bytes": 1122,
-      "sha256": "7af0afb5175b165448ac6750a7478043cd329d275691f781c39a6fcd0ee28a7e"
+      "bytes": 2693,
+      "sha256": "729be0d47e7e1d19ee54aba3cee74a821ff212e7d0440de0087ec5881401ad9a"
     },
     {
       "path": "src/ts/storage/deviceBackup/entry.ts",
       "mode": "100644",
-      "bytes": 3093,
-      "sha256": "e1e631f2ea1e756c773ec0351cdc44268dcde2106f3ea23472de4caa47a588ed"
+      "bytes": 3408,
+      "sha256": "c8bab3defd5605bff716a4d4aaac22249da1adc60668246d7465026f84c85f6e"
     },
     {
       "path": "src/ts/storage/deviceBackup/job.test.ts",
@@ -14613,8 +14631,8 @@
     {
       "path": "src/ts/storage/nativeFileJobs.test.ts",
       "mode": "100644",
-      "bytes": 209114,
-      "sha256": "fc32f82120eabdd4b62552995e194a323bd65aaeeed658aa471e470f60630575"
+      "bytes": 213138,
+      "sha256": "8bfc4f9e7ee741540538e2232a85708dc3c978f40818e583a51150568757d28c"
     },
     {
       "path": "src/ts/storage/nativeFileJobs.ts",

@@ -108,6 +108,24 @@ fn ios_bench_external_input() -> Result<serde_json::Value, &'static str> {
         })),
         // A relaunch uses the stored connection and secret, never fresh credentials.
         "external-storage-restart" => Ok(serde_json::json!({ "before": read("RISUNEST_IOS_EXTERNAL_BEFORE")? })),
+        "external-sync" => Ok(serde_json::json!({
+            "webdav": {
+                "endpoint": read("RISUNEST_IOS_WEBDAV_URL")?,
+                "accountId": read("RISUNEST_IOS_WEBDAV_USER")?,
+                "password": read("RISUNEST_IOS_WEBDAV_PASSWORD")?,
+                "root": read("RISUNEST_IOS_WEBDAV_SYNC_ROOT")?,
+            },
+            "before": read("RISUNEST_IOS_EXTERNAL_SYNC_FIRST")?,
+            "after": read("RISUNEST_IOS_EXTERNAL_SYNC_SECOND")?,
+        })),
+        "external-sync-restart" => Ok(serde_json::json!({
+            "before": read("RISUNEST_IOS_EXTERNAL_SYNC_FIRST")?,
+            "after": read("RISUNEST_IOS_EXTERNAL_SYNC_SECOND")?,
+        })),
+        "backup-file" | "backup-file-restart" => Ok(serde_json::json!({
+            "before": read("RISUNEST_IOS_BACKUP_FILE_BEFORE")?,
+            "after": read("RISUNEST_IOS_BACKUP_FILE_AFTER")?,
+        })),
         _ => Err("External storage verification phase required"),
     }
 }

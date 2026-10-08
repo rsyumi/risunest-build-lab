@@ -248,7 +248,7 @@ export class SyncDriver {
   }
 
   /** Names a dialog by its type and the product string key of its message, never by its text. */
-  private async describeDialog(value: { type: string; msg?: string; stackTrace?: string; checkboxConfirm?: { title: string } }) {
+  async describeDialog(value: { type: string; msg?: string; stackTrace?: string; checkboxConfirm?: { title: string } }) {
     const { language } = await import("../../src/lang");
     const text = value.checkboxConfirm?.title ?? value.msg ?? "";
     const find = (node: unknown, path: string, depth: number): string | undefined => {
@@ -333,7 +333,8 @@ export class SyncDriver {
     }
   }
 
-  private async answerDialog(value: { type: string; checkboxConfirm?: { title: string } ; msg?: string }, replacement: "accept" | "refuse",
+  /** Answers a sync binding confirmation the way a person would: replace only when asked to accept, connect without downloading. */
+  async answerDialog(value: { type: string; checkboxConfirm?: { title: string } ; msg?: string }, replacement: "accept" | "refuse",
     outcome: { replacementShown: boolean; replacementGatedByCheckbox: boolean | null; previousFilesShown: boolean }) {
     const { language } = await import("../../src/lang");
     if (value.type !== "checkboxConfirm" || !value.checkboxConfirm)

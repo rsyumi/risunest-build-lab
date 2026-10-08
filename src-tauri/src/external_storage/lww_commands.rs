@@ -248,7 +248,7 @@ pub(crate) struct Inspection {
 }
 #[tauri::command]
 pub(crate) async fn external_lww_inspect(app: AppHandle, request: Request) -> Result<Inspection> {
-    logged("external_lww_inspect", async move {
+    logged("external_lww_inspect", Box::pin(async move {
         let context = context(&request.connection_id)?;
         let mut session = context.session.lock().await;
         session.cancel = context.cancel.lock().map_err(runtime::local_error)?.clone();
@@ -278,7 +278,7 @@ pub(crate) async fn external_lww_inspect(app: AppHandle, request: Request) -> Re
             registration_changed: false,
             server_restored: false,
         })
-    }.await)
+    }).await)
 }
 pub(crate) struct StageRequest {
     request: Request,
@@ -332,7 +332,7 @@ pub(crate) async fn external_lww_stage_binding(
     app: AppHandle,
     request: StageRequest,
 ) -> Result<Staged> {
-    logged("external_lww_stage_binding", async move {
+    logged("external_lww_stage_binding", Box::pin(async move {
         let context = context(&request.request.connection_id)?;
         let mut session = context.session.lock().await;
         open(&app, &request.request.connection_id, &mut session).await?;
@@ -357,14 +357,14 @@ pub(crate) async fn external_lww_stage_binding(
             staging_id: stage.staging_id,
             receive_id: request.request.header.request_id,
         })
-    }.await)
+    }).await)
 }
 #[tauri::command]
 pub(crate) async fn external_lww_publish(
     app: AppHandle,
     request: Request,
 ) -> Result<PublicationResult> {
-    logged("external_lww_publish", async move {
+    logged("external_lww_publish", Box::pin(async move {
         let state = app.state::<crate::persistent_store::PersistentStoreState>();
         let _operation = state.admit_renderer_operation().map_err(runtime::local_error)?;
         let context = context(&request.connection_id)?;
@@ -415,14 +415,14 @@ pub(crate) async fn external_lww_publish(
             }
         }
         Ok(result)
-    }.await)
+    }).await)
 }
 #[tauri::command]
 pub(crate) async fn external_lww_receive(
     app: AppHandle,
     request: Request,
 ) -> Result<Option<StageReceive>> {
-    logged("external_lww_receive", async move {
+    logged("external_lww_receive", Box::pin(async move {
         let context = context(&request.connection_id)?;
         let mut session = context.session.lock().await;
         open(&app, &request.connection_id, &mut session).await?;
@@ -446,7 +446,7 @@ pub(crate) async fn external_lww_receive(
             context.turn.lock().map_err(runtime::local_error)?.observed_foreign(Instant::now());
         }
         Ok(page)
-    }.await)
+    }).await)
 }
 
 /// The first unfinished page in `queue`, dropping finished ones. A page of
@@ -470,13 +470,13 @@ fn next_receive_page(
 
 #[tauri::command]
 pub(crate) async fn external_lww_maintenance(app:AppHandle,request:Request)->Result<Option<serde_json::Value>> {
-    logged("external_lww_maintenance", async move {
+    logged("external_lww_maintenance", Box::pin(async move {
         let context=context(&request.connection_id)?;
         let Ok(mut session)=context.maintenance.try_lock() else {return Ok(None)};
         let cancel=context.cancel.lock().map_err(runtime::local_error)?.clone();
         let result=maintain(&app,&request,&context,&mut session,&cancel).await;
         session.finish_maintenance(result)
-    }.await)
+    }).await)
 }
 /// One maintenance tick on the engine kept from earlier ticks. A replaced
 /// cancellation or an expired clock admission takes a fresh clock sample, and
@@ -525,7 +525,7 @@ pub(crate) async fn external_lww_fence(
     connection_id: String,
     new_device: bool,
 ) -> Result<()> {
-    logged("external_lww_fence", async move {
+    logged("external_lww_fence", Box::pin(async move {
         let context = context(&connection_id)?;
         context
             .cancel
@@ -542,7 +542,7 @@ pub(crate) async fn external_lww_fence(
         }
         session.fresh_after = Instant::now();
         fenced
-    }.await)
+    }).await)
 }
 /// Asks the repository about a sent segment only when one awaits an answer,
 /// so a binding change away from a repository that cannot be reached goes
@@ -619,7 +619,7 @@ pub(crate) async fn external_lww_prepare_new_device(
     app: AppHandle,
     request: NewDeviceRequest,
 ) -> Result<NewDevicePreparation> {
-    logged("external_lww_prepare_new_device", async move {
+    logged("external_lww_prepare_new_device", Box::pin(async move {
         let context = context(&request.request.connection_id)?;
         let mut session = context.session.lock().await;
         // Acquiring this lock settles every task using the old cancellation token.
@@ -637,7 +637,7 @@ pub(crate) async fn external_lww_prepare_new_device(
                 &session.cancel,
             )
             .await
-    }.await)
+    }).await)
 }
 
 #[cfg(test)]

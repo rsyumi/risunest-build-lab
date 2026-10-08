@@ -87,8 +87,7 @@ async function main() {
     phase !== "sync" &&
     phase !== "sync-restart" &&
     phase !== "sync-publish" &&
-    phase !== "external-storage" &&
-    phase !== "external-storage-restart"
+    !/^(external-storage|external-sync|backup-file)(-restart)?$/.test(phase)
   ) {
     // Product CSS gives the empty app root a full viewport of height.
     // Keep native-contract status/results visible to older WebKit accessibility.
@@ -179,9 +178,9 @@ async function main() {
     await syncContract(phase);
     return;
   }
-  if (phase === "external-storage" || phase === "external-storage-restart") {
+  if (/^(external-storage|external-sync|backup-file)(-restart)?$/.test(phase)) {
     const { externalStorageContract } = await import("./externalStorageContracts");
-    await externalStorageContract(phase);
+    await externalStorageContract(phase as Parameters<typeof externalStorageContract>[0]);
     return;
   }
   installIOSPersistenceLifecycle(async () => {

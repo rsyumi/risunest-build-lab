@@ -1,6 +1,6 @@
 use super::*;
 use crate::native_log::logged;
-use crate::asset_repository::job_pins::{CasReleaseOutcome, DurableCasJob};
+use crate::asset_repository::job_pins::{durable_cas_job_held, CasReleaseOutcome, DurableCasJob};
 use std::io::ErrorKind;
 use tauri::{AppHandle, Manager, State};
 
@@ -12,13 +12,34 @@ fn release_native_restore_pins(
     if !session.includes_library {
         return Ok(());
     }
-    match DurableCasJob::open(root, &session.job_id) {
-        Ok(mut pins) => pins.release(outcome).map_err(|_| {
-            error(
+    // The running restore job keeps its journal through the missing-body transfer
+    // and seals and releases it itself.
+    match durable_cas_job_held(root, &session.job_id) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(_) => {
+            return Err(error(
                 "device-storage-failed",
-                "Native portable recovery could not release durable asset pins",
-            )
-        }),
+                "Native portable recovery could not open durable asset pins",
+            ))
+        }
+    }
+    match DurableCasJob::open(root, &session.job_id) {
+        Ok(mut pins) => {
+            // A job that stopped before its seal registered none of its objects; the
+            // aborted release registers the bodies it had already published.
+            let outcome = if pins.is_sealed() {
+                outcome
+            } else {
+                CasReleaseOutcome::Aborted
+            };
+            pins.release(outcome).map_err(|_| {
+                error(
+                    "device-storage-failed",
+                    "Native portable recovery could not release durable asset pins",
+                )
+            })
+        }
         Err(failure) if failure.kind() == ErrorKind::NotFound => Ok(()),
         Err(_) => Err(error(
             "device-storage-failed",
@@ -68,6 +89,23 @@ pub(super) fn complete_native_recovery_for_test(
     release: impl FnOnce(&Session, &std::path::Path, CasReleaseOutcome) -> Result<()>,
 ) -> Result<()> {
     complete_native_recovery_with(state, session_id, release)
+}
+
+#[cfg(test)]
+pub(crate) fn complete_native_recovery_command_for_test(
+    state: &DeviceBackupState,
+    session_id: &str,
+) -> Result<()> {
+    complete_native_recovery(state, session_id)
+}
+
+#[cfg(test)]
+pub(super) fn release_native_restore_pins_for_test(
+    session: &Session,
+    root: &std::path::Path,
+    outcome: CasReleaseOutcome,
+) -> Result<()> {
+    release_native_restore_pins(session, root, outcome)
 }
 
 #[tauri::command(async)]

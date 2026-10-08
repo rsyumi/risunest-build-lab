@@ -19,7 +19,11 @@ export interface DeviceMaintenanceEntryDependencies {
 function showStartupFailure(retry: () => void): void {
   const host = document.createElement("main");
   host.setAttribute("role", "status");
+  // The body does not scroll and #app fills it, so the panel covers the viewport itself.
   host.style.cssText =
+    "position:fixed;inset:0;z-index:100;overflow:auto;background:var(--risu-theme-bgcolor);color:var(--risu-theme-textcolor)";
+  const panel = document.createElement("section");
+  panel.style.cssText =
     "font:16px system-ui;padding:2rem;max-width:42rem;margin:auto;line-height:1.6";
   const heading = document.createElement("h1");
   heading.textContent = "RisuNest backup maintenance";
@@ -33,7 +37,8 @@ function showStartupFailure(retry: () => void): void {
     action.disabled = true;
     retry();
   };
-  host.append(heading, message, action);
+  panel.append(heading, message, action);
+  host.append(panel);
   document.getElementById("preloading")?.remove();
   document.body.append(host);
 }

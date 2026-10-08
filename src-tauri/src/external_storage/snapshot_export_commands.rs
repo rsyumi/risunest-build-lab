@@ -98,7 +98,7 @@ fn publish_uri_destination(
         .fs()
         .open(selected.clone(), options)
         .map_err(|_| ProviderError::new(ErrorKind::Transient))?;
-    let mut buffer = [0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         cancel.check()?;
         let count = source
@@ -216,7 +216,7 @@ pub(crate) async fn external_storage_export_snapshot(
     request: ExportSnapshotRequest,
     progress: tauri::ipc::Channel<serde_json::Value>,
 ) -> Result<ExportSnapshotResponse> {
-    logged("external_storage_export_snapshot", async move {
+    logged("external_storage_export_snapshot", Box::pin(async move {
         if !valid_id(&request.connection_id) || !valid_id(&request.snapshot_id) {
             return Err(ProviderError::new(ErrorKind::Corrupt));
         }
@@ -320,7 +320,7 @@ pub(crate) async fn external_storage_export_snapshot(
         counters.flush();
         cancel.check()?;
         publish_prepared_snapshot(&app, selected, prepared, &sections, staging.path(), &cancel)
-    }.await)
+    }).await)
 }
 
 #[cfg(test)]

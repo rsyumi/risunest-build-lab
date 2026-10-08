@@ -64,6 +64,8 @@ mod renderer_recovery;
 mod server_sync;
 mod trust_boundary;
 #[cfg(test)]
+mod command_future_size;
+#[cfg(test)]
 mod test_memory;
 #[cfg(windows)]
 mod windows_appearance;
