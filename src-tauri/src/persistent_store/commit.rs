@@ -2378,7 +2378,7 @@ pub(super) fn apply_conversation_mutation(
     }
 }
 
-fn refresh_character_summary(
+pub(super) fn refresh_character_summary(
     transaction: &Transaction<'_>,
     generation: &str,
     character_id: &str,
@@ -2389,6 +2389,42 @@ fn refresh_character_summary(
             WHERE generation = ?1 AND character_id = ?2
          ) WHERE generation = ?1 AND character_id = ?2",
         params![generation, character_id],
+    )?;
+    Ok(())
+}
+
+/// Selects the first conversation when the stored `chatPage` names none of the character's
+/// conversations, as upstream does when it opens such a character.
+pub(super) fn reset_stale_chat_page(
+    transaction: &Transaction<'_>,
+    generation: &str,
+    character_id: &str,
+) -> StoreResult<()> {
+    let row: Option<(String, i64)> = transaction
+        .query_row(
+            "SELECT detail, conversation_count FROM characters
+             WHERE generation = ?1 AND character_id = ?2 AND archived_object IS NULL",
+            params![generation, character_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((detail, conversation_count)) = row else {
+        return Ok(());
+    };
+    let mut detail: Value = serde_json::from_str(&detail)?;
+    let selected = detail.get("chatPage").and_then(Value::as_u64);
+    if conversation_count == 0
+        || selected.is_some_and(|index| index < conversation_count as u64)
+    {
+        return Ok(());
+    }
+    detail
+        .as_object_mut()
+        .ok_or_else(|| validation("Character detail must be an object"))?
+        .insert("chatPage".to_owned(), Value::from(0));
+    transaction.execute(
+        "UPDATE characters SET detail = ?3 WHERE generation = ?1 AND character_id = ?2",
+        params![generation, character_id, serde_json::to_string(&detail)?],
     )?;
     Ok(())
 }

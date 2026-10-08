@@ -1484,7 +1484,7 @@ export const languageGerman = {
         replaceAction: "Ersetzen",
         cancelAction: "Abbrechen",
         clockBlocked: "Die Synchronisierung wurde wegen unterschiedlicher Geräte- und Remotezeiten angehalten. Korrigieren Sie die Zeit und versuchen Sie es erneut.",
-        writerCollision: "Die Synchronisierung wurde wegen einer doppelten Geräteidentität angehalten. Verbinden Sie sich erneut als neues Gerät.",
+        writerCollision: "Die Synchronisierung wurde wegen einer doppelten Geräteidentität angehalten. Registrieren Sie auf dem Server ein neues Gerät, geben Sie den neuen Registrierungscode ein und wählen Sie dann „Als neues Gerät verbinden“.",
         unitTooLarge: "Die Synchronisierung wurde angehalten, weil ein Element auf diesem Gerät zu groß ist, um es an den Server zu senden. Verkleinern Sie das große Element und versuchen Sie es erneut.",
         newDeviceAction: "Als neues Gerät verbinden",
         restoreTitle: "Sicherung wiederherstellen?",
@@ -1498,6 +1498,8 @@ export const languageGerman = {
         downloadFailedNotConnected: "Die Dateien konnten nicht heruntergeladen werden, daher wurde keine Verbindung hergestellt. Versuchen Sie es erneut oder verbinden Sie ohne Herunterladen.",
         previousStorageUnavailable: "Dateien, die nur auf dem zuvor verwendeten Server oder externen Speicher liegen, konnten nicht abgerufen werden, daher wurde die Synchronisierung angehalten. Versuchen Sie es erneut, sobald er erreichbar ist.",
         registrationRevoked: "Die Registrierung dieses Geräts wurde auf dem Server entfernt, daher kann es nicht synchronisieren. Registrieren Sie dieses Gerät erneut auf dem Server und geben Sie dann den neuen Registrierungscode ein.",
+        registrationUsed: "Dieser Registrierungscode wurde bereits verwendet, daher kann sich dieses Gerät damit nicht verbinden. Registrieren Sie auf dem Server ein neues Gerät und geben Sie dann den neuen Registrierungscode ein.",
+        registrationUsedOnboarding: "Dieser Registrierungscode wurde bereits verwendet, daher kann sich dieses Gerät damit nicht verbinden. Registrieren Sie auf dem Server ein neues Gerät und geben Sie dann den neuen Registrierungscode ein.",
         bindingIncomplete: "Die Verbindung wurde nicht abgeschlossen. Drücken Sie Connect and sync, um sie abzuschließen.",
     },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>;

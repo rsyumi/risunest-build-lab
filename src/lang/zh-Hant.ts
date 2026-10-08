@@ -1543,7 +1543,7 @@ export const languageChineseTraditional = {
         replaceAction: "取代",
         cancelAction: "取消",
         clockBlocked: "裝置與遠端時間有差異，同步已停止。請校正時間後重試。",
-        writerCollision: "裝置識別重複，同步已停止。請作為新裝置重新連線。",
+        writerCollision: "裝置識別重複，同步已停止。請在伺服器上註冊新裝置，輸入新的註冊碼後選擇「作為新裝置連線」。",
         unitTooLarge: "此裝置上有項目過大，無法傳送到伺服器，同步已停止。請縮小該項目後重試。",
         newDeviceAction: "作為新裝置連線",
         restoreTitle: "是否還原備份？",
@@ -1557,6 +1557,8 @@ export const languageChineseTraditional = {
         downloadFailedNotConnected: "無法下載檔案，因此未進行連線。請重試，或不下載直接連線。",
         previousStorageUnavailable: "無法取得僅儲存在先前使用的伺服器或外部儲存空間中的檔案，同步已停止。請在可以連線時重試。",
         registrationRevoked: "此裝置在伺服器上的註冊已被移除，無法同步。請在伺服器上重新註冊此裝置，然後輸入新的註冊碼。",
+        registrationUsed: "此註冊碼已被使用，此裝置無法用它連線。請在伺服器上註冊新裝置，然後輸入新的註冊碼。",
+        registrationUsedOnboarding: "此註冊碼已被使用，此裝置無法用它連線。請在伺服器上註冊新裝置，然後輸入新的註冊碼。",
         bindingIncomplete: "連線未完成。請按 Connect and sync 完成連線。",
     },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>

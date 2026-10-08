@@ -1793,6 +1793,10 @@ export const languageKorean = {
             "restoreFailed": '캐릭터를 복원하지 못했습니다.',
             "archiveRefreshFailed": '캐릭터를 보관했지만 목록에 반영하지 못했습니다. 앱을 다시 시작해주세요.',
             "restoreRefreshFailed": '캐릭터를 복원했지만 목록에 반영하지 못했습니다. 앱을 다시 시작해주세요.',
+            "archiveRemoteAssetUnavailable": '서버나 외부 저장소에만 있는 파일을 가져오지 못해 캐릭터를 보관하지 못했습니다. 연결을 확인한 후 다시 시도해주세요.',
+            "archiveAssetMissing": '사라진 파일이 있어 캐릭터를 보관하지 못했습니다. 데이터 점검에서 확인해주세요.',
+            "restoreRemoteAssetUnavailable": '서버나 외부 저장소에만 있는 파일을 가져오지 못해 캐릭터를 복원하지 못했습니다. 연결을 확인한 후 다시 시도해주세요.',
+            "restoreAssetMissing": '사라진 파일이 있어 캐릭터를 복원하지 못했습니다. 데이터 점검에서 확인해주세요.',
         },
         exportExcluded: {
             title: '내보내기 완료',
@@ -2006,7 +2010,6 @@ export const languageKorean = {
             registrationCode: '등록 코드',
             readRegistration: '코드 읽기',
             scanRegistration: 'QR 코드 스캔',
-            cancelScan: '스캔 취소',
             registrationInvalid: '올바른 등록 코드가 아닙니다.',
             cameraDenied:
                 '카메라 권한이 허용되지 않았습니다. 다시 시도하거나 코드를 붙여넣으세요.',
@@ -2022,15 +2025,16 @@ export const languageKorean = {
             residency: {
                 title: '에셋 보관 방식',
                 description:
-                    '에셋 보관 방식은 기기마다 따로 선택할 수 있습니다. 로컬에 보관하면 에셋을 불러오는 게 더 빠르지만 동기화 시간과 차지하는 용량이 늘어납니다. 원격 파일을 사용하는 경우 용량이 절약되지만 에셋을 불러올 때 시간이 더 소요될 수 있습니다.',
+                    '에셋을 이 기기에 모두 보관하면 빠르게 불러올 수 있지만 동기화 시간과 저장 공간 사용량이 늘어납니다. 필요할 때 서버에서 불러오면 저장 공간을 절약할 수 있으며, 휴지통에 없는 캐릭터의 현재 캐릭터 아이콘은 이 기기에 보관합니다.',
                 full: '이 기기에 모두 보관',
                 remote: '필요할 때 서버에서 불러오기',
                 local: '이 기기에 있는 파일',
                 remoteOnly: '서버에만 있는 파일',
                 externalOnly: '외부 저장소에만 있는 파일',
                 unavailable: '찾을 수 없는 파일',
+                checking: '파일 확인 중…',
                 cleanupNote:
-                    '정리하면 서버에 있는 파일 중 이 기기의 사본을 삭제합니다.',
+                    '휴지통에 없는 캐릭터의 현재 캐릭터 아이콘을 제외하고, 서버에 있는 파일의 이 기기 사본을 삭제합니다.',
                 clean: '이 기기의 사본 정리',
                 cancel: '취소',
                 working: '파일 처리 중… 현재 요청이 끝나면 취소됩니다.',
@@ -2086,6 +2090,7 @@ export const languageKorean = {
             progressFiles: '처리한 파일',
             pendingChanges: '올릴 변경',
             elapsed: '경과',
+            remaining: '남은 시간',
             count: '{0}개',
             itemsCount: '{0}개 항목',
             activity: { enumerating: '항목 확인 중', preparing: '이 기기의 변경 내용 준비 중', downloading: '받을 데이터 다운로드 및 확인 중', verifying: '서버에 있는 항목 확인 중', uploading: '업로드 중', confirming: '서버 확인 대기 중', staging: '받은 내용 저장 중' },
@@ -2104,6 +2109,10 @@ export const languageKorean = {
             errorHelp:
                 '동기화를 마치지 못했습니다. 이 기기에서 고친 내용은 그대로 있습니다. 다시 시도하세요.',
             "connectRowHelpScan": '서버에서 만든 등록 코드를 붙여넣거나 QR 코드를 스캔하세요. 기기마다 별도의 등록 코드가 필요합니다.',
+        },
+        qrScan: {
+            instruction: 'QR 코드를 사각형 안에 맞추세요.',
+            instructionOnboarding: 'QR 코드를 사각형 안에 맞춰주세요.',
         },
         menuTitle: 'RisuNest',
         tabList: 'RisuNest 설정 탭',
@@ -2139,6 +2148,9 @@ export const languageKorean = {
         },
         ui: {
             title: 'UI',
+            messageSendKey: '메시지 보내기 키',
+            messageSendKeyHelp: 'Enter를 선택하는 경우 Enter로 메시지를 보내고 Shift+Enter로 줄바꿈합니다. Ctrl/Shift+Enter를 선택하는 경우 Ctrl+Enter나 Shift+Enter로 메시지를 보내고 Enter로 줄바꿈합니다. 전송 버튼을 선택하는 경우 Enter로 줄바꿈하고 메시지는 전송 버튼으로만 보냅니다.',
+            messageSendKeyButton: '전송 버튼',
             chatEditPopup: '채팅 수정 팝업창 사용',
             chatEditPopupHelp: '채팅 수정 버튼을 누르면 팝업창에서 내용을 수정할 수 있도록 합니다.',
         },
@@ -2257,8 +2269,6 @@ export const languageKorean = {
             createSnapshotHelp:
                 '지금 상태를 저장해 두고 나중에 되돌릴 수 있습니다.',
             createSnapshot: '지금 만들기',
-            gcSeparation:
-                '데이터 점검에서 끊어진 연결을 지워도 파일은 삭제되지 않으므로, 필요한 경우 사용하지 않는 파일을 찾아서 삭제해주세요.',
             gcSearching: '사용하지 않는 파일을 찾는 중',
             gcDeleting: '사용하지 않는 파일을 삭제하는 중',
             gcListTitle: '삭제할 파일',
@@ -2275,7 +2285,7 @@ export const languageKorean = {
             gcHeldMigration: '진행 중인 이동에 사용 중',
             gcHeldJob: '실행 중인 작업에서 사용 중',
             gcTitle: '사용하지 않는 파일',
-            gcHelp: '어디에서도 쓰지 않는 파일을 찾아 지웁니다.',
+            gcHelp: '어디에서도 사용하지 않는 파일을 찾아 삭제합니다.',
             gcRun: '찾기',
             gcRunConfirm: '지금 삭제',
             gcResult: '삭제 가능: {0}개 ({1})',
@@ -2570,6 +2580,8 @@ export const languageKorean = {
             "reasonBusy": '다른 작업에서 데이터를 사용하고 있습니다. 작업이 끝난 후 다시 시도해주세요.',
             "reasonPendingOperation": '보류 중인 동기화 작업을 해결한 후 다시 시도해주세요.',
             "reasonServerStatus": '동기화 서버 상태를 확인하지 못했습니다. 연결을 확인한 후 다시 시도해주세요.',
+            "reasonRemoteAssetUnavailable": '서버나 외부 저장소에만 있는 파일을 가져오지 못해 내보내지 못했습니다. 연결을 확인한 후 다시 시도해주세요.',
+            "reasonAssetMissing": '사라진 파일이 있어 내보내지 못했습니다. 데이터 점검에서 확인해주세요.',
             "warningSourceProblems": '일부 원본 데이터를 읽지 못했습니다. 내보낸 복구 파일을 확인해주세요.',
             "warningRepairRequired": '원본은 보존되었으며, 복원하기 전에 복구해야 합니다.',
             "warningCompatibilityLosses": '선택한 백업 형식에서 지원하지 않는 데이터 일부가 제외되거나 변환되었습니다.',
@@ -2699,9 +2711,9 @@ export const languageKorean = {
             },
             hub: {
                 title: '동기화 서버와 연결',
-                lead: '동기화 서버의 기기 관리에서 이 기기용 등록 코드를 만들고 아래에 붙여넣어주세요.',
+                lead: '동기화 서버의 기기 등록에서 이 기기용 등록 코드를 만들고 아래에 붙여넣어주세요.',
                 leadScan:
-                    '동기화 서버의 기기 관리에서 이 기기용 등록 코드를 만들고 QR 코드를 스캔하거나 아래에 붙여넣어주세요.',
+                    '동기화 서버의 기기 등록에서 이 기기용 등록 코드를 만들고 QR 코드를 스캔하거나 아래에 붙여넣어주세요.',
             },
             external: {
                 title: '외부 저장소 연결',
@@ -2772,7 +2784,7 @@ export const languageKorean = {
         replaceAction: "교체",
         cancelAction: "취소",
         clockBlocked: "기기와 원격 간의 시간 차이가 있어 동기화가 중단되었습니다. 시간을 보정한 후 다시 시도해주세요.",
-        writerCollision: "중복된 기기로 인해 동기화가 중단되었습니다. 새 기기로 다시 연결해주세요.",
+        writerCollision: "중복된 기기로 인해 동기화가 중단되었습니다. 동기화 서버의 기기 등록에서 새 등록 코드를 만들어 입력한 뒤 새 기기로 연결을 누르세요.",
         unitTooLarge: "이 기기에 서버로 보내기에 너무 큰 항목이 있어 동기화가 중단되었습니다. 해당 항목의 크기를 줄인 후 다시 시도해주세요.",
         newDeviceAction: "새 기기로 연결",
         restoreTitle: "백업을 복원하시겠습니까?",
@@ -2787,6 +2799,8 @@ export const languageKorean = {
         downloadFailedNotConnected: "파일을 다운로드하지 못해 연결하지 않았습니다. 다시 시도하거나 다운로드하지 않고 연결하세요.",
         previousStorageUnavailable: "이전에 연결한 서버나 외부 저장소에만 있는 파일을 가져오지 못해 동기화하지 못했습니다. 연결할 수 있을 때 다시 시도하세요.",
         registrationRevoked: "서버에서 이 기기의 등록이 해제되어 동기화할 수 없습니다. 서버에서 이 기기를 새로 등록한 뒤 새 등록 코드를 입력하세요.",
+        registrationUsed: "이미 사용한 등록 코드로는 연결할 수 없습니다. 동기화 서버의 기기 등록에서 새 등록 코드를 만들어 입력하세요.",
+        registrationUsedOnboarding: "이미 사용한 등록 코드로는 연결할 수 없습니다. 동기화 서버의 기기 등록에서 새 등록 코드를 만들어 입력해주세요.",
         bindingIncomplete: "연결이 완료되지 않았습니다. 연결하고 동기화를 눌러 연결을 마치세요.",
     },
     navigationBlockedWhileEditingPaused: "편집이 잠시 중단되어 캐릭터를 선택할 수 없습니다.",

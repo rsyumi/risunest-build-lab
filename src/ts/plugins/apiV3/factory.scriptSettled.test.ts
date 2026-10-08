@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SandboxHost } from './factory'
 import { collectPluginReadProvenance, PluginReadBaselines } from '../pluginReadBaselines'
+import type { fetchNative, GlobalFetchArgs } from '../../globalApi.svelte'
 
 /**
  * The guest reports when its top level script has settled. A window the host
@@ -50,6 +51,81 @@ function bridgeStubs(): Record<string, unknown> {
 }
 
 describe('sandbox script completion', () => {
+    it('stays busy after a callback returns until its stream finishes', async () => {
+        let callback!: () => Promise<{content: ReadableStream}>
+        const host = new SandboxHost({ register: (fn: typeof callback) => { callback = fn } })
+        const frame = document.createElement('iframe')
+        document.body.append(frame)
+        host.run(frame, '')
+        const post = vi.spyOn(frame.contentWindow!, 'postMessage')
+        const send = (data: unknown, ports: MessagePort[] = []) => window.dispatchEvent(new MessageEvent('message', {
+            source: frame.contentWindow, data, ports,
+        }))
+        send({type:'CALL_ROOT', method:'register', reqId:'register', args:[{__type:'CALLBACK_REF', id:'stream-callback'}]})
+        send({type:'SCRIPT_SETTLED'})
+        await vi.waitFor(() => expect(host.isIdle()).toBe(true))
+        const result = callback()
+        expect(host.isIdle()).toBe(false)
+        const invocation = post.mock.calls.at(-1)![0]
+        const channel = new MessageChannel()
+        send({type:'CALLBACK_RETURN', reqId:invocation.reqId, result:{content:{__type:'STREAM_PORT', portIndex:0}}}, [channel.port2])
+        const {content} = await result
+        expect(host.isIdle()).toBe(false)
+        const reader = content.getReader()
+        channel.port1.postMessage({done:true})
+        expect(await reader.read()).toEqual({done:true, value:undefined})
+        expect(host.isIdle()).toBe(true)
+        channel.port1.close()
+        host.terminate()
+    })
+
+    it('reports busy until a host call and its delivered stream finish', async () => {
+        let finish!: (stream: ReadableStream) => void
+        const host = new SandboxHost({ ...bridgeStubs(), stream: () => new Promise(resolve => { finish = resolve }) })
+        const changed = vi.fn()
+        host.onActivityChanged(changed)
+        const child = await runGuest(host, `globalThis.result = risuai.stream()`)
+        await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+        expect(host.isIdle()).toBe(false)
+        const cancel = vi.fn()
+        finish(new ReadableStream({ cancel }))
+        await (child as any).result
+        expect(host.isIdle()).toBe(false)
+        await (await (child as any).result).cancel()
+        await vi.waitFor(() => expect(host.isIdle()).toBe(true))
+        expect(cancel).toHaveBeenCalledOnce()
+        expect(changed).toHaveBeenCalled()
+        host.terminate()
+    })
+
+    // Each method reads the signal field of the host function it reaches.
+    it.each([
+        ['nativeFetch', 'signal' satisfies keyof Parameters<typeof fetchNative>[1]],
+        ['risuFetch', 'abortSignal' satisfies keyof GlobalFetchArgs],
+    ] as const)('aborts an admitted %s with and without a caller signal', async (method, field) => {
+        for (const callerSignal of [false, true]) {
+            let signal: AbortSignal | undefined
+            const fetcher = vi.fn((_url, options) => new Promise(resolve => {
+                signal = options[field]
+                signal!.addEventListener('abort', () => resolve(null), { once: true })
+            }))
+            const host = new SandboxHost({ ...bridgeStubs(), [method]: fetcher })
+            const frame = document.createElement('iframe')
+            document.body.append(frame)
+            host.run(frame, '')
+            window.dispatchEvent(new MessageEvent('message', {
+                source: frame.contentWindow,
+                data: {type:'CALL_ROOT', method, reqId:'synthetic-fetch', args:['https://synthetic.invalid', callerSignal
+                    ? {[field]:{__type:'ABORT_SIGNAL_REF', abortId:'caller', aborted:false}} : {}]},
+            }))
+            await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce())
+            expect(signal?.aborted).toBe(false)
+            host.terminate()
+            expect(signal?.aborted).toBe(true)
+            await vi.waitFor(() => expect(host.isIdle()).toBe(true))
+        }
+    })
+
     beforeEach(() => {
         vi.stubGlobal('ImageBitmap', class {})
     })

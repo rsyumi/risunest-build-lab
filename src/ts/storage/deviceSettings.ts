@@ -8,6 +8,8 @@ import {
 } from './startupExclusions'
 import { getDeviceMarkers, type DeviceMarkerStorage } from './deviceMarkers'
 
+export type MessageSendKey = 'enter' | 'ctrl-shift-enter' | 'button'
+
 export interface RisuNestDeviceSettings {
     schema: 'risunest.device-settings/v1'
     performanceProfile: RuntimePerformanceProfile
@@ -15,6 +17,7 @@ export interface RisuNestDeviceSettings {
     nativeFileLogEnabled: boolean
     generationHistoryLimitEnabled: boolean
     generationHistoryLimitMultiplier: number
+    messageSendKey: MessageSendKey
 }
 
 const storageKey = 'risuNestDeviceSettings'
@@ -27,6 +30,7 @@ const defaults: RisuNestDeviceSettings = {
     nativeFileLogEnabled: true,
     generationHistoryLimitEnabled: false,
     generationHistoryLimitMultiplier: 2,
+    messageSendKey: 'enter',
 }
 
 function snapshot(settings: RisuNestDeviceSettings): RisuNestDeviceSettings {
@@ -46,7 +50,7 @@ function isValidSettings(value: unknown): value is RisuNestDeviceSettings {
     if (!value || typeof value !== 'object') return false
     const settings = value as Record<string, unknown>
     return (
-        Object.keys(settings).length === 6 &&
+        Object.keys(settings).length === 7 &&
         settings.schema === defaults.schema &&
         (settings.performanceProfile === 'normal' ||
             settings.performanceProfile === 'low-spec') &&
@@ -55,7 +59,10 @@ function isValidSettings(value: unknown): value is RisuNestDeviceSettings {
         typeof settings.generationHistoryLimitEnabled === 'boolean' &&
         typeof settings.generationHistoryLimitMultiplier === 'number' &&
         Number.isFinite(settings.generationHistoryLimitMultiplier) &&
-        settings.generationHistoryLimitMultiplier >= 1
+        settings.generationHistoryLimitMultiplier >= 1 &&
+        (settings.messageSendKey === 'enter' ||
+            settings.messageSendKey === 'ctrl-shift-enter' ||
+            settings.messageSendKey === 'button')
     )
 }
 

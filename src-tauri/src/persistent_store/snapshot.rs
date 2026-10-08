@@ -21,7 +21,8 @@ use uuid::Uuid;
 
 const MIN_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 const UNSCANNABLE_BLOCKER: &str = "record-unscannable";
-const CAS_PHYSICAL_PREFIX: &[u8] = b"assets/objects/";
+const CAS_PHYSICAL_PREFIX: &str = "assets/objects/";
+const URL_SCHEMES: [&str; 3] = ["risuasset:", "http:", "https:"];
 const COLD_STORAGE_HEADER: &str = "\u{ef01}COLDSTORAGE\u{ef01}";
 
 #[cfg(test)]
@@ -893,14 +894,16 @@ fn collect_character_asset_hashes_inner(
         .optional()?
         .flatten();
     if let Some(manifest_hash) = manifest_hash {
-        if let Some(canonical) = cas.read_object(&manifest_hash)? {
-            if let Ok(entries) =
-                crate::asset_repository::owner_manifest_codec::decode_owner_manifest(&canonical)
-            {
-                for entry in entries {
-                    if let Some(payload) = entry.payload_hash {
-                        hashes.insert(hex::encode(payload));
-                    }
+        // Assets only the manifest lists would be left out, so an absent manifest refuses.
+        let canonical = cas.read_object(&manifest_hash)?.ok_or_else(|| StoreError::Validation {
+            message: super::archive::ARCHIVE_DATA_MISSING_MESSAGE.to_owned(),
+        })?;
+        if let Ok(entries) =
+            crate::asset_repository::owner_manifest_codec::decode_owner_manifest(&canonical)
+        {
+            for entry in entries {
+                if let Some(payload) = entry.payload_hash {
+                    hashes.insert(hex::encode(payload));
                 }
             }
         }
@@ -1192,48 +1195,51 @@ fn observe_text(value: &str, roots: &mut AssetRootSet) {
 fn observe_native_cas_paths(value: &str, roots: &mut AssetRootSet) {
     let bytes = value.as_bytes();
     let physical_len = CAS_PHYSICAL_PREFIX.len() + 65;
-    if bytes.len() >= physical_len {
-        for start in 0..=bytes.len() - physical_len {
-            let candidate = &bytes[start..start + physical_len];
-            if let Some(hash) = cas_hash_from_physical_key(candidate) {
-                if bytes
-                    .get(start + physical_len)
-                    .is_none_or(|next| !next.is_ascii_hexdigit() && *next != b'/')
-                {
-                    roots.object_hashes.insert(hash);
-                }
+    // No occurrence of the prefix can overlap another, so the search finds every start.
+    for (start, _) in value.match_indices(CAS_PHYSICAL_PREFIX) {
+        let Some(candidate) = bytes.get(start..start + physical_len) else {
+            break;
+        };
+        if let Some(hash) = cas_hash_from_physical_key(candidate) {
+            if bytes
+                .get(start + physical_len)
+                .is_none_or(|next| !next.is_ascii_hexdigit() && *next != b'/')
+            {
+                roots.object_hashes.insert(hash);
             }
         }
     }
 
-    for (start, _) in value.char_indices() {
-        let remainder = &value[start..];
-        if !starts_with_url_scheme(remainder) {
-            continue;
-        }
-        let end = remainder.find(is_url_delimiter).unwrap_or(remainder.len());
-        let candidate = &remainder[..end];
-        let native_marker = candidate.to_ascii_lowercase().contains("risuasset");
-        let Some(physical_key) = crate::native_media::decode_physical_key(candidate) else {
-            if native_marker {
-                retain_unknown_native_url(roots);
+    // Each scheme is ASCII and ends in its only colon, so every URL start is found from a colon
+    // and is a character boundary, and no start matches two schemes.
+    for (colon, _) in value.match_indices(':') {
+        for scheme in URL_SCHEMES {
+            let Some(start) = (colon + 1).checked_sub(scheme.len()) else {
+                continue;
+            };
+            if !bytes[start..=colon].eq_ignore_ascii_case(scheme.as_bytes()) {
+                continue;
             }
-            continue;
-        };
-        if let Some(hash) = cas_hash_from_physical_key(physical_key.as_bytes()) {
-            roots.object_hashes.insert(hash);
-        } else {
-            retain_unknown_native_url(roots);
+            observe_native_url(&value[start..], roots);
         }
     }
 }
 
-fn starts_with_url_scheme(value: &str) -> bool {
-    ["risuasset:", "http:", "https:"].iter().any(|prefix| {
-        value
-            .get(..prefix.len())
-            .is_some_and(|value| value.eq_ignore_ascii_case(prefix))
-    })
+fn observe_native_url(remainder: &str, roots: &mut AssetRootSet) {
+    let end = remainder.find(is_url_delimiter).unwrap_or(remainder.len());
+    let candidate = &remainder[..end];
+    let native_marker = candidate.to_ascii_lowercase().contains("risuasset");
+    let Some(physical_key) = crate::native_media::decode_physical_key(candidate) else {
+        if native_marker {
+            retain_unknown_native_url(roots);
+        }
+        return;
+    };
+    if let Some(hash) = cas_hash_from_physical_key(physical_key.as_bytes()) {
+        roots.object_hashes.insert(hash);
+    } else {
+        retain_unknown_native_url(roots);
+    }
 }
 
 fn is_url_delimiter(character: char) -> bool {
@@ -1252,7 +1258,7 @@ fn retain_unknown_native_url(roots: &mut AssetRootSet) {
 }
 
 fn cas_hash_from_physical_key(value: &[u8]) -> Option<String> {
-    if value.len() != CAS_PHYSICAL_PREFIX.len() + 65 || !value.starts_with(CAS_PHYSICAL_PREFIX) {
+    if value.len() != CAS_PHYSICAL_PREFIX.len() + 65 || !value.starts_with(CAS_PHYSICAL_PREFIX.as_bytes()) {
         return None;
     }
     let suffix = &value[CAS_PHYSICAL_PREFIX.len()..];
@@ -1551,5 +1557,73 @@ impl super::PersistentStore {
         let parsed=Uuid::parse_str(id).map_err(|_|validation("invalid snapshot stage identity"))?;
         if parsed.to_string()!=id {return Err(validation("invalid snapshot stage identity"));}
         Ok(self.snapshots_dir.join(format!("restore-source-{stage_id}.sqlite")))
+    }
+}
+
+#[cfg(test)]
+mod native_path_scan_tests {
+    use super::*;
+
+    /// The scan that tried every byte and character position, kept to check the searched one.
+    fn observe_every_position(value: &str, roots: &mut AssetRootSet) {
+        let bytes = value.as_bytes();
+        let physical_len = CAS_PHYSICAL_PREFIX.len() + 65;
+        if bytes.len() >= physical_len {
+            for start in 0..=bytes.len() - physical_len {
+                if let Some(hash) = cas_hash_from_physical_key(&bytes[start..start + physical_len]) {
+                    if bytes.get(start + physical_len).is_none_or(|next| !next.is_ascii_hexdigit() && *next != b'/') {
+                        roots.object_hashes.insert(hash);
+                    }
+                }
+            }
+        }
+        for (start, _) in value.char_indices() {
+            let remainder = &value[start..];
+            let scheme = ["risuasset:", "http:", "https:"].iter()
+                .any(|prefix| remainder.get(..prefix.len()).is_some_and(|value| value.eq_ignore_ascii_case(prefix)));
+            if scheme {
+                observe_native_url(remainder, roots);
+            }
+        }
+    }
+
+    #[test]
+    fn the_searched_scan_finds_what_trying_every_position_finds() {
+        let keys = ["0f".repeat(32), "a1".repeat(32)].map(|hash| format!("assets/objects/{}/{}", &hash[..2], &hash[2..]));
+        let urls = keys.iter().flat_map(|key| {
+            let encoded = hex::encode(key);
+            [format!("http://risuasset.localhost/{encoded}"), format!("risuasset://localhost/{encoded}"),
+                format!("HTTPS://RISUASSET.LOCALHOST/{encoded}?size=1"), format!("risuasset://localhost/{}", &encoded[2..])]
+        }).collect::<Vec<_>>();
+        let mut fragments = vec![
+            "assets/objects/", "assets/objects/assets/objects/", "assets/objects/0f/", "http:", "HTTP:", "https:", "HtTpS:",
+            "risuasset:", "RISUASSET:", "risuasset", "risuasset://localhost/zz", "http://example.invalid/x", ":", "::", "/", "//",
+            "a", "0", "f", "h", "ttp:", "s:", " ", "\"", "<", ")", "\u{d55c}", "\u{e9}", "\u{1f600}", "\u{ef01}",
+        ];
+        fragments.extend(keys.iter().map(String::as_str));
+        let suffixed = keys.iter().flat_map(|key| [format!("{key}/"), format!("{key}a"), format!("{key}G"), format!("x{key}")]).collect::<Vec<_>>();
+        fragments.extend(suffixed.iter().map(String::as_str));
+        fragments.extend(urls.iter().map(String::as_str));
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut found = (0, 0);
+        for _ in 0..20_000 {
+            let mut value = String::new();
+            for _ in 0..next() % 9 {
+                value.push_str(fragments[(next() % fragments.len() as u64) as usize]);
+            }
+            let (mut searched, mut every) = (AssetRootSet::default(), AssetRootSet::default());
+            observe_native_cas_paths(&value, &mut searched);
+            observe_every_position(&value, &mut every);
+            assert_eq!(searched, every, "{value:?}");
+            found.0 += usize::from(!every.object_hashes.is_empty());
+            found.1 += usize::from(every.retain_all_objects);
+        }
+        assert!(found.0 > 1_000 && found.1 > 1_000, "the inputs must reach both outcomes: {found:?}");
     }
 }

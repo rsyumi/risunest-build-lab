@@ -898,44 +898,79 @@ pub(crate) fn pds_archive_preview(
     }))
 }
 
+/// Archiving and restoring may fetch a body another storage holds, through clients that block
+/// and so cannot run on the async runtime.
+async fn archive_operation<R: tauri::Runtime, T: Send + 'static>(
+    app: AppHandle<R>,
+    command: &'static str,
+    operation: impl FnOnce(&PersistentStoreState) -> StoreResult<T> + Send + 'static,
+) -> Result<T, StoreError> {
+    let joined = tauri::async_runtime::spawn_blocking(move || operation(&app.state::<PersistentStoreState>())).await;
+    logged(command, joined.unwrap_or_else(|error| Err(StoreError::Store {
+        message: format!("character archive worker stopped: {error}"),
+    })))
+}
+
 #[tauri::command(async)]
-pub(crate) fn pds_archive_character(
-    state: State<'_, PersistentStoreState>,
+pub(crate) async fn pds_archive_character(
+    app: AppHandle,
     character_id: String,
     expected_revision: i64,
     operation_id: String,
 ) -> Result<RevisionResult, StoreError> {
-    logged("pds_archive_character", (|| {
+    archive_character(app, character_id, expected_revision, operation_id).await
+}
+
+async fn archive_character<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    character_id: String,
+    expected_revision: i64,
+    operation_id: String,
+) -> Result<RevisionResult, StoreError> {
+    archive_operation(app, "pds_archive_character", move |state| {
         let now_ms = current_time_ms()?;
         let operation = state.begin_archive_operation(operation_id)?;
-        with_store_mutex_mut(&state, |store| {
+        with_store_mutex_mut(state, |store| {
             store.archive_character_with_cancellation(
                 &character_id,
                 expected_revision,
                 now_ms,
                 &|| operation.is_cancelled(),
+                Some(operation.cancelled.clone()),
             )
         })
-    })())
+    })
+    .await
 }
 
 #[tauri::command(async)]
-pub(crate) fn pds_restore_character(
-    state: State<'_, PersistentStoreState>,
+pub(crate) async fn pds_restore_character(
+    app: AppHandle,
     character_id: String,
     expected_revision: i64,
     operation_id: String,
 ) -> Result<RevisionResult, StoreError> {
-    logged("pds_restore_character", (|| {
+    restore_character(app, character_id, expected_revision, operation_id).await
+}
+
+pub(super) async fn restore_character<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    character_id: String,
+    expected_revision: i64,
+    operation_id: String,
+) -> Result<RevisionResult, StoreError> {
+    archive_operation(app, "pds_restore_character", move |state| {
         let operation = state.begin_archive_operation(operation_id)?;
-        with_store_mutex_mut(&state, |store| {
+        with_store_mutex_mut(state, |store| {
             store.restore_character_with_cancellation(
                 &character_id,
                 expected_revision,
                 &|| operation.is_cancelled(),
+                Some(operation.cancelled.clone()),
             )
         })
-    })())
+    })
+    .await
 }
 
 #[tauri::command(async)]
@@ -2744,7 +2779,7 @@ mod tests {
             .unwrap();
         app.manage(PersistentStoreState::default());
         assert!(pds_read_root(app.state(), None).is_err());
-        assert!(pds_archive_character(app.state(), "synthetic".into(), 0, String::new()).is_err());
+        assert!(tauri::async_runtime::block_on(archive_character(app.handle().clone(), "synthetic".into(), 0, String::new())).is_err());
         assert!(data_health::pds_data_health_repair_plan(app.state()).is_err());
         assert!(hypa::pds_hypa_embedding_usage(app.state()).is_err());
         assert!(super::super::sync_selection::pds_lww_binding_content(app.state()).is_err());

@@ -248,6 +248,17 @@ impl RemoteBodies {
         }
         Ok(found)
     }
+    /// Every hash with a source registered through `connection_id`, in any
+    /// library or root.
+    pub(crate) fn connection_hashes(&mut self,connection_id:&str)->Result<BTreeSet<String>> {
+        let mut found=BTreeSet::new();
+        let Some(db)=self.db()? else {return Ok(found)};
+        let mut statement=db.prepare("SELECT hash FROM sources WHERE json_extract(source,'$.connectionId')=?1
+            UNION SELECT hash FROM packed_sources WHERE json_extract(source,'$.connectionId')=?1").map_err(local)?;
+        let mut rows=statement.query([connection_id]).map_err(local)?;
+        while let Some(row)=rows.next().map_err(local)? {found.insert(row.get(0).map_err(local)?);}
+        Ok(found)
+    }
     /// The hashes in `hashes` that have any registered source.
     fn present(&mut self,hashes:&[&str])->Result<BTreeSet<String>> {
         let mut found=BTreeSet::new();

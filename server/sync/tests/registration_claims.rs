@@ -8,7 +8,9 @@ use risunest_sync_server::{
 };
 use risunest_sync_wire::{
     canonical,
-    lww::{CancelOperationRequest, NewDeviceClaimReceipt, NewDeviceClaimRequest},
+    lww::{
+        CancelOperationRequest, NewDeviceClaimReceipt, NewDeviceClaimRequest, NewDeviceClaimState,
+    },
 };
 use std::{sync::Arc, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -40,20 +42,31 @@ fn claim_lookup_is_registration_scoped_and_rechecks_revocation_after_reopen() {
     let candidate = store.add_device().unwrap();
     let unrelated = store.add_device().unwrap();
     let new = actor(&store, &candidate);
-    assert_eq!(store.new_device_writer_claim(&new).unwrap(), None);
+    assert_eq!(
+        store.new_device_writer_claim(&new).unwrap(),
+        NewDeviceClaimState {
+            claim: None,
+            used: false
+        }
+    );
     let request = claim(Some(&former.token));
     let receipt = store.claim_new_device_writer(&new, &request).unwrap();
     assert_eq!(
         store
             .new_device_writer_claim(&actor(&store, &unrelated))
             .unwrap(),
-        None
+        NewDeviceClaimState {
+            claim: None,
+            used: false
+        }
     );
     drop(store);
 
     let store = Store::open(root.path()).unwrap();
     let new = actor(&store, &candidate);
-    let saved = store.new_device_writer_claim(&new).unwrap().unwrap();
+    let state = store.new_device_writer_claim(&new).unwrap();
+    assert!(state.used);
+    let saved = state.claim.unwrap();
     assert_eq!(saved.request_digest, request.digest().unwrap());
     assert_eq!(saved.receipt, receipt);
     let serialized = serde_json::to_string(&saved).unwrap();
@@ -63,7 +76,10 @@ fn claim_lookup_is_registration_scoped_and_rechecks_revocation_after_reopen() {
         store
             .new_device_writer_claim(&actor(&store, &unrelated))
             .unwrap(),
-        None
+        NewDeviceClaimState {
+            claim: None,
+            used: false
+        }
     );
     metadata(&root)
         .execute("UPDATE devices SET revoked=1 WHERE id=?1", [&new.id])
@@ -185,6 +201,14 @@ fn published_rejected_and_cancelled_credentials_are_not_fresh() {
             }
             _ => unreachable!(),
         }
+        assert_eq!(
+            store.new_device_writer_claim(&new).unwrap(),
+            NewDeviceClaimState {
+                claim: None,
+                used: true
+            },
+            "{kind}"
+        );
         assert_eq!(
             store
                 .claim_new_device_writer(&new, &claim(Some(&former.token)))
@@ -505,6 +529,78 @@ async fn claim_revokes_a_request_already_authenticated_before_its_body_arrives()
                 .get::<_, i64>(0))
             .unwrap(),
         0
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn the_claim_route_reports_each_registration_claim_and_use_without_changing_them() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::init(root.path()).unwrap());
+    let unused = store.add_device().unwrap();
+    let published = store.add_device().unwrap();
+    let claimed = store.add_device().unwrap();
+    store
+        .push(
+            &actor(&store, &published),
+            &request(&store, WRITER_A, "published", vec![inline("a", WRITER_A, 1, "a")]),
+        )
+        .unwrap();
+    let receipt = store
+        .claim_new_device_writer(&actor(&store, &claimed), &claim(None))
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = http::router(store.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let read = |credential: &DeviceCredential| {
+        client
+            .get(format!("http://{address}/session/claim-writer"))
+            .bearer_auth(&credential.token)
+            .header("x-risu-library", &credential.library_id)
+            .send()
+    };
+    let response = read(&unused).await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response.bytes().await.unwrap().as_ref(),
+        br#"{"claim":null,"used":false}"#
+    );
+    let response = read(&published).await.unwrap();
+    assert_eq!(
+        canonical::decode::<NewDeviceClaimState>(&response.bytes().await.unwrap(), 4096).unwrap(),
+        NewDeviceClaimState {
+            claim: None,
+            used: true
+        }
+    );
+    let response = read(&claimed).await.unwrap();
+    let state =
+        canonical::decode::<NewDeviceClaimState>(&response.bytes().await.unwrap(), 4096).unwrap();
+    assert!(state.used);
+    let saved = state.claim.unwrap();
+    assert_eq!(saved.request_digest, claim(None).digest().unwrap());
+    assert_eq!(saved.receipt, receipt);
+    // Reading the state claims nothing: the unused registration still claims a writer, and the
+    // claimed one still refuses any other publisher.
+    let other = NewDeviceClaimRequest {
+        writer_id: "00000000-0000-4000-8000-000000000005".into(),
+        authorization_id: "00000000-0000-4000-8000-000000000006".into(),
+        former_token: None,
+    };
+    store
+        .claim_new_device_writer(&actor(&store, &unused), &other)
+        .unwrap();
+    assert_eq!(
+        store
+            .push(
+                &actor(&store, &claimed),
+                &request(&store, WRITER_B, "other-writer", vec![inline("b", WRITER_B, 2, "b")]),
+            )
+            .unwrap_err()
+            .code,
+        "writer-collision"
     );
     server.abort();
 }

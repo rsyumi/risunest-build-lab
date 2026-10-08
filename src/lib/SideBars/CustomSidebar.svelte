@@ -30,9 +30,10 @@
         {:else if item.type === 'persona'}
             <PersonaBind />
         {:else if item.type === 'setting'}
-            <SettingRenderer items={
-                [getFullSettingsData().find(s => s.id === item.subType)]
-            } />
+            {@const setting = getFullSettingsData().find(s => s.id === item.subType)}
+            {#if setting}
+                <SettingRenderer items={[setting]} />
+            {/if}
         {/if}
     {/each}
 </div>

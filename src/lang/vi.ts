@@ -1484,7 +1484,7 @@ export const languageVietnamese = {
         replaceAction: "Thay thế",
         cancelAction: "Hủy",
         clockBlocked: "Đồng bộ đã dừng do thời gian thiết bị và từ xa khác nhau. Hãy chỉnh lại thời gian và thử lại.",
-        writerCollision: "Đồng bộ đã dừng do trùng danh tính thiết bị. Hãy kết nối lại dưới dạng thiết bị mới.",
+        writerCollision: "Đồng bộ đã dừng do trùng danh tính thiết bị. Hãy đăng ký thiết bị mới trên máy chủ, nhập mã đăng ký mới rồi chọn “Kết nối dưới dạng thiết bị mới”.",
         unitTooLarge: "Đồng bộ đã dừng do một mục trên thiết bị này quá lớn để gửi lên máy chủ. Hãy giảm kích thước mục lớn đó và thử lại.",
         newDeviceAction: "Kết nối dưới dạng thiết bị mới",
         restoreTitle: "Khôi phục bản sao lưu?",
@@ -1498,6 +1498,8 @@ export const languageVietnamese = {
         downloadFailedNotConnected: "Không thể tải xuống các tệp nên chưa kết nối. Hãy thử lại hoặc kết nối mà không tải xuống.",
         previousStorageUnavailable: "Không thể lấy các tệp chỉ được lưu trên máy chủ hoặc bộ nhớ ngoài đã dùng trước đó nên đồng bộ đã dừng. Hãy thử lại khi có thể truy cập.",
         registrationRevoked: "Đăng ký của thiết bị này đã bị xóa trên máy chủ nên không thể đồng bộ. Hãy đăng ký lại thiết bị này trên máy chủ, sau đó nhập mã đăng ký mới.",
+        registrationUsed: "Mã đăng ký này đã được sử dụng nên thiết bị này không thể kết nối bằng mã đó. Hãy đăng ký thiết bị mới trên máy chủ, sau đó nhập mã đăng ký mới.",
+        registrationUsedOnboarding: "Mã đăng ký này đã được sử dụng nên thiết bị này không thể kết nối bằng mã đó. Hãy đăng ký thiết bị mới trên máy chủ, sau đó nhập mã đăng ký mới.",
         bindingIncomplete: "Kết nối chưa hoàn tất. Hãy nhấn Connect and sync để hoàn tất kết nối.",
     },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>;

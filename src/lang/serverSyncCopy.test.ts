@@ -40,4 +40,14 @@ describe('sync recovery copy', () => {
         })
         for (const text of [languageEnglish.risuNest.serverSync, languageKorean.risuNest.serverSync]) expect(text).not.toHaveProperty('downloadBeforeDisconnect')
     })
+    it('names the device registration of the sync server where onboarding asks for a code', () => {
+        expect(languageKorean.risuNest.onboarding.hub).toMatchObject({
+            lead: '동기화 서버의 기기 등록에서 이 기기용 등록 코드를 만들고 아래에 붙여넣어주세요.',
+            leadScan: '동기화 서버의 기기 등록에서 이 기기용 등록 코드를 만들고 QR 코드를 스캔하거나 아래에 붙여넣어주세요.',
+        })
+        expect(languageEnglish.risuNest.onboarding.hub).toMatchObject({
+            lead: 'Register this device on the sync server, then paste its registration code below.',
+            leadScan: 'Register this device on the sync server, then scan its QR code or paste its registration code below.',
+        })
+    })
 })

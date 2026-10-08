@@ -15,6 +15,7 @@ import { createMetadataOnlySelectedConversation, isMetadataOnlySelectedConversat
 import type { Database, character } from './database.svelte'
 import type { LwwStageReceive, PersistentDataStore, WorkingSetCommit } from './persistentDataStore'
 import { planConversationInsertPages } from './conversationInsertPages'
+import { PluginDeviceKeyspace } from '../plugins/pluginDeviceKeyspace'
 
 async function harness() {
     const database = structuredClone(fixtureDatabase)
@@ -35,12 +36,12 @@ async function harness() {
     return { database, store, commit, coordinator }
 }
 
-async function runtimeHarness(registry?: ReturnType<typeof createGeneratingConversationRegistry>, extraState?: Partial<PersistentDataRuntimeStateAdapter>) {
+async function runtimeHarness(registry?: ReturnType<typeof createGeneratingConversationRegistry>, extraState?: Partial<PersistentDataRuntimeStateAdapter>, onLocalRevision?: (revision: number) => void) {
     const values = await harness()
-    return initializeRuntimeHarness(values, registry, extraState)
+    return initializeRuntimeHarness(values, registry, extraState, onLocalRevision)
 }
 
-async function initializeRuntimeHarness(values: Omit<Awaited<ReturnType<typeof harness>>, 'store'> & {store: PersistentDataStore}, registry?: ReturnType<typeof createGeneratingConversationRegistry>, extraState?: Partial<PersistentDataRuntimeStateAdapter>) {
+async function initializeRuntimeHarness(values: Omit<Awaited<ReturnType<typeof harness>>, 'store'> & {store: PersistentDataStore}, registry?: ReturnType<typeof createGeneratingConversationRegistry>, extraState?: Partial<PersistentDataRuntimeStateAdapter>, onLocalRevision?: (revision: number) => void) {
     const {database,store} = values
     const runtime = createPersistentDataRuntime({store,state:{
         captureRoot:()=>capturePersistentRoot(database), capturePresets:()=>database.botPresets,
@@ -49,7 +50,7 @@ async function initializeRuntimeHarness(values: Omit<Awaited<ReturnType<typeof h
         getGeneratingConversations:()=>registry?.snapshot() ?? [],
         getSelectedCharacterId:()=>database.characters[0]?.chaId,replaceDatabase:()=>undefined,publishCharacter:()=>undefined,publishConversation:()=>undefined,
         ...extraState,
-    },prepareDatabase:async(value)=>value})
+    },prepareDatabase:async(value)=>value,onLocalRevision})
     await runtime.initializeActiveWorkingSet(database)
     return {...values,store:store as PersistentDataStore,runtime}
 }
@@ -98,6 +99,28 @@ async function identityRuntimeHarness() {
 }
 
 describe('LWW renderer save path', () => {
+    it('invalidates a held device plugin cache after receiving plugin-local units without a plugin restart', async () => {
+        let value = 'before'
+        const keyspace = new PluginDeviceKeyspace('synthetic', {
+            hydrate: async () => ({ complete: true, byteSize: value.length, entries: [{space:'string', key:'key', value}] }),
+            read: async () => value, keys: async () => ['key'], write: async () => {},
+        })
+        expect(await keyspace.getItem('string', 'key')).toBe('before')
+        const reload = vi.fn()
+        const invalidated = vi.fn(() => keyspace.invalidate())
+        const { runtime, store } = await runtimeHarness(undefined, { onPluginDeviceStorageChanged: invalidated, afterRemotePluginChange: reload })
+        store.lwwStageReceive = async () => {}
+        store.lwwApplyReceive = async () => {
+            value = 'received'
+            return { revision: runtime.revision, affectedKeys: ['["plugin-local","synthetic","string","key"]'], heldKeys: [], deferredKeys: [] }
+        }
+        store.lwwFinishReceive = async () => {}
+        await runtime.applyLwwReceive({ bindingAuthority:'synthetic', requestId:'receive-local-plugin', changes:[], progress:{kind:'server',cursor:'1'}, admittedTimeUpperMs:'100' })
+        expect(invalidated).toHaveBeenCalledWith('synthetic')
+        expect(await keyspace.getItem('string', 'key')).toBe('received')
+        expect(reload).not.toHaveBeenCalled()
+    })
+
     it('stores every page of a newly added character with its final conversation order', async () => {
         const { store, coordinator } = await harness()
         const added = { type: 'character', chaId: 'paged-addition', name: 'Paged addition', chatPage: 1,
@@ -220,6 +243,26 @@ describe('LWW renderer save path', () => {
         commit.mockClear()
         await runtime.flushPendingDataLocally('after-remote-selected-deletion')
         expect(commit).not.toHaveBeenCalled()
+    })
+
+    it('does not report a received change as a local revision', async () => {
+        const onLocalRevision = vi.fn()
+        const {database,store,runtime} = await runtimeHarness(undefined, undefined, onLocalRevision)
+        const before = runtime.revision
+        const key = '["character","char-a","notes"]'
+        store.lwwStageReceive = async()=>undefined
+        store.lwwApplyReceive = async()=>{
+            const result = await store.commit({expectedRevision:runtime.revision,unitMutations:[{type:'set',key,value:'remote'}]})
+            return {...result,affectedKeys:[key],heldKeys:[],deferredKeys:[]}
+        }
+        store.lwwFinishReceive = async()=>undefined
+        await runtime.applyLwwReceive({bindingAuthority:'a',requestId:'received-notes',changes:[{key,stamp:{physicalMs:'1',logical:'0',writerId:'remote'},value:{kind:'inline',bytes:'InJlbW90ZSI='}}],progress:{kind:'server',cursor:'1'},admittedTimeUpperMs:'100'})
+        expect(runtime.revision).toBe(before + 1)
+        expect(onLocalRevision).not.toHaveBeenCalled()
+        database.username = 'Local edit after a receive'
+        runtime.markPersistentDataDirty(1)
+        await runtime.flushPendingDataLocally('local-edit-after-receive')
+        expect(onLocalRevision).toHaveBeenCalledExactlyOnceWith(before + 2)
     })
 
     it('captures receive baselines only for a pull that carries changes', async () => {

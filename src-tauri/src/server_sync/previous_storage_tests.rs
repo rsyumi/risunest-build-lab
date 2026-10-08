@@ -38,7 +38,7 @@ pub(crate) fn bind_server(store: &mut PersistentStore, server: &LocalServerFixtu
     use crate::persistent_store::sync_selection::{SwitchBindingRequest, SyncTarget};
     let client = server.client(store);
     let original = store.lww_binding_state().unwrap();
-    let inspected = super::binding::inspect(store, &header(store)).unwrap();
+    let inspected = super::binding::inspect(store, &header(store), false).unwrap();
     store.switch_lww_binding(&SwitchBindingRequest {
         header: header(store),
         expected_selection_epoch: original.selection_epoch,
@@ -84,7 +84,7 @@ fn archive_push_under_remote_policy_uploads_nothing_the_server_already_holds() {
     let hash = alias.object_hash.clone().unwrap();
     store.commit(&WorkingSetCommit {
         expected_revision: store.revision().unwrap(),
-        add_character: Some(serde_json::json!({"chaId":"archive-remote","type":"character","name":"Synthetic","image":alias.key,"chats":[]})),
+        add_character: Some(serde_json::json!({"chaId":"archive-remote","type":"character","name":"Synthetic","emotionImages":[["neutral",alias.key]],"chats":[]})),
         ..Default::default()
     }).unwrap();
     drain_publications(&core, &mut store, &[]).unwrap();

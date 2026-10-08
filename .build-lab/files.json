@@ -1593,8 +1593,8 @@
     {
       "path": "crates/sync-wire/src/lww.rs",
       "mode": "100644",
-      "bytes": 6179,
-      "sha256": "75970d64def2ca8bcb9fcf3318e0b40a99230fca050a2c3c625ba58eacd09495"
+      "bytes": 6692,
+      "sha256": "3d9f83d1868d08a6c61d1f25c2c9d3ff26cd12fe7e5b9865f3b71cc85a813b2b"
     },
     {
       "path": "crates/sync-wire/src/order.rs",
@@ -1677,8 +1677,8 @@
     {
       "path": "crates/sync-wire/tests/lww_protocol.rs",
       "mode": "100644",
-      "bytes": 7344,
-      "sha256": "2741a498bd138e5433723c29a69f5bb93aae294d4886c96e73492d16cf06cdf3"
+      "bytes": 8791,
+      "sha256": "79adc9e2383301b373fe756e912a47e396c85cdfff1771e292e8999c468d7191"
     },
     {
       "path": "crates/sync-wire/tests/payload.rs",
@@ -4245,8 +4245,8 @@
     {
       "path": "server/sync/src/store/lww.rs",
       "mode": "100644",
-      "bytes": 23531,
-      "sha256": "cd8e8f50a8e041d0f18fc4816cc09873b3a16e1259898a1da8c84e7a89347e99"
+      "bytes": 23590,
+      "sha256": "c6c643539beb9983c5cad50961fe033dce5258def0171247a0ed6c61df8527b2"
     },
     {
       "path": "server/sync/src/store/lww_tests.rs",
@@ -4293,8 +4293,8 @@
     {
       "path": "server/sync/src/store/registration_claims.rs",
       "mode": "100644",
-      "bytes": 4328,
-      "sha256": "66c4b255dafbcbbb9c7d7ea3c47d35ec0a56310e772988f9cfa4cef38ccdf7b8"
+      "bytes": 4667,
+      "sha256": "7db87c9d6b45ce588f1523d88d36b9c643cccf85f6c7b4ce0cc3c332faba1a8e"
     },
     {
       "path": "server/sync/src/store/retention.rs",
@@ -4425,8 +4425,8 @@
     {
       "path": "server/sync/tests/lww.rs",
       "mode": "100644",
-      "bytes": 31371,
-      "sha256": "ea8428549cf1d663f07fcf12608b107b45d3123be46a1a62556cd3f824b5e3b0"
+      "bytes": 31396,
+      "sha256": "ff5e42d27e9442904043e398c1bceb11c2ffe409789f2996bd8b41fb2cc7dc7f"
     },
     {
       "path": "server/sync/tests/maintenance.rs",
@@ -4443,8 +4443,8 @@
     {
       "path": "server/sync/tests/registration_claims.rs",
       "mode": "100644",
-      "bytes": 23184,
-      "sha256": "6661a0ccccf82e5ec3c93064f4af5767378a87ccd0d041c0e89e833da42e5096"
+      "bytes": 26578,
+      "sha256": "2b180a01eaf5123437ade6be4ef16336f4d3ae4744c0c5e431103dc8d8d37a51"
     },
     {
       "path": "server/sync/tests/review_recovery.rs",
@@ -5661,8 +5661,8 @@
     {
       "path": "src-tauri/src/asset_repository/payload_cas.rs",
       "mode": "100644",
-      "bytes": 102132,
-      "sha256": "63bbc82a043254b14b7cc42f96b3d8be1337943d2883be4509d20baae183a9f5"
+      "bytes": 116221,
+      "sha256": "cbe4878b002303570732119e9a01bb707bd23773c5688cac5d897f249e793ebc"
     },
     {
       "path": "src-tauri/src/boot_marker.rs",
@@ -5697,8 +5697,8 @@
     {
       "path": "src-tauri/src/command_future_size.rs",
       "mode": "100644",
-      "bytes": 11742,
-      "sha256": "b7311cc9ee3d9301177040695e540486a69d8cf73a861445ec574cbbd893597f"
+      "bytes": 11915,
+      "sha256": "72b49779bb41d761b996ade1320d625904d7656197ea70ed1c614b4baf50b1df"
     },
     {
       "path": "src-tauri/src/data_health/journal.rs",
@@ -5817,8 +5817,8 @@
     {
       "path": "src-tauri/src/external_storage/capture.rs",
       "mode": "100644",
-      "bytes": 49987,
-      "sha256": "074846a7cee7e5990cccd8f7fc3ffa3aa3c66a37d5cd05d2f6b89e18323ea58e"
+      "bytes": 54628,
+      "sha256": "fb8bbe5c7a0cc3c1f116ae569e88010ad401a1ebf8f49e5e15239d7145b60249"
     },
     {
       "path": "src-tauri/src/external_storage/cleanup.rs",
@@ -5847,8 +5847,8 @@
     {
       "path": "src-tauri/src/external_storage/content_store.rs",
       "mode": "100644",
-      "bytes": 27517,
-      "sha256": "77fa5fe798def5cc250851202b2b88e5932ee2ca4c95d290849b72c74d78fa16"
+      "bytes": 27883,
+      "sha256": "e35edd5b8f31331506ed25f23093fd6ef7e3660910c6f68d7c2c8fec3b5ae2ff"
     },
     {
       "path": "src-tauri/src/external_storage/contract.rs",
@@ -5883,8 +5883,8 @@
     {
       "path": "src-tauri/src/external_storage/fake.rs",
       "mode": "100644",
-      "bytes": 43857,
-      "sha256": "e215f86218d4ee2ab280fa5e32d36c4ca082e48be64738f87feabcbe91d5f699"
+      "bytes": 44457,
+      "sha256": "1ab3c61ff20b1ff7a9dfddeb712851a7d59c9c2dceb58894637624151c5f4be1"
     },
     {
       "path": "src-tauri/src/external_storage/gc_store.rs",
@@ -5961,8 +5961,8 @@
     {
       "path": "src-tauri/src/external_storage/lww_commands.rs",
       "mode": "100644",
-      "bytes": 48018,
-      "sha256": "ed934e69b895d1d6249ad04c2659fe089654f4592fabd5897b5b9305b382df7b"
+      "bytes": 48135,
+      "sha256": "9b36e8b05442c9f2e9585f1a00e93cc12e866ea49c4b25c48eaccd78f9e0b801"
     },
     {
       "path": "src-tauri/src/external_storage/lww_compaction.rs",
@@ -5973,8 +5973,8 @@
     {
       "path": "src-tauri/src/external_storage/lww_engine.rs",
       "mode": "100644",
-      "bytes": 101644,
-      "sha256": "22c07b690aa93c18eff6cedc6e2971c96e366b77fbb46b497bdf0f9ee6e41dff"
+      "bytes": 103677,
+      "sha256": "2857544f457f13ff16717433bfdd7675f699451370b32aa3e3f1567b8ed5cae9"
     },
     {
       "path": "src-tauri/src/external_storage/lww_large_unit_tests.rs",
@@ -5985,8 +5985,8 @@
     {
       "path": "src-tauri/src/external_storage/lww_residency.rs",
       "mode": "100644",
-      "bytes": 56534,
-      "sha256": "4ed6bffc7529261b0a3db59532686f59599af339b9969da259cb0cca396b5365"
+      "bytes": 57246,
+      "sha256": "c6ca1ae056749e31772385e0863ddc6e1f40fee66d8472841f7ca316d1dd4b7a"
     },
     {
       "path": "src-tauri/src/external_storage/lww_residency_hydration_tests.rs",
@@ -6009,8 +6009,8 @@
     {
       "path": "src-tauri/src/external_storage/mod.rs",
       "mode": "100644",
-      "bytes": 2028,
-      "sha256": "b62ab8b4d78f0e413d9ed5f66d784df8fc3b3e234ae2e4f2fa3023ef1475d721"
+      "bytes": 2039,
+      "sha256": "a882d6cb57d685131a29a4aa38ade9d1d88a1eaaf6b8d9e62b1d9c2fe68916db"
     },
     {
       "path": "src-tauri/src/external_storage/oauth.rs",
@@ -6027,20 +6027,20 @@
     {
       "path": "src-tauri/src/external_storage/packaging.rs",
       "mode": "100644",
-      "bytes": 482635,
-      "sha256": "4a498a99080f128b50dadf938ce9486f2a0cb3af4b14651a8eee1af0fbcbe22a"
+      "bytes": 491702,
+      "sha256": "12998e9e338efe5d79447f00424d7953545973f2ac09af737c801ffb916cfdeb"
     },
     {
       "path": "src-tauri/src/external_storage/phase_progress.rs",
       "mode": "100644",
-      "bytes": 4713,
-      "sha256": "66264eb270d1a373d19eded8d76ca7a63429c28b5bcfc56e6dcc71d920815d21"
+      "bytes": 5740,
+      "sha256": "b0673a8de5fdd3f2cc793c37816603b7ec02394806d3830028dccb3932b46a93"
     },
     {
       "path": "src-tauri/src/external_storage/previous_storage_tests.rs",
       "mode": "100644",
-      "bytes": 21010,
-      "sha256": "8cf4ca6644254125725e9d33521b13eb2a93e33f55a119ca3af5b93cb5140c5b"
+      "bytes": 25444,
+      "sha256": "056bc3971893df4aebf4a542f1bd70eb25c6a6d06f6601481841152a5ac0fd98"
     },
     {
       "path": "src-tauri/src/external_storage/providers/common.rs",
@@ -6339,14 +6339,14 @@
     {
       "path": "src-tauri/src/external_storage/runtime.rs",
       "mode": "100644",
-      "bytes": 102029,
-      "sha256": "ab2186a86b23f113ab34d234fb174be1f59a06e51c735bfc02c6d96ce66909da"
+      "bytes": 103191,
+      "sha256": "1c70c1b2a834d66039dea2f0f339ede6f20aa321e7de741551a0b1dc15266f6c"
     },
     {
       "path": "src-tauri/src/external_storage/runtime_restore.rs",
       "mode": "100644",
-      "bytes": 119747,
-      "sha256": "d124ffc4883b7517953e9500ab72220f9ad11fb47e89772dfba0a73fa4c72657"
+      "bytes": 124847,
+      "sha256": "ace8659ee4ae3e534bffa754044f4e6b4d8d4e831e8b5749ba73fe384cdfff20"
     },
     {
       "path": "src-tauri/src/external_storage/secrets.rs",
@@ -6381,8 +6381,8 @@
     {
       "path": "src-tauri/src/external_storage/snapshot_restore.rs",
       "mode": "100644",
-      "bytes": 121339,
-      "sha256": "c2d9ebfdd9f938909178f5eef1f0032630893075b15882abbec5509237de2860"
+      "bytes": 131934,
+      "sha256": "14c5904c7da4edf0abdd9be89cb6a329b6462a0ef8d4cfb7d4c40c746f9b78ec"
     },
     {
       "path": "src-tauri/src/external_storage/tests.rs",
@@ -6495,8 +6495,8 @@
     {
       "path": "src-tauri/src/lib.rs",
       "mode": "100644",
-      "bytes": 56463,
-      "sha256": "39610ab5364fc0b90f4d9a9fa1bafa45992f81c4b7b1698d9a722e02816c74c1"
+      "bytes": 56530,
+      "sha256": "7344b58348e2809b0c18d0bd1740ea538dd5a495165fe3522159df26edaa26be"
     },
     {
       "path": "src-tauri/src/linux_session.rs",
@@ -6729,8 +6729,8 @@
     {
       "path": "src-tauri/src/native_file_jobs/portable.rs",
       "mode": "100644",
-      "bytes": 98906,
-      "sha256": "f96ab241dc5285e54b5e4e4a6751d82594d05bd945281b6786ce2a29c0a878c3"
+      "bytes": 104273,
+      "sha256": "3cc17ce13d9a1d399cc7465f81c4a3494858fd737e46fa8a2abbc9142ed93629"
     },
     {
       "path": "src-tauri/src/native_file_jobs/portable_source_custody.rs",
@@ -6909,8 +6909,8 @@
     {
       "path": "src-tauri/src/persistent_store/archive.rs",
       "mode": "100644",
-      "bytes": 43333,
-      "sha256": "d91824151755ea3f9a97a3dcbbbcbc7d057304e12323447b782229233e047eba"
+      "bytes": 45595,
+      "sha256": "c26263c1690e5d6c6ee69e9d64c554e88d8411012f7471cda574819bc3961328"
     },
     {
       "path": "src-tauri/src/persistent_store/asset_object_catalog.rs",
@@ -6921,8 +6921,8 @@
     {
       "path": "src-tauri/src/persistent_store/asset_residency.rs",
       "mode": "100644",
-      "bytes": 37856,
-      "sha256": "e5a6710bea002dd52639518dae2ad92aaea9e8dcfb0e40dfe03d6aa31a51d6ca"
+      "bytes": 44737,
+      "sha256": "fc66701ec5910cf595d45e7b0ee839e125b060e4ad6fb532f75aaddab155f7b2"
     },
     {
       "path": "src-tauri/src/persistent_store/benchmark.rs",
@@ -6945,20 +6945,20 @@
     {
       "path": "src-tauri/src/persistent_store/commands.rs",
       "mode": "100644",
-      "bytes": 126417,
-      "sha256": "4a66f6bd23079c2252a5e18051c457ecec555a61d12902f9f0b3dab05ab8a61c"
+      "bytes": 127790,
+      "sha256": "9e0ffed9cbb5e35be4dba7c41539212b8dfdf5060928dd4986f40f075a88473a"
     },
     {
       "path": "src-tauri/src/persistent_store/commands/data_health.rs",
       "mode": "100644",
-      "bytes": 20704,
-      "sha256": "5da9c0d16b68255e9cb4d27ac57744e51f58634557d5d243520d406cf00829ce"
+      "bytes": 22694,
+      "sha256": "43220fe15afc64582704bf50cc17f33e94a813c4f35287c3ca9e1a0faa79bd1e"
     },
     {
       "path": "src-tauri/src/persistent_store/commands/data_health/tests.rs",
       "mode": "100644",
-      "bytes": 20749,
-      "sha256": "eaee473c2f14fe900233790ce23429fbf74c3d698fa0ddcf50591563a07a8951"
+      "bytes": 22329,
+      "sha256": "de92911866fa2b3d899cfd325e2dbea1f6009e8e804938fb38fa9fb8b68572d4"
     },
     {
       "path": "src-tauri/src/persistent_store/commands/hypa.rs",
@@ -6987,8 +6987,8 @@
     {
       "path": "src-tauri/src/persistent_store/commit.rs",
       "mode": "100644",
-      "bytes": 118383,
-      "sha256": "1710fa5d1359433ce4fefda79da29c4427e3b54e17218fd7c3c9ce7f1d466dc4"
+      "bytes": 119775,
+      "sha256": "28adba672acac27be25bb3d3d702b26565d93754d4a3015230fdb0ed4c9b07f0"
     },
     {
       "path": "src-tauri/src/persistent_store/content_capture.rs",
@@ -7071,8 +7071,8 @@
     {
       "path": "src-tauri/src/persistent_store/external_apply.rs",
       "mode": "100644",
-      "bytes": 34817,
-      "sha256": "6f2937edd4774025ae755f0d59262b2029f7f982f082ad115fde4171a574dda2"
+      "bytes": 35945,
+      "sha256": "46397592aeb61e4e179c6df107b695e1178d8195cb036b472737e55a544c313b"
     },
     {
       "path": "src-tauri/src/persistent_store/external_capture.rs",
@@ -7119,8 +7119,8 @@
     {
       "path": "src-tauri/src/persistent_store/lww.rs",
       "mode": "100644",
-      "bytes": 172766,
-      "sha256": "ac395044a1bcf587d1f8119c74e865120bf3896529bd22681bb5112cda574177"
+      "bytes": 175314,
+      "sha256": "6ffae3fbd8d6a536a1ed4412fb778cad128dd85e69d4a5fd6fafbcaea15a917e"
     },
     {
       "path": "src-tauri/src/persistent_store/lww_binding_stage.rs",
@@ -7131,8 +7131,8 @@
     {
       "path": "src-tauri/src/persistent_store/lww_binding_stage_tests.rs",
       "mode": "100644",
-      "bytes": 50070,
-      "sha256": "dc64dcb9f15901a6d1b8df1c14c67f376f0cb04a85e87d17e546415a13103ead"
+      "bytes": 59704,
+      "sha256": "b83699c5e7ba470b76cc499c85a4f9936c2c038f44ff3d8e32c6d546063e0aeb"
     },
     {
       "path": "src-tauri/src/persistent_store/lww_classification.rs",
@@ -7143,8 +7143,8 @@
     {
       "path": "src-tauri/src/persistent_store/lww_commands.rs",
       "mode": "100644",
-      "bytes": 3423,
-      "sha256": "af1ca4c10ea5d104b32be4beef5db57c1ae7623eeb8778c9f5959ec9984ffc3e"
+      "bytes": 7770,
+      "sha256": "67dceda9aaff0cfe0987e100040a34503f2e20c1a547cc1d20e68ee0b902275a"
     },
     {
       "path": "src-tauri/src/persistent_store/lww_intent_rows.rs",
@@ -7167,8 +7167,8 @@
     {
       "path": "src-tauri/src/persistent_store/lww_projection.rs",
       "mode": "100644",
-      "bytes": 74033,
-      "sha256": "36b075be6adc166f6d1752a2134be6b4d186e627f354f0a2024a638f75bcd31a"
+      "bytes": 75094,
+      "sha256": "c6e187a4e3c5dbb3bb1e888ebd81244d7091617b0be88a67cf1d80ab4e37f58d"
     },
     {
       "path": "src-tauri/src/persistent_store/lww_quarantine.rs",
@@ -7215,8 +7215,8 @@
     {
       "path": "src-tauri/src/persistent_store/mod.rs",
       "mode": "100644",
-      "bytes": 135973,
-      "sha256": "7c5556971d2384438dc364286ec228b2d51801cff0df62c516da110b218a53ea"
+      "bytes": 138632,
+      "sha256": "ceddff217ea71c2bdabc9e898b7aa6b7b45507a0d3660756edf9d49b27a55e6d"
     },
     {
       "path": "src-tauri/src/persistent_store/owner_projection.rs",
@@ -7251,8 +7251,8 @@
     {
       "path": "src-tauri/src/persistent_store/portable_validation.rs",
       "mode": "100644",
-      "bytes": 24781,
-      "sha256": "69b36118362483819886e1773ef574256c12cef0b8ef179ea7763d5af472d064"
+      "bytes": 25468,
+      "sha256": "d473b3854ed784a8c9da29b6c30c9b722b05b3d49a69170cc4bf751d290a7468"
     },
     {
       "path": "src-tauri/src/persistent_store/preservation.rs",
@@ -7281,14 +7281,14 @@
     {
       "path": "src-tauri/src/persistent_store/repair.rs",
       "mode": "100644",
-      "bytes": 38803,
-      "sha256": "07af1d35018988be21f87e91d70846e372f1df3a9fb18792ecc956942f398300"
+      "bytes": 40488,
+      "sha256": "6bf2d18c0fb93e02ff82b8e7c55334855628b663be4d51c68e24ae3a0385063d"
     },
     {
       "path": "src-tauri/src/persistent_store/repair/tests.rs",
       "mode": "100644",
-      "bytes": 54901,
-      "sha256": "d5ba3f32caab3390e0e2e027847cfce471e9480c76e995c83f198baf5e8f4935"
+      "bytes": 56631,
+      "sha256": "ec0e4e8f2a9649f558ada239311f045434db3af639ed807265cff9d43291f8e0"
     },
     {
       "path": "src-tauri/src/persistent_store/schema.rs",
@@ -7317,8 +7317,8 @@
     {
       "path": "src-tauri/src/persistent_store/snapshot.rs",
       "mode": "100644",
-      "bytes": 67404,
-      "sha256": "47de3bf21fd2cb1d2bd7e5a3a875da5520a101ae8101783193282042f4346034"
+      "bytes": 71302,
+      "sha256": "9d9f383d52e7d56490ca480b7b5720bec5965ac48f333e1ba8929f552efa3b90"
     },
     {
       "path": "src-tauri/src/persistent_store/snapshot_archive.rs",
@@ -7329,26 +7329,38 @@
     {
       "path": "src-tauri/src/persistent_store/sync_selection.rs",
       "mode": "100644",
-      "bytes": 51632,
-      "sha256": "4f889031842bf37e4ae68235fdd17e794079ec1a13dc3b4f46dd2c061b6f6c3d"
+      "bytes": 51660,
+      "sha256": "ba130455981c2e10a2f966a3a2491274059fee413f2a5a611dcaf91abe4cc645"
     },
     {
       "path": "src-tauri/src/persistent_store/tests.rs",
       "mode": "100644",
-      "bytes": 5765,
-      "sha256": "e3086deda5ab03178e9a741a945c385d6403fae279aae6f706360408ac551ce2"
+      "bytes": 5920,
+      "sha256": "8f8dbc514d0911e89a55574f39afb43b68c7ffb8b3c4f1815693b7c62b549a00"
     },
     {
       "path": "src-tauri/src/persistent_store/tests/activation_golden_tests.rs",
       "mode": "100644",
-      "bytes": 37115,
-      "sha256": "68f68a46dae6f4ff503bb9618b4394cb35e8fe9438b74543e81fdad8e45ad2e2"
+      "bytes": 37402,
+      "sha256": "372f84bff34c0b829471928ab2dbcd02a30baaee3da5bbb014944b125a23a65f"
+    },
+    {
+      "path": "src-tauri/src/persistent_store/tests/archive_receive_tests.rs",
+      "mode": "100644",
+      "bytes": 23262,
+      "sha256": "f3e5779607e1c2be0d3c74d1d00af68b09a2422f346a0ecb7572991f0837910e"
+    },
+    {
+      "path": "src-tauri/src/persistent_store/tests/archive_residency_tests.rs",
+      "mode": "100644",
+      "bytes": 14010,
+      "sha256": "6c4af8ad309ead0058b807443643165e8d61b5147346e966d1c921e1c94b48a8"
     },
     {
       "path": "src-tauri/src/persistent_store/tests/archive_tests.rs",
       "mode": "100644",
-      "bytes": 29114,
-      "sha256": "c3216f3a9c179e30ee8372406b4490031967397aaa7fe6b08c1aa50913706e73"
+      "bytes": 29138,
+      "sha256": "0a1b5ba1010827f654cc3f251974466bc835e681a4d49ac7e87c91091e8fdfb4"
     },
     {
       "path": "src-tauri/src/persistent_store/tests/asset_alias_tests.rs",
@@ -7377,8 +7389,8 @@
     {
       "path": "src-tauri/src/persistent_store/tests/data_health_tests.rs",
       "mode": "100644",
-      "bytes": 7803,
-      "sha256": "55b6ebabc0095f0e2c1fd9e014c0e16eb4500ddfbb33179fcfd9313d18791719"
+      "bytes": 20429,
+      "sha256": "8a0e9a936032332c6544c756a08d66e93e30ed9c340948b5176ea1f37dc062d3"
     },
     {
       "path": "src-tauri/src/persistent_store/tests/display_name_tests.rs",
@@ -7389,8 +7401,8 @@
     {
       "path": "src-tauri/src/persistent_store/tests/external_apply_tests.rs",
       "mode": "100644",
-      "bytes": 51603,
-      "sha256": "165883adccd47d63045e6d559abeac5b1e444444cad8457eefafef3f30cbddc8"
+      "bytes": 55271,
+      "sha256": "2af223992da26c0a3bfeda5627108f815ff8d3f4272b5caafe876499e5feb42f"
     },
     {
       "path": "src-tauri/src/persistent_store/tests/external_content_gc_tests.rs",
@@ -7443,8 +7455,8 @@
     {
       "path": "src-tauri/src/persistent_store/tests/storage_stats_tests.rs",
       "mode": "100644",
-      "bytes": 2956,
-      "sha256": "c61c2c57619588e19c8d7abb8438ff5fa78a6dbfd7d564b2d103394ebd941066"
+      "bytes": 6533,
+      "sha256": "9fee7543b479ede2c41352d2d05cfb9923d99a904d88ef435c5f71d10de9eb10"
     },
     {
       "path": "src-tauri/src/persistent_store/tests/vault_boundary_tests.rs",
@@ -7479,8 +7491,8 @@
     {
       "path": "src-tauri/src/portable_backup/capture.rs",
       "mode": "100644",
-      "bytes": 9547,
-      "sha256": "13d47d2a84356ce2429b45d065d4cdeb3409da879080e82f2305e01db1012db9"
+      "bytes": 10349,
+      "sha256": "e8804f6da2fac7cb423e31ec877749142a410f8ba705e16fe570c860587be915"
     },
     {
       "path": "src-tauri/src/portable_backup/catalog.rs",
@@ -7497,8 +7509,8 @@
     {
       "path": "src-tauri/src/portable_backup/mod.rs",
       "mode": "100644",
-      "bytes": 7489,
-      "sha256": "04b045df53c1f1c61def6e52cc661a4b839b4edaefc8ed879e9b67b040c29710"
+      "bytes": 7903,
+      "sha256": "7da9f8d4b79396e4b5e2d69a0d30086307507276a58ffcaba1d4e4943d8d91c3"
     },
     {
       "path": "src-tauri/src/portable_backup/reader.rs",
@@ -7521,14 +7533,14 @@
     {
       "path": "src-tauri/src/portable_backup/tests.rs",
       "mode": "100644",
-      "bytes": 28785,
-      "sha256": "980ced63ba200132296f54fb5c2bff612c32b693c8e9ecd568a6f5015bb18cf0"
+      "bytes": 31011,
+      "sha256": "f8d8c4502069fafa23eb3c0b38327bc6b0f79be65e8f89b7ede76515fff59b19"
     },
     {
       "path": "src-tauri/src/portable_backup/validation.rs",
       "mode": "100644",
-      "bytes": 35188,
-      "sha256": "45a487ce5184243cb1f722efc6015b8896c1e1f9deda6fe33d0dc96b13f54bce"
+      "bytes": 38732,
+      "sha256": "43b3268ca749cec6dadfc13d5d51b8206f6159bd0ce6a5bc2796d34643ff7537"
     },
     {
       "path": "src-tauri/src/portable_backup/writer.rs",
@@ -7557,8 +7569,8 @@
     {
       "path": "src-tauri/src/server_sync/binding.rs",
       "mode": "100644",
-      "bytes": 109027,
-      "sha256": "5e9cd93c9afb6da6f6988d807adb5af6d32eb869bee476453b6be68c2ade32d3"
+      "bytes": 121891,
+      "sha256": "343a9a9ad40a4edd721665d78e54e6c5f9dca4b7f6b64ded3b60498af4b4067a"
     },
     {
       "path": "src-tauri/src/server_sync/body_encoding_tests.rs",
@@ -7569,20 +7581,20 @@
     {
       "path": "src-tauri/src/server_sync/cache.rs",
       "mode": "100644",
-      "bytes": 58279,
-      "sha256": "f7156b92aed951ba9cc646c92227de19382771f77a671709ab876bc8b7e77a87"
+      "bytes": 58602,
+      "sha256": "8990a558b4c98c5b13b2e794d455c5dfd417a4bde6458dd3155464c63fb07f48"
     },
     {
       "path": "src-tauri/src/server_sync/client.rs",
       "mode": "100644",
-      "bytes": 54973,
-      "sha256": "3a21c285e4767feee4679434fec73dc0fd8e25ea9248723b32014f6006b67796"
+      "bytes": 59490,
+      "sha256": "623aae6f79d9189827392319857fb4d4ecf9d45be4d86066520aac9954809bdf"
     },
     {
       "path": "src-tauri/src/server_sync/commands.rs",
       "mode": "100644",
-      "bytes": 50927,
-      "sha256": "64894c1b7c65031d5f8fb6c1625ef261db3eda05d8d3f15508e3e8cfbfabca17"
+      "bytes": 53340,
+      "sha256": "d9bc04e3b31d4c48d4d01e455cdf1a9818ceb87700b77d4b77a43f9ddc1308fb"
     },
     {
       "path": "src-tauri/src/server_sync/concurrency_tests.rs",
@@ -7617,20 +7629,20 @@
     {
       "path": "src-tauri/src/server_sync/lww_client.rs",
       "mode": "100644",
-      "bytes": 64180,
-      "sha256": "bb8aa69efc33c00b9e102d5ff731dafa9072067c88ddd2db5d5858339004233b"
+      "bytes": 65496,
+      "sha256": "d96b35bdc8b87618a2488e1b097e53334fdb99d297712356d24c5a0d1d77b4dc"
     },
     {
       "path": "src-tauri/src/server_sync/lww_large_unit_tests.rs",
       "mode": "100644",
-      "bytes": 9761,
-      "sha256": "78b8b2cd9f4a1b70f1d2b163ad16b58d9933e1e3d1f39548e69445b4731da1f4"
+      "bytes": 13035,
+      "sha256": "5718be25aa200d3ded58f315f8ac952b0cb9e9085bf7b7ed3b5af3360d188ca6"
     },
     {
       "path": "src-tauri/src/server_sync/lww_tests.rs",
       "mode": "100644",
-      "bytes": 63397,
-      "sha256": "f4a5c46e26df2ed356642bb71d7c1f85b5060ce08dffa9de0e1e286df3a00821"
+      "bytes": 65975,
+      "sha256": "af0b4ef9c97b1941d1c17ba987f11b073733fa3ecfc99a797067b47aa707f3c8"
     },
     {
       "path": "src-tauri/src/server_sync/management.rs",
@@ -7653,14 +7665,14 @@
     {
       "path": "src-tauri/src/server_sync/media_admission_tests.rs",
       "mode": "100644",
-      "bytes": 21672,
-      "sha256": "050423e59e0196dd7198c85cb2831e5bcdf8707fa23cdc18373096fd447728ac"
+      "bytes": 22155,
+      "sha256": "eef6edb9b09db9d0165fdac8268dde0ea0e9b4e8fbd2ce3a4a8ec0141f41eb8b"
     },
     {
       "path": "src-tauri/src/server_sync/mod.rs",
       "mode": "100644",
-      "bytes": 12352,
-      "sha256": "b3091118a55a716a3f85e21dafd0d3b0aa44c9913cb1e7acf24d23708cf6f211"
+      "bytes": 12397,
+      "sha256": "23361e99a2e1dfffd42bbd095e76d2ef808847ad7c3d93f5d61552ad7772da69"
     },
     {
       "path": "src-tauri/src/server_sync/notification.rs",
@@ -7677,20 +7689,26 @@
     {
       "path": "src-tauri/src/server_sync/previous_storage_tests.rs",
       "mode": "100644",
-      "bytes": 8708,
-      "sha256": "a87ce711a49dc463d9c1bc92efa09f926934383f238764b06299aca750d1d2ef"
+      "bytes": 8737,
+      "sha256": "90713c659abd7e1e6b0d23854a5b3c50e739c76e8081bdc6a6cce2c3d41b6e0d"
     },
     {
       "path": "src-tauri/src/server_sync/progress.rs",
       "mode": "100644",
-      "bytes": 10951,
-      "sha256": "e5ccc87463f64214cb46d8c74a1dd3697b9b6a482df3f935ca049ff0a24011fc"
+      "bytes": 11241,
+      "sha256": "f5c8d615ef1c6bfc54b3efd0776adee2df7844407124065e3e395955427ba2bc"
+    },
+    {
+      "path": "src-tauri/src/server_sync/representative_image_tests.rs",
+      "mode": "100644",
+      "bytes": 19822,
+      "sha256": "4fdb4240cf1c373f8718fce15913b2e0154795563618c358661b9858bebd62a2"
     },
     {
       "path": "src-tauri/src/server_sync/residency.rs",
       "mode": "100644",
-      "bytes": 37450,
-      "sha256": "a958b2279ae3f6ecb2bb776e4bd65aa40c1bc1589e75b2b7b23e82b521bc7951"
+      "bytes": 38670,
+      "sha256": "a1ae116b934248cdc35e428ac26bcbe9bca28289c865f8306bb49c9f02e34dd9"
     },
     {
       "path": "src-tauri/src/server_sync/residency/tests.rs",
@@ -7701,8 +7719,8 @@
     {
       "path": "src-tauri/src/server_sync/residency_lww_tests.rs",
       "mode": "100644",
-      "bytes": 33023,
-      "sha256": "3c306182672b6c48e75bb3b312d2c80b4a067e2eb1884c388a879135947b8df7"
+      "bytes": 37936,
+      "sha256": "bd2926d5367c260f520dab7967514260c1f68d06788c1eb374199ae6861bfb7f"
     },
     {
       "path": "src-tauri/src/server_sync/tests.rs",
@@ -7989,26 +8007,26 @@
     {
       "path": "src/lang/cn.ts",
       "mode": "100644",
-      "bytes": 97766,
-      "sha256": "d0c7eb818a430d31f5c653ddcf773b80983311d5e11cd2bbfd5c0cbb06db280c"
+      "bytes": 98145,
+      "sha256": "3b7583aa0ab107a1dc102d945a7b9b4c5ac107f2e10071607f118e411db8ea47"
     },
     {
       "path": "src/lang/de.ts",
       "mode": "100644",
-      "bytes": 116383,
-      "sha256": "88a42614d1b7849ea311b38f952f4578b50300369d9eb27d2697d2e0733c7896"
+      "bytes": 116967,
+      "sha256": "3f7800280173871ea451b9e1c36d0b74fef5b65841bdbe01e4e38bab2acba593"
     },
     {
       "path": "src/lang/en.ts",
       "mode": "100644",
-      "bytes": 186640,
-      "sha256": "aaa019cf818c3421419facfef0c8dd8868f8c01588e98d199844f44f80879681"
+      "bytes": 188482,
+      "sha256": "b903906832f6e940394ee70d4d3fd874b3173655e4e2235492d747e58a646d5c"
     },
     {
       "path": "src/lang/es.ts",
       "mode": "100644",
-      "bytes": 112127,
-      "sha256": "4ef5d19cbeca35d4769c2cf2d83707fe1173624bf5a17f86ebb8270ceae0a0de"
+      "bytes": 112670,
+      "sha256": "eccff7a72824a906fd9331c9785436fd98fded26339ba1772a3afe7c698a909b"
     },
     {
       "path": "src/lang/index.ts",
@@ -8019,26 +8037,26 @@
     {
       "path": "src/lang/ko.ts",
       "mode": "100644",
-      "bytes": 209324,
-      "sha256": "1b513d8f0628fee24603f8ed9b54bcbdba7f4bd1303475b3a711f7ac64e0c84f"
+      "bytes": 211396,
+      "sha256": "952cedfff5d7894d97682b5ab57d4682cfcdc5b614ca17131c8695aad71836d2"
     },
     {
       "path": "src/lang/lwwSyncCopy.test.ts",
       "mode": "100644",
-      "bytes": 6938,
-      "sha256": "b47b45d15eabd4746428811ab7a7dfa611135f5c7d2b3a5d61a025e839903208"
+      "bytes": 8177,
+      "sha256": "a86dd4872bb10acff7668e091139567212903edf82a4541f4bad3c15b4e6e8a1"
     },
     {
       "path": "src/lang/serverSyncCopy.test.ts",
       "mode": "100644",
-      "bytes": 3168,
-      "sha256": "3f1ac4830c2c55fa8633805b6b169a450319d382d30b43ce0039c1531c46055e"
+      "bytes": 3971,
+      "sha256": "a6ff1b076ae629ba04a176ebc16434bf7664112a10074d27717e5f4d5995e55c"
     },
     {
       "path": "src/lang/settingsCopy.test.ts",
       "mode": "100644",
-      "bytes": 2610,
-      "sha256": "b6f71b5d553c9119707f547792ad3b74a3f30fb6d3fa755e4eab91fd027a70b3"
+      "bytes": 3073,
+      "sha256": "9c2db4fafd53bb4ec172ce5ec5d256e3bb717606e39e5b24542df98f50a31d54"
     },
     {
       "path": "src/lang/upstreamBackupRestoreCopy.test.ts",
@@ -8049,14 +8067,14 @@
     {
       "path": "src/lang/vi.ts",
       "mode": "100644",
-      "bytes": 124848,
-      "sha256": "0527a4dccf19ad1813f0f4d6a01c63fd54ed63331c5817cba5a1cb421ceb3b4f"
+      "bytes": 125409,
+      "sha256": "f3dfeca84089f62c4b6e21af2f3fd66c6a94989d01eb1838d569289bfbc04490"
     },
     {
       "path": "src/lang/zh-Hant.ts",
       "mode": "100644",
-      "bytes": 105629,
-      "sha256": "05ecb1b28cee5f02df30de3006e155ef0c20db0faa4fdfa404acfea3be221bd7"
+      "bytes": 106008,
+      "sha256": "95bbc48a66b86fc0570c0703c9d1c240546d002f1e2137b6c8f9d5344a37a8ca"
     },
     {
       "path": "src/lib/ChatScreens/AssetInput.svelte",
@@ -8271,14 +8289,14 @@
     {
       "path": "src/lib/ChatScreens/DefaultChatScreen.svelte",
       "mode": "100644",
-      "bytes": 88216,
-      "sha256": "a658859736d614762a3a1ceb065396435c3018014a70ba75297e87d61c31b68b"
+      "bytes": 87988,
+      "sha256": "c72160665732dd38575aec9dbac2223c2d42a82721d227bd396a9037ff30d378"
     },
     {
       "path": "src/lib/ChatScreens/DefaultChatScreen.svelte.test.ts",
       "mode": "100644",
-      "bytes": 30734,
-      "sha256": "454aef9ac5efb7d67fce363c01321b19bc429dd08ba39478525d9bfdaaf98a11"
+      "bytes": 33612,
+      "sha256": "0d486c2160d5ab89ab3d6066443b0ea660950679cfb5c3964b9fb1e89031c0f4"
     },
     {
       "path": "src/lib/ChatScreens/EmotionBox.svelte",
@@ -8703,8 +8721,8 @@
     {
       "path": "src/lib/Others/Onboarding/Onboarding.svelte",
       "mode": "100644",
-      "bytes": 77832,
-      "sha256": "00052d150f0596ed9af7ff08f7ced218e31b4c775f5c699a132d41ef516e52df"
+      "bytes": 77960,
+      "sha256": "c5b8a1441a213e772a7443a27b6615342054330cee81ecc5caf50461d9da0191"
     },
     {
       "path": "src/lib/Others/Onboarding/Onboarding.theme.test.ts",
@@ -8795,6 +8813,12 @@
       "mode": "100644",
       "bytes": 69096,
       "sha256": "3a98670553b913f129fe3d451d3b0805b3217d6ecf22f475c03edded688a8427"
+    },
+    {
+      "path": "src/lib/Others/QrScanOverlay.svelte",
+      "mode": "100644",
+      "bytes": 2072,
+      "sha256": "d3c60a7a63117071648261374503cc1be3515b47f3c3a0944a42d139cc33bc26"
     },
     {
       "path": "src/lib/Others/QuickSettingsGUI.svelte",
@@ -9015,14 +9039,14 @@
     {
       "path": "src/lib/Setting/ExternalStorage/ConnectionForm.svelte",
       "mode": "100644",
-      "bytes": 46414,
-      "sha256": "4edfe4b7e819e82fd4069bd2b158ebd4c5ba4bfde68dc363a01e1ae2c9d82db2"
+      "bytes": 46171,
+      "sha256": "95264f43b73a4be04358d71806a1bacd6150b642204f48806e2b26309de68491"
     },
     {
       "path": "src/lib/Setting/ExternalStorage/ConnectionForm.test.ts",
       "mode": "100644",
-      "bytes": 46083,
-      "sha256": "b64c474b1a14693fa4776f9e4a418287889c33bb1427fdc514d1c1876e035be2"
+      "bytes": 48850,
+      "sha256": "17064020b12ed889226180fa7a1c0f34d2e339a5852a380cbc5adc0ea38fe9b3"
     },
     {
       "path": "src/lib/Setting/ExternalStorage/ExternalFolderSelector.conventions.test.ts",
@@ -9045,14 +9069,14 @@
     {
       "path": "src/lib/Setting/ExternalStorage/ExternalStorageSettings.svelte",
       "mode": "100644",
-      "bytes": 70038,
-      "sha256": "c6eacc9497da22d5f414dcbb246c55cceaf10ad4c0473c3e792f0f14b87557df"
+      "bytes": 72978,
+      "sha256": "e61954a055c3d3d25fadaf8d852886b7fc812138b3a5e3b033938e3ab99a2157"
     },
     {
       "path": "src/lib/Setting/ExternalStorage/ExternalStorageSettings.test.ts",
       "mode": "100644",
-      "bytes": 77061,
-      "sha256": "b03717a7456cb737f00d034f4c6d16c46ba33d43b87e26ffff4ffc8b2c772779"
+      "bytes": 82419,
+      "sha256": "a87c3ff2c8f77fc266740e13c8c18e93d9443d4df7a08baa33bf5aadad23f5db"
     },
     {
       "path": "src/lib/Setting/ExternalStorage/strings.test.ts",
@@ -9063,8 +9087,8 @@
     {
       "path": "src/lib/Setting/ExternalStorage/strings.ts",
       "mode": "100644",
-      "bytes": 44056,
-      "sha256": "ef51e3f10b90535ac9f450dd28c7d13d68616c52c9c2da0a5b0800f2c7290189"
+      "bytes": 44282,
+      "sha256": "0512d40406a3c961511ed661c27066f22f474848789e3dce3c6de5f8bda951ba"
     },
     {
       "path": "src/lib/Setting/Pages/AccessibilitySettings.svelte",
@@ -9465,14 +9489,14 @@
     {
       "path": "src/lib/Setting/Pages/RisuNestStorageDashboard.svelte",
       "mode": "100644",
-      "bytes": 23683,
-      "sha256": "6635ca8fa4b6b5c4c083b6659aeb66c5f7619796e5deaeb646f86f5abe9ee592"
+      "bytes": 25798,
+      "sha256": "76b1c1be7ab5371449f6480d7e0704a168625f68ed94a1841f666e45b335adca"
     },
     {
       "path": "src/lib/Setting/Pages/RisuNestStorageDashboard.test.ts",
       "mode": "100644",
-      "bytes": 20610,
-      "sha256": "615a130aa0980d41517ff06c81bfce024eaf3e36b9baa71a1dcb20b75b442404"
+      "bytes": 25259,
+      "sha256": "824abe54a37012df275d97f0fd01e6111dbca8156845053abae24fa3162eb2b7"
     },
     {
       "path": "src/lib/Setting/Pages/RisuNestUpdateSettings.svelte",
@@ -9495,14 +9519,14 @@
     {
       "path": "src/lib/Setting/Pages/ServerSyncSettings.svelte",
       "mode": "100644",
-      "bytes": 30799,
-      "sha256": "f4823ae314e5958dc15464a47d9e52b0f3f8e64b32327baa99a9a97bb4df3227"
+      "bytes": 34837,
+      "sha256": "311c09a6da78bb2fdac01d265e71955792759e5c1fd753a62dad9052958cdc40"
     },
     {
       "path": "src/lib/Setting/Pages/ServerSyncSettings.test.ts",
       "mode": "100644",
-      "bytes": 52688,
-      "sha256": "ef0b033b516b44c0a868bb3feea1de23f2763b45e961451810bb05128d19dca7"
+      "bytes": 75981,
+      "sha256": "24665e8cc88760536d3024f414e2e39a70fa5c697f0dcb76548b8b3c7183e871"
     },
     {
       "path": "src/lib/Setting/Pages/UserSettings.account.test.ts",
@@ -9567,8 +9591,8 @@
     {
       "path": "src/lib/Setting/RisuNest/RisuNestSettingControl.svelte",
       "mode": "100644",
-      "bytes": 3251,
-      "sha256": "07f19bbc7442fca88752777c78d44d9f5a50322d7795ddbac862842fc20e6429"
+      "bytes": 3356,
+      "sha256": "9f594953597252690143c3b9fc059b38d253d506aac875262991253e2ae41dbc"
     },
     {
       "path": "src/lib/Setting/RisuNest/RisuNestSettingRows.svelte",
@@ -9643,6 +9667,12 @@
       "sha256": "934907ba8aad5d544fbf4d61c68538deeafda95110c87a3000453639392d654f"
     },
     {
+      "path": "src/lib/Setting/RisuNest/messageSendKey.test.ts",
+      "mode": "100644",
+      "bytes": 4369,
+      "sha256": "4068bfb8c72c30b02a9dc0f4be17965218b6bac4841ee9ca5f0a61da440052e6"
+    },
+    {
       "path": "src/lib/Setting/RisuNest/settingControls.test.ts",
       "mode": "100644",
       "bytes": 6005,
@@ -9705,8 +9735,8 @@
     {
       "path": "src/lib/Setting/Wrappers/SettingSegmented.svelte",
       "mode": "100644",
-      "bytes": 2180,
-      "sha256": "b0702fdd40f05392b4a85cfd36120ab8e68ec64b594d960d848221ac208e7f2d"
+      "bytes": 2678,
+      "sha256": "bac2e9879dcd4524f3051b14a757471a74846782a65a13966a38cff538f3d2cb"
     },
     {
       "path": "src/lib/Setting/Wrappers/SettingSelect.svelte",
@@ -9807,8 +9837,14 @@
     {
       "path": "src/lib/SideBars/CustomSidebar.svelte",
       "mode": "100644",
-      "bytes": 1441,
-      "sha256": "d6f5f65d95b8a935db5097bd6e685de8398c7732bfb9a583da4680fcef924be0"
+      "bytes": 1498,
+      "sha256": "98263be3213607f437407d8247f73af96030a1a8278eb8fb16dd06a2845bf9a1"
+    },
+    {
+      "path": "src/lib/SideBars/CustomSidebar.svelte.test.ts",
+      "mode": "100644",
+      "bytes": 2153,
+      "sha256": "4712de94b5986e7cd9a7dd2390cf692464378fcbe41acc604f4a455cea1b5e9d"
     },
     {
       "path": "src/lib/SideBars/DevTool.svelte",
@@ -10443,8 +10479,8 @@
     {
       "path": "src/main.startup.test.ts",
       "mode": "100644",
-      "bytes": 2886,
-      "sha256": "3e2107364003bbc7c90ff4d122ebfe7e35b69f27450023ab0905680bbd7d4103"
+      "bytes": 2913,
+      "sha256": "838a7d51505734d0f977224ba92fc83f899ea138f8c297fbafe4502a9a278b3b"
     },
     {
       "path": "src/main.ts",
@@ -10473,8 +10509,8 @@
     {
       "path": "src/styles.css",
       "mode": "100644",
-      "bytes": 16099,
-      "sha256": "0447b5fe5081aefa9cccd31eb747c8ea9c43d1630bff47becbc86b39c4332dd0"
+      "bytes": 16399,
+      "sha256": "7e02785646ca7ec21f3b8dc8755fa7a7c9e45235cdf124af7e9cbb551a7a72c3"
     },
     {
       "path": "src/ts/3d/threeload.ts",
@@ -10593,14 +10629,14 @@
     {
       "path": "src/ts/bootstrap.recoveryExclusions.test.ts",
       "mode": "100644",
-      "bytes": 21670,
-      "sha256": "788092596810b3aa86730839f4e308660a7f3f4eb5f43ab22aec0cb094db1508"
+      "bytes": 22520,
+      "sha256": "ac6fb90431a22ab2b128e502969d766d6cebac4167076c92f53e511838ca5a25"
     },
     {
       "path": "src/ts/bootstrap.ts",
       "mode": "100644",
-      "bytes": 48572,
-      "sha256": "dba0e66025cade666299e5e6d17c228592bdbdf75d7bb6d474e8c833bb164ab4"
+      "bytes": 48757,
+      "sha256": "11c82a15503a74ffda3008273fefdecd76f9fcc7d21e2c80b7aa97d0d9933e8e"
     },
     {
       "path": "src/ts/cbs.historyWindow.test.ts",
@@ -10665,8 +10701,8 @@
     {
       "path": "src/ts/chatBranchUi.test.ts",
       "mode": "100644",
-      "bytes": 15047,
-      "sha256": "44161738def76ed43515eb96df4baab1d40c95e8249c288088ccbba14fde1417"
+      "bytes": 16154,
+      "sha256": "e671c23c8c74e3c0ebfed1b3403b7b81a5cbe27a1f59cc0d2c6779a94af882ab"
     },
     {
       "path": "src/ts/chatBranchUi.ts",
@@ -11121,14 +11157,14 @@
     {
       "path": "src/ts/gui/nativeFileJobDialogModel.test.ts",
       "mode": "100644",
-      "bytes": 44203,
-      "sha256": "159150d1537a7dcfce9fdb016c6574912ded7a6718bd701e5b875143c3d94347"
+      "bytes": 44322,
+      "sha256": "7140b9aa6cefcb41fc8063206600ca4471ef2061e54a587dd7dd0d66dfdf664c"
     },
     {
       "path": "src/ts/gui/nativeFileJobDialogModel.ts",
       "mode": "100644",
-      "bytes": 30361,
-      "sha256": "0f7370a5b645dbd1482c88e697d80429cc48bbb41fede69ebd7386ee83c87c92"
+      "bytes": 30528,
+      "sha256": "a199f9116412ed9e67c81bfa6d8a1dcc9988cb0fee5ae7357daa456cf6e1e9eb"
     },
     {
       "path": "src/ts/gui/nativeFileJobProgress.test.ts",
@@ -11751,14 +11787,14 @@
     {
       "path": "src/ts/plugins/apiV3/factory.scriptSettled.test.ts",
       "mode": "100644",
-      "bytes": 15074,
-      "sha256": "3abc893eb23521aa153aaf4bdc94c34e5142d38730bfe5e493f4c6a4d4d3b800"
+      "bytes": 19083,
+      "sha256": "431a22bb88d1ec8d1d13cc55bdcce1098a01700fd7b04cd5d8800a757965e121"
     },
     {
       "path": "src/ts/plugins/apiV3/factory.ts",
       "mode": "100644",
-      "bytes": 47256,
-      "sha256": "efffde45e74000501f93477fe1a9a717ef8c691c4a2f6dcff9a52102febca133"
+      "bytes": 50361,
+      "sha256": "4fc99637749730a3f77ae2d8904d0b48bb7a8fa1fbfae2c54142fdbc6931790c"
     },
     {
       "path": "src/ts/plugins/apiV3/risuai.d.ts",
@@ -11793,8 +11829,8 @@
     {
       "path": "src/ts/plugins/apiV3/v3.domRpc.test.ts",
       "mode": "100644",
-      "bytes": 36476,
-      "sha256": "0aaad3d4894faabf72565ee070948f77327e7bb7ff6dcd9f2344c27558ab77d1"
+      "bytes": 42424,
+      "sha256": "0656240e479a002a6337efb343d8c88e39cd0ab8110cfb9e9413f46dbfa2bf6e"
     },
     {
       "path": "src/ts/plugins/apiV3/v3.fullObjectCompatibility.test.ts",
@@ -11829,8 +11865,8 @@
     {
       "path": "src/ts/plugins/apiV3/v3.svelte.ts",
       "mode": "100644",
-      "bytes": 75485,
-      "sha256": "639ad290c35db3d863d2a007944f5d898e79b080c0585c1fa6d6d6a6d0f7050a"
+      "bytes": 77883,
+      "sha256": "b31882d7f2fd4463435672dc04784fec5c84aa98ed397ce73c3921c396420616"
     },
     {
       "path": "src/ts/plugins/chatViewEvents.test.ts",
@@ -11937,14 +11973,14 @@
     {
       "path": "src/ts/plugins/hostToolHost.test.ts",
       "mode": "100644",
-      "bytes": 8544,
-      "sha256": "9e2380ca9c1071107173c112bf9c745795e4f0928a312b57bce4b1e1364d9daf"
+      "bytes": 9955,
+      "sha256": "56a6bb6336aafcd8cf66640e3a3f8dbce50fb1163ae1c31b7ac737d9cf2bd28f"
     },
     {
       "path": "src/ts/plugins/hostToolHost.ts",
       "mode": "100644",
-      "bytes": 2280,
-      "sha256": "b6d03b6932e1cb3ae3573fd7aeea81eff4b09e1b68c0ef491e5f8fe64492ba2a"
+      "bytes": 2624,
+      "sha256": "49a4f8d704f23de1dbee04bfb3a7f97400ffd2ecb352fca254599377a61fedc7"
     },
     {
       "path": "src/ts/plugins/messageButtons.svelte.ts",
@@ -11991,14 +12027,14 @@
     {
       "path": "src/ts/plugins/pluginCompatibility.test.ts",
       "mode": "100644",
-      "bytes": 12326,
-      "sha256": "7d7d8efb34caa65b03263295ba121aaf5a9dbec7af123cb084e3a2e011a6d3eb"
+      "bytes": 15735,
+      "sha256": "05b1117f465d4e74b7dea90a2051c3d8ace071a1f37674d1f97c0e01b6dc367b"
     },
     {
       "path": "src/ts/plugins/pluginCompatibility.ts",
       "mode": "100644",
-      "bytes": 2283,
-      "sha256": "22f36ca5a2448f09cd29e99f65cf3921cd572a48a58e0c08d22e3678b2c5ca94"
+      "bytes": 4229,
+      "sha256": "8eb9b660ea3de48209ea32a0524ef3192c987317a9c5144d388a76a97053c466"
     },
     {
       "path": "src/ts/plugins/pluginDataInventory.removal.test.ts",
@@ -12141,8 +12177,20 @@
     {
       "path": "src/ts/plugins/plugins.svelte.ts",
       "mode": "100644",
-      "bytes": 25571,
-      "sha256": "d9092dc32eabe8a7ed85b1609032049104487face757a53e18c50c24109ad983"
+      "bytes": 27013,
+      "sha256": "2f4e6d6492f33bc4e659fb4de8c40288c86d5e2b4590f26186c4a5f25b4efc14"
+    },
+    {
+      "path": "src/ts/plugins/pluginsOffForThisStart.test.ts",
+      "mode": "100644",
+      "bytes": 2834,
+      "sha256": "f649ae0a872d2a0265f36a3ee5b936ed03b9b019573f98591f5fa1aa61aab63d"
+    },
+    {
+      "path": "src/ts/plugins/pluginsSyncReload.test.ts",
+      "mode": "100644",
+      "bytes": 3586,
+      "sha256": "db25ccbde2047fce0badde4cdf9d20f6a6f7d4b824588bbafb61c9758980e6be"
     },
     {
       "path": "src/ts/plugins/publicSetter.generation.test.ts",
@@ -12705,8 +12753,8 @@
     {
       "path": "src/ts/process/mcp/mcp.ts",
       "mode": "100644",
-      "bytes": 14808,
-      "sha256": "a8727778c71b2257170f42e07ede5da80556f862919d8cbeccc4cfe0c957aceb"
+      "bytes": 15102,
+      "sha256": "ffcc1b2957f5c750e6510ca9392de1e3000e957e497a79a2220f3e16723d0d30"
     },
     {
       "path": "src/ts/process/mcp/mcplib.ts",
@@ -12723,8 +12771,8 @@
     {
       "path": "src/ts/process/mcp/pluginmcp.ts",
       "mode": "100644",
-      "bytes": 1817,
-      "sha256": "072ea074d51a2f27fbc0b435bd2cbb6b786f5df8c6ff747094b94ad9a5ba9e7c"
+      "bytes": 2189,
+      "sha256": "4f3f5023e7b833de611e962bd0684f4b4a638d3626872b0bd2fdaaa47d29f17e"
     },
     {
       "path": "src/ts/process/mcp/risuaccess/characters.ts",
@@ -13533,8 +13581,8 @@
     {
       "path": "src/ts/setting/accessibilitySettingsData.ts",
       "mode": "100644",
-      "bytes": 6813,
-      "sha256": "0fa8b0b86ccb8cc431fc040d11470597d28f3584daf81ffa9346593eee4c993a"
+      "bytes": 6617,
+      "sha256": "51647341dcc971f70be8f0cd73a95a1aaa65a4981b3db0fa1ecee82bf1c0fcd9"
     },
     {
       "path": "src/ts/setting/advancedSettingsData.ts",
@@ -13599,8 +13647,8 @@
     {
       "path": "src/ts/setting/risuNestSettingsData.ts",
       "mode": "100644",
-      "bytes": 4836,
-      "sha256": "9bbae9f8e3cffa299ea90e14dcd6bc6b9f03d7d3cfd7b61f1c864e06b9f93a56"
+      "bytes": 5702,
+      "sha256": "eba86b85457be7050e3c3960dcc8d81cc7711db962c548d7c4a6d224eaefda49"
     },
     {
       "path": "src/ts/setting/risuNestSettingsTabs.ts",
@@ -13623,8 +13671,8 @@
     {
       "path": "src/ts/setting/types.ts",
       "mode": "100644",
-      "bytes": 5851,
-      "sha256": "d48d0cd505b7d11df3fa78624286485defa6f860d972df7687414f540c9ae794"
+      "bytes": 5999,
+      "sha256": "6907d4e20157cbdd5c2acf2103588b8e1182eed53c6cb5fd4fc84f4013bb717c"
     },
     {
       "path": "src/ts/setting/utils.test.ts",
@@ -13929,14 +13977,14 @@
     {
       "path": "src/ts/storage/characterArchive.test.ts",
       "mode": "100644",
-      "bytes": 4643,
-      "sha256": "3dd216456501da1fa47e7c3ff09f2455712df9116c9448d488f0cfbab8e8d01a"
+      "bytes": 10181,
+      "sha256": "077fd2ba2a4d2a6302b3d60ede9755f9bd829e4eef787ae0655c9eb1c75348c5"
     },
     {
       "path": "src/ts/storage/characterArchive.ts",
       "mode": "100644",
-      "bytes": 5051,
-      "sha256": "d5a4579a4d96c5f8485deadac860142fc8e33974acaaa326cba0ace0467e03b9"
+      "bytes": 5815,
+      "sha256": "2b9fadf158e117bf179ce528be158d685af8348acba0716b3d0259d65065e68d"
     },
     {
       "path": "src/ts/storage/characterArchiveView.test.ts",
@@ -14241,14 +14289,14 @@
     {
       "path": "src/ts/storage/deviceSettings.test.ts",
       "mode": "100644",
-      "bytes": 14332,
-      "sha256": "e2a286a3fca8724aeaa9f6953db606057eea7d00e3c1867696765dcb84aac730"
+      "bytes": 16235,
+      "sha256": "84e9c8c6cb88e1b553b14a473549dbcf9495a7fc55ecb6ab2b6cc89f0e111389"
     },
     {
       "path": "src/ts/storage/deviceSettings.ts",
       "mode": "100644",
-      "bytes": 6021,
-      "sha256": "c806c14d8699f1052da59eaec070ef5cd342112abeacd3a36a5585ec9c044112"
+      "bytes": 6318,
+      "sha256": "b28ccfb425fc6c2339b7a259fa0d2d154daeb27a303038c15bda20b773357036"
     },
     {
       "path": "src/ts/storage/deviceSettingsStartup.ts",
@@ -14439,8 +14487,8 @@
     {
       "path": "src/ts/storage/lwwSavePath.test.ts",
       "mode": "100644",
-      "bytes": 56253,
-      "sha256": "f80b21f0eb8ff5bf2f7e5bf1e3212fb7453909fc2b2b66479ce1ecc22b19a191"
+      "bytes": 59203,
+      "sha256": "aad58df57d7a138dbc6b9ea1c46cd1e941c823e8d105e8f0c89923c6f3b3787d"
     },
     {
       "path": "src/ts/storage/lwwWorkingSetApply.ts",
@@ -14613,8 +14661,8 @@
     {
       "path": "src/ts/storage/nativeDataHealthRepair.ts",
       "mode": "100644",
-      "bytes": 2353,
-      "sha256": "429daf9f1b14b173206d26d6b95cd215d10fa9f96f6af3a88795136746f65896"
+      "bytes": 2043,
+      "sha256": "f686ea453e577e46b754a38fa349eed9f711c8a622882e96c45a36293f301c2f"
     },
     {
       "path": "src/ts/storage/nativeDatasetExportRoute.test.ts",
@@ -14697,8 +14745,8 @@
     {
       "path": "src/ts/storage/nativeJpegAssetImport.test.ts",
       "mode": "100644",
-      "bytes": 7160,
-      "sha256": "fdc759d5c357e0067fcdee47df4df187256d3291f96b17ae772077fc1e24f43b"
+      "bytes": 11031,
+      "sha256": "98cd7a7ca92b1968985024b64931832fba50673a43e13b78c7716a4b4955bbe1"
     },
     {
       "path": "src/ts/storage/nativeJpegAssetImport.ts",
@@ -14811,8 +14859,8 @@
     {
       "path": "src/ts/storage/nativePersistentMaintenance.ts",
       "mode": "100644",
-      "bytes": 16204,
-      "sha256": "bfaba2c82c226cbf2d22f68cf61a784f7a1cd9449bb900f9b13b1dd05da6212a"
+      "bytes": 16575,
+      "sha256": "bc9e285622134ed62efe51a3d5ef38ac6896bae9d720d341bf81c1d3b67457f3"
     },
     {
       "path": "src/ts/storage/nativePluginPermissions.test.ts",
@@ -14913,8 +14961,8 @@
     {
       "path": "src/ts/storage/persistentBootstrap.ts",
       "mode": "100644",
-      "bytes": 6846,
-      "sha256": "b6786e0d755ca2906b612370f29cd2dd6fffd1344e0d0f75199fefb546a9de9d"
+      "bytes": 6853,
+      "sha256": "6193574694b599f28c58b737210e5dfab52fc5e16078769401067787eb1cd53f"
     },
     {
       "path": "src/ts/storage/persistentConversationRead.test.ts",
@@ -14937,26 +14985,26 @@
     {
       "path": "src/ts/storage/persistentDataRuntime.production.test.ts",
       "mode": "100644",
-      "bytes": 106930,
-      "sha256": "20b42e708d23852d107ff83f38fa420d68e195d392c97e61da0d8d33ad01b970"
+      "bytes": 107846,
+      "sha256": "3c578a65ebdb15af112ac7fed6a9a3743d975a69750bdb56a368907a3742e3d8"
     },
     {
       "path": "src/ts/storage/persistentDataRuntime.svelte.ts",
       "mode": "100644",
-      "bytes": 37184,
-      "sha256": "fa325318560ced0498b65d6690768dbeeadc88ca11d271e366a107b092db80fe"
+      "bytes": 37354,
+      "sha256": "d13861a450f55f2b33f46fa66cb57b4383ab6ba412e46b1a147c2825db380421"
     },
     {
       "path": "src/ts/storage/persistentDataRuntime.test.ts",
       "mode": "100644",
-      "bytes": 72321,
-      "sha256": "3c106073a0b3afa82438112e16233e301bd6fcb09d83025a1541c880088836bb"
+      "bytes": 76204,
+      "sha256": "99191a95d1df5ba8bd89239e54f997d4df0a2ae90d8109902beab6c2ba9a5fd4"
     },
     {
       "path": "src/ts/storage/persistentDataRuntime.ts",
       "mode": "100644",
-      "bytes": 88949,
-      "sha256": "635dad51fb826439a322563b07f3aac70a2902b690a56df7773dd29ed215bd64"
+      "bytes": 89706,
+      "sha256": "2a907810d5878d89bb5bfb2e86d515228af96f493de08136b47cbb56262ab5cf"
     },
     {
       "path": "src/ts/storage/persistentDataRuntime.upstreamImport.test.ts",
@@ -15261,14 +15309,14 @@
     {
       "path": "src/ts/storage/risuNestStorageDashboard.test.ts",
       "mode": "100644",
-      "bytes": 18236,
-      "sha256": "c7c9a361e942ec7b255d8d302b928a128cfc26f3ba56893856d6262de59046eb"
+      "bytes": 26647,
+      "sha256": "0d775d6e34646ea112323c5142f4b3ebbc18818f31ff1c2049abf8815d045a92"
     },
     {
       "path": "src/ts/storage/risuNestStorageDashboard.ts",
       "mode": "100644",
-      "bytes": 9297,
-      "sha256": "8d123cf158c930154d59cb7af907398fc957987f4a06ce05fc30e5e775fcc07a"
+      "bytes": 11238,
+      "sha256": "ee580960e2df3c76a28894cd1a04acf60f3f511ba3dc43e0e1b4f683c0cda351"
     },
     {
       "path": "src/ts/storage/risuSave.ts",
@@ -15483,14 +15531,14 @@
     {
       "path": "src/ts/storage/sync/bindingDefaults.test.ts",
       "mode": "100644",
-      "bytes": 5126,
-      "sha256": "3e3c483b9723bf0e50b8b12598ac72ae0f663ea9d9dd00bfb029cd5f777f64a8"
+      "bytes": 6184,
+      "sha256": "dfa9ff4158230e5b3873acb1b47730bcdb4e4428601badcb6439cd0a0484ac95"
     },
     {
       "path": "src/ts/storage/sync/bindingDefaults.ts",
       "mode": "100644",
-      "bytes": 6828,
-      "sha256": "2953a69f6b92ab63a36a7fe8edcb93729f96610a6495d7193a8fdda64efd899f"
+      "bytes": 7120,
+      "sha256": "df3ace30794232376d6d8b48f6e758d2416752e309814e7b60cdf18f77d09575"
     },
     {
       "path": "src/ts/storage/sync/bindingDialog.test.ts",
@@ -15519,20 +15567,20 @@
     {
       "path": "src/ts/storage/sync/bindingLocalData.test.ts",
       "mode": "100644",
-      "bytes": 3178,
-      "sha256": "736cbea121d4a6837f9bc6692aa84dd6d043becbbe1c4cec996d42a35b1dea61"
+      "bytes": 4920,
+      "sha256": "53f2e76e435a6d1be65b8462db2d2b2d65969f8a34e67e01fbbcd7fe7fffa86f"
     },
     {
       "path": "src/ts/storage/sync/bindingLocalData.ts",
       "mode": "100644",
-      "bytes": 2043,
-      "sha256": "8a1c014b039e945c9c489772f733192f757128dceb286f356845db1b59b42f23"
+      "bytes": 2731,
+      "sha256": "7d88cc80aa5bde0190a976ba7ef4bfab3b7a10f59d6f917caf92b15733d436df"
     },
     {
       "path": "src/ts/storage/sync/bindingLocalDataFlow.test.ts",
       "mode": "100644",
-      "bytes": 5438,
-      "sha256": "5b66e82c97362f9b9e97a12c435c90aee34010dd7606a9f12535ceae7a55e29a"
+      "bytes": 9396,
+      "sha256": "407fe80a97e6bd665b76197dc0c5a40d681a92f071e2f6fa3d47aa589287c522"
     },
     {
       "path": "src/ts/storage/sync/bindingNative.test.ts",
@@ -15549,14 +15597,14 @@
     {
       "path": "src/ts/storage/sync/bindingProduction.test.ts",
       "mode": "100644",
-      "bytes": 23645,
-      "sha256": "d43bbaf9607fc1289fd2647c4a5562df08df1d5bd68b72f0b65ffea0a9d3e8dd"
+      "bytes": 23922,
+      "sha256": "fa5644b9befb985c47d37a79f40d7063ad0bb1ceba46ff55d0379429e4483952"
     },
     {
       "path": "src/ts/storage/sync/bindingProduction.ts",
       "mode": "100644",
-      "bytes": 2370,
-      "sha256": "956e152caa55e2131678186f0d7316c753d7f034e1ef19c27d53189a75486ad6"
+      "bytes": 3007,
+      "sha256": "68e77a73a3c49ca0d0817eab06ff59060d23cc3f5bcc42109252638b412346af"
     },
     {
       "path": "src/ts/storage/sync/bindingRegistry.test.ts",
@@ -15835,16 +15883,28 @@
       "sha256": "45b9bdc27974977dce7d73b20b79bd36ad8a9d55054026d96a547c0340418b18"
     },
     {
+      "path": "src/ts/storage/sync/remainingTime.test.ts",
+      "mode": "100644",
+      "bytes": 7577,
+      "sha256": "b669725f4178d189c3ba312e2fd29b39a6dcef316c24099f6df5f57ec6667ea3"
+    },
+    {
+      "path": "src/ts/storage/sync/remainingTime.ts",
+      "mode": "100644",
+      "bytes": 3922,
+      "sha256": "81f4d6efbd905d0bb79c5274f78854a3c29bf1d3373378b83c4a7f2c2a8be653"
+    },
+    {
       "path": "src/ts/storage/sync/serverAssetResidency.test.ts",
       "mode": "100644",
-      "bytes": 9985,
-      "sha256": "c06f1b2dbc59a01eb80ac0b7b27f6343a8bd45822e624fbc64ac979ce6cb87a0"
+      "bytes": 10655,
+      "sha256": "1658e48a3ba4774ba9d17fa59f9e425b8d7e4c4a9e308e870ab9746542cd945b"
     },
     {
       "path": "src/ts/storage/sync/serverAssetResidency.ts",
       "mode": "100644",
-      "bytes": 4481,
-      "sha256": "9b8c116048dd2d25a5a60569ac00899600d173ec3b89aa399ee328d00aebde35"
+      "bytes": 4856,
+      "sha256": "abd42fe9a69d500e2d9602933abd54593778b2521448d4c197f4eaa4778b2d3d"
     },
     {
       "path": "src/ts/storage/sync/serverOnlyBoundary.test.ts",
@@ -15891,38 +15951,38 @@
     {
       "path": "src/ts/storage/sync/serverSyncProduction.test.ts",
       "mode": "100644",
-      "bytes": 48756,
-      "sha256": "4d14eb024ae1dda1d6bda77924001127e6b57f3ef41a36efd37ee57b31bf46c0"
+      "bytes": 73480,
+      "sha256": "a25dcf8df6df619fc1610d11442b2f73a3b04d1ec955057f77fbf25b9c523a56"
     },
     {
       "path": "src/ts/storage/sync/serverSyncProduction.ts",
       "mode": "100644",
-      "bytes": 31277,
-      "sha256": "1caf98db38b22e8dac688a6183feb886b33702f546c4988f8e205fc9cf4f2567"
+      "bytes": 36236,
+      "sha256": "390badab7a9ecc774409ef7022169b0bacecc79c02c8a5c9940d1658e8794273"
     },
     {
       "path": "src/ts/storage/sync/serverSyncProgress.test.ts",
       "mode": "100644",
-      "bytes": 12446,
-      "sha256": "0b99422ee0ee735b47c6e32d3329665b418389c1e9243b93ce4d3c392805392d"
+      "bytes": 19929,
+      "sha256": "96cc6734a186e2e0a17e8a2650026d1d66d9925521fd592c0216a48b3ec0bdaf"
     },
     {
       "path": "src/ts/storage/sync/serverSyncProgress.ts",
       "mode": "100644",
-      "bytes": 11819,
-      "sha256": "ce3372b1b19e13c00d3c22a96c12531f4b930ba7ea95f6ea028d38abaf505115"
+      "bytes": 14895,
+      "sha256": "541dc79bc09263269fa523ebfb6a9c9b535a0e6c18afbae755335a58b3b1eb4f"
     },
     {
       "path": "src/ts/storage/sync/serverSyncQr.test.ts",
       "mode": "100644",
-      "bytes": 4121,
-      "sha256": "073e1f9b2e9f270524c0f34b2926f127c6c29105a3b69996f3a94ebc85ba2f40"
+      "bytes": 4313,
+      "sha256": "bb09ddcc9eb74e6cf83b72dbab65d709bb36befc90b6b580d2f3f203ab7d9116"
     },
     {
       "path": "src/ts/storage/sync/serverSyncQr.ts",
       "mode": "100644",
-      "bytes": 2879,
-      "sha256": "acfd287ae080d51b7e4a3c93540b96fd81a23168fe916d39c049ce44940fe968"
+      "bytes": 767,
+      "sha256": "b9a90642cf6f0a37d629aa0a8ee1c91ea426775a7dcdeaa9dbfd67c6a27c33d0"
     },
     {
       "path": "src/ts/storage/sync/serverSyncRegistration.test.ts",
@@ -15957,26 +16017,26 @@
     {
       "path": "src/ts/storage/sync/serverSyncRuntime.test.ts",
       "mode": "100644",
-      "bytes": 8639,
-      "sha256": "f163c007d9216c4eb1fa44677f01b1d095d2b56de1614c688671f82b3c789f4c"
+      "bytes": 11071,
+      "sha256": "cb41fad9fe9ceb18040ad052829adbdff31a2d581c703470776b6e6f9edd4f98"
     },
     {
       "path": "src/ts/storage/sync/serverSyncScheduler.test.ts",
       "mode": "100644",
-      "bytes": 15548,
-      "sha256": "b7d79d9204086a759be129c0d249516037f7b0986076a16c530d45df63d4fa37"
+      "bytes": 16683,
+      "sha256": "83449cc64a0ab68bafb7c2a4f68e581fee888e894ddbf8a44ac8ecd847ecb8ad"
     },
     {
       "path": "src/ts/storage/sync/serverSyncScheduler.ts",
       "mode": "100644",
-      "bytes": 9356,
-      "sha256": "b0e70f20add7d5558a3cf7bb0d102d637aa6c5638b23018e149d6a3fba2715fb"
+      "bytes": 9502,
+      "sha256": "e0cb72d3b82efc24a5edfa69d00e6989b12b5ccb687fb83e21999539183a32f5"
     },
     {
       "path": "src/ts/storage/sync/serverSyncStartup.test.ts",
       "mode": "100644",
-      "bytes": 23458,
-      "sha256": "4eff317bb3a3f8478c3fba0580205698900028bbf116b80e41c7ca1219d3e49d"
+      "bytes": 26504,
+      "sha256": "4b4d32e319c0fd175025eaffd3534c8618afbe40d7a596b487630e3b6fca7d4c"
     },
     {
       "path": "src/ts/storage/sync/syncConflictBackup.test.ts",
@@ -16371,14 +16431,14 @@
     {
       "path": "src/ts/storage/upstreamReplacement.test.ts",
       "mode": "100644",
-      "bytes": 3089,
-      "sha256": "4d2336c4061af1ba96cd6683a61dd528108cd0983e62a16722a75aa4a4a4e78c"
+      "bytes": 4289,
+      "sha256": "b506865106b4108b462570b98b8afe61cecb0f1fd959d37fa15800b3a0b15689"
     },
     {
       "path": "src/ts/storage/upstreamReplacement.ts",
       "mode": "100644",
-      "bytes": 3466,
-      "sha256": "e2f346a0a3b37a30d1ddbe6c21eb072604901d009035a4dce9062a85fe7af287"
+      "bytes": 3705,
+      "sha256": "464af831b6f31854544ffbd84d881b578974374ff27a17cbd2d553fe0a9474d7"
     },
     {
       "path": "src/ts/storage/windowedNavigation.integration.test.ts",
@@ -16525,6 +16585,12 @@
       "sha256": "ac35b8962dfed59ea5f67b7c1f8b92c9abc22d4410ea06be8cffabdba0a21ad4"
     },
     {
+      "path": "src/ts/ui/messageSendKey.ts",
+      "mode": "100644",
+      "bytes": 566,
+      "sha256": "f2565bc8d25041e3e7b62b63cf47e07d0832cd11701488624b8bf63b0b9089ac"
+    },
+    {
       "path": "src/ts/ui/modalNavigation.test.ts",
       "mode": "100644",
       "bytes": 13574,
@@ -16559,6 +16625,30 @@
       "mode": "100644",
       "bytes": 1587,
       "sha256": "3e02e534a596a8a5f0b820ae6b3d1363b9945075ee04e99512092a248f23222f"
+    },
+    {
+      "path": "src/ts/ui/qrScanOverlay.test.ts",
+      "mode": "100644",
+      "bytes": 4470,
+      "sha256": "b5c09d4faaaf0aef74b184d6d9f3424ab71c8ff42d3faa284ea694cc2766e9e7"
+    },
+    {
+      "path": "src/ts/ui/qrScanOverlay.ts",
+      "mode": "100644",
+      "bytes": 760,
+      "sha256": "9255ff1d9bb4adf4bf3595463a8f8c261cd277747ab69fed33ad947c7c6d129b"
+    },
+    {
+      "path": "src/ts/ui/qrScanner.test.ts",
+      "mode": "100644",
+      "bytes": 7888,
+      "sha256": "93da1dcfbfbd3747d092679096b679bdf8799e38bf6b862e474f007ee3a4df63"
+    },
+    {
+      "path": "src/ts/ui/qrScanner.ts",
+      "mode": "100644",
+      "bytes": 4778,
+      "sha256": "0960b7e129dfc01f6b3e85d723514a3f931fcadd7f065532549b48ea9b0535e0"
     },
     {
       "path": "src/ts/ui/restoreFocusAfterInputBlock.test.ts",

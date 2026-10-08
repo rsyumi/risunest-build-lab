@@ -192,6 +192,12 @@ fn portable_error(failure: portable_backup::Error) -> NativeJobError {
         portable_backup::Error::Cancelled => {
             NativeJobError::new("cancelled", "Portable backup was cancelled")
         }
+        failure @ portable_backup::Error::RemotePayloadUnavailable => {
+            NativeJobError::new("remote-asset-unavailable", failure.to_string())
+        }
+        failure @ portable_backup::Error::PayloadMissing => {
+            NativeJobError::new("asset-missing", failure.to_string())
+        }
         failure => error(failure),
     }
 }
@@ -1326,6 +1332,43 @@ mod tests {
         assert_eq!(PersistentStore::open(&restore.target).unwrap().revision().unwrap(), restore.revision);
     }
 
+    /// Exports a library whose one asset body is not on this device, held as `held` says.
+    fn export_without_local_body(held: bool) -> (NativeJobError, bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let mut store = library(&source);
+        let body = b"synthetic body kept elsewhere";
+        let hash = crate::server_sync::lww_tests::put_asset(&mut store, "assets/synthetic-elsewhere.bin", body)
+            .object_hash
+            .unwrap();
+        let cas = crate::asset_repository::PayloadCas::new(&source).unwrap();
+        fs::remove_file(cas.object_path(&hash).unwrap().unwrap()).unwrap();
+        if held {
+            // Custody is recorded, but the server cannot be reached.
+            crate::server_sync::residency::test_remote::hold(&source, &[(&hash, body.len() as u64)]);
+        }
+        let jobs = directory.path().join("jobs");
+        fs::create_dir_all(&jobs).unwrap();
+        let revision = store.revision().unwrap();
+        let export = super::super::JobRegistry::default()
+            .create_internal(super::super::JobKind::ExportPortableBackup, Some(revision), vec![], false)
+            .unwrap();
+        let destination = directory.path().join("backup.risunest");
+        let failure = export_portable(Some(&destination), revision, &jobs, &directory.path().join("handoffs"), store, &export, None, "9.8.7-synthetic")
+            .unwrap_err();
+        (failure, destination.exists())
+    }
+
+    #[test]
+    fn an_export_names_a_body_it_could_not_fetch_or_find_and_writes_nothing() {
+        let (unfetched, written) = export_without_local_body(true);
+        assert_eq!(unfetched.code, "remote-asset-unavailable");
+        assert!(!written);
+        let (missing, written) = export_without_local_body(false);
+        assert_eq!(missing.code, "asset-missing");
+        assert!(!written);
+    }
+
     #[test]
     fn portable_disk_full_keeps_its_classification_through_wrappers() {
         let disk_full = || std::io::Error::from(std::io::ErrorKind::StorageFull);
@@ -2034,6 +2077,68 @@ mod tests {
             .find(|character| character["chaId"] == "synthetic-large")
             .unwrap();
         assert!(character["chats"][0]["message"][0]["data"] == data.as_str());
+    }
+
+    #[test]
+    fn a_library_with_archived_characters_exports_without_preservation_and_restores_exactly() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let mut store = library(&source);
+        crate::persistent_store::tests::data_health_tests::add_character_with_additional_asset(&mut store, "char-owner");
+        let character = |database: &serde_json::Value, id: &str| {
+            database["characters"].as_array().unwrap().iter().find(|character| character["chaId"] == id).cloned()
+        };
+        let before = store.materialize(None).unwrap();
+        for id in ["char-a", "char-owner"] {
+            let revision = store.revision().unwrap();
+            store.archive_character(id, revision, 10).unwrap();
+        }
+        let jobs = directory.path().join("jobs");
+        fs::create_dir_all(&jobs).unwrap();
+        let revision = store.revision().unwrap();
+        let export = super::super::JobRegistry::default()
+            .create_internal(super::super::JobKind::ExportPortableBackup, Some(revision), vec![], false)
+            .unwrap();
+        let result = export_portable(None, revision, &jobs, &directory.path().join("handoffs"), store, &export, None, "9.8.7-synthetic")
+            .expect("a library with archived characters exports without a preservation prompt");
+        assert!(result.warning_codes.is_empty(), "{:?}", result.warning_codes);
+        let path = std::path::PathBuf::from(result.handoff_path.unwrap());
+        let archive = VerifiedArchive::open(File::open(&path).unwrap(), &jobs, &NeverCancelled).unwrap();
+        let archived: i64 = archive
+            .db
+            .query_row("SELECT count(*) FROM characters WHERE archived_object IS NOT NULL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(archived, 2);
+        drop(archive);
+
+        let target = directory.path().join("target");
+        let target_store = library(&target);
+        let target_revision = target_store.revision().unwrap();
+        let restore_jobs = directory.path().join("restore-job");
+        fs::create_dir(&restore_jobs).unwrap();
+        let restore = super::super::JobRegistry::default()
+            .create_internal(super::super::JobKind::RestorePortableBackup, Some(target_revision), vec![], false)
+            .unwrap();
+        let bytes = fs::metadata(&path).unwrap().len();
+        restore_portable(
+            OpenedJobSource { file: File::open(path).unwrap(), custody: None, total_bytes: bytes },
+            true,
+            target_revision,
+            &restore_jobs,
+            target_store,
+            &restore,
+            None,
+        )
+        .unwrap();
+        let mut restored = PersistentStore::open(&target).unwrap();
+        for id in ["char-a", "char-owner"] {
+            let revision = restored.revision().unwrap();
+            restored.restore_character(id, revision).unwrap();
+        }
+        let after = restored.materialize(None).unwrap();
+        for id in ["char-a", "char-b", "char-c", "char-owner"] {
+            assert_eq!(character(&after, id), character(&before, id), "{id}");
+        }
     }
 
     #[test]

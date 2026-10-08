@@ -30,6 +30,8 @@ mod media_admission_tests;
 #[cfg(test)]
 mod residency_lww_tests;
 #[cfg(test)]
+mod representative_image_tests;
+#[cfg(test)]
 pub(crate) mod previous_storage_tests;
 
 #[derive(Debug, serde::Serialize)]

@@ -1,8 +1,19 @@
 use super::*;
-use risunest_sync_wire::lww::{NewDeviceClaimReceipt, NewDeviceClaimRequest, NewDeviceClaimStatus};
+use risunest_sync_wire::lww::{
+    NewDeviceClaimReceipt, NewDeviceClaimRequest, NewDeviceClaimState, NewDeviceClaimStatus,
+};
+
+/// Whether a writer or operation already belongs to the device, which keeps it from claiming one.
+fn registration_used(tx: &rusqlite::Transaction, device: &Device) -> Result<bool> {
+    Ok(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM writers WHERE device=?1) OR EXISTS(SELECT 1 FROM operations WHERE device=?1)",
+        [&device.id],
+        |row| row.get(0),
+    )?)
+}
 
 impl Store {
-    pub fn new_device_writer_claim(&self, device: &Device) -> Result<Option<NewDeviceClaimStatus>> {
+    pub fn new_device_writer_claim(&self, device: &Device) -> Result<NewDeviceClaimState> {
         let mut db = self.db()?;
         let tx = db.transaction()?;
         Self::require_device(&tx, device)?;
@@ -13,14 +24,18 @@ impl Store {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        saved
-            .map(|(request_digest, body)| {
+        let claim = saved
+            .map(|(request_digest, body)| -> Result<_> {
                 Ok(NewDeviceClaimStatus {
                     request_digest,
                     receipt: parse(&body)?,
                 })
             })
-            .transpose()
+            .transpose()?;
+        Ok(NewDeviceClaimState {
+            claim,
+            used: registration_used(&tx, device)?,
+        })
     }
 
     pub fn claim_new_device_writer(
@@ -46,12 +61,7 @@ impl Store {
             }
             return parse(&body);
         }
-        let used: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM writers WHERE device=?1) OR EXISTS(SELECT 1 FROM operations WHERE device=?1)",
-            [&device.id],
-            |row| row.get(0),
-        )?;
-        if used {
+        if registration_used(&tx, device)? {
             return Err(Error::new("registration-used", 409));
         }
         let authorization_used: bool = tx.query_row(

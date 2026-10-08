@@ -10,7 +10,7 @@
     import SettingToggle from '../RisuNest/SettingToggle.svelte'
     import SettingNotice from '../RisuNest/SettingNotice.svelte'
     import StatusBadge from '../RisuNest/StatusBadge.svelte'
-    import { CloudIcon, DatabaseIcon, PackageIcon, PinIcon, ServerIcon } from '@lucide/svelte'
+    import { CloudIcon, DatabaseIcon, MonitorSmartphoneIcon, PackageIcon, PinIcon, ServerIcon } from '@lucide/svelte'
     import { alertConfirm, alertNormal, alertCheckboxConfirm } from 'src/ts/alert'
     import { DBState } from 'src/ts/stores.svelte'
     import { getExternalStorageBridge } from 'src/ts/storage/sync/external/bridge'
@@ -43,8 +43,9 @@
         ExternalSnapshotExportProgress,
     } from 'src/ts/storage/sync/external/types'
     import { externalRestoreAreas } from 'src/ts/storage/sync/external/restoreScope'
-    import { downloadRemoteAssets, getAssetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency'
+    import { countConnectionOnlyAssets, downloadRemoteAssets } from 'src/ts/storage/sync/serverAssetResidency'
     import { formatRisuNestStorageBytes } from 'src/ts/storage/risuNestStorageDashboard'
+    import { createRemainingTimeEstimator, formatRemaining } from 'src/ts/storage/sync/remainingTime'
     import ConnectionForm from './ConnectionForm.svelte'
     import { externalConnectionTitle, externalErrorKind, externalErrorMessage, externalStorageStrings } from './strings'
 
@@ -53,8 +54,6 @@
     const EMPTY_HISTORY_STEPS = 4
     /** What a repository accepts for each retention limit. */
     const RETENTION_LIMITS = { keepCount: [1, 1000], keepDays: [7, 3650] } as const
-    /** How long disconnecting waits for the file check before it asks without the check's answer. */
-    const REMOTE_ONLY_CHECK_MS = 3_000
     const strings = $derived(externalStorageStrings(DBState.db.language))
     let storageState = $state<ExternalStorageState | null>(null)
     let adding = $state(false)
@@ -82,6 +81,8 @@
     let quota = $state<Record<string, ExternalQuotaSummary>>({})
     let remoteOnly = $state<Record<string, number | null>>({})
     let removalDownload = $state<{ connectionId: string; controller: AbortController; cancelling: boolean } | null>(null)
+    /** The disconnect waiting for its file check, which cancelling abandons. */
+    let removalCheck = $state<{ connectionId: string; controller: AbortController } | null>(null)
     let recoveryKey = $state('')
     let recoveryPanel = $state<HTMLDivElement | undefined>()
     let connectionSettings = $state<ExternalConnectionSettingsMaterial | null>(null)
@@ -97,6 +98,9 @@
     /** The state an automatic backup switch was set to while its change runs. Otherwise it shows the stored setting. */
     let automaticRequest = $state<Record<string, boolean>>({})
     let stopBindingChanges: (() => void) | undefined
+    /** Time left of each connection's running transfer, once its rate is known. */
+    let remaining = $state<Record<string, number>>({})
+    const remainingEstimators = new Map<string, ReturnType<typeof createRemainingTimeEstimator>>()
 
     async function setSyncBinding(connection: ExternalConnectionSummary, enabled: boolean): Promise<void> {
         busy = true
@@ -153,6 +157,7 @@
         }
         try {
             storageState = await bridge.getState()
+            estimateRemaining(storageState)
             for (const connection of storageState.connections) {
                 if (historyRequested.has(connection.id)) continue
                 historyRequested.add(connection.id)
@@ -187,6 +192,23 @@
         await refresh()
         const open = storageState?.connections.filter(connection => selectedTab(connection.id) === 'history') ?? []
         await Promise.all(open.map(connection => loadHistory(connection, false)))
+    }
+
+    function estimateRemaining(state: ExternalStorageState): void {
+        const at = Date.now()
+        const next: Record<string, number> = {}
+        for (const connection of state.connections) {
+            const job = state.jobs.find(item => item.connectionId === connection.id)
+            // Only a running phase measured in bytes against a fixed total has a time left.
+            const phase = job && externalJobIsActive(job) && !externalJobIsPaused(job) && activeJobFraction(job) !== null
+                ? `${job.id}:${job.phase}:${job.counters ?? ''}` : undefined
+            const items = { done: Number(job?.completedItems), total: Number(job?.totalItems) }
+            let estimator = remainingEstimators.get(connection.id)
+            if (!estimator) remainingEstimators.set(connection.id, estimator = createRemainingTimeEstimator())
+            const left = estimator.update(phase, Number(job?.completedBytes ?? 0), Number(job?.totalBytes ?? 0), at, Number.isFinite(items.done) && items.total > 0 ? items : undefined)
+            if (left !== undefined) next[connection.id] = left
+        }
+        remaining = next
     }
 
     function schedulePoll(whileBusy = false): void {
@@ -425,8 +447,8 @@
     }
 
     /** Files only this connection holds, as the residency status counts them. */
-    async function remoteOnlyFiles(connection: ExternalConnectionSummary): Promise<number> {
-        return (await getAssetResidencyStatus()).externalObjects.find(entry => entry.connectionId === connection.id)?.objects ?? 0
+    function remoteOnlyFiles(connection: ExternalConnectionSummary): Promise<number> {
+        return countConnectionOnlyAssets(connection.id)
     }
 
     async function loadRemoteOnlyFiles(connection: ExternalConnectionSummary): Promise<void> {
@@ -498,24 +520,26 @@
     async function removeConnection(connection: ExternalConnectionSummary): Promise<void> {
         busy = true
         activeAction = `remove:${connection.id}`
+        const check = new AbortController()
+        removalCheck = { connectionId: connection.id, controller: check }
         let held: number | undefined
-        let timer: ReturnType<typeof setTimeout> | undefined
         try {
             held = await Promise.race([
                 remoteOnlyFiles(connection),
-                new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), REMOTE_ONLY_CHECK_MS) }),
+                new Promise<undefined>(resolve => check.signal.addEventListener('abort', () => resolve(undefined), { once: true })),
             ])
         } catch {} finally {
-            clearTimeout(timer)
+            removalCheck = null
             busy = false
             activeAction = ''
         }
+        if (check.signal.aborted) return
         const remoteOnly = held !== 0
         // The card's own two lines tell apart connections to one service and account.
         const name = `${externalConnectionTitle(strings, connection)}\n${connectionPlace(connection)}`
         const choice = await alertCheckboxConfirm({
             title: strings.removeTitle,
-            description: remoteOnly ? `${name}\n\n${held === undefined ? strings.removeRemoteOnlyUnknown : strings.removeRemoteOnly}` : name,
+            description: remoteOnly ? `${name}\n\n${strings.removeDeletes}\n\n${held === undefined ? strings.removeRemoteOnlyUnknown : strings.removeRemoteOnly}` : name,
             checkboxLabel: remoteOnly ? strings.downloadThenRemove : strings.removeAcknowledge,
             actionLabel: strings.remove,
             cancelLabel: strings.cancel,
@@ -697,12 +721,15 @@
         return (job.kind === 'restore' && strings.restorePhases[job.phase]) || strings.jobActive[job.kind]
     }
 
+    // A backup registers each pack as it seals it, so its upload has no total until it ends.
+    const uploadTotalGrows = (job: ExternalJobSummary) => job.kind === 'backup' && job.counters === 'transferred' && externalJobIsActive(job)
+
     function activeJobFraction(job: ExternalJobSummary): number | null {
-        return job.kind === 'restore' && RESTORE_APPLY_PHASES.has(job.phase) ? null : externalJobProgress(job)
+        return (job.kind === 'restore' && RESTORE_APPLY_PHASES.has(job.phase)) || uploadTotalGrows(job) ? null : externalJobProgress(job)
     }
 
     function jobSize(job: ExternalJobSummary): string {
-        const size = `${bytes(job.completedBytes)}${job.totalBytes ? ` / ${bytes(job.totalBytes)}` : ''}`
+        const size = `${bytes(job.completedBytes)}${job.totalBytes && !uploadTotalGrows(job) ? ` / ${bytes(job.totalBytes)}` : ''}`
         return job.counters ? `${strings.jobCounters[job.counters]} ${size}` : size
     }
 
@@ -768,6 +795,7 @@
     onDestroy(() => {
         destroyed = true
         removalDownload?.controller.abort()
+        removalCheck?.controller.abort()
         clearTimeout(pollTimer)
         stopJobEvents?.()
         stopSyncFailures?.()
@@ -854,6 +882,9 @@
                 {#if job && externalJobIsPaused(job) && job.error?.retryAtMs}<p class="note">{strings.retryAt.replace('{0}', when(job.error.retryAtMs))}</p>{/if}
                 {#if job && externalJobIsActive(job) && !externalJobIsPaused(job)}
                     <SettingProgress label={activeJobLabel(job)} detail={jobSize(job)} fraction={activeJobFraction(job)} />
+                    {#if remaining[connection.id] !== undefined}
+                        <dl class="kv"><dt>{strings.remaining}</dt><dd>{formatRemaining(remaining[connection.id])}</dd></dl>
+                    {/if}
                 {/if}
 
                 {#if unlockConnection?.id === connection.id}
@@ -905,9 +936,13 @@
                                             <div class="item-head">
                                                 <span class="kind" data-kind={item.kind}>{strings.historyKinds[item.kind]}</span>
                                                 <span class="item-time">{when(item.createdAtMs)}</span>
-                                                {#if item.pinned}<span class="kept"><PinIcon size={12} aria-hidden="true" />{strings.pinned}</span>{/if}
+                                                {#if item.pinned || item.sameDevice}
+                                                    <span class="item-flags">
+                                                        {#if item.pinned}<span class="flag"><PinIcon size={12} aria-hidden="true" />{strings.pinned}</span>{/if}
+                                                        {#if item.sameDevice}<span class="flag item-device"><MonitorSmartphoneIcon size={12} aria-hidden="true" />{strings.thisDevice}</span>{/if}
+                                                    </span>
+                                                {/if}
                                             </div>
-                                            {#if item.sameDevice}<p class="item-meta">{strings.thisDevice}</p>{/if}
                                             <div class="item-actions">
                                                 <SettingButton size="sm" variant="secondary" disabled={busy || (job && externalJobIsActive(job)) || !usable} onclick={() => beginRestore(connection, item)}>{strings.restore}</SettingButton>
                                                 <SettingButton size="sm" variant="quiet" disabled={busy || (job && externalJobIsActive(job)) || !usable} onclick={() => exportSnapshot(connection.id, item.snapshotId)}>{strings.download}</SettingButton>
@@ -1007,6 +1042,8 @@
                     <span class="foot-end">
                         {#if removalDownload?.connectionId === connection.id}
                             <SettingButton variant="secondary" disabled={removalDownload.cancelling} onclick={() => { if (removalDownload) { removalDownload.cancelling = true; removalDownload.controller.abort() } }}>{strings.cancel}</SettingButton>
+                        {:else if removalCheck?.connectionId === connection.id}
+                            <SettingButton variant="secondary" onclick={() => removalCheck?.controller.abort()}>{strings.cancel}</SettingButton>
                         {/if}
                         <SettingButton variant="danger" busy={activeAction === `remove:${connection.id}`} disabled={busy} onclick={() => removeConnection(connection)}>{strings.remove}</SettingButton>
                     </span>
@@ -1303,18 +1340,24 @@
         font-weight: 500;
         font-variant-numeric: tabular-nums;
     }
-    .kept {
+    .item-flags {
+        display: inline-flex;
+        flex-wrap: wrap;
+        align-items: center;
+        row-gap: 0.25rem;
+    }
+    .flag {
         display: inline-flex;
         align-items: center;
         gap: 0.25rem;
         font-size: 12px;
+        line-height: 1.25;
         color: var(--risu-theme-textcolor2);
     }
-    .item-meta {
-        margin: 0;
-        font-size: 12.5px;
-        color: var(--risu-theme-textcolor2);
-        overflow-wrap: anywhere;
+    .flag + .flag {
+        margin-left: 0.5rem;
+        padding-left: 0.5rem;
+        border-left: 1px solid var(--risu-theme-darkborderc);
     }
     .item-actions {
         display: flex;

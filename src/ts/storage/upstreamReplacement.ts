@@ -48,20 +48,29 @@ export async function acquireUpstreamImportPause(runtime: UpstreamReplacementRun
     }
 }
 
+async function hasLibraryContent(): Promise<boolean> {
+    try {
+        return await (await import('./sync/bindingLocalData')).hasLocalLibraryContent()
+    } catch {
+        // An unreadable library still asks.
+        return true
+    }
+}
+
 export async function confirmUpstreamLibraryReplacement(bound: boolean, warnings: string[] = []): Promise<boolean> {
-    const [{ alertActionConfirm, alertCheckboxConfirm }, { language }, { nativeFileJobHost }] = await Promise.all([
+    const [alert, { language }, { nativeFileJobHost }] = await Promise.all([
         import('../alert'), import('../../lang'), import('./nativeFileJobManager'),
     ])
-    // The onboarding runs on a device without data, so an unbound restore there replaces nothing.
-    if (!bound && get(nativeFileJobHost) === 'onboarding') {
-        return warnings.length === 0 || await alertActionConfirm({
+    // In the onboarding, an unbound restore over a library without content replaces nothing.
+    if (!bound && get(nativeFileJobHost) === 'onboarding' && !await hasLibraryContent()) {
+        return warnings.length === 0 || await alert.alertActionConfirm({
             title: language.lwwSync.restoreTitle,
             description: warnings.join('\n\n'),
             actionLabel: language.lwwSync.restoreAction,
             cancelLabel: language.lwwSync.cancelAction,
         })
     }
-    return (await alertCheckboxConfirm({
+    return (await alert.alertCheckboxConfirm({
         title: language.lwwSync.restoreTitle,
         description: [bound ? language.lwwSync.restoreDescriptionBound : language.lwwSync.restoreDescription, ...warnings].join('\n\n'),
         checkboxLabel: language.lwwSync.restoreAcknowledge,

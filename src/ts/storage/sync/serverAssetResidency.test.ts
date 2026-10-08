@@ -4,7 +4,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: mock.invoke }))
 vi.mock('../../mobileBackgroundTask', () => ({ beginMobileBackgroundTask: mock.begin }))
 vi.mock('src/ts/stores.svelte', () => ({ selectedCharID: { subscribe: (run: (value: number) => void) => { run(mock.selectedIndex); return () => {} } } }))
 vi.mock('../database.svelte', () => ({ getDatabase: () => ({ characters: [{ chaId: 'selected-policy-character' }] }) }))
-import { downloadRemoteAssets, evictLocalAssets, getAssetResidencyStatus, setAssetResidencyPolicy } from './serverAssetResidency'
+import { countConnectionOnlyAssets, downloadRemoteAssets, evictLocalAssets, getAssetResidencyStatus, setAssetResidencyPolicy } from './serverAssetResidency'
 
 const status = { policy: 'full', localBytes: 2, remoteBytes: 1, remoteObjects: 1, serverBytes: 1, serverObjects: 1, externalObjects: [], unavailableObjects: 0, evictedBytes: 0 }
 beforeEach(() => { vi.resetAllMocks(); mock.selectedIndex = 0 })
@@ -53,6 +53,16 @@ describe('asset residency mobile lifetime', () => {
         ]) {
             mock.invoke.mockResolvedValueOnce(invalid)
             await expect(getAssetResidencyStatus()).rejects.toThrow('invalid-asset-residency-status')
+        }
+    })
+    it('counts the files one connection alone holds and rejects a malformed count', async () => {
+        mock.invoke.mockResolvedValueOnce(2)
+        await expect(countConnectionOnlyAssets('receiver')).resolves.toBe(2)
+        expect(mock.invoke).toHaveBeenCalledExactlyOnceWith('asset_residency_connection_objects', { connectionId: 'receiver' })
+        expect(mock.begin).not.toHaveBeenCalled()
+        for (const invalid of [undefined, -1, 1.5, '2']) {
+            mock.invoke.mockResolvedValueOnce(invalid)
+            await expect(countConnectionOnlyAssets('receiver')).rejects.toThrow('invalid-asset-residency-status')
         }
     })
     it('writes remote policy without background admission', async () => {

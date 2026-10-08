@@ -44,6 +44,7 @@ import type {
 import type { CharacterActivationOptions } from './activeWorkingSet.svelte'
 import { notifyLocalPersistentRevision } from './persistentRevisionEvents'
 import { retryCommittedWorkingSetRefreshWithContinuation } from './committedWorkingSetContinuation'
+import { invalidatePluginDeviceKeyspaces } from '../plugins/pluginDeviceKeyspace'
 import {
     capturePersistentRoot,
     capturePersistentPluginStorage,
@@ -159,8 +160,7 @@ export function createProductionStateAdapter(options: {
             void applyReceivedDisplaySettings(fields).catch((error) => console.error(error))
         },
         afterRemotePluginChange() {
-            // The reload a local plugin toggle runs.
-            void import('../plugins/plugins.svelte').then(({ loadPlugins }) => loadPlugins())
+            void import('../plugins/plugins.svelte').then(({ requestPluginReloadAfterSync }) => requestPluginReloadAfterSync())
                 .catch((error) => productionConfiguration.onBackgroundError?.(error))
         },
         captureCharacterIndex: () => characterIndex,
@@ -415,6 +415,9 @@ export function createProductionStateAdapter(options: {
         },
         onPluginStorageChanged(owner) {
             notifyPluginStorageOwnerChanged(owner)
+        },
+        onPluginDeviceStorageChanged(owner) {
+            invalidatePluginDeviceKeyspaces(owner)
         },
         getGeneratingConversations: () => generatingConversations.snapshot(),
         subscribeConversationOperationActive(listener) {

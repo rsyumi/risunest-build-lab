@@ -9,7 +9,6 @@ import { beginPluginClaimSession, type PluginClaimSession } from "../pluginClaim
 import DOMPurify from 'dompurify';
 import { additionalChatMenu, additionalFloatingActionButtons, additionalHamburgerMenu, additionalSettingsMenu, bodyIntercepterStore, chatPanelStore, DBState, selectedCharID, type MenuDef } from "src/ts/stores.svelte";
 import { v4 } from "uuid";
-import { sleep } from "src/ts/util";
 import { alertConfirm, alertError, alertNormal } from "src/ts/alert";
 import { language } from "src/lang";
 import { checkCharOrder, forageStorage, getFetchLogs } from "src/ts/globalApi.svelte";
@@ -586,6 +585,7 @@ class SafeMutationObserver {
 }
 
 const pluginUnloadCallbacks: Map<string, Function[]> = new Map();
+const pluginGuestUnloadCallbacks = new Map<string, Function[]>();
 
 const addPluginUnloadCallback = (pluginName: string, callback: Function) => {
     if(!pluginUnloadCallbacks.has(pluginName)){
@@ -619,36 +619,31 @@ const removePluginChatPanels = (pluginName: string) => {
 }
 
 const unloadV3Plugin = async (pluginName: string) => {
-    pluginDatabaseAccessByOwner.get(pluginName)?.closeReadBaselines?.()
-    pluginDatabaseAccessByOwner.delete(pluginName)
-    const callbacks = pluginUnloadCallbacks.get(pluginName);
     const instance = v3PluginInstances.find(p => p.name === pluginName);
-    if(instance){
-        const index = v3PluginInstances.findIndex(p => p.name === pluginName);
-        if(index !== -1){
-            v3PluginInstances.splice(index, 1);
-        }
-    }
-    if(callbacks){
-        pluginUnloadCallbacks.delete(pluginName); 
-        let promises: Promise<void>[] = [];
-        for(const callback of callbacks){
-            const result = callback();
-            if(result instanceof Promise){
-                promises.push(result);
-            }
-        }
-
-        await Promise.any([
-            Promise.all(promises),
-            sleep(1000) //timeout after 1 second
-        ])
-    }
+    instance?.host.beginUnload?.();
+    const guestCallbacks = pluginGuestUnloadCallbacks.get(pluginName) ?? [];
+    pluginGuestUnloadCallbacks.delete(pluginName);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
-        instance?.host?.terminate();        
-        await instance?.host?.drainStorageMutations?.()
-    } catch (error) {
-        console.error(`Error terminating plugin ${pluginName}:`, error);
+        if (guestCallbacks.length > 0) {
+            const settled = Promise.allSettled(guestCallbacks.map(async (callback) =>
+                instance?.host.invokeUnloadCallback ? instance.host.invokeUnloadCallback(callback) : callback()));
+            await Promise.race([settled, new Promise<void>(resolve => { timeout = setTimeout(resolve, 1000); })]);
+        }
+    } finally {
+        clearTimeout(timeout);
+        // Keep DOM and permission access available until the guest finishes its cleanup.
+        const callbacks = pluginUnloadCallbacks.get(pluginName) ?? [];
+        pluginUnloadCallbacks.delete(pluginName);
+        await Promise.allSettled(callbacks.map(async callback => callback()));
+        instance?.host.terminate();
+        pluginGuestUnloadCallbacks.delete(pluginName);
+        await instance?.host.drainStorageMutations?.();
+        pluginDatabaseAccessByOwner.get(pluginName)?.closeReadBaselines?.();
+        pluginDatabaseAccessByOwner.delete(pluginName);
+        const index = v3PluginInstances.indexOf(instance);
+        if (index >= 0) v3PluginInstances.splice(index, 1);
+        notifyPluginActivity();
     }
 }
 
@@ -1371,7 +1366,12 @@ const makeRisuaiAPIV3 = (
             addPluginUnloadCallback(plugin.name, () => removePluginChatPanels(plugin.name));
             return {id};
         },
-        registerMCP: (...args: Parameters<typeof registerMCPModule>) => registerOwnedPluginMCP(plugin.name, ...args),
+        registerMCP: async (...args: Parameters<typeof registerMCPModule>) => {
+            if (pluginLifetime.signal.aborted) throw new Error('Plugin sandbox terminated');
+            const dispose = await registerOwnedPluginMCP(plugin.name, ...args);
+            if (pluginLifetime.signal.aborted) dispose();
+            else addPluginUnloadCallback(plugin.name, dispose);
+        },
         unregisterMCP: unregisterMCPModule,
         unregisterUIPart: (id: string) => {
             const removeFromMenuStore = (menuStore: MenuDef[]) => {
@@ -1400,7 +1400,9 @@ const makeRisuaiAPIV3 = (
             return observer
         },
         onUnload: (callback: () => void) => {
-            addPluginUnloadCallback(plugin.name, callback);
+            const callbacks = pluginGuestUnloadCallbacks.get(plugin.name) ?? [];
+            callbacks.push(callback);
+            pluginGuestUnloadCallbacks.set(plugin.name, callbacks);
         },
         getFetchLogs: async () => {
             const unsafeFetchLog = getFetchLogs()
@@ -1558,7 +1560,7 @@ const makeRisuaiAPIV3 = (
                 // explicitly with `allowPlugins: true`, accepting responsibility
                 // for avoiding provider-to-provider call loops.
                 blockPlugins: !options.allowPlugins,
-            }, options.mode)
+            }, options.mode, pluginLifetime.signal)
         },
         sendChat: async (message: string) => {
             const authorityEpoch = getPersistentStorageAuthorityEpoch();
@@ -1741,8 +1743,40 @@ type V3PluginInstance = {
 }
 
 const v3PluginInstances: V3PluginInstance[] = [];
+const pluginActivityListeners = new Set<() => void>();
+const pluginLoadMutex = new Mutex();
+let authorityReplacementFenced = false;
+
+function notifyPluginActivity(): void {
+    for (const listener of pluginActivityListeners) listener();
+}
+
+export function subscribeV3PluginActivity(listener: () => void): () => void {
+    pluginActivityListeners.add(listener);
+    const unsubscribe = doingChat.subscribe(listener);
+    return () => { pluginActivityListeners.delete(listener); unsubscribe(); };
+}
+
+/** A reload may stop plugin work, but never a chat generation or an authority replacement. */
+export function canInterruptV3Plugins(): boolean {
+    return !authorityReplacementFenced && !get(doingChat);
+}
+
+export function areV3PluginsIdle(): boolean {
+    return canInterruptV3Plugins()
+        && v3PluginInstances.every(({ host }) => host.isIdle?.() ?? true);
+}
+
+export function prepareV3PluginsForReload(interrupt = false): boolean {
+    if (!(interrupt ? canInterruptV3Plugins() : areV3PluginsIdle())) return false;
+    for (const { host } of v3PluginInstances) host.beginUnload?.();
+    return true;
+}
 
 export async function fencePluginExecutionForAuthorityReplacement(): Promise<void> {
+    authorityReplacementFenced = true;
+    const { cancelPluginReloadAfterSync } = await import('../plugins.svelte');
+    cancelPluginReloadAfterSync();
     for (const access of pluginDatabaseAccessByOwner.values()) access.expireReadBaselines?.()
     await loadV3Plugins([])
     for (const access of pluginDatabaseAccessByOwner.values()) access.closeReadBaselines?.()
@@ -1756,23 +1790,28 @@ export async function invalidatePluginCachesAfterAuthorityReplacement(): Promise
 }
 
 export async function restartPluginsAfterAuthorityReplacement(): Promise<void> {
+    authorityReplacementFenced = false;
     const {loadPluginsAfterAuthoritativeRestore} = await import('../plugins.svelte')
     await loadPluginsAfterAuthoritativeRestore()
 }
 
-export async function loadV3Plugins(plugins:RisuPlugin[]){
-    const instancesToUnload = [...v3PluginInstances];
-    await Promise.all(instancesToUnload.map(async (instance) => {
-        await unloadV3Plugin(instance.name);
-    }));
+export async function loadV3Plugins(plugins:RisuPlugin[], isCurrent: () => boolean = () => true){
+    await pluginLoadMutex.runExclusive(async () => {
+        if (!isCurrent()) return;
+        const instancesToUnload = [...v3PluginInstances];
+        await Promise.all(instancesToUnload.map(async (instance) => {
+            await unloadV3Plugin(instance.name);
+        }));
 
-    for(const entry of documentEventListeners){
-        entry.target.removeEventListener(entry.type, entry.listener, entry.options);
-    }
-    documentEventListeners.length = 0;
+        for(const entry of documentEventListeners){
+            entry.target.removeEventListener(entry.type, entry.listener, entry.options);
+        }
+        documentEventListeners.length = 0;
 
-    const loadPromises = plugins.map(plugin => executePluginV3(plugin));
-    await Promise.all(loadPromises);
+        if (!isCurrent() || authorityReplacementFenced) return;
+        const loadPromises = plugins.map(plugin => executePluginV3(plugin));
+        await Promise.all(loadPromises);
+    });
 }
 
 export async function executePluginV3(plugin:RisuPlugin){
@@ -1788,6 +1827,7 @@ export async function executePluginV3(plugin:RisuPlugin){
     document.body.appendChild(iframe);
     const claimSession: { current: PluginClaimSession | null } = { current: null };
     const host = new SandboxHost(makeRisuaiAPIV3(iframe, plugin, claimSession));
+    host.onActivityChanged?.(notifyPluginActivity);
     v3PluginInstances.push({
         name: plugin.name,
         host

@@ -24,6 +24,10 @@
         localValue = getSettingValue(item, ctx)
     })
 
+    $effect(() => item.subscribeValue?.(() => {
+        localValue = getSettingValue(item, ctx)
+    }))
+
     $effect(() => {
         const value = localValue
         if (value === UNINITIALIZED) return

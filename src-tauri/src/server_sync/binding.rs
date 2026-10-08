@@ -9,7 +9,7 @@ use crate::persistent_store::{
     PersistentStore,
 };
 use risunest_sync_wire::{
-    lww::{AckRequest, NewDeviceClaimReceipt, NewDeviceClaimRequest, NewDeviceClaimStatus, StatePage, StatePin},
+    lww::{AckRequest, NewDeviceClaimReceipt, NewDeviceClaimRequest, NewDeviceClaimState, StatePage, StatePin},
     stamp::DecimalU64,
     MAX_METADATA_BYTES,
 };
@@ -110,14 +110,65 @@ fn first_state_page(core: &LwwClient) -> Result<StatePage> {
     }
     Ok(page)
 }
-pub(crate) fn inspect(store: &PersistentStore, header: &Header) -> Result<Inspection> {
+/// Refuses a registration the server would refuse later in this join, before the library is read.
+/// A join that keeps this installation's writer needs a registration unclaimed or claimed by that
+/// writer. A join that claims a fresh writer needs a registration nothing has used, unless it is
+/// the claim of this installation's own fresh-writer reservation.
+fn check_registration(
+    core: &LwwClient,
+    store: &PersistentStore,
+    config: &StoredConfig,
+    claims_writer: bool,
+) -> Result<()> {
+    let (_, state): (_, NewDeviceClaimState) = core.client.json(
+        reqwest::Method::GET,
+        "session/claim-writer",
+        &[],
+        None::<&()>,
+        &[],
+    )?;
+    let claimed = state.claim.map(|claim| claim.receipt.writer_id);
+    if !claims_writer {
+        let writer = store.lww_clock_state()?.writer_id;
+        return match claimed {
+            Some(claimed) if claimed != writer => Err(SyncError::new("registration-used", 409)),
+            _ => Ok(()),
+        };
+    }
+    if let Some(claimed) = claimed {
+        let reserved = claim_record::<FreshWriterReservation>(
+            &core.log,
+            &fresh_writer_record("fresh-writer", config),
+        )?;
+        return if reserved.is_some_and(|reserved| reserved.writer_id == claimed) {
+            Ok(())
+        } else {
+            Err(SyncError::new("registration-integrity", 409))
+        };
+    }
+    if state.used {
+        return Err(SyncError::new("registration-used", 409));
+    }
+    // The server recognizes the registration this device holds only when its credential is sent.
+    if let Some(stored) = store.server_stored_config()? {
+        if stored.library_id == config.library_id
+            && stored.device_id == config.device_id
+            && readable(&stored, store.repository_root())?.is_some()
+        {
+            return Err(SyncError::new("registration-not-new", 409));
+        }
+    }
+    Ok(())
+}
+/// `new_device` is a join the user asked to make as a new device.
+pub(crate) fn inspect(store: &PersistentStore, header: &Header, new_device: bool) -> Result<Inspection> {
     assert_authority(store, header)?;
     let core = candidate(store)?;
     core.fresh_admission()?;
     let head = core.client.resolve_identity()?;
-    let page = first_state_page(&core)?;
     let config = core
         .access
+        .clone()
         .ok_or_else(|| SyncError::new("server-unconfigured", 409))?;
     #[cfg(test)]
     super::hash_metrics::record(
@@ -139,6 +190,11 @@ pub(crate) fn inspect(store: &PersistentStore, header: &Header) -> Result<Inspec
     let server_restored = active
         .as_ref()
         .is_some_and(|old| same_library(&old.config) && old.epoch != head.epoch);
+    // The binding flow joins as a new device or with a fresh writer in exactly these cases.
+    let claims_writer =
+        new_device || server_restored || (previously_bound_library && registration_changed);
+    check_registration(&core, store, &config, claims_writer)?;
+    let page = first_state_page(&core)?;
     let id = store.register_lww_binding_inspection(
         header.binding_authority,
         &SyncTarget::Server("server".into()),
@@ -533,14 +589,14 @@ fn complete_fresh_writer(
 ) -> Result<()> {
     let root = store.repository_root().to_owned();
     let core = LwwClient::new(&root, target.config.resolve(&root)?)?;
-    let (_, saved): (_, Option<NewDeviceClaimStatus>) = core.client.json(
+    let (_, state): (_, NewDeviceClaimState) = core.client.json(
         reqwest::Method::GET,
         "session/claim-writer",
         &[],
         None::<&()>,
         &[],
     )?;
-    let receipt = if let Some(saved) = saved {
+    let receipt = if let Some(saved) = state.claim {
         if saved.request_digest != reservation.request_digest {
             return Err(SyncError::new("new-device-registration-integrity", 409));
         }
@@ -776,7 +832,7 @@ pub(crate) fn first_binding_cycle(
     super::client::with_test_io(&root, counters, || {
         let original = store.lww_binding_state()?;
         if original.target != SyncTarget::None { return Err(SyncError::new("fixture-first-binding-required",409)); }
-        let inspected = inspect(store, &super::lww_tests::header(store))?;
+        let inspected = inspect(store, &super::lww_tests::header(store), false)?;
         if inspected.previously_bound_library { return Err(SyncError::new("fixture-first-binding-required",409)); }
         if inspected.empty { return Err(SyncError::new("fixture-nonempty-target-required",409)); }
         let staged = stage(store, &super::lww_tests::header(store), &inspected.inspection_id, None)?;
@@ -859,6 +915,23 @@ mod tests {
         crate::server_sync::lww_tests::receive_available(&receiver,&mut target,&[]).unwrap();
         assert_eq!(target.read_root(None).unwrap().value["language"],"ko");
     }
+    #[test]
+    fn a_joining_store_binds_a_chat_whose_message_page_is_larger_than_a_metadata_body() {
+        use super::super::body_encoding_tests::random_text;
+        let server = LocalServerFixture::new();
+        let (_source_root, mut source) = local();
+        let (_target_root, mut target) = local();
+        let sender = server.client(&source);
+        let data = random_text(risunest_sync_wire::MAX_METADATA_BYTES + 64 * 1024, 9);
+        crate::server_sync::lww_tests::insert_messages(&mut source, 0, vec![serde_json::json!({"role":"user","data":data})]);
+        crate::server_sync::lww_tests::drain_publications(&sender, &mut source, &[]).unwrap();
+        server.prepare_binding_candidate(&target);
+        let counters = std::sync::Arc::new(super::super::client::TestIoCounters::default());
+        first_binding_cycle(&mut target, counters, |_| {}).unwrap();
+        let chat = target.read_conversation("char", "chat", None).unwrap().unwrap().value;
+        assert_eq!(chat["message"].as_array().unwrap().len(), 1);
+        assert!(chat["message"][0]["data"] == data.as_str());
+    }
     fn configure(
         server: &LocalServerFixture,
         store: &PersistentStore,
@@ -873,7 +946,7 @@ mod tests {
     fn bind(store: &mut PersistentStore) -> Header {
         let original = store.lww_binding_state().unwrap();
         let request = header(store);
-        let inspected = inspect(store, &request).unwrap();
+        let inspected = inspect(store, &request, false).unwrap();
         let state = store
             .switch_lww_binding(
                 &crate::persistent_store::sync_selection::SwitchBindingRequest {
@@ -914,7 +987,7 @@ mod tests {
         );
         let original = target.lww_binding_state().unwrap();
         let request = header(&target);
-        let inspected = inspect(&target, &request).unwrap();
+        let inspected = inspect(&target, &request, false).unwrap();
         let request = header(&target);
         let staged = stage(&mut target, &request, &inspected.inspection_id, None).unwrap();
         let hash = alias.object_hash.unwrap();
@@ -992,7 +1065,7 @@ mod tests {
             old.device_id
         );
         let request = header(&store);
-        let inspected = inspect(&store, &request).unwrap();
+        let inspected = inspect(&store, &request, false).unwrap();
         let request = header(&store);
         let staged = stage(&mut store, &request, &inspected.inspection_id, None).unwrap();
         let prepared = prepare_new_device(&mut store, &request, &staged.staging_id).unwrap();
@@ -1048,7 +1121,7 @@ mod tests {
         core.push(&mut store, &bound, &[]).unwrap();
         let fresh = configure(&server, &store);
         let request = header(&store);
-        let inspected = inspect(&store, &request).unwrap();
+        let inspected = inspect(&store, &request, false).unwrap();
         let request = header(&store);
         let staged = stage(&mut store, &request, &inspected.inspection_id, None).unwrap();
         let prepared = prepare_new_device(&mut store, &request, &staged.staging_id).unwrap();
@@ -1113,7 +1186,7 @@ mod tests {
         assert_eq!(core.log.pending().unwrap().len(), 1);
         configure(&server, &store);
         let request = header(&store);
-        let inspected = inspect(&store, &request).unwrap();
+        let inspected = inspect(&store, &request, false).unwrap();
         let request = header(&store);
         let staged = stage(&mut store, &request, &inspected.inspection_id, None).unwrap();
         let preparation = prepare_new_device(&mut store, &request, &staged.staging_id).unwrap();
@@ -1183,7 +1256,7 @@ mod tests {
         save(&mut a, &["root", "language"], serde_json::json!("ko"));
         switch_to(&mut a, SyncTarget::None, None);
         save(&mut a, &["root", "askRemoval"], serde_json::json!(false));
-        let inspected = inspect(&a, &header(&a)).unwrap();
+        let inspected = inspect(&a, &header(&a), false).unwrap();
         assert!(inspected.previously_bound_library);
         assert!(!inspected.registration_changed && !inspected.server_restored);
         let writer = a.lww_clock_state().unwrap().writer_id;
@@ -1372,7 +1445,7 @@ mod tests {
         drop(client);
         switch_to(&mut a, SyncTarget::None, None);
         assert_eq!(a.lww_receive_row_counts(&unfinished).unwrap(), (0, 0));
-        let inspected = inspect(&a, &header(&a)).unwrap();
+        let inspected = inspect(&a, &header(&a), false).unwrap();
         assert!(inspected.previously_bound_library);
         let state = switch_to(&mut a, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
         activate(&mut a, &Header { binding_authority: state.target_authority, request_id: uuid::Uuid::new_v4().to_string() }, None).unwrap();
@@ -1389,11 +1462,11 @@ mod tests {
         let (_b_root, mut b) = local();
         let peer = server.client(&b);
         configure(&server, &a);
-        let inspected = inspect(&a, &header(&a)).unwrap();
+        let inspected = inspect(&a, &header(&a), false).unwrap();
         assert!(inspected.empty);
         switch_to(&mut a, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
         // The app stops here. The retry finds the target already switched and switches no further.
-        let retried = inspect(&a, &header(&a)).unwrap();
+        let retried = inspect(&a, &header(&a), false).unwrap();
         assert!(retried.empty && !retried.previously_bound_library);
         resume(&mut a);
         assert!(a.server_stored_config().unwrap().is_some());
@@ -1412,7 +1485,7 @@ mod tests {
         let (_b_root, mut b) = local();
         let config = configure(&server, &a);
         assert!(pending_binding(&a).unwrap().is_none());
-        let inspected = inspect(&a, &header(&a)).unwrap();
+        let inspected = inspect(&a, &header(&a), false).unwrap();
         assert!(inspected.empty);
         assert!(pending_binding(&a).unwrap().is_none());
         switch_to(&mut a, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
@@ -1440,7 +1513,7 @@ mod tests {
         let server = LocalServerFixture::new();
         let (_root, mut a) = local();
         configure(&server, &a);
-        let inspected = inspect(&a, &header(&a)).unwrap();
+        let inspected = inspect(&a, &header(&a), false).unwrap();
         switch_to(&mut a, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
         assert!(pending_binding(&a).unwrap().unwrap().server_empty);
         server.server.rotate_restored_epoch().unwrap();
@@ -1475,7 +1548,7 @@ mod tests {
         page.items.into_iter().find(|item| &item.key == key)
     }
     fn fresh_inspection(store: &PersistentStore) -> Inspection {
-        let inspected = inspect(store, &header(store)).unwrap();
+        let inspected = inspect(store, &header(store), false).unwrap();
         assert!(inspected.previously_bound_library);
         assert!(inspected.registration_changed);
         assert!(!inspected.server_restored);
@@ -1516,7 +1589,7 @@ mod tests {
             save(&mut a, &["root", "language"], serde_json::json!("ko"));
             save(&mut a, &["root", "askRemoval"], serde_json::json!(true));
             let config = configure(&server, &a);
-            let inspected = inspect(&a, &header(&a)).unwrap();
+            let inspected = inspect(&a, &header(&a), false).unwrap();
             assert!(inspected.empty);
             let request = switch_owing_initial_publication(&mut a, inspected.inspection_id);
             assert_eq!(a.lww_owed_initial_publication().unwrap(), Some(request.binding_authority.0.to_string()));
@@ -1548,7 +1621,7 @@ mod tests {
         let (_root, mut a) = local();
         save(&mut a, &["root", "language"], serde_json::json!("ko"));
         configure(&server, &a);
-        let inspected = inspect(&a, &header(&a)).unwrap();
+        let inspected = inspect(&a, &header(&a), false).unwrap();
         let state = switch_to(&mut a, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
         assert_eq!(a.lww_owed_initial_publication().unwrap(), None);
         activate(&mut a, &Header { binding_authority: state.target_authority, request_id: uuid::Uuid::new_v4().to_string() }, None).unwrap();
@@ -1564,7 +1637,7 @@ mod tests {
                 initial_publication: true,
             })
             .is_err());
-        let inspected = inspect(&a, &header(&a)).unwrap();
+        let inspected = inspect(&a, &header(&a), false).unwrap();
         switch_owing_initial_publication(&mut a, inspected.inspection_id);
         assert!(a.lww_owed_initial_publication().unwrap().is_some());
         switch_to(&mut a, SyncTarget::None, None);
@@ -1642,7 +1715,7 @@ mod tests {
         gone.store(true, std::sync::atomic::Ordering::SeqCst);
         let live = LocalServerFixture::new();
         let fresh = configure(&live, &a);
-        let inspected = inspect(&a, &header(&a)).unwrap();
+        let inspected = inspect(&a, &header(&a), false).unwrap();
         assert!(!inspected.previously_bound_library);
         let request = header(&a);
         let staged = stage(&mut a, &request, &inspected.inspection_id, None).unwrap();
@@ -1778,7 +1851,7 @@ mod tests {
         let retained = outbox(&a);
         assert_eq!(retained.len(), 1);
         configure_endpoint(&a, &registration, &format!("{}/", server.endpoint));
-        let inspected = inspect(&a, &header(&a)).unwrap();
+        let inspected = inspect(&a, &header(&a), false).unwrap();
         assert!(inspected.previously_bound_library);
         assert!(!inspected.registration_changed && !inspected.server_restored);
         let state = switch_to(&mut a, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
@@ -2010,13 +2083,13 @@ mod tests {
                         let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024).await.unwrap();
                         let mut saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
                         match field {
-                            1 => saved["requestDigest"] = serde_json::json!("0".repeat(64)),
-                            2 => saved["receipt"]["authorizationId"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
-                            3 => saved["receipt"]["writerId"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
-                            4 => saved["receipt"]["deviceId"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
-                            5 => saved["receipt"]["libraryId"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
-                            6 => saved["receipt"]["epoch"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
-                            7 => saved["receipt"]["formerCredentialInactive"] = serde_json::json!(false),
+                            1 => saved["claim"]["requestDigest"] = serde_json::json!("0".repeat(64)),
+                            2 => saved["claim"]["receipt"]["authorizationId"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
+                            3 => saved["claim"]["receipt"]["writerId"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
+                            4 => saved["claim"]["receipt"]["deviceId"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
+                            5 => saved["claim"]["receipt"]["libraryId"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
+                            6 => saved["claim"]["receipt"]["epoch"] = serde_json::json!(uuid::Uuid::new_v4().to_string()),
+                            7 => saved["claim"]["receipt"]["formerCredentialInactive"] = serde_json::json!(false),
                             _ => unreachable!(),
                         }
                         axum::Json(saved).into_response()
@@ -2080,7 +2153,7 @@ mod tests {
         let authority = a.lww_binding_authority().unwrap();
         assert_eq!(complete_fresh_writer(&mut a, &log, authority, &target, &old, &reserved).unwrap_err().code, "new-device-registration-integrity");
         let new = server.server.authenticate(&fresh.library_id, &fresh.token).unwrap();
-        assert!(server.server.new_device_writer_claim(&new).unwrap().is_none());
+        assert!(server.server.new_device_writer_claim(&new).unwrap().claim.is_none());
         assert!(server.server.authenticate(&old_config.library_id, &old_config.token).is_ok());
         assert_eq!(a.lww_clock_state().unwrap().writer_id, reserved.old_writer_id);
     }
@@ -2123,7 +2196,7 @@ mod tests {
         drop(core);
         a.server_stored_config().unwrap().unwrap().remove(root.path()).unwrap();
         let fresh = configure(&server, &a);
-        let inspected = inspect(&a, &header(&a)).unwrap();
+        let inspected = inspect(&a, &header(&a), false).unwrap();
         assert!(inspected.registration_changed);
         let request = header(&a);
         let staged = stage(&mut a, &request, &inspected.inspection_id, None).unwrap();
@@ -2208,7 +2281,7 @@ mod tests {
         save(&mut a, &["root", "language"], serde_json::json!("after-backup"));
         server.server.rotate_restored_epoch().unwrap();
         let fresh = configure(&server, &a);
-        let inspected = inspect(&a, &header(&a)).unwrap();
+        let inspected = inspect(&a, &header(&a), false).unwrap();
         assert!(inspected.server_restored);
         assert!(inspected.registration_changed);
         assert!(!inspected.previously_bound_library);
@@ -2224,6 +2297,164 @@ mod tests {
         assert_eq!(a.server_stored_config().unwrap().unwrap().device_id, fresh.device_id);
         save(&mut a, &["root", "language"], serde_json::json!("ko"));
         assert!(bound_client(&a).push(&mut a, &next, &[]).unwrap().is_some());
-        assert!(!inspect(&a, &header(&a)).unwrap().server_restored);
+        assert!(!inspect(&a, &header(&a), false).unwrap().server_restored);
+    }
+    /// A server that records the method and path of every request it receives.
+    fn recording_server() -> (LocalServerFixture, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let server = LocalServerFixture::with_router(move |router| {
+            router.layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    recorded.lock().unwrap().push(format!("{} {}", request.method(), request.uri().path()));
+                    next.run(request)
+                },
+            ))
+        });
+        (server, requests)
+    }
+    /// Saves an issued registration as the code this store connects with next.
+    fn enter_code(store: &PersistentStore, config: &super::super::client::ServerConfig) {
+        let stored = StoredConfig::persist(store.repository_root(), config).unwrap();
+        OperationLog::open(store.repository_root()).unwrap().save_config("candidate", &stored).unwrap();
+    }
+    /// What the old installation of a registration claimed before this one received the code.
+    fn claim_for_other_installation(server: &LocalServerFixture, config: &super::super::client::ServerConfig) {
+        let device = server.server.authenticate(&config.library_id, &config.token).unwrap();
+        server
+            .server
+            .claim_new_device_writer(&device, &NewDeviceClaimRequest {
+                writer_id: uuid::Uuid::new_v4().to_string(),
+                authorization_id: uuid::Uuid::new_v4().to_string(),
+                former_token: None,
+            })
+            .unwrap();
+    }
+    /// Asserts that a join was refused with `code` after reading only the registration.
+    fn refused_before_reading_the_library(
+        store: &PersistentStore,
+        requests: &std::sync::Mutex<Vec<String>>,
+        new_device: bool,
+        code: &str,
+    ) {
+        let inspections = || -> i64 {
+            OperationLog::open(store.repository_root()).unwrap().0
+                .query_row("SELECT count(*) FROM bindings", [], |r| r.get(0))
+                .unwrap()
+        };
+        let before = inspections();
+        requests.lock().unwrap().clear();
+        assert_eq!(inspect(store, &header(store), new_device).err().expect("refused").code, code);
+        let seen = std::mem::take(&mut *requests.lock().unwrap());
+        assert!(seen.contains(&"GET /session/claim-writer".to_string()), "{seen:?}");
+        assert!(
+            seen.iter().all(|request| ["GET /time", "GET /session", "GET /session/claim-writer"].contains(&request.as_str())),
+            "{seen:?}"
+        );
+        assert_eq!(inspections(), before);
+    }
+    #[test]
+    fn a_registration_another_installation_claimed_is_refused_before_the_library_is_read() {
+        use crate::server_sync::lww_tests::drain_publications;
+        let (server, requests) = recording_server();
+        let (_p_root, mut peer_store) = local();
+        let peer = server.client(&peer_store);
+        save(&mut peer_store, &["root", "language"], serde_json::json!("ja"));
+        drain_publications(&peer, &mut peer_store, &[]).unwrap();
+        let (_old_root, old) = local();
+        let reused = configure(&server, &old);
+        claim_for_other_installation(&server, &reused);
+        let (_root, reinstalled) = local();
+        enter_code(&reinstalled, &reused);
+        refused_before_reading_the_library(&reinstalled, &requests, false, "registration-used");
+        refused_before_reading_the_library(&reinstalled, &requests, true, "registration-integrity");
+        let fresh = configure(&server, &reinstalled);
+        let inspected = inspect(&reinstalled, &header(&reinstalled), false).unwrap();
+        assert!(!inspected.empty);
+        assert_eq!(inspected.library_id, fresh.library_id);
+    }
+    #[test]
+    fn a_used_registration_joins_as_its_installations_but_not_as_a_new_device() {
+        let (server, requests) = recording_server();
+        let (_a_root, mut a) = local();
+        let shared = configure(&server, &a);
+        bind(&mut a);
+        // Nothing used the registration yet, and it is the one this device holds.
+        refused_before_reading_the_library(&a, &requests, true, "registration-not-new");
+        save(&mut a, &["root", "language"], serde_json::json!("ja"));
+        assert!(push_now(&bound_client(&a), &mut a).unwrap().is_some());
+        refused_before_reading_the_library(&a, &requests, true, "registration-used");
+        // An unclaimed registration takes any installation's writer, so a rejoin or a second
+        // installation joining with it is not refused.
+        enter_code(&a, &shared);
+        inspect(&a, &header(&a), false).unwrap();
+        let (_b_root, b) = local();
+        enter_code(&b, &shared);
+        inspect(&b, &header(&b), false).unwrap();
+        refused_before_reading_the_library(&b, &requests, true, "registration-used");
+    }
+    #[test]
+    fn a_registration_claimed_by_this_installation_rejoins_and_resumes_its_own_claim() {
+        let (server, requests) = recording_server();
+        let (_a_root, mut a) = local();
+        configure(&server, &a);
+        bind(&mut a);
+        save(&mut a, &["root", "language"], serde_json::json!("ko"));
+        let fresh = configure(&server, &a);
+        let inspected = fresh_inspection(&a);
+        STOP_AFTER_FRESH_CLAIM.with(|stop| stop.set(true));
+        assert_eq!(fresh_writer(&mut a, &inspected.inspection_id).unwrap_err().code, "fresh-writer-stopped-after-claim");
+        // The claim is this installation's own reservation, so connecting again finishes it.
+        let retried = fresh_inspection(&a);
+        let (_b_root, b) = local();
+        enter_code(&b, &fresh);
+        refused_before_reading_the_library(&b, &requests, false, "registration-used");
+        refused_before_reading_the_library(&b, &requests, true, "registration-integrity");
+        let reserved = fresh_writer(&mut a, &retried.inspection_id).unwrap();
+        resume(&mut a);
+        assert_eq!(a.lww_clock_state().unwrap().writer_id, reserved.writer_id);
+        assert_eq!(a.server_stored_config().unwrap().unwrap().device_id, fresh.device_id);
+        // A rejoin with the code its own writer claimed keeps that writer and publishes.
+        enter_code(&a, &fresh);
+        inspect(&a, &header(&a), false).unwrap();
+        refused_before_reading_the_library(&a, &requests, true, "registration-integrity");
+        assert!(push_now(&bound_client(&a), &mut a).unwrap().is_some());
+    }
+    #[test]
+    fn an_installation_stopped_by_a_writer_collision_connects_as_a_new_device_with_a_fresh_code() {
+        use crate::server_sync::lww_tests::drain_publications;
+        let (server, requests) = recording_server();
+        let (_root, mut reinstalled) = local();
+        let reused = configure(&server, &reinstalled);
+        bind(&mut reinstalled);
+        // The installation that first used the code claims it after this one joined.
+        claim_for_other_installation(&server, &reused);
+        let (_p_root, mut peer_store) = local();
+        let peer = server.client(&peer_store);
+        save(&mut peer_store, &["root", "language"], serde_json::json!("ja"));
+        drain_publications(&peer, &mut peer_store, &[]).unwrap();
+        save(&mut reinstalled, &["root", "language"], serde_json::json!("local"));
+        assert_eq!(push_now(&bound_client(&reinstalled), &mut reinstalled).unwrap_err().code, "writer-collision");
+        // Connecting as a new device with the same code is refused before the library is read.
+        enter_code(&reinstalled, &reused);
+        refused_before_reading_the_library(&reinstalled, &requests, true, "registration-integrity");
+        let fresh = configure(&server, &reinstalled);
+        let inspected = inspect(&reinstalled, &header(&reinstalled), true).unwrap();
+        assert!(inspected.previously_bound_library && inspected.registration_changed);
+        let request = header(&reinstalled);
+        let staged = stage(&mut reinstalled, &request, &inspected.inspection_id, None).unwrap();
+        let prepared = prepare_new_device(&mut reinstalled, &request, &staged.staging_id).unwrap();
+        let result = reinstalled
+            .lww_replace_target_as_new_device(&request, &staged.staging_id, &prepared.authorization_id)
+            .unwrap();
+        let next = Header { binding_authority: result.binding_authority, request_id: uuid::Uuid::new_v4().to_string() };
+        activate(&mut reinstalled, &next, Some((&prepared.authorization_id, &result.writer_id))).unwrap();
+        assert_eq!(reinstalled.read_root(None).unwrap().value["language"], "ja");
+        assert_eq!(reinstalled.server_stored_config().unwrap().unwrap().device_id, fresh.device_id);
+        assert!(server.server.authenticate(&reused.library_id, &reused.token).is_err());
+        save(&mut reinstalled, &["root", "language"], serde_json::json!("ko"));
+        assert!(bound_client(&reinstalled).push(&mut reinstalled, &next, &[]).unwrap().is_some());
+        crate::server_sync::lww_tests::receive_available(&peer, &mut peer_store, &[]).unwrap();
+        assert_eq!(peer_store.read_root(None).unwrap().value["language"], "ko");
     }
 }

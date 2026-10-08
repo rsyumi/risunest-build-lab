@@ -765,6 +765,15 @@ async fn read_catalog_with(
     Ok((result, packs, nodes))
 }
 
+fn pack_totals(packs: &BTreeMap<String, RemoteObject>) -> (u64, u64) {
+    (
+        packs.len() as u64,
+        packs.values().fold(0u64, |sum, pack| sum.saturating_add(pack.receipt.byte_length)),
+    )
+}
+
+/// Opens every pack, counting each one in `progress`, which the caller
+/// planned them in.
 async fn open_packs(
     packs: &BTreeMap<String, RemoteObject>,
     root_key: &[u8; 32],
@@ -774,12 +783,6 @@ async fn open_packs(
     progress: &PhaseProgress,
     cancel: &Cancellation,
 ) -> Result<BTreeMap<String, PathBuf>> {
-    // What each catalog needs is known before any of it is fetched, and a
-    // later catalog adds to the same total rather than restarting it.
-    progress.plan(
-        packs.len() as u64,
-        packs.values().map(|pack| pack.receipt.byte_length).sum(),
-    );
     let mut paths = BTreeMap::new();
     for (id, pack) in packs {
         cancel.check()?;
@@ -1324,45 +1327,94 @@ async fn turn_over_packs_with(
     BTreeMap<String, PreparedRecord>,
     BTreeMap<String, PreparedObject>,
 )> {
-    let mut records = BTreeMap::new();
-    let mut objects = BTreeMap::new();
-    let mut pending = Vec::new();
-    for resolved in plan {
-        match resolved.source.clone() {
-            Some(source) => insert_prepared(
-                resolved.entry,
-                resolved.digest,
-                source,
-                &mut records,
-                &mut objects,
-            )?,
-            None => pending.push(Pending::new(resolved)?),
-        }
-    }
-    // Packs in the order the plan first needs them, each with the entries it
-    // carries. A pack no remaining chunk names is never opened.
-    let mut order: Vec<String> = Vec::new();
-    let mut users: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (index, item) in pending.iter().enumerate() {
-        for chunk in &item.resolved.entry.chunks {
-            let entries = users.entry(chunk.pack_id.clone()).or_insert_with(|| {
-                order.push(chunk.pack_id.clone());
-                Vec::new()
-            });
-            if entries.last() != Some(&index) {
-                entries.push(index);
+    let turnover = Turnover::new(plan, packs)?;
+    let (items, bytes) = turnover.remaining();
+    progress.plan(items, bytes);
+    run_turnover(turnover, root_key, staging_root, provider, repository, progress, durability, cancel).await
+}
+
+/// A plan whose packs are known and none of them fetched yet.
+struct Turnover {
+    records: BTreeMap<String, PreparedRecord>,
+    objects: BTreeMap<String, PreparedObject>,
+    pending: Vec<Pending>,
+    order: Vec<String>,
+    users: BTreeMap<String, Vec<usize>>,
+    required: Vec<RemoteObject>,
+}
+
+impl Turnover {
+    fn new(plan: Vec<ResolvedEntry>, packs: &BTreeMap<String, RemoteObject>) -> Result<Self> {
+        let mut records = BTreeMap::new();
+        let mut objects = BTreeMap::new();
+        let mut pending = Vec::new();
+        for resolved in plan {
+            match resolved.source.clone() {
+                Some(source) => insert_prepared(
+                    resolved.entry,
+                    resolved.digest,
+                    source,
+                    &mut records,
+                    &mut objects,
+                )?,
+                None => pending.push(Pending::new(resolved)?),
             }
         }
+        // Packs in the order the plan first needs them, each with the entries it
+        // carries. A pack no remaining chunk names is never opened.
+        let mut order: Vec<String> = Vec::new();
+        let mut users: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (index, item) in pending.iter().enumerate() {
+            for chunk in &item.resolved.entry.chunks {
+                let entries = users.entry(chunk.pack_id.clone()).or_insert_with(|| {
+                    order.push(chunk.pack_id.clone());
+                    Vec::new()
+                });
+                if entries.last() != Some(&index) {
+                    entries.push(index);
+                }
+            }
+        }
+        let mut required = Vec::with_capacity(order.len());
+        for id in &order {
+            required.push(
+                packs
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| corrupt("catalog pack is missing"))?,
+            );
+        }
+        Ok(Self { records, objects, pending, order, users, required })
     }
-    let mut required = Vec::with_capacity(order.len());
-    for id in &order {
-        required.push(
-            packs
-                .get(id)
-                .cloned()
-                .ok_or_else(|| corrupt("catalog pack is missing"))?,
-        );
+
+    /// The packs still to fetch, and their bytes. A pack an interrupted
+    /// attempt already placed is among them and counts as soon as it is found.
+    fn remaining(&self) -> (u64, u64) {
+        (
+            self.required.len() as u64,
+            self.required
+                .iter()
+                .fold(0u64, |sum, pack| sum.saturating_add(pack.receipt.byte_length)),
+        )
     }
+}
+
+/// Fetches the packs a turnover planned, counting each one in `progress`.
+#[allow(clippy::too_many_arguments)]
+async fn run_turnover(
+    turnover: Turnover,
+    root_key: &[u8; 32],
+    staging_root: &Path,
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    progress: &PhaseProgress,
+    durability: Durability,
+    cancel: &Cancellation,
+) -> Result<(
+    BTreeMap<String, PreparedRecord>,
+    BTreeMap<String, PreparedObject>,
+)> {
+    let Turnover { mut records, mut objects, pending, order, mut users, required } = turnover;
     let pending = std::sync::Arc::new(pending);
     let prepared_root = staging_root.to_path_buf();
     let prepared_pending = pending.clone();
@@ -1371,12 +1423,6 @@ async fn turn_over_packs_with(
         .await
         .map_err(transient)??;
     drop(cpu);
-    // What each catalog needs is known before any of it is fetched, and a
-    // later catalog adds to the same total rather than restarting it.
-    progress.plan(
-        required.len() as u64,
-        required.iter().map(|pack| pack.receipt.byte_length).sum(),
-    );
     let opened_root = staging_root.to_path_buf();
     let mut content = Some(
         spawn_blocking(move || Placement::open(&opened_root, durability))
@@ -1635,6 +1681,93 @@ pub(crate) async fn download_sections(
     progress: &PhaseProgress,
     cancel: &Cancellation,
 ) -> Result<Vec<CapturedSection>> {
+    let mut prepared = Vec::new();
+    for (id, reference) in wanted_sections(snapshot, wanted, staging_root, root_key, provider, repository, cancel).await? {
+        let section = walk_section(
+            &id, reference, snapshot, staging_root, root_key, record_into, provider, repository, progress, cancel,
+        )
+        .await?;
+        let (items, bytes) = pack_totals(&section.packs);
+        progress.plan(items, bytes);
+        prepared.push(fetch_section(section, staging_root, root_key, provider, repository, progress, cancel).await?);
+    }
+    Ok(prepared)
+}
+
+/// The wanted sections of a snapshot with their catalogs read and none of
+/// their packs fetched yet, so their packs can be planned with the rest of a
+/// restore before any of them is.
+pub(crate) struct SectionsWalk {
+    sections: Vec<WalkedSection>,
+}
+
+struct WalkedSection {
+    reference: wire::SectionSnapshotRef,
+    complete: Vec<CompleteEntry>,
+    packs: BTreeMap<String, RemoteObject>,
+}
+
+/// Reads the catalogs of the sections `download_sections` would download,
+/// counting each node it fetches in `walked`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn walk_sections(
+    snapshot: &RemoteObject,
+    wanted: &BTreeSet<String>,
+    staging_root: &Path,
+    root_key: &[u8; 32],
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    walked: &PhaseProgress,
+    cancel: &Cancellation,
+) -> Result<SectionsWalk> {
+    let mut sections = Vec::new();
+    for (id, reference) in wanted_sections(snapshot, wanted, staging_root, root_key, provider, repository, cancel).await? {
+        sections.push(
+            walk_section(&id, reference, snapshot, staging_root, root_key, None, provider, repository, walked, cancel)
+                .await?,
+        );
+    }
+    Ok(SectionsWalk { sections })
+}
+
+impl SectionsWalk {
+    /// The packs still to fetch, and their bytes.
+    pub(crate) fn remaining(&self) -> (u64, u64) {
+        self.sections.iter().fold((0u64, 0u64), |(items, bytes), section| {
+            let (more_items, more_bytes) = pack_totals(&section.packs);
+            (items.saturating_add(more_items), bytes.saturating_add(more_bytes))
+        })
+    }
+
+    /// Fetches what `remaining` planned, counting each pack in `progress`.
+    pub(crate) async fn fetch(
+        self,
+        staging_root: &Path,
+        root_key: &[u8; 32],
+        provider: &dyn Provider,
+        repository: &RepositoryHandle,
+        progress: &PhaseProgress,
+        cancel: &Cancellation,
+    ) -> Result<Vec<CapturedSection>> {
+        let mut prepared = Vec::with_capacity(self.sections.len());
+        for section in self.sections {
+            prepared.push(fetch_section(section, staging_root, root_key, provider, repository, progress, cancel).await?);
+        }
+        Ok(prepared)
+    }
+}
+
+/// The section references of `snapshot` the caller asked for. A section left
+/// out of `wanted` is never read.
+async fn wanted_sections(
+    snapshot: &RemoteObject,
+    wanted: &BTreeSet<String>,
+    staging_root: &Path,
+    root_key: &[u8; 32],
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    cancel: &Cancellation,
+) -> Result<Vec<(String, wire::SectionSnapshotRef)>> {
     if wanted.is_empty() {
         return Ok(Vec::new());
     }
@@ -1656,70 +1789,108 @@ pub(crate) async fn download_sections(
     };
     let document =
         super::control::SnapshotView::read(&root_bytes, wire_role, &snapshot.repository_id)?;
-    let mut prepared = Vec::new();
-    for (id, reference) in &document.sections {
-        if !wanted.contains(id) {
-            continue;
-        }
-        let entries_root = RemoteObject::from_stored(&reference.entries_root, repository)?;
-        if entries_root.repository_id != snapshot.repository_id {
-            return Err(corrupt("section catalog repository differs"));
-        }
-        let (complete, packs, nodes) = read_catalog_with(
-            &entries_root,
-            wire::CatalogKind::Section,
-            root_key,
-            staging_root,
-            provider,
-            repository,
-            progress,
-            cancel,
-        )
-        .await?;
-        record_read(
-            record_into,
-            &super::packaging::CatalogRoot::Section(id.clone()),
-            &entries_root,
-            &complete,
-            &packs,
-            &nodes,
-            repository,
-        );
-        validate_section_lengths(&complete)?;
-        let pack_paths =
-            open_packs(&packs, root_key, staging_root, provider, repository, progress, cancel)
-                .await?;
-        let cpu = cpu_permit().await?;
-        let section_cancel = cancel.clone();
-        let section_staging = staging_root.to_path_buf();
-        let sources = spawn_blocking(move || {
-            materialize_section_entries(complete, &pack_paths, &section_staging, &section_cancel)
-        })
-        .await
-        .map_err(transient)??;
-        drop(cpu);
-        prepared.push(CapturedSection {
-            kind: reference.kind,
-            generation: reference.generation.clone(),
-            gc_floor: reference.gc_floor.clone(),
-            max_write_clock: reference.max_write_clock.clone(),
-            content_fingerprint: reference.content_fingerprint,
-            sources,
-        });
+    Ok(document
+        .sections
+        .into_iter()
+        .filter(|(id, _)| wanted.contains(id))
+        .collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn walk_section(
+    id: &str,
+    reference: wire::SectionSnapshotRef,
+    snapshot: &RemoteObject,
+    staging_root: &Path,
+    root_key: &[u8; 32],
+    record_into: Option<&Path>,
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    progress: &PhaseProgress,
+    cancel: &Cancellation,
+) -> Result<WalkedSection> {
+    let entries_root = RemoteObject::from_stored(&reference.entries_root, repository)?;
+    if entries_root.repository_id != snapshot.repository_id {
+        return Err(corrupt("section catalog repository differs"));
     }
-    Ok(prepared)
+    let (complete, packs, nodes) = read_catalog_with(
+        &entries_root,
+        wire::CatalogKind::Section,
+        root_key,
+        staging_root,
+        provider,
+        repository,
+        progress,
+        cancel,
+    )
+    .await?;
+    record_read(
+        record_into,
+        &super::packaging::CatalogRoot::Section(id.to_owned()),
+        &entries_root,
+        &complete,
+        &packs,
+        &nodes,
+        repository,
+    );
+    validate_section_lengths(&complete)?;
+    Ok(WalkedSection { reference, complete, packs })
+}
+
+async fn fetch_section(
+    section: WalkedSection,
+    staging_root: &Path,
+    root_key: &[u8; 32],
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    progress: &PhaseProgress,
+    cancel: &Cancellation,
+) -> Result<CapturedSection> {
+    let WalkedSection { reference, complete, packs } = section;
+    let pack_paths =
+        open_packs(&packs, root_key, staging_root, provider, repository, progress, cancel)
+            .await?;
+    let cpu = cpu_permit().await?;
+    let section_cancel = cancel.clone();
+    let section_staging = staging_root.to_path_buf();
+    let sources = spawn_blocking(move || {
+        materialize_section_entries(complete, &pack_paths, &section_staging, &section_cancel)
+    })
+    .await
+    .map_err(transient)??;
+    drop(cpu);
+    Ok(CapturedSection {
+        kind: reference.kind,
+        generation: reference.generation,
+        gc_floor: reference.gc_floor,
+        max_write_clock: reference.max_write_clock,
+        content_fingerprint: reference.content_fingerprint,
+        sources,
+    })
 }
 
 pub(crate) async fn download_checkpoint_data(
     root: &RemoteObject, staging_root: &Path, root_key: &[u8;32],
     provider: &dyn Provider, repository: &RepositoryHandle, progress: &PhaseProgress, cancel: &Cancellation,
 ) -> Result<(Vec<PreparedRecord>, Vec<PreparedObject>)> {
+    let turnover=walk_checkpoint_data(root,staging_root,root_key,provider,repository,progress,cancel).await?;
+    let (items,bytes)=turnover.remaining();
+    progress.plan(items,bytes);
+    let (records,objects)=run_turnover(turnover,root_key,staging_root,provider,repository,progress,Durability::Durable,cancel).await?;
+    Ok((records.into_values().collect(),objects.into_values().collect()))
+}
+
+/// Reads a record catalog, counting each node it fetches in `progress`, and
+/// works out which of its packs this staging directory still needs.
+async fn walk_checkpoint_data(
+    root: &RemoteObject, staging_root: &Path, root_key: &[u8;32],
+    provider: &dyn Provider, repository: &RepositoryHandle, progress: &PhaseProgress, cancel: &Cancellation,
+) -> Result<Turnover> {
     ensure_directory(staging_root)?;
     let (entries,packs,_) = read_catalog_with(root,wire::CatalogKind::Records,root_key,staging_root,provider,repository,progress,cancel).await?;
     let content=content_store(staging_root)?;
     let plan=resolve_entries(entries,staging_root,&content,None,cancel)?;
-    let (records,objects)=turn_over_packs(plan,&packs,root_key,staging_root,provider,repository,progress,cancel).await?;
-    Ok((records.into_values().collect(),objects.into_values().collect()))
+    Turnover::new(plan,&packs)
 }
 
 pub(crate) async fn download_control_catalogs(
@@ -2139,6 +2310,7 @@ fn decode_original_unit(content: &ContentStore, key: &str, hash: &str, length: u
     Ok(unit)
 }
 
+#[cfg(test)]
 pub(crate) async fn download_original_backup_units(
     root: &RemoteObject,
     staging_root: &Path,
@@ -2148,6 +2320,30 @@ pub(crate) async fn download_original_backup_units(
     progress: &PhaseProgress,
     cancel: &Cancellation,
 ) -> Result<OriginalUnits> {
+    let walk = walk_original_backup_units(root, staging_root, key, provider, repository, progress, cancel).await?;
+    let (packs, bytes) = walk.plan.remaining_packs()?;
+    progress.plan(packs, bytes);
+    fetch_original_backup_units(walk, staging_root, key, provider, repository, progress, cancel).await
+}
+
+/// An original unit catalog read into its disk index and pack plan, none of
+/// its packs fetched yet.
+struct OriginalUnitsWalk {
+    kept: OriginalUnits,
+    plan: RestoreBodyPlan,
+}
+
+/// Reads the original unit catalog, counting each node it fetches in
+/// `progress`, and plans the packs its controls lie in.
+async fn walk_original_backup_units(
+    root: &RemoteObject,
+    staging_root: &Path,
+    key: &[u8; 32],
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    progress: &PhaseProgress,
+    cancel: &Cancellation,
+) -> Result<OriginalUnitsWalk> {
     ensure_directory(staging_root)?;
     let kept = OriginalUnits::new(staging_root)?;
     kept.db.execute_batch("CREATE TABLE nodes(id TEXT PRIMARY KEY,body TEXT NOT NULL,visited INTEGER NOT NULL);
@@ -2189,7 +2385,7 @@ pub(crate) async fn download_original_backup_units(
         kept.db.execute_batch("COMMIT").map_err(transient)?;
         discard_object(staging_root,&object);
     }
-    let mut plan=RestoreBodyPlan::new(staging_root)?;
+    let plan=RestoreBodyPlan::new(staging_root)?;
     let mut after=String::new();
     loop {
         cancel.check()?;
@@ -2230,8 +2426,21 @@ pub(crate) async fn download_original_backup_units(
         },false,repository)?;
     }
     plan.seal()?;
-    let (packs,bytes)=plan.remaining_packs()?;
-    progress.plan(packs,bytes);
+    Ok(OriginalUnitsWalk{kept,plan})
+}
+
+/// Fetches the packs an original unit walk planned, counting each one in
+/// `progress`, and checks every control they carry.
+async fn fetch_original_backup_units(
+    walk: OriginalUnitsWalk,
+    staging_root: &Path,
+    key: &[u8; 32],
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    progress: &PhaseProgress,
+    cancel: &Cancellation,
+) -> Result<OriginalUnits> {
+    let OriginalUnitsWalk{kept,mut plan}=walk;
     let mut content=content_store(staging_root)?;
     loop {
         cancel.check()?;
@@ -2262,7 +2471,8 @@ pub(crate) async fn download_backup_original_units(
     let document=super::control::SnapshotView::read(&read_bytes(&root,wire::MAX_METADATA_BYTES)?,wire::ObjectRole::BackupBundle,&snapshot.repository_id)?;
     if snapshot.object_id != format!("snapshot-{}",document.snapshot_id) {return Err(corrupt("backup identity differs"))}
     let original=RemoteObject::from_stored(document.original_units.as_ref().ok_or_else(|| corrupt("complete original unit root is required"))?,repository)?;
-    download_original_backup_units(&original,staging_root,key,provider,repository,&PhaseProgress::silent(),cancel).await
+    let walk=walk_original_backup_units(&original,staging_root,key,provider,repository,&PhaseProgress::silent(),cancel).await?;
+    fetch_original_backup_units(walk,staging_root,key,provider,repository,&PhaseProgress::silent(),cancel).await
 }
 
 pub(crate) struct DatabaseFirstSnapshot {
@@ -2338,23 +2548,69 @@ pub(crate) async fn admit_asset_catalogs(
 }
 /// Counts in `progress` what it downloads, and plans the packs of the asset
 /// bodies this device lacks, which the restore receives once it is adopted.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn download_snapshot_database_first(snapshot:&RemoteObject,staging_root:&Path,library_root:&Path,connection_root:&Path,connection_id:&str,key:&[u8;32],provider:&dyn Provider,repository:&RepositoryHandle,progress:&PhaseProgress,cancel:&Cancellation)->Result<DatabaseFirstSnapshot> {
+    let walked=PhaseProgress::silent();
+    let walk=walk_snapshot_database_first(snapshot,staging_root,library_root,connection_root,connection_id,key,provider,repository,&walked,cancel).await?;
+    let (items,bytes)=walk.remaining()?;
+    progress.plan_after(walked.read(),items,bytes);
+    fetch_snapshot_database_first(walk,key,provider,repository,progress,cancel).await
+}
+
+/// A database-first restore with every catalog it needs read and none of its
+/// packs fetched yet.
+pub(crate) struct DatabaseFirstWalk {
+    staging_root:PathBuf,
+    snapshot_id:String,
+    repository_id:String,
+    fingerprint:String,
+    revision:String,
+    captured_by_device:Option<String>,
+    original:OriginalUnitsWalk,
+    records:Turnover,
+    asset_objects:Vec<PreparedObject>,
+    required:BTreeSet<String>,
+    present:BTreeSet<String>,
+    missing:BTreeSet<String>,
+    sources:Vec<super::lww_residency::SharedPackedSource>,
+    missing_packs:(u64,u64),
+}
+
+impl DatabaseFirstWalk {
+    /// The packs still to fetch, the ones holding the asset bodies this device
+    /// lacks included, and their bytes.
+    pub(crate) fn remaining(&self)->Result<(u64,u64)> {
+        let (original_items,original_bytes)=self.original.plan.remaining_packs()?;
+        let (record_items,record_bytes)=self.records.remaining();
+        Ok((
+            original_items.saturating_add(record_items).saturating_add(self.missing_packs.0),
+            original_bytes.saturating_add(record_bytes).saturating_add(self.missing_packs.1),
+        ))
+    }
+}
+
+/// Reads every catalog a database-first restore needs, counting each node it
+/// fetches in `walked`, and works out which packs each one needs, the packs of
+/// the asset bodies this device lacks among them. No pack is fetched.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn walk_snapshot_database_first(snapshot:&RemoteObject,staging_root:&Path,library_root:&Path,connection_root:&Path,connection_id:&str,key:&[u8;32],provider:&dyn Provider,repository:&RepositoryHandle,walked:&PhaseProgress,cancel:&Cancellation)->Result<DatabaseFirstWalk> {
     if snapshot.role!=ObjectRole::BackupBundle {return Err(corrupt("full backup required"));}
     ensure_directory(staging_root)?;
-    let root_path=open_object_counted(snapshot,key,staging_root,provider,repository,progress,cancel).await?;
+    let root_path=open_object_counted(snapshot,key,staging_root,provider,repository,walked,cancel).await?;
     let document=super::control::SnapshotView::read(&read_bytes(&root_path,wire::MAX_METADATA_BYTES)?,wire::ObjectRole::BackupBundle,&snapshot.repository_id)?;
     if snapshot.object_id!=format!("snapshot-{}",document.snapshot_id) {return Err(corrupt("backup identity"));}
     let original_root = document.original_units.as_ref()
         .ok_or_else(|| corrupt("full backup original unit root is required"))?;
     let original_root = RemoteObject::from_stored(original_root, repository)?;
-    let original_units = download_original_backup_units(
-        &original_root, staging_root, key, provider, repository, progress, cancel,
+    let original = walk_original_backup_units(
+        &original_root, staging_root, key, provider, repository, walked, cancel,
     ).await?;
     let records_root=RemoteObject::from_stored(&document.library.record_catalog,repository)?;
-    let (records,mut objects)=download_checkpoint_data(&records_root,staging_root,key,provider,repository,progress,cancel).await?;
+    let records=walk_checkpoint_data(&records_root,staging_root,key,provider,repository,walked,cancel).await?;
     let assets_root=RemoteObject::from_stored(&document.library.asset_catalog,repository)?;
-    let (entries,packs,_)=read_catalog_with(&assets_root,wire::CatalogKind::Assets,key,staging_root,provider,repository,progress,cancel).await?;
+    let (entries,packs,_)=read_catalog_with(&assets_root,wire::CatalogKind::Assets,key,staging_root,provider,repository,walked,cancel).await?;
+    let mut objects=Vec::new();
     let cas=PayloadCas::new(library_root).map_err(transient)?;
     let metadata = rusqlite::Connection::open_with_flags(
         library_root.join("persistent/persistent.sqlite"),
@@ -2396,8 +2652,21 @@ pub(crate) async fn download_snapshot_database_first(snapshot:&RemoteObject,stag
         sources.push(source);
         objects.push(PreparedObject{content_hash:hash.clone(),byte_length:entry.byte_length,source:ObjectSource::Library(hash)});
     }
-    progress.plan(missing_packs.len() as u64,missing_packs.values().sum());
-    Ok(DatabaseFirstSnapshot{snapshot:PreparedRemoteSnapshot{snapshot_id:document.snapshot_id,repository_id:snapshot.repository_id.clone(),fingerprint:hex::encode(document.library.content_fingerprint),library_fingerprint:hex::encode(document.library.content_fingerprint),logical_revision:document.revision.parse().map_err(corrupt)?,staging_root:staging_root.into(),records,objects,captured_by_device:document.captured_by_device},original_units,required,present,missing,sources})
+    let missing_packs=(missing_packs.len() as u64,missing_packs.values().fold(0u64,|sum,bytes|sum.saturating_add(*bytes)));
+    Ok(DatabaseFirstWalk{staging_root:staging_root.into(),snapshot_id:document.snapshot_id,repository_id:snapshot.repository_id.clone(),
+        fingerprint:hex::encode(document.library.content_fingerprint),revision:document.revision,captured_by_device:document.captured_by_device,
+        original,records,asset_objects:objects,required,present,missing,sources,missing_packs})
+}
+
+/// Fetches the original unit and record packs a walk planned, counting each
+/// one in `progress`. The asset bodies are received once the restore is adopted.
+pub(crate) async fn fetch_snapshot_database_first(walk:DatabaseFirstWalk,key:&[u8;32],provider:&dyn Provider,repository:&RepositoryHandle,progress:&PhaseProgress,cancel:&Cancellation)->Result<DatabaseFirstSnapshot> {
+    let DatabaseFirstWalk{staging_root,snapshot_id,repository_id,fingerprint,revision,captured_by_device,original,records,asset_objects,required,present,missing,sources,..}=walk;
+    let original_units=fetch_original_backup_units(original,&staging_root,key,provider,repository,progress,cancel).await?;
+    let (records,record_objects)=run_turnover(records,key,&staging_root,provider,repository,progress,Durability::Durable,cancel).await?;
+    let mut objects=record_objects.into_values().collect::<Vec<_>>();
+    objects.extend(asset_objects);
+    Ok(DatabaseFirstSnapshot{snapshot:PreparedRemoteSnapshot{snapshot_id,repository_id,fingerprint:fingerprint.clone(),library_fingerprint:fingerprint,logical_revision:revision.parse().map_err(corrupt)?,staging_root,records:records.into_values().collect(),objects,captured_by_device},original_units,required,present,missing,sources})
 }
 pub(crate) async fn download_snapshot(
     snapshot: &RemoteObject,

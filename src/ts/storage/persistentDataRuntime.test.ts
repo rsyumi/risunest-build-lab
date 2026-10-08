@@ -1,6 +1,6 @@
 import { UNOWNED_PLUGIN_OWNER } from '../plugins/pluginOwner'
 import { runNativeDataHealthRepair } from './nativeDataHealthRepair'
-import { subscribeLocalPersistentRevision } from './persistentRevisionEvents'
+import { notifyLocalPersistentRevision, subscribeLocalPersistentRevision } from './persistentRevisionEvents'
 import { describe, expect, it, vi } from 'vitest'
 import type { Database } from './database.svelte'
 import { capturePersistentPluginStorage, capturePersistentPresets, capturePersistentRoot, createPersistentDataRuntime, publishPersistentCharacterMutationToWorkingSet, publishPersistentConversationReplacementToWorkingSet, restoreStableWorkingSetSelection } from './persistentDataRuntime'
@@ -237,6 +237,7 @@ function createFenceRuntimeHarness(
     initial: Database,
     restored: Database = initial,
     restoredRevision = 2,
+    onLocalRevision: (revision: number) => void = (revision) => notifyLocalPersistentRevision(revision),
 ) {
     let database = structuredClone(initial)
     let revision = 1
@@ -282,6 +283,7 @@ function createFenceRuntimeHarness(
             publishConversation: vi.fn(),
         },
         prepareDatabase: async (value) => value,
+        onLocalRevision,
     })
     return {
         runtime,
@@ -333,8 +335,15 @@ describe('native data health repair coordination', () => {
         const harness = createFenceRuntimeHarness(makeConversationDatabase('Initial'))
         await harness.runtime.initializeActiveWorkingSet(harness.database)
         vi.mocked(harness.store.acquireRevision).mockRejectedValueOnce(new Error('projection failed'))
-        await expect(runNativeDataHealthRepair(1, async () => ({ revision: 2 }), harness.runtime))
-            .rejects.toMatchObject({ committedRevision: 2, code: 'activation-committed-refresh-failed' })
+        const notified = vi.fn()
+        const unsubscribe = subscribeLocalPersistentRevision(notified)
+        try {
+            await expect(runNativeDataHealthRepair(1, async () => ({ revision: 2 }), harness.runtime))
+                .rejects.toMatchObject({ committedRevision: 2, code: 'activation-committed-refresh-failed' })
+        } finally {
+            unsubscribe()
+        }
+        expect(notified).toHaveBeenCalledExactlyOnceWith(2, 'edit')
         expect(() => harness.runtime.assertPersistentMutationAllowed()).toThrow()
         expect(harness.database.username).toBe('Initial')
     })
@@ -343,8 +352,15 @@ describe('native data health repair coordination', () => {
         const harness = createFenceRuntimeHarness(makeConversationDatabase('Initial'))
         await harness.runtime.initializeActiveWorkingSet(harness.database)
         const mutate = vi.fn(async () => { throw { code: 'committed', revision: 2, message: 'diagnosis failed' } })
-        await expect(runNativeDataHealthRepair(1, mutate, harness.runtime))
-            .rejects.toMatchObject({ committedRevision: 2, recoveryRequired: true })
+        const notified = vi.fn()
+        const unsubscribe = subscribeLocalPersistentRevision(notified)
+        try {
+            await expect(runNativeDataHealthRepair(1, mutate, harness.runtime))
+                .rejects.toMatchObject({ committedRevision: 2, recoveryRequired: true })
+        } finally {
+            unsubscribe()
+        }
+        expect(notified).toHaveBeenCalledExactlyOnceWith(2, 'edit')
         expect(mutate).toHaveBeenCalledExactlyOnceWith(1)
         expect(harness.runtime.revision).toBe(2)
         expect(() => harness.runtime.assertPersistentMutationAllowed()).toThrow()
@@ -1652,5 +1668,74 @@ describe('native replacement working-set refresh', () => {
                 ],
             }),
         )
+    })
+
+    it('reports a revision committed under the fence once, after release', async () => {
+        const onLocalRevision = vi.fn()
+        const harness = createFenceRuntimeHarness(
+            makeConversationDatabase('Before native commit'),
+            makeConversationDatabase('After native commit'),
+            2,
+            onLocalRevision,
+        )
+        const { runtime } = harness
+        await runtime.initializeActiveWorkingSet(harness.database)
+        const token = await runtime.capturePersistentMutationToken('native-commit')
+        const fence = await runtime.acquireDestructiveReplacementFence(token)
+        await fence.refreshCommittedWorkingSet(2)
+        expect(onLocalRevision).not.toHaveBeenCalled()
+        fence.release()
+        fence.release()
+        expect(onLocalRevision).toHaveBeenCalledExactlyOnceWith(2)
+    })
+
+    it('reports a revision committed under the fence whose refresh is still pending', async () => {
+        const onLocalRevision = vi.fn()
+        const harness = createFenceRuntimeHarness(
+            makeConversationDatabase('Before native commit'),
+            makeConversationDatabase('After native commit'),
+            2,
+            onLocalRevision,
+        )
+        const { runtime } = harness
+        await runtime.initializeActiveWorkingSet(harness.database)
+        const token = await runtime.capturePersistentMutationToken('native-commit')
+        const fence = await runtime.acquireDestructiveReplacementFence(token)
+        runtime.markCommittedWorkingSetRefreshRequired(2, new Error('synthetic projection failure'))
+        fence.release()
+        expect(onLocalRevision).toHaveBeenCalledExactlyOnceWith(2)
+    })
+
+    it('reports nothing for a fence released at the revision it held', async () => {
+        const onLocalRevision = vi.fn()
+        const harness = createFenceRuntimeHarness(
+            makeConversationDatabase('Unchanged'),
+            makeConversationDatabase('Unchanged'),
+            2,
+            onLocalRevision,
+        )
+        const { runtime } = harness
+        await runtime.initializeActiveWorkingSet(harness.database)
+        const fence = await runtime.acquireDestructiveReplacementFence(
+            await runtime.capturePersistentMutationToken('native-commit-cancelled'),
+        )
+        fence.release()
+        expect(onLocalRevision).not.toHaveBeenCalled()
+    })
+
+    it('does not report a revision committed elsewhere and projected through a refresh', async () => {
+        const onLocalRevision = vi.fn()
+        const harness = createFenceRuntimeHarness(
+            makeConversationDatabase('Before received change'),
+            makeConversationDatabase('After received change'),
+            2,
+            onLocalRevision,
+        )
+        const { runtime } = harness
+        await runtime.initializeActiveWorkingSet(harness.database)
+        await harness.store.commit({ expectedRevision: 1 } as Parameters<PersistentDataStore['commit']>[0])
+        await expect(runtime.refreshActiveWorkingSetFromStore(2)).resolves.toMatchObject({ revision: 2, projection: 'applied' })
+        expect(harness.database.username).toBe('After received change')
+        expect(onLocalRevision).not.toHaveBeenCalled()
     })
 })

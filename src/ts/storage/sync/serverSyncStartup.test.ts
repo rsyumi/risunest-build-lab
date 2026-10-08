@@ -4,7 +4,7 @@ import type { SyncBindingState } from './bindingFlow'
 
 const f = vi.hoisted(() => ({
     invoke: vi.fn(), offline: true, repairError: undefined as unknown, activationError: undefined as unknown, fenceError: undefined as unknown,
-    configured: true, pending: null as unknown, inspectError: undefined as unknown,
+    configured: true, pending: null as unknown, inspectError: undefined as unknown, pushError: undefined as unknown,
     sharedData: false, marker: false, queued: 0, outbox: 0, pushed: 0,
     binding: undefined as unknown as SyncBindingState,
     runtime: { revision: 0, getStorageAuthorityEpoch: () => 'storage', subscribeActiveConversationViewportSource: () => () => {}, captureSelectedConversationTarget: () => null, setActivatedLibraryRecoveryLifecycle() {}, markCommittedWorkingSetRefreshRequired() {} },
@@ -32,7 +32,7 @@ vi.mock('@lucide/svelte', () => ({ CheckIcon: () => {}, LoaderCircleIcon: () => 
 vi.mock('./serverSyncRegistrationInbox', () => ({ serverRegistrationInbox: { changed: { subscribe: () => () => {} }, releaseConsumed() {}, take: () => undefined } }))
 vi.mock('./serverSyncQr', () => ({ canScanServerRegistration: false, createServerQrScanner: () => ({ cancel() {} }) }))
 vi.mock('./serverAssetResidency', () => ({ getAssetResidencyStatus: async () => undefined, setAssetResidencyPolicy: vi.fn(), evictLocalAssets: vi.fn(), cancelAssetResidencyOperation: vi.fn() }))
-vi.mock('src/lang', () => ({ language: { loading: 'Loading', lwwSync: { concurrentEditNotice: 'Concurrent edits', clockBlocked: 'Clock blocked', writerCollision: 'Writer blocked', bindingIncomplete: 'Binding incomplete', registrationRevoked: 'Registration revoked' }, risuNest: { serverSync: { title: 'Sync', description: 'Sync library', connect: 'Connect and sync', syncNow: 'Sync now', disconnect: 'Disconnect', disconnected: 'Stopped', ready: 'Ready', errorHelp: 'Connection failed', credentialUnavailable: 'Credential unavailable', registrationCode: 'Registration code', readRegistration: 'Read', pendingChanges: 'Changes to upload', count: '{0}', lastSuccess: 'Last sync', management: {}, residency: {} } } } }))
+vi.mock('src/lang', () => ({ language: { loading: 'Loading', lwwSync: { concurrentEditNotice: 'Concurrent edits', clockBlocked: 'Clock blocked', writerCollision: 'Writer blocked', bindingIncomplete: 'Binding incomplete', registrationRevoked: 'Registration revoked', registrationUsed: 'Registration used', registrationUsedOnboarding: 'Registration used in onboarding', newDeviceAction: 'Connect as new device' }, risuNest: { serverSync: { title: 'Sync', description: 'Sync library', connect: 'Connect and sync', syncNow: 'Sync now', disconnect: 'Disconnect', disconnected: 'Stopped', ready: 'Ready', errorHelp: 'Connection failed', credentialUnavailable: 'Credential unavailable', registrationCode: 'Registration code', readRegistration: 'Read', pendingChanges: 'Changes to upload', count: '{0}', lastSuccess: 'Last sync', management: {}, residency: {} } } } }))
 
 let production: typeof import('./serverSyncProduction')
 let ui: typeof import('svelte')
@@ -42,7 +42,7 @@ const commands = () => f.invoke.mock.calls.map(([command]) => command)
 const button = (text: string) => [...document.querySelectorAll('button')].find(value => value.textContent?.trim() === text)
 beforeEach(async () => {
     vi.resetModules(); f.invoke.mockReset(); f.offline = true; f.repairError = undefined; f.activationError = undefined; f.fenceError = undefined
-    f.configured = true; f.pending = null; f.inspectError = undefined
+    f.configured = true; f.pending = null; f.inspectError = undefined; f.pushError = undefined
     f.sharedData = false; f.marker = false; f.queued = 0; f.outbox = 0; f.pushed = 0
     f.binding = { target: { kind: 'server', connectionId: 'server' }, targetAuthority: '4', selectionEpoch: 'persisted', libraryId: 'library', progress: null }
     Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
@@ -57,7 +57,7 @@ beforeEach(async () => {
             if (f.marker) { f.marker = false; f.queued += 1; f.outbox += 2 }
         }
         if (command === 'server_sync_configure') f.pending = { endpoint: args.config.endpoint, libraryId: args.config.libraryId, epoch: 'epoch', serverEmpty: true }
-        if (command === 'server_sync_lww_push') { if (!f.outbox) return null; f.outbox -= 1; f.pushed += 1; return { accepted: 1 } }
+        if (command === 'server_sync_lww_push') { if (f.pushError) throw f.pushError; if (!f.outbox) return null; f.outbox -= 1; f.pushed += 1; return { accepted: 1 } }
         if (command === 'server_sync_lww_pull') return { bindingAuthority: f.binding.targetAuthority, requestId: 'pull', changes: [] }
         if (command === 'server_sync_lww_pending_binding') return structuredClone(f.pending)
         if (command === 'server_sync_lww_pending_count') return f.outbox
@@ -280,5 +280,39 @@ describe('initial publication owed by a first binding that stopped after its swi
         await vi.waitFor(() => expect(f.pushed).toBe(shared ? 2 : 0))
         expect(f.marker).toBe(false); expect(f.queued).toBe(shared ? 1 : 0); expect(f.outbox).toBe(0)
         expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { configured: true, bound: true }, paused: false, error: '', bindingIncomplete: false })
+    })
+})
+
+describe('a duplicate device connecting again with a registration code', () => {
+    async function readCode(deviceId: string) {
+        const { encodeServerRegistration } = await import('./serverSyncRegistration')
+        const input = document.querySelector('textarea')!
+        input.value = encodeServerRegistration({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId, token: 'ab'.repeat(32) })
+        input.dispatchEvent(new Event('input', { bubbles: true })); await settle()
+        button('Read')!.click(); await settle()
+    }
+    it('refuses a used code before reading the library and keeps connecting as a new device available', async () => {
+        f.offline = false; f.pushError = { code: 'writer-collision', status: 409, retryable: false }
+        Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+        await production.installServerSyncProduction()
+        await vi.waitFor(() => expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: true, error: 'writer-collision', blockedCode: 'writer-collision' }))
+        await settings()
+        expect(document.body.textContent).toContain('Writer blocked')
+        await readCode('reused')
+        f.invoke.mockClear(); f.inspectError = { code: 'registration-integrity', status: 409, retryable: false }
+        button('Connect as new device')!.click()
+        await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toBe('Registration used'))
+        expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_inspect', { request: { bindingAuthority: '4', requestId: expect.any(String) }, newDevice: true })
+        for (const command of ['server_sync_lww_stage_target', 'server_sync_lww_fence', 'server_sync_lww_prepare_new_device', 'pds_lww_switch_target']) expect(commands()).not.toContain(command)
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: true, error: 'registration-integrity', blockedCode: 'writer-collision' })
+        expect(document.querySelector('textarea')).not.toBeNull()
+        await readCode('reused')
+        expect(button('Connect as new device')).toBeDefined()
+        f.invoke.mockClear(); f.inspectError = { code: 'registration-used', status: 409, retryable: false }
+        button('Connect and sync')!.click()
+        await vi.waitFor(() => expect(document.querySelector('textarea')).not.toBeNull())
+        expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_inspect', { request: { bindingAuthority: '4', requestId: expect.any(String) }, newDevice: false })
+        expect(commands()).not.toContain('server_sync_lww_stage_target')
+        expect(document.querySelector('[role="alert"]')?.textContent).toBe('Registration used')
     })
 })

@@ -20,6 +20,11 @@ const state = vi.hoisted(() => ({
 }))
 
 const platformState = vi.hoisted(() => ({ android: true, ios: false }))
+const qr = vi.hoisted(() => ({ scan: vi.fn(), cancel: vi.fn() }))
+vi.mock('src/ts/ui/qrScanner', async importOriginal => ({
+    ...await importOriginal<typeof import('src/ts/ui/qrScanner')>(),
+    createQrScanner: () => qr,
+}))
 vi.mock('src/ts/platform', () => ({
     get isTauriAndroid() { return platformState.android },
     get isTauriIOS() { return platformState.ios },
@@ -46,6 +51,7 @@ vi.mock('src/ts/storage/sync/external/bridge', () => ({
 
 import ConnectionForm from './ConnectionForm.svelte'
 import { externalStorageStrings } from './strings'
+import { QrScanError } from 'src/ts/ui/qrScanner'
 
 let target: HTMLDivElement
 let component: ReturnType<typeof mount> | undefined
@@ -177,6 +183,8 @@ beforeEach(() => {
     platformState.ios = false
     state.native = true
     for (const mock of Object.values(state)) if (typeof mock !== 'boolean') mock.mockReset()
+    qr.scan.mockReset()
+    qr.cancel.mockReset()
     target = document.createElement('div')
     document.body.append(target)
     state.listProviders.mockResolvedValue([{
@@ -299,6 +307,62 @@ describe('opening an existing repository', () => {
             recoveryKey: 'fixed-recovery-key',
         }))
         expect(state.prepareConnectionSettingsImport).not.toHaveBeenCalled()
+    })
+})
+
+describe('scanning connection settings', () => {
+    const payload = () => target.querySelector<HTMLTextAreaElement>('textarea')!.value
+    const restore = (tone?: 'onboarding') => {
+        component = mount(ConnectionForm, {
+            target,
+            props: { strings, onconnected: vi.fn(), oncancel: vi.fn(), restoreOnly: true, ...(tone ? { tone } : {}) },
+        })
+    }
+
+    it('fills the settings field from the scanned code in the screen wording', async () => {
+        qr.scan.mockResolvedValue('  scanned-settings  ')
+        restore()
+        await settle()
+        button(strings.scanConnectionSettings).click()
+        await settle()
+        expect(qr.scan).toHaveBeenCalledExactlyOnceWith('settings')
+        expect(payload()).toBe('scanned-settings')
+        expect(target.querySelector('[role="alert"]')).toBeNull()
+    })
+
+    it('uses the onboarding wording from the onboarding screen', async () => {
+        qr.scan.mockResolvedValue('scanned-settings')
+        restore('onboarding')
+        await settle()
+        button(strings.scanConnectionSettings).click()
+        await settle()
+        expect(qr.scan).toHaveBeenCalledExactlyOnceWith('onboarding')
+    })
+
+    it('returns quietly from a cancelled scan and reports a failed one', async () => {
+        qr.scan.mockRejectedValueOnce(new QrScanError('qr-scan-cancelled')).mockRejectedValueOnce(new QrScanError('qr-camera-permission-denied'))
+        restore()
+        await settle()
+        button(strings.scanConnectionSettings).click()
+        await settle()
+        expect(target.querySelector('[role="alert"]')).toBeNull()
+        expect(payload()).toBe('')
+        button(strings.scanConnectionSettings).click()
+        await settle()
+        expect(target.querySelector('[role="alert"]')?.textContent).toBe(strings.errorGeneric)
+    })
+
+    it('marks the scan button busy while the camera runs and ends the scan when the form closes', async () => {
+        qr.scan.mockReturnValue(new Promise(() => {}))
+        restore()
+        await settle()
+        button(strings.scanConnectionSettings).click()
+        await settle()
+        const scanButton = [...target.querySelectorAll('button')].find(item => item.textContent?.includes(strings.scanConnectionSettings))
+        expect(scanButton?.getAttribute('aria-busy')).toBe('true')
+        await unmount(component!)
+        component = undefined
+        expect(qr.cancel).toHaveBeenCalledOnce()
     })
 })
 

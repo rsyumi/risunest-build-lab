@@ -30,6 +30,11 @@ it('describes only the reset and restore actions in their help', () => {
     expect(languageKorean.risuNest.backup.restoreHelp).toBe('계정 동기화 충돌 백업으로 데이터를 복원합니다.')
     expect(languageEnglish.risuNest.backup.restoreHelp).toBe('Restores data from an account sync conflict backup.')
 })
+it('describes only finding and deleting unused files in their help', () => {
+    expect(languageKorean.risuNest.storage.gcHelp).toBe('어디에서도 사용하지 않는 파일을 찾아 삭제합니다.')
+    expect(languageEnglish.risuNest.storage.gcHelp).toBe('Finds and deletes files that nothing refers to.')
+    for (const storage of [languageKorean.risuNest.storage, languageEnglish.risuNest.storage]) expect(storage).not.toHaveProperty('gcSeparation')
+})
 it('names toggle presets without a particle placeholder', () => {
     expect(languageKorean.togglePresetRenamed('기본', '전투')).toBe('"기본" 프리셋 이름을 바꿨으며, 새 이름은 "전투"입니다.')
     expect(languageKorean.togglePresetDuplicated('기본 사본')).toBe('"기본 사본" 프리셋으로 복제했습니다.')

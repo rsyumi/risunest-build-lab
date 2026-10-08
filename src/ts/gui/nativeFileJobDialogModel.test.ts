@@ -148,6 +148,8 @@ describe('nativeFileJobDialogModel', () => {
         ['server-sync-busy', 'reasonBusy'],
         ['resolve-pending-operation-first', 'reasonPendingOperation'],
         ['server-status-unavailable', 'reasonServerStatus'],
+        ['remote-asset-unavailable', 'reasonRemoteAssetUnavailable'],
+        ['asset-missing', 'reasonAssetMissing'],
     ] as const)('presents actionable file failure %s while keeping diagnostics secondary', (code, key) => {
         const model = buildNativeFileJobDialogModel(null, outcome({ state: 'failed', error: { code, message: 'synthetic detail', recoveryRequired: false } }), 0)
         expect(model.terminal?.reason).toBe(copy[key])

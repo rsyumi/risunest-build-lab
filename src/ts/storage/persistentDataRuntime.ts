@@ -319,6 +319,7 @@ export interface PersistentDataRuntimeStateAdapter {
     captureWorkingSetDatabase?(): Database | null
     /** Host caches outside the working set that a remote change invalidates. */
     onPluginStorageChanged?(owner: string, key: string): void
+    onPluginDeviceStorageChanged?(owner: string): void
     getGeneratingConversations?(): readonly GeneratingConversation[]
     conversationViewportRowBudget?: number
     canActivateWorkingSet?(): boolean
@@ -524,6 +525,7 @@ export interface PersistentDataRuntime {
         reason: string,
         options?: { publishOfficial?: boolean },
     ): Promise<PersistentMutationToken>
+    /** A revision committed while this fence is held is reported as a local revision on release. */
     acquireDestructiveReplacementFence(
         expected: PersistentMutationToken,
     ): Promise<PersistentDestructiveReplacementFence>
@@ -1190,6 +1192,7 @@ export function createPersistentDataRuntime(
         for (const key of result.affectedKeys) {
             const [kind, owner, name] = JSON.parse(key)
             if (kind === 'plugin') dependencies.state.onPluginStorageChanged?.(owner, name)
+            else if (kind === 'plugin-local') dependencies.state.onPluginDeviceStorageChanged?.(owner)
             else if (kind === 'order' && owner === 'plugin-storage') {
                 dependencies.state.onPluginStorageChanged?.(name, '')
             }
@@ -1647,6 +1650,15 @@ export function createPersistentDataRuntime(
                     if (released) return
                     coordinator.releaseDestructiveReplacementFence(owner)
                     released = true
+                    // Nothing else can commit while the fence is held, so a later
+                    // revision is the holder's own change and sync must send it.
+                    const committed = coordinator.revision
+                    if (committed <= heldRevision) return
+                    try {
+                        dependencies.onLocalRevision?.(committed)
+                    } catch (error) {
+                        dependencies.onBackgroundError?.(error)
+                    }
                 },
             }
         },

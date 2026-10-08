@@ -1244,6 +1244,34 @@ pub(super) struct OriginalBackupUnit {
     pub value: risunest_sync_wire::unit::UnitValue,
 }
 
+fn encode_original_unit(
+    key: risunest_sync_wire::unit::UnitKey,
+    value: risunest_sync_wire::unit::UnitValue,
+) -> Result<Vec<u8>> {
+    value.validate().map_err(corrupt)?;
+    let record = OriginalBackupUnit { schema: "risunest.backup-unit/v1".into(), key, value };
+    let bytes = risunest_sync_wire::canonical::encode(&record).map_err(corrupt)?;
+    if bytes.len() > risunest_sync_wire::MAX_METADATA_BYTES {
+        return Err(ProviderError::new(ErrorKind::FileTooLarge));
+    }
+    Ok(bytes)
+}
+
+/// How many original units a bundle carries and what they come to once
+/// encoded, read the way the catalog build reads them but keeping nothing.
+fn original_unit_totals(units: &super::capture::OriginalBackupUnits, cancel: &Cancellation) -> Result<(u64, u64)> {
+    let (mut items, mut bytes) = (0u64, 0u64);
+    for unit in units.units().map_err(corrupt)? {
+        if items % 128 == 0 {
+            cancel.check()?;
+        }
+        let (key, value) = unit.map_err(corrupt)?;
+        bytes = bytes.saturating_add(encode_original_unit(key, value)?.len() as u64);
+        items += 1;
+    }
+    Ok((items, bytes))
+}
+
 fn original_unit_sources(
     units: impl Iterator<Item = crate::persistent_store::StoreResult<(risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue)>>,
     directory: &Path,
@@ -1253,14 +1281,7 @@ fn original_unit_sources(
     let mut sources = Vec::new();
     for unit in units {
         let (key,value) = unit.map_err(corrupt)?;
-        value.validate().map_err(corrupt)?;
-        let record = OriginalBackupUnit {
-            schema: "risunest.backup-unit/v1".into(), key: key.clone(), value: value.clone(),
-        };
-        let bytes = risunest_sync_wire::canonical::encode(&record).map_err(corrupt)?;
-        if bytes.len() > risunest_sync_wire::MAX_METADATA_BYTES {
-            return Err(ProviderError::new(ErrorKind::FileTooLarge));
-        }
+        let bytes = encode_original_unit(key.clone(), value)?;
         spool.write_all(&bytes).map_err(transient)?;
         sources.push(SourceEntry {
             kind: wire::CatalogEntryKind::Record,
@@ -1513,6 +1534,14 @@ fn admitted_packs(
     Ok(true)
 }
 
+fn source_totals(sources: &[SourceEntry]) -> (u64, u64) {
+    (
+        sources.len() as u64,
+        sources.iter().fold(0u64, |sum, source| sum.saturating_add(source.byte_length)),
+    )
+}
+
+/// Counts each source in `prepared` once it is done. The caller planned them.
 async fn build_entries(
     kind: wire::CatalogKind,
     sources: Vec<SourceEntry>,
@@ -1534,10 +1563,6 @@ async fn build_entries(
     hydration: &mut SourceHydration,
     cancel: &Cancellation,
 ) -> Result<(Vec<EntryPlan>, Vec<RemoteObject>)> {
-    prepared.plan(
-        sources.len() as u64,
-        sources.iter().map(|source| source.byte_length).sum(),
-    );
     let size = StoredSize { limits, repository_id: format_repository_id };
     let max_pack = size.pack_capacity(&format!("pack-{}", "0".repeat(64)))?;
     let preferred = match kind {
@@ -3573,6 +3598,8 @@ async fn package_and_upload_content_catalog(
     } else {
         let mut hydration=SourceHydration::default();
         let mut maintenance=MaintenanceReport::default();
+        let (items,bytes)=source_totals(&sources);
+        prepared.plan(items,bytes);
         let (entries,uploaded)=build_entries(kind,sources,
             &repository_root.join("external-storage"),&repository.repository_id,&build_root,
             root_key,limits,None,None,false,&mut cache,&mut evidence,journal,provider,repository,
@@ -3673,6 +3700,57 @@ pub(crate) async fn package_and_upload_protected(
     if observed_fingerprint != metadata.content_fingerprint {
         return Err(corrupt("snapshot library fingerprint differs"));
     }
+    // A published state keeps the sections the observed state already had and
+    // replaces only the ones this device captured. A bundle starts empty and
+    // declares exactly what it covers.
+    let mut published_sections = match &metadata.purpose {
+        SnapshotPurpose::SyncState {
+            parent_sections, ..
+        } => parent_sections.clone(),
+        SnapshotPurpose::BackupBundle { .. } | SnapshotPurpose::LwwCheckpoint { .. } => BTreeMap::new(),
+    };
+    // An unchanged section keeps the reference the observed state carried, so
+    // its commit number still names the publication that changed it.
+    let sections: Vec<CapturedSection> = sections
+        .into_iter()
+        .filter(|captured| {
+            !published_sections.get(captured.kind.id()).is_some_and(|carried| {
+                carried.content_fingerprint == captured.content_fingerprint
+                    && carried.gc_floor == captured.gc_floor
+                    && carried.max_write_clock == captured.max_write_clock
+            })
+        })
+        .collect();
+    // Everything this publication prepares is planned before the first domain
+    // starts, out of what the capture already says, so the total the job
+    // reports first is the one it finishes at.
+    let original_totals = match &metadata.purpose {
+        SnapshotPurpose::BackupBundle { original_units, .. } => {
+            let units = original_units.clone();
+            let totals_cancel = cancel.clone();
+            let cpu = cpu_permit().await?;
+            let totals = spawn_blocking(move || original_unit_totals(&units, &totals_cancel))
+                .await
+                .map_err(transient)??;
+            drop(cpu);
+            totals
+        }
+        SnapshotPurpose::SyncState { .. } | SnapshotPurpose::LwwCheckpoint { .. } => (0, 0),
+    };
+    let (asset_items, asset_bytes) = source_totals(&asset_sources);
+    let mut planned = [
+        source_totals(&record_sources),
+        (asset_items, asset_bytes),
+        original_totals,
+    ]
+    .into_iter()
+    .fold((0u64, 0u64), |(items, bytes), (more_items, more_bytes)| {
+        (items.saturating_add(more_items), bytes.saturating_add(more_bytes))
+    });
+    for source in sections.iter().flat_map(|captured| &captured.sources) {
+        planned = (planned.0.saturating_add(1), planned.1.saturating_add(source.byte_length));
+    }
+    prepared.plan(planned.0, planned.1);
     let mut maintenance = MaintenanceReport::default();
     let mut hydration = SourceHydration::default();
     let record_fingerprint = catalog_fingerprint(wire::CatalogKind::Records, &record_sources);
@@ -3753,6 +3831,7 @@ pub(crate) async fn package_and_upload_protected(
             return Err(corrupt("empty asset catalog closure"));
         }
         referenced.extend(objects);
+        prepared.completed_many(asset_items, asset_bytes);
         root
     } else {
         let (asset_entries, uploaded) = build_entries(
@@ -3804,26 +3883,8 @@ pub(crate) async fn package_and_upload_protected(
         asset_catalog: asset_catalog.stored(repository)?,
         content_fingerprint: metadata.content_fingerprint,
     };
-    // A published state keeps the sections the observed state already had and
-    // replaces only the ones this device captured. A bundle starts empty and
-    // declares exactly what it covers.
-    let mut published_sections = match &metadata.purpose {
-        SnapshotPurpose::SyncState {
-            parent_sections, ..
-        } => parent_sections.clone(),
-        SnapshotPurpose::BackupBundle { .. } | SnapshotPurpose::LwwCheckpoint { .. } => BTreeMap::new(),
-    };
     let mut built_sections = BTreeSet::new();
     for captured in sections {
-        // An unchanged section keeps the reference the observed state carried,
-        // so its commit number still names the publication that changed it.
-        if published_sections.get(captured.kind.id()).is_some_and(|carried| {
-            carried.content_fingerprint == captured.content_fingerprint
-                && carried.gc_floor == captured.gc_floor
-                && carried.max_write_clock == captured.max_write_clock
-        }) {
-            continue;
-        }
         let sources: Vec<SourceEntry> = captured
             .sources
             .iter()
@@ -4987,6 +5048,131 @@ mod tests {
             assert_eq!(everything.items, everything.total_items);
             assert_eq!(everything.total_items, library.total_items + section_sources);
             assert!(everything.total_bytes > library.total_bytes);
+        });
+    }
+
+    type PlannedReading = (crate::external_storage::phase_progress::PhaseCounters, usize);
+
+    /// Publishes the synthetic library under `purpose`, recording each reading
+    /// with the provider requests answered when it arrived.
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_planned(
+        root: &Path,
+        id: &str,
+        cache: &Path,
+        purpose: SnapshotPurpose,
+        sections: Vec<CapturedSection>,
+        provider: &Arc<FakeProvider>,
+        repository: &RepositoryHandle,
+    ) -> (CompletedSnapshot, Vec<PlannedReading>, crate::external_storage::phase_progress::PhaseCounters, usize) {
+        let (capture, _) = captured(root, &format!("capture-{id}"), 1, b"planned record", b"planned asset");
+        let mut transfer = journal(&root.join(id), id, &capture);
+        let mut snapshot_metadata = metadata(id, &capture);
+        snapshot_metadata.purpose = purpose;
+        let readings: Arc<std::sync::Mutex<Vec<PlannedReading>>> = Arc::default();
+        let collected = Arc::clone(&readings);
+        let observed = Arc::clone(provider);
+        let prepared = PhaseProgress::new(move |reading| {
+            collected.lock().unwrap().push((reading, observed.request_count()));
+        });
+        let before = provider.request_count();
+        let completed = package_and_upload(
+            capture, sections, root, cache, snapshot_metadata, &[31; 32], limits(256 * 1024), None,
+            &mut transfer, provider.as_ref(), repository, &prepared, &Cancellation::default(),
+        )
+        .await
+        .unwrap();
+        let readings = readings.lock().unwrap().clone();
+        (completed, readings, prepared.read(), before)
+    }
+
+    /// The first reading already carries the total the preparation finishes
+    /// at, it arrives before the provider is asked anything, and no reading
+    /// in between moves the total or runs past it.
+    fn assert_planned_once(
+        readings: &[PlannedReading],
+        last: crate::external_storage::phase_progress::PhaseCounters,
+        requests_before: usize,
+    ) {
+        let (first, requests) = readings.first().copied().unwrap();
+        assert_eq!(requests, requests_before);
+        assert_eq!((first.items, first.bytes), (0, 0));
+        for (reading, _) in readings {
+            assert_eq!((reading.total_items, reading.total_bytes), (last.total_items, last.total_bytes));
+            assert!(reading.items <= reading.total_items && reading.bytes <= reading.total_bytes);
+        }
+        assert_eq!((last.items, last.bytes), (last.total_items, last.total_bytes));
+    }
+
+    /// A backup reads, compresses and packs its records, its assets, each
+    /// section and every original unit, a page of units at a time, before it
+    /// finishes preparing. All of it is planned once, out of what the capture
+    /// already says, so the total the job shows first is the one it ends at.
+    /// That holds when the asset catalog is already published and only
+    /// referenced again, and when a state carries a section unchanged.
+    #[test]
+    fn a_publication_plans_its_whole_preparation_before_the_first_domain() {
+        runtime().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let spool = root.path().join("section-spool");
+            let hypa = section(&spool, SectionKind::Hypa, "planned", 1);
+            let plugins = section(&spool, SectionKind::LocalPlugins, "planned", 1);
+            let changed = section(&spool, SectionKind::LocalPlugins, "changed", 1);
+            let provider = Arc::new(FakeProvider::new(false));
+            let repository = fake::repository();
+            let cache = root.path().join("planned-cache");
+            // More units than one page of the original unit catalog build.
+            let bundle = || SnapshotPurpose::BackupBundle {
+                source: wire_control::BundleSource::Device { writer_id: "synthetic-writer".into() },
+                remote_generation: None,
+                original_units: (0..300)
+                    .map(|index| {
+                        (
+                            risunest_sync_wire::unit::UnitKey::new(&["future-opaque", &format!("planned-{index:03}")]).unwrap(),
+                            risunest_sync_wire::unit::UnitValue::object(
+                                risunest_sync_wire::descriptor::RecordDescriptor::content(hex::encode(hash(
+                                    format!("synthetic planned unit {index}").as_bytes(),
+                                ))),
+                            )
+                            .unwrap(),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>()
+                    .into(),
+            };
+
+            let (first, readings, last, before) = publish_planned(
+                root.path(), "planned-1", &cache, bundle(), vec![hypa.clone(), plugins.clone()], &provider, &repository,
+            )
+            .await;
+            assert_planned_once(&readings, last, before);
+            let section_sources = (hypa.sources.len() + plugins.sources.len()) as u64;
+            assert_eq!(last.total_items, 2 + section_sources + 300);
+
+            // The asset catalog is referenced again rather than built, and its
+            // asset still counts as prepared.
+            let (again, readings, last, before) = publish_planned(
+                root.path(), "planned-2", &cache, bundle(), vec![hypa.clone(), plugins.clone()], &provider, &repository,
+            )
+            .await;
+            assert_eq!(again.asset_catalog.object_id, first.asset_catalog.object_id);
+            assert_planned_once(&readings, last, before);
+            assert_eq!(last.total_items, 2 + section_sources + 300);
+
+            // A state carries its unchanged section and prepares only the one
+            // that changed.
+            let state = SnapshotPurpose::SyncState {
+                epoch: "epoch".into(),
+                generation: risunest_sync_wire::head::Sequence::from(2u64),
+                parent_sections: first.sections.clone(),
+            };
+            let (carried, readings, last, before) = publish_planned(
+                root.path(), "planned-3", &cache, state, vec![hypa.clone(), changed.clone()], &provider, &repository,
+            )
+            .await;
+            assert_eq!(carried.sections[SectionKind::Hypa.id()], first.sections[SectionKind::Hypa.id()]);
+            assert_planned_once(&readings, last, before);
+            assert_eq!(last.total_items, 2 + changed.sources.len() as u64);
         });
     }
 
