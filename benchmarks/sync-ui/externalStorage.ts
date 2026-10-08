@@ -15,14 +15,14 @@ const missing = (step: string, message: string, detail: Record<string, unknown> 
 };
 
 // The code and kind of a native error, never its message, which may carry an endpoint.
-function errorShape(error: unknown) {
+export function errorShape(error: unknown) {
   if (!error || typeof error !== "object") return { error: typeof error };
   const value = error as { code?: unknown; kind?: unknown; reason?: unknown; name?: unknown };
   const text = (field: unknown) => typeof field === "string" ? redact(field).slice(0, 80) : undefined;
   return { code: text(value.code), kind: text(value.kind), reason: text(value.reason), name: text(value.name) };
 }
 
-async function guarded<T>(step: string, run: () => Promise<T>): Promise<T> {
+export async function guarded<T>(step: string, run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } catch (error) {

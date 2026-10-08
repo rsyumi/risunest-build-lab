@@ -380,7 +380,7 @@ pub(crate) async fn external_storage_start_job(
     mut request: StartJobRequest,
     job_id: Option<String>,
 ) -> Result<Value> {
-    logged("external_storage_start_job", async move {
+    logged("external_storage_start_job", Box::pin(async move {
         request.validate()?;
         if let Some(id) = &job_id {
             if uuid::Uuid::parse_str(id).ok().is_none_or(|parsed| parsed.to_string() != *id)
@@ -495,7 +495,7 @@ pub(crate) async fn external_storage_start_job(
         }
         wake_job(app, job.id.clone())?;
         Ok(job.summary)
-    }.await)
+    }).await)
 }
 fn same_explicit_retry(job: &DurableJob, request: &StartJobRequest) -> bool {
     if same_requested_operation(&job.request, request) { return true; }

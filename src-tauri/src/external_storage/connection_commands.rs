@@ -1041,7 +1041,7 @@ pub(crate) async fn external_storage_commit_connection(
     state: State<'_, ConnectionCommandState>,
     request: CommitConnectionRequest,
 ) -> ConnectResult<ConnectionResult> {
-    logged("external_storage_commit_connection", async move {
+    logged("external_storage_commit_connection", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         let preparation_id = request.preparation_id;
         let mut pending = take_preparation(&state, &preparation_id)?;
@@ -1092,7 +1092,7 @@ pub(crate) async fn external_storage_commit_connection(
                 Err(error)
             }
         }
-    }.await)
+    }).await)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1101,7 +1101,7 @@ pub(crate) async fn external_storage_begin_authorization(
     state: State<'_, ConnectionCommandState>,
     request: BeginAuthorizationRequest,
 ) -> Result<PendingAuthorizationSummary> {
-    logged("external_storage_begin_authorization", async move {
+    logged("external_storage_begin_authorization", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         let BeginAuthorizationRequest {
             preparation_id,
@@ -1150,7 +1150,7 @@ pub(crate) async fn external_storage_begin_authorization(
             expires_at_ms: expires_at_ms.to_string(),
             state: "browser-required",
         })
-    }.await)
+    }).await)
 }
 
 #[cfg(target_os = "ios")]
@@ -1160,7 +1160,7 @@ pub(crate) async fn external_storage_begin_authorization(
     state: State<'_, ConnectionCommandState>,
     request: BeginAuthorizationRequest,
 ) -> Result<PendingAuthorizationSummary> {
-    logged("external_storage_begin_authorization", async move {
+    logged("external_storage_begin_authorization", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         let BeginAuthorizationRequest {
             preparation_id,
@@ -1205,7 +1205,7 @@ pub(crate) async fn external_storage_begin_authorization(
             expires_at_ms: expires_at_ms.to_string(),
             state: "complete",
         })
-    }.await)
+    }).await)
 }
 
 #[cfg(target_os = "android")]
@@ -1215,7 +1215,7 @@ pub(crate) async fn external_storage_begin_authorization(
     state: State<'_, ConnectionCommandState>,
     request: BeginAuthorizationRequest,
 ) -> Result<PendingAuthorizationSummary> {
-    logged("external_storage_begin_authorization", async move {
+    logged("external_storage_begin_authorization", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         let BeginAuthorizationRequest {
             preparation_id,
@@ -1269,7 +1269,7 @@ pub(crate) async fn external_storage_begin_authorization(
             expires_at_ms: expires_at_ms.to_string(),
             state: authorization_state,
         })
-    }.await)
+    }).await)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1279,7 +1279,7 @@ pub(crate) async fn external_storage_complete_authorization(
     state: State<'_, ConnectionCommandState>,
     mut request: CompleteAuthorizationRequest,
 ) -> ConnectResult<CompleteAuthorizationResult> {
-    logged("external_storage_complete_authorization", async move {
+    logged("external_storage_complete_authorization", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         if let Some(mut redirect_url) = request.redirect_url {
             redirect_url.zeroize();
@@ -1334,7 +1334,7 @@ pub(crate) async fn external_storage_complete_authorization(
         .await;
         lock(&state.authorization_cancellations)?.remove(&request.authorization_id);
         result
-    }.await)
+    }).await)
 }
 
 #[cfg(target_os = "ios")]
@@ -1344,7 +1344,7 @@ pub(crate) async fn external_storage_complete_authorization(
     state: State<'_, ConnectionCommandState>,
     mut request: CompleteAuthorizationRequest,
 ) -> ConnectResult<CompleteAuthorizationResult> {
-    logged("external_storage_complete_authorization", async move {
+    logged("external_storage_complete_authorization", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         if request.redirect_url.is_some() {
             return Err(ProviderError::new(ErrorKind::Unsupported).into());
@@ -1390,7 +1390,7 @@ pub(crate) async fn external_storage_complete_authorization(
         .await;
         lock(&state.authorization_cancellations)?.remove(&request.authorization_id);
         result
-    }.await)
+    }).await)
 }
 
 #[cfg(target_os = "android")]
@@ -1400,7 +1400,7 @@ pub(crate) async fn external_storage_complete_authorization(
     state: State<'_, ConnectionCommandState>,
     request: CompleteAuthorizationRequest,
 ) -> ConnectResult<CompleteAuthorizationResult> {
-    logged("external_storage_complete_authorization", async move {
+    logged("external_storage_complete_authorization", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         let redirect_url = request.redirect_url.map(Zeroizing::new);
         let client_secret = request.client_secret.map(Zeroizing::new);
@@ -1492,7 +1492,7 @@ pub(crate) async fn external_storage_complete_authorization(
         .await;
         lock(&state.authorization_cancellations)?.remove(&request.authorization_id);
         result
-    }.await)
+    }).await)
 }
 
 #[tauri::command]
@@ -1501,7 +1501,7 @@ pub(crate) async fn external_storage_list_folders(
     state: State<'_, ConnectionCommandState>,
     request: ListFoldersRequest,
 ) -> Result<FolderPage> {
-    logged("external_storage_list_folders", async move {
+    logged("external_storage_list_folders", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         let mut session = lock(&state.folder_selections)?
             .remove(&request.selection_id)
@@ -1611,7 +1611,7 @@ pub(crate) async fn external_storage_list_folders(
         };
         lock(&state.folder_selections)?.insert(request.selection_id, session);
         Ok(result)
-    }.await)
+    }).await)
 }
 
 #[tauri::command]
@@ -1620,7 +1620,7 @@ pub(crate) async fn external_storage_select_folder(
     state: State<'_, ConnectionCommandState>,
     request: SelectFolderRequest,
 ) -> Result<FolderSelection> {
-    logged("external_storage_select_folder", async move {
+    logged("external_storage_select_folder", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         let session = lock(&state.folder_selections)?
             .remove(&request.selection_id)
@@ -1680,7 +1680,7 @@ pub(crate) async fn external_storage_select_folder(
             name: folder.name,
             account_hint: Some(session.account_hint),
         })
-    }.await)
+    }).await)
 }
 
 #[tauri::command]

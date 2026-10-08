@@ -1,4 +1,4 @@
-"""Loopback WebDAV server and inputs for the Mac external storage backup round trip."""
+"""Loopback WebDAV server and inputs for the Mac external storage and backup file round trips."""
 import json
 import os
 import hashlib
@@ -14,7 +14,11 @@ import urllib.request
 from pathlib import Path
 
 PHASES = ('external-storage', 'external-storage-restart')
-DEPENDENCIES = {'external-storage-restart': 'external-storage'}
+SYNC_PHASES = ('external-sync', 'external-sync-restart')
+FILE_PHASES = ('backup-file', 'backup-file-restart')
+GROUPS = (PHASES, SYNC_PHASES, FILE_PHASES)
+DEPENDENCIES = {'external-storage-restart': 'external-storage', 'external-sync-restart': 'external-sync',
+                'backup-file-restart': 'backup-file'}
 ROOT_FOLDER = 'RisuNest'
 SYSTEM_KEYCHAIN = '/Library/Keychains/System.keychain'
 
@@ -44,6 +48,10 @@ def issue_loopback_certificate(directory):
             '-extfile', 'server.ext', '-out', 'server.pem')
     (directory / 'ca.key').unlink()
     return directory / 'ca.pem', directory / 'server.pem', directory / 'server.key'
+
+
+def file_markers():
+    return {'before': f'file-before-{secrets.token_hex(6)}', 'after': f'file-after-{secrets.token_hex(6)}'}
 
 
 class ExternalStorageSession:
@@ -108,11 +116,13 @@ class ExternalStorageSession:
         raise RuntimeError('WebDAV server did not listen')
 
     def before(self, phase):
-        if phase == 'external-storage':
+        if phase in ('external-storage', 'external-sync'):
             return {'webdav': {'endpoint': self.endpoint, 'accountId': self.user, 'password': self.password,
                                'root': ROOT_FOLDER},
                     'before': self.markers['before'], 'after': self.markers['after']}
         # A relaunch uses the stored connection and secret, never fresh credentials.
+        if phase == 'external-sync-restart':
+            return {'before': self.markers['before'], 'after': self.markers['after']}
         return {'before': self.markers['before']}
 
     def summarize(self):

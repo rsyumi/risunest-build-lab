@@ -38,6 +38,34 @@ fn active_device_restore_owns_only_its_exact_native_library_job() {
 }
 
 #[test]
+fn native_recovery_leaves_live_restore_pins_and_settles_unsealed_pins_as_aborted() {
+    use crate::asset_repository::job_pins::{CasJobKind, CasJobOwner, CasObjectRole, CasReleaseOutcome, DurableCasJob};
+    let root = tempfile::tempdir().unwrap();
+    let mut store = crate::persistent_store::PersistentStore::open(root.path()).unwrap();
+    let job = "unsealed-restore-job";
+    let mut pins = DurableCasJob::begin(root.path(), job, CasJobKind::LocalBackupRestore, CasJobOwner::for_test(), 0).unwrap();
+    let cas = crate::asset_repository::PayloadCas::new(root.path()).unwrap();
+    let published = pins.prepare_bytes(&cas, b"synthetic body published after activation", CasObjectRole::DirectObject).unwrap().content_hash;
+    let coordinator = state(root.path());
+    let stage = store.replace_begin().unwrap().staging_id;
+    let id = coordinator.create_native_portable_session(job, true, &["hypa".into()], 0, Some(stage)).unwrap();
+    let session = coordinator.session(&id).unwrap();
+
+    commands::release_native_restore_pins_for_test(&session, root.path(), CasReleaseOutcome::Committed).unwrap();
+    assert!(!pins.is_released());
+    let more = pins.prepare_bytes(&cas, b"synthetic body after device recovery", CasObjectRole::DirectObject).unwrap().content_hash;
+    drop(pins);
+
+    commands::release_native_restore_pins_for_test(&session, root.path(), CasReleaseOutcome::Committed).unwrap();
+    assert_eq!(DurableCasJob::open(root.path(), job).err().map(|error| error.kind()), Some(std::io::ErrorKind::NotFound));
+    let library = rusqlite::Connection::open(root.path().join("persistent").join(crate::persistent_store::DATABASE_FILE)).unwrap();
+    for hash in [published, more] {
+        let registered: i64 = library.query_row("SELECT count(*) FROM asset_objects WHERE object_hash=?1", [&hash], |row| row.get(0)).unwrap();
+        assert_eq!(registered, 1);
+    }
+}
+
+#[test]
 fn portable_adoption_requires_completed_exact_native_session_before_release() {
     use crate::local_backup::NeverCancelled;
     let root=tempfile::tempdir().unwrap();
