@@ -1029,8 +1029,8 @@
     {
       "path": "benchmarks/sync-ui/externalSync.ts",
       "mode": "100644",
-      "bytes": 11222,
-      "sha256": "e6c1f0bdba93c6841d85a4a657b780e2fc2f9a795243b7c564fde5de5517c01d"
+      "bytes": 12048,
+      "sha256": "2c1543447d536b4ce729ea23f18b700669fbdc843ef12f8116f95c3a828bbf0b"
     },
     {
       "path": "benchmarks/sync-ui/portableBackup.ts",
@@ -5961,8 +5961,8 @@
     {
       "path": "src-tauri/src/external_storage/lww_commands.rs",
       "mode": "100644",
-      "bytes": 46824,
-      "sha256": "939f24757e21eeac0b46a794d1ea70fbebd68ab555d4d88db4dfaa4a8d4f876d"
+      "bytes": 48018,
+      "sha256": "ed934e69b895d1d6249ad04c2659fe089654f4592fabd5897b5b9305b382df7b"
     },
     {
       "path": "src-tauri/src/external_storage/lww_compaction.rs",
@@ -8697,8 +8697,8 @@
     {
       "path": "src/lib/Others/NativeFileJobDialog.svelte",
       "mode": "100644",
-      "bytes": 10900,
-      "sha256": "23f566b8bb39afd4614876de609cf3587e38b8eb3b574dc1efa4370db7c77574"
+      "bytes": 11051,
+      "sha256": "52f7864303712f76f079cd3bb04d3ea8779b1df37eb6f2b9dc7f9cc6f63f059e"
     },
     {
       "path": "src/lib/Others/Onboarding/Onboarding.svelte",
@@ -9609,8 +9609,14 @@
     {
       "path": "src/lib/Setting/RisuNest/SettingProgress.svelte",
       "mode": "100644",
-      "bytes": 2270,
-      "sha256": "c42a77edee40e940af891cc19f6eca54d6a667e8bbf454d9bcbb1b721115814f"
+      "bytes": 2438,
+      "sha256": "d812ada6b3aed38e2ee9438ddd0b7f0004b091ac18d5d9134eb8f457f080762b"
+    },
+    {
+      "path": "src/lib/Setting/RisuNest/SettingProgress.test.ts",
+      "mode": "100644",
+      "bytes": 1918,
+      "sha256": "b42efdf1a35d56670ab68d60275a222151c8ed58f5fb02a266e21feed6bdff8a"
     },
     {
       "path": "src/lib/Setting/RisuNest/SettingRow.svelte",
@@ -11115,14 +11121,14 @@
     {
       "path": "src/ts/gui/nativeFileJobDialogModel.test.ts",
       "mode": "100644",
-      "bytes": 42762,
-      "sha256": "2450af5a9bb611386918faafe6bad5ac15398566822097a461c85f075480c7e5"
+      "bytes": 44203,
+      "sha256": "159150d1537a7dcfce9fdb016c6574912ded7a6718bd701e5b875143c3d94347"
     },
     {
       "path": "src/ts/gui/nativeFileJobDialogModel.ts",
       "mode": "100644",
-      "bytes": 30125,
-      "sha256": "1d0b725827af342da3cefa5f1f8ed81d388dd6f5c49f5985e9e03fa577cc101d"
+      "bytes": 30361,
+      "sha256": "0f7370a5b645dbd1482c88e697d80429cc48bbb41fede69ebd7386ee83c87c92"
     },
     {
       "path": "src/ts/gui/nativeFileJobProgress.test.ts",
