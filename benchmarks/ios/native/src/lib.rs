@@ -63,6 +63,73 @@ fn ios_bench_cloud_key() -> Result<String, &'static str> {
     std::env::var("RISUNEST_IOS_CLOUD_KEY").map_err(|_| "Live credential unavailable")
 }
 
+#[tauri::command]
+fn ios_bench_sync_input() -> Result<serde_json::Value, &'static str> {
+    let read = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .ok_or("Sync inputs unavailable")
+    };
+    match ios_bench_phase().as_str() {
+        "sync" => Ok(serde_json::json!({
+            "registration": read("RISUNEST_IOS_SYNC_REGISTRATION")?,
+            "expect": read("RISUNEST_IOS_SYNC_EXPECT")?,
+            "marker": read("RISUNEST_IOS_SYNC_MARKER")?,
+        })),
+        "sync-publish" => Ok(serde_json::json!({
+            "registration": read("RISUNEST_IOS_SYNC_REGISTRATION")?,
+            "marker": read("RISUNEST_IOS_SYNC_PUBLISH")?,
+        })),
+        // A relaunch reconnects from the stored credential, never from a registration.
+        "sync-restart" => Ok(serde_json::json!({ "marker": read("RISUNEST_IOS_SYNC_MARKER")? })),
+        _ => Err("Sync verification phase required"),
+    }
+}
+
+#[tauri::command]
+fn ios_bench_external_input() -> Result<serde_json::Value, &'static str> {
+    let read = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .ok_or("External storage inputs unavailable")
+    };
+    match ios_bench_phase().as_str() {
+        "external-storage" => Ok(serde_json::json!({
+            "webdav": {
+                "endpoint": read("RISUNEST_IOS_WEBDAV_URL")?,
+                "accountId": read("RISUNEST_IOS_WEBDAV_USER")?,
+                "password": read("RISUNEST_IOS_WEBDAV_PASSWORD")?,
+                "root": read("RISUNEST_IOS_WEBDAV_ROOT")?,
+            },
+            "before": read("RISUNEST_IOS_EXTERNAL_BEFORE")?,
+            "after": read("RISUNEST_IOS_EXTERNAL_AFTER")?,
+        })),
+        // A relaunch uses the stored connection and secret, never fresh credentials.
+        "external-storage-restart" => Ok(serde_json::json!({ "before": read("RISUNEST_IOS_EXTERNAL_BEFORE")? })),
+        "external-sync" => Ok(serde_json::json!({
+            "webdav": {
+                "endpoint": read("RISUNEST_IOS_WEBDAV_URL")?,
+                "accountId": read("RISUNEST_IOS_WEBDAV_USER")?,
+                "password": read("RISUNEST_IOS_WEBDAV_PASSWORD")?,
+                "root": read("RISUNEST_IOS_WEBDAV_SYNC_ROOT")?,
+            },
+            "before": read("RISUNEST_IOS_EXTERNAL_SYNC_FIRST")?,
+            "after": read("RISUNEST_IOS_EXTERNAL_SYNC_SECOND")?,
+        })),
+        "external-sync-restart" => Ok(serde_json::json!({
+            "before": read("RISUNEST_IOS_EXTERNAL_SYNC_FIRST")?,
+            "after": read("RISUNEST_IOS_EXTERNAL_SYNC_SECOND")?,
+        })),
+        "backup-file" | "backup-file-restart" => Ok(serde_json::json!({
+            "before": read("RISUNEST_IOS_BACKUP_FILE_BEFORE")?,
+            "after": read("RISUNEST_IOS_BACKUP_FILE_AFTER")?,
+        })),
+        _ => Err("External storage verification phase required"),
+    }
+}
+
 fn benchmark_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         ios_bench_phase,
@@ -70,6 +137,8 @@ fn benchmark_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send
         ios_bench_report,
         ios_bench_stream_url,
         ios_bench_cloud_key,
+        ios_bench_sync_input,
+        ios_bench_external_input,
         ios_bench_network_probe,
         ios_bench_authenticate
     ]

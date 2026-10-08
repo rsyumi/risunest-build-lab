@@ -167,7 +167,7 @@ export async function applyTargetedWorkingSetInvalidation(
     if (plan.root) {
         const root = await reader.readRoot()
         assertPinnedRevision(reader.revision, root.revision, 'Root')
-        rootValue = root.value
+        rootValue = options.prepareRoot ? await options.prepareRoot(root.value) : root.value
     }
 
     const botPresetsId = rootValue?.botPresetsId ?? previous.botPresetsId

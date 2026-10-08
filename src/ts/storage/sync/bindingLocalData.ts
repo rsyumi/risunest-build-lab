@@ -33,6 +33,18 @@ export async function hasLocalBindingData(): Promise<boolean> {
     return hasNonDefaultBindingData(await inspectLocalBindingData())
 }
 
+/**
+ * Whether replacing this library loses content: anything beyond what a new device stores,
+ * leaving out root settings such as the language the onboarding chooses.
+ */
+export async function hasLocalLibraryContent(): Promise<boolean> {
+    const [content, { prepareDatabaseForBootstrap }, { NEW_DATABASE_SEED }] = await Promise.all([
+        inspectLocalBindingData(), import('../databasePreparation'), import('../persistentBootstrap'),
+    ])
+    const { database } = await prepareDatabaseForBootstrap({ ...NEW_DATABASE_SEED } as Database)
+    return hasNonDefaultBindingData({ ...content, factoryLibrary: database as unknown as Record<string, unknown> }, { rootScalars: false })
+}
+
 export async function hasLocalSharedBindingData(): Promise<boolean> {
     const { content, pluginLocalParticipating } = await readLocalBindingData()
     // Plugin-local values are shared only while this device takes part in plugin-local sync.

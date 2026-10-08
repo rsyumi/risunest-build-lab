@@ -330,10 +330,11 @@ pub(crate) fn capture_prepared_native_sections(
 ) -> Result<Vec<PreparedDeviceSection>> {
     let kinds = selected_native_kinds(section_ids)?;
     check_cancelled(probe)?;
+    let scratch = crate::external_storage::leftovers::scratch_directory(store.repository_root())?;
     let sections = store
         .device_store_mut()
         .map_err(device_store_error)?
-        .capture_backup_sections(&kinds)
+        .capture_backup_sections(&kinds, &scratch)
         .map_err(device_store_error)?;
     require(
         sections.len() == kinds.len(),
@@ -532,6 +533,7 @@ fn native_transport_digest(
 pub(crate) fn prepare_native_sections(
     archive: &VerifiedArchive,
     section_ids: &[String],
+    scratch: &std::path::Path,
     probe: &dyn CancellationProbe,
 ) -> Result<Vec<PreparedDeviceSection>> {
     let kinds = selected_native_kinds(section_ids)?;
@@ -574,7 +576,7 @@ pub(crate) fn prepare_native_sections(
                     "Native backup section fingerprint has the wrong length",
                 )
             })?;
-        let mut builder = SectionSpoolBuilder::new_backup(kind).map_err(device_store_error)?;
+        let mut builder = SectionSpoolBuilder::new_backup(kind, scratch).map_err(device_store_error)?;
         let mut statement = archive.db.prepare(
             "SELECT ordinal,CAST(metadata AS BLOB) FROM device_records
                 WHERE section=?1 AND ordinal>=0 ORDER BY ordinal",
@@ -766,6 +768,7 @@ pub(crate) fn prepare_journaled_native_sections(
         .into_iter()
         .map(|manifest| (manifest.section_id.clone(), manifest))
         .collect::<BTreeMap<_, _>>();
+    let scratch = crate::external_storage::leftovers::scratch_directory(&state.repository_root)?;
     let mut prepared = Vec::with_capacity(kinds.len());
     for kind in kinds {
         let manifest = manifest_by_id.get(kind.id()).ok_or_else(|| {
@@ -793,7 +796,7 @@ pub(crate) fn prepare_journaled_native_sections(
                     "Native recovery fingerprint has the wrong length",
                 )
             })?;
-        let mut builder = SectionSpoolBuilder::new_backup(kind).map_err(device_store_error)?;
+        let mut builder = SectionSpoolBuilder::new_backup(kind, &scratch).map_err(device_store_error)?;
         let mut after = None;
         let mut observed = 0u64;
         loop {

@@ -550,6 +550,27 @@ describe('RisuNestDataHealth', () => {
         ).toContain(strings.repairNone)
     })
 
+    it('asks for a new check instead of a load failure when the data changed after the shown result', async () => {
+        maintenance.planNativeDataHealthRepair.mockRejectedValueOnce({ code: 'revision-conflict', expected: 12, actual: 13 })
+        const target = await setup(damaged)
+        const summary = () => target.querySelector('[data-data-health-summary]')?.textContent ?? ''
+        expect(summary()).toContain(strings.outdated)
+        expect(summary()).not.toContain(strings.loadFailed)
+        expect(target.querySelector('[data-data-health-repair]')).toBeNull()
+        expect(target.textContent).not.toContain(strings.repairNone)
+        expect(target.querySelectorAll('[data-data-health-group]')).toHaveLength(2)
+
+        maintenance.scanNativeDataHealth.mockResolvedValue({ ...damaged, revision: 13 })
+        const quickScan = [...target.querySelectorAll<HTMLButtonElement>('button')].find(
+            (button) => button.textContent?.trim() === strings.quickScan,
+        )
+        expect(quickScan?.disabled).toBe(false)
+        quickScan?.click()
+        await settle()
+        expect(summary()).not.toContain(strings.outdated)
+        expect(target.querySelectorAll('[data-data-health-choice]')).toHaveLength(1)
+    })
+
     it('keeps every string it shows in both shipped languages', () => {
         for (const key of Object.keys(strings)) {
             expect(

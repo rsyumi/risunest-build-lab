@@ -165,6 +165,18 @@ fn validate_row(table: &PortableTable, row: &Row<'_>) -> StoreResult<()> {
         }
         "characters" => {
             let value = json(row, 10)?;
+            if row.get::<_, Option<String>>(11)?.is_some() {
+                // An archived row keeps its summary columns, and its detail is in the archive. What
+                // stays is the marker that names the row.
+                let id: String = row.get(0)?;
+                let name: String = row.get(4)?;
+                let character_type: String = row.get(7)?;
+                require(
+                    value == super::archive::marker_detail(&id, &name, &character_type),
+                    "portable archived character marker differs",
+                )?;
+                return require(row.get::<_, i64>(1)? >= 0, "portable character order is negative");
+            }
             require(
                 value.is_object() && value.get("chats").is_none(),
                 "portable character contains separated conversations",

@@ -267,8 +267,12 @@ export interface PersistentDataRuntimeStateAdapter {
     captureCharacterIndex?(): ReadonlyMap<string, CompleteCharacter>
     beforeCapture?(): void
     afterRemoteApply?(): void
+    /** Root fields that projected units left without a value take the value a load gives them. */
+    fillRootFieldDefaults?(fields: readonly string[]): void
     /** Root fields whose working-set value changed when stored units were projected into it. */
     afterRemoteRootChange?(fields: ReadonlySet<string>): void
+    /** A received plugin record changed which plugins run or how they are loaded. */
+    afterRemotePluginChange?(): void
     canonicalCapture?: PersistenceCanonicalCapture
     captureRoot(): RootDatabase
     capturePluginStorage?(): Database['pluginCustomStorage'] | null
@@ -315,6 +319,7 @@ export interface PersistentDataRuntimeStateAdapter {
     captureWorkingSetDatabase?(): Database | null
     /** Host caches outside the working set that a remote change invalidates. */
     onPluginStorageChanged?(owner: string, key: string): void
+    onPluginDeviceStorageChanged?(owner: string): void
     getGeneratingConversations?(): readonly GeneratingConversation[]
     conversationViewportRowBudget?: number
     canActivateWorkingSet?(): boolean
@@ -338,6 +343,8 @@ export interface PersistentDataRuntimeDependencies {
     onDestructiveReplacementFenceChanged?(active: boolean): void
     /** Detaches the input synchronously before any asynchronous preparation. */
     prepareDatabase(database: Database): Promise<Database>
+    /** Gives a stored root read by a refresh the same preparation boot applies. */
+    prepareRoot?(root: PersistentRoot): Promise<PersistentRoot>
 }
 
 export interface PersistentActivatedLibraryGuard {
@@ -518,6 +525,7 @@ export interface PersistentDataRuntime {
         reason: string,
         options?: { publishOfficial?: boolean },
     ): Promise<PersistentMutationToken>
+    /** A revision committed while this fence is held is reported as a local revision on release. */
     acquireDestructiveReplacementFence(
         expected: PersistentMutationToken,
     ): Promise<PersistentDestructiveReplacementFence>
@@ -718,7 +726,12 @@ export function createPersistentDataRuntime(
             coordinator.pendingWorkingSetRefreshRevision === null &&
             dependencies.state.canDeactivateWorkingSet?.() !== false,
         canDeactivateCharacter: dependencies.state.canDeactivateCharacter,
-        releaseInactiveCharacter: dependencies.state.releaseInactiveCharacter,
+        releaseInactiveCharacter: dependencies.state.releaseInactiveCharacter
+            ? (id) => {
+                dependencies.state.releaseInactiveCharacter!(id)
+                coordinator.forgetMaterializedCharacter(id)
+            }
+            : undefined,
         shouldHydrateFullCharacter: dependencies.state.shouldHydrateFullCharacter,
         canReleaseConversation: dependencies.state.canReleaseConversation,
         canUseWindowedSelectedConversation:
@@ -762,8 +775,8 @@ export function createPersistentDataRuntime(
         } catch (error) {
             if (strict) throw error
             // The projection is installed either way; a stale cursor only costs
-            // the next window an idempotent replay.
-            dependencies.onBackgroundError?.(error)
+            // the next window an idempotent replay, so the user has nothing to act on.
+            console.warn('The content change cursor was not committed', error)
         }
     }
     /// The change window and every record reprojected for it are read through
@@ -816,6 +829,7 @@ export function createPersistentDataRuntime(
                             {
                                 ...pinned,
                                 keepConversation,
+                                prepareRoot: dependencies.prepareRoot,
                                 changeSet,
                                 deferredConversation,
                                 onPluginStorageChanged:
@@ -831,7 +845,11 @@ export function createPersistentDataRuntime(
                 }
             }
             return {
-                database: await projectPinnedScalableWorkingSet(lease, { ...pinned, keepConversation }),
+                database: await projectPinnedScalableWorkingSet(lease, {
+                    ...pinned,
+                    keepConversation,
+                    prepareRoot: dependencies.prepareRoot,
+                }),
                 deferred: false,
                 windowedMetadata,
             }
@@ -899,8 +917,15 @@ export function createPersistentDataRuntime(
                 activeCharacterIds,
                 options?.forceScalableProjection ?? true,
             )
-            if (activatedLibraryGuard) dependencies.state.afterRemoteApply?.()
-            workingSet.installCommittedWorkingSet(projected.database, revision, projected.windowedMetadata)
+            let installed = projected.database
+            if (activatedLibraryGuard) {
+                // The activated library has no resident character to keep selected,
+                // and its derived identity mirrors belong to the installed baseline.
+                dependencies.state.restoreSelection?.(null, null)
+                dependencies.state.afterRemoteApply?.()
+                installed = dependencies.state.captureWorkingSetDatabase?.() ?? installed
+            }
+            workingSet.installCommittedWorkingSet(installed, revision, projected.windowedMetadata)
             applyInstalledRootChanges(rootBefore)
             deferredContentPending = projected.deferred
             if (!projected.deferred) await commitContentCursor(revision, activatedLibraryGuard !== null)
@@ -1005,6 +1030,30 @@ export function createPersistentDataRuntime(
         }
     }
     const generating = () => [...(dependencies.state.getGeneratingConversations?.() ?? generatingConversations.snapshot())]
+    /// Keeps the selection on the same character and conversation after applied
+    /// units moved or removed them. A removed character clears the selection and a
+    /// removed conversation falls back to the first remaining one, as local removal
+    /// does. Returns the conversation that still has to be opened.
+    const reconcileAppliedSelection = (
+        database: Database,
+        pinned: { characterId: string | null; conversationId: string | null },
+    ): string | null => {
+        if (!pinned.characterId) return null
+        const character = database.characters.find((value) => value.chaId === pinned.characterId)
+        if (!character) {
+            dependencies.state.restoreSelection?.(null, null)
+            workingSet.invalidateNavigation()
+            workingSet.reconcileActiveCharacterIds(database, null)
+            coordinator.releaseRemovedSelectedConversation(true)
+            return null
+        }
+        dependencies.state.restoreSelection?.(pinned.characterId, pinned.conversationId)
+        if (!pinned.conversationId || character.chats.some((value) => value.id === pinned.conversationId)) return null
+        character.chatPage = 0
+        workingSet.invalidateNavigation()
+        coordinator.releaseRemovedSelectedConversation(false)
+        return character.chats[0]?.id ?? null
+    }
     const projectAppliedUnits = async (result: LwwApplyResult, baseline?: ReturnType<typeof captureLwwWorkingSetBaseline>, localIntent = false, preserveWindowMetadata = false, projectionObserver?: PersistentUnitIntentProjectionObserver): Promise<void> => {
         if (!localIntent && result.affectedKeys.length === 0) {
             // Nothing reached the library, so the working set and its mirrors stay untouched.
@@ -1045,6 +1094,23 @@ export function createPersistentDataRuntime(
         }))]
         const rootValue = (field: string) => canonicalJson({ value: (database as unknown as Record<string, unknown>)[field] })
         let rootBefore: string[] = []
+        const receivedPlugins = localIntent ? [] : [...new Set(result.affectedKeys.flatMap((key) => {
+            const [kind, collection, name] = JSON.parse(key) as string[]
+            return kind === 'record' && collection === 'plugins' ? [name] : []
+        }))]
+        const pluginLoadInputs = () => canonicalJson(receivedPlugins.map((name) => {
+            const plugin = database.plugins?.find((value) => value.name === name)
+            return plugin ? [plugin.enabled, plugin.script, plugin.version, plugin.arguments, plugin.realArg] : null
+        }))
+        let pluginsBefore = ''
+        let pluginsChanged = false
+        // Membership and order units can move the selected entries away from their indexes.
+        const reselect = result.affectedKeys.some((key) => {
+            const [kind, id] = JSON.parse(key) as string[]
+            return kind === 'exists' ? id === 'character' || id === 'conversation' : kind === 'order' && id === 'conversations'
+        })
+        let pinnedSelection: { characterId: string | null; conversationId: string | null } | null = null
+        let reopenConversation: string | null = null
         let applied: ReturnType<typeof captureLwwWorkingSetBaseline>
         let adoptWindowedMetadata = () => {}
         let windowedConversation: { characterId: string; conversationId: string; totalMessages: number } | undefined
@@ -1058,10 +1124,19 @@ export function createPersistentDataRuntime(
                 if (dependencies.state.captureWorkingSetDatabase?.() !== database) throw new Error('Persistent working set changed during unit projection')
                 dependencies.state.beforeCapture?.()
                 rootBefore = rootFields.map(rootValue)
+                if (receivedPlugins.length) pluginsBefore = pluginLoadInputs()
+                if (reselect) pinnedSelection = {
+                    characterId: dependencies.state.getSelectedCharacterId() ?? null,
+                    conversationId: dependencies.state.getSelectedConversationId?.() ?? null,
+                }
                 projectionObserver?.beforeProjection()
             }, () => {
+                // Corrected in the same turn as the projection, before any view reads the indexes.
+                if (pinnedSelection) reopenConversation = reconcileAppliedSelection(database, pinnedSelection)
+                pluginsChanged = receivedPlugins.length > 0 && pluginLoadInputs() !== pluginsBefore
                 const canonicalCapture = dependencies.state.canonicalCapture
                 const beforeDerive = canonicalCapture?.root() ?? canonicalJson(dependencies.state.captureRoot())
+                if (rootFields.length > 0) dependencies.state.fillRootFieldDefaults?.(rootFields)
                 dependencies.state.afterRemoteApply?.()
                 const afterDerive = canonicalCapture?.root() ?? canonicalJson(dependencies.state.captureRoot())
                 const derivedMutations = beforeDerive === afterDerive ? [] : canonicalCapture
@@ -1109,15 +1184,24 @@ export function createPersistentDataRuntime(
             try { dependencies.state.afterRemoteRootChange?.(changedRootFields) }
             catch (error) { dependencies.onBackgroundError?.(error) }
         }
+        if (pluginsChanged) {
+            try { dependencies.state.afterRemotePluginChange?.() }
+            catch (error) { dependencies.onBackgroundError?.(error) }
+        }
         if (!projectionObserver) refreshSelectedSession()
         for (const key of result.affectedKeys) {
             const [kind, owner, name] = JSON.parse(key)
             if (kind === 'plugin') dependencies.state.onPluginStorageChanged?.(owner, name)
+            else if (kind === 'plugin-local') dependencies.state.onPluginDeviceStorageChanged?.(owner)
             else if (kind === 'order' && owner === 'plugin-storage') {
                 dependencies.state.onPluginStorageChanged?.(name, '')
             }
         }
         await commitContentCursor(result.revision)
+        // Activation flushes first, so it waits for the operation that applied these units.
+        const reopened = reopenConversation
+        if (reopened) void Promise.resolve().then(() => workingSet.activateConversation(reopened))
+            .catch((error) => dependencies.onBackgroundError?.(error))
     }
     const drainLwwDeferred = async (authorityEpoch = coordinator.storageAuthorityEpoch): Promise<void> => {
         coordinator.assertPersistentMutationAllowed(authorityEpoch)
@@ -1181,8 +1265,9 @@ export function createPersistentDataRuntime(
             const rootBefore = canonicalClone(dependencies.state.captureRoot())
             workingSet.invalidateNavigation()
             dependencies.state.replaceDatabase(projected.database, new Set(), true)
+            dependencies.state.restoreSelection?.(null, null)
             dependencies.state.afterRemoteApply?.()
-            workingSet.installCommittedWorkingSet(projected.database, latest.revision, projected.windowedMetadata)
+            workingSet.installCommittedWorkingSet(dependencies.state.captureWorkingSetDatabase?.() ?? projected.database, latest.revision, projected.windowedMetadata)
             applyInstalledRootChanges(rootBefore)
             await commitContentCursor(latest.revision, true)
             guard.ready = true
@@ -1565,6 +1650,15 @@ export function createPersistentDataRuntime(
                     if (released) return
                     coordinator.releaseDestructiveReplacementFence(owner)
                     released = true
+                    // Nothing else can commit while the fence is held, so a later
+                    // revision is the holder's own change and sync must send it.
+                    const committed = coordinator.revision
+                    if (committed <= heldRevision) return
+                    try {
+                        dependencies.onLocalRevision?.(committed)
+                    } catch (error) {
+                        dependencies.onBackgroundError?.(error)
+                    }
                 },
             }
         },
@@ -1592,6 +1686,7 @@ export function createPersistentDataRuntime(
                     selectedCharacterId,
                     selectedConversationId,
                     activeCharacterIds: workingSet.activeCharacterIds,
+                    prepareRoot: dependencies.prepareRoot,
                 },
             )
             const releaseAllowed = canRelease ? await canRelease() : true

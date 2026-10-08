@@ -431,7 +431,7 @@ fn insert_preparation(
         .take()
         .map(|value| {
             risunest_external_storage_format::crypto::RecoveryKey::parse(&value)
-                .map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
+                .map_err(|_| ProviderError::new(ErrorKind::RecoveryKeyMismatch))?;
             Ok(Zeroizing::new(value))
         })
         .transpose()?;
@@ -1020,7 +1020,7 @@ pub(crate) async fn external_storage_unlock_connection(
         let recovered = recovery::open_bootstrap(&root, provider.as_ref(), &handle, &recovery_key, &cancel).await?;
         if recovered.metadata.descriptor != stored.descriptor
             || recovered.metadata.descriptor_locator != stored.descriptor_locator {
-            return Err(ProviderError::new(ErrorKind::Corrupt));
+            return Err(ProviderError::new(ErrorKind::RepositoryMismatch));
         }
         descriptor::read(&root, provider.as_ref(), &handle, &stored.descriptor_locator,
             &stored.descriptor, &recovered.key, &cancel).await?;
@@ -1041,7 +1041,7 @@ pub(crate) async fn external_storage_commit_connection(
     state: State<'_, ConnectionCommandState>,
     request: CommitConnectionRequest,
 ) -> ConnectResult<ConnectionResult> {
-    logged("external_storage_commit_connection", async move {
+    logged("external_storage_commit_connection", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         let preparation_id = request.preparation_id;
         let mut pending = take_preparation(&state, &preparation_id)?;
@@ -1092,7 +1092,7 @@ pub(crate) async fn external_storage_commit_connection(
                 Err(error)
             }
         }
-    }.await)
+    }).await)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1101,7 +1101,7 @@ pub(crate) async fn external_storage_begin_authorization(
     state: State<'_, ConnectionCommandState>,
     request: BeginAuthorizationRequest,
 ) -> Result<PendingAuthorizationSummary> {
-    logged("external_storage_begin_authorization", async move {
+    logged("external_storage_begin_authorization", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         let BeginAuthorizationRequest {
             preparation_id,
@@ -1150,7 +1150,7 @@ pub(crate) async fn external_storage_begin_authorization(
             expires_at_ms: expires_at_ms.to_string(),
             state: "browser-required",
         })
-    }.await)
+    }).await)
 }
 
 #[cfg(target_os = "ios")]
@@ -1160,7 +1160,7 @@ pub(crate) async fn external_storage_begin_authorization(
     state: State<'_, ConnectionCommandState>,
     request: BeginAuthorizationRequest,
 ) -> Result<PendingAuthorizationSummary> {
-    logged("external_storage_begin_authorization", async move {
+    logged("external_storage_begin_authorization", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         let BeginAuthorizationRequest {
             preparation_id,
@@ -1205,7 +1205,7 @@ pub(crate) async fn external_storage_begin_authorization(
             expires_at_ms: expires_at_ms.to_string(),
             state: "complete",
         })
-    }.await)
+    }).await)
 }
 
 #[cfg(target_os = "android")]
@@ -1215,7 +1215,7 @@ pub(crate) async fn external_storage_begin_authorization(
     state: State<'_, ConnectionCommandState>,
     request: BeginAuthorizationRequest,
 ) -> Result<PendingAuthorizationSummary> {
-    logged("external_storage_begin_authorization", async move {
+    logged("external_storage_begin_authorization", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         let BeginAuthorizationRequest {
             preparation_id,
@@ -1269,7 +1269,7 @@ pub(crate) async fn external_storage_begin_authorization(
             expires_at_ms: expires_at_ms.to_string(),
             state: authorization_state,
         })
-    }.await)
+    }).await)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1279,7 +1279,7 @@ pub(crate) async fn external_storage_complete_authorization(
     state: State<'_, ConnectionCommandState>,
     mut request: CompleteAuthorizationRequest,
 ) -> ConnectResult<CompleteAuthorizationResult> {
-    logged("external_storage_complete_authorization", async move {
+    logged("external_storage_complete_authorization", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         if let Some(mut redirect_url) = request.redirect_url {
             redirect_url.zeroize();
@@ -1334,7 +1334,7 @@ pub(crate) async fn external_storage_complete_authorization(
         .await;
         lock(&state.authorization_cancellations)?.remove(&request.authorization_id);
         result
-    }.await)
+    }).await)
 }
 
 #[cfg(target_os = "ios")]
@@ -1344,7 +1344,7 @@ pub(crate) async fn external_storage_complete_authorization(
     state: State<'_, ConnectionCommandState>,
     mut request: CompleteAuthorizationRequest,
 ) -> ConnectResult<CompleteAuthorizationResult> {
-    logged("external_storage_complete_authorization", async move {
+    logged("external_storage_complete_authorization", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         if request.redirect_url.is_some() {
             return Err(ProviderError::new(ErrorKind::Unsupported).into());
@@ -1390,7 +1390,7 @@ pub(crate) async fn external_storage_complete_authorization(
         .await;
         lock(&state.authorization_cancellations)?.remove(&request.authorization_id);
         result
-    }.await)
+    }).await)
 }
 
 #[cfg(target_os = "android")]
@@ -1400,7 +1400,7 @@ pub(crate) async fn external_storage_complete_authorization(
     state: State<'_, ConnectionCommandState>,
     request: CompleteAuthorizationRequest,
 ) -> ConnectResult<CompleteAuthorizationResult> {
-    logged("external_storage_complete_authorization", async move {
+    logged("external_storage_complete_authorization", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         let redirect_url = request.redirect_url.map(Zeroizing::new);
         let client_secret = request.client_secret.map(Zeroizing::new);
@@ -1492,7 +1492,7 @@ pub(crate) async fn external_storage_complete_authorization(
         .await;
         lock(&state.authorization_cancellations)?.remove(&request.authorization_id);
         result
-    }.await)
+    }).await)
 }
 
 #[tauri::command]
@@ -1501,7 +1501,7 @@ pub(crate) async fn external_storage_list_folders(
     state: State<'_, ConnectionCommandState>,
     request: ListFoldersRequest,
 ) -> Result<FolderPage> {
-    logged("external_storage_list_folders", async move {
+    logged("external_storage_list_folders", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         let mut session = lock(&state.folder_selections)?
             .remove(&request.selection_id)
@@ -1611,7 +1611,7 @@ pub(crate) async fn external_storage_list_folders(
         };
         lock(&state.folder_selections)?.insert(request.selection_id, session);
         Ok(result)
-    }.await)
+    }).await)
 }
 
 #[tauri::command]
@@ -1620,7 +1620,7 @@ pub(crate) async fn external_storage_select_folder(
     state: State<'_, ConnectionCommandState>,
     request: SelectFolderRequest,
 ) -> Result<FolderSelection> {
-    logged("external_storage_select_folder", async move {
+    logged("external_storage_select_folder", Box::pin(async move {
         let _cleanup_guard = state.admit()?;
         let session = lock(&state.folder_selections)?
             .remove(&request.selection_id)
@@ -1680,7 +1680,7 @@ pub(crate) async fn external_storage_select_folder(
             name: folder.name,
             account_hint: Some(session.account_hint),
         })
-    }.await)
+    }).await)
 }
 
 #[tauri::command]
@@ -1744,7 +1744,17 @@ async fn commit_preparation(
     if let Some(connection_id) = preparation.renewal.as_deref() {
         return renew_connection(app, connection_id, credential, cancel).await.map_err(Into::into);
     }
-    let root = connection_root(app)?;
+    commit_new_connection(&connection_root(app)?, connection_id, preparation, credential, cancel).await
+}
+
+async fn commit_new_connection(
+    root: &std::path::Path,
+    connection_id: &str,
+    preparation: &PendingPreparation,
+    credential: CredentialInput,
+    cancel: &Cancellation,
+) -> ConnectResult<ConnectionResult> {
+    let root = root.to_path_buf();
     let dependencies = connection::dependencies_for_config(&root, &preparation.request.config)?;
     let provider_vault = dependencies.vault.clone();
     let key_vault = secrets::repository_key_vault(&root);
@@ -1876,7 +1886,7 @@ async fn commit_preparation(
                                     expected != &recovered.metadata.descriptor.repository_id
                                 })
                             {
-                                return Err(ProviderError::new(ErrorKind::Corrupt).into());
+                                return Err(ProviderError::new(ErrorKind::RepositoryMismatch).into());
                             }
                             require_repository_strategy(
                                 &capabilities,
@@ -1978,12 +1988,12 @@ async fn commit_preparation(
         .as_ref()
         .is_some_and(|expected| expected != &handle.repository_id)
     {
-        return Err(ProviderError::new(ErrorKind::Corrupt).into());
+        return Err(ProviderError::new(ErrorKind::RepositoryMismatch).into());
     }
     // Nothing this attempt left behind can be promoted later, so it goes with
     // the refusal.
     if store
-        .identity_holder(&handle.connection_identity)?
+        .identity_holder(&pending.repository_id, &handle.connection_identity)?
         .is_some_and(|held| held != connection_id)
     {
         let _ = store.remove_pending(connection_id);
@@ -2046,7 +2056,7 @@ async fn commit_preparation(
                 recovery::open_bootstrap(&root, provider.as_ref(), &handle, &recovery_key, cancel)
                     .await?;
             if recovered.metadata.descriptor != *descriptor || *recovered.key != *root_key {
-                return Err(ProviderError::new(ErrorKind::Corrupt).into());
+                return Err(ProviderError::new(ErrorKind::RepositoryMismatch).into());
             }
             descriptor::read(
                 &root,
@@ -2070,10 +2080,18 @@ async fn commit_preparation(
     } else {
         None
     };
-    Ok(ConnectionResult {
-        connection: connection::summary(&stored),
-        recovery,
-    })
+    Ok(committed_result(&stored, preparation.request.mode, recovery))
+}
+
+/// A stored connection does not keep how it was opened, so the result carries the request's mode.
+fn committed_result(
+    stored: &StoredConnection,
+    mode: ConnectionOpenMode,
+    recovery: Option<RecoveryKeyMaterial>,
+) -> ConnectionResult {
+    let mut connection = connection::summary(stored);
+    connection.mode = mode;
+    ConnectionResult { connection, recovery }
 }
 
 async fn validate_sync_folder_before_commit(
@@ -2159,7 +2177,7 @@ pub(crate) async fn open_connected_with_cancel(
         )
         .await?;
     if handle.repository_id != stored.provider_repository_id {
-        return Err(ProviderError::new(ErrorKind::Corrupt));
+        return Err(ProviderError::new(ErrorKind::RepositoryMismatch));
     }
     stored
         .descriptor
@@ -2210,7 +2228,9 @@ pub(crate) async fn external_storage_remove_connection(
     logged("external_storage_remove_connection", async move {
         let cleanup_state = app.state::<ConnectionCommandState>();
         let _cleanup_guard = cleanup_state.admit()?;
-        runtime::require_connection_idle(&app, &connection_id).await?;
+        let _removal = app
+            .state::<super::job_store::JobCommandState>()
+            .hold_connection_removal(&connection_id)?;
         let root = connection_root(&app)?;
         let file_jobs = app.state::<crate::native_file_jobs::NativeFileJobState>();
         let _permit = file_jobs
@@ -2221,6 +2241,7 @@ pub(crate) async fn external_storage_remove_connection(
         pds.external_prepare_connection_removal(&connection_id)
             .map_err(runtime::local_error)?;
         drop(pds);
+        runtime::end_removed_connection_jobs(&root, &connection_id)?;
         let mut store = ConnectionStore::open(&root)?;
         let stored = store.read(&connection_id)?;
         runtime::native_store(&app)?
@@ -2367,7 +2388,8 @@ pub(crate) async fn external_storage_save_connection_settings_file(
             &stored.recovery_key_ref,
         )
         .await?;
-        let imported = recovery::import_connection_settings(&verified, &recovery_key)?;
+        let imported = recovery::import_connection_settings(&verified, &recovery_key).map_err(|error|
+            if error.kind == ErrorKind::RecoveryKeyMismatch { ProviderError::new(ErrorKind::Corrupt) } else { error })?;
         if imported.repository_id != stored.descriptor.repository_id || imported.config != stored.config
         {
             return Err(ProviderError::new(ErrorKind::Corrupt));
@@ -2640,6 +2662,120 @@ mod tests {
     }
 
     #[test]
+    fn http_connections_prepare_and_list_only_for_user_configured_providers() {
+        let state = ConnectionCommandState::default();
+        let s3 = PrepareConnectionRequest {
+            config: super::super::contract::ConnectionConfig {
+                provider: "s3".into(),
+                profile: Some("generic".into()),
+                endpoint: "http://127.0.0.1:9000".into(),
+                account_id: String::new(),
+                location: BTreeMap::from([
+                    ("bucket".into(), "synthetic-bucket".into()),
+                    ("addressing".into(), "path".into()),
+                ]),
+                oauth_profile: None,
+            },
+            mode: ConnectionOpenMode::Create,
+            purpose: ConnectionPurpose::Backup,
+            recovery_key: None,
+            acknowledgements: Vec::new(),
+        };
+        assert_eq!(insert_preparation(&state, s3, None, None, false).unwrap().endpoint.authority,
+            "http://127.0.0.1:9000");
+
+        let mut stored = StoredConnection {
+            id: "http-webdav".into(),
+            config: super::super::contract::ConnectionConfig {
+                provider: "webdav".into(),
+                profile: None,
+                endpoint: "http://192.168.0.10:8080/dav".into(),
+                account_id: "synthetic".into(),
+                location: BTreeMap::from([("root".into(), "RisuNest".into())]),
+                oauth_profile: None,
+            },
+            descriptor: Descriptor::new("synthetic-repository".into(), None).unwrap(),
+            descriptor_locator: super::super::fake::locator(),
+            provider_repository_id: "synthetic-provider-root".into(),
+            credential_ref: "credential".into(),
+            root_key_ref: "root-key".into(),
+            recovery_key_ref: "recovery-key".into(),
+            retention_policy: None,
+            capabilities: super::super::fake::capabilities(false),
+            created_at_ms: 1,
+            verified_at_ms: 1,
+            last_sync_at_ms: None,
+            last_backup_at_ms: None,
+        };
+        assert!(summary(&stored).is_ok());
+        stored.config.provider = "mybox".into();
+        stored.config.account_id = String::new();
+        stored.config.location = BTreeMap::from([("rootFolderName".into(), "RisuNest".into())]);
+        stored.config.endpoint = "http://open-api.mybox.naver.com/v1".into();
+        assert!(summary(&stored).is_err());
+        stored.config.endpoint = "https://open-api.mybox.naver.com/v1".into();
+        assert!(summary(&stored).is_ok());
+    }
+
+    /// The form sends S3 settings without an account, which the access key
+    /// fills in only once the connection commits.
+    #[test]
+    fn an_http_s3_connection_commits_with_the_settings_the_form_sends() {
+        use super::super::wire_fixture::{Reply, WireServer};
+        let server = WireServer::start(vec![Reply::Http {
+            status: 403,
+            headers: vec![("Content-Type".into(), "application/xml".into())],
+            body: b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>AccessDenied</Code></Error>".to_vec(),
+        }]);
+        let endpoint = server.url.origin().ascii_serialization();
+        assert!(endpoint.starts_with("http://127.0.0.1:"));
+        let state = ConnectionCommandState::default();
+        let request = PrepareConnectionRequest {
+            config: super::super::contract::ConnectionConfig {
+                provider: "s3".into(),
+                profile: Some("generic".into()),
+                endpoint,
+                account_id: String::new(),
+                location: BTreeMap::from([
+                    ("bucket".into(), "synthetic-bucket".into()),
+                    ("prefix".into(), "risunest".into()),
+                    ("region".into(), "us-east-1".into()),
+                    ("addressing".into(), "path".into()),
+                ]),
+                oauth_profile: None,
+            },
+            mode: ConnectionOpenMode::Create,
+            purpose: ConnectionPurpose::Backup,
+            recovery_key: None,
+            acknowledgements: Vec::new(),
+        };
+        let id = insert_preparation(&state, request, None, None, false).unwrap().preparation_id;
+        let pending = take_preparation(&state, &id).unwrap();
+        let secret = connection::encode_secret("s3", ProviderSecretInput::S3 {
+            access_key_id: "AKIASYNTHETICEXAMPLE".into(),
+            secret_access_key: "synthetic/secret/key".into(),
+        }).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let result = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let result = commit_new_connection(
+                root.path(), &id, &pending, CredentialInput::Bytes(secret), &Cancellation::default(),
+            ).await;
+            if let Ok(left) = ConnectionStore::open(root.path()).and_then(|store| store.pending(&id)) {
+                let _ = secrets::provider_vault(root.path()).remove(&SecretRef(left.credential_ref)).await;
+                let keys = secrets::repository_key_vault(root.path());
+                let _ = keys.remove(&SecretRef(left.root_key_ref)).await;
+                let _ = keys.remove(&SecretRef(left.recovery_key_ref)).await;
+            }
+            result
+        });
+        let Err(ConnectionFailure::Provider(error)) = result else { panic!("the refused listing must fail the commit") };
+        assert_ne!(error.kind, ErrorKind::Unsupported);
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].headers.starts_with("GET /synthetic-bucket?"), "{}", requests[0].headers.lines().next().unwrap_or_default());
+    }
+
+    #[test]
     fn connection_settings_are_authenticated_before_endpoint_review() {
         let descriptor = Descriptor::new("synthetic-repository".into(), None).unwrap();
         let stored = StoredConnection {
@@ -2815,6 +2951,17 @@ mod tests {
             verified_at_ms: 1,
             last_sync_at_ms: None, last_backup_at_ms: None, retention_policy: None,
         }
+    }
+
+    #[test]
+    fn a_committed_connection_reports_the_mode_it_was_opened_in() {
+        let stored = renewal_fixture();
+        let created = committed_result(&stored, ConnectionOpenMode::Create, Some(RecoveryKeyMaterial { key: "recovery".into() }));
+        assert!(created.connection.mode == ConnectionOpenMode::Create);
+        assert!(created.recovery.is_some());
+        let opened = committed_result(&stored, ConnectionOpenMode::Existing, None);
+        assert!(opened.connection.mode == ConnectionOpenMode::Existing);
+        assert!(opened.recovery.is_none());
     }
 
     #[test]

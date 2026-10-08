@@ -23,6 +23,7 @@ import {
     releasePersistentRevisionLease,
 } from './persistentRecordIterator'
 import { defineOwnEnumerableProperty } from './ownEnumerableProperty'
+import { projectSelectionIndexes } from './persistentSelectionBoundary'
 import type { WorkingSetResidencyRegistry } from './workingSetResidency'
 
 type CompleteCharacter = character
@@ -152,6 +153,23 @@ const catalogCharacterFields = [
     'trashTime',
     'lastInteraction',
 ] as const
+const catalogCharacterFieldSet: ReadonlySet<string> = new Set(catalogCharacterFields)
+
+/// Copies one stored field into a stub when the stub shows it; other fields stay out of the stub.
+export function patchCatalogCharacterField(
+    target: CompleteCharacter,
+    detail: CharacterDetail | CompleteCharacter,
+    field: string,
+): void {
+    if (!catalogCharacterFieldSet.has(field)) return
+    const targetRecord = target as unknown as Record<string, unknown>
+    const detailRecord = detail as unknown as Record<string, unknown>
+    if (Object.hasOwn(detailRecord, field) && detailRecord[field] !== undefined) {
+        targetRecord[field] = detailRecord[field]
+    } else {
+        delete targetRecord[field]
+    }
+}
 
 export function patchWorkingSetCharacterDetail(
     target: CompleteCharacter,
@@ -160,13 +178,7 @@ export function patchWorkingSetCharacterDetail(
     const targetRecord = target as unknown as Record<string, unknown>
     const detailRecord = detail as unknown as Record<string, unknown>
     if (isCatalogCharacterStub(target)) {
-        for (const key of catalogCharacterFields) {
-            if (Object.hasOwn(detailRecord, key) && detailRecord[key] !== undefined) {
-                targetRecord[key] = detailRecord[key]
-            } else {
-                delete targetRecord[key]
-            }
-        }
+        for (const key of catalogCharacterFields) patchCatalogCharacterField(target, detail, key)
         return
     }
     for (const key of Object.keys(targetRecord)) {
@@ -400,6 +412,8 @@ export interface PinnedScalableWorkingSetOptions {
     selectedCharacterId: string | null
     selectedConversationId?: string | null
     activeCharacterIds?: ReadonlySet<string>
+    /** Applies the root preparation boot gives a stored root before it enters the working set. */
+    prepareRoot?: (root: PersistentRoot) => Promise<PersistentRoot>
 }
 
 async function readPinnedConversationSummaries(
@@ -489,7 +503,8 @@ export async function projectPinnedScalableWorkingSet(
 ): Promise<Database> {
     const root = await reader.readRoot()
     assertPinnedRevision(reader.revision, root.revision, 'Root')
-    const presets = await readPinnedActivePreset(reader, root.value.botPresetsId)
+    const rootValue = options.prepareRoot ? await options.prepareRoot(root.value) : root.value
+    const presets = await readPinnedActivePreset(reader, rootValue.botPresetsId)
     const residentIds = new Set(options.activeCharacterIds)
     if (options.selectedCharacterId) residentIds.add(options.selectedCharacterId)
     let selectedDetail: CharacterDetail | null = null
@@ -535,15 +550,15 @@ export async function projectPinnedScalableWorkingSet(
             : createPinnedDetailOnlyCharacter(summary, detail))
     }
 
-    return {
-        ...root.value,
+    return projectSelectionIndexes({
+        ...rootValue,
         pluginCustomStorage: {},
         botPresets: createCatalogPresetWorkingSet(
             presets.catalog,
             presets.active,
         ),
         characters,
-    } as Database
+    } as Database)
 }
 
 export async function projectScalableWorkingSetAtRevision(

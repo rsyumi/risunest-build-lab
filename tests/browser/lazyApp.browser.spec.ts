@@ -1,6 +1,6 @@
 import { test, expect } from './fixture'
 
-declare global { interface Window { lazyApp: { open(route: string): void }; lazyImportBoundary: { arm(route: string): void; hold(route: string): void; rejectHeld(): void; attempts(): number } } }
+declare global { interface Window { lazyApp: { open(route: string): void; showDialog(): void; read(): { sidebarClosing: boolean; dialog: string; entries: number } }; lazyImportBoundary: { arm(route: string): void; hold(route: string): void; rejectHeld(): void; attempts(): number } } }
 
 const hosts = ['settings', 'custom', 'grid', 'presets', 'personas', 'mobile'] as const
 for (const host of hosts) {
@@ -60,4 +60,30 @@ test('actual MobileBody ignores a prior import rejection after footer leave and 
     await expect(page.locator('[data-lazy-loaded]')).toHaveCount(1)
     await expect(page.getByRole('alert')).toHaveCount(0)
     expect(errors).toEqual([])
+})
+
+test('actual App closes the open sidebar on Back and leaves Escape to its contents', async ({ page }) => {
+    await page.goto('/lazyApp.html')
+    await page.evaluate(() => window.lazyApp.open('sidebar'))
+    await expect(page.getByRole('button', { name: 'Synthetic grid opener', exact: true })).toBeVisible()
+    await expect.poll(() => page.evaluate(() => window.lazyApp.read().entries)).toBe(1)
+    await page.keyboard.press('Escape')
+    expect(await page.evaluate(() => window.lazyApp.read())).toEqual({ sidebarClosing: false, dialog: 'none', entries: 1 })
+    await page.evaluate(() => history.back())
+    await expect.poll(() => page.evaluate(() => window.lazyApp.read().sidebarClosing)).toBe(true)
+    expect(page.url()).toMatch(/\/lazyApp\.html$/)
+})
+
+test('actual App cancels a dialog shown outside every layer on the Android root Back', async ({ page }) => {
+    await page.goto('/lazyApp.html')
+    const rootBack = () => page.evaluate(() => {
+        const event = new Event('risunest-root-back', { cancelable: true })
+        window.dispatchEvent(event)
+        return event.defaultPrevented
+    })
+    expect(await rootBack()).toBe(false)
+    await page.evaluate(() => window.lazyApp.showDialog())
+    expect(await rootBack()).toBe(true)
+    expect(await page.evaluate(() => window.lazyApp.read().dialog)).toBe('none')
+    expect(await rootBack()).toBe(false)
 })

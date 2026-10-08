@@ -1156,27 +1156,28 @@ impl Provider for GitlabPackages {
             let files = self
                 .package_files(settings, &credential, package_id, cancel)
                 .await?;
-            let Some(file) = files.iter().find(|file| file.file_name == placement.file) else {
-                return Ok(());
-            };
-            let response = self
-                .send(
-                    settings,
-                    Outgoing {
-                        method: reqwest::Method::DELETE,
-                        url: api::package_file_url(settings, package_id, file.id)?,
-                        operation: ProviderOperation::Delete,
-                        credential: Some(&credential),
-                        body: None,
-                        content_length: None,
-                    },
-                    cancel,
-                )
-                .await?;
-            match response.status {
-                200 | 204 | 404 => Ok(()),
-                status => Err(api::classify(status, &response.headers, self.now())),
+            // A name stored twice is one object, so every copy goes.
+            for file in files.iter().filter(|file| file.file_name == placement.file) {
+                let response = self
+                    .send(
+                        settings,
+                        Outgoing {
+                            method: reqwest::Method::DELETE,
+                            url: api::package_file_url(settings, package_id, file.id)?,
+                            operation: ProviderOperation::Delete,
+                            credential: Some(&credential),
+                            body: None,
+                            content_length: None,
+                        },
+                        cancel,
+                    )
+                    .await?;
+                match response.status {
+                    200 | 204 | 404 => {}
+                    status => return Err(api::classify(status, &response.headers, self.now())),
+                }
             }
+            Ok(())
         })
     }
 

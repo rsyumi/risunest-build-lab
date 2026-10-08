@@ -1,5 +1,5 @@
 use super::body_encoding_tests::random_text;
-use super::lww_tests::{drain_publications, header, local, publish_cycle, receive_available, save, LocalServerFixture};
+use super::lww_tests::{drain_publications, header, insert_messages, local, publish_cycle, receive_available, save, LocalServerFixture};
 use crate::persistent_store::PersistentStore;
 use risunest_sync_wire::{descriptor::RecordDescriptor, unit::{UnitValue, MAX_INLINE_UNIT_BYTES}, MAX_METADATA_BYTES};
 use serde_json::{json, Value};
@@ -202,4 +202,70 @@ fn a_failed_push_keeps_its_copies_for_the_retry_and_a_finished_one_removes_them(
     drain_publications(&ca, &mut a, &[]).unwrap();
     assert_eq!(pending(&a), 0);
     assert!(!lane(&a, "send").exists());
+}
+
+/// One message whose stored body is larger than a metadata body, so the
+/// message page that holds it alone is too.
+fn oversized_message(seed: usize) -> Value {
+    json!({"role":"user","data":random_text(MAX_METADATA_BYTES + 64 * 1024, seed)})
+}
+
+fn received_data(store: &PersistentStore) -> Vec<Value> {
+    let chat = store.read_conversation("char", "chat", None).unwrap().unwrap().value;
+    chat["message"].as_array().unwrap().iter().map(|message| message["data"].clone()).collect()
+}
+
+#[test]
+fn a_bound_store_receives_message_pages_larger_than_a_metadata_body_on_every_receive() {
+    let server = LocalServerFixture::new();
+    let (_a, mut a) = local();
+    let (_b, mut b) = local();
+    let ca = server.client(&a);
+    let cb = server.client(&b);
+    let first = oversized_message(5);
+    insert_messages(&mut a, 0, vec![first.clone()]);
+    let key = risunest_sync_wire::unit::UnitKey::new(&["messages", "char", "chat"]).unwrap();
+    let entry = a.lww_read_outbox(0.into(), 256).unwrap().entries.into_iter().find(|entry| entry.key == key).unwrap();
+    let UnitValue::Object { descriptor, .. } = &entry.value else { panic!("messages are an object unit") };
+    assert_eq!(descriptor.dependencies.len(), 1);
+    assert!(a.lww_object_body(&descriptor.dependencies[0]).unwrap().unwrap().len() > MAX_METADATA_BYTES);
+    drain_publications(&ca, &mut a, &[]).unwrap();
+    receive_available(&cb, &mut b, &[]).unwrap();
+    assert!(received_data(&b) == [first["data"].clone()]);
+    let second = oversized_message(6);
+    insert_messages(&mut a, 1, vec![second.clone()]);
+    drain_publications(&ca, &mut a, &[]).unwrap();
+    receive_available(&cb, &mut b, &[]).unwrap();
+    assert!(received_data(&b) == [first["data"].clone(), second["data"].clone()]);
+    assert!(!lane(&b, "receive").exists());
+}
+
+#[test]
+fn messages_and_archive_bodies_larger_than_a_metadata_body_are_prepared_whole() {
+    let server = LocalServerFixture::new();
+    let (_a, a) = local();
+    let (_b, mut b) = local();
+    let ca = server.client(&a);
+    let cb = server.client(&b);
+    let staging = tempfile::tempdir().unwrap();
+    let cache = super::cache::Cache::open(staging.path()).unwrap();
+    let writer_id = b.lww_clock_state().unwrap().writer_id;
+    let mut changes = Vec::new();
+    let mut hashes = Vec::new();
+    for (seed, parts) in [(7, vec!["archive", "char"]), (8, vec!["messages", "char", "chat"])] {
+        let body = random_text(MAX_METADATA_BYTES + 1, seed).into_bytes();
+        let hash = cache.put(&body).unwrap();
+        changes.push(crate::persistent_store::lww::Change {
+            key: risunest_sync_wire::unit::UnitKey::new(&parts).unwrap(),
+            stamp: risunest_sync_wire::stamp::Stamp { physical_ms: 1.into(), logical: 0, writer_id: writer_id.clone() },
+            value: UnitValue::object(RecordDescriptor::content(hash.clone())).unwrap(),
+        });
+        hashes.push(hash);
+    }
+    super::transfer::Transfer::new(&ca.client, &cache).unwrap().upload(&hashes, &[]).unwrap();
+    cb.prepare_bodies(&mut b, &changes, 1.into()).unwrap();
+    for hash in &hashes {
+        assert!(b.lww_verified_object_present(hash).unwrap());
+        assert!(b.lww_object_body(hash).unwrap().unwrap().len() > MAX_METADATA_BYTES);
+    }
 }

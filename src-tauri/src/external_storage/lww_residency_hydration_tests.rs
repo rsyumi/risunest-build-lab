@@ -338,6 +338,7 @@ fn hydration_opens_the_same_databases_however_many_pack_groups_it_reads() {
     assert_eq!(observed("catalog", root).len(), 1, "one catalog connection for every registration");
     let scratch = observed("scratch", root);
     assert!(!scratch.is_empty());
+    assert!(scratch.iter().all(|path| path.starts_with(root.join("external-storage").join("scratch"))), "{scratch:?}");
     let staged = super::super::snapshot_restore::CONTENT_STORE_OPENS
         .lock()
         .unwrap()

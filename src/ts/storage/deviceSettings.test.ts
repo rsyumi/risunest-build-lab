@@ -19,6 +19,7 @@ const defaults = {
     nativeFileLogEnabled: true,
     generationHistoryLimitEnabled: false,
     generationHistoryLimitMultiplier: 2,
+    messageSendKey: 'enter',
 }
 
 describe('device settings', () => {
@@ -47,6 +48,39 @@ describe('device settings', () => {
 
         const { getDeviceSettings } = await loadDeviceSettings()
         expect(getDeviceSettings().androidKeepAliveDuringGeneration).toBe(false)
+    })
+
+    it.each(['enter', 'ctrl-shift-enter', 'button'] as const)('persists the %s send key across reloads', async (messageSendKey) => {
+        const device = await loadDeviceSettings()
+        device.updateDeviceSettings({ messageSendKey })
+        await device.flushDeviceSettings()
+
+        const reloaded = await loadDeviceSettings()
+        expect(reloaded.getDeviceSettings().messageSendKey).toBe(messageSendKey)
+    })
+
+    it('keeps send keys independent between device stores', async () => {
+        const device = await loadDeviceSettings()
+        const { createNativeDeviceMarkers, DEVICE_MARKER_KEYS } = await import('./deviceMarkers')
+        const firstWrite = vi.fn(async () => {})
+        const secondWrite = vi.fn(async () => {})
+        const store = (set: typeof firstWrite) => createNativeDeviceMarkers({
+            get: async () => null, readMany: async () => [], set, patch: async () => {},
+        }, DEVICE_MARKER_KEYS.map(() => null))
+        const first = store(firstWrite)
+        const second = store(secondWrite)
+        device.loadDeviceSettings(first)
+        device.updateDeviceSettings({ messageSendKey: 'button' })
+        await device.flushDeviceSettings()
+        device.loadDeviceSettings(second)
+        expect(device.getDeviceSettings().messageSendKey).toBe('enter')
+        expect(secondWrite).not.toHaveBeenCalled()
+        device.updateDeviceSettings({ messageSendKey: 'ctrl-shift-enter' })
+        await device.flushDeviceSettings()
+        device.loadDeviceSettings(first)
+        expect(device.getDeviceSettings().messageSendKey).toBe('button')
+        expect(firstWrite).toHaveBeenCalledExactlyOnceWith('risuNestDeviceSettings', expect.any(String))
+        expect(secondWrite).toHaveBeenCalledExactlyOnceWith('risuNestDeviceSettings', expect.any(String))
     })
 
 
@@ -190,6 +224,7 @@ describe('device settings', () => {
         ['a multiplier below one', { generationHistoryLimitMultiplier: 0 }],
         ['a non-finite multiplier', { generationHistoryLimitMultiplier: Number.POSITIVE_INFINITY }],
         ['an unknown key', { unknownSetting: true }],
+        ['an unsupported send key', { messageSendKey: 'space' }],
     ])('refuses %s and keeps every stored setting', async (_name, update) => {
         const { getDeviceSettings, subscribeDeviceSettings, updateDeviceSettings } = await loadDeviceSettings()
         updateDeviceSettings({ performanceProfile: 'low-spec', nativeFileLogEnabled: false })

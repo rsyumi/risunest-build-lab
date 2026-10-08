@@ -1441,12 +1441,19 @@ fn contains_target(index: &TargetIndex, kind: &str, key: &str) -> bool {
     index.get(kind).is_some_and(|keys| keys.contains(key))
 }
 
+/// The stored root selects by `id`; an index selects by position, as upstream databases do.
 fn selected_array_value<'a>(
     database: &'a Value,
     field: &str,
     index: Option<&Value>,
 ) -> Option<&'a Value> {
-    selected_slice_value(optional_array(database, field), index)
+    let values = optional_array(database, field);
+    match index {
+        Some(Value::String(id)) => values
+            .iter()
+            .find(|value| value.get("id").and_then(Value::as_str) == Some(id.as_str())),
+        index => selected_slice_value(values, index),
+    }
 }
 
 fn selected_slice_value<'a>(values: &'a [Value], index: Option<&Value>) -> Option<&'a Value> {
@@ -2472,6 +2479,61 @@ mod tests {
 
         assert_eq!(error.code, F0ErrorCode::InvalidInventory);
         assert!(error.message.contains("mime"));
+    }
+
+    #[test]
+    fn a_selection_stored_by_id_resolves_like_one_stored_by_index() {
+        let database = |preset: Value, persona: Value| {
+            json!({
+                "botPresets": [{"id":"preset-a","name":"First"},{"id":"preset-b","name":"Second"}],
+                "botPresetsId": preset,
+                "personas": [{"id":"persona-a"},{"id":"persona-b"}],
+                "selectedPersona": persona,
+                "characters": []
+            })
+        };
+        let selections = |database: &Value| {
+            rebuild_f0_v1(database, &[], &[])
+                .unwrap()
+                .references
+                .into_iter()
+                .filter(|reference| reference.owner_kind == "root")
+                .map(|reference| (reference.source_path, reference.target_key, reference.status))
+                .collect::<Vec<_>>()
+        };
+        let resolved = vec![
+            ("$.botPresetsId".to_owned(), "Second".to_owned(), F0ReferenceStatus::Present),
+            ("$.selectedPersona".to_owned(), "persona-b".to_owned(), F0ReferenceStatus::Present),
+        ];
+        assert_eq!(selections(&database(json!("preset-b"), json!("persona-b"))), resolved);
+        assert_eq!(selections(&database(json!(1), json!(1))), resolved);
+        assert_eq!(
+            selections(&database(json!("preset-gone"), json!("persona-gone"))),
+            vec![
+                ("$.botPresetsId".to_owned(), "#preset-gone".to_owned(), F0ReferenceStatus::UnexpectedMissing),
+                ("$.selectedPersona".to_owned(), "#persona-gone".to_owned(), F0ReferenceStatus::UnexpectedMissing),
+            ]
+        );
+
+        // The stored root keeps presets in their own rows, so the selected one arrives beside it.
+        let mut root = database(json!("preset-b"), json!("persona-b"));
+        let presets = root.as_object_mut().unwrap().remove("botPresets").unwrap();
+        let targets = scan_portable_fragment(PortableFragment::Root {
+            value: &root,
+            selected_preset: presets.get(1),
+        })
+        .unwrap()
+        .into_iter()
+        .filter(|reference| reference.owner_kind == "root")
+        .map(|reference| (reference.source_path, reference.target_key))
+        .collect::<Vec<_>>();
+        assert_eq!(
+            targets,
+            [
+                ("$.botPresetsId".to_owned(), "Second".to_owned()),
+                ("$.selectedPersona".to_owned(), "persona-b".to_owned()),
+            ]
+        );
     }
 
     fn payload(kind: F0PayloadKind, key: &str) -> F0PayloadDescriptor {

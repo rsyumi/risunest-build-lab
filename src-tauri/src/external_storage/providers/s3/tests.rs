@@ -467,10 +467,18 @@ fn addressing_and_endpoint_paths_build_the_documented_urls() {
         "https://s3.hf.co/synthetic-namespace/synthetic-bucket\
          ?list-type=2&prefix=risunest%2Fsnapshots%2F"
     );
-    assert_eq!(
-        hugging.connection_identity,
-        "s3/hf/https://s3.hf.co/synthetic-namespace/synthetic-bucket/risunest"
-    );
+    assert_eq!(hugging.connection_identity, "s3/synthetic-bucket/risunest");
+    // The endpoint and profile only say how to reach the bucket, so another
+    // address for the same bucket and prefix is the same repository.
+    for (profile, endpoint) in [
+        ("generic", "http://127.0.0.1:9/other-path"),
+        ("r2", "https://synthetic-account.r2.cloudflarestorage.com"),
+    ] {
+        assert_eq!(
+            context(profile, endpoint, None).connection_identity,
+            hugging.connection_identity
+        );
+    }
     assert_eq!(
         hugging.key("packs/pack-1").unwrap(),
         "risunest/packs/pack-1"
@@ -518,7 +526,7 @@ fn create_refuses_an_occupied_root_and_existing_requires_a_descriptor() {
             .unwrap();
         assert_eq!(
             handle.connection_identity,
-            format!("s3/r2/{}/{BUCKET}/{PREFIX}", server.url.as_str())
+            format!("s3/{BUCKET}/{PREFIX}")
         );
         assert_eq!(handle.repository_id, handle.connection_identity);
         assert!(reported.require(PublicationStrategy::Cas).is_ok());
@@ -1658,7 +1666,7 @@ fn a_foreign_handle_or_locator_never_reaches_the_service() {
         let mut sink = SpoolSink::create(&directory.path().join("body"), 64).unwrap();
 
         let foreign = RemoteLocator {
-            connection_identity: "s3/r2/https://other.invalid/other/root".into(),
+            connection_identity: "s3/other-bucket/root".into(),
             collection: None,
             object: "head".into(),
         };
@@ -1835,7 +1843,7 @@ fn deleting_addresses_one_key_folds_404_and_refuses_the_head_and_descriptors() {
             );
         }
         let foreign = RemoteLocator {
-            connection_identity: "s3/generic/https://other.invalid/other/root".into(),
+            connection_identity: "s3/other-bucket/root".into(),
             collection: Some("packs".into()),
             object: "packs/pack-1".into(),
         };
@@ -2108,5 +2116,26 @@ fn lost_multipart_completion_requires_exact_remote_bytes() {
         assert_eq!(records[1].body, spool.bytes);
         assert!(line(&records[3]).starts_with("HEAD "));
         assert!(line(&records[4]).starts_with("GET "));
+    });
+}
+
+/// The external LWW opening admits its clock from the listing it requests.
+#[test]
+fn every_profile_listing_yields_a_usable_clock_sample() {
+    runtime().block_on(async {
+        let date = httpdate::fmt_http_date(std::time::UNIX_EPOCH + std::time::Duration::from_millis(NOW_MS));
+        for profile in ["aws", "r2", "b2", "hf", "generic"] {
+            let server = WireServer::start(vec![
+                reply(200, &[("Date", &date)], listing("descriptors", &["descriptor-1"], None)),
+                reply(200, &[("Date", &date)], listing("segments", &[], None)),
+            ]);
+            let test = dependencies();
+            let (provider, handle) = opened(&test, profile, &server).await;
+            let started = std::time::Instant::now();
+            provider.list_objects(&handle, Collection::Segments, None, 1, &Cancellation::default()).await.unwrap();
+            assert!(test.dependencies.requests.clock_sample_after(&handle.account, started).unwrap().is_some(), "{profile}");
+            let records = server.requests.lock().unwrap();
+            assert!(line(&records[1]).starts_with("GET ") && header(&records[1], "cache-control").as_deref() == Some("no-cache, no-store"), "{profile}");
+        }
     });
 }

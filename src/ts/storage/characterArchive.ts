@@ -63,6 +63,22 @@ function confirmWithTitle(title: string, body: string): Promise<boolean> {
 ${body}`)
 }
 
+// What the native store says when an archive or a restore cannot reach a file it reads.
+const ARCHIVE_DATA_MISSING = 'character archive data is missing'
+const ARCHIVE_DATA_UNAVAILABLE = 'character archive data could not be fetched'
+
+function mutationFailure(error: unknown, restoring: boolean): string {
+    const strings = language.risuNest.archive
+    const message = error instanceof Error ? error.message : undefined
+    if (message === ARCHIVE_DATA_UNAVAILABLE) {
+        return restoring ? strings.restoreRemoteAssetUnavailable : strings.archiveRemoteAssetUnavailable
+    }
+    if (message === ARCHIVE_DATA_MISSING) {
+        return restoring ? strings.restoreAssetMissing : strings.archiveAssetMissing
+    }
+    return restoring ? strings.restoreFailed : strings.archiveFailed
+}
+
 async function runArchiveMutation(
     reason: string,
     mutate: (expectedRevision: number) => Promise<{ revision: number }>,
@@ -86,7 +102,7 @@ async function runArchiveMutation(
         console.error('Character archive operation failed', error)
         alertError(committed
             ? restoring ? strings.restoreRefreshFailed : strings.archiveRefreshFailed
-            : restoring ? strings.restoreFailed : strings.archiveFailed)
+            : mutationFailure(error, restoring))
         return committed
     } finally {
         fence?.release()

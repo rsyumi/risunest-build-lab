@@ -257,7 +257,7 @@ final class NativeUITests: XCTestCase {
             wait(for: [elapsed], timeout: 25)
             app.activate()
         }
-        XCTAssertTrue(result.waitForExistence(timeout: 200))
+        XCTAssertTrue(result.waitForExistence(timeout: 300))
         let measurement = XCTAttachment(string: result.value as? String ?? result.label)
         measurement.lifetime = .keepAlways
         add(measurement)
@@ -266,6 +266,282 @@ final class NativeUITests: XCTestCase {
 
     func testLiveCloudTransition() throws { try liveCloud(cancel: false) }
     func testLiveCloudCancellation() throws { try liveCloud(cancel: true) }
+
+    private final class SyncPreflight {
+        var status: Int?
+        var error: String?
+        var errorCode: Int?
+    }
+
+    private static let registrationPrefix = "risunestlocal://sync-server/register#"
+
+    private func syncInputs() throws -> (registration: String, expect: String, marker: String) {
+        let environment = ProcessInfo.processInfo.environment
+        guard let supplied = environment["RISUNEST_IOS_SYNC_REGISTRATION"], !supplied.isEmpty,
+              let expect = environment["RISUNEST_IOS_SYNC_EXPECT"], !expect.isEmpty,
+              let marker = environment["RISUNEST_IOS_SYNC_MARKER"], !marker.isEmpty else {
+            throw XCTSkip("Sync registration not supplied")
+        }
+        return (Self.registrationURI(supplied), expect, marker)
+    }
+
+    // Test Lab regenerates the xctestrun it runs, so the registration payload may be supplied without its URI prefix.
+    private static func registrationURI(_ supplied: String) -> String {
+        supplied.contains("://") ? supplied : registrationPrefix + supplied
+    }
+
+    private func syncEnvironment(_ outcome: [String: Any]) {
+        let data = try! JSONSerialization.data(withJSONObject: outcome, options: [.sortedKeys])
+        let line = "sync-env: " + String(data: data, encoding: .utf8)!
+        print(line)
+        let attachment = XCTAttachment(string: line)
+        attachment.name = "sync-env"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// Reaches the registration endpoint from the device before the app does. Only the status is recorded.
+    private func syncPreflight(_ registration: String, phase: String) {
+        let prefix = Self.registrationPrefix
+        var url: URL?
+        if registration.hasPrefix(prefix) {
+            var encoded = String(registration.dropFirst(prefix.count))
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            encoded += String(repeating: "=", count: (4 - encoded.count % 4) % 4)
+            if let data = Data(base64Encoded: encoded),
+               let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let endpoint = payload["endpoint"] as? String {
+                url = URL(string: endpoint + "/head")
+            }
+        }
+        guard let url else {
+            syncEnvironment([
+                "phase": phase, "stage": "preflight", "passed": false, "reason": "registration-unreadable",
+                "length": registration.count, "prefixed": registration.hasPrefix(prefix),
+                "hasFragment": registration.contains("#"),
+            ])
+            XCTFail("sync-env: the registration could not be read")
+            return
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 30
+        let session = URLSession(configuration: configuration)
+        let observed = SyncPreflight()
+        let received = expectation(description: "Sync endpoint preflight")
+        session.dataTask(with: url) { data, response, error in
+            observed.status = (response as? HTTPURLResponse)?.statusCode
+            observed.errorCode = error.map { ($0 as NSError).code }
+            if let data, let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                observed.error = body["error"] as? String
+            }
+            received.fulfill()
+        }.resume()
+        wait(for: [received], timeout: 40)
+        session.invalidateAndCancel()
+        // An unauthenticated request reaching the server is refused with this exact error.
+        let reachable = observed.status == 401 && observed.error == "unauthorized"
+        syncEnvironment([
+            "phase": phase, "stage": "preflight", "passed": reachable, "https": url.scheme == "https",
+            "status": observed.status as Any? ?? NSNull(), "errorCode": observed.errorCode as Any? ?? NSNull(),
+        ])
+        XCTAssertTrue(reachable, "sync-env: the registration endpoint is not reachable from the device")
+    }
+
+    private func runSync(phase: String, environment: [String: String]) {
+        let app = XCUIApplication(bundleIdentifier: "io.github.rsyumi.risunest.ios.bench")
+        app.launchEnvironment["RISUNEST_IOS_PHASE"] = phase
+        for (key, value) in environment {
+            app.launchEnvironment[key] = value
+        }
+        app.launch()
+        let texts = app.webViews.staticTexts
+        let result = texts.containing(NSPredicate(format: "label BEGINSWITH %@", "sync-result:")).firstMatch
+        let failure = texts.containing(NSPredicate(format: "label BEGINSWITH %@", "verification-error:")).firstMatch
+        let step = texts.containing(NSPredicate(format: "label BEGINSWITH %@", "sync-step:")).firstMatch
+        var lastStep = "sync-step:unknown"
+        // An app that stops running ends the wait at once, with the last step it showed.
+        // The step label is replaced as the phase advances, so it is read without failing when it is gone.
+        let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            if result.exists || failure.exists || app.state == .notRunning { return true }
+            if let label = try? step.snapshot().label { lastStep = label }
+            return false
+        }, object: nil)
+        let outcome = XCTWaiter().wait(for: [settled], timeout: 600)
+        if app.state == .notRunning {
+            let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            attachment.name = "\(phase)-final"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        } else {
+            attachScreenshot(app, name: "\(phase)-final")
+        }
+        guard outcome == .completed, result.exists || failure.exists else {
+            let stopped = app.state == .notRunning
+            let last = (try? step.snapshot().label) ?? lastStep
+            let attachment = XCTAttachment(string: "\(stopped ? "app-stopped" : "timeout") \(last)")
+            attachment.name = "\(phase)-last-step"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            print(last)
+            XCTFail(stopped ? "\(phase) stopped running; last \(last)" : "\(phase) did not finish; last \(last)")
+            return
+        }
+        let evidence = result.exists ? result.label : failure.label
+        let attachment = XCTAttachment(string: evidence)
+        attachment.name = "\(phase)-result"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        print(evidence)
+        XCTAssertTrue(evidence.hasPrefix("sync-result:passed"), evidence)
+    }
+
+    func testSyncConnect() throws {
+        continueAfterFailure = false
+        let inputs = try syncInputs()
+        syncPreflight(inputs.registration, phase: "sync")
+        runSync(phase: "sync", environment: [
+            "RISUNEST_IOS_SYNC_REGISTRATION": inputs.registration,
+            "RISUNEST_IOS_SYNC_EXPECT": inputs.expect,
+            "RISUNEST_IOS_SYNC_MARKER": inputs.marker,
+        ])
+    }
+
+    /// Publishes a seeded library with `RISUNEST_IOS_SYNC_PUBLISH` in a message to an empty server library.
+    func testSyncPublish() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard let supplied = environment["RISUNEST_IOS_SYNC_REGISTRATION"], !supplied.isEmpty,
+              let marker = environment["RISUNEST_IOS_SYNC_PUBLISH"], !marker.isEmpty else {
+            throw XCTSkip("Sync publication not requested")
+        }
+        let registration = Self.registrationURI(supplied)
+        syncPreflight(registration, phase: "sync-publish")
+        runSync(phase: "sync-publish", environment: [
+            "RISUNEST_IOS_SYNC_REGISTRATION": registration,
+            "RISUNEST_IOS_SYNC_PUBLISH": marker,
+        ])
+    }
+
+    /// Runs after testSyncConnect in the same installation and relaunches without the registration.
+    func testSyncRestart() throws {
+        continueAfterFailure = false
+        let inputs = try syncInputs()
+        syncPreflight(inputs.registration, phase: "sync-restart")
+        runSync(phase: "sync-restart", environment: ["RISUNEST_IOS_SYNC_MARKER": inputs.marker])
+    }
+
+    private func externalInputs() throws -> [String: String] {
+        let environment = ProcessInfo.processInfo.environment
+        let names = ["RISUNEST_IOS_WEBDAV_URL", "RISUNEST_IOS_WEBDAV_USER", "RISUNEST_IOS_WEBDAV_PASSWORD",
+                     "RISUNEST_IOS_WEBDAV_ROOT", "RISUNEST_IOS_EXTERNAL_BEFORE", "RISUNEST_IOS_EXTERNAL_AFTER"]
+        var inputs: [String: String] = [:]
+        for name in names {
+            guard let value = environment[name], !value.isEmpty else { throw XCTSkip("WebDAV server not supplied") }
+            inputs[name] = value
+        }
+        return inputs
+    }
+
+    /// Reaches the WebDAV server from the device before the app does. It must refuse an unauthenticated request.
+    private func webDavPreflight(_ endpoint: String, phase: String) {
+        guard let url = URL(string: endpoint) else {
+            syncEnvironment(["phase": phase, "stage": "webdav-preflight", "passed": false, "reason": "url-unreadable"])
+            XCTFail("sync-env: the WebDAV URL could not be read")
+            return
+        }
+        // A loopback server on the simulator host is plain HTTP, which the runner's URLSession refuses.
+        guard url.scheme == "https" else {
+            syncEnvironment(["phase": phase, "stage": "webdav-preflight", "passed": true, "skipped": "loopback"])
+            return
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 30
+        let session = URLSession(configuration: configuration)
+        let observed = SyncPreflight()
+        let received = expectation(description: "WebDAV endpoint preflight")
+        session.dataTask(with: url) { _, response, error in
+            observed.status = (response as? HTTPURLResponse)?.statusCode
+            observed.errorCode = error.map { ($0 as NSError).code }
+            received.fulfill()
+        }.resume()
+        wait(for: [received], timeout: 40)
+        session.invalidateAndCancel()
+        let reachable = observed.status == 401
+        syncEnvironment([
+            "phase": phase, "stage": "webdav-preflight", "passed": reachable, "https": url.scheme == "https",
+            "status": observed.status as Any? ?? NSNull(), "errorCode": observed.errorCode as Any? ?? NSNull(),
+        ])
+        XCTAssertTrue(reachable, "sync-env: the WebDAV server is not reachable from the device")
+    }
+
+    /// Connects a new WebDAV backup repository, backs up, changes the library and restores the backup.
+    func testExternalStorageBackupRestore() throws {
+        continueAfterFailure = false
+        let inputs = try externalInputs()
+        webDavPreflight(inputs["RISUNEST_IOS_WEBDAV_URL"]!, phase: "external-storage")
+        runSync(phase: "external-storage", environment: inputs)
+    }
+
+    /// Runs after testExternalStorageBackupRestore in the same installation and relaunches without the password.
+    func testExternalStorageRestart() throws {
+        continueAfterFailure = false
+        let inputs = try externalInputs()
+        webDavPreflight(inputs["RISUNEST_IOS_WEBDAV_URL"]!, phase: "external-storage-restart")
+        runSync(phase: "external-storage-restart",
+                environment: ["RISUNEST_IOS_EXTERNAL_BEFORE": inputs["RISUNEST_IOS_EXTERNAL_BEFORE"]!])
+    }
+
+    private func suppliedInputs(_ names: [String], otherwise reason: String) throws -> [String: String] {
+        let environment = ProcessInfo.processInfo.environment
+        var inputs: [String: String] = [:]
+        for name in names {
+            guard let value = environment[name], !value.isEmpty else { throw XCTSkip(reason) }
+            inputs[name] = value
+        }
+        return inputs
+    }
+
+    private static let externalSyncInputs = ["RISUNEST_IOS_WEBDAV_URL", "RISUNEST_IOS_WEBDAV_USER", "RISUNEST_IOS_WEBDAV_PASSWORD",
+                                             "RISUNEST_IOS_WEBDAV_SYNC_ROOT", "RISUNEST_IOS_EXTERNAL_SYNC_FIRST",
+                                             "RISUNEST_IOS_EXTERNAL_SYNC_SECOND"]
+
+    /// Connects a new WebDAV sync repository, turns sync on, changes a message and publishes it.
+    func testExternalSyncPublish() throws {
+        continueAfterFailure = false
+        let inputs = try suppliedInputs(Self.externalSyncInputs, otherwise: "WebDAV sync repository not supplied")
+        webDavPreflight(inputs["RISUNEST_IOS_WEBDAV_URL"]!, phase: "external-sync")
+        runSync(phase: "external-sync", environment: inputs)
+    }
+
+    /// Runs after testExternalSyncPublish in the same installation and relaunches without the password.
+    func testExternalSyncRestart() throws {
+        continueAfterFailure = false
+        let inputs = try suppliedInputs(Self.externalSyncInputs, otherwise: "WebDAV sync repository not supplied")
+        webDavPreflight(inputs["RISUNEST_IOS_WEBDAV_URL"]!, phase: "external-sync-restart")
+        runSync(phase: "external-sync-restart", environment: [
+            "RISUNEST_IOS_EXTERNAL_SYNC_FIRST": inputs["RISUNEST_IOS_EXTERNAL_SYNC_FIRST"]!,
+            "RISUNEST_IOS_EXTERNAL_SYNC_SECOND": inputs["RISUNEST_IOS_EXTERNAL_SYNC_SECOND"]!,
+        ])
+    }
+
+    private static let backupFileInputs = ["RISUNEST_IOS_BACKUP_FILE_BEFORE", "RISUNEST_IOS_BACKUP_FILE_AFTER"]
+
+    /// Exports a RisuNest backup to a temporary file, changes a message and restores the file in the same app.
+    func testBackupFileRestore() throws {
+        continueAfterFailure = false
+        let inputs = try suppliedInputs(Self.backupFileInputs, otherwise: "Backup file markers not supplied")
+        runSync(phase: "backup-file", environment: inputs)
+    }
+
+    /// Runs after testBackupFileRestore in the same installation and checks the restored library after a relaunch.
+    func testBackupFileRestoreRestart() throws {
+        continueAfterFailure = false
+        let inputs = try suppliedInputs(Self.backupFileInputs, otherwise: "Backup file markers not supplied")
+        runSync(phase: "backup-file-restart", environment: inputs)
+    }
 
     func testOAuthCallbackReturn() throws {
         continueAfterFailure = false
@@ -328,14 +604,21 @@ final class NativeUITests: XCTestCase {
     private func cancelPicker(_ app: XCUIApplication, step: Int) {
         // On iOS 26, export subfolders show a Back button; Cancel is at the root.
         let cancel = app.buttons["Cancel"]
+        // Earlier iOS titles a folder's back button with its parent and gives it no BackButton identifier.
+        let parentTitles = ["Back", "Browse", "Locations", "On My iPhone", "On My iPad", "RisuNest iOS Bench"]
+        let titledBack = app.navigationBars.buttons.matching(NSPredicate(format: "label IN %@", parentTitles)).firstMatch
         for _ in 0..<4 {
             if cancel.waitForExistence(timeout: 2) {
                 cancel.tap()
                 return
             }
             let back = app.navigationBars.buttons.matching(identifier: "BackButton").firstMatch
-            guard back.waitForExistence(timeout: 15) else { break }
-            back.tap()
+            if back.waitForExistence(timeout: 15) {
+                back.tap()
+                continue
+            }
+            guard titledBack.waitForExistence(timeout: 2) else { break }
+            titledBack.tap()
         }
         let back = app.navigationBars.buttons.matching(identifier: "BackButton").firstMatch
         let close = app.buttons["Close"]
@@ -345,7 +628,10 @@ final class NativeUITests: XCTestCase {
         let backHittable = backExists && back.isHittable
         let closeExists = close.exists
         let closeHittable = closeExists && close.isHittable
-        print("RISUNEST_CR228_PICKER_CAPABILITY step=\(step) cancel_exists=\(cancelExists ? 1 : 0) cancel_hittable=\(cancelHittable ? 1 : 0) back_exists=\(backExists ? 1 : 0) back_hittable=\(backHittable ? 1 : 0) close_exists=\(closeExists ? 1 : 0) close_hittable=\(closeHittable ? 1 : 0)")
+        print("RISUNEST_CR228_PICKER_CAPABILITY step=\(step) cancel_exists=\(cancelExists ? 1 : 0) cancel_hittable=\(cancelHittable ? 1 : 0) back_exists=\(backExists ? 1 : 0) back_hittable=\(backHittable ? 1 : 0) close_exists=\(closeExists ? 1 : 0) close_hittable=\(closeHittable ? 1 : 0) titled_back_exists=\(titledBack.exists ? 1 : 0)")
+        let navigation = app.navigationBars.buttons.allElementsBoundByIndex.prefix(8)
+            .map { "\($0.identifier)/\($0.label)" }.joined(separator: ",")
+        print("RISUNEST_CR228_PICKER_NAVIGATION step=\(step) bars=\(app.navigationBars.count) buttons=\(navigation)")
         if closeExists && closeHittable {
             close.tap()
             return

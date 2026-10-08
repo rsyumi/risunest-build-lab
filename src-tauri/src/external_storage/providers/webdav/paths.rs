@@ -108,12 +108,13 @@ pub(super) fn direct_member(collection: &[String], target: &[String]) -> Option<
         .then(|| target[collection.len()].clone())
 }
 
-/// Provider, endpoint, account and root in one string another device computes
-/// identically from the same configuration. Lengths prefix each part so no
-/// combination of separators inside a part can produce another identity.
-pub(super) fn connection_identity(base: &Url, account: &str, root: &[String]) -> String {
+/// Provider, account and root in one string another device computes
+/// identically, whichever address it reaches the server through. Lengths
+/// prefix each part so no combination of separators inside a part can produce
+/// another identity.
+pub(super) fn connection_identity(account: &str, root: &[String]) -> String {
     let mut identity = String::from("webdav");
-    for part in [base.as_str(), account, &root.join("/")] {
+    for part in [account, &root.join("/")] {
         identity.push(':');
         identity.push_str(&part.len().to_string());
         identity.push(':');
@@ -195,13 +196,13 @@ mod tests {
     }
 
     #[test]
-    fn identity_separates_endpoint_account_and_root() {
-        let ambiguous = connection_identity(&base(), "user:1", &["a".into()]);
-        let other = connection_identity(&base(), "user", &["1:a".into()]);
+    fn identity_separates_account_and_root() {
+        let ambiguous = connection_identity("user:1", &["a".into()]);
+        let other = connection_identity("user", &["1:a".into()]);
         assert_ne!(ambiguous, other);
         assert_eq!(
-            connection_identity(&base(), "user", &["a".into()]),
-            connection_identity(&base(), "user", &["a".into()])
+            connection_identity("user", &["a".into()]),
+            connection_identity("user", &["a".into()])
         );
     }
 }

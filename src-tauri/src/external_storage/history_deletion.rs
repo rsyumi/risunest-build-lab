@@ -96,7 +96,7 @@ pub(crate) async fn external_storage_prepare_history_delete(
     app: tauri::AppHandle,
     request: PrepareHistoryDeleteRequest,
 ) -> Result<HistoryDeletePreparation> {
-    logged("external_storage_prepare_history_delete", async move {
+    logged("external_storage_prepare_history_delete", Box::pin(async move {
         let connected = connection_commands::open_connected(&app, &request.connection_id).await?;
         let observation: StoredObject = serde_json::from_str(&request.point_observation)
             .map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
@@ -108,7 +108,7 @@ pub(crate) async fn external_storage_prepare_history_delete(
             same_device: inspected.same_device,
             last_retained: inspected.last_retained,
         })
-    }.await)
+    }).await)
 }
 
 pub(crate) async fn run_delete_history(

@@ -55,6 +55,12 @@ async function command(
 }
 export const getAssetResidencyStatus = (target?: AssetResidencyTarget) =>
   command("server_sync_asset_status", target ? { target } : undefined);
+/** The status's `externalObjects` count for one connection, without the rest of the status. */
+export async function countConnectionOnlyAssets(connectionId: string): Promise<number> {
+  const objects = await invoke<number>("asset_residency_connection_objects", { connectionId });
+  if (!count(objects)) throw new Error("invalid-asset-residency-status");
+  return objects;
+}
 async function protectedCommand(name: string, args?: Record<string, unknown>, signal?: AbortSignal, operationId?: string) {
   const task = await beginMobileBackgroundTask("sync");
   let cancellation: Promise<void> | undefined;

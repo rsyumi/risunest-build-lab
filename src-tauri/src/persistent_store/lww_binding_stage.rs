@@ -205,7 +205,9 @@ impl PersistentStore {
             crate::persistent_store::sync_selection::validate_binding_stage_content(&self.connection, &id)?;
             id
         } else {
-            let temporary = tempfile::tempdir()?;
+            let temporary = crate::external_storage::leftovers::local_scratch(&self.repository_root, "binding-stage-")?;
+            #[cfg(test)]
+            STAGE_SCRATCH.with(|scratch| scratch.replace(Some(temporary.path().to_owned())));
             let path = temporary.path().join("incoming.sqlite");
             let mut isolated = Connection::open(&path)?;
             schema::initialize(&mut isolated)?;
@@ -412,6 +414,8 @@ pub(in crate::persistent_store) fn validate_binding_source_rows(db: &Connection,
 
 #[cfg(test)]
 thread_local! { static FAIL_AFTER_STAGE_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(test)]
+thread_local! { static STAGE_SCRATCH: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) }; }
 
 pub(in crate::persistent_store) fn seed_binding_holds(tx: &Transaction<'_>, staging_id: &str, header: &Header) -> StoreResult<()> {
     tx.execute("INSERT INTO lww_receive_rows(request_id,key,stamp,value,status) SELECT ?2,key,stamp,value,'held' FROM lww_binding_source_units WHERE staging_id=?1 AND status='held'", params![staging_id,header.request_id])?;

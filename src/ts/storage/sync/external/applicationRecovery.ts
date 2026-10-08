@@ -12,6 +12,8 @@ interface Application {
     jobId: string
     fence: PersistentDestructiveReplacementFence
     confirm(): Promise<ExternalApplicationConfirmation>
+    /** Runs after the commit is confirmed and before each projection reads it. */
+    reopenStore?(): Promise<void>
     refreshReleased(revision: number): Promise<CommittedApplyOutcome>
     refreshDeviceState?(): Promise<void>
     afterRefresh(): Promise<void>
@@ -35,12 +37,16 @@ export function hasPendingExternalApplication(): boolean {
 }
 
 async function settle(current: PendingApplication): Promise<void> {
-    current.fence?.release()
-    current.fence = undefined
-    if (pending !== current) return
-    await current.application.settled()
-    pending = undefined
-    recovery.set(null)
+    // The owner settles its guard first; releasing a pause that still holds one fences the library.
+    try {
+        if (pending !== current) return
+        await current.application.settled()
+        pending = undefined
+        recovery.set(null)
+    } finally {
+        current.fence?.release()
+        current.fence = undefined
+    }
 }
 
 async function resume(current: PendingApplication): Promise<void> {
@@ -57,6 +63,7 @@ async function resume(current: PendingApplication): Promise<void> {
             current.revision = confirmation.revision
         }
         if (!current.projected) {
+            await current.application.reopenStore?.()
             let outcome: CommittedApplyOutcome
             if (current.fence) {
                 outcome = await current.fence.refreshCommittedWorkingSet(current.revision)

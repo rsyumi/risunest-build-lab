@@ -1,3 +1,4 @@
+import { formatBytes } from '../gui/nativeFileJobDialogModel'
 import type {
     NativeAssetGcResult,
     NativePersistentStorageStats,
@@ -5,6 +6,7 @@ import type {
     NativeSnapshotInfo,
 } from './nativePersistentMaintenance'
 import type { SyncConflictBackupEntry } from './sync/syncConflictBackup'
+import type { AssetResidencyStatus } from './sync/serverAssetResidency'
 import type {
     ServerSyncCacheUsage,
 } from './sync/serverSyncProduction'
@@ -29,6 +31,9 @@ export interface RisuNestStorageDashboardSnapshot {
     snapshots: NativeSnapshotInfo[]
     conflictBackups: SyncConflictBackupEntry[]
     tempUsage: ServerSyncCacheUsage | null
+    /** Where the files this device does not store are held, read after the totals. */
+    residency: AssetResidencyStatus | null
+    residencyLoading: boolean
     gcPreview: NativeAssetGcResult | null
     gcResult: NativeAssetGcResult | null
 }
@@ -38,6 +43,7 @@ export interface RisuNestStorageDashboardDependencies {
     listSnapshots(): Promise<NativeSnapshotInfo[]>
     listConflictBackups(): Promise<SyncConflictBackupEntry[]>
     getTemp(): Promise<ServerSyncCacheUsage>
+    getResidency(): Promise<AssetResidencyStatus>
     cleanupTemp(): Promise<ServerSyncCacheUsage>
     previewGc(): Promise<NativeAssetGcResult>
     executeGc(): Promise<NativeAssetGcResult>
@@ -47,20 +53,29 @@ export interface RisuNestStorageDashboardDependencies {
 }
 
 export function formatRisuNestStorageBytes(bytes: number): string {
-    const mib = 1024 * 1024
-    const gib = 1024 * mib
-    if (bytes >= gib) return `${(bytes / gib).toFixed(1)} GiB`
-    if (bytes >= mib) return `${(bytes / mib).toFixed(1)} MiB`
-    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`
-    return `${Math.max(0, Math.round(bytes))} bytes`
+    return formatBytes(Math.max(0, bytes))
 }
 
-function isInlay(
-    alias: NativePersistentStorageStats['assetAliases'][number],
-): boolean {
-    return (
-        alias.kind.toLowerCase().includes('inlay') || Boolean(alias.inlayType)
-    )
+export type StorageOffDevicePart = 'server' | 'external' | 'unavailable'
+
+/**
+ * The places the asset residency status names for files this device does not
+ * store, split the way the asset residency group splits them. Bytes for the
+ * server and external storage, a file count for files no source holds.
+ */
+export function storageOffDeviceParts(
+    residency: AssetResidencyStatus,
+): { part: StorageOffDevicePart; value: number }[] {
+    const externalBytes =
+        residency.remoteObjects > residency.serverObjects
+            ? residency.remoteBytes - residency.serverBytes
+            : 0
+    const parts: { part: StorageOffDevicePart; value: number }[] = [
+        { part: 'server', value: residency.serverBytes },
+        { part: 'external', value: externalBytes },
+        { part: 'unavailable', value: residency.unavailableObjects },
+    ]
+    return parts.filter((entry) => entry.value > 0)
 }
 
 export function storageDashboardRollup(
@@ -88,23 +103,20 @@ export function storageDashboardRollup(
     )
     const cacheBytes = cache?.cacheBytes ?? 0
     const ledgerBytes = cache?.ledgerBytes ?? 0
-    const inlayBytes = stats.assetAliases
-        .filter(isInlay)
-        .reduce((total, alias) => total + alias.bytes, 0)
     return {
         cards: [
             {
                 id: 'total',
                 bytes:
                     stats.databaseBytes +
-                    stats.assetObjects.bytes +
+                    stats.assetBodies.bytes +
                     snapshotBytes +
                     conflictBackupBytes +
                     cacheBytes +
                     ledgerBytes,
             },
-            { id: 'media', bytes: stats.assetObjects.bytes },
-            { id: 'inlays', bytes: inlayBytes },
+            { id: 'media', bytes: stats.assetBodies.bytes },
+            { id: 'inlays', bytes: stats.inlayBodies.bytes },
             { id: 'plugins', bytes: stats.pluginStorage.bytes },
             { id: 'snapshots', bytes: snapshotBytes },
             { id: 'conflictBackups', bytes: conflictBackupBytes },
@@ -135,6 +147,8 @@ export function createRisuNestStorageDashboard(
         snapshots: [],
         conflictBackups: [],
         tempUsage: null,
+        residency: null,
+        residencyLoading: false,
         gcPreview: null,
         gcResult: null,
     }
@@ -149,6 +163,28 @@ export function createRisuNestStorageDashboard(
     const activeActions = new Set<string>()
     let latestReload = 0
     let pendingReloads = 0
+    // The residency status walks the whole library, so reloads share one request.
+    let residencyRequest: Promise<AssetResidencyStatus> | null = null
+    let latestResidency = 0
+    const loadResidency = (stats: NativePersistentStorageStats) => {
+        const residencyId = ++latestResidency
+        if (stats.missingAssetBodies.count === 0) {
+            update({ residency: null, residencyLoading: false })
+            return
+        }
+        update({ residency: null, residencyLoading: true })
+        residencyRequest ??= deps.getResidency().finally(() => {
+            residencyRequest = null
+        })
+        residencyRequest.then(
+            (residency) => {
+                if (residencyId === latestResidency) update({ residency, residencyLoading: false })
+            },
+            () => {
+                if (residencyId === latestResidency) update({ residency: null, residencyLoading: false })
+            },
+        )
+    }
     const publishBusy = () => update({ busy: [...activeActions] })
     const invalidatePendingReloads = () => {
         if (pendingReloads === 0) return
@@ -191,6 +227,7 @@ export function createRisuNestStorageDashboard(
                     } else failed.push(source)
                 })
                 update({ ...next, loadedSources: [...loaded], failedSources: failed, loadFailed: failed.length > 0 })
+                if (next.stats) loadResidency(next.stats)
             }
         } catch {
             if (reloadId === latestReload) update({ loadFailed: true })

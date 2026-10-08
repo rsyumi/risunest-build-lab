@@ -21,6 +21,8 @@ const server = vi.hoisted(() => ({
     restoreServerSyncBackup: vi.fn(),
 }))
 vi.mock('src/ts/storage/sync/serverSyncProduction', () => server)
+const residency = vi.hoisted(() => ({ getAssetResidencyStatus: vi.fn() }))
+vi.mock('src/ts/storage/sync/serverAssetResidency', () => residency)
 const backups = vi.hoisted(() => ({ list: vi.fn(), remove: vi.fn() }))
 const alerts = vi.hoisted(() => ({
     alertConfirm: vi.fn(),
@@ -42,7 +44,8 @@ const syncText = languageEnglish.risuNest.serverSync
 const stats = {
     snapshotBytes: 2 * 1024 * 1024,
     databaseBytes: 1024 * 1024,
-    assetObjects: { count: 2, bytes: 2 * 1024 * 1024 }, assetAliases: [{ kind: 'inlay', inlayType: null, count: 1, bytes: 1024 * 1024 }], pluginStorage: { count: 1, bytes: 1024 },
+    assetObjects: { count: 2, bytes: 2 * 1024 * 1024 }, assetBodies: { count: 2, bytes: 2 * 1024 * 1024 },
+    missingAssetBodies: { count: 0, bytes: 0 }, inlayBodies: { count: 1, bytes: 1024 * 1024 }, assetAliases: [{ kind: 'inlay', inlayType: null, count: 1, bytes: 1024 * 1024 }], pluginStorage: { count: 1, bytes: 1024 },
     characters: { active: { count: 2, bytes: 0 }, trashedCount: 1 }, conversations: { count: 3, messageCount: 4 }, assetObjectDeletions: [],
 }
 
@@ -149,6 +152,76 @@ describe('RisuNestStorageDashboard', () => {
         expect(
             target.querySelector('[role="status"][aria-live="polite"]'),
         ).not.toBeNull()
+    })
+
+    describe('images and media held elsewhere', () => {
+        const offloaded = {
+            ...stats,
+            assetObjects: { count: 4, bytes: 1024 * 1024 * 1024 + 1024 * 1024 },
+            assetBodies: { count: 1, bytes: 1024 * 1024 },
+            missingAssetBodies: { count: 3, bytes: 1024 * 1024 * 1024 },
+        }
+        const status = {
+            policy: 'remote', localBytes: 1024 * 1024, remoteBytes: 1024 * 1024 * 1024, remoteObjects: 3,
+            serverBytes: 1024 * 1024 * 1024, serverObjects: 3, externalObjects: [], unavailableObjects: 0, evictedBytes: 0,
+        }
+        const mediaItem = (target: HTMLElement) =>
+            [...target.querySelectorAll<HTMLElement>('[data-storage-legend] > li')]
+                .find((item) => item.textContent?.includes(languageEnglish.risuNest.storage.media))!
+        const flat = (element: Element | null | undefined) => element?.textContent?.replace(/\s+/g, ' ').trim()
+
+        it('counts the files on this device and notes the size held only on the server', async () => {
+            residency.getAssetResidencyStatus.mockResolvedValue(status)
+            const target = setup(Promise.resolve(offloaded))
+            await vi.waitFor(() => expect(target.querySelector('[data-storage-off-device]')).not.toBeNull())
+
+            const item = mediaItem(target)
+            expect(flat(item.firstElementChild)).toBe('Images & media 1.0 MiB')
+            expect(flat(item.querySelector('[data-storage-off-device]'))).toBe('Files only on the server 1.0 GiB')
+            // Total: database 1 MiB + media 1 MiB + snapshots 2 MiB + cache and ledger 3 KiB + conflict backup 4 KiB.
+            const total = flat(target.querySelector('[data-storage-summary] .font-bold'))
+            expect(total).toBe('4.0 MiB')
+            expect(residency.getAssetResidencyStatus).toHaveBeenCalledOnce()
+        })
+
+        it('holds the note line while the residency status loads, without delaying the totals', async () => {
+            let resolveStatus: ((value: typeof status) => void) | undefined
+            residency.getAssetResidencyStatus.mockImplementation(() => new Promise((resolve) => { resolveStatus = resolve }))
+            const target = setup(Promise.resolve(offloaded))
+            await vi.waitFor(() => expect(target.querySelector('[data-storage-off-device-placeholder]')).not.toBeNull())
+
+            const item = mediaItem(target)
+            expect(item.querySelector('[data-storage-off-device-placeholder]')?.className).toContain('h-4')
+            expect(item.className).toContain('col-span-full')
+            expect(target.textContent).toContain('Total data')
+            resolveStatus?.(status)
+            await vi.waitFor(() => expect(item.querySelector('[data-storage-off-device]')?.className).toContain('text-xs'))
+            expect(target.querySelector('[data-storage-off-device-placeholder]')).toBeNull()
+            expect(item.className).toContain('col-span-full')
+        })
+
+        it('names external storage and files not found apart from the server', async () => {
+            residency.getAssetResidencyStatus.mockResolvedValue({
+                ...status, remoteBytes: 1000, remoteObjects: 4, serverBytes: 900, serverObjects: 3, unavailableObjects: 2,
+                externalObjects: [{ connectionId: 'synthetic', objects: 1 }],
+            })
+            const target = setup(Promise.resolve(offloaded))
+            await vi.waitFor(() => expect(target.querySelector('[data-storage-off-device]')).not.toBeNull())
+
+            expect(flat(target.querySelector('[data-storage-off-device]'))).toBe(
+                'Files only on the server 900 B · Files only in external storage 100 B · Files not found 2',
+            )
+        })
+
+        it('adds no note when every file is on this device', async () => {
+            const target = setup()
+            await vi.waitFor(() => expect(target.textContent).toContain('Total data'))
+
+            expect(target.querySelector('[data-storage-off-device-placeholder]')).toBeNull()
+            expect(target.querySelector('[data-storage-off-device]')).toBeNull()
+            expect(mediaItem(target).className).not.toContain('col-span-full')
+            expect(residency.getAssetResidencyStatus).not.toHaveBeenCalled()
+        })
     })
 
     it('places the loading placeholder where the total, bar and legend appear', async () => {
@@ -302,12 +375,12 @@ describe('RisuNestStorageDashboard', () => {
         )
     })
 
-    it('says that clearing a link does not delete the file', async () => {
+    it('describes the unused files row with its own action only', async () => {
         const target = setup()
-        await vi.waitFor(() => expect(target.textContent).toContain('Unused files'))
-        expect(target.textContent).toContain(
-            'Clearing a broken link in the data check does not delete the file.',
-        )
+        await vi.waitFor(() => expect(target.querySelector('[data-storage-action="gc"]')).not.toBeNull())
+
+        const row = target.querySelector<HTMLElement>('[data-storage-action="gc"]')!
+        expect(row.querySelector('p')?.textContent).toBe('Finds and deletes files that nothing refers to.')
     })
 
     it('formats large counts with locale separators', async () => {

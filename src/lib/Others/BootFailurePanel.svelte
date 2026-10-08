@@ -87,18 +87,15 @@
         {#if failure.stage}
             <span class="text-xs text-textcolor2 select-text">{copy.stage}: {failure.stage}</span>
         {/if}
-        {#if isTauri}
+        {#if isTauri && failure.stage !== 'native-setup'}
             <div class="rounded-md border border-darkborderc p-3">
                 <p class="text-sm font-bold">{language.risuNest.recovery.exportTitle}</p>
                 <p class="mt-1 text-xs text-textcolor2">{language.risuNest.recovery.exportHelp}</p>
                 <button
-                    class="mt-2 bg-darkbutton border border-darkborderc rounded-md px-4 py-2 text-sm hover:bg-selected disabled:opacity-50"
-                    disabled={failure.stage === 'native-setup'}
+                    class="mt-2 bg-darkbutton border border-darkborderc rounded-md px-4 py-2 text-sm hover:bg-selected"
                     onclick={exportData}
                 >{language.risuNest.recovery.exportAction}</button>
-                {#if failure.stage === 'native-setup'}
-                    <p class="mt-2 text-xs text-textcolor2">{language.risuNest.recovery.exportUnavailable}</p>
-                {:else if exportMessage}
+                {#if exportMessage}
                     <p class="mt-2 text-xs text-textcolor2" role="status">{exportMessage}</p>
                 {/if}
             </div>

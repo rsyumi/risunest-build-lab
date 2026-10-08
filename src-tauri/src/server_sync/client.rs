@@ -360,6 +360,20 @@ impl ServerClient {
             .unwrap_or_else(|error| error.into_inner()) = candidate_config;
         Ok(head)
     }
+    /// The identity check of a connection being configured. A connection that
+    /// fails before any reply, as one through a tunnel that has just started
+    /// can, is tried once more after the usual retry delay.
+    pub fn resolve_configured_identity(&self) -> Result<RemoteHead> {
+        let attempted = (self.retry_budget.clock)();
+        match self.resolve_identity() {
+            Err(error) if error.code == "server-unreachable" => {
+                let failed_for = (self.retry_budget.clock)().saturating_duration_since(attempted);
+                self.wait_after_ambiguous(&error, failed_for)?;
+                self.resolve_identity()
+            }
+            other => other,
+        }
+    }
     pub fn config(&self) -> ServerConfig {
         self.config
             .read()
@@ -1414,6 +1428,81 @@ mod tests {
             assert_eq!(reply.status, status);
             assert_eq!(task.join().unwrap(), 1, "{status} {body}");
         }
+    }
+
+    /// A loopback endpoint that closes its first `dropped` connections before
+    /// any reply and forwards later ones to `target`, if there is one.
+    fn closing_endpoint(
+        dropped: usize,
+        target: Option<std::net::SocketAddr>,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::net::{Shutdown, TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = accepted.clone();
+        std::thread::spawn(move || {
+            for client in listener.incoming() {
+                let Ok(client) = client else { return };
+                let index = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let Some(target) = target.filter(|_| index >= dropped) else {
+                    drop(client);
+                    continue;
+                };
+                let server = TcpStream::connect(target).unwrap();
+                for (mut from, mut to) in [
+                    (client.try_clone().unwrap(), server.try_clone().unwrap()),
+                    (server, client),
+                ] {
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut from, &mut to);
+                        let _ = to.shutdown(Shutdown::Write);
+                    });
+                }
+            }
+        });
+        (endpoint, accepted)
+    }
+
+    #[test]
+    fn a_configured_connection_closed_before_any_reply_is_tried_once_more() {
+        let server = crate::server_sync::lww_tests::LocalServerFixture::new();
+        let (_root, store) = crate::server_sync::lww_tests::local();
+        let (registered, _) = server.candidate(&store);
+        let target = Url::parse(&registered.endpoint).unwrap().socket_addrs(|| None).unwrap()[0];
+        let (endpoint, accepted) = closing_endpoint(1, Some(target));
+        let mut client = ServerClient::new(ServerConfig { endpoint, ..registered.clone() }).unwrap();
+        client.retry_budget = no_sleep_budget();
+        let head = client.resolve_configured_identity().unwrap();
+        assert_eq!(head.library_id, registered.library_id);
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(*client.retry_budget.spent.lock().unwrap() >= Duration::from_secs(1));
+
+        let (endpoint, accepted) = closing_endpoint(usize::MAX, None);
+        let mut client = ServerClient::new(ServerConfig { endpoint, ..registered }).unwrap();
+        client.retry_budget = no_sleep_budget();
+        let error = client.resolve_configured_identity().unwrap_err();
+        assert_eq!((error.code.as_str(), error.status), ("server-unreachable", 503));
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_configured_connection_that_replies_is_not_tried_again() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", server.server_addr());
+        let task = std::thread::spawn(move || {
+            let request = server.recv().unwrap();
+            request
+                .respond(tiny_http::Response::from_string("{\"error\":\"unavailable\"}").with_status_code(503))
+                .unwrap();
+            server.recv_timeout(Duration::from_millis(200)).unwrap().is_none()
+        });
+        let mut client = ServerClient::new(config(&endpoint)).unwrap();
+        client.retry_budget = no_sleep_budget();
+        let error = client.resolve_configured_identity().unwrap_err();
+        assert_eq!(error.status, 503);
+        assert!(task.join().unwrap());
+        assert_eq!(*client.retry_budget.spent.lock().unwrap(), Duration::ZERO);
     }
 
 }

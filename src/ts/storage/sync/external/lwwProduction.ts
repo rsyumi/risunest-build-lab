@@ -33,6 +33,9 @@ export function supportsExternalLwwNewDevice(id: string): boolean {
 }
 const header = (connectionId: string, context: BindingContext, requestId: string = crypto.randomUUID()) => ({ connectionId, bindingAuthority: context.state.targetAuthority, requestId, generating: generatingConversations.snapshot() })
 const native = createNativeSyncBindingBridge()
+// A start that left sync off registers the transports, so settings can still change the sync target,
+// but leaves the bound target stopped until the user starts it.
+let resumeBoundTarget = true
 
 function createAdapter(connectionId: string): Adapter {
     let active: BindingContext | undefined
@@ -77,7 +80,8 @@ function createAdapter(connectionId: string): Adapter {
         maintain: async () => { const current = await context(); current.signal.throwIfAborted(); await invoke('external_lww_maintenance', { request: header(connectionId, current) }) },
         failed: error => {
             reportFailure(connectionId, error)
-            if ((error as { kind?: string })?.kind === 'corrupt') scheduler.stop()
+            const kind = (error as { kind?: string })?.kind
+            if (kind === 'corrupt' || kind === 'repositoryMismatch') scheduler.stop()
         },
     })
     const transport: SyncBindingTransport & { receiveAvailableChanges(context: BindingContext): Promise<void> } = {
@@ -135,14 +139,15 @@ export async function refreshExternalLwwAdapters(state: ExternalStorageState): P
     for (const [id, adapter] of adapters) if (binding.target.kind !== 'external' || binding.target.connectionId !== id) {
         adapter.scheduler.stop(); adapter.state = undefined
     }
-    if (binding.target.kind === 'external') {
+    if (binding.target.kind === 'external' && resumeBoundTarget) {
         const adapter = adapters.get(binding.target.connectionId)
         if (adapter && adapter.state?.targetAuthority !== binding.targetAuthority) await resumeCurrentSyncBinding(binding.target)
     }
 }
 
-export async function installExternalLwwAdapters(state: ExternalStorageState): Promise<() => void> {
+export async function installExternalLwwAdapters(state: ExternalStorageState, resumeBound = true): Promise<() => void> {
     if (!isTauri) return () => {}
+    resumeBoundTarget = resumeBound
     await refreshExternalLwwAdapters(state)
     const dirty = (generation = false) => { for (const adapter of adapters.values()) if (adapter.state) adapter.scheduler.dirty(generation) }
     const disposeRevision = subscribeLocalPersistentRevision((_revision, cause) => dirty(cause === 'generation-complete'))
@@ -177,13 +182,21 @@ export async function installExternalLwwAdapters(state: ExternalStorageState): P
         document.removeEventListener('visibilitychange', foreground)
         window.removeEventListener('online', foreground); window.removeEventListener('offline', foreground)
         for (const adapter of [...adapters.values()]) adapter.dispose()
+        resumeBoundTarget = true
     }
+}
+
+/** Whether sync with this connection was started in this session. */
+export function isExternalLwwRunning(connectionId: string): boolean {
+    return !!adapters.get(connectionId)?.state
 }
 
 export async function requestExternalLwwNow(connectionId: string): Promise<void> {
     const adapter = adapters.get(connectionId)
     if (!adapter) throw new Error('Sync binding transport is unavailable')
     await runWithMobileBackgroundTask('sync', async () => {
+        // A binding the start left stopped resumes before it publishes.
+        if (!adapter.state) await resumeCurrentSyncBinding({ kind: 'external', connectionId })
         await adapter.scheduler.publishNow(true)
         await adapter.scheduler.resumeForeground(false)
     })

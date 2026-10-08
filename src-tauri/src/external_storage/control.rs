@@ -12,7 +12,6 @@ use super::{
     journal::{SpoolAdmission, TransferJournal},
     packaging::{native_role, wire_role, RemoteObject},
     publication::HeadObservation,
-    transfer::SpoolSink,
     transfer_job,
 };
 use risunest_external_storage_format::{
@@ -424,6 +423,103 @@ pub(crate) fn prepare_head(
     })
 }
 
+/// Control objects are small and bounded, so they are received in memory.
+struct ControlSink {
+    bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    max_length: u64,
+    verified: bool,
+}
+impl ControlSink {
+    fn new(max_length: u64) -> Self {
+        Self { bytes: Default::default(), max_length, verified: false }
+    }
+    fn take(&self) -> Result<Vec<u8>> {
+        Ok(std::mem::take(&mut *self.bytes.lock().map_err(transient)?))
+    }
+}
+/// The writer refuses a provider overrun before it reaches memory.
+struct ControlWriter {
+    bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    remaining: u64,
+    cancel: Cancellation,
+}
+impl tokio::io::AsyncWrite for ControlWriter {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if self.cancel.check().is_err() {
+            return std::task::Poll::Ready(Err(std::io::Error::other("cancelled")));
+        }
+        if bytes.len() as u64 > self.remaining {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "transfer-limit-exceeded",
+            )));
+        }
+        match self.bytes.lock() {
+            Ok(mut out) => out.extend_from_slice(bytes),
+            Err(_) => return std::task::Poll::Ready(Err(std::io::Error::other("control receive lock"))),
+        }
+        self.remaining -= bytes.len() as u64;
+        std::task::Poll::Ready(Ok(bytes.len()))
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+impl super::contract::TransferSink for ControlSink {
+    fn open<'a>(
+        &'a mut self,
+        offset: u64,
+        max_length: u64,
+        cancel: &'a Cancellation,
+    ) -> super::contract::ProviderFuture<'a, std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
+        Box::pin(async move {
+            cancel.check()?;
+            let mut bytes = self.bytes.lock().map_err(transient)?;
+            if self.verified
+                || offset.checked_add(max_length).is_none_or(|end| end > self.max_length)
+                || offset > bytes.len() as u64
+            {
+                return Err(ProviderError::new(ErrorKind::Corrupt));
+            }
+            bytes.truncate(offset as usize);
+            drop(bytes);
+            Ok(Box::pin(ControlWriter {
+                bytes: self.bytes.clone(),
+                remaining: max_length,
+                cancel: cancel.clone(),
+            }) as std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>>)
+        })
+    }
+    fn finish<'a>(&'a mut self, length: u64, sha256: &'a str) -> super::contract::ProviderFuture<'a, ()> {
+        Box::pin(async move {
+            let bytes = self.bytes.lock().map_err(transient)?;
+            if self.verified
+                || length > self.max_length
+                || bytes.len() as u64 != length
+                || hex::encode(hash(&bytes)) != sha256
+            {
+                return Err(ProviderError::new(ErrorKind::Corrupt));
+            }
+            drop(bytes);
+            self.verified = true;
+            Ok(())
+        })
+    }
+}
+
 async fn download_control(
     provider: &dyn Provider,
     repository: &RepositoryHandle,
@@ -432,21 +528,17 @@ async fn download_control(
     max_ciphertext: u64,
     cancel: &Cancellation,
 ) -> Result<(ReadReceipt, Option<Vec<u8>>)> {
-    let root = tempfile::tempdir().map_err(transient)?;
-    let path = root.path().join("control.partial");
-    let mut sink = SpoolSink::create(&path, max_ciphertext)?;
+    let mut sink = ControlSink::new(max_ciphertext);
     let receipt = provider
         .read_object(repository, locator, unchanged, &mut sink, cancel)
         .await?;
     match &receipt {
         ReadReceipt::NotModified(_) => Ok((receipt, None)),
         ReadReceipt::Body(body) => {
-            if !body.complete || !sink.is_verified() || body.byte_length > max_ciphertext {
+            if !body.complete || !sink.verified || body.byte_length > max_ciphertext {
                 return Err(corrupt("incomplete control object"));
             }
-            let mut file = crate::trust_boundary::open_regular_source(&path).map_err(corrupt)?;
-            let mut bytes = Vec::with_capacity(body.byte_length as usize);
-            file.read_to_end(&mut bytes).map_err(corrupt)?;
+            let bytes = sink.take()?;
             if bytes.len() as u64 != body.byte_length {
                 return Err(corrupt("control object length differs"));
             }
@@ -1559,6 +1651,44 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn control_sink_receives_a_resumed_body_in_memory_and_verifies_it_once() {
+        use crate::external_storage::contract::TransferSink;
+        use tokio::io::AsyncWriteExt;
+        runtime().block_on(async {
+            let cancel = Cancellation::default();
+            let body = b"synthetic control body";
+            let digest = hex::encode(hash(body));
+            let mut sink = ControlSink::new(body.len() as u64);
+            sink.open(0, 9, &cancel).await.unwrap().write_all(b"synthetiX").await.unwrap();
+            sink.open(8, body.len() as u64 - 8, &cancel).await.unwrap().write_all(&body[8..]).await.unwrap();
+            assert_eq!(sink.finish(body.len() as u64, &"0".repeat(64)).await.unwrap_err().kind, ErrorKind::Corrupt);
+            sink.finish(body.len() as u64, &digest).await.unwrap();
+            assert_eq!(sink.finish(body.len() as u64, &digest).await.unwrap_err().kind, ErrorKind::Corrupt);
+            assert_eq!(sink.open(0, 1, &cancel).await.err().map(|error| error.kind), Some(ErrorKind::Corrupt));
+            assert_eq!(sink.take().unwrap(), body);
+        });
+    }
+
+    #[test]
+    fn control_sink_refuses_overruns_gaps_and_oversized_bodies() {
+        use crate::external_storage::contract::TransferSink;
+        use tokio::io::AsyncWriteExt;
+        runtime().block_on(async {
+            let cancel = Cancellation::default();
+            let mut sink = ControlSink::new(8);
+            for (offset, length) in [(0, 9), (4, 4), (u64::MAX, 1)] {
+                assert_eq!(sink.open(offset, length, &cancel).await.err().map(|error| error.kind), Some(ErrorKind::Corrupt));
+            }
+            let mut writer = sink.open(0, 4, &cancel).await.unwrap();
+            assert_eq!(writer.write_all(b"12345").await.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+            writer.write_all(b"1234").await.unwrap();
+            assert_eq!(writer.write_all(b"5").await.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(sink.finish(9, &hex::encode(hash(b"123456789"))).await.unwrap_err().kind, ErrorKind::Corrupt);
+            assert_eq!(sink.take().unwrap(), b"1234");
+        });
     }
 
     fn connected(

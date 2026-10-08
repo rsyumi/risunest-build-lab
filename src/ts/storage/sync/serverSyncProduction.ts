@@ -9,18 +9,21 @@ import { RevisionConflictError, type LwwStageReceive, type LwwRemoteChange } fro
 import { runWithMobileBackgroundTask } from '../../mobileBackgroundTask'
 import { fencePluginExecutionForAuthorityReplacement, invalidatePluginCachesAfterAuthorityReplacement, restartPluginsAfterAuthorityReplacement } from 'src/ts/plugins/apiV3/v3.svelte'
 import { registerSyncBindingTransport, resumeCurrentSyncBinding } from './bindingRegistry'
-import type { SyncBindingTransport, BindingContext, BindingOutcome, SyncBindingOptions } from './bindingFlow'
-import { replaceNativeSyncBinding, replaceNativeSyncBindingAsNewDevice } from './bindingNative'
+import type { SyncBindingTransport, BindingContext, BindingOutcome, SyncBindingOptions, StagedSyncTarget } from './bindingFlow'
+import { createNativeSyncBindingBridge, replaceNativeSyncBinding, replaceNativeSyncBindingAsNewDevice } from './bindingNative'
 import { createServerSyncScheduler, integrityCodes, serverSyncErrorCode } from './serverSyncScheduler'
 import { subscribeLocalPersistentRevision } from '../persistentRevisionEvents'
 import { listen } from '@tauri-apps/api/event'
 import { generatingConversations } from '../generatingConversationRegistry'
 import { bindSyncTarget, unbindSyncTarget } from './bindingRegistry'
+import { subscribeSyncBindingChanges } from './bindingChanges'
 import type { ServerConfig } from './serverSync'
 import { get } from 'svelte/store'
 import { selectedCharID } from 'src/ts/stores.svelte'
 import { getDatabase } from '../database.svelte'
-import { createRateMeter, laneDeltas, readServerSyncLanes, routinePeak, routineWork, type ServerSyncAttempt, type ServerSyncLane, type ServerSyncStage } from './serverSyncProgress'
+import { bytePhase, createRateMeter, laneDeltas, readServerSyncLanes, routineMoved, routinePeak, type ServerSyncAttempt, type ServerSyncLane, type ServerSyncStage } from './serverSyncProgress'
+import { createRemainingTimeEstimator } from './remainingTime'
+import { setAssetResidencyPolicy, type AssetResidencyPolicy } from './serverAssetResidency'
 
 const selectedCharacterId = () => getDatabase().characters[get(selectedCharID)]?.chaId ?? null
 
@@ -31,7 +34,11 @@ export function initializeNativeSyncBindings(): () => void {
     if (nativeBindings) return disposeNativeSyncBindings
     let activeToken: PersistentMutationToken | undefined
     const token = () => { if (!activeToken) throw new Error('Sync binding pause is unavailable'); return activeToken }
+    const bridge = createNativeSyncBindingBridge()
     nativeBindings = installSyncBindingFlow({
+        // Switching to a received state checks that state again, so it is part of applying it.
+        native: { ...bridge, switchTarget: (...args) => bindingStaged ? during('applying', () => bridge.switchTarget(...args)) : bridge.switchTarget(...args) },
+        whileAsking,
         recovery: createSyncBindingRecoveryRegistration(getPersistentDataRuntime, token),
         withPausedWrites: operation => withPausedPersistentWrites('sync-binding', async pausedToken => {
             activeToken = pausedToken
@@ -49,7 +56,7 @@ export function initializeNativeSyncBindings(): () => void {
 }
 export function disposeNativeSyncBindings(): void { disposeServer?.(); disposeServer = undefined; nativeBindings?.dispose(); nativeBindings = undefined }
 
-type Status = { configured: boolean; libraryId?: string | null; deviceId?: string | null; writerId: string; bindingAuthority: string }
+type Status = { configured: boolean; libraryId?: string | null; deviceId?: string | null; writerId: string; bindingAuthority: string; assetPolicy?: AssetResidencyPolicy }
 let status: Status = { configured: false, writerId: '', bindingAuthority: '0' }
 type PendingBinding = { endpoint: string; libraryId: string; epoch: string; serverEmpty: boolean }
 let bindingIncomplete = false
@@ -60,9 +67,13 @@ let foreground = false
 let replacing = false
 let hydrating: Promise<void> | undefined
 let hydrationPending = false
+let representativesPending = false
+let representativesTimer: ReturnType<typeof setTimeout> | undefined
 let hydrationAgain = false
 let hydrationError = ''
 let schedulerAuthority: string | undefined
+// A connection that asked to keep assets on the server, until its binding to that library is active.
+let requestedRemoteAssets: { libraryId: string } | undefined
 const listeners = new Set<(value: ReturnType<typeof snapshot>) => void>()
 const changed = () => { for (const listener of listeners) listener(snapshot()) }
 // One attempt runs from the first sync step until sending, receiving, asset downloads and binding
@@ -72,6 +83,8 @@ let attemptFailed = false
 // Read when a watched attempt starts, so even an attempt that ends before its next read has a start to count from.
 let baseline: Promise<ServerSyncLane[] | undefined> | undefined
 let binding = false
+// A binding that received the server state it replaces this library with.
+let bindingStaged = false
 let operations = 0
 let lastSuccessAt: number | undefined
 // A routine attempt that moved anything stays on screen as finished for a moment.
@@ -80,23 +93,30 @@ let finishedTimer: ReturnType<typeof setTimeout> | undefined
 let watchers = 0
 let sampling: ReturnType<typeof setInterval> | undefined
 const meter = createRateMeter()
+const remaining = createRemainingTimeEstimator()
 const readLanes = () => readServerSyncLanes().catch(() => undefined)
 async function sample(): Promise<void> {
     const captured = attempt
     if (!captured) return
     const first = !baseline
     const start = baseline ??= readLanes()
-    // The upload a routine bar fills toward is fixed once, when the attempt begins publishing.
-    const plan = captured.mode === 'routine' && captured.plannedSend === undefined && captured.stages.includes('publishing')
+    // The upload a bar fills toward is fixed once, when the attempt begins publishing.
+    const plan = captured.plannedSend === undefined && captured.stages.includes('publishing')
     const [before, lanes, pending] = await Promise.all([start, first ? start : readLanes(), plan ? controller.pendingChanges().catch(() => undefined) : undefined])
     if (captured !== attempt) return
     if (!before) { if (baseline === start) baseline = undefined; return }
     if (!lanes) return
     captured.lanes = laneDeltas(lanes, before)
     if (typeof pending === 'number') captured.plannedSend = pending + (captured.lanes.find(lane => lane.lane === 'send')?.itemsDone ?? 0)
+    // A receive is measured against the server changes it reported when first seen at work.
+    const receive = captured.lanes.find(lane => lane.lane === 'receive')
+    if (captured.plannedReceive === undefined && receive && receive.backlogDone > 0) captured.plannedReceive = receive.backlogDone + receive.backlogLeft
     captured.peak = routinePeak(captured)
-    meter.add(Date.now(), captured.lanes.reduce((total, lane) => total + lane.sentBytes + lane.receivedBytes, 0))
+    const at = Date.now()
+    meter.add(at, captured.lanes.reduce((total, lane) => total + lane.sentBytes + lane.receivedBytes, 0))
     captured.rate = meter.rate()
+    const phase = bytePhase(captured)
+    captured.remainingMs = remaining.update(phase?.key, phase?.done ?? 0, phase?.total ?? 0, at, phase?.items)
     changed()
 }
 const clearFinished = () => { clearTimeout(finishedTimer); finishedTimer = undefined; finished = undefined }
@@ -105,10 +125,10 @@ async function finish(ended: ServerSyncAttempt, start: Promise<ServerSyncLane[] 
     const [before, lanes] = await Promise.all([start, readLanes()])
     if (!before || !lanes || attempt || !watchers) return
     ended.lanes = laneDeltas(lanes, before)
-    const work = routineWork(ended)
-    if (work.changes.total + work.assets.total === 0) return
+    if (!routineMoved(ended)) return
     clearFinished()
     ended.endedAt = Date.now()
+    ended.remainingMs = undefined
     finished = ended
     finishedTimer = setTimeout(() => { clearFinished(); changed() }, 1500)
     changed()
@@ -122,7 +142,7 @@ const watchSamples = () => {
 async function during<T>(stage: ServerSyncStage, operation: () => Promise<T>): Promise<T> {
     // Connecting and downloading every asset show their steps; a routine attempt they join becomes one of them.
     const mode = binding || operations ? 'full' : 'routine'
-    if (!attempt) { attempt = { mode, startedAt: Date.now(), stages: [], active: [], current: stage }; attemptFailed = false; baseline = undefined; meter.reset(); clearFinished(); watchSamples() }
+    if (!attempt) { attempt = { mode, startedAt: Date.now(), stages: [], active: [], current: stage }; attemptFailed = false; baseline = undefined; meter.reset(); remaining.reset(); clearFinished(); watchSamples() }
     else if (mode === 'full') attempt.mode = mode
     const entered = attempt
     if (!entered.stages.includes(stage)) entered.stages.push(stage)
@@ -139,6 +159,15 @@ const settleAttempt = () => {
     watchSamples()
     if (!attemptFailed && ended.mode === 'routine' && start) void finish(ended, start)
     changed()
+}
+/** Stops the elapsed time of a binding while it waits for the user to answer. */
+async function whileAsking<T>(ask: () => Promise<T>): Promise<T> {
+    const held = binding ? attempt : undefined
+    if (!held || held.pausedAt !== undefined) return ask()
+    const pausedAt = held.pausedAt = Date.now()
+    changed()
+    try { return await ask() }
+    finally { held.pausedMs = (held.pausedMs ?? 0) + Date.now() - pausedAt; held.pausedAt = undefined; if (held === attempt) changed() }
 }
 /** A cancelled or failed step keeps the attempt from counting as a completed sync. */
 async function attempted<T>(operation: () => Promise<T>): Promise<T> {
@@ -159,18 +188,27 @@ const receivedBodyReferences = (changes: LwwRemoteChange[]) => changes.some(chan
     const descriptor = change.value.descriptor as { dependencies?: unknown[]; dependencyRoot?: unknown; relationRoot?: unknown }
     return !!descriptor.dependencies?.length || !!descriptor.dependencyRoot || !!descriptor.relationRoot
 })
+const receivedRepresentativeReferences = (changes: LwwRemoteChange[]) => changes.some(change => {
+    const key: string[] = JSON.parse(change.key)
+    return key[0] === 'character' && (key[2] === 'image' || key[2] === 'trashTime')
+        || key[0] === 'exists' && key[1] === 'character'
+        || key[0] === 'archive'
+})
 function continueHydration(): void {
-    if (!hydrationPending || !foreground || !context || context.signal.aborted || scheduler.isBlocked()) return
+    if ((!hydrationPending && !representativesPending) || !foreground || !context || context.signal.aborted || scheduler.isBlocked()) return
     if (hydrating) { hydrationAgain = true; return }
     const captured = context
+    const representativesOnly = !hydrationPending
     hydrationPending = false
+    representativesPending = false
     hydrationAgain = false
-    hydrating = during('assets', () => invoke('server_sync_lww_hydrate', { request: header(), selectedCharacterId: selectedCharacterId() })).then(() => {
+    hydrating = during('assets', () => invoke('server_sync_lww_hydrate', { request: header(), selectedCharacterId: selectedCharacterId(), ...(representativesOnly ? { representativesOnly: true } : {}) })).then(() => {
         if (captured === context && !captured.signal.aborted && hydrationError && error === hydrationError) { error = ''; hydrationError = '' }
     }).catch(value => {
         attemptFailed = true
         if (captured !== context || captured.signal.aborted) return
-        hydrationPending = true
+        if (representativesOnly) representativesPending = true
+        else hydrationPending = true
         if (serverSyncErrorCode(value) !== 'cancelled' && foreground && !scheduler.isBlocked()) {
             hydrationError = serverSyncErrorCode(value) || 'server-unreachable'; error = hydrationError
         }
@@ -246,10 +284,12 @@ const scheduler = createServerSyncScheduler({
             if (captured !== context) throw new Error('Sync binding changed')
             const request = await during('downloading', () => invoke<LwwStageReceive>('server_sync_lww_pull', { request: header() }))
             captured.signal.throwIfAborted()
-            try { await during('applying', () => applyPersistentLwwReceive(request)) }
+            // A page is applied under the stage that received it, so reading many pages shows one stage.
+            try { await during('downloading', () => applyPersistentLwwReceive(request)) }
             catch (value) { throw localApplyFailure(value) }
             checkContext(captured)
             if (receivedBodyReferences(request.changes)) { receivedBodies = true; hydrationPending = true }
+            if (status.assetPolicy === 'remote' && receivedRepresentativeReferences(request.changes)) { receivedBodies = true; representativesPending = true }
             if (!foreground && !completeAvailable) break
             await invoke('server_sync_lww_ack', { request: { bindingAuthority: request.bindingAuthority, requestId: request.requestId } })
             checkContext(captured)
@@ -273,20 +313,29 @@ const scheduler = createServerSyncScheduler({
     recovered() { if (error && error !== hydrationError) { error = ''; changed() } },
     activity() { settleAttempt(); changed() },
 })
+// Native code accepts the remote policy only once the server is active, and it must hold before the
+// first hydration. A binding to another library, such as one resumed after a cancelled bind, keeps its own.
+const remoteAssetsRequested = (c: BindingContext) => !!requestedRemoteAssets && requestedRemoteAssets.libraryId === c.state.libraryId
+async function keepAssetsRemote(c: BindingContext): Promise<void> {
+    requestedRemoteAssets = undefined
+    await setAssetResidencyPolicy('remote')
+    checkContext(c)
+}
 // Scheduler blocks and errors belong to one binding authority and never carry over to another.
 const adoptSchedulerAuthority = (c: BindingContext) => {
     if (schedulerAuthority === c.state.targetAuthority) return
     scheduler.reset(); error = ''; hydrationError = ''; schedulerAuthority = c.state.targetAuthority
 }
 const transport: SyncBindingTransport = {
-    inspectTarget: c => during('preparing', () => invoke('server_sync_lww_inspect', { request: { bindingAuthority: c.state.targetAuthority, requestId: crypto.randomUUID() } })),
-    pullAvailableState: (inspected,c) => during('downloading', () => invoke('server_sync_lww_stage_target', { inspectionId: inspected.inspectionId, request: { bindingAuthority: c.state.targetAuthority, requestId: crypto.randomUUID() } })),
+    // A registration that cannot join this way is refused here, before the library is read.
+    inspectTarget: c => during('preparing', () => invoke('server_sync_lww_inspect', { request: { bindingAuthority: c.state.targetAuthority, requestId: crypto.randomUUID() }, newDevice: c.mode === 'new-device' })),
+    pullAvailableState: async (inspected,c) => { const staged = await during('downloading', () => invoke<StagedSyncTarget>('server_sync_lww_stage_target', { inspectionId: inspected.inspectionId, request: { bindingAuthority: c.state.targetAuthority, requestId: crypto.randomUUID() } })); bindingStaged = true; return staged },
     replaceFromTarget: (...args) => during('applying', () => replaceNativeSyncBinding(...args)),
     reportStopped(value) {
         const code = serverSyncErrorCode(failures(value)[0])
         if (code !== 'cancelled') { error = code || 'server-unreachable'; changed() }
     },
-    async fenceOldJobs(c) { foreground = false; context = undefined; persistedBinding = undefined; await scheduler.fence(); await hydrating; await invoke('server_sync_lww_fence', { newDevice: c.mode === 'new-device' || c.mode === 'fresh-writer' }); hydrationPending = false; hydrationAgain = false },
+    async fenceOldJobs(c) { foreground = false; context = undefined; persistedBinding = undefined; await scheduler.fence(); await hydrating; await invoke('server_sync_lww_fence', { newDevice: c.mode === 'new-device' || c.mode === 'fresh-writer' }); hydrationPending = false; representativesPending = false; hydrationAgain = false },
     async receiveAvailableChanges(c) { c.signal.throwIfAborted(); if (!context || context.state.targetAuthority !== c.state.targetAuthority || context.state.selectionEpoch !== c.state.selectionEpoch) throw new Error('Sync binding changed'); await receiveAvailableServerChanges(); c.signal.throwIfAborted() },
     async publishInitialSharedState(c) {
         context = c
@@ -294,11 +343,11 @@ const transport: SyncBindingTransport = {
         checkContext(c)
         await pushAvailable(c, true)
     },
-    async resumeBinding(c) { context = c; adoptSchedulerAuthority(c); await invoke('server_sync_lww_activate', { request: header() }); checkContext(c); persistedBinding = c.state; hydrationPending = true; await updateForeground(document.visibilityState !== 'hidden'); scheduler.remoteHint() },
+    async resumeBinding(c) { context = c; adoptSchedulerAuthority(c); await invoke('server_sync_lww_activate', { request: header() }); checkContext(c); if (remoteAssetsRequested(c)) await keepAssetsRemote(c); persistedBinding = c.state; hydrationPending = true; await updateForeground(document.visibilityState !== 'hidden'); scheduler.remoteHint() },
     prepareNewDeviceBinding: (staged,c) => invoke('server_sync_lww_prepare_new_device', { stagingId: staged.stagingId, request: { bindingAuthority: c.state.targetAuthority, requestId: staged.receiveId } }),
     replaceAsNewDevice: (...args) => during('applying', () => replaceNativeSyncBindingAsNewDevice(...args)),
     prepareFreshWriter: (inspected,c) => invoke('server_sync_lww_prepare_fresh_writer', { inspectionId: inspected.inspectionId, request: { bindingAuthority: c.state.targetAuthority, requestId: crypto.randomUUID() } }),
-    async resumeNewDeviceBinding(preparation,result,c) { await invoke('server_sync_lww_activate_new_device', { authorizationId: preparation.authorizationId, writerId: result.writerId, request: { bindingAuthority: result.bindingAuthority, requestId: crypto.randomUUID() } }); context = c; adoptSchedulerAuthority(c); checkContext(c); persistedBinding = c.state; error = ''; hydrationError = ''; hydrationPending = true; await scheduler.retry(); await updateForeground(document.visibilityState !== 'hidden'); scheduler.remoteHint() },
+    async resumeNewDeviceBinding(preparation,result,c) { await invoke('server_sync_lww_activate_new_device', { authorizationId: preparation.authorizationId, writerId: result.writerId, request: { bindingAuthority: result.bindingAuthority, requestId: crypto.randomUUID() } }); context = c; adoptSchedulerAuthority(c); checkContext(c); if (remoteAssetsRequested(c)) await keepAssetsRemote(c); persistedBinding = c.state; error = ''; hydrationError = ''; hydrationPending = true; await scheduler.retry(); await updateForeground(document.visibilityState !== 'hidden'); scheduler.remoteHint() },
 }
 export async function receiveAvailableServerChanges(): Promise<void> { await scheduler.receiveAvailableChanges() }
 export async function configureServerSyncConnection(config: ServerConfig): Promise<void> { await invoke('server_sync_configure', { config }); error = '' }
@@ -314,11 +363,22 @@ async function bindServer(options: SyncBindingOptions = {}): Promise<BindingOutc
         await controller.ensureStatus().catch(() => {})
         throw value
     }
-    finally { binding = false; settleAttempt() }
+    finally {
+        binding = false
+        bindingStaged = false
+        // What continues after connecting, such as reading back this device's publication, shows as automatic sync.
+        if (attempt && !operations && attempt.mode === 'full') { attempt.mode = 'routine'; changed() }
+        settleAttempt()
+    }
 }
-export async function connectServerSync(config: ServerConfig, newDevice = false): Promise<BindingOutcome> {
+/** With `remote`, the device keeps assets on the server from the start; `full` keeps its stored policy. */
+export async function connectServerSync(config: ServerConfig, newDevice = false, policy?: AssetResidencyPolicy): Promise<BindingOutcome> {
     await configureServerSyncConnection(config)
-    const outcome = await bindServer(newDevice ? { mode: 'new-device' } : {})
+    // Setting `full` here would download every asset inside the binding itself.
+    requestedRemoteAssets = policy === 'remote' ? { libraryId: config.libraryId } : undefined
+    let outcome: BindingOutcome
+    try { outcome = await bindServer(newDevice ? { mode: 'new-device' } : {}) }
+    finally { requestedRemoteAssets = undefined }
     await controller.ensureStatus()
     return outcome
 }
@@ -336,10 +396,17 @@ export async function retryServerSync(): Promise<void> {
     }
     foreground = false; await scheduler.fence(); await hydrating; await retryNativeClock(); await scheduler.retry(); await updateForeground(document.visibilityState !== 'hidden'); changed()
 }
-export async function installServerSyncProduction(): Promise<void> {
+/** With `resumeBound` false, the server transport is registered for settings but a bound server stays stopped. */
+export async function installServerSyncProduction({ resumeBound = true }: { resumeBound?: boolean } = {}): Promise<void> {
     if (!isTauri || disposeServer) return
     const disposers = [registerSyncBindingTransport({ kind: 'server', connectionId: 'server' }, transport)]
-    disposers.push(subscribeLocalPersistentRevision((_revision,cause) => scheduler.localChange(cause === 'generation-complete')))
+    disposers.push(subscribeLocalPersistentRevision((_revision,cause) => {
+        // Saves come in bursts while chatting, so character icons are checked once they settle.
+        if (status.assetPolicy === 'remote') { clearTimeout(representativesTimer); representativesTimer = setTimeout(() => { representativesTimer = undefined; representativesPending = true; continueHydration() }, 2000) }
+        scheduler.localChange(cause === 'generation-complete')
+    }))
+    // Another sync target taking over fences this one without a status read, so the server card reads it again.
+    disposers.push(subscribeSyncBindingChanges(() => { void controller.ensureStatus().catch(() => {}) }))
     // The source is renewed on every store revision; only a different conversation counts as opened.
     // The one open at startup is covered by the startup pull.
     const conversationIdentity = () => {
@@ -358,8 +425,9 @@ export async function installServerSyncProduction(): Promise<void> {
     const visibility = () => { void updateForeground(document.visibilityState !== 'hidden').catch(value => { if (serverSyncErrorCode(value) === 'cancelled') return; error = serverSyncErrorCode(value) || 'server-unreachable'; changed() }) }
     document.addEventListener('visibilitychange', visibility)
     disposers.push(() => document.removeEventListener('visibilitychange', visibility))
-    disposeServer = () => { scheduler.dispose(); for (const dispose of disposers) dispose(); context = undefined; persistedBinding = undefined; foreground = false; hydrationPending = false; hydrationAgain = false; attempt = undefined; clearFinished(); watchSamples() }
+    disposeServer = () => { scheduler.dispose(); for (const dispose of disposers) dispose(); context = undefined; persistedBinding = undefined; foreground = false; hydrationPending = false; representativesPending = false; clearTimeout(representativesTimer); representativesTimer = undefined; hydrationAgain = false; attempt = undefined; clearFinished(); watchSamples() }
     await controller.ensureStatus()
+    if (!resumeBound) return
     const current = await invoke<BindingContext['state']>('pds_lww_binding_state')
     if (current.target.kind === 'server' && status.configured) {
         try { await resumeCurrentServerBinding(current) }
@@ -381,7 +449,7 @@ async function completeInterruptedBinding(): Promise<void> {
     bindingIncomplete = true; changed()
 }
 
-const snapshot = () => ({ status: { ...status, bound: persistedBinding?.target.kind === 'server' || !!context && !context.signal.aborted }, running: scheduler.isRunning() || !!hydrating, paused: !context || context.signal.aborted || scheduler.isBlocked(), replacing, draining: false, error, bindingIncomplete, progress: attempt && { ...attempt, stages: [...attempt.stages], active: [...attempt.active] }, finished: finished && { ...finished, stages: [...finished.stages], active: [...finished.active] }, lastSuccessAt })
+const snapshot = () => ({ status: { ...status, bound: persistedBinding?.target.kind === 'server' || !!context && !context.signal.aborted }, running: scheduler.isRunning() || !!hydrating, paused: !context || context.signal.aborted || scheduler.isBlocked(), blockedCode: scheduler.blockedCode(), replacing, draining: false, error, bindingIncomplete, progress: attempt && { ...attempt, stages: [...attempt.stages], active: [...attempt.active] }, finished: finished && { ...finished, stages: [...finished.stages], active: [...finished.active] }, lastSuccessAt })
 const controller = {
     snapshot,
     subscribe: (listener: (value: ReturnType<typeof snapshot>) => void) => { listeners.add(listener); listener(controller.snapshot()); return () => { listeners.delete(listener) } },
@@ -408,7 +476,9 @@ const controller = {
     confirmReplacement: async () => {},
     holdAutomaticSync: () => { foreground = false; if (hydrating) hydrationPending = true; void scheduler.fence() },
     ensureStatus: async () => {
+        const previousPolicy = status.assetPolicy
         if (isTauri) { [status,persistedBinding] = await Promise.all([invoke<Status>('server_sync_status'),invoke<BindingContext['state']>('pds_lww_binding_state')]) }
+        if (status.assetPolicy === 'remote' && previousPolicy !== 'remote') { representativesPending = true; continueHydration() }
         if (status.configured || persistedBinding?.target.kind !== 'server') bindingIncomplete = false
         changed()
     },

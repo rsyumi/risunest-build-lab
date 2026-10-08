@@ -3,6 +3,10 @@ import { createServerQrScanner } from "./serverSyncQr";
 import { createRegistrationInbox } from "./serverSyncRegistrationInbox";
 import vector from "../../../../crates/sync-connect/tests/registration-vector.json";
 import { Format } from "@tauri-apps/plugin-barcode-scanner";
+function view() {
+  const hide = vi.fn();
+  return Object.assign(vi.fn(() => hide), { hide });
+}
 function api() {
   return {
     cancel: vi.fn().mockResolvedValue(undefined),
@@ -18,25 +22,27 @@ function api() {
 describe("QR registration input", () => {
   it("uses the common parser and closes the scanner on success and invalid input", async () => {
     const driver = api();
-    const scanner = createServerQrScanner(driver);
-    const ready = vi.fn();
-    expect(await scanner.scan(ready)).toEqual(vector.registration);
-    expect(ready).toHaveBeenCalledOnce();
+    const screen = view();
+    const scanner = createServerQrScanner(driver, screen);
+    expect(await scanner.scan()).toEqual(vector.registration);
+    expect(screen).toHaveBeenCalledOnce();
+    expect(screen.hide).toHaveBeenCalledOnce();
     expect(driver.cancel).toHaveBeenCalledOnce();
     driver.scan.mockResolvedValue({
       format: Format.QRCode,
       content: "secret invalid input",
       bounds: null,
     });
-    await expect(scanner.scan(ready)).rejects.toThrow(
+    await expect(scanner.scan()).rejects.toThrow(
       "invalid-registration-uri",
     );
+    expect(screen.hide).toHaveBeenCalledTimes(2);
     expect(driver.cancel).toHaveBeenCalledTimes(2);
   });
   it("does not start the camera when permission is denied", async () => {
     const driver = api();
     driver.checkPermissions.mockResolvedValue("denied");
-    await expect(createServerQrScanner(driver).scan(vi.fn())).rejects.toThrow(
+    await expect(createServerQrScanner(driver, view()).scan()).rejects.toThrow(
       "qr-camera-permission-blocked",
     );
     expect(driver.scan).not.toHaveBeenCalled();
@@ -49,8 +55,8 @@ describe("QR registration input", () => {
         grant = resolve;
       }),
     );
-    const scanner = createServerQrScanner(driver);
-    const pending = scanner.scan(vi.fn());
+    const scanner = createServerQrScanner(driver, view());
+    const pending = scanner.scan();
     scanner.cancel();
     await expect(pending).rejects.toThrow("qr-scan-cancelled");
     grant("granted");
@@ -61,15 +67,15 @@ describe("QR registration input", () => {
     const driver = api();
     driver.checkPermissions.mockResolvedValue("prompt");
     driver.requestPermissions.mockResolvedValue("denied");
-    await expect(createServerQrScanner(driver).scan(vi.fn())).rejects.toThrow("qr-camera-permission-denied");
+    await expect(createServerQrScanner(driver, view()).scan()).rejects.toThrow("qr-camera-permission-denied");
     expect(driver.scan).not.toHaveBeenCalled();
   });
   it("single-flights scanning and resolves cancellation even if the native scan stays pending", async () => {
     const driver = api();
     driver.scan.mockReturnValue(new Promise(() => {}));
-    const scanner = createServerQrScanner(driver);
-    const pending = scanner.scan(vi.fn());
-    await expect(scanner.scan(vi.fn())).rejects.toThrow("qr-scan-busy");
+    const scanner = createServerQrScanner(driver, view());
+    const pending = scanner.scan();
+    await expect(scanner.scan()).rejects.toThrow("qr-scan-busy");
     scanner.cancel();
     await expect(pending).rejects.toThrow("qr-scan-cancelled");
     expect(driver.cancel).toHaveBeenCalledOnce();
@@ -91,7 +97,7 @@ describe("QR registration input", () => {
     try {
       const driver = api();
       driver.scan.mockReturnValue(new Promise(() => {}));
-      const pending = createServerQrScanner(driver).scan(vi.fn());
+      const pending = createServerQrScanner(driver, view()).scan();
       const result = expect(pending).rejects.toThrow('qr-scan-timeout');
       await vi.advanceTimersByTimeAsync(60_000);
       await result;

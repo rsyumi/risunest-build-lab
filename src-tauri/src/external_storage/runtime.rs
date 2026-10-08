@@ -15,7 +15,7 @@ use crate::native_log::logged;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -26,16 +26,16 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 pub(crate) fn local_error(error: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Transient).caused(&error)
+    ProviderError::new(ErrorKind::LocalFailure).caused(&error)
 }
-pub(crate) fn root(app: &AppHandle) -> Result<PathBuf> {
+pub(crate) fn root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
     app.state::<JobCommandState>()
         .root
         .get()
         .cloned()
         .ok_or_else(|| ProviderError::new(ErrorKind::Transient))
 }
-pub(crate) fn native_store(app: &AppHandle) -> Result<PersistentStore> {
+pub(crate) fn native_store<R: Runtime>(app: &AppHandle<R>) -> Result<PersistentStore> {
     persistent_store::commands::with_store_mut(app.state(), |store| store.open_native_job_store())
         .map_err(local_error)
 }
@@ -44,9 +44,18 @@ pub(crate) fn record_connection_completion(
     connection_id: &str,
     kind: super::connection_store::CompletionKind,
 ) {
-    let result = root(app).and_then(|root| {
-        ConnectionStore::open(&root)?.record_completion(connection_id, kind, now_ms())
-    });
+    match root(app) {
+        Ok(root) => record_connection_completion_at(&root, connection_id, kind),
+        Err(_) => crate::nlog!("warn", "External connection completion timestamp could not be recorded"),
+    }
+}
+pub(crate) fn record_connection_completion_at(
+    root: &std::path::Path,
+    connection_id: &str,
+    kind: super::connection_store::CompletionKind,
+) {
+    let result = ConnectionStore::open(root)
+        .and_then(|mut store| store.record_completion(connection_id, kind, now_ms()));
     if result.is_err() {
         crate::nlog!("warn", "External connection completion timestamp could not be recorded");
     }
@@ -87,18 +96,17 @@ pub(crate) fn read_job_session(app: &AppHandle, id: &str) -> Result<()> {
     require_session(&job.request, &current)
 }
 
-pub(crate) async fn require_connection_idle(app: &AppHandle, connection: &str) -> Result<()> {
-    let state = app.state::<JobCommandState>();
-    if state
-        .active
-        .lock()
-        .map_err(local_error)?
-        .values()
-        .any(|(id, _)| id == connection)
-    {
-        return Err(ProviderError::new(ErrorKind::PreconditionFailed));
-    }
-    Ok(())
+/// Ends the jobs of a connection being removed. A job whose remote outcome is
+/// unknown, or a restore already applying on this device, keeps its row until
+/// that is resolved.
+pub(crate) fn end_removed_connection_jobs(root: &std::path::Path, connection: &str) -> Result<()> {
+    JobStore::open(root)?.end_connection_jobs(connection, |job| {
+        if job.summary["state"] == "uncertain" || super::runtime_restore::application_started(job) {
+            return false;
+        }
+        settle_invalidated(job, "cancelled");
+        true
+    })
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -134,7 +142,7 @@ pub(crate) fn external_storage_set_execution_session(
         Ok(())
     })())
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn external_storage_capture_exit_target(app: AppHandle) -> Result<Value> {
     logged("external_storage_capture_exit_target", (|| {
         let store = native_store(&app)?;
@@ -144,8 +152,8 @@ pub(crate) fn external_storage_capture_exit_target(app: AppHandle) -> Result<Val
         )
     })())
 }
-#[tauri::command]
-pub(crate) fn external_storage_get_state(app: AppHandle) -> Result<Value> {
+#[tauri::command(async)]
+pub(crate) fn external_storage_get_state<R: Runtime>(app: AppHandle<R>) -> Result<Value> {
     logged("external_storage_get_state", (|| {
         let root = root(&app)?;
         let connection_store = ConnectionStore::open(&root)?;
@@ -162,15 +170,44 @@ pub(crate) fn external_storage_get_state(app: AppHandle) -> Result<Value> {
         let jobs = JobStore::open(&root)?
             .list_for_state()?
             .into_iter()
-            .map(|job| reconcile_job(&app, job).map(|job| {
+            .map(|job| reconcile_job_for_read(&app, job).map(|job| {
                 job_summary(&root, job)
             }))
             .collect::<Result<Vec<_>>>()?;
         for connection in &mut connections { apply_job_connection_status(connection, &jobs); }
-        Ok(
-            json!({"supported":true,"selection":selection_dto(native_store(&app)?.external_selection().map_err(local_error)?),"connections":connections,"jobs":jobs}),
-        )
+        let state = app.state::<JobCommandState>();
+        let selection = match native_store(&app).and_then(|store| store.external_selection().map_err(local_error)) {
+            Ok(selection) => shown_selection(&state, selection)?,
+            Err(error) => match state.shown_selection.lock().map_err(local_error)?.clone() {
+                Some(selection) if store_held(&app, &error) => selection,
+                _ => return Err(error),
+            },
+        };
+        Ok(json!({"supported":true,"selection":selection,"connections":connections,"jobs":jobs}))
     })())
+}
+
+fn shown_selection(state: &JobCommandState, selection: Selection) -> Result<Value> {
+    let selection = selection_dto(selection);
+    *state.shown_selection.lock().map_err(local_error)? = Some(selection.clone());
+    Ok(selection)
+}
+
+/// Device maintenance refuses the store while it holds it, as a restore commit
+/// does.
+fn store_held<R: Runtime>(app: &AppHandle<R>, error: &ProviderError) -> bool {
+    matches!(error.kind, ErrorKind::Transient | ErrorKind::LocalFailure)
+        && app.state::<persistent_store::commands::PersistentStoreState>().maintenance_active()
+}
+
+/// A job as stored while device maintenance holds the store. The first read
+/// after it reconciles the job.
+fn reconcile_job_for_read<R: Runtime>(app: &AppHandle<R>, job: DurableJob) -> Result<DurableJob> {
+    let stored = job.clone();
+    match reconcile_job(app, job) {
+        Err(error) if store_held(app, &error) => Ok(stored),
+        reconciled => reconciled,
+    }
 }
 
 #[derive(Deserialize)]
@@ -211,7 +248,7 @@ pub(crate) async fn external_storage_set_sync_target(
             .external_select(&request.expected_selection_epoch, &target)
             .map_err(local_error)?;
         drop(active);
-        Ok(selection_dto(selected))
+        shown_selection(&state, selected)
     }.await)
 }
 #[derive(Deserialize)]
@@ -220,22 +257,22 @@ pub(crate) struct SetPausedRequest {
     paused: bool,
     expected_selection_epoch: String,
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn external_storage_set_sync_paused(app: AppHandle, request: SetPausedRequest) -> Result<Value> {
     logged("external_storage_set_sync_paused", (|| {
         let selected = native_store(&app)?.external_set_paused(&request.expected_selection_epoch, request.paused).map_err(local_error)?;
-        Ok(selection_dto(selected))
+        shown_selection(&app.state::<JobCommandState>(), selected)
     })())
 }
 #[tauri::command]
 pub(crate) fn external_storage_set_automatic_backup_paused(app: AppHandle, connection_id: String, paused: bool) -> Result<()> {
     logged("external_storage_set_automatic_backup_paused", (|| ConnectionStore::open(&root(&app)?)?.set_automatic_backup_paused(&connection_id, paused))())
 }
-#[tauri::command]
-pub(crate) fn external_storage_get_job(app: AppHandle, job_id: String) -> Result<Value> {
+#[tauri::command(async)]
+pub(crate) fn external_storage_get_job<R: Runtime>(app: AppHandle<R>, job_id: String) -> Result<Value> {
     logged("external_storage_get_job", (|| {
         let directory = root(&app)?;
-        let job = reconcile_job(&app, JobStore::open(&directory)?.read(&job_id)?)?;
+        let job = reconcile_job_for_read(&app, JobStore::open(&directory)?.read(&job_id)?)?;
         Ok(job_summary(&directory, job))
     })())
 }
@@ -281,10 +318,18 @@ fn job_summary(root: &std::path::Path, mut job: DurableJob) -> Value {
         // carries once the job is settled.
         job.summary["checkRequest"] = json!({"snapshotId": job.request.snapshot_id});
     }
-    if !job.terminal() {
+    // A publication uploads packs while it still prepares the rest, so its
+    // preparation keeps the counters until it has done all it planned.
+    if !job.terminal() && !preparing(&job.summary) {
         refresh_transfer_counters(root, &mut job);
     }
     job.summary
+}
+
+fn preparing(summary: &Value) -> bool {
+    let count = |name: &str| summary[name].as_str().and_then(|value| value.parse::<u64>().ok());
+    summary["counters"] == "prepared"
+        && matches!((count("completedItems"), count("totalItems")), (Some(done), Some(total)) if done < total)
 }
 
 fn refresh_transfer_counters(root: &std::path::Path, job: &mut DurableJob) {
@@ -305,7 +350,7 @@ fn refresh_transfer_counters(root: &std::path::Path, job: &mut DurableJob) {
     }
 }
 #[tauri::command]
-pub(crate) async fn external_storage_cancel_job(app: AppHandle, job_id: String) -> Result<Value> {
+pub(crate) async fn external_storage_cancel_job(app: AppHandle, job_id: String, stopped_by_app: Option<bool>) -> Result<Value> {
     logged("external_storage_cancel_job", async move {
         let store = JobStore::open(&root(&app)?)?;
         let state = app.state::<JobCommandState>();
@@ -342,14 +387,20 @@ pub(crate) async fn external_storage_cancel_job(app: AppHandle, job_id: String) 
             {
                 pds.external_cancel_prepared(&job_id).map_err(local_error)?;
             }
-            job.summary["state"] = json!("cancelled");
-            job.summary["phase"] = json!("cancelled");
-            job.summary["updatedAtMs"] = json!(now_ms().to_string());
+            settle_cancelled(&mut job, stopped_by_app == Some(true));
             store.put(&job)?;
         }
         super::runtime_restore::discard_finished_staging(&root(&app)?, &job);
         Ok(job.summary)
     }.await)
+}
+/// Settles a job as cancelled. A job the app gave up on after its own retries keeps that
+/// mark, so the renderer shows its error instead of a cancellation the user never made.
+fn settle_cancelled(job: &mut DurableJob, stopped_by_app: bool) {
+    job.summary["state"] = json!("cancelled");
+    job.summary["phase"] = json!("cancelled");
+    job.summary["updatedAtMs"] = json!(now_ms().to_string());
+    if stopped_by_app { job.summary["stoppedByApp"] = json!(true); }
 }
 #[tauri::command]
 pub(crate) async fn external_storage_stop_restore(app: AppHandle, job_id: String) -> Result<Value> {
@@ -375,7 +426,7 @@ pub(crate) async fn external_storage_start_job(
     mut request: StartJobRequest,
     job_id: Option<String>,
 ) -> Result<Value> {
-    logged("external_storage_start_job", async move {
+    logged("external_storage_start_job", Box::pin(async move {
         request.validate()?;
         if let Some(id) = &job_id {
             if uuid::Uuid::parse_str(id).ok().is_none_or(|parsed| parsed.to_string() != *id)
@@ -490,7 +541,7 @@ pub(crate) async fn external_storage_start_job(
         }
         wake_job(app, job.id.clone())?;
         Ok(job.summary)
-    }.await)
+    }).await)
 }
 fn same_explicit_retry(job: &DurableJob, request: &StartJobRequest) -> bool {
     if same_requested_operation(&job.request, request) { return true; }
@@ -604,13 +655,19 @@ pub(crate) fn require_admitted_library(
     Ok(())
 }
 
-fn reconcile_job(app: &AppHandle, mut job: DurableJob) -> Result<DurableJob> {
-    if job.request.kind==JobKind::Restore && !job.terminal() {
-        if let Some(result)=super::runtime_restore::confirmed_restore_activation(app,&job)? {
-            job.summary["result"]=result;
-        } else {job.summary.as_object_mut().unwrap().remove("result");}
-    }
+fn reconcile_job<R: Runtime>(app: &AppHandle<R>, mut job: DurableJob) -> Result<DurableJob> {
     let state = app.state::<JobCommandState>();
+    if job.request.kind==JobKind::Restore && !job.terminal() {
+        match super::runtime_restore::confirmed_restore_activation(app,&job) {
+            Ok(Some(result))=>{job.summary["result"]=result;}
+            Ok(None)=>{job.summary.as_object_mut().unwrap().remove("result");}
+            // A commit's device maintenance refuses the store, and meanwhile the
+            // running worker's record stands.
+            Err(error) if matches!(error.kind, ErrorKind::Transient | ErrorKind::LocalFailure)
+                && state.job_is_active(&job.id)? => {}
+            Err(error)=>return Err(error),
+        }
+    }
     let active = state.active.lock().map_err(local_error)?;
     if active.contains_key(&job.id) {
         return Ok(job);
@@ -619,7 +676,7 @@ fn reconcile_job(app: &AppHandle, mut job: DurableJob) -> Result<DurableJob> {
 }
 
 // The caller either holds the active-jobs mutex or owns the cleanup claim.
-fn reconcile_stopped_job(app: &AppHandle, mut job: DurableJob) -> Result<DurableJob> {
+fn reconcile_stopped_job<R: Runtime>(app: &AppHandle<R>, mut job: DurableJob) -> Result<DurableJob> {
     let before = job.clone();
     let mut pds = native_store(app)?;
     let complete = if job.request.kind == JobKind::Restore {
@@ -811,9 +868,13 @@ pub(crate) fn wake_job(app: AppHandle, id: String) -> Result<()> {
                         &error,
                         std::panic::Location::caller(),
                     );
-                    let mut pds = native_store(&app)?;
-                    let authoritative = pds.external_job(&job.id).map_err(local_error)?;
                     let local_application = super::runtime_restore::application_started(&job);
+                    // A restore past its commit is pending either way, without reading the store.
+                    let mut pds = if local_application { None } else { Some(native_store(&app)?) };
+                    let authoritative = match pds.as_mut() {
+                        Some(pds) => pds.external_job(&job.id).map_err(local_error)?,
+                        None => None,
+                    };
                     let pending = local_application || authoritative.iter().any(|item| {
                         item.id == id
                             && ["publishing", "publicationUnknown", "applying"]
@@ -835,12 +896,13 @@ pub(crate) fn wake_job(app: AppHandle, id: String) -> Result<()> {
                             | ErrorKind::ClockSkew
                             | ErrorKind::LocalStorageFull
                             | ErrorKind::LocalPermissionDenied
+                            | ErrorKind::LocalFailure
                     );
                     if !pending && !retryable {
-                        if let Some(item) = authoritative.iter().find(|item| {
+                        if let (Some(pds), Some(item)) = (pds.as_mut(), authoritative.iter().find(|item| {
                             item.id == id
                                 && ["preparing", "ready", "stale"].contains(&item.phase.as_str())
-                        }) {
+                        })) {
                             pds.external_cancel_prepared(&item.id).map_err(local_error)?;
                         }
                     }
@@ -933,8 +995,11 @@ pub(crate) fn error_dto(error: &ProviderError) -> Value {
         ErrorKind::DeviceVaultUnavailable => ("Unlock the device credential store and retry.", "retry", false),
         ErrorKind::ClockSkew => ("Correct the device clock and retry.", "retry", false),
         ErrorKind::LocationOccupied => ("Choose an empty repository folder.", "check-endpoint", false),
+        ErrorKind::RepositoryMismatch => ("This location holds a different repository.", "check-endpoint", false),
+        ErrorKind::RecoveryKeyMismatch => ("The recovery key does not match this repository.", "unlock-key", false),
         ErrorKind::LocalStorageFull => ("This device has insufficient space.", "free-space", false),
         ErrorKind::LocalPermissionDenied => ("Allow access to the local files and retry.", "retry", false),
+        ErrorKind::LocalFailure => ("This device could not complete the operation.", "retry", true),
         ErrorKind::StorageFull => (
             "The destination has insufficient space.",
             "free-space",
@@ -983,11 +1048,13 @@ pub(crate) fn connection_directory(root: &std::path::Path, connection: &str) -> 
         risunest_external_storage_format::content_identity::hash(connection.as_bytes()),
     ))
 }
+/// The name is a short hash prefix because SQLite opens the databases below it
+/// with paths Windows still limits to MAX_PATH.
 pub(crate) fn job_directory(root: &std::path::Path, connection: &str, job: &str) -> PathBuf {
     connection_directory(root, connection)
         .join("jobs")
         .join(hex::encode(
-            risunest_external_storage_format::content_identity::hash(job.as_bytes()),
+            &risunest_external_storage_format::content_identity::hash(job.as_bytes())[..8],
         ))
 }
 /// The transfer spool as `job_id` sees it when it seals another object: every
@@ -1340,6 +1407,36 @@ pub(crate) fn transfer_progress(
     job_phase_progress(root, job_id, "transferred")
 }
 
+/// Continues the transfer reading an earlier phase of `job` recorded, for a
+/// phase whose downloads that phase already planned.
+pub(crate) fn resumed_transfer_progress(
+    root: &std::path::Path,
+    job: &DurableJob,
+) -> std::sync::Arc<super::phase_progress::PhaseProgress> {
+    let summary = &job.summary;
+    let count = |name: &str| {
+        summary[name]
+            .as_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let reading = if summary["counters"] == "transferred" {
+        super::phase_progress::PhaseCounters {
+            items: count("completedItems"),
+            total_items: count("totalItems"),
+            bytes: count("completedBytes"),
+            total_bytes: count("totalBytes"),
+        }
+    } else {
+        super::phase_progress::PhaseCounters::default()
+    };
+    let root = root.to_path_buf();
+    let job_id = job.id.clone();
+    super::phase_progress::PhaseProgress::resumed(reading, move |reading| {
+        let _ = record_counters(&root, &job_id, "transferred", reading);
+    })
+}
+
 fn record_check_progress(
     root: &std::path::Path,
     job_id: &str,
@@ -1518,6 +1615,7 @@ async fn run_backup(
         },
     };
     let cache = package_cache_root(&directory)?;
+    let prepared = preparation_progress(&root, &job.id);
     let completed = super::packaging::package_and_upload(
         capture,
         sections,
@@ -1531,10 +1629,11 @@ async fn run_backup(
         &mut journal,
         connected.provider.as_ref(),
         &connected.handle,
-        &preparation_progress(&root, &job.id),
+        &prepared,
         cancel,
     )
     .await?;
+    prepared.flush();
     match super::packaging::verify_publication(
         &completed,
         &root,
@@ -1684,6 +1783,34 @@ pub(crate) async fn external_storage_get_quota(
 mod tests {
     use super::*;
     #[test]
+    fn local_failures_name_the_device_and_stay_retryable() {
+        let error = local_error("synthetic local failure");
+        assert_eq!(error.kind, ErrorKind::LocalFailure);
+        let dto = error_dto(&error);
+        assert_eq!(dto["code"], "localFailure");
+        assert_eq!(dto["action"], "retry");
+        assert_eq!(dto["retryable"], true);
+    }
+
+    /// A long device-store write elsewhere, such as a publication persisting
+    /// its segment, does not fail a state read.
+    #[test]
+    fn a_held_device_store_write_does_not_fail_the_state_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        app.manage(persistent_store::commands::PersistentStoreState::with_test_store(PersistentStore::open(root).unwrap()));
+        let jobs = JobCommandState::default();
+        jobs.root.set(root.to_owned()).unwrap();
+        app.manage(jobs);
+        let holder = rusqlite::Connection::open(root.join("persistent").join("device.sqlite")).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let state = external_storage_get_state(app.handle().clone());
+        holder.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(state.unwrap()["supported"], true);
+    }
+
+    #[test]
     fn stopped_unknown_reconciliation_drops_the_stale_result_until_it_completes() {
         let mut job=automatic_job();
         job.summary["result"]=json!({"stopReason":"uncertain","reason":"publication-unknown"});
@@ -1712,6 +1839,22 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_job_carries_the_app_stop_only_when_the_app_stopped_it() {
+        let mut by_user = automatic_job();
+        by_user.summary["error"] = json!({"code":"transient","action":"retry","retryable":true});
+        let mut by_app = by_user.clone();
+        settle_cancelled(&mut by_user, false);
+        settle_cancelled(&mut by_app, true);
+        for job in [&by_user, &by_app] {
+            assert_eq!(job.summary["state"], "cancelled");
+            assert_eq!(job.summary["phase"], "cancelled");
+            assert_eq!(job.summary["error"]["code"], "transient");
+        }
+        assert!(by_user.summary.get("stoppedByApp").is_none());
+        assert_eq!(by_app.summary["stoppedByApp"], true);
+    }
+
+    #[test]
     fn a_new_restore_choice_never_resumes_a_different_pending_request() {
         let existing: StartJobRequest = serde_json::from_value(json!({"connectionId":"x", "kind":"restore", "snapshotId":"a", "restoreAreas":["library"]})).unwrap();
         let mut incoming = existing.clone();
@@ -1725,6 +1868,59 @@ mod tests {
         incoming.target_revision = Some("2".into());
         assert!(!same_requested_operation(&existing, &incoming));
     }
+    /// A removed connection keeps no job that would wait to run again. A job
+    /// whose remote outcome is unknown, or a restore applying on this device,
+    /// keeps its row, and other connections' jobs are untouched.
+    #[test]
+    fn removing_a_connection_ends_its_waiting_jobs_and_keeps_unresolved_ones() {
+        let job = |request: Value, state: &str| {
+            let mut job = DurableJob::new(serde_json::from_value(request).unwrap(), 1, persistent_store::sync_selection::CaptureIdentity {
+                store_id: "store".into(), library_epoch: "library".into(), generation: "generation".into(),
+                selection_epoch: "selection".into(), revision: 1,
+            });
+            job.summary["state"] = json!(state);
+            job
+        };
+        let backup = json!({"connectionId":"removed","kind":"backup","reason":"automatic"});
+        let restore = json!({"connectionId":"removed","kind":"restore","snapshotId":"snapshot"});
+        for (request, state, applying, ended) in [
+            (&backup, "queued", false, true),
+            (&backup, "waiting", false, true),
+            (&backup, "running", false, true),
+            (&backup, "uncertain", false, false),
+            (&restore, "waiting", false, true),
+            (&restore, "running", true, false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let store = JobStore::open(root.path()).unwrap();
+            let finished = job(backup.clone(), "succeeded");
+            store.put(&finished).unwrap();
+            let mut live = job(request.clone(), state);
+            if applying {
+                live.summary["applicationStarted"] = json!(true);
+            }
+            store.put(&live).unwrap();
+            let other = job(json!({"connectionId":"kept","kind":"backup","reason":"automatic"}), "waiting");
+            store.put(&other).unwrap();
+
+            end_removed_connection_jobs(root.path(), "removed").unwrap();
+
+            let after = store.read(&live.id).unwrap();
+            if ended {
+                assert_eq!(after.summary["state"], "cancelled", "{state}");
+                assert_eq!(after.summary["error"]["code"], error_dto(&ProviderError::new(ErrorKind::Cancelled))["code"]);
+            } else {
+                assert_eq!(after.summary, live.summary, "{state}");
+            }
+            assert_eq!(
+                store.list_pending().unwrap().iter().any(|job| job.request.connection_id == "removed"),
+                !ended
+            );
+            assert_eq!(store.read(&other.id).unwrap().summary, other.summary);
+            assert_eq!(store.read(&finished.id).unwrap().summary, finished.summary);
+        }
+    }
+
     fn automatic_job() -> DurableJob {
         let request = serde_json::from_value(json!({
             "connectionId":"x", "kind":"backup", "reason":"automatic", "targetRevision":"1"
@@ -1735,12 +1931,13 @@ mod tests {
         })
     }
 
-    /// Invariant 23. A publication registers nothing for the longest part of
-    /// its own work, so an empty journal must not overwrite what preparation
-    /// counted. The first registration is what hands the counters over, and
-    /// the summary says which of the two the numbers are.
+    /// Invariant 23. An empty journal must not overwrite what preparation
+    /// counted, and a publication uploads packs while it still prepares the
+    /// rest. The first registration after preparation did all it planned is
+    /// what hands the counters over, and the summary says which of the two
+    /// the numbers are.
     #[test]
-    fn a_summary_keeps_prepared_counters_until_the_journal_holds_a_transfer() {
+    fn a_summary_keeps_prepared_counters_until_preparation_finishes_and_the_journal_holds_a_transfer() {
         use super::super::journal::{JobIdentity, TransferJournal};
         let root = tempfile::tempdir().unwrap();
         let store = JobStore::open(root.path()).unwrap();
@@ -1793,6 +1990,23 @@ mod tests {
         // is the one that was already counted.
         journal.register(&intent).unwrap();
         drop(journal);
+        let preparing = job_summary(root.path(), store.read(&job.id).unwrap());
+        assert_eq!(preparing["counters"], "prepared");
+        assert_eq!(preparing["completedItems"], "7");
+        assert_eq!(preparing["totalItems"], "9");
+
+        record_counters(
+            root.path(),
+            &job.id,
+            "prepared",
+            super::super::phase_progress::PhaseCounters {
+                items: 9,
+                total_items: 9,
+                bytes: 90,
+                total_bytes: 90,
+            },
+        )
+        .unwrap();
         let transferred = job_summary(root.path(), store.read(&job.id).unwrap());
         assert_eq!(transferred["counters"], "transferred");
         assert_eq!(transferred["totalItems"], "1");

@@ -171,6 +171,9 @@ export interface SettingItem {
      */
     getValue?: (db: Database, ctx?: SettingContext) => any;
 
+    /** Subscribe to value changes outside the reactive database, returning cleanup. */
+    subscribeValue?: (listener: () => void) => () => void;
+
     /**
      * Optional setter function for the setting's value.
      * TODO: Consider making SettingItem generic or using discriminated unions to eliminate `any` from accessor signatures.

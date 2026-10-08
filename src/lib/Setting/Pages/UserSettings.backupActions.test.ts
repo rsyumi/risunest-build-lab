@@ -134,4 +134,10 @@ describe('rendered backup actions', () => {
         expect(button(language.portableBackup.restore).disabled).toBe(false)
         expect(m.normal).not.toHaveBeenCalled()
     })
+    it.each([['dialog', false], ['inline', true]] as const)('shows the busy notice for a running %s operation: %s', async (presentation, shown) => {
+        nativeFileOperation.set({ kind: 'export', presentation } as never)
+        await render()
+        expect(target.textContent?.includes(language.risuNest.backup.fileBusy)).toBe(shown)
+        expect(button(language.portableBackup.export).disabled).toBe(true)
+    })
 })

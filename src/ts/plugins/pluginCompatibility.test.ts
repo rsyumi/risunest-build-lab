@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
     createPluginLoadOrchestrator,
+    createDeferredPluginReload,
     createPluginLoadReentrancyGuard,
     runPluginUnloadCallbacks,
 } from './pluginCompatibility'
@@ -16,6 +17,82 @@ function deferred<T>() {
 }
 
 describe('plugin load orchestration', () => {
+    it('coalesces remote reloads until work is idle and cancels a pending replacement reload', async () => {
+        let idle = false
+        let changed!: () => void
+        const reload = vi.fn(async () => {})
+        const deferredReload = createDeferredPluginReload({ isIdle: () => idle, canInterrupt: () => true, subscribe: fn => { changed = fn }, reload, onError: vi.fn(), waitLimitMs: 60_000 })
+        deferredReload.request()
+        deferredReload.request()
+        await Promise.resolve()
+        expect(reload).not.toHaveBeenCalled()
+        idle = true
+        changed()
+        await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1))
+        idle = false
+        deferredReload.request()
+        deferredReload.cancel()
+        idle = true
+        changed()
+        await Promise.resolve()
+        expect(reload).toHaveBeenCalledTimes(1)
+    })
+
+    it('interrupts plugin work that never settles once the wait limit passes, after chat generation ends', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        try {
+            let interruptible = true
+            let changed!: () => void
+            const reload = vi.fn(async (_isCurrent: () => boolean, _interrupt: boolean) => {})
+            const deferredReload = createDeferredPluginReload({
+                isIdle: () => false, canInterrupt: () => interruptible,
+                subscribe: fn => { changed = fn }, reload, onError: vi.fn(), waitLimitMs: 1_000,
+            })
+            deferredReload.request()
+            await vi.advanceTimersByTimeAsync(999)
+            expect(reload).not.toHaveBeenCalled()
+            interruptible = false
+            await vi.advanceTimersByTimeAsync(1)
+            expect(reload).not.toHaveBeenCalled()
+            interruptible = true
+            changed()
+            await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce())
+            expect(reload.mock.calls[0][1]).toBe(true)
+
+            deferredReload.request()
+            deferredReload.cancel()
+            await vi.advanceTimersByTimeAsync(1_000)
+            expect(reload).toHaveBeenCalledOnce()
+            deferredReload.request()
+            await vi.advanceTimersByTimeAsync(999)
+            expect(reload).toHaveBeenCalledOnce()
+            await vi.advanceTimersByTimeAsync(1)
+            expect(reload).toHaveBeenCalledTimes(2)
+        } finally { vi.useRealTimers() }
+    })
+
+    it('checks idle admission inside the load mutex before clearing providers', async () => {
+        const resetRegistry = vi.fn(async () => {})
+        const loadV3 = vi.fn(async () => {})
+        const load = createPluginLoadOrchestrator<string>({ resetRegistry, loadV3 })
+        await load(['remote'], () => false)
+        expect(resetRegistry).not.toHaveBeenCalled()
+        expect(loadV3).not.toHaveBeenCalled()
+    })
+
+    it('does not load an obsolete remote runtime after authority replacement starts', async () => {
+        const reset = deferred<void>()
+        const loadV3 = vi.fn(async () => {})
+        const load = createPluginLoadOrchestrator<string>({ resetRegistry: () => reset.promise, loadV3 })
+        let current = true
+        const pending = load(['remote'], () => true, () => current)
+        await Promise.resolve()
+        current = false
+        reset.resolve()
+        await pending
+        expect(loadV3).not.toHaveBeenCalled()
+    })
+
     it('serializes a late registry reset before a newer plugin runtime load', async () => {
         const resetStarted = deferred<void>()
         const finishReset = deferred<void>()

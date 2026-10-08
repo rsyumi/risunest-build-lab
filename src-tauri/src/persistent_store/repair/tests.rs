@@ -329,6 +329,44 @@ fn a_repair_that_leaves_the_library_refused_is_not_applied() {
 }
 
 #[test]
+fn a_repair_is_applied_while_the_sync_server_holds_a_body_this_device_does_not() {
+    let (_directory, mut store) = fixture();
+    let root = store.repository_root().to_owned();
+    let cas = crate::asset_repository::PayloadCas::new(&root).unwrap();
+    let payload = cas.prepare_bytes(b"synthetic server-held body").unwrap();
+    let generation = active_generation(&store.connection).unwrap();
+    store
+        .connection
+        .execute(
+            "INSERT INTO asset_aliases (generation, logical_key, object_hash, kind, size, mime, name, ext)
+             VALUES (?1, 'assets/kept.png', ?2, 'asset', ?3, 'image/png', 'kept.png', 'png')",
+            rusqlite::params![generation, payload.content_hash, payload.byte_size as i64],
+        )
+        .unwrap();
+    std::fs::remove_file(cas.object_path(&payload.content_hash).unwrap().unwrap()).unwrap();
+    crate::server_sync::residency::test_remote::hold(&root, &[(&payload.content_hash, payload.byte_size)]);
+
+    let (revision, _) = store
+        .apply_repair(
+            1,
+            &[candidate(RepairAction::DropReference {
+                owner: crate::data_health::Owner {
+                    kind: "root".to_owned(),
+                    id: "database".to_owned(),
+                },
+                source_path: "$.userIcon".to_owned(),
+                occurrence: 0,
+            })],
+            10,
+        )
+        .expect("the gate accepts a body the server holds");
+    assert_eq!(revision.revision, 2);
+    assert_eq!(root_of(&store).get("userIcon"), None);
+    assert_eq!(root_of(&store).get("customBackground").and_then(Value::as_str), Some("assets/kept.png"));
+    assert_eq!(crate::server_sync::residency::test_remote::fetched(&root), 0);
+}
+
+#[test]
 fn a_removed_alias_releases_its_object_into_the_journal() {
     let (_directory, mut store) = fixture();
     let cas = crate::asset_repository::PayloadCas::new(store.repository_root()).unwrap();

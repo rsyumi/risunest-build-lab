@@ -11,11 +11,13 @@
         fraction?: number | null
         /** The operation finished: a check replaces the spinner. */
         done?: boolean
+        /** The operation ended without finishing: the spinner and the pulse stop. */
+        stopped?: boolean
         /** Controls for the running operation, such as a cancel button. */
         actions?: Snippet
     }
 
-    let { label, detail, fraction = null, done = false, actions }: Props = $props()
+    let { label, detail, fraction = null, done = false, stopped = false, actions }: Props = $props()
 
     let percent = $derived(fraction === null ? null : Math.max(0, Math.min(100, Math.round(fraction * 100))))
 </script>
@@ -24,7 +26,7 @@
     <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5">
         {#if done}
             <CheckIcon size={15} class="shrink-0 text-success-500" aria-hidden="true" />
-        {:else}
+        {:else if !stopped}
             <LoaderCircleIcon size={15} class="shrink-0 text-borderc motion-safe:animate-spin" aria-hidden="true" />
         {/if}
         <span class="min-w-0 flex-[1_1_10rem] text-sm">{label}</span>
@@ -47,7 +49,7 @@
         class="h-1.5 w-full overflow-hidden rounded-full bg-darkbutton"
     >
         {#if percent === null}
-            <div class="h-full w-full bg-borderc/60 motion-safe:animate-pulse"></div>
+            <div class="h-full w-full bg-borderc/60 {done || stopped ? '' : 'motion-safe:animate-pulse'}"></div>
         {:else}
             <div class="h-full bg-borderc transition-[width] duration-300" style:width={`${percent}%`}></div>
         {/if}

@@ -219,6 +219,7 @@ struct Sent {
     url: String,
     headers: BTreeMap<String, String>,
     body_length: u64,
+    control: bool,
 }
 
 #[derive(Default)]
@@ -249,6 +250,7 @@ impl crate::external_storage::http::HttpTransport for ScriptedTransport {
             let url = request.url.to_string();
             let headers = request.headers.clone();
             let declared = request.content_length;
+            let control = request.control;
             let mut body_length = 0u64;
             if let Some(mut body) = request.body {
                 let mut buffer = vec![0u8; 64 * 1024];
@@ -269,6 +271,7 @@ impl crate::external_storage::http::HttpTransport for ScriptedTransport {
                 url,
                 headers,
                 body_length,
+                control,
             });
             let reply = self
                 .replies
@@ -1139,6 +1142,8 @@ fn session_fragments_are_320_kib_aligned_and_sent_in_order_without_authorization
             assert_eq!(fragment.url, "https://sn3302.up.1drv.com/up/session");
             assert!(!fragment.headers.contains_key("authorization"));
             assert_eq!(fragment.body_length % graph::FRAGMENT_ALIGNMENT, 0);
+            // A fragment carries data, so the short control deadline must not cover it.
+            assert!(!fragment.control);
         }
         assert_eq!(
             fragments[0].headers["content-range"],
@@ -2225,4 +2230,24 @@ fn setup_folder_exposes_decoded_path_once_and_sync_fails_closed_without_it() {
             "parentReference":{"path":format!("/drive/root:/{parent}")}}));
         assert_eq!(selected.sync_root_path().is_ok(), accepted);
     }
+}
+
+/// The external LWW opening admits its clock from the listing it requests.
+#[test]
+fn segment_listing_yields_a_usable_clock_sample() {
+    runtime().block_on(async {
+        let date = httpdate::fmt_http_date(std::time::UNIX_EPOCH + std::time::Duration::from_millis(NOW_MS));
+        let dated = |body: String| Reply::Http { status: 200, body: body.into_bytes(),
+            headers: vec![("Content-Type".to_owned(), "application/json".to_owned()), ("Date".to_owned(), date.clone())] };
+        let server = WireServer::start(vec![dated(root_folder()), dated(descriptor_page()), dated(children_page(&[]))]);
+        let harness = harness(NOW_MS);
+        let provider = create(harness.dependencies.clone()).unwrap();
+        let cancel = Cancellation::default();
+        let (repository, _) = open(&provider, &config_for(&server, "personal"), OpenMode::Existing, &cancel).await.unwrap();
+        let started = std::time::Instant::now();
+        provider.list_objects(&repository, Collection::Segments, None, 1, &cancel).await.unwrap();
+        assert!(harness.dependencies.requests.clock_sample_after(&repository.account, started).unwrap().is_some());
+        let records = server.requests.lock().unwrap();
+        assert!(line(&records[2]).starts_with("GET "));
+    });
 }

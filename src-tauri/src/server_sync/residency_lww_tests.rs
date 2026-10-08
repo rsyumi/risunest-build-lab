@@ -64,6 +64,91 @@ fn server_hydration_registers_every_body_it_fetches_or_finds_local() {
     store.asset_gc_dry_run(1024, None, crate::external_storage::runtime::now_ms() as i64, 0).unwrap();
 }
 
+/// Local, server-held and missing bodies are told apart by one batched presence check, and a
+/// link in place of a shard folder fails the status and the download instead of being counted.
+#[test]
+fn the_status_and_download_check_presence_in_one_pass_and_refuse_a_linked_shard() {
+    use crate::asset_repository::body_io::{reset_body_io, take_body_io};
+    fn link_directory(target: &std::path::Path, link: &std::path::Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            assert!(std::process::Command::new("cmd").creation_flags(0x08000000).args(["/C", "mklink", "/J"])
+                .arg(link).arg(target).output().unwrap().status.success());
+        }
+    }
+    let server = LocalServerFixture::new();
+    let (_root, mut store) = local();
+    let core = server.client(&store);
+    let held = vec![81; 64 * 1024];
+    let held_hash = put_asset(&mut store, "assets/status-held.png", &held).object_hash.unwrap();
+    super::lww_tests::drain_publications(&core, &mut store, &[]).unwrap();
+    store.asset_residency_set_policy(super::residency::AssetPolicy::Remote, || Ok(())).unwrap();
+    store.asset_residency_evict(|| Ok(())).unwrap();
+    let kept = b"synthetic body kept on this device".to_vec();
+    let kept_hash = put_asset(&mut store, "assets/status-kept.png", &kept).object_hash.unwrap();
+    let lost = b"synthetic body no storage holds".to_vec();
+    let lost_hash = put_asset(&mut store, "assets/status-lost.png", &lost).object_hash.unwrap();
+    let cas = PayloadCas::new(store.repository_root()).unwrap();
+    cas.unlink_exact_object(&lost_hash, lost.len() as u64, &crate::asset_repository::object_physical_key(&lost_hash)).unwrap();
+    let counts = |status: &serde_json::Value| ["localBytes", "serverObjects", "serverBytes", "unavailableObjects"].map(|field| status[field].as_u64().unwrap());
+
+    reset_body_io();
+    let status = serde_json::to_value(store.asset_residency_status().unwrap()).unwrap();
+    let work = take_body_io();
+    assert_eq!((work.stat_requests, work.batch_stat_requests), (0, 1));
+    assert_eq!(counts(&status), [kept.len() as u64, 1, held.len() as u64, 1]);
+
+    let shard = store.repository_root().join("assets").join("objects").join(&kept_hash[..2]);
+    let outside = tempfile::tempdir().unwrap();
+    let moved = outside.path().join("shard");
+    std::fs::rename(&shard, &moved).unwrap();
+    link_directory(&moved, &shard);
+    assert!(store.asset_residency_status().is_err());
+    assert!(store.asset_residency_download_remote(None, None, None, || Ok(())).is_err());
+    assert!(cas.stat_object(&held_hash).unwrap().is_none(), "a refused download fetches nothing");
+    #[cfg(unix)]
+    std::fs::remove_file(&shard).unwrap();
+    #[cfg(windows)]
+    std::fs::remove_dir(&shard).unwrap();
+    std::fs::rename(&moved, &shard).unwrap();
+
+    let downloaded = serde_json::to_value(store.asset_residency_download_remote(None, None, None, || Ok(())).unwrap()).unwrap();
+    assert_eq!(cas.stat_object(&held_hash).unwrap(), Some(held.len() as u64));
+    assert_eq!(counts(&downloaded), [(kept.len() + held.len()) as u64, 0, 0, 1]);
+}
+
+/// Offloading keeps every catalog row, so only the device body figure drops,
+/// by what the residency status then counts as held by the server alone.
+#[test]
+fn offloading_lowers_the_device_body_bytes_and_keeps_the_catalog() {
+    let server = LocalServerFixture::new();
+    let (_root, mut store) = local();
+    let core = server.client(&store);
+    let first = vec![71; 128 * 1024 + 1];
+    let second = vec![73; 64 * 1024];
+    put_asset(&mut store, "assets/offload-first.png", &first);
+    put_asset(&mut store, "assets/offload-second.png", &second);
+    super::lww_tests::drain_publications(&core, &mut store, &[]).unwrap();
+    let offloaded = (first.len() + second.len()) as u64;
+    let before = store.storage_stats().unwrap();
+    assert_eq!(before.missing_asset_bodies.count, 0);
+    assert!(before.asset_bodies.bytes >= offloaded);
+
+    store.asset_residency_set_policy(super::residency::AssetPolicy::Remote, || Ok(())).unwrap();
+    assert_eq!(store.asset_residency_evict(|| Ok(())).unwrap().evicted_bytes, offloaded);
+
+    let after = store.storage_stats().unwrap();
+    assert_eq!(after.asset_objects, before.asset_objects);
+    assert_eq!(after.asset_bodies.count, before.asset_bodies.count - 2);
+    assert_eq!(after.asset_bodies.bytes, before.asset_bodies.bytes - offloaded);
+    assert_eq!((after.missing_asset_bodies.count, after.missing_asset_bodies.bytes), (2, offloaded));
+    let status = serde_json::to_value(store.asset_residency_status().unwrap()).unwrap();
+    assert_eq!(status["serverBytes"], offloaded);
+}
+
 #[test]
 fn selected_archive_priority_uses_native_metadata_without_reading_the_archive() {
     use crate::asset_repository::body_io::{reset_body_io,take_body_io};
@@ -107,14 +192,15 @@ fn selected_character_assets_finish_before_uncapped_catalog_hydration() {
     let (_root, mut store) = local();
     let core = server.client(&store);
     let hashes = (0..130).map(|index| put_asset(&mut store, &format!("assets/priority-{index}.png"), format!("synthetic priority {index}").as_bytes()).object_hash.unwrap()).collect::<Vec<_>>();
+    super::lww_tests::drain_publications(&core, &mut store, &[]).unwrap();
+    store.asset_residency_set_policy(super::residency::AssetPolicy::Remote, || Ok(())).unwrap();
+    store.asset_residency_evict(|| Ok(())).unwrap();
+    // Make every body remote before assigning the representative image.
     store.commit(&WorkingSetCommit {
         expected_revision: store.revision().unwrap(),
         add_character: Some(serde_json::json!({"chaId":"selected-priority","type":"character","name":"Synthetic","image":"assets/priority-129.png","additionalAssets":[["extra","assets/priority-128.png","png"]],"chats":[]})),
         ..Default::default()
     }).unwrap();
-    super::lww_tests::drain_publications(&core, &mut store, &[]).unwrap();
-    store.asset_residency_set_policy(super::residency::AssetPolicy::Remote, || Ok(())).unwrap();
-    store.asset_residency_evict(|| Ok(())).unwrap();
     let cas = PayloadCas::new(store.repository_root()).unwrap();
     assert_eq!(store.selected_character_asset_hashes("selected-priority").unwrap(), [hashes[128].clone(),hashes[129].clone()].into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>());
     assert!(store.selected_character_asset_hashes("missing-character").unwrap().is_empty());
@@ -140,6 +226,10 @@ fn switching_to_full_policy_hydrates_selected_references_before_other_characters
         put_asset(&mut store,"assets/policy-second.png",b"second synthetic policy priority"),
     ];
     aliases.sort_by(|a,b| a.object_hash.cmp(&b.object_hash));
+    super::lww_tests::drain_publications(&core,&mut store,&[]).unwrap();
+    store.asset_residency_set_policy(super::residency::AssetPolicy::Remote,||Ok(())).unwrap();
+    store.asset_residency_evict(||Ok(())).unwrap();
+    // Start with remote bodies, before the new character references are hydrated.
     for (character,alias) in [("policy-other",&aliases[0]),("policy-selected",&aliases[1])] {
         store.commit(&WorkingSetCommit {
             expected_revision:store.revision().unwrap(),
@@ -147,9 +237,6 @@ fn switching_to_full_policy_hydrates_selected_references_before_other_characters
             ..Default::default()
         }).unwrap();
     }
-    super::lww_tests::drain_publications(&core,&mut store,&[]).unwrap();
-    store.asset_residency_set_policy(super::residency::AssetPolicy::Remote,||Ok(())).unwrap();
-    store.asset_residency_evict(||Ok(())).unwrap();
     let cas=PayloadCas::new(store.repository_root()).unwrap();
     let selected=aliases[1].object_hash.as_ref().unwrap(); let other=aliases[0].object_hash.as_ref().unwrap();
     assert!(cas.stat_object(selected).unwrap().is_none()); assert!(cas.stat_object(other).unwrap().is_none());

@@ -64,6 +64,8 @@ mod renderer_recovery;
 mod server_sync;
 mod trust_boundary;
 #[cfg(test)]
+mod command_future_size;
+#[cfg(test)]
 mod test_memory;
 #[cfg(windows)]
 mod windows_appearance;
@@ -783,6 +785,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_media::streaming::native_media_base_url,
         native_media::streaming::native_media_ensure,
         server_sync::commands::server_sync_asset_status,
+        server_sync::commands::asset_residency_connection_objects,
         server_sync::commands::server_sync_status,
         server_sync::commands::server_sync_configure,
         server_sync::commands::server_sync_lww_push,

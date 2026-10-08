@@ -6,6 +6,7 @@ import { DBState } from 'src/ts/stores.svelte'
 import DefaultChatScreen from './DefaultChatScreen.svelte'
 import { chatScreenState } from '../../ts/ui/chatScreenState.svelte'
 import { doingChat } from 'src/ts/process/index.svelte'
+import { updateDeviceSettings } from 'src/ts/storage/deviceSettings'
 import { noteGenerationMessage, noteGenerationStarted, subscribeGenerationEnd, type GenerationEndRecord } from 'src/ts/process/generationEnd'
 
 const mocks = vi.hoisted(() => ({ trigger: vi.fn(), generate: vi.fn(), process: vi.fn(), error: vi.fn(), postFile: vi.fn(),
@@ -83,6 +84,7 @@ function send() {
 }
 beforeEach(async () => {
     vi.clearAllMocks()
+    updateDeviceSettings({ messageSendKey: 'enter' })
     chatScreenState.clear()
     mocks.translate.mockResolvedValue('')
     mocks.bounded = false
@@ -475,6 +477,55 @@ it('does not send or reroll from composing keyboard events', async () => {
     expect(mocks.generate).not.toHaveBeenCalled()
     expect(input.value).toBe('Composition draft')
 })
+
+const sendKeyCases: Array<{ name: string; keys: KeyboardEventInit; sends: string[] }> = [
+    { name: 'Enter', keys: {}, sends: ['enter'] },
+    { name: 'Shift+Enter', keys: { shiftKey: true }, sends: ['ctrl-shift-enter'] },
+    { name: 'Ctrl+Enter', keys: { ctrlKey: true }, sends: ['ctrl-shift-enter'] },
+    { name: 'Command+Enter', keys: { metaKey: true }, sends: ['ctrl-shift-enter'] },
+    { name: 'Alt+Enter', keys: { altKey: true }, sends: [] },
+    { name: 'Ctrl+Shift+Enter', keys: { ctrlKey: true, shiftKey: true }, sends: [] },
+    { name: 'Command+Shift+Enter', keys: { metaKey: true, shiftKey: true }, sends: [] },
+    { name: 'Ctrl+Command+Enter', keys: { ctrlKey: true, metaKey: true }, sends: [] },
+    { name: 'Ctrl+Alt+Enter', keys: { ctrlKey: true, altKey: true }, sends: [] },
+    { name: 'composing Enter', keys: { isComposing: true }, sends: [] },
+    { name: 'composing Shift+Enter', keys: { isComposing: true, shiftKey: true }, sends: [] },
+    { name: 'WebKit IME confirmation', keys: { keyCode: 229, ctrlKey: true }, sends: [] },
+]
+
+for (const mode of ['enter', 'ctrl-shift-enter', 'button'] as const) {
+    for (const selector of ['textarea.input-text', '#messageInputTranslate']) {
+        it.each(sendKeyCases)(`${mode}, ${selector}: $name sends only when selected`, async ({ keys, sends }) => {
+            mocks.bounded = true
+            DBState.db.sendWithEnter = false
+            DBState.db.useAutoTranslateInput = true
+            await tick()
+            const draft = type('Synthetic send-key draft')
+            updateDeviceSettings({ messageSendKey: mode })
+            const input = document.querySelector<HTMLTextAreaElement>(selector)!
+            const event = new KeyboardEvent('keydown', { key: 'Enter', ...keys, bubbles: true, cancelable: true })
+            input.dispatchEvent(event)
+            if (sends.includes(mode)) {
+                expect(event.defaultPrevented).toBe(true)
+                await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
+            } else {
+                await tick()
+                expect(event.defaultPrevented).toBe(false)
+                expect(mocks.generate).not.toHaveBeenCalled()
+                expect(draft.value).toBe('Synthetic send-key draft')
+            }
+        })
+    }
+
+    it(`keeps the send button available in ${mode} mode`, async () => {
+        mocks.bounded = true
+        updateDeviceSettings({ messageSendKey: mode })
+        type('Synthetic button draft')
+        document.querySelector<HTMLButtonElement>('.button-icon-send')!.click()
+        await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
+        expect(mocks.appended).toEqual([expect.objectContaining({ data: 'Synthetic button draft' })])
+    })
+}
 
 const stopListening: Array<() => void> = []
 function listenGenerationEnd() {

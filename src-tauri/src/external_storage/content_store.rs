@@ -234,13 +234,20 @@ impl ContentStore {
     }
 
     pub(crate) fn stat(&self, digest: &str) -> Result<Option<u64>> {
+        Ok(self.locate(digest)?.map(|(size, _)| size))
+    }
+
+    /// The length of a body and, when a file holds it, that file: what `stat`
+    /// and `file_path` answer, from one lookup. Staged bodies are small, so no
+    /// file holds them.
+    pub(crate) fn locate(&self, digest: &str) -> Result<Option<(u64, Option<PathBuf>)>> {
         if let Some(bytes) = self.staged.get(digest) {
-            return Ok(Some(bytes.len() as u64));
+            return Ok(Some((bytes.len() as u64, None)));
         }
         if let Some(size) = small_object_store::size(&self.db, digest)
             .map_err(|_| invalid("Capture object identity is invalid"))?
         {
-            return Ok(Some(size));
+            return Ok(Some((size, None)));
         }
         let path = self.objects.join(digest);
         match fs::symlink_metadata(&path) {
@@ -249,7 +256,7 @@ impl ContentStore {
             Ok(metadata) if is_link_like(&metadata) || !metadata.is_file() => {
                 Err(invalid("Capture object must not be a link"))
             }
-            Ok(metadata) => Ok(Some(metadata.len())),
+            Ok(metadata) => Ok(Some((metadata.len(), Some(path)))),
         }
     }
 

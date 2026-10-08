@@ -2,20 +2,10 @@
     import { language } from 'src/lang'
     import SettingButton from 'src/lib/Setting/RisuNest/SettingButton.svelte'
     import { persistentLocalSaveFailure, getPersistentDataRuntime } from 'src/ts/storage/persistentDataRuntime.svelte'
+    import { localSaveFailureMessage } from 'src/ts/storage/localSaveFailureMessage'
 
     let saving = $state(false)
-    const copy = $derived(language.risuNest.localSaveFailure)
-    const error = $derived($persistentLocalSaveFailure && typeof $persistentLocalSaveFailure === 'object'
-        ? $persistentLocalSaveFailure as { code?: unknown; area?: unknown; name?: unknown } : null)
-    const area = $derived(typeof error?.area === 'string' ? ({
-        root: copy.settings, character: language.character, conversation: copy.conversation,
-        presets: copy.presets, 'plugin storage': copy.plugins, 'asset aliases': copy.assets,
-    } as Record<string, string>)[error.area] ?? copy.data : copy.data)
-    const message = $derived(error?.code === 'unsaveable-value'
-        ? copy.invalid.replace('{0}', area)
-        : error?.code === 'payload-too-large' ? copy.tooLarge
-        : error?.name === 'QuotaExceededError' ? copy.storage
-        : error?.name === 'WindowedConversationSaveError' ? copy.currentChat : copy.failed)
+    const message = $derived(localSaveFailureMessage($persistentLocalSaveFailure))
 
     async function retry() {
         if (saving) return

@@ -91,13 +91,23 @@ fn remove_managed(root: &Path, directory: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn managed_scratch(root: &Path, prefix: &str) -> Result<tempfile::TempDir> {
+/// The app-owned directory that holds every scratch directory. Startup empties
+/// it, so whatever a crash left there is gone by the next run.
+pub(crate) fn scratch_directory(root: &Path) -> io::Result<PathBuf> {
     let directory = root.join("external-storage").join("scratch");
-    fs::create_dir_all(&directory).map_err(local_error)?;
-    if !managed_directory(root, &directory).map_err(local_error)? {
-        return Err(super::contract::ProviderError::new(super::contract::ErrorKind::Corrupt));
+    fs::create_dir_all(&directory)?;
+    if !managed_directory(root, &directory)? {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "scratch directory is unavailable"));
     }
-    tempfile::Builder::new().prefix(prefix).tempdir_in(directory).map_err(local_error)
+    Ok(directory)
+}
+
+pub(crate) fn local_scratch(root: &Path, prefix: &str) -> io::Result<tempfile::TempDir> {
+    tempfile::Builder::new().prefix(prefix).tempdir_in(scratch_directory(root)?)
+}
+
+pub(crate) fn managed_scratch(root: &Path, prefix: &str) -> Result<tempfile::TempDir> {
+    local_scratch(root, prefix).map_err(local_error)
 }
 
 pub(crate) fn remove_connection_directory(root: &Path, connection_id: &str) -> io::Result<()> {

@@ -6,10 +6,6 @@ describe('sync recovery copy', () => {
     it('states replacement without promising an automatic safety copy in either locale', () => {
         expect(languageEnglish.syncConflictRestoreConfirm).toContain('No automatic backup is created')
         expect(languageKorean.syncConflictRestoreConfirm).toContain('자동 백업은 만들지 않습니다')
-        for (const text of [languageEnglish.risuNest.serverSync, languageKorean.risuNest.serverSync]) {
-            expect(text.management.restoreConfirm).not.toMatch(/first backed up|먼저 백업/)
-            expect(text.backupHelp).not.toMatch(/first backed up|먼저 백업/)
-        }
     })
     it('keeps upstream question wording but uses action confirmations for RisuNest', () => {
         const found: string[] = []
@@ -25,7 +21,9 @@ describe('sync recovery copy', () => {
         expect(languageKorean.risuNest.serverSync).toMatchObject({
             disconnect: '연결 해제',
             disconnectTitle: '연결을 해제하시겠습니까?',
+            disconnectDescription: '이 기기와 서버의 동기화를 중지합니다.',
             disconnectRemoteOnly: '서버에만 있는 파일이 있습니다. 필요한 경우 다운로드한 뒤 연결을 해제하세요.',
+            disconnectRemoteOnlyUnknown: '파일을 확인할 수 없습니다. 필요한 경우 서버에만 있는 파일을 다운로드한 뒤 연결을 해제하세요.',
             downloadThenDisconnect: '다운로드 후 연결 해제',
             downloadFailedKeptConnection: '파일을 다운로드하지 못해 연결을 해제하지 않았습니다. 다시 시도하거나 다운로드하지 않고 연결을 해제하세요.',
             residency: { download: '다운로드' },
@@ -33,11 +31,23 @@ describe('sync recovery copy', () => {
         expect(languageEnglish.risuNest.serverSync).toMatchObject({
             disconnect: 'Disconnect',
             disconnectTitle: 'Disconnect from the server?',
+            disconnectDescription: 'This device stops syncing with the server.',
             disconnectRemoteOnly: 'Some files are stored only on the server. If you need them, download them before disconnecting.',
+            disconnectRemoteOnlyUnknown: 'Files could not be checked. Download any files stored only on the server before disconnecting if you need them.',
             downloadThenDisconnect: 'Download, then disconnect',
             downloadFailedKeptConnection: 'The files could not be downloaded, so the server was not disconnected. Try again, or disconnect without downloading.',
             residency: { download: 'Download' },
         })
         for (const text of [languageEnglish.risuNest.serverSync, languageKorean.risuNest.serverSync]) expect(text).not.toHaveProperty('downloadBeforeDisconnect')
+    })
+    it('names the device registration of the sync server where onboarding asks for a code', () => {
+        expect(languageKorean.risuNest.onboarding.hub).toMatchObject({
+            lead: '동기화 서버의 기기 등록에서 이 기기용 등록 코드를 만들고 아래에 붙여넣어주세요.',
+            leadScan: '동기화 서버의 기기 등록에서 이 기기용 등록 코드를 만들고 QR 코드를 스캔하거나 아래에 붙여넣어주세요.',
+        })
+        expect(languageEnglish.risuNest.onboarding.hub).toMatchObject({
+            lead: 'Register this device on the sync server, then paste its registration code below.',
+            leadScan: 'Register this device on the sync server, then scan its QR code or paste its registration code below.',
+        })
     })
 })

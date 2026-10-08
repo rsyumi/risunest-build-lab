@@ -15,7 +15,7 @@ function canonical(value: unknown): unknown {
         .map(key => [key, canonical(value[key])]))
 }
 
-function libraryProjection(library: JsonRecord): unknown {
+function libraryProjection(library: JsonRecord, rootScalars: boolean): unknown {
     const ids = new Map<string, string>()
     const records = new Set<JsonRecord>()
     const register = (items: unknown, scope: string) => {
@@ -44,8 +44,9 @@ function libraryProjection(library: JsonRecord): unknown {
             (records.has(value) && ['id', 'chaId'].includes(key)) ||
             ['bindedPersona', 'characterIds', 'enabledModules', 'charOrder', 'modules', 'characters', 'folderId'].includes(key))]))
     }
-    return canonical(Object.fromEntries(Object.entries(library).filter(([key]) =>
-        recordCollections.has(key) || (!localRootKeys.has(key) && !derivedRootKeys.has(key) && !['botPresetsId', 'selectedPersona', 'hypaV3PresetId', 'translatorPresetId', 'explicitGlobalChatVariables', 'protectedPresetValues'].includes(key)))
+    return canonical(Object.fromEntries(Object.entries(library).filter(([key, value]) =>
+        (rootScalars || (value !== null && typeof value === 'object')) &&
+        (recordCollections.has(key) || (!localRootKeys.has(key) && !derivedRootKeys.has(key) && !['botPresetsId', 'selectedPersona', 'hypaV3PresetId', 'translatorPresetId', 'explicitGlobalChatVariables', 'protectedPresetValues'].includes(key))))
         .map(([key, value]) => [key, project(value, key)])))
 }
 
@@ -73,7 +74,8 @@ export function validateBindingCount(value: unknown): string {
     return value
 }
 
-export function hasNonDefaultBindingData(content: BindingLocalContent): boolean {
+/** With `rootScalars` false, root strings, numbers and booleans, such as the language, are not data. */
+export function hasNonDefaultBindingData(content: BindingLocalContent, { rootScalars = true }: { rootScalars?: boolean } = {}): boolean {
     const opaque = validateBindingCount(content.opaqueSharedUnitCount)
     const ordinary = validateBindingCount(content.ordinaryPluginValueCount)
     const hypa = validateBindingCount(content.hypaValueCount)
@@ -89,5 +91,5 @@ export function hasNonDefaultBindingData(content: BindingLocalContent): boolean 
     if (JSON.stringify(canonical(content.sharedVariables ?? {})) !== JSON.stringify(canonical(content.factorySharedVariables ?? {}))) return true
     if (ordinary !== '0' || hypa !== '0' || pluginLocal !== '0') return true
     if (aliases !== factoryAliases) return true
-    return JSON.stringify(libraryProjection(content.library)) !== JSON.stringify(libraryProjection(content.factoryLibrary))
+    return JSON.stringify(libraryProjection(content.library, rootScalars)) !== JSON.stringify(libraryProjection(content.factoryLibrary, rootScalars))
 }

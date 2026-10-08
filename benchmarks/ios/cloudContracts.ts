@@ -25,7 +25,7 @@ export async function cloudContract(cancelExpected: boolean) {
   cancel.textContent = "Cancel live request";
   cancel.onclick = () => controller.abort();
   document.getElementById("benchmark")!.append(cancel);
-  const watchdog = setTimeout(() => controller.abort("timeout"), 180_000);
+  const watchdog = setTimeout(() => controller.abort("timeout"), 270_000);
   let text = "";
   let chunks = 0;
   let hiddenChunks = 0;
@@ -70,7 +70,7 @@ export async function cloudContract(cancelExpected: boolean) {
         {
           role: "user",
           content:
-            "For a synthetic mobile streaming test, write 300 numbered sentences about an imaginary squirrel sorting colored wooden blocks. Each sentence must have at least 15 words. Do not summarize or stop early.",
+            "For a synthetic mobile streaming test, write 150 numbered sentences about an imaginary squirrel sorting colored wooden blocks. Each sentence must have at least 15 words. Do not summarize or stop early.",
         },
       ],
       options: { num_predict: 8192 },

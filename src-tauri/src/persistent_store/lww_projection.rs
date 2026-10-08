@@ -1096,14 +1096,24 @@ fn apply_value(
             if next.is_none() {
                 match p[1].as_str() {
                     "character" => commit::delete_character(tx, generation, &p[2])?,
-                    "conversation" => commit::apply_conversation_mutation(
-                        tx,
-                        generation,
-                        &super::super::ConversationMutation::Delete {
-                            character_id: p[2].clone(),
-                            conversation_id: p[3].clone(),
-                        },
-                    )?,
+                    "conversation" => {
+                        let present: bool = tx.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM conversations WHERE generation=?1 AND character_id=?2 AND conversation_id=?3)",
+                            params![generation, p[2], p[3]],
+                            |r| r.get(0),
+                        )?;
+                        commit::apply_conversation_mutation(
+                            tx,
+                            generation,
+                            &super::super::ConversationMutation::Delete {
+                                character_id: p[2].clone(),
+                                conversation_id: p[3].clone(),
+                            },
+                        )?;
+                        if present {
+                            commit::reset_stale_chat_page(tx, generation, &p[2])?;
+                        }
+                    }
                     "preset" => {
                         tx.execute(
                             "DELETE FROM bot_presets WHERE generation=?1 AND preset_id=?2",
@@ -1137,15 +1147,17 @@ fn apply_value(
                         )?
                         .is_none()
                         {
+                            // `chatPage` never syncs, so a character first seen here
+                            // selects its first conversation, as a new upstream one does.
                             commit::put_character_detail(
                                 tx,
                                 generation,
-                                &json!({"chaId":p[2],"name":"","type":next.unwrap().get("type").cloned().unwrap_or(json!("character"))}),
+                                &json!({"chaId":p[2],"name":"","type":next.unwrap().get("type").cloned().unwrap_or(json!("character")),"chatPage":0}),
                             )?;
                         }
                     }
                     "conversation" => {
-                        tx.execute(
+                        let inserted = tx.execute(
                             "INSERT OR IGNORE INTO conversations VALUES(?1,?2,?3,0,0,'',0,?4)",
                             params![
                                 generation,
@@ -1154,6 +1166,11 @@ fn apply_value(
                                 serde_json::to_string(&json!({"id":p[3],"name":""}))?
                             ],
                         )?;
+                        // A replacement writes characters before their conversations, and
+                        // no later unit has to recount them.
+                        if inserted > 0 {
+                            commit::refresh_character_summary(tx, generation, &p[2])?;
+                        }
                     }
                     "preset" => {
                         tx.execute(
@@ -1164,6 +1181,20 @@ fn apply_value(
                                 serde_json::to_string(&json!({"id":p[2],"name":""}))?
                             ],
                         )?;
+                    }
+                    "persona" => {
+                        // Fields can arrive in a later receive than the membership.
+                        let mut v = root(tx, generation)?;
+                        let present = v
+                            .get("personas")
+                            .and_then(Value::as_array)
+                            .is_some_and(|items| {
+                                items.iter().any(|r| r.get("id").and_then(Value::as_str) == Some(&p[2]))
+                            });
+                        if !present {
+                            patch_array(&mut v, "personas", "id", &p[2], None, Some(json!({"id":p[2]})))?;
+                            write_root(tx, generation, &v)?;
+                        }
                     }
                     _ => {}
                 }
@@ -1390,6 +1421,9 @@ pub(in crate::persistent_store) fn refresh_orders(
             }),
             "record" => Some(unit_key(&["order", &p[1]])?),
             "plugin" => Some(unit_key(&["order", "plugin-storage", &p[1]])?),
+            "character" if p.get(2).is_some_and(|field| field == "trashTime") => {
+                Some(unit_key(&["order", "characters"])?)
+            }
             _ => None,
         };
         if let Some(scope) = scope {
@@ -1523,7 +1557,22 @@ pub(in crate::persistent_store) fn refresh_orders(
             .collect::<Vec<_>>();
         let ids = risunest_sync_wire::order::read_order(&ordered, &live, &BTreeSet::new());
         if p[1] == "characters" {
-            let valid = ids.iter().cloned().collect::<BTreeSet<_>>();
+            // Trashed characters keep their configured index for the trash
+            // view but stay out of the order the sidebar shows.
+            let trashed: BTreeSet<String> = {
+                let mut s = tx.prepare(
+                    "SELECT character_id FROM characters WHERE generation=?1 AND trashed=1",
+                )?;
+                let v = s
+                    .query_map([generation], |r| r.get(0))?
+                    .collect::<Result<_, _>>()?;
+                v
+            };
+            let valid = ids
+                .iter()
+                .filter(|id| !trashed.contains(*id))
+                .cloned()
+                .collect::<BTreeSet<_>>();
             let mut seen = BTreeSet::new();
             let mut projected = Vec::new();
             for entry in order {
@@ -1544,7 +1593,7 @@ pub(in crate::persistent_store) fn refresh_orders(
                 }
             }
             for id in &ids {
-                if seen.insert(id.clone()) {
+                if valid.contains(id) && seen.insert(id.clone()) {
                     projected.push(json!(id));
                 }
             }

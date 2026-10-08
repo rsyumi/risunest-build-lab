@@ -2,20 +2,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { languageEnglish } from 'src/lang/en'
-const f = vi.hoisted(() => ({ pending: vi.fn(async (): Promise<number | undefined> => undefined), connect: vi.fn(), complete: vi.fn(), configure: vi.fn(), bind: vi.fn(), disconnect: vi.fn(), hold: vi.fn(), release: vi.fn(), status: vi.fn(), policy: vi.fn(), cancel: vi.fn(), checkbox: vi.fn(), native: true, scan: false, os: 'windows', listeners: new Set<(value: Record<string, unknown>) => void>(), bindingState: vi.fn(), preset: vi.fn(), state: { db: {} as Record<string, unknown> }, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
+const f = vi.hoisted(() => ({ pending: vi.fn(async (): Promise<number | undefined> => undefined), ensure: vi.fn(), connect: vi.fn(), complete: vi.fn(), configure: vi.fn(), bind: vi.fn(), disconnect: vi.fn(), hold: vi.fn(), release: vi.fn(), status: vi.fn(), policy: vi.fn(), evict: vi.fn(), cancel: vi.fn(), checkbox: vi.fn(), action: vi.fn(), native: true, scan: false, scanner: { scan: vi.fn(), cancel: vi.fn() }, os: 'windows', listeners: new Set<(value: Record<string, unknown>) => void>(), bindingState: vi.fn(), preset: vi.fn(), state: { db: {} as Record<string, unknown> }, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
 vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish, changeLanguage: vi.fn() }))
 vi.mock('src/ts/platform', () => ({ get isTauri() { return f.native } }))
 vi.mock('@tauri-apps/plugin-os', () => ({ platform: () => f.os }))
-vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertCheckboxConfirm: f.checkbox, alertError: vi.fn(), alertNormal: vi.fn(), openRisuAccountLogin: vi.fn() }))
+vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertCheckboxConfirm: f.checkbox, alertActionConfirm: f.action, alertError: vi.fn(), alertNormal: vi.fn(), openRisuAccountLogin: vi.fn() }))
 vi.mock('src/ts/storage/sync/serverSyncProduction', () => ({
     connectServerSync: f.connect, completeServerSyncBinding: f.complete, configureServerSyncConnection: f.configure, disconnectServerSync: f.disconnect, retryServerSync: vi.fn(), holdServerSync: f.hold,
     getServerSyncCacheUsage: vi.fn(), cleanupServerSyncCache: vi.fn(),
-    getServerSyncController: () => ({ snapshot: () => f.view, subscribe: (listener: (value: Record<string, unknown>) => void) => { f.listeners.add(listener); listener(f.view); return () => { f.listeners.delete(listener) } }, ensureStatus: vi.fn(), watchProgress: () => () => {}, pendingChanges: f.pending, track: (_stage: string, operation: () => Promise<unknown>) => operation() }),
+    getServerSyncController: () => ({ snapshot: () => f.view, subscribe: (listener: (value: Record<string, unknown>) => void) => { f.listeners.add(listener); listener(f.view); return () => { f.listeners.delete(listener) } }, ensureStatus: f.ensure, watchProgress: () => () => {}, pendingChanges: f.pending, track: (_stage: string, operation: () => Promise<unknown>) => operation() }),
 }))
-vi.mock('src/ts/storage/sync/serverAssetResidency', () => ({ getAssetResidencyStatus: f.status, setAssetResidencyPolicy: f.policy, evictLocalAssets: vi.fn(), cancelAssetResidencyOperation: f.cancel }))
+vi.mock('src/ts/storage/sync/serverAssetResidency', () => ({ getAssetResidencyStatus: f.status, setAssetResidencyPolicy: f.policy, evictLocalAssets: f.evict, cancelAssetResidencyOperation: f.cancel }))
 vi.mock('src/ts/storage/sync/serverSyncRegistration', () => ({ parseServerRegistration: () => ({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }) }))
 vi.mock('src/ts/storage/sync/serverSyncRegistrationInbox', () => ({ serverRegistrationInbox: { changed: { subscribe: () => () => {} }, releaseConsumed: vi.fn() } }))
-vi.mock('src/ts/storage/sync/serverSyncQr', () => ({ get canScanServerRegistration() { return f.scan }, createServerQrScanner: () => ({ cancel: vi.fn() }) }))
+vi.mock('src/ts/storage/sync/serverSyncQr', () => ({ get canScanServerRegistration() { return f.scan }, createServerQrScanner: () => f.scanner }))
 vi.mock('src/ts/storage/sync/bindingRegistry', () => ({ bindSyncTarget: f.bind }))
 vi.mock('src/ts/storage/sync/bindingNative', () => ({ createNativeSyncBindingBridge: () => ({ state: f.bindingState }) }))
 vi.mock('src/ts/storage/sync/nativeOfficialAccountOperations', () => ({ restoreNativeOfficialAccountBackup: vi.fn() }))
@@ -24,7 +24,7 @@ vi.mock('src/ts/storage/fileOperationErrorPresentation', () => ({ presentFileOpe
 vi.mock('src/ts/characterCards', () => ({ hubURL: 'https://synthetic.invalid' }))
 vi.mock('src/ts/globalApi.svelte', () => ({ getVersionString: () => 'synthetic' }))
 vi.mock('src/ts/gui/colorscheme', () => ({ updateTextThemeAndCSS: vi.fn() }))
-vi.mock('src/ts/gui/nativeFileJobDialogModel', () => ({ buildNativeFileJobDialogModel: () => ({ open: false }), formatElapsed: (milliseconds: number) => `${Math.floor(milliseconds / 1000)}s` }))
+vi.mock('src/ts/gui/nativeFileJobDialogModel', async importOriginal => ({ formatBytes: (await importOriginal<typeof import('src/ts/gui/nativeFileJobDialogModel')>()).formatBytes, buildNativeFileJobDialogModel: () => ({ open: false }), formatElapsed: (milliseconds: number) => `${Math.floor(milliseconds / 1000)}s` }))
 vi.mock('src/ts/process/templates/templates', () => ({ prebuiltPresets: {} }))
 vi.mock('src/ts/storage/database.svelte', () => ({ setPreset: f.preset }))
 vi.mock('src/ts/storage/nativeFileJobManager', async () => { const { writable } = await import('svelte/store'); return { cancelActiveNativeFileOperation: vi.fn(), dismissNativeFileOperationOutcome: vi.fn(), nativeFileJobHost: writable('dialog'), nativeFileOperation: writable(null), nativeFileOperationOutcome: writable(null) } })
@@ -37,12 +37,13 @@ vi.mock('src/lib/Setting/ExternalStorage/ConnectionForm.svelte', () => ({ defaul
 vi.mock('src/lib/Others/Onboarding/onboardingWeave', () => ({ observeOnboardingWeave: () => () => {} }))
 vi.mock('src/ts/stores.svelte', () => ({ DBState: f.state }))
 import ServerSyncSettings from './ServerSyncSettings.svelte'
+import { QrScanError } from 'src/ts/ui/qrScanner'
 import Onboarding from 'src/lib/Others/Onboarding/Onboarding.svelte'
 let component: ReturnType<typeof mount> | undefined
 let host: HTMLDivElement
 beforeEach(() => {
     vi.clearAllMocks(); f.native = true; f.scan = false; f.os = 'windows'; f.listeners.clear(); f.view = { status: { configured: false }, paused: false }; host = document.createElement('div'); document.body.append(host)
-    for (const mock of [f.disconnect, f.hold, f.release, f.status, f.policy, f.cancel, f.checkbox, f.complete]) mock.mockReset()
+    for (const mock of [f.disconnect, f.hold, f.release, f.status, f.policy, f.evict, f.cancel, f.checkbox, f.action, f.complete, f.ensure]) mock.mockReset()
     f.hold.mockResolvedValue(f.release)
     f.state.db = { language: 'en', characters: [] }
     f.preset.mockImplementation((db: Record<string, unknown>) => ({ ...db, preset: 'starting' }))
@@ -67,7 +68,7 @@ it.each([
     await registration()
     click(newDevice ? languageEnglish.lwwSync.newDeviceAction : languageEnglish.risuNest.serverSync.connect)
     await settle()
-    expect(connectTarget).toHaveBeenCalledExactlyOnceWith({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }, newDevice)
+    expect(connectTarget).toHaveBeenCalledExactlyOnceWith({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }, newDevice, error ? undefined : 'full')
     expect(f.connect).not.toHaveBeenCalled()
 })
 it.each(['', 'server-unreachable', 'clock-skew', 'unauthorized'])('offers no new-device connection outside the duplicate-device recovery state ("%s")', async error => {
@@ -76,6 +77,74 @@ it.each(['', 'server-unreachable', 'clock-skew', 'unauthorized'])('offers no new
     await registration()
     expect(findButton(languageEnglish.risuNest.serverSync.connect)).toBeDefined()
     expect(findButton(languageEnglish.lwwSync.newDeviceAction)).toBeUndefined()
+})
+describe('a registration code the server refuses', () => {
+    const usedCodes = ['registration-used', 'registration-integrity', 'registration-not-new']
+    it.each(usedCodes.flatMap(error => [{ error, tone: 'settings' as const }, { error, tone: 'onboarding' as const }]))('asks for a new registration code for "$error" in $tone', async ({ error, tone }) => {
+        f.view = { status: { configured: true, bound: false }, paused: true, error }
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn(), tone } })
+        await settle()
+        expect(host.querySelector('[role="alert"]')?.textContent).toBe(tone === 'onboarding' ? languageEnglish.lwwSync.registrationUsedOnboarding : languageEnglish.lwwSync.registrationUsed)
+        expect(host.querySelector('#server-registration')).not.toBeNull()
+    })
+    it('names the new registration code a duplicate device needs', async () => {
+        f.view = { status: { configured: true, bound: true }, paused: true, error: 'writer-collision', blockedCode: 'writer-collision' }
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+        expect(host.querySelector('[role="alert"]')?.textContent).toBe(languageEnglish.lwwSync.writerCollision)
+    })
+    it.each(usedCodes.flatMap(error => [{ error, newDevice: false }, { error, newDevice: true }]))('returns to the code input when $error refuses a connection with newDevice=$newDevice', async ({ error, newDevice }) => {
+        const stopped = { status: { configured: true, bound: true }, paused: true, error: 'writer-collision', blockedCode: 'writer-collision' }
+        f.view = stopped
+        const connectTarget = vi.fn(async (): Promise<void> => {
+            publish({ ...stopped, error })
+            throw Object.assign(new Error(error), { code: error, status: 409, retryable: false })
+        })
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget } })
+        await registration()
+        click(newDevice ? languageEnglish.lwwSync.newDeviceAction : languageEnglish.risuNest.serverSync.connect)
+        await settle()
+        expect(connectTarget).toHaveBeenCalledExactlyOnceWith(registered, newDevice, undefined)
+        expect(host.querySelector('[role="alert"]')?.textContent).toBe(languageEnglish.lwwSync.registrationUsed)
+        expect(host.querySelector('#server-registration')).not.toBeNull()
+        expect(findButton(languageEnglish.risuNest.serverSync.connect)).toBeUndefined()
+        // Sync is still stopped by the duplicate device, so a new code can connect as a new device.
+        await registration()
+        expect(findButton(languageEnglish.lwwSync.newDeviceAction)).toBeDefined()
+        connectTarget.mockImplementationOnce(async () => { publish({ status: { configured: true, bound: true }, paused: false, error: '' }) })
+        click(languageEnglish.lwwSync.newDeviceAction)
+        await settle()
+        expect(connectTarget).toHaveBeenLastCalledWith(registered, true, undefined)
+        expect(host.querySelector('#server-registration')).toBeNull()
+    })
+    it('returns to the code input when a first connection is refused', async () => {
+        const connectTarget = vi.fn(async () => { throw Object.assign(new Error('registration-used'), { code: 'registration-used', status: 409, retryable: false }) })
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget } })
+        await registration()
+        click(languageEnglish.risuNest.serverSync.connect)
+        await settle()
+        expect(connectTarget).toHaveBeenCalledExactlyOnceWith(registered, false, 'full')
+        expect(host.querySelector('[role="alert"]')?.textContent).toBe(languageEnglish.lwwSync.registrationUsed)
+        expect(host.querySelector('#server-registration')).not.toBeNull()
+    })
+    it('keeps the read code when the connection fails for another reason', async () => {
+        const connectTarget = vi.fn(async () => { throw Object.assign(new Error('server-unreachable'), { code: 'server-unreachable', status: 503, retryable: true }) })
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget } })
+        await registration()
+        click(languageEnglish.risuNest.serverSync.connect)
+        await settle()
+        expect(host.querySelector('[role="alert"]')).not.toBeNull()
+        expect(host.querySelector('#server-registration')).toBeNull()
+        expect(findButton(languageEnglish.risuNest.serverSync.connect)).toBeDefined()
+    })
+    it('keeps onboarding on the code input when the code is refused', async () => {
+        f.connect.mockRejectedValue(Object.assign(new Error('registration-used'), { code: 'registration-used', status: 409, retryable: false }))
+        await openOnboardingServer(); await registration(); click(languageEnglish.risuNest.serverSync.connect); await settle()
+        expect(f.connect).toHaveBeenCalledExactlyOnceWith(registered, false, 'full')
+        expect(heading()).toBe(onboarding.hub.title)
+        expect(host.querySelector('[role="alert"]')?.textContent).toBe(languageEnglish.lwwSync.registrationUsedOnboarding)
+        expect(host.querySelector('#server-registration')).not.toBeNull()
+    })
 })
 it('shows an unfinished connection with Connect, which finishes it with the saved registration', async () => {
     f.view = { status: { configured: false, bound: true }, paused: true, error: '', bindingIncomplete: true }
@@ -144,10 +213,62 @@ it.each([false, true])('mentions the QR code in the connection help only where i
     expect(host.textContent).toContain(scan ? languageEnglish.risuNest.serverSync.connectRowHelpScan : languageEnglish.risuNest.serverSync.connectRowHelp)
     expect(host.textContent?.includes('QR')).toBe(scan)
 })
+describe('scanning a registration QR code', () => {
+    const sync = languageEnglish.risuNest.serverSync
+    beforeEach(() => { f.scan = true })
+    it('scans in the settings wording, and the scanned registration is reviewed before connecting', async () => {
+        f.scanner.scan.mockResolvedValue({ endpoint: 'https://scanned.invalid', libraryId: 'scanned-library', deviceId: 'device', token: 'synthetic' })
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+        click(sync.scanRegistration)
+        await settle()
+        expect(f.scanner.scan).toHaveBeenCalledExactlyOnceWith('settings')
+        expect(host.textContent).toContain(sync.reviewTitle)
+        expect(host.textContent).toContain('https://scanned.invalid')
+        expect(host.querySelector('[role="alert"]')).toBeNull()
+    })
+    it('marks the scan button busy while the camera runs and offers no second cancel below the camera screen', async () => {
+        f.scanner.scan.mockReturnValue(new Promise(() => {}))
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+        click(sync.scanRegistration)
+        await settle()
+        const buttons = [...host.querySelectorAll('button')]
+        expect(buttons).toHaveLength(2)
+        expect(buttons[1].textContent).toContain(sync.scanRegistration)
+        expect(buttons[1].getAttribute('aria-busy')).toBe('true')
+        expect(host.textContent).not.toContain(languageEnglish.cancel)
+    })
+    it('returns quietly from a cancelled scan and explains a failed one', async () => {
+        f.scanner.scan.mockRejectedValueOnce(new QrScanError('qr-scan-cancelled')).mockRejectedValueOnce(new QrScanError('qr-scan-timeout'))
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+        click(sync.scanRegistration)
+        await settle()
+        expect(host.querySelector('[role="alert"]')).toBeNull()
+        expect(findButton(sync.scanRegistration)?.disabled).toBe(false)
+        click(sync.scanRegistration)
+        await settle()
+        expect(host.querySelector('[role="alert"]')?.textContent).toBe(sync.cameraUnavailable)
+    })
+    it('ends a running scan when the screen closes', async () => {
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+        await unmount(component); component = undefined
+        expect(f.scanner.cancel).toHaveBeenCalledOnce()
+    })
+    it('scans in the onboarding wording from the onboarding screen', async () => {
+        f.scanner.scan.mockReturnValue(new Promise(() => {}))
+        await openOnboardingServer()
+        click(sync.scanRegistration)
+        await settle()
+        expect(f.scanner.scan).toHaveBeenCalledExactlyOnceWith('onboarding')
+    })
+})
 it('keeps settings on the existing production action by default', async () => {
     component = mount(ServerSyncSettings, { target: host })
     await registration(); click(languageEnglish.risuNest.serverSync.connect); await settle()
-    expect(f.connect).toHaveBeenCalledExactlyOnceWith({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }, false)
+    expect(f.connect).toHaveBeenCalledExactlyOnceWith({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }, false, 'full')
 })
 it('dismisses a registration without connecting', async () => {
     const connectTarget = vi.fn()
@@ -171,11 +292,52 @@ async function mountBound(status: Record<string, unknown> = residencyStatus()) {
 }
 const alertText = () => host.querySelector('[role="alert"]')?.textContent
 describe('disconnecting with files kept only on the server', () => {
-    it('disconnects without asking when no file is kept only on the server', async () => {
+    it('asks before disconnecting when no file is kept only on the server', async () => {
         await mountBound(residencyStatus({ remoteObjects: 0, remoteBytes: 0, serverObjects: 0, serverBytes: 0 }))
+        f.action.mockResolvedValue(true)
         click(sync.disconnect); await settle()
+        expect(f.action).toHaveBeenCalledExactlyOnceWith({
+            title: sync.disconnectTitle, description: sync.disconnectDescription, actionLabel: sync.disconnect, cancelLabel: languageEnglish.cancel,
+        })
         expect(f.checkbox).not.toHaveBeenCalled(); expect(f.policy).not.toHaveBeenCalled()
         expect(f.disconnect).toHaveBeenCalledOnce()
+    })
+    it('keeps the connection when the question is cancelled', async () => {
+        await mountBound(residencyStatus({ remoteObjects: 0, remoteBytes: 0, serverObjects: 0, serverBytes: 0 }))
+        f.action.mockResolvedValue(false)
+        click(sync.disconnect); await settle()
+        expect(f.action).toHaveBeenCalledOnce()
+        expect(f.disconnect).not.toHaveBeenCalled()
+    })
+    it('shows the disconnect as running while it checks the files', async () => {
+        await mountBound()
+        f.status.mockReturnValue(new Promise(() => {}))
+        click(sync.disconnect); await settle()
+        const button = host.querySelector<HTMLButtonElement>('button[aria-busy="true"]')
+        expect(button?.textContent).toContain(sync.disconnect)
+        expect(button?.disabled).toBe(true)
+        expect(f.checkbox).not.toHaveBeenCalled(); expect(f.action).not.toHaveBeenCalled()
+        expect(f.disconnect).not.toHaveBeenCalled()
+    })
+    it('asks with the unknown wording once the file check takes more than a few seconds', async () => {
+        await mountBound()
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        try {
+            f.status.mockReturnValue(new Promise(() => {}))
+            f.checkbox.mockResolvedValue({ confirmed: false, checked: false })
+            click(sync.disconnect); await settle()
+            await vi.advanceTimersByTimeAsync(2_900); await settle()
+            expect(f.checkbox).not.toHaveBeenCalled()
+            await vi.advanceTimersByTimeAsync(100); await settle()
+            expect(f.checkbox).toHaveBeenCalledExactlyOnceWith({
+                title: sync.disconnectTitle, description: sync.disconnectRemoteOnlyUnknown, checkboxLabel: sync.downloadThenDisconnect,
+                actionLabel: sync.disconnect, cancelLabel: languageEnglish.cancel, requireChecked: false,
+            })
+            expect(host.querySelector('button[aria-busy="true"]')).toBeNull()
+            expect(f.disconnect).not.toHaveBeenCalled()
+        } finally {
+            vi.useRealTimers()
+        }
     })
     it('reads the current status when disconnecting and asks once with an unchecked download option', async () => {
         await mountBound(residencyStatus({ remoteObjects: 0, remoteBytes: 0, serverObjects: 0, serverBytes: 0 }))
@@ -257,9 +419,11 @@ describe('disconnecting with files kept only on the server', () => {
         expect(f.disconnect).not.toHaveBeenCalled(); expect(f.release).toHaveBeenCalledOnce()
         expect(alertText()).toBeUndefined()
     })
-    it('disconnects without asking when the remaining files are kept only in external storage', async () => {
+    it('asks without the download option when the remaining files are kept only in external storage', async () => {
         await mountBound(residencyStatus(externalOnly))
+        f.action.mockResolvedValue(true)
         click(sync.disconnect); await settle()
+        expect(f.action).toHaveBeenCalledOnce()
         expect(f.checkbox).not.toHaveBeenCalled(); expect(f.policy).not.toHaveBeenCalled()
         expect(f.disconnect).toHaveBeenCalledOnce()
     })
@@ -295,22 +459,43 @@ describe('disconnecting with files kept only on the server', () => {
         failMount({ code: 'server-unreachable' }); await settle()
         expect(alertText()).toBe(sync.downloadFailedKeptConnection)
     })
-    it('disconnects without asking when the status cannot be read', async () => {
+    it('asks with the unknown wording when the status cannot be read', async () => {
         await mountBound()
         f.status.mockRejectedValueOnce(new Error('status-unavailable'))
+        f.checkbox.mockResolvedValue({ confirmed: true, checked: false })
         click(sync.disconnect); await settle()
-        expect(f.checkbox).not.toHaveBeenCalled(); expect(f.policy).not.toHaveBeenCalled()
+        expect(f.checkbox).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ description: sync.disconnectRemoteOnlyUnknown, requireChecked: false }))
+        expect(f.action).not.toHaveBeenCalled(); expect(f.policy).not.toHaveBeenCalled()
         expect(f.disconnect).toHaveBeenCalledOnce()
+    })
+    it('keeps the connection when the unknown question is cancelled', async () => {
+        await mountBound()
+        f.status.mockRejectedValueOnce(new Error('status-unavailable'))
+        f.checkbox.mockResolvedValue({ confirmed: false, checked: false })
+        click(sync.disconnect); await settle()
+        expect(f.checkbox).toHaveBeenCalledOnce()
+        expect(f.disconnect).not.toHaveBeenCalled()
     })
 })
 it('removes the asset storage controls once the server is disconnected', async () => {
     await mountBound(residencyStatus({ policy: 'full', remoteObjects: 0, remoteBytes: 0, serverObjects: 0, serverBytes: 0 }))
     expect(host.textContent).toContain(sync.residency.title)
     f.disconnect.mockImplementation(async () => { publish({ status: { configured: true, bound: false }, paused: true, error: '' }) })
+    f.action.mockResolvedValue(true)
     click(sync.disconnect); await settle()
     expect(f.disconnect).toHaveBeenCalledOnce()
     expect(host.textContent).not.toContain(sync.residency.title)
-    for (const label of [sync.residency.full, sync.residency.remote, sync.residency.clean, sync.residency.download]) expect(findButton(label)).toBeUndefined()
+    for (const label of [sync.residency.clean, sync.residency.download]) expect(findButton(label)).toBeUndefined()
+    expect(host.querySelector('[role="radiogroup"]')).toBeNull()
+})
+it('changes the asset storage choice from its radio options', async () => {
+    await mountBound(residencyStatus({ policy: 'full' }))
+    const options = [...host.querySelectorAll<HTMLInputElement>('[role="radiogroup"] input[type="radio"]')]
+    expect(options.map(option => [option.closest('label')?.textContent?.trim(), option.checked])).toEqual([[sync.residency.full, true], [sync.residency.remote, false]])
+    f.policy.mockResolvedValue(residencyStatus({ policy: 'remote' })); f.status.mockResolvedValue(residencyStatus({ policy: 'remote' }))
+    options[1].click(); await settle()
+    expect(f.policy).toHaveBeenCalledExactlyOnceWith('remote')
+    expect(options[1].checked).toBe(true)
 })
 it('shows no asset storage controls for a stored server registration that is not connected', async () => {
     f.view = { status: { configured: true, bound: false }, paused: true, error: '' }
@@ -325,6 +510,80 @@ it('counts only files the server holds as kept only on the server', async () => 
     const row = [...host.querySelectorAll('*')].find(node => node.children.length === 0 && node.textContent === sync.residency.remoteOnly)?.parentElement?.parentElement
     expect(row?.textContent).toContain('4.0 MiB')
     expect(host.textContent).not.toContain('8.0 MiB')
+})
+it('prints an empty server share in the same unit as external storage sizes', async () => {
+    await mountBound(residencyStatus({ remoteBytes: 0, remoteObjects: 0, serverBytes: 0, serverObjects: 0 }))
+    const row = [...host.querySelectorAll('*')].find(node => node.children.length === 0 && node.textContent === sync.residency.remoteOnly)?.parentElement?.parentElement
+    expect(row?.textContent).toContain('0 B')
+    expect(host.textContent).not.toContain('bytes')
+})
+describe('asset storage chosen before connecting', () => {
+    const choices = () => [...host.querySelectorAll<HTMLInputElement>('[role="radiogroup"] input[type="radio"]')]
+    const shownChoices = () => choices().map(option => [option.closest('label')?.textContent?.trim(), option.checked])
+    it.each(['settings', 'onboarding'] as const)('offers the choice with the registration in the %s screen, keeping every asset on this device by default', async tone => {
+        const connectTarget = vi.fn(async () => {})
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget, tone } })
+        await registration()
+        expect(host.querySelector('[role="radiogroup"]')?.getAttribute('aria-label')).toBe(sync.residency.title)
+        expect(host.textContent).toContain(sync.residency.description)
+        expect(shownChoices()).toEqual([[sync.residency.full, true], [sync.residency.remote, false]])
+        choices()[1].click(); await tick()
+        expect(shownChoices()).toEqual([[sync.residency.full, false], [sync.residency.remote, true]])
+        expect(f.policy).not.toHaveBeenCalled()
+        click(sync.connect); await settle()
+        expect(connectTarget).toHaveBeenCalledExactlyOnceWith(registered, false, 'remote')
+        expect(f.policy).not.toHaveBeenCalled()
+    })
+    it('starts from the asset storage this device already keeps', async () => {
+        f.status.mockResolvedValue(residencyStatus({ policy: 'remote' }))
+        const connectTarget = vi.fn(async () => {})
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget } })
+        await settle(); await registration()
+        expect(shownChoices()).toEqual([[sync.residency.full, false], [sync.residency.remote, true]])
+        click(sync.connect); await settle()
+        expect(connectTarget).toHaveBeenCalledExactlyOnceWith(registered, false, 'remote')
+    })
+    it('downloads every asset with sync stopped once a device that kept them on the server connects keeping them here', async () => {
+        f.status.mockResolvedValue(residencyStatus({ policy: 'remote' }))
+        f.policy.mockResolvedValue(residencyStatus({ policy: 'full', remoteObjects: 0, remoteBytes: 0, serverObjects: 0, serverBytes: 0 }))
+        const connectTarget = vi.fn(async () => { publish({ status: { configured: true, bound: true }, paused: false, error: '' }) })
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget } })
+        await settle(); await registration()
+        choices()[0].click(); await tick()
+        click(sync.connect); await settle()
+        expect(connectTarget).toHaveBeenCalledExactlyOnceWith(registered, false, 'full')
+        expect(f.policy).toHaveBeenCalledExactlyOnceWith('full')
+        const order = [connectTarget, f.hold, f.policy, f.release].map(mock => mock.mock.invocationCallOrder[0])
+        expect(order).toEqual([...order].sort((a, b) => a - b))
+    })
+    it('downloads nothing when that connection is cancelled', async () => {
+        f.status.mockResolvedValue(residencyStatus({ policy: 'remote' }))
+        const connectTarget = vi.fn(async () => ({ kind: 'cancelled' }))
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget } })
+        await settle(); await registration()
+        choices()[0].click(); await tick()
+        click(sync.connect); await settle()
+        expect(connectTarget).toHaveBeenCalledExactlyOnceWith(registered, false, 'full')
+        expect(f.policy).not.toHaveBeenCalled(); expect(f.hold).not.toHaveBeenCalled()
+    })
+    it('leaves a connected device on its own asset storage group when it reads a new registration', async () => {
+        f.view = { status: { configured: true, bound: true }, paused: false, error: '' }
+        f.status.mockResolvedValue(residencyStatus({ policy: 'full' }))
+        const connectTarget = vi.fn(async () => {})
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget } })
+        await settle(); click(sync.enterCode); await tick(); await registration()
+        expect(host.querySelectorAll('[role="radiogroup"]')).toHaveLength(1)
+        click(sync.connect); await settle()
+        expect(connectTarget).toHaveBeenCalledExactlyOnceWith(registered, false, undefined)
+    })
+    it('mounted onboarding connects with the asset storage chosen on its screen', async () => {
+        f.connect.mockResolvedValue({ kind: 'bound' })
+        await openOnboardingServer(); await registration()
+        choices()[1].click(); await tick()
+        click(sync.connect); await settle()
+        expect(f.connect).toHaveBeenCalledExactlyOnceWith(registered, false, 'remote')
+        expect(heading()).toBe(onboarding.done.title)
+    })
 })
 describe('downloading files kept only on the server', () => {
     it.each([
@@ -358,6 +617,147 @@ describe('downloading files kept only on the server', () => {
     })
 })
 
+describe('asset storage before its breakdown loads', () => {
+    const connectedView = (assetPolicy: string, fields: Record<string, unknown> = {}) => ({ status: { configured: true, bound: true, assetPolicy }, paused: false, error: '', ...fields })
+    function deferred<T>() { let resolve!: (value: T) => void; let reject!: (error: unknown) => void; const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail }); return { promise, resolve, reject } }
+    const choices = () => [...host.querySelectorAll<HTMLInputElement>('[role="radiogroup"] input[type="radio"]')]
+    const shownChoices = () => choices().map(option => [option.closest('label')?.textContent?.trim(), option.checked, option.disabled])
+    const loading = () => host.querySelector('[data-residency-loading]')
+    const rowValue = (label: string) => [...host.querySelectorAll('.place')].find(row => row.querySelector('.place-label')?.textContent === label)?.querySelector('.value')?.textContent
+    async function mountLoading(assetPolicy: string) {
+        f.view = connectedView(assetPolicy)
+        const read = deferred<ReturnType<typeof residencyStatus>>()
+        f.status.mockReturnValueOnce(read.promise)
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+        return read
+    }
+    it('shows the choices with the stored policy and a loading state in place of the breakdown', async () => {
+        const read = await mountLoading('remote')
+        expect(host.textContent).toContain(sync.residency.title)
+        expect(shownChoices()).toEqual([[sync.residency.full, false, false], [sync.residency.remote, true, false]])
+        expect(loading()?.getAttribute('role')).toBe('status')
+        expect(loading()?.querySelector('.checking')?.textContent?.trim()).toBe(sync.residency.checking)
+        expect(loading()?.querySelector('.places')?.getAttribute('aria-hidden')).toBe('true')
+        expect([...loading()!.querySelectorAll('.place-label')].map(label => label.textContent)).toEqual([sync.residency.local, sync.residency.remoteOnly, sync.residency.unavailable])
+        expect(host.querySelectorAll('.place .value')).toHaveLength(0)
+        expect(host.querySelector('.distribution')).toBeNull()
+        expect(findButton(sync.residency.download)).toBeUndefined()
+        expect(findButton(sync.residency.clean)?.disabled).toBe(false)
+        read.resolve(residencyStatus({ localBytes: 2048 })); await settle()
+        expect(loading()).toBeNull()
+        expect(rowValue(sync.residency.local)).toBe('2.0 KiB')
+        expect(rowValue(sync.residency.remoteOnly)).toBe('4.0 KiB')
+        expect(rowValue(sync.residency.unavailable)).toBe(sync.count.replace('{0}', '0'))
+        expect(host.querySelector('.distribution')).not.toBeNull()
+        expect(findButton(sync.residency.download)).toBeUndefined()
+    })
+    it('offers the download only once the breakdown lists files kept elsewhere', async () => {
+        const read = await mountLoading('full')
+        expect(shownChoices()).toEqual([[sync.residency.full, true, false], [sync.residency.remote, false, false]])
+        expect(findButton(sync.residency.download)).toBeUndefined()
+        read.resolve(residencyStatus({ policy: 'full' })); await settle()
+        expect(findButton(sync.residency.download)?.disabled).toBe(false)
+    })
+    it('keeps the blocks of the group while the breakdown arrives', async () => {
+        const read = await mountLoading('full')
+        const blocks = () => [...host.querySelectorAll('section')].find(section => section.textContent?.includes(sync.residency.title))?.querySelectorAll('.sync-block').length
+        expect(blocks()).toBe(3)
+        read.resolve(residencyStatus({ policy: 'full' })); await settle()
+        expect(blocks()).toBe(3)
+    })
+    it('changes the choice while the breakdown loads and keeps the newer breakdown over the first one', async () => {
+        const first = await mountLoading('full')
+        f.ensure.mockImplementation(async () => { publish(connectedView('remote')) })
+        f.policy.mockResolvedValue(residencyStatus({ policy: 'remote', localBytes: 1024 }))
+        choices()[1].click(); await settle()
+        expect(f.policy).toHaveBeenCalledExactlyOnceWith('remote')
+        expect(f.status).toHaveBeenCalledOnce()
+        expect(loading()).toBeNull()
+        expect(rowValue(sync.residency.local)).toBe('1.0 KiB')
+        first.resolve(residencyStatus({ policy: 'full', localBytes: 8 * 1024 * 1024 })); await settle()
+        expect(rowValue(sync.residency.local)).toBe('1.0 KiB')
+        expect(shownChoices()).toEqual([[sync.residency.full, false, false], [sync.residency.remote, true, false]])
+        expect(findButton(sync.residency.download)).toBeUndefined()
+    })
+    it('disables the choices while the change runs and returns them to the stored policy when it is refused', async () => {
+        await mountLoading('remote')
+        const change = deferred<never>()
+        f.policy.mockReturnValue(change.promise)
+        choices()[0].click(); await settle()
+        expect(shownChoices()).toEqual([[sync.residency.full, true, true], [sync.residency.remote, false, true]])
+        expect(findButton(sync.residency.cancel)).toBeDefined()
+        change.reject({ code: 'server-unreachable', retryable: true }); await settle()
+        expect(shownChoices()).toEqual([[sync.residency.full, false, false], [sync.residency.remote, true, false]])
+        expect(alertText()).toBe(sync.errorHelp)
+    })
+    it('drops the loading state when the breakdown cannot be read', async () => {
+        const read = await mountLoading('remote')
+        read.reject({ code: 'local-store-unavailable' }); await settle()
+        expect(loading()).toBeNull()
+        expect(host.querySelectorAll('.place')).toHaveLength(0)
+        expect(shownChoices()).toEqual([[sync.residency.full, false, false], [sync.residency.remote, true, false]])
+        expect(findButton(sync.residency.clean)).toBeDefined()
+        expect(alertText()).toBe(sync.errorHelp)
+    })
+    it('shows the sync storage without waiting for the breakdown', async () => {
+        const { getServerSyncCacheUsage } = await import('src/ts/storage/sync/serverSyncProduction')
+        vi.mocked(getServerSyncCacheUsage).mockResolvedValue({ totalBytes: 2, cacheBytes: 1, protectedBytes: 0, reclaimableBytes: 1, ledgerBytes: 1, databaseBytes: 0, blockedReason: null })
+        await mountLoading('full')
+        expect(loading()).not.toBeNull()
+        expect(host.textContent).toContain(sync.management.title)
+    })
+    it('connects keeping every asset here and downloads them when the stored policy kept them on the server', async () => {
+        f.view = { status: { configured: false, assetPolicy: 'remote' }, paused: false, error: '' }
+        f.status.mockReturnValue(new Promise(() => {}))
+        f.policy.mockResolvedValue(residencyStatus({ policy: 'full', remoteObjects: 0, remoteBytes: 0, serverObjects: 0, serverBytes: 0 }))
+        const connectTarget = vi.fn(async () => { publish(connectedView('remote')) })
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget } })
+        await settle(); await registration()
+        expect(shownChoices()).toEqual([[sync.residency.full, false, false], [sync.residency.remote, true, false]])
+        choices()[0].click(); await tick()
+        click(sync.connect); await settle()
+        expect(connectTarget).toHaveBeenCalledExactlyOnceWith(registered, false, 'full')
+        expect(f.policy).toHaveBeenCalledExactlyOnceWith('full')
+        const order = [connectTarget, f.hold, f.policy, f.release].map(mock => mock.mock.invocationCallOrder[0])
+        expect(order).toEqual([...order].sort((a, b) => a - b))
+    })
+    it.each([
+        { name: 'a policy change', returns: 'policy', policy: 'remote', act: () => choices()[1].click() },
+        { name: 'downloading the files kept elsewhere', returns: 'policy', policy: 'full', act: () => click(sync.residency.download) },
+        { name: 'a cleanup', returns: 'evict', policy: 'full', act: () => click(sync.residency.clean) },
+    ] as const)('shows the breakdown $name returns without reading it again', async ({ returns, policy, act }) => {
+        f.view = connectedView('full')
+        f.status.mockResolvedValue(residencyStatus({ policy: 'full', localBytes: 8 * 1024 * 1024 }))
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+        expect(rowValue(sync.residency.local)).toBe('8.0 MiB')
+        f[returns].mockResolvedValue(residencyStatus({ policy, localBytes: 3 * 1024 }))
+        act(); await settle()
+        expect(f[returns]).toHaveBeenCalledOnce()
+        expect(f.status).toHaveBeenCalledOnce()
+        expect(rowValue(sync.residency.local)).toBe('3.0 KiB')
+        expect(alertText()).toBeUndefined()
+    })
+    it('reads the breakdown again after an operation that returns none', async () => {
+        f.view = connectedView('full')
+        f.status.mockResolvedValueOnce(residencyStatus({ policy: 'full', localBytes: 8 * 1024 * 1024 })).mockResolvedValue(residencyStatus({ policy: 'full', localBytes: 1024 }))
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle()
+        click(sync.syncNow); await settle()
+        expect(f.status).toHaveBeenCalledTimes(2)
+        expect(rowValue(sync.residency.local)).toBe('1.0 KiB')
+    })
+    it('keeps a choice made before connecting when the connection status is published again', async () => {
+        f.view = { status: { configured: false, assetPolicy: 'full' }, paused: false, error: '' }
+        component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+        await settle(); await registration()
+        choices()[1].click(); await tick()
+        publish({ status: { configured: false, assetPolicy: 'full' }, paused: false, error: '' }); await settle()
+        expect(shownChoices()).toEqual([[sync.residency.full, false, false], [sync.residency.remote, true, false]])
+    })
+})
+
 const onboarding = languageEnglish.risuNest.onboarding
 const heading = () => host.querySelector('h1')?.textContent
 function pick(title: string) { const entry = [...host.querySelectorAll('button')].find(button => button.querySelector('b')?.textContent === title); expect(entry).toBeDefined(); entry!.click() }
@@ -371,7 +771,7 @@ const registered = { endpoint: 'https://synthetic.invalid', libraryId: 'library'
 it.each(['bound', 'cancelled'])('mounted onboarding advances only after %s shared binding outcome', async kind => {
     f.connect.mockResolvedValue({ kind })
     await openOnboardingServer(); await registration(); click(languageEnglish.risuNest.serverSync.connect); await settle()
-    expect(f.connect).toHaveBeenCalledExactlyOnceWith(registered, false)
+    expect(f.connect).toHaveBeenCalledExactlyOnceWith(registered, false, 'full')
     expect(f.configure).not.toHaveBeenCalled(); expect(f.bind).not.toHaveBeenCalled()
     expect(heading()).toBe(kind === 'bound' ? onboarding.done.title : onboarding.hub.title)
 })
@@ -379,7 +779,7 @@ it('mounted onboarding connects as a new device through the same action', async 
     f.view = { status: { configured: true, bound: false }, paused: true, error: 'writer-collision' }
     f.connect.mockResolvedValue({ kind: 'bound' })
     await openOnboardingServer(); await registration(); click(languageEnglish.lwwSync.newDeviceAction); await settle()
-    expect(f.connect).toHaveBeenCalledExactlyOnceWith(registered, true)
+    expect(f.connect).toHaveBeenCalledExactlyOnceWith(registered, true, 'full')
     expect(heading()).toBe(onboarding.done.title)
 })
 it.each([false, true])('mounted onboarding mentions the QR code only where it can be scanned (%s)', async scan => {
@@ -528,10 +928,10 @@ describe('layout', () => {
     })
 })
 describe('progress', () => {
-    const lane = (name: string, counts: Record<string, unknown> = {}) => ({ lane: name, active: false, step: 'idle', listed: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...counts })
+    const lane = (name: string, counts: Record<string, unknown> = {}) => ({ lane: name, active: false, step: 'idle', listed: 0, listedTotal: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...counts })
     const running = (startedAt: number) => ({
         status: { configured: true, bound: true }, paused: false, running: true, error: '',
-        progress: { mode: 'full', startedAt, stages: ['downloading', 'publishing'], active: ['publishing'], current: 'publishing', rate: 2048, lanes: [lane('send', { active: true, step: 'uploading', filesDone: 1, filesTotal: 2, bytesDone: 1024, bytesTotal: 4096, sentBytes: 3000 }), lane('receive', { receivedBytes: 500 })] },
+        progress: { mode: 'full', startedAt, stages: ['downloading', 'publishing'], active: ['publishing'], current: 'publishing', rate: 2048, plannedSend: 4, lanes: [lane('send', { active: true, step: 'uploading', itemsDone: 1, itemsTotal: 2, filesDone: 1, filesTotal: 2, bytesDone: 1024, bytesTotal: 4096, sentBytes: 3000 }), lane('receive', { receivedBytes: 500 })] },
     })
     const panel = () => host.querySelector('[data-sync-progress]')
     it('shows the running step, the stages and the transfer counts of a sync', async () => {
@@ -541,7 +941,7 @@ describe('progress', () => {
         expect(panel()?.querySelector('[role="status"]')?.textContent).toContain(sync.activity.uploading)
         expect(panel()?.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('25')
         expect([...panel()!.querySelectorAll('li')].map(item => [item.textContent?.trim(), item.getAttribute('aria-current')])).toEqual([[sync.stage.downloading, null], [sync.stage.publishing, 'step']])
-        expect([...panel()!.querySelectorAll('dt')].map(term => term.textContent)).toEqual([sync.verifiedBytes, sync.transferRate, sync.progressFiles, sync.elapsed])
+        expect([...panel()!.querySelectorAll('dt')].map(term => term.textContent)).toEqual([sync.verifiedBytes, sync.transferRate, sync.progressItems, sync.progressFiles, sync.elapsed])
         expect(panel()!.textContent).toContain('2.0 KiB/s')
         expect(host.querySelector('[data-tone]')?.textContent?.trim()).toBe(sync.running)
     })
@@ -626,7 +1026,7 @@ describe('progress', () => {
             expect(lastSync()).toBe(true)
         })
         it('keeps Details as it was left for the next sync', async () => {
-            f.view = connected({ running: true, progress: routine([lane('send', { active: true, step: 'confirming', itemsDone: 1, itemsTotal: 2 })]) })
+            f.view = connected({ running: true, progress: routine([lane('send', { active: true, step: 'confirming', itemsDone: 1, itemsTotal: 2 })], { plannedSend: 2 }) })
             component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
             await settle()
             panel()!.querySelector('summary')!.click(); await settle()

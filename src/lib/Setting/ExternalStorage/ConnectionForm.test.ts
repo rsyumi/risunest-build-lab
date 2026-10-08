@@ -20,6 +20,11 @@ const state = vi.hoisted(() => ({
 }))
 
 const platformState = vi.hoisted(() => ({ android: true, ios: false }))
+const qr = vi.hoisted(() => ({ scan: vi.fn(), cancel: vi.fn() }))
+vi.mock('src/ts/ui/qrScanner', async importOriginal => ({
+    ...await importOriginal<typeof import('src/ts/ui/qrScanner')>(),
+    createQrScanner: () => qr,
+}))
 vi.mock('src/ts/platform', () => ({
     get isTauriAndroid() { return platformState.android },
     get isTauriIOS() { return platformState.ios },
@@ -46,6 +51,7 @@ vi.mock('src/ts/storage/sync/external/bridge', () => ({
 
 import ConnectionForm from './ConnectionForm.svelte'
 import { externalStorageStrings } from './strings'
+import { QrScanError } from 'src/ts/ui/qrScanner'
 
 let target: HTMLDivElement
 let component: ReturnType<typeof mount> | undefined
@@ -139,7 +145,20 @@ async function settle(): Promise<void> {
     await tick()
 }
 
+/** Fills the required fields a test leaves empty, as a user would before continuing. */
+async function fillRequiredFields(): Promise<void> {
+    for (const label of target.querySelectorAll('label')) {
+        const input = label.querySelector<HTMLInputElement>('input[id^="external-storage-field-"]')
+        if (!input || input.value.trim() || label.querySelector('span')?.textContent?.endsWith(strings.optional)) continue
+        typeInto(input, input.id.endsWith('-endpoint') ? 'https://storage.test'
+            : input.type === 'datetime-local' ? '2030-01-01T00:00' : 'synthetic-value')
+        input.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    await settle()
+}
+
 async function prepareGoogleConnection(): Promise<void> {
+    await fillRequiredFields()
     button(strings.prepare).click()
     await settle()
     labelControl<HTMLInputElement>(strings.confirmEndpoint).click()
@@ -164,6 +183,8 @@ beforeEach(() => {
     platformState.ios = false
     state.native = true
     for (const mock of Object.values(state)) if (typeof mock !== 'boolean') mock.mockReset()
+    qr.scan.mockReset()
+    qr.cancel.mockReset()
     target = document.createElement('div')
     document.body.append(target)
     state.listProviders.mockResolvedValue([{
@@ -186,6 +207,49 @@ afterEach(async () => {
     if (component) await unmount(component)
     component = undefined
     target.remove()
+})
+
+describe('choosing a service', () => {
+    it('names the service once, as the label of its select', async () => {
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+
+        const headings = [...target.querySelectorAll('h1, h2, h3, h4, h5, h6')].map(item => item.textContent?.trim())
+        expect(headings).not.toContain(strings.provider)
+        const named = [...target.querySelectorAll('*')]
+            .filter(item => item.children.length === 0 && item.textContent?.trim() === strings.provider)
+        expect(named).toHaveLength(1)
+        expect(named[0].closest('label')?.querySelector('select')).not.toBeNull()
+    })
+
+    it('warns about the hidden app data space only while it is the chosen Google Drive location', async () => {
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+        const google = strings.providers.google_drive
+        const space = labelControl<HTMLSelectElement>(strings.fields['google_drive.space'])
+        expect(space.value).toBe('drive')
+        expect(target.textContent).not.toContain(google.warningTitle)
+        expect(target.textContent).not.toContain(google.warning)
+
+        space.value = 'appDataFolder'
+        space.dispatchEvent(new Event('change', { bubbles: true }))
+        await settle()
+        expect(target.textContent).toContain(google.warningTitle)
+        expect(target.textContent).toContain(google.warning)
+
+        const visible = labelControl<HTMLSelectElement>(strings.fields['google_drive.space'])
+        visible.value = 'drive'
+        visible.dispatchEvent(new Event('change', { bubbles: true }))
+        await settle()
+        expect(target.textContent).not.toContain(google.warningTitle)
+    })
+
+    it('keeps the GitLab cleanup policy warning for every GitLab connection', async () => {
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+        await selectProvider('gitlab_packages')
+        expect(target.textContent).toContain(strings.providers.gitlab_packages.warningTitle)
+    })
 })
 
 describe('opening an existing repository', () => {
@@ -234,6 +298,7 @@ describe('opening an existing repository', () => {
         code.value = 'fixed-recovery-key'
         code.dispatchEvent(new Event('input', { bubbles: true }))
         await settle()
+        await fillRequiredFields()
         button(strings.prepare).click()
         await settle()
 
@@ -242,6 +307,62 @@ describe('opening an existing repository', () => {
             recoveryKey: 'fixed-recovery-key',
         }))
         expect(state.prepareConnectionSettingsImport).not.toHaveBeenCalled()
+    })
+})
+
+describe('scanning connection settings', () => {
+    const payload = () => target.querySelector<HTMLTextAreaElement>('textarea')!.value
+    const restore = (tone?: 'onboarding') => {
+        component = mount(ConnectionForm, {
+            target,
+            props: { strings, onconnected: vi.fn(), oncancel: vi.fn(), restoreOnly: true, ...(tone ? { tone } : {}) },
+        })
+    }
+
+    it('fills the settings field from the scanned code in the screen wording', async () => {
+        qr.scan.mockResolvedValue('  scanned-settings  ')
+        restore()
+        await settle()
+        button(strings.scanConnectionSettings).click()
+        await settle()
+        expect(qr.scan).toHaveBeenCalledExactlyOnceWith('settings')
+        expect(payload()).toBe('scanned-settings')
+        expect(target.querySelector('[role="alert"]')).toBeNull()
+    })
+
+    it('uses the onboarding wording from the onboarding screen', async () => {
+        qr.scan.mockResolvedValue('scanned-settings')
+        restore('onboarding')
+        await settle()
+        button(strings.scanConnectionSettings).click()
+        await settle()
+        expect(qr.scan).toHaveBeenCalledExactlyOnceWith('onboarding')
+    })
+
+    it('returns quietly from a cancelled scan and reports a failed one', async () => {
+        qr.scan.mockRejectedValueOnce(new QrScanError('qr-scan-cancelled')).mockRejectedValueOnce(new QrScanError('qr-camera-permission-denied'))
+        restore()
+        await settle()
+        button(strings.scanConnectionSettings).click()
+        await settle()
+        expect(target.querySelector('[role="alert"]')).toBeNull()
+        expect(payload()).toBe('')
+        button(strings.scanConnectionSettings).click()
+        await settle()
+        expect(target.querySelector('[role="alert"]')?.textContent).toBe(strings.errorGeneric)
+    })
+
+    it('marks the scan button busy while the camera runs and ends the scan when the form closes', async () => {
+        qr.scan.mockReturnValue(new Promise(() => {}))
+        restore()
+        await settle()
+        button(strings.scanConnectionSettings).click()
+        await settle()
+        const scanButton = [...target.querySelectorAll('button')].find(item => item.textContent?.includes(strings.scanConnectionSettings))
+        expect(scanButton?.getAttribute('aria-busy')).toBe('true')
+        await unmount(component!)
+        component = undefined
+        expect(qr.cancel).toHaveBeenCalledOnce()
     })
 })
 
@@ -254,6 +375,7 @@ describe('OAuth folder setup', () => {
         expect(target.textContent).not.toContain('Folder ID')
         expect(target.textContent).not.toContain('Drive ID')
         expect(target.textContent).not.toContain('Folder item ID')
+        await fillRequiredFields()
         button(strings.prepare).click()
         await settle()
 
@@ -288,6 +410,7 @@ describe('OAuth folder setup', () => {
         space.dispatchEvent(new Event('change', { bubbles: true }))
         await settle()
         expect(() => labelControl(strings.fields['google_drive.folderName'])).toThrow()
+        await fillRequiredFields()
         button(strings.prepare).click()
         await settle()
         expect(state.prepareConnection.mock.calls[0][0].config.location).not.toHaveProperty('folderName')
@@ -306,6 +429,7 @@ describe('OAuth folder setup', () => {
         await selectMode(strings.existing)
         typeInto(labelControl<HTMLInputElement>(strings.recoveryCode), 'recovery-key')
         await settle()
+        await fillRequiredFields()
         button(strings.prepare).click()
         await settle()
 
@@ -342,6 +466,7 @@ describe('OAuth folder setup', () => {
         await selectMode(strings.existing)
         typeInto(labelControl<HTMLInputElement>(strings.recoveryCode), 'recovery-key')
         await settle()
+        await fillRequiredFields()
         button(strings.prepare).click()
         await settle()
         button(strings.selectFolder).click()
@@ -368,6 +493,7 @@ describe('OAuth folder setup', () => {
         await selectMode(strings.existing)
         typeInto(labelControl<HTMLInputElement>(strings.recoveryCode), 'recovery-key')
         await settle()
+        await fillRequiredFields()
         button(strings.prepare).click()
         await settle()
         typeInto(labelControl<HTMLInputElement>(strings.oauthClientSecret), 'secret')
@@ -399,6 +525,7 @@ describe('OAuth folder setup', () => {
         await selectMode(strings.existing)
         typeInto(labelControl<HTMLInputElement>(strings.recoveryCode), 'recovery-key')
         await settle()
+        await fillRequiredFields()
         button(strings.prepare).click()
         await settle()
         button(strings.selectFolder).click()
@@ -427,6 +554,7 @@ describe('OAuth folder setup', () => {
         project.value = 'application-id'
         project.dispatchEvent(new Event('change', { bubbles: true }))
         await settle()
+        await fillRequiredFields()
         button(strings.prepare).click()
         await settle()
         labelControl<HTMLInputElement>(strings.confirmEndpoint).click()
@@ -635,6 +763,7 @@ describe('service presets', () => {
         })
         await settle()
         await selectProvider('gitlab_packages')
+        await fillRequiredFields()
         button(strings.prepare).click()
         await settle()
         labelControl<HTMLInputElement>(strings.confirmEndpoint).click()
@@ -681,6 +810,7 @@ describe('what a connection stores', () => {
         state.validateSyncRoot.mockRejectedValueOnce({ kind: 'invalid-config' })
         component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
         await settle(); await selectProvider('s3'); button(strings.sync).click(); await settle()
+        await fillRequiredFields()
         button(strings.prepare).click(); await settle()
         expect(state.validateSyncRoot).toHaveBeenCalledOnce()
         expect(state.prepareConnection).not.toHaveBeenCalled()
@@ -709,7 +839,7 @@ describe('what a connection stores', () => {
         })
         await settle()
         await selectProvider('s3')
-        expect(target.textContent).not.toContain(strings.scopeHelp)
+        await fillRequiredFields()
         button(strings.prepare).click()
         await settle()
 
@@ -721,6 +851,95 @@ describe('what a connection stores', () => {
         expect(state.prepareConnection.mock.calls.at(-1)?.[0]).not.toHaveProperty('publicationStrategy')
     })
 
+})
+
+describe('required connection fields', () => {
+    function changeValue(control: HTMLInputElement, value: string): void {
+        typeInto(control, value)
+        control.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+
+    it('reports an empty WebDAV folder name beside the field without preparing', async () => {
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+        await selectProvider('webdav')
+        changeValue(labelControl<HTMLInputElement>(strings.endpoint), 'https://dav.example.test/remote.php/dav')
+        changeValue(labelControl<HTMLInputElement>(strings.fields['webdav.accountId']), 'synthetic-user')
+        await settle()
+        button(strings.prepare).click()
+        await settle()
+
+        const root = labelControl<HTMLInputElement>(strings.fields['webdav.root'])
+        expect(state.prepareConnection).not.toHaveBeenCalled()
+        expect([...target.querySelectorAll('[role="alert"]')].map(alert => alert.textContent))
+            .toEqual([strings.folderNameRequired])
+        expect(root.closest('label')?.querySelector('[role="alert"]')).not.toBeNull()
+        expect(document.activeElement).toBe(root)
+
+        typeInto(root, 'RisuNest')
+        await settle()
+        expect(target.querySelector('[role="alert"]')).toBeNull()
+        root.dispatchEvent(new Event('change', { bubbles: true }))
+        await settle()
+        button(strings.prepare).click()
+        await settle()
+        expect(state.prepareConnection).toHaveBeenCalledWith(expect.objectContaining({
+            config: expect.objectContaining({ accountId: 'synthetic-user', location: { root: 'RisuNest' } }),
+        }))
+    })
+
+    it('describes the WebDAV folder as the one to create in or the one that holds the repository', async () => {
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+        await selectProvider('webdav')
+        const help = () => labelControl<HTMLInputElement>(strings.fields['webdav.root']).closest('label')?.textContent
+        expect(help()).toContain(strings.fieldHelp['webdav.root'])
+        await selectMode(strings.existing)
+        expect(help()).toContain(strings.existingFieldHelp['webdav.root'])
+        expect(help()).not.toContain(strings.fieldHelp['webdav.root'])
+    })
+
+    it('reports each empty required field and leaves optional fields alone', async () => {
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+        await selectProvider('s3')
+        button(strings.prepare).click()
+        await settle()
+
+        const alerts = [...target.querySelectorAll('[role="alert"]')]
+        expect(alerts.map(alert => alert.closest('label')?.querySelector('span')?.textContent))
+            .toEqual([strings.endpoint, strings.fields['s3.bucket']])
+        expect(alerts.map(alert => alert.textContent)).toEqual([strings.fieldRequired, strings.fieldRequired])
+        expect(document.activeElement).toBe(labelControl<HTMLInputElement>(strings.endpoint))
+        expect(state.prepareConnection).not.toHaveBeenCalled()
+    })
+
+    it('reports an empty secret beside the field without connecting', async () => {
+        state.prepareConnection.mockResolvedValue({
+            ...prepared,
+            requiresOAuth: false,
+            endpoint: { ...prepared.endpoint, providerId: 's3', authority: 's3.test' },
+        })
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+        await selectProvider('s3')
+        await fillRequiredFields()
+        button(strings.prepare).click()
+        await settle()
+        labelControl<HTMLInputElement>(strings.confirmEndpoint).click()
+        await settle()
+        typeInto(labelControl<HTMLInputElement>(strings.fields['s3.accessKeyId']), 'synthetic-access-key')
+        await settle()
+        button(strings.connect).click()
+        await settle()
+
+        const secret = labelControl<HTMLInputElement>(strings.fields['s3.secretAccessKey'])
+        expect(state.commitConnection).not.toHaveBeenCalled()
+        expect([...target.querySelectorAll('[role="alert"]')].map(alert => alert.textContent))
+            .toEqual([strings.fieldRequired])
+        expect(secret.closest('label')?.querySelector('[role="alert"]')).not.toBeNull()
+        expect(document.activeElement).toBe(secret)
+    })
 })
 
 describe('native failure messages', () => {
@@ -737,12 +956,14 @@ describe('native failure messages', () => {
             requiresOAuth: false,
             endpoint: { ...prepared.endpoint, providerId: 's3', authority: 's3.test' },
         })
+        await fillRequiredFields()
         button(strings.prepare).click()
         await settle()
         labelControl<HTMLInputElement>(strings.confirmEndpoint).click()
         await settle()
 
         state.commitConnection.mockRejectedValueOnce({ kind: 'unsupported', httpStatus: null, retryAtMs: null })
+        await fillRequiredFields()
         button(strings.connect).click()
         await settle()
 

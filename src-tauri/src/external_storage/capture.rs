@@ -274,23 +274,7 @@ impl CaptureCatalog {
         expected_hash: &[u8; 32],
         expected_identity: &CaptureIdentity,
     ) -> Result<Self> {
-        let mut file = crate::trust_boundary::open_regular_source(path)?;
-        let size = file.metadata()?.len();
-        if hash_reader(&mut file, size).map_err(|_| invalid("Capture catalog integrity failed"))?
-            != *expected_hash
-        {
-            return Err(invalid("Capture catalog integrity failed"));
-        }
-        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let encoded: String = db.query_row(
-            "SELECT identity FROM capture_info WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?;
-        let identity: CaptureIdentity = serde_json::from_str(&encoded)?;
-        if identity != *expected_identity {
-            return Err(invalid("Capture catalog identity differs"));
-        }
+        let (db, identity) = verified_catalog(path, expected_hash, expected_identity)?;
         Ok(Self {
             db,
             path: path.into(),
@@ -654,6 +638,38 @@ impl ContentCaptureSink for CaptureCatalog {
     }
 }
 
+/// The catalog at `path`, read only, once its bytes and identity match the registration.
+fn verified_catalog(
+    path: &Path,
+    expected_hash: &[u8; 32],
+    expected_identity: &CaptureIdentity,
+) -> Result<(Connection, CaptureIdentity)> {
+    let mut file = crate::trust_boundary::open_regular_source(path)?;
+    let size = file.metadata()?.len();
+    if hash_reader(&mut file, size).map_err(|_| invalid("Capture catalog integrity failed"))?
+        != *expected_hash
+    {
+        return Err(invalid("Capture catalog integrity failed"));
+    }
+    let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let encoded: String = db.query_row(
+        "SELECT identity FROM capture_info WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    let identity: CaptureIdentity = serde_json::from_str(&encoded)?;
+    if identity != *expected_identity {
+        return Err(invalid("Capture catalog identity differs"));
+    }
+    Ok((db, identity))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Calls to `registered_roots`, so a test can count them.
+    pub(crate) static REGISTERED_ROOT_COLLECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn resolve_registered_catalog(
     repository_root: &Path,
     reference: &DurableCaptureReference,
@@ -686,6 +702,9 @@ fn resolve_registered_catalog(
     Ok((canonical, root))
 }
 
+/// Each body's length and file as `ContentStore::locate` found it, by identity.
+type Located = std::collections::BTreeMap<String, Option<(u64, Option<PathBuf>)>>;
+
 fn capture_roots<'a>(
     references: impl IntoIterator<Item = &'a DurableCaptureReference>,
     repository_root: &Path,
@@ -707,6 +726,9 @@ fn capture_roots<'a>(
     } else {
         None
     };
+    // Catalogs under one root share its content store, and most of them name
+    // the same bodies, so each body is located once per pass.
+    let mut stores = std::collections::BTreeMap::<PathBuf, (ContentStore, Located)>::new();
     for reference in references {
         check()?;
         let (path, external_root) = resolve_registered_catalog(repository_root, reference)?;
@@ -714,11 +736,17 @@ fn capture_roots<'a>(
             .ok()
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or_else(|| invalid("Registered capture hash is invalid"))?;
-        let catalog =
-            CaptureCatalog::reopen(&path, &external_root, &expected, &reference.identity)?;
+        let (db, _) = verified_catalog(&path, &expected, &reference.identity)?;
+        let (content, located) = match stores.entry(external_root) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let content = ContentStore::open(entry.key())?;
+                entry.insert((content, Default::default()))
+            }
+        };
         roots.catalogs.insert(path);
 
-        let mut dependencies = catalog.db.prepare(
+        let mut dependencies = db.prepare(
             "SELECT DISTINCT d.hash FROM dependencies d LEFT JOIN generated g ON g.hash=d.hash WHERE g.hash IS NULL",
         )?;
         for hash in dependencies.query_map([], |row| row.get::<_, String>(0))? {
@@ -729,7 +757,7 @@ fn capture_roots<'a>(
             roots.assets.object_hashes.insert(hash);
         }
         if let Some(payloads) = &payloads {
-            let mut held = catalog.db.prepare(
+            let mut held = db.prepare(
                 "SELECT DISTINCT d.hash,d.bytes FROM dependencies d LEFT JOIN generated g ON g.hash=d.hash WHERE g.hash IS NULL",
             )?;
             for payload in held.query_map([], |row| {
@@ -747,7 +775,7 @@ fn capture_roots<'a>(
             }
         }
 
-        let mut objects = catalog.db.prepare(
+        let mut objects = db.prepare(
             "SELECT hash,bytes FROM records UNION SELECT hash,bytes FROM generated ORDER BY hash",
         )?;
         for object in objects.query_map([], |row| {
@@ -758,10 +786,25 @@ fn capture_roots<'a>(
                 return Err(invalid("Registered capture object identity differs"));
             }
             check()?;
-            catalog.content.validate_checked(&hash, bytes, verify_contents, &cancelled)?;
+            let location = match located.get(&hash) {
+                Some(location) => location.clone(),
+                None => {
+                    let location = content.locate(&hash)?;
+                    located.insert(hash.clone(), location.clone());
+                    location
+                }
+            };
+            match &location {
+                Some((size, _)) if *size == bytes as u64 => {}
+                Some(_) => return Err(invalid("Capture object length differs")),
+                None => return Err(invalid("Capture object is missing")),
+            }
+            if verify_contents {
+                content.validate_checked(&hash, bytes, true, &cancelled)?;
+            }
             // Protected in whichever store holds it: a file by its path, a
             // database body by its identity.
-            match catalog.content.file_path(&hash)? {
+            match location.and_then(|(_, path)| path) {
                 Some(path) => {
                     roots.logical_records.insert(path);
                 }
@@ -810,6 +853,8 @@ pub(crate) fn registered_roots(
     db: &Connection,
     repository_root: &Path,
 ) -> Result<crate::asset_repository::migration_gc::AssetRootSet> {
+    #[cfg(test)]
+    REGISTERED_ROOT_COLLECTIONS.with(|count| count.set(count.get() + 1));
     let references = registered_references(db, repository_root)?;
     if references.is_empty() {
         return Ok(crate::asset_repository::migration_gc::AssetRootSet::default());
@@ -1038,6 +1083,54 @@ mod tests {
         assert!(catalog.content.put(&record_hash, record).is_err());
         assert!(registered_capture_roots([&reference], root.path()).is_ok());
         assert!(validate_capture_sources([&reference], root.path()).is_err());
+    }
+
+    /// A finished catalog under `external` holding one record, with what it records
+    /// for that record changed by `edit` before it is registered.
+    fn registered_record(external: &Path, name: &str, record: &[u8], edit: &str) -> DurableCaptureReference {
+        let mut catalog = CaptureCatalog::create(&external.join("captures").join(name), external, None).unwrap();
+        catalog.begin(&identity(), None).unwrap();
+        catalog.record("root", record).unwrap();
+        catalog.finish().unwrap();
+        if !edit.is_empty() {
+            catalog.db.execute_batch(edit).unwrap();
+        }
+        catalog.durable_reference(name, external.parent().unwrap()).unwrap()
+    }
+
+    fn validation_message(result: Result<RegisteredCaptureRoots>) -> String {
+        match result {
+            Err(StoreError::Validation { message }) => message,
+            other => panic!("expected a validation failure, got {:?}", other.map(|roots| roots.catalogs)),
+        }
+    }
+
+    #[test]
+    fn catalogs_naming_one_body_are_checked_against_it_each() {
+        let root = tempfile::tempdir().unwrap();
+        let external = root.path().join("external-storage");
+        let record = b"synthetic shared record";
+        let record_hash = hex::encode(hash(record));
+        let first = registered_record(&external, "first", record, "");
+        let second = registered_record(&external, "second", record, "");
+        let roots = registered_capture_roots([&first, &second], root.path()).unwrap();
+        assert_eq!(roots.catalogs.len(), 2);
+        assert_eq!(roots.content_objects, BTreeSet::from([record_hash.clone()]));
+        assert!(roots.logical_records.is_empty());
+
+        // The body is found once, and a later catalog that records another
+        // length for it still fails as it does alone.
+        let longer = registered_record(&external, "longer", record, "UPDATE records SET bytes=bytes+1");
+        assert_eq!(validation_message(registered_capture_roots([&longer], root.path())), "Capture object length differs");
+        assert_eq!(validation_message(registered_capture_roots([&first, &longer], root.path())), "Capture object length differs");
+
+        let other = b"synthetic record only one catalog names";
+        let lost = registered_record(&external, "lost", other, "");
+        let store = rusqlite::Connection::open(external.join("content.sqlite")).unwrap();
+        store.execute("DELETE FROM small_objects WHERE hash=?1", [hex::encode(hash(other))]).unwrap();
+        drop(store);
+        assert_eq!(validation_message(registered_capture_roots([&first, &lost], root.path())), "Capture object is missing");
+        assert!(registered_capture_roots([&first, &second], root.path()).is_ok());
     }
 
     #[test]

@@ -5,8 +5,8 @@ export const registeredCustomPluginMCPs: Map<string, CustomPluginMCPClient> = ne
 
 export class CustomPluginMCPClient extends MCPClientLike {
 
-    #getToolList: () => Promise<MCPTool[]>;
-    #callTool: (toolName: string, content: any) => Promise<RPCToolCallContent[]>;
+    #getToolList: (() => Promise<MCPTool[]>) | null;
+    #callTool: ((toolName: string, content: any) => Promise<RPCToolCallContent[]>) | null;
     constructor(arg: {
         identifier: string;
         name: string;
@@ -24,11 +24,18 @@ export class CustomPluginMCPClient extends MCPClientLike {
     }
 
     async getToolList() {
+        if (!this.#getToolList) return [];
         return await this.#getToolList();
     }
 
     async callTool(toolName: string, args: any) {
+        if (!this.#callTool) throw new Error('Plugin MCP is no longer registered');
         return await this.#callTool(toolName, args);
+    }
+
+    revoke() {
+        this.#getToolList = null;
+        this.#callTool = null;
     }
 
 }
@@ -50,9 +57,12 @@ export async function registerMCPModule(arg: {
         getToolList,
         callTool,
     });
+    registeredCustomPluginMCPs.get(arg.identifier)?.revoke();
     registeredCustomPluginMCPs.set(arg.identifier, client);
+    return client;
 }
 
 export async function unregisterMCPModule(identifier: string) {
+    registeredCustomPluginMCPs.get(identifier)?.revoke();
     registeredCustomPluginMCPs.delete(identifier);
 }

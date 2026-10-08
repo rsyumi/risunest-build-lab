@@ -329,9 +329,9 @@ pub(crate) fn export_verified_snapshot_controlled(
     {
         return Err(corrupt("snapshot device sections differ from its capture"));
     }
-    let sections = super::sections::prepare_received_backup_sections(sections, cancel)?;
-    let fingerprint = decode_hash(&snapshot.library_fingerprint)?;
     std::fs::create_dir_all(scratch_parent).map_err(transient)?;
+    let sections = super::sections::prepare_received_backup_sections(sections, scratch_parent, cancel)?;
+    let fingerprint = decode_hash(&snapshot.library_fingerprint)?;
     let scratch = tempfile::Builder::new()
         .prefix("external-snapshot-export-")
         .tempdir_in(scratch_parent)

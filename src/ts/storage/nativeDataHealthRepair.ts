@@ -1,7 +1,6 @@
 import type { PersistentDataRuntime } from './persistentDataRuntime'
 import { RevisionConflictError } from './persistentDataStore'
 import { NativeFileJobActivationCommittedError } from './nativeFileJobs'
-import { notifyLocalPersistentRevision } from './persistentRevisionEvents'
 
 export async function runNativeDataHealthRepair<T extends { revision: number }>(
     expectedRevision: number,
@@ -15,20 +14,17 @@ export async function runNativeDataHealthRepair<T extends { revision: number }>(
         throw new RevisionConflictError(expectedRevision, token.revision)
     }
     const fence = await runtime.acquireDestructiveReplacementFence(token)
-    let committedRevision: number | undefined
     try {
         const result = await mutate(fence.revision).catch((error: unknown) => {
             if (error && typeof error === 'object' && 'code' in error && error.code === 'committed'
                 && 'revision' in error && typeof error.revision === 'number'
                 && Number.isSafeInteger(error.revision) && error.revision >= fence.revision) {
-                committedRevision = error.revision
                 const committedError = new NativeFileJobActivationCommittedError(error.revision, error)
                 runtime.markCommittedWorkingSetRefreshRequired(error.revision, committedError)
                 throw committedError
             }
             throw error
         })
-        committedRevision = result.revision
         try {
             const outcome = await fence.refreshCommittedWorkingSet(result.revision)
             if (outcome.projection === 'refresh-required') {
@@ -40,6 +36,5 @@ export async function runNativeDataHealthRepair<T extends { revision: number }>(
         return result
     } finally {
         fence.release()
-        if (committedRevision !== undefined) notifyLocalPersistentRevision(committedRevision)
     }
 }

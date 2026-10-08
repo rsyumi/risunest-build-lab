@@ -31,6 +31,7 @@ import {
     type NativeFileJobResult,
 } from './nativeFileJobs'
 import { describeDesktopSource } from './nativeFileSourceInfo'
+import { formatPreservationReport } from './preservationReportMessage'
 import { getPersistentDataRuntime } from './persistentDataRuntime.svelte'
 import {
     holdServerSyncAfterRestore,
@@ -321,10 +322,7 @@ export async function restoreBackupFromNativeSource(
                             'Unsupported backup format',
                         )
                     })()
-                    if (report)
-                        alertNormal(
-                            `${language.portableBackup.preserved}: ${report.files} ${language.files}, ${report.bytes} bytes. ${language.portableBackup.preservedSourceHelp}\n${report.path}`,
-                        )
+                    if (report) alertNormal(formatPreservationReport(report))
                     return result
             } finally {
                 joined.dispose()

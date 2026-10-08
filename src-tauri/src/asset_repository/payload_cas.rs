@@ -1,7 +1,7 @@
 use crate::trust_boundary::{is_link_like, is_lower_hex_256, sync_directory};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs::{self, File, Metadata, OpenOptions},
     io::{self, ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
@@ -29,6 +29,13 @@ pub(crate) fn reset_root_path_validations() {
 #[allow(dead_code)]
 pub(crate) fn root_path_validations() -> usize {
     ROOT_PATH_VALIDATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Runs between the validation of a shard folder and the lookups through it.
+    static STAT_OBJECTS_SHARD_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
@@ -558,6 +565,140 @@ impl PayloadCas {
         Ok(Some(fs::symlink_metadata(path)?.len()))
     }
 
+    /// The length of every object file, read in one pass over the shard
+    /// directories instead of one confined lookup per object.
+    pub(crate) fn object_lengths(&self) -> io::Result<HashMap<String, u64>> {
+        self.ensure_repository_root()?;
+        let mut lengths = HashMap::new();
+        let assets_directory = self.repository_root.join("assets");
+        let objects_directory = assets_directory.join("objects");
+        if !self.existing_owned_directory(&assets_directory)?
+            || !self.existing_owned_directory(&objects_directory)?
+        {
+            return Ok(lengths);
+        }
+        for shard in fs::read_dir(&objects_directory)? {
+            let shard = shard?;
+            let Some(prefix) = shard.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let metadata = match shard.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if prefix.len() != 2 || !metadata.is_dir() || is_link_like(&metadata) {
+                continue;
+            }
+            let entries = match fs::read_dir(shard.path()) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            for entry in entries {
+                let entry = entry?;
+                let Some(rest) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                let content_hash = format!("{prefix}{rest}");
+                if !is_lower_hex_256(&content_hash) {
+                    continue;
+                }
+                let metadata = match entry.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                if metadata.is_file() && !is_link_like(&metadata) {
+                    lengths.insert(content_hash, metadata.len());
+                }
+            }
+        }
+        Ok(lengths)
+    }
+
+    /// What `stat_object` answers for each hash, validating the repository root and its
+    /// object folders once per call and each shard folder before and after its objects are
+    /// looked up, instead of once per object. A shard or object folder that disappears or is
+    /// replaced during the pass is looked up again object by object, so a concurrent write or
+    /// cleanup answers as `stat_object` would and a link still fails closed.
+    pub(crate) fn stat_objects<'a>(
+        &self,
+        content_hashes: impl IntoIterator<Item = &'a str>,
+    ) -> io::Result<Vec<Option<u64>>> {
+        #[cfg(test)]
+        super::body_io::batch_stat_request();
+        let content_hashes = content_hashes.into_iter().collect::<Vec<_>>();
+        let mut shards = BTreeMap::<&str, Vec<usize>>::new();
+        for (index, content_hash) in content_hashes.iter().enumerate() {
+            validate_content_hash(content_hash)?;
+            shards.entry(&content_hash[..2]).or_default().push(index);
+        }
+        let mut sizes = vec![None; content_hashes.len()];
+        if content_hashes.is_empty() {
+            return Ok(sizes);
+        }
+        let Some(objects_directory) = self.checked_objects_directory()? else {
+            return Ok(sizes);
+        };
+        let mut again = Vec::new();
+        for (shard, indices) in shards {
+            let shard_directory = objects_directory.join(shard);
+            if !self.existing_owned_directory(&shard_directory)? {
+                continue;
+            }
+            #[cfg(test)]
+            STAT_OBJECTS_SHARD_HOOK.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().as_mut() {
+                    hook(&shard_directory);
+                }
+            });
+            for &index in &indices {
+                let object_path = shard_directory.join(&content_hashes[index][2..]);
+                match fs::symlink_metadata(&object_path) {
+                    Ok(metadata) => {
+                        if is_link_like(&metadata) {
+                            return invalid_owned_path(&object_path, "linked object is forbidden");
+                        }
+                        if !metadata.is_file() {
+                            return invalid_owned_path(
+                                &object_path,
+                                "content-addressed object is not a file",
+                            );
+                        }
+                        sizes[index] = Some(metadata.len());
+                    }
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            // The sizes stand only if they were read through the shard validated above.
+            if !self.existing_owned_directory(&shard_directory)? {
+                again.extend(indices);
+            }
+        }
+        if self.checked_objects_directory()?.as_ref() != Some(&objects_directory) {
+            again = (0..content_hashes.len()).collect();
+        }
+        for index in again {
+            sizes[index] = self.stat_object(content_hashes[index])?;
+        }
+        Ok(sizes)
+    }
+
+    fn checked_objects_directory(&self) -> io::Result<Option<PathBuf>> {
+        self.ensure_repository_root()?;
+        let assets_directory = self.repository_root.join("assets");
+        if !self.existing_owned_directory(&assets_directory)? {
+            return Ok(None);
+        }
+        let objects_directory = assets_directory.join("objects");
+        if !self.existing_owned_directory(&objects_directory)? {
+            return Ok(None);
+        }
+        Ok(Some(objects_directory))
+    }
+
     pub fn read_object(&self, content_hash: &str) -> io::Result<Option<Vec<u8>>> {
         #[cfg(test)]
         let _body_scope = super::body_io::object_scope(content_hash);
@@ -987,16 +1128,7 @@ impl PayloadCasReadScan {
     }
 
     fn checked_objects_directory(&self) -> io::Result<Option<PathBuf>> {
-        self.cas.ensure_repository_root()?;
-        let assets_directory = self.cas.repository_root.join("assets");
-        if !self.cas.existing_owned_directory(&assets_directory)? {
-            return Ok(None);
-        }
-        let objects_directory = assets_directory.join("objects");
-        if !self.cas.existing_owned_directory(&objects_directory)? {
-            return Ok(None);
-        }
-        Ok(Some(objects_directory))
+        self.cas.checked_objects_directory()
     }
 }
 
@@ -2347,5 +2479,171 @@ mod body_io_tests {
         assert_eq!(owner.asset_work().read_bytes, 3); assert_eq!(owner.asset_work().outstanding_readers, 0);
         assert!(owner.scope_violations > 0); assert!(worker.scope_violations > 0);
         assert_eq!(worker.asset_work().read_bytes, 0);
+    }
+}
+
+#[cfg(test)]
+mod stat_objects_tests {
+    use super::*;
+    use crate::asset_repository::body_io::{reset_body_io, take_body_io};
+
+    /// Objects in `count` different shards, sorted by hash, so the pass reaches them in order.
+    fn objects(cas: &PayloadCas, count: usize) -> Vec<PreparedPayload> {
+        let mut shards = BTreeSet::new();
+        let mut objects = (0..)
+            .map(|index| cas.prepare_bytes(format!("synthetic body {index}").repeat(index % 5 + 1).as_bytes()).unwrap())
+            .filter(|object| shards.insert(object.content_hash[..2].to_owned()))
+            .take(count)
+            .collect::<Vec<_>>();
+        objects.sort_by(|left, right| left.content_hash.cmp(&right.content_hash));
+        objects
+    }
+
+    fn hashes(objects: &[PreparedPayload]) -> Vec<&str> {
+        objects.iter().map(|object| object.content_hash.as_str()).collect()
+    }
+
+    /// Runs `hook` once, at the first shard the pass validates.
+    fn with_shard_hook<T>(hook: impl FnOnce(&Path) + 'static, run: impl FnOnce() -> T) -> T {
+        let mut hook = Some(hook);
+        STAT_OBJECTS_SHARD_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |shard: &Path| {
+                if let Some(hook) = hook.take() {
+                    hook(shard);
+                }
+            }))
+        });
+        let result = run();
+        STAT_OBJECTS_SHARD_HOOK.with(|slot| *slot.borrow_mut() = None);
+        result
+    }
+
+    fn link_directory(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            assert!(std::process::Command::new("cmd").creation_flags(0x08000000).args(["/C", "mklink", "/J"])
+                .arg(link).arg(target).output().unwrap().status.success());
+        }
+    }
+
+    #[test]
+    fn answers_what_stat_object_answers_in_one_batch_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let unwritten = "ab".repeat(32);
+        assert_eq!(cas.stat_objects([unwritten.as_str()]).unwrap(), [None]);
+        let objects = objects(&cas, 2);
+        let beside = format!("{}{}", &objects[0].content_hash[..2], "0".repeat(62));
+        let elsewhere = (0..=255).map(|shard| format!("{shard:02x}{}", "0".repeat(62)))
+            .find(|hash| objects.iter().all(|object| object.content_hash[..2] != hash[..2])).unwrap();
+        let hashes = [&objects[0].content_hash, &beside, &objects[1].content_hash, &elsewhere, &objects[0].content_hash];
+        reset_body_io();
+        let batch = cas.stat_objects(hashes.iter().map(|hash| hash.as_str())).unwrap();
+        let work = take_body_io();
+        assert_eq!((work.batch_stat_requests, work.stat_requests, work.presence_queries), (1, 0, 0));
+        assert_eq!(batch, [Some(objects[0].byte_size), None, Some(objects[1].byte_size), None, Some(objects[0].byte_size)]);
+        assert_eq!(batch, hashes.iter().map(|hash| cas.stat_object(hash).unwrap()).collect::<Vec<_>>());
+        assert!(cas.stat_objects(std::iter::empty()).unwrap().is_empty());
+        assert_eq!(cas.stat_objects(["AB".repeat(32).as_str()]).unwrap_err().kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn a_folder_in_place_of_an_object_or_a_linked_shard_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let objects = objects(&cas, 2);
+        let object_path = directory.path().join(&objects[0].physical_key);
+        fs::remove_file(&object_path).unwrap();
+        fs::create_dir(&object_path).unwrap();
+        assert_eq!(cas.stat_objects([objects[0].content_hash.as_str()]).unwrap_err().kind(), ErrorKind::InvalidData);
+        assert_eq!(cas.stat_object(&objects[0].content_hash).unwrap_err().kind(), ErrorKind::InvalidData);
+        let shard = directory.path().join("assets").join("objects").join(&objects[1].content_hash[..2]);
+        let moved = outside.path().join("shard");
+        fs::rename(&shard, &moved).unwrap();
+        link_directory(&moved, &shard);
+        assert_eq!(cas.stat_objects([objects[1].content_hash.as_str()]).unwrap_err().kind(), ErrorKind::InvalidData);
+        assert_eq!(cas.stat_object(&objects[1].content_hash).unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_linked_object_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let object = cas.prepare_bytes(b"synthetic linked candidate").unwrap();
+        let object_path = directory.path().join(&object.physical_key);
+        fs::remove_file(&object_path).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), &object_path).unwrap();
+        #[cfg(windows)]
+        if let Err(error) = std::os::windows::fs::symlink_file(outside.path(), &object_path) {
+            if error.kind() == ErrorKind::PermissionDenied {
+                return;
+            }
+            panic!("create reparse fixture: {error}");
+        }
+        assert_eq!(cas.stat_objects([object.content_hash.as_str()]).unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_shard_removed_during_the_pass_answers_missing_without_an_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let objects = objects(&cas, 3);
+        let batch = with_shard_hook(|shard| fs::remove_dir_all(shard).unwrap(), || cas.stat_objects(hashes(&objects)).unwrap());
+        assert_eq!(batch, [None, Some(objects[1].byte_size), Some(objects[2].byte_size)]);
+    }
+
+    #[test]
+    fn every_object_folder_removed_during_the_pass_answers_missing_without_an_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let objects = objects(&cas, 3);
+        let assets = directory.path().join("assets");
+        let batch = with_shard_hook(move |_| fs::remove_dir_all(&assets).unwrap(), || cas.stat_objects(hashes(&objects)).unwrap());
+        assert_eq!(batch, [None, None, None]);
+    }
+
+    #[test]
+    fn objects_removed_or_written_during_the_pass_are_answered_as_found() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let objects = objects(&cas, 3);
+        let root = directory.path().to_owned();
+        let removed = root.join(&objects[0].physical_key);
+        // A body whose shard does not exist yet and comes after the first one the pass reaches.
+        let written = (0..).map(|index| format!("synthetic late body {index}"))
+            .find(|body| {
+                let hash = hex::encode(Sha256::digest(body.as_bytes()));
+                hash[..2] > objects[0].content_hash[..2] && !root.join("assets").join("objects").join(&hash[..2]).exists()
+            })
+            .unwrap();
+        let late = hex::encode(Sha256::digest(written.as_bytes()));
+        let mut asked = hashes(&objects);
+        asked.push(&late);
+        let batch = with_shard_hook(move |_| {
+            fs::remove_file(&removed).unwrap();
+            PayloadCas::new(&root).unwrap().prepare_bytes(written.as_bytes()).unwrap();
+        }, || cas.stat_objects(asked.iter().copied()).unwrap());
+        assert_eq!(batch, [None, Some(objects[1].byte_size), Some(objects[2].byte_size), cas.stat_object(&late).unwrap()]);
+        assert!(batch[3].is_some());
+    }
+
+    #[test]
+    fn a_shard_replaced_by_a_link_during_the_pass_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let objects = objects(&cas, 2);
+        let moved = outside.path().join("shard");
+        let result = with_shard_hook(move |shard| {
+            fs::rename(shard, &moved).unwrap();
+            link_directory(&moved, shard);
+        }, || cas.stat_objects(hashes(&objects)));
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidData);
     }
 }

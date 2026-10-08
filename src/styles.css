@@ -506,6 +506,16 @@ select optgroup {
   z-index: 1100;
 }
 
+/* A QR scan shows the camera behind the transparent web view, so only its overlay is painted. */
+html[data-risunest-qr-scan],
+html[data-risunest-qr-scan] body {
+  background: transparent !important;
+}
+
+html[data-risunest-qr-scan] body > :not(.risunest-qr-scan) {
+  visibility: hidden !important;
+}
+
 .saving-animation {
   animation: saving-anime 1s infinite;
   background-size: 200% auto;
