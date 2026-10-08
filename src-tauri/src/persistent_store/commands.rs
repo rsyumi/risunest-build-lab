@@ -157,6 +157,13 @@ impl PersistentStoreState {
         Ok(true)
     }
 
+    pub(crate) fn maintenance_active(&self) -> bool {
+        self.renderer_gate
+            .state
+            .lock()
+            .is_ok_and(|state| state.maintenance_active)
+    }
+
     pub(crate) fn admit_renderer_operation(&self) -> StoreResult<RendererOperationGuard> {
         self.try_admit_renderer_operation()?
             .ok_or_else(renderer_gate_error)
@@ -259,6 +266,24 @@ impl PersistentStoreState {
         Ok(Some(maintenance))
     }
 
+    /// Opens the renderer store again while `maintenance` still keeps renderer
+    /// operations out, for a native commit that the renderer adopts in place.
+    pub(crate) fn reopen_under_maintenance(
+        &self,
+        maintenance: &DeviceMaintenanceGuard,
+        app_data_dir: &Path,
+    ) -> StoreResult<()> {
+        if !Arc::ptr_eq(&maintenance.gate, &self.renderer_gate) {
+            return Err(StoreError::Validation {
+                message: "device maintenance guard belongs to another persistent store".to_owned(),
+            });
+        }
+        let mut store = self.store.lock().map_err(|error| StoreError::Store {
+            message: format!("persistent store mutex poisoned: {error}"),
+        })?;
+        open_persistent_store(app_data_dir, &mut store).map(|_| ())
+    }
+
     pub(crate) fn reset_renderer_session(&self) -> StoreResult<()> {
         let Some(_maintenance) = self.try_acquire_renderer_maintenance()? else {
             return Ok(());
@@ -316,7 +341,7 @@ impl PersistentStoreState {
 
 /// Deletes retired libraries in the background for the life of the process,
 /// starting with whatever an earlier run left behind.
-fn start_retired_purge(app: &AppHandle, state: &PersistentStoreState) {
+fn start_retired_purge<R: tauri::Runtime>(app: &AppHandle<R>, state: &PersistentStoreState) {
     if state.retired_purge_started.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -346,6 +371,11 @@ fn start_retired_purge(app: &AppHandle, state: &PersistentStoreState) {
 impl PersistentStoreState {
     pub(crate) fn with_test_store(store: PersistentStore) -> Self {
         Self { store: Mutex::new(Some(store)), ..Self::default() }
+    }
+
+    /// A store the renderer has not opened yet, whose opening starts no purge.
+    pub(crate) fn unopened_without_purge() -> Self {
+        Self { retired_purge_started: AtomicBool::new(true), ..Self::default() }
     }
 }
 
@@ -491,29 +521,45 @@ pub(crate) fn pds_open(
     app: AppHandle,
     state: State<'_, PersistentStoreState>,
 ) -> Result<PersistentStoreOpenResult, StoreError> {
-    logged("pds_open", (|| {
-        let operation_guard = state.admit_renderer_operation()?;
-        let app_data_dir = crate::app_paths::data_root(&app).map_err(|message| StoreError::Store { message })?;
-        let opened = open_renderer_persistent_store_admitted(&state, &operation_guard, &app_data_dir)?;
-        start_retired_purge(&app, &state);
-        Ok(opened)
-    })())
+    logged("pds_open", open_for_renderer(&app, &state))
+}
+
+/// Opens the store the renderer works through and starts the work that waits for it.
+pub(crate) fn open_for_renderer<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &PersistentStoreState,
+) -> StoreResult<PersistentStoreOpenResult> {
+    let operation_guard = state.admit_renderer_operation()?;
+    let app_data_dir = crate::app_paths::data_root(app).map_err(|message| StoreError::Store { message })?;
+    let (opened, first_open) = open_renderer_persistent_store_admitted(state, &operation_guard, &app_data_dir)?;
+    start_retired_purge(app, state);
+    // A page that starts before the store opens cannot judge the asset journals
+    // whose owners only the store records, so they are judged again now.
+    if first_open {
+        if let Some(cas) = app.try_state::<crate::asset_repository::commands::DurableCasJobState>() {
+            if let Err(error) = cas.sweep_settled_jobs(app) {
+                crate::nlog!("warn", "Asset journals await cleanup after the store opened: {error}");
+            }
+        }
+    }
+    Ok(opened)
 }
 
 #[cfg(test)]
-fn open_renderer_persistent_store(
+pub(crate) fn open_renderer_persistent_store(
     state: &PersistentStoreState,
     app_data_dir: &Path,
 ) -> StoreResult<PersistentStoreOpenResult> {
     let operation_guard = state.admit_renderer_operation()?;
-    open_renderer_persistent_store_admitted(state, &operation_guard, app_data_dir)
+    open_renderer_persistent_store_admitted(state, &operation_guard, app_data_dir).map(|(opened, _)| opened)
 }
 
+/// Also returns whether this call opened the store.
 fn open_renderer_persistent_store_admitted(
     state: &PersistentStoreState,
     operation_guard: &RendererOperationGuard,
     app_data_dir: &Path,
-) -> StoreResult<PersistentStoreOpenResult> {
+) -> StoreResult<(PersistentStoreOpenResult, bool)> {
     if !operation_guard.belongs_to(state) {
         return Err(StoreError::Validation {
             message: "renderer operation permit belongs to another persistent store".to_owned(),
@@ -522,7 +568,8 @@ fn open_renderer_persistent_store_admitted(
     let mut store = state.store.lock().map_err(|error| StoreError::Store {
         message: format!("persistent store mutex poisoned: {error}"),
     })?;
-    open_persistent_store(app_data_dir, &mut store)
+    let opening = store.is_none();
+    open_persistent_store(app_data_dir, &mut store).map(|opened| (opened, opening))
 }
 
 fn open_persistent_store(
@@ -851,44 +898,79 @@ pub(crate) fn pds_archive_preview(
     }))
 }
 
+/// Archiving and restoring may fetch a body another storage holds, through clients that block
+/// and so cannot run on the async runtime.
+async fn archive_operation<R: tauri::Runtime, T: Send + 'static>(
+    app: AppHandle<R>,
+    command: &'static str,
+    operation: impl FnOnce(&PersistentStoreState) -> StoreResult<T> + Send + 'static,
+) -> Result<T, StoreError> {
+    let joined = tauri::async_runtime::spawn_blocking(move || operation(&app.state::<PersistentStoreState>())).await;
+    logged(command, joined.unwrap_or_else(|error| Err(StoreError::Store {
+        message: format!("character archive worker stopped: {error}"),
+    })))
+}
+
 #[tauri::command(async)]
-pub(crate) fn pds_archive_character(
-    state: State<'_, PersistentStoreState>,
+pub(crate) async fn pds_archive_character(
+    app: AppHandle,
     character_id: String,
     expected_revision: i64,
     operation_id: String,
 ) -> Result<RevisionResult, StoreError> {
-    logged("pds_archive_character", (|| {
+    archive_character(app, character_id, expected_revision, operation_id).await
+}
+
+async fn archive_character<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    character_id: String,
+    expected_revision: i64,
+    operation_id: String,
+) -> Result<RevisionResult, StoreError> {
+    archive_operation(app, "pds_archive_character", move |state| {
         let now_ms = current_time_ms()?;
         let operation = state.begin_archive_operation(operation_id)?;
-        with_store_mutex_mut(&state, |store| {
+        with_store_mutex_mut(state, |store| {
             store.archive_character_with_cancellation(
                 &character_id,
                 expected_revision,
                 now_ms,
                 &|| operation.is_cancelled(),
+                Some(operation.cancelled.clone()),
             )
         })
-    })())
+    })
+    .await
 }
 
 #[tauri::command(async)]
-pub(crate) fn pds_restore_character(
-    state: State<'_, PersistentStoreState>,
+pub(crate) async fn pds_restore_character(
+    app: AppHandle,
     character_id: String,
     expected_revision: i64,
     operation_id: String,
 ) -> Result<RevisionResult, StoreError> {
-    logged("pds_restore_character", (|| {
+    restore_character(app, character_id, expected_revision, operation_id).await
+}
+
+pub(super) async fn restore_character<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    character_id: String,
+    expected_revision: i64,
+    operation_id: String,
+) -> Result<RevisionResult, StoreError> {
+    archive_operation(app, "pds_restore_character", move |state| {
         let operation = state.begin_archive_operation(operation_id)?;
-        with_store_mutex_mut(&state, |store| {
+        with_store_mutex_mut(state, |store| {
             store.restore_character_with_cancellation(
                 &character_id,
                 expected_revision,
                 &|| operation.is_cancelled(),
+                Some(operation.cancelled.clone()),
             )
         })
-    })())
+    })
+    .await
 }
 
 #[tauri::command(async)]
@@ -2024,6 +2106,22 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    /// The intent recovery every mutable command runs first takes no device-store
+    /// write when nothing settled, so another connection's long write does not fail it.
+    #[test]
+    fn a_held_device_store_write_does_not_fail_a_change_cursor_commit() {
+        let directory = tempdir().unwrap();
+        let state = PersistentStoreState::with_test_store(PersistentStore::open(directory.path()).unwrap());
+        let holder = rusqlite::Connection::open(directory.path().join("persistent").join("device.sqlite")).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let committed = with_store_mutex_mut(&state, |store| {
+            let revision = store.revision()?;
+            store.commit_working_set_change_cursor(revision)
+        });
+        holder.execute_batch("ROLLBACK").unwrap();
+        committed.unwrap();
+    }
+
     #[test]
     fn cleanup_maintenance_timeout_preserves_admission_for_retry() {
         let state = PersistentStoreState::default();
@@ -2681,7 +2779,7 @@ mod tests {
             .unwrap();
         app.manage(PersistentStoreState::default());
         assert!(pds_read_root(app.state(), None).is_err());
-        assert!(pds_archive_character(app.state(), "synthetic".into(), 0, String::new()).is_err());
+        assert!(tauri::async_runtime::block_on(archive_character(app.handle().clone(), "synthetic".into(), 0, String::new())).is_err());
         assert!(data_health::pds_data_health_repair_plan(app.state()).is_err());
         assert!(hypa::pds_hypa_embedding_usage(app.state()).is_err());
         assert!(super::super::sync_selection::pds_lww_binding_content(app.state()).is_err());

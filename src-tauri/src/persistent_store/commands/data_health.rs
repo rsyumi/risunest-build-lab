@@ -7,10 +7,11 @@ use super::{
     PersistentStoreState, RendererOperationGuard,
 };
 use crate::data_health::journal;
-use crate::data_health::repair::{self, RepairCandidate, RepairPreview};
-use crate::data_health::{read_result, write_result, DeepProgress, ScanDepth, ScanResult};
+use crate::data_health::repair::{self, RepairAction, RepairCandidate, RepairPreview};
+use crate::data_health::{codes, read_result, write_result, DeepProgress, ScanDepth, ScanResult};
 use crate::local_backup::CancellationProbe;
 use crate::persistent_store::{DataHealthReader, StoreError, StoreResult};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -282,10 +283,48 @@ fn current_diagnosis(
 pub(crate) fn pds_data_health_repair_plan(
     state: State<'_, PersistentStoreState>,
 ) -> Result<Vec<RepairCandidate>, StoreError> {
-    logged("pds_data_health_repair_plan", (|| {
-        let operation_guard = state.admit_renderer_operation()?;
-        Ok(repair::plan(&current_diagnosis(&state, &operation_guard)?.1))
-    })())
+    logged("pds_data_health_repair_plan", repair_plan(&state))
+}
+
+fn repair_plan(state: &PersistentStoreState) -> StoreResult<Vec<RepairCandidate>> {
+    let operation_guard = state.admit_renderer_operation()?;
+    let diagnosis = current_diagnosis(state, &operation_guard)?.1;
+    let returned = returned_bodies(state, &operation_guard, &diagnosis)?;
+    Ok(repair::plan(&diagnosis).into_iter().filter(|candidate| !returned.contains(&candidate.id)).collect())
+}
+
+/// Drop-alias choices whose body has become available since the diagnosis. Custody changes do
+/// not move the revision, so a stored diagnosis can still name a body this device can now reach.
+fn returned_bodies(
+    state: &PersistentStoreState,
+    operation_guard: &RendererOperationGuard,
+    diagnosis: &ScanResult,
+) -> StoreResult<BTreeSet<String>> {
+    let absent = repair::plan(diagnosis)
+        .into_iter()
+        .filter_map(|candidate| match &candidate.action {
+            RepairAction::DropAlias { kind, key } if diagnosis.items[candidate.finding].code == codes::ALIAS_OBJECT_ABSENT => {
+                Some((candidate.id.clone(), (kind.clone(), key.clone())))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if absent.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let aliases = absent.iter().map(|(_, alias)| alias.clone()).collect::<Vec<_>>();
+    let available = with_store_mutex_admitted(state, operation_guard, |store| store.alias_bodies_available(&aliases))?;
+    Ok(absent.into_iter().zip(available).filter(|(_, available)| *available).map(|((id, _), _)| id).collect())
+}
+
+fn offered_selection(
+    state: &PersistentStoreState,
+    operation_guard: &RendererOperationGuard,
+    diagnosis: &ScanResult,
+    selection: &[String],
+) -> StoreResult<Vec<String>> {
+    let returned = returned_bodies(state, operation_guard, diagnosis)?;
+    Ok(selection.iter().filter(|id| !returned.contains(*id)).cloned().collect())
 }
 
 #[tauri::command(async)]
@@ -298,6 +337,7 @@ pub(crate) fn pds_data_health_repair_preview(
         let operation_guard = state.admit_renderer_operation()?;
         let diagnosis = current_diagnosis(&state, &operation_guard)?.1;
         require_diagnosis_identity(&diagnosis, diagnosis.revision, expected_scanned_at)?;
+        let selection = offered_selection(&state, &operation_guard, &diagnosis, &selection)?;
         Ok(repair::preview(&diagnosis, &selection))
     })())
 }
@@ -416,7 +456,8 @@ fn apply_repair(
     let operation_guard = state.admit_renderer_operation()?;
     let (root, diagnosis) = current_diagnosis(state, &operation_guard)?;
     require_diagnosis_identity(&diagnosis, expected_revision, expected_scanned_at)?;
-    let preview = repair::preview(&diagnosis, selection);
+    let selection = offered_selection(state, &operation_guard, &diagnosis, selection)?;
+    let preview = repair::preview(&diagnosis, &selection);
     if preview.selected.is_empty() {
         return Err(StoreError::Validation {
             message: "select at least one change to repair".to_owned(),

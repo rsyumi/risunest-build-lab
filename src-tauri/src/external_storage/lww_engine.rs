@@ -924,7 +924,7 @@ impl ExternalLwwEngine {
                         .is_none_or(|age|age>super::leases::CACHE_REUSE_LIMIT_MS) {
                         super::snapshot_restore::revalidate_catalog(
                             &proof.catalog,risunest_external_storage_format::snapshot::CatalogKind::Records,
-                            &self.root_key,self.provider.as_ref(),&self.repository,cancel,
+                            &self.root_key,self.provider.as_ref(),&self.repository,&root,cancel,
                         ).await?;
                     }
                 }
@@ -936,7 +936,7 @@ impl ExternalLwwEngine {
                             AssetReference::Catalog(catalog)=>{
                                 if checked_assets.insert(hex::encode(catalog.ciphertext_sha256)) {
                                     super::snapshot_restore::revalidate_catalog(catalog,risunest_external_storage_format::snapshot::CatalogKind::Assets,
-                                        &self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
+                                        &self.root_key,self.provider.as_ref(),&self.repository,&root,cancel).await?;
                                 }
                             }
                             AssetReference::Standalone(body)=>{
@@ -958,11 +958,11 @@ impl ExternalLwwEngine {
                     .is_none_or(|age|age>super::leases::CACHE_REUSE_LIMIT_MS) {
                     for catalog in &publication.data_catalogs {
                         super::snapshot_restore::revalidate_catalog(catalog,risunest_external_storage_format::snapshot::CatalogKind::Records,
-                            &self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
+                            &self.root_key,self.provider.as_ref(),&self.repository,&root,cancel).await?;
                     }
                     for catalog in &publication.asset_catalogs {
                         super::snapshot_restore::revalidate_catalog(catalog,risunest_external_storage_format::snapshot::CatalogKind::Assets,
-                            &self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
+                            &self.root_key,self.provider.as_ref(),&self.repository,&root,cancel).await?;
                     }
                     for body in publication.bodies.iter().filter(|body|body.complete) {
                         let intent=ObjectIntent{job_id:self.library.clone(),repository_id:self.repository.repository_id.clone(),
@@ -1077,27 +1077,46 @@ impl ExternalLwwEngine {
                 byte_length: body.byte_length,
                 sha256: body.sha256.clone(),
             };
-            if publication.bodies[index].resume.is_none() {
-                publication.bodies[index].resume = self
-                    .provider
-                    .begin_upload(&self.repository, &intent, cancel)
-                    .await?
-                    .map(Self::saved);
+            let mut finished = None;
+            if let Some(saved) = publication.bodies[index].resume.as_ref() {
+                // An earlier attempt may have finished without its answer, or
+                // its session may have moved on or expired.
+                let saved = Self::resume(saved);
+                match self.provider.reconcile_upload(&self.repository, &intent, Some(&saved), cancel).await? {
+                    UploadResolution::Complete(receipt) => finished = Some(receipt),
+                    UploadResolution::Resumable(state) => publication.bodies[index].resume = Some(Self::saved(state)),
+                    UploadResolution::RestartRequired => publication.bodies[index].resume = None,
+                    UploadResolution::Conflict => return Err(segment::corrupt()),
+                }
                 store
                     .external_lww_persist(&publication, &sealed)
                     .map_err(store_error)?;
             }
-            let resume = publication.bodies[index].resume.as_ref().map(Self::resume);
-            let receipt = self
-                .provider
-                .create_object(
-                    &self.repository,
-                    &intent,
-                    &source,
-                    resume.as_ref(),
-                    cancel,
-                )
-                .await?;
+            let receipt = match finished {
+                Some(receipt) => receipt,
+                None => {
+                    if publication.bodies[index].resume.is_none() {
+                        publication.bodies[index].resume = self
+                            .provider
+                            .begin_upload(&self.repository, &intent, cancel)
+                            .await?
+                            .map(Self::saved);
+                        store
+                            .external_lww_persist(&publication, &sealed)
+                            .map_err(store_error)?;
+                    }
+                    let resume = publication.bodies[index].resume.as_ref().map(Self::resume);
+                    self.provider
+                        .create_object(
+                            &self.repository,
+                            &intent,
+                            &source,
+                            resume.as_ref(),
+                            cancel,
+                        )
+                        .await?
+                }
+            };
             Self::validate_receipt(&intent, &receipt)?;
             publication.bodies[index].locator = Some(receipt.locator);
             publication.bodies[index].complete = true;
@@ -1277,7 +1296,7 @@ impl ExternalLwwEngine {
     fn held_body_error(error: ProviderError) -> ProviderError {
         match error.kind {
             ErrorKind::Cancelled | ErrorKind::PreconditionFailed | ErrorKind::Corrupt
-                | ErrorKind::LocalStorageFull | ErrorKind::LocalPermissionDenied => error,
+                | ErrorKind::LocalStorageFull | ErrorKind::LocalPermissionDenied | ErrorKind::LocalFailure => error,
             _ => ProviderError { kind: ErrorKind::PreviousStorageUnavailable, http_status: None, retry_at_ms: None,
                 oauth_error: None, oauth_error_description: None, cause: error.cause },
         }
@@ -1848,7 +1867,7 @@ impl ExternalLwwEngine {
         inspection: &str,
         cancel: &Cancellation,
     ) -> Result<crate::persistent_store::lww::BindingUnitStage> {
-        let directory=tempfile::tempdir().map_err(transient)?;
+        let directory=super::leftovers::managed_scratch(store.repository_root(),"lww-published-")?;
         let mut published=self.published_state(store,directory.path(),cancel).await?;
         published.require_complete()?;
         self.stage_published_objects(store,&mut published,directory.path(),cancel).await?;
@@ -1884,7 +1903,7 @@ impl ExternalLwwEngine {
         cancel: &Cancellation,
     ) -> Result<crate::persistent_store::lww::NewDevicePreparation> {
         self.settle_publication(store, cancel).await?;
-        let directory=tempfile::tempdir().map_err(transient)?;
+        let directory=super::leftovers::managed_scratch(store.repository_root(),"lww-published-")?;
         self.published_state(store,directory.path(),cancel).await?.require_complete()?;
         let preparation = store
             .prepare_lww_new_device(header, staging)
@@ -2027,7 +2046,7 @@ impl ExternalLwwEngine {
         offered: &mut Vec<String>,
         cancel: &Cancellation,
     ) -> Result<()> {
-        let directory=tempfile::tempdir().map_err(transient)?;
+        let directory=super::leftovers::managed_scratch(store.repository_root(),"lww-published-")?;
         let mut state=self.published_state(store,directory.path(),cancel).await?;
         self.stage_published_objects(store,&mut state,directory.path(),cancel).await?;
         let target = self.target_scope();
@@ -2056,6 +2075,47 @@ impl ExternalLwwEngine {
         }
         Ok(())
     }
+    /// Brings the bodies the archives and restores of `request` read on this device from the
+    /// storage that holds them, so applying the page never waits on a body held elsewhere.
+    /// Pages are stored before earlier ones are applied, so this runs as each is handed out.
+    pub(crate) async fn prepare_archive_bodies(
+        store: &mut PersistentStore,
+        request: &StageReceive,
+        cancel: &Cancellation,
+    ) -> Result<()> {
+        let missing = store.lww_incoming_archive_bodies(&request.changes).map_err(store_error)?;
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let root = store.repository_root().to_owned();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // The flag also stops a transfer the hydration has in flight.
+        let watcher = {
+            let (cancel, cancelled) = (cancel.clone(), cancelled.clone());
+            tokio::spawn(async move {
+                cancel.cancelled().await;
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+            })
+        };
+        let worker = cancel.clone();
+        let fetched = spawn_blocking(move || {
+            let check = || {
+                worker.check().map_err(|_| crate::server_sync::SyncError::new("cancelled", 409))
+            };
+            crate::server_sync::residency::HydrationSession::new(&root, Some(cancelled))
+                .and_then(|mut session| session.hydrate_many(&missing, &check))
+        })
+        .await;
+        watcher.abort();
+        match fetched.map_err(transient)? {
+            Ok(unavailable) if unavailable.is_empty() => Ok(()),
+            Ok(_) => Err(ProviderError {
+                cause: ErrorCause(Some("required-asset-unavailable".into())),
+                ..ProviderError::new(ErrorKind::PreviousStorageUnavailable)
+            }),
+            Err(error) => Err(Self::held_server_body_error(error, cancel)),
+        }
+    }
     #[cfg(test)]
     pub(crate) async fn receive_and_apply(
         &self,
@@ -2068,6 +2128,7 @@ impl ExternalLwwEngine {
         let requests = self.receive_requests(store, authority, cancel).await?;
         let mut count = 0;
         for request in requests {
+            Self::prepare_archive_bodies(store, &request, cancel).await?;
             store.lww_stage_receive(&request).map_err(store_error)?;
             let applied = store
                 .lww_apply_receive(&ApplyReceive {

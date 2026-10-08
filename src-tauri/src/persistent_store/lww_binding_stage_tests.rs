@@ -203,6 +203,21 @@ fn frozen_stage_reopens_retries_exactly_and_rejects_changed_source_or_projection
 }
 
 #[test]
+fn staging_database_lives_in_app_scratch_beside_a_crash_leftover_and_is_removed() {
+    let dir=tempfile::tempdir().unwrap(); let mut store=PersistentStore::open(dir.path()).unwrap();
+    let scratch_root=dir.path().join("external-storage").join("scratch");
+    let leftover=scratch_root.join("binding-stage-leftover");
+    std::fs::create_dir_all(&leftover).unwrap(); std::fs::write(leftover.join("incoming.sqlite"),b"synthetic crash leftover").unwrap();
+    let (header,inspection)=context(&store);
+    STAGE_SCRATCH.with(|scratch| scratch.replace(None));
+    store.lww_stage_binding_units(&header,&inspection,&[change(&["root","language"],json!("remote"))],7.into()).unwrap();
+    let staged=STAGE_SCRATCH.with(|scratch| scratch.take()).expect("binding stage scratch");
+    assert!(staged.starts_with(&scratch_root),"{staged:?}");
+    assert!(!staged.exists());
+    assert_eq!(std::fs::read_dir(&scratch_root).unwrap().count(),1);
+}
+
+#[test]
 fn crash_after_atomic_copy_retains_exact_receipt_before_caller_registration() {
     let dir=tempfile::tempdir().unwrap(); let mut store=PersistentStore::open(dir.path()).unwrap();
     let (header,inspection)=context(&store); let incoming=vec![change(&["character","missing","name"],json!("held"))];
@@ -606,4 +621,150 @@ fn streamed_binding_source_digest_matches_the_complete_sorted_input() {
     assert_eq!(stage.source_digest, expected);
     let rows = binding_source_rows(&store.connection, &stage.staging_id).unwrap();
     assert_eq!(source_digest_rows(&rows).unwrap(), expected);
+}
+
+fn change_at(key: &[&str], value: Value, physical_ms: u64) -> Change {
+    let mut change = change(key, value);
+    change.stamp.physical_ms = physical_ms.into();
+    change
+}
+fn deleted_at(key: &[&str], physical_ms: u64) -> Change {
+    let mut change = change_at(key, Value::Null, physical_ms);
+    change.value = UnitValue::Deleted;
+    change
+}
+fn receive(store: &mut PersistentStore, cursor: u64, changes: Vec<Change>) {
+    let header = Header { binding_authority: store.lww_binding_authority().unwrap(), request_id: uuid::Uuid::new_v4().to_string() };
+    store.lww_stage_receive(&StageReceive { header: header.clone(), changes, progress: Progress { kind: "server".into(), cursor: cursor.into(), writer_id: None }, admitted_time_upper_ms: 100.into() }).unwrap();
+    store.lww_apply_receive(&ApplyReceive { header: header.clone(), generating: vec![] }).unwrap();
+    store.lww_finish_receive(&header).unwrap();
+}
+/// Each character's stored conversation count beside the conversation rows it counts.
+fn conversation_counts(store: &PersistentStore, generation: &str) -> Vec<(String, i64, i64)> {
+    let mut statement = store.connection.prepare("SELECT c.character_id,c.conversation_count,(SELECT count(*) FROM conversations x WHERE x.generation=c.generation AND x.character_id=c.character_id) FROM characters c WHERE c.generation=?1 ORDER BY c.character_id").unwrap();
+    let rows = statement.query_map([generation], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().collect::<Result<_, _>>().unwrap();
+    rows
+}
+fn chat_page(store: &PersistentStore, character_id: &str) -> Value {
+    let detail: String = store.connection.query_row("SELECT detail FROM characters WHERE generation=?1 AND character_id=?2", params![active_generation(&store.connection).unwrap(), character_id], |r| r.get(0)).unwrap();
+    serde_json::from_str::<Value>(&detail).unwrap()["chatPage"].clone()
+}
+fn select_chat_page(store: &PersistentStore, character_id: &str, index: u64) {
+    let generation = active_generation(&store.connection).unwrap();
+    let detail: String = store.connection.query_row("SELECT detail FROM characters WHERE generation=?1 AND character_id=?2", params![generation, character_id], |r| r.get(0)).unwrap();
+    let mut detail: Value = serde_json::from_str(&detail).unwrap();
+    detail["chatPage"] = json!(index);
+    store.connection.execute("UPDATE characters SET detail=?3 WHERE generation=?1 AND character_id=?2", params![generation, character_id, detail.to_string()]).unwrap();
+}
+/// The fail-fast library gate an export capture runs, and what a data health scan reports.
+fn export_gate(store: &mut PersistentStore) -> (Result<(), String>, Vec<crate::data_health::Finding>) {
+    let lease = store.acquire_revision(store.revision().unwrap()).unwrap().lease;
+    let reader = store.data_health_reader(&lease).unwrap();
+    let gate = crate::portable_backup::validate_live_library(&reader.connection, &reader.cas, &crate::local_backup::NeverCancelled).map(|_| ()).map_err(|error| error.to_string());
+    let findings = reader.scan(256, &crate::local_backup::NeverCancelled).unwrap().items;
+    drop(reader);
+    store.release_revision(&lease).unwrap();
+    (gate, findings)
+}
+
+/// Findings outside the root. The fixture root names no preset or persona, so the scan reports
+/// those two root references whatever the records hold.
+fn record_findings(findings: &[crate::data_health::Finding]) -> Vec<String> {
+    findings.iter().filter(|finding| finding.owner.kind != "root").map(|finding| format!("{} {}/{} {:?} {}", finding.code, finding.owner.kind, finding.owner.id, finding.locator.as_ref().map(|locator| &locator.source_path), finding.detail)).collect()
+}
+
+#[test]
+fn a_replaced_library_counts_the_conversations_projected_after_their_character() {
+    let dir = tempfile::tempdir().unwrap(); let mut store = PersistentStore::open(dir.path()).unwrap();
+    let mut messages = change(&["messages","windowed","chat-1"], Value::Null);
+    messages.value = message_value(&store, &[json!({"role":"user","data":"synthetic-first","chatId":"m1"}), json!({"role":"char","data":"synthetic-second","chatId":"m2"})]);
+    let mut incoming = vec![
+        change(&["exists","character","windowed"], json!({"type":"character"})),
+        change(&["character","windowed","name"], json!("Synthetic Windowed")),
+        change(&["order","conversations","windowed"], json!({"ids":["chat-1","chat-2","chat-4","chat-5"],"folders":[]})),
+        deleted_at(&["exists","conversation","windowed","chat-3"], 7),
+        messages,
+        change(&["exists","character","single"], json!({"type":"character"})),
+        change(&["character","single","name"], json!("Synthetic Single")),
+        change(&["exists","conversation","single","only"], json!(true)),
+        change(&["conversation","single","only","name"], json!("Only")),
+    ];
+    for id in ["chat-1","chat-2","chat-4","chat-5"] {
+        incoming.push(change(&["exists","conversation","windowed",id], json!(true)));
+        incoming.push(change(&["conversation","windowed",id,"name"], json!(id)));
+    }
+    let (header, inspection) = context(&store);
+    let stage = store.lww_stage_binding_units(&header, &inspection, &incoming, 7.into()).unwrap();
+    let expected = vec![("single".to_owned(), 1, 1), ("windowed".to_owned(), 4, 4)];
+    assert_eq!(conversation_counts(&store, &stage.staging_id), expected);
+    activate(&mut store, &header, &inspection, &stage);
+    assert_eq!(conversation_counts(&store, &active_generation(&store.connection).unwrap()), expected);
+    for id in ["single", "windowed"] { assert_eq!(chat_page(&store, id), json!(0)); }
+    let (gate, findings) = export_gate(&mut store);
+    assert_eq!(gate, Ok(()));
+    assert_eq!(record_findings(&findings), Vec::<String>::new());
+}
+
+#[test]
+fn received_conversations_count_toward_their_character_in_any_page_order() {
+    let dir = tempfile::tempdir().unwrap(); let mut store = PersistentStore::open(dir.path()).unwrap();
+    let incoming = vec![
+        change(&["exists","character","early"], json!({"type":"character"})),
+        change(&["character","early","name"], json!("Synthetic Early")),
+        change(&["order","conversations","early"], json!({"ids":["first"],"folders":[]})),
+        change(&["exists","conversation","early","first"], json!(true)),
+        change(&["conversation","early","first","name"], json!("First")),
+        change(&["order","conversations","late"], json!({"ids":["held"],"folders":[]})),
+        change(&["exists","conversation","late","held"], json!(true)),
+        change(&["conversation","late","held","name"], json!("Held")),
+    ];
+    let (header, inspection) = context(&store);
+    let stage = store.lww_stage_binding_units(&header, &inspection, &incoming, 7.into()).unwrap();
+    activate(&mut store, &header, &inspection, &stage);
+    // The conversation order reaches this device one page before the conversation it names.
+    receive(&mut store, 1, vec![change_at(&["order","conversations","early"], json!({"ids":["first","second"],"folders":[]}), 8)]);
+    receive(&mut store, 2, vec![
+        change_at(&["exists","conversation","early","second"], json!(true), 8),
+        change_at(&["conversation","early","second","name"], json!("Second"), 8),
+    ]);
+    // The character of a conversation held since the binding arrives in a later page.
+    receive(&mut store, 3, vec![change_at(&["exists","character","late"], json!({"type":"character"}), 8)]);
+    let expected = vec![("early".to_owned(), 2, 2), ("late".to_owned(), 1, 1)];
+    assert_eq!(conversation_counts(&store, &active_generation(&store.connection).unwrap()), expected);
+    for id in ["early", "late"] { assert_eq!(chat_page(&store, id), json!(0)); }
+    let (gate, findings) = export_gate(&mut store);
+    assert_eq!(gate, Ok(()));
+    assert_eq!(record_findings(&findings), Vec::<String>::new());
+}
+
+#[test]
+fn a_received_deletion_selects_the_first_conversation_when_the_selected_one_is_gone() {
+    let dir = tempfile::tempdir().unwrap(); let mut store = PersistentStore::open(dir.path()).unwrap();
+    let mut incoming = Vec::new();
+    for character in ["last", "kept"] {
+        incoming.push(change(&["exists","character",character], json!({"type":"character"})));
+        incoming.push(change(&["order","conversations",character], json!({"ids":["chat-1","chat-2","chat-3"],"folders":[]})));
+        for id in ["chat-1","chat-2","chat-3"] {
+            incoming.push(change(&["exists","conversation",character,id], json!(true)));
+            incoming.push(change(&["conversation",character,id,"name"], json!(id)));
+        }
+    }
+    let (header, inspection) = context(&store);
+    let stage = store.lww_stage_binding_units(&header, &inspection, &incoming, 7.into()).unwrap();
+    activate(&mut store, &header, &inspection, &stage);
+    select_chat_page(&store, "last", 2);
+    select_chat_page(&store, "kept", 1);
+    let mut deletions = Vec::new();
+    for character in ["last", "kept"] {
+        deletions.push(deleted_at(&["exists","conversation",character,"chat-3"], 8));
+        deletions.push(change_at(&["order","conversations",character], json!({"ids":["chat-1","chat-2"],"folders":[]}), 8));
+    }
+    receive(&mut store, 1, deletions);
+    let expected = vec![("kept".to_owned(), 2, 2), ("last".to_owned(), 2, 2)];
+    assert_eq!(conversation_counts(&store, &active_generation(&store.connection).unwrap()), expected);
+    assert_eq!(chat_page(&store, "last"), json!(0));
+    assert_eq!(chat_page(&store, "kept"), json!(1));
+    let (gate, findings) = export_gate(&mut store);
+    assert_eq!(gate, Ok(()));
+    assert_eq!(record_findings(&findings), Vec::<String>::new());
 }

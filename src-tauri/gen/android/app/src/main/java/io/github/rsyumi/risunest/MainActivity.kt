@@ -15,6 +15,7 @@ import android.provider.Settings
 import android.provider.OpenableColumns
 import android.util.Log
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
@@ -46,6 +47,8 @@ import kotlinx.coroutines.withContext
 
 private const val EXIT_CONFIRMATION_WINDOW_MILLIS = 2_000L
 private const val EXIT_FLUSH_TIMEOUT_MILLIS = 1_500L
+private const val ROOT_BACK_EVENT = "risunest-root-back"
+private const val ROOT_BACK_REPLY_TIMEOUT_MILLIS = 1_000L
 private const val NATIVE_LIFECYCLE_EVENT = "risu-native-lifecycle"
 private const val OPENED_FILES_EVENT = "risu-opened-files"
 private const val STOP_REASON = "stop"
@@ -184,6 +187,22 @@ internal fun resolveWebViewMargins(
 
 internal fun nativeMarginInsetTypes() = WindowInsetsCompat.Type.systemBars() or
   WindowInsetsCompat.Type.displayCutout()
+
+/**
+ * Before Android 11 the web view never learns the keyboard height from insets, so the keyboard
+ * shrinks the web view itself there. Later versions leave the keyboard inset to the web view.
+ */
+internal fun keyboardResizesWebView(sdkInt: Int) = sdkInt < Build.VERSION_CODES.R
+
+internal fun resolveWebViewBottomMargin(sdkInt: Int, margins: WebViewMargins, imeBottom: Int) =
+  if (keyboardResizesWebView(sdkInt)) maxOf(margins.bottom, imeBottom) else margins.bottom
+
+/** Offers the page a Back the web view cannot take itself; the page answers true when it used it. */
+internal fun rootBackScript() =
+  "(function(){var e=new Event('$ROOT_BACK_EVENT',{cancelable:true});" +
+    "window.dispatchEvent(e);return e.defaultPrevented})()"
+
+internal fun pageUsedRootBack(reply: String?) = reply == "true"
 
 internal enum class BackNavigationAction {
   GO_BACK,
@@ -691,6 +710,11 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         }
     }
     enableEdgeToEdge()
+    // adjustNothing reports no keyboard insets before Android 11; adjustResize reports them
+    // without resizing the edge-to-edge window.
+    if (keyboardResizesWebView(Build.VERSION.SDK_INT)) {
+      window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+    }
     // super.onCreate starts the native app, which may connect right away.
     PlatformTls.initialize(applicationContext)
     super.onCreate(savedInstanceState)
@@ -760,6 +784,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       val handledInsetTypes = nativeMarginInsetTypes()
       val systemBars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
       val displayCutout = windowInsets.getInsets(WindowInsetsCompat.Type.displayCutout())
+      val ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime())
       val margins = resolveWebViewMargins(
         systemBars = WebViewMargins(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom),
         displayCutout = WebViewMargins(
@@ -773,7 +798,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         leftMargin = margins.left
         topMargin = margins.top
         rightMargin = margins.right
-        bottomMargin = margins.bottom
+        bottomMargin = resolveWebViewBottomMargin(Build.VERSION.SDK_INT, margins, ime.bottom)
       }
       WindowInsetsCompat.Builder(windowInsets)
         .setInsets(handledInsetTypes, Insets.NONE)
@@ -785,21 +810,41 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       object : OnBackPressedCallback(true) {
         override fun handleOnBackPressed() {
           if (lifecycleWebView !== webView) return
-          when (backNavigationPolicy.decide(webView.canGoBack(), SystemClock.elapsedRealtime())) {
-            BackNavigationAction.GO_BACK -> webView.goBack()
-            BackNavigationAction.SHOW_EXIT_HINT -> {
-              dispatchLifecycleFlush(EXIT_REASON)
-              Toast.makeText(
-                this@MainActivity,
-                R.string.press_back_again_to_exit,
-                Toast.LENGTH_SHORT,
-              ).show()
-            }
-            BackNavigationAction.EXIT -> requestExitFlushThenFinish()
+          val pressedAt = SystemClock.elapsedRealtime()
+          if (webView.canGoBack()) {
+            navigateBack(webView, canGoBack = true, pressedAt)
+            return
           }
+          // A dialog shown outside every navigation layer has no history entry, and the web view
+          // skips entries a page added without a tap, so the page gets this Back first. A page
+          // that does not answer leaves the exit policy in charge.
+          var answered = false
+          val answer = { used: Boolean ->
+            if (!answered && lifecycleWebView === webView) {
+              answered = true
+              if (!used) navigateBack(webView, canGoBack = false, pressedAt)
+            }
+          }
+          mainHandler.postDelayed({ answer(false) }, ROOT_BACK_REPLY_TIMEOUT_MILLIS)
+          webView.evaluateJavascript(rootBackScript()) { reply -> answer(pageUsedRootBack(reply)) }
         }
       },
     )
+  }
+
+  private fun navigateBack(webView: WebView, canGoBack: Boolean, pressedAt: Long) {
+    when (backNavigationPolicy.decide(canGoBack, pressedAt)) {
+      BackNavigationAction.GO_BACK -> webView.goBack()
+      BackNavigationAction.SHOW_EXIT_HINT -> {
+        dispatchLifecycleFlush(EXIT_REASON)
+        Toast.makeText(
+          this,
+          R.string.press_back_again_to_exit,
+          Toast.LENGTH_SHORT,
+        ).show()
+      }
+      BackNavigationAction.EXIT -> requestExitFlushThenFinish()
+    }
   }
 
 

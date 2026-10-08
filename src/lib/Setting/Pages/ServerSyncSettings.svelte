@@ -1,14 +1,15 @@
 <script lang="ts">
     import { onMount, onDestroy } from 'svelte'
-    import { CheckIcon, ChevronRightIcon, LoaderCircleIcon, TriangleAlertIcon } from '@lucide/svelte'
+    import { CheckIcon, ChevronRightIcon, CloudDownloadIcon, HardDriveIcon, LoaderCircleIcon } from '@lucide/svelte'
     import { language } from 'src/lang'
-    import { alertCheckboxConfirm, alertConfirm } from 'src/ts/alert'
+    import { alertActionConfirm, alertCheckboxConfirm, alertConfirm } from 'src/ts/alert'
     import { isTauri } from 'src/ts/platform'
     import { platform as nativePlatform } from '@tauri-apps/plugin-os'
     import { completeServerSyncBinding, connectServerSync, disconnectServerSync, holdServerSync, retryServerSync, getServerSyncController, getServerSyncCacheUsage, cleanupServerSyncCache, type ServerSyncCacheUsage } from 'src/ts/storage/sync/serverSyncProduction'
     import { parseServerRegistration } from 'src/ts/storage/sync/serverSyncRegistration'
     import { serverRegistrationInbox } from 'src/ts/storage/sync/serverSyncRegistrationInbox'
     import { canScanServerRegistration, createServerQrScanner } from 'src/ts/storage/sync/serverSyncQr'
+    import { isQrScanCancelled } from 'src/ts/ui/qrScanner'
     import { getAssetResidencyStatus, setAssetResidencyPolicy, evictLocalAssets, cancelAssetResidencyOperation, type AssetResidencyPolicy, type AssetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency'
     import { describeBlockedReason } from 'src/ts/storage/sync/blockedReasonText'
     import type { ServerConfig } from 'src/ts/storage/sync/serverSync'
@@ -18,11 +19,12 @@
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingButton from '../RisuNest/SettingButton.svelte'
-    import SegmentedButtons from '../RisuNest/SegmentedButtons.svelte'
     import SettingProgress from '../RisuNest/SettingProgress.svelte'
+    import SettingNotice from '../RisuNest/SettingNotice.svelte'
+    import StatusBadge from '../RisuNest/StatusBadge.svelte'
 
     interface Props {
-        connectTarget?: (config: ServerConfig, newDevice: boolean) => Promise<unknown>
+        connectTarget?: (config: ServerConfig, newDevice: boolean, policy?: AssetResidencyPolicy) => Promise<unknown>
         /** `onboarding` drops the section heading and panel, which the onboarding screen provides. */
         tone?: 'settings' | 'onboarding'
     }
@@ -30,6 +32,8 @@
     let { connectTarget = connectServerSync, tone = 'settings' }: Props = $props()
 
     const copy = language.risuNest.serverSync
+    /** How long disconnecting waits for the file check before it asks without the check's answer. */
+    const SERVER_ONLY_CHECK_MS = 3_000
     const controller = getServerSyncController()
     const scanner = createServerQrScanner()
     let view = $state(controller.snapshot())
@@ -39,8 +43,12 @@
     let scanning = $state(false)
     let failure = $state('')
     let residency = $state<AssetResidencyStatus | undefined>()
+    // Reading the breakdown can outlast an operation started meanwhile, so only the latest read is applied.
+    let residencyRead = 0
+    let residencyFailed = $state(false)
     let cache = $state<ServerSyncCacheUsage | undefined>()
     let downloading = $state(false)
+    let checkingFiles = $state(false)
     let codeOpen = $state(false)
     let policy = $state<AssetResidencyPolicy>('full')
     let pending = $state<number | undefined>()
@@ -51,8 +59,13 @@
     let stopWatching = () => {}
     const writerRecoveryCodes = ['writer-collision', 'equal-stamp-integrity']
     const registrationCodes = ['unauthorized', 'invalid-device-token', 'server-epoch-changed']
-    let writerRecovery = $derived(writerRecoveryCodes.includes(view.error))
+    // The server refused the registration code itself, so only a new one can connect.
+    const usedRegistrationCodes = ['registration-used', 'registration-integrity', 'registration-not-new']
+    // Sync stays stopped by the collision while another connection attempt fails.
+    let writerRecovery = $derived(writerRecoveryCodes.includes(view.error) || writerRecoveryCodes.includes(view.blockedCode))
     let connected = $derived(!!view.status.configured && !!view.status.bound)
+    // The connection status carries the stored policy, so the choices do not wait for the breakdown.
+    let storedPolicy = $derived(view.status.assetPolicy ?? residency?.policy)
     // A connected device keeps its registration input folded until a code is needed again.
     let codeShown = $derived(!view.status.bound || !!view.error || !!failure || !!candidate || codeOpen)
     let status = $derived.by((): { label: string; tone: 'idle' | 'connected' | 'working' | 'paused' | 'attention' } => {
@@ -87,28 +100,73 @@
         if (token === 'unit-too-large') return language.lwwSync.unitTooLarge
         if (token === 'device-credential-unavailable') return linux ? copy.credentialUnavailableLinux : copy.credentialUnavailable
         if (registrationCodes.includes(token)) return language.lwwSync.registrationRevoked
+        if (usedRegistrationCodes.includes(token)) return tone === 'onboarding' ? language.lwwSync.registrationUsedOnboarding : language.lwwSync.registrationUsed
         if (token === PREVIOUS_FILES_DOWNLOAD_FAILED) return language.lwwSync.downloadFailedNotConnected
         if (token === 'previous-storage-unavailable') return language.lwwSync.previousStorageUnavailable
         if (token.startsWith('qr-')) return token.includes('permission') ? copy.cameraDenied : copy.cameraUnavailable
         return copy.errorHelp
     }
-    async function refresh() { await controller.ensureStatus(); residency = await getAssetResidencyStatus(); cache = await getServerSyncCacheUsage() }
-    async function run(operation: () => Promise<unknown>) {
+    async function readResidency() {
+        const read = ++residencyRead
+        residencyFailed = false
+        try {
+            const next = await getAssetResidencyStatus()
+            if (read === residencyRead) residency = next
+        } catch (error) {
+            if (read !== residencyRead) return
+            residencyFailed = true
+            throw error
+        }
+    }
+    async function readCache() { cache = await getServerSyncCacheUsage() }
+    // A policy change, download or cleanup answers with the breakdown it leaves, which is shown without reading it again.
+    async function refresh(known?: AssetResidencyStatus | void) {
+        if (known) { residencyRead++; residencyFailed = false; residency = known }
+        await controller.ensureStatus(); await Promise.all([known ? undefined : readResidency(), readCache()])
+    }
+    async function run(operation: () => Promise<AssetResidencyStatus | void>) {
         if (busy) return
         busy = true; failure = ''
         // A failure the operation already explained stays over a later refresh error.
-        try { await operation(); await refresh() } catch (error) { failure ||= message(error) } finally { busy = false }
+        try { await refresh(await operation()) } catch (error) { failure ||= message(error) } finally { busy = false }
     }
     function readCode() { try { candidate = parseServerRegistration(code); code = ''; failure = '' } catch { failure = copy.registrationInvalid } }
-    async function scan() { scanning = true; try { candidate = await scanner.scan(() => {}); failure = '' } catch (error) { failure = message(error) } finally { scanning = false } }
-    async function connect(newDevice = false) { if (!candidate) return; await connectTarget(candidate, newDevice); candidate = undefined; codeOpen = false }
-    async function downloadAll() { downloading = true; try { await controller.track('assets', () => setAssetResidencyPolicy('full')) } finally { downloading = false } }
-    async function downloadHeld() { const release = await holdServerSync(); try { await downloadAll() } finally { await release() } }
+    async function scan() { scanning = true; try { candidate = await scanner.scan(tone); failure = '' } catch (error) { if (!isQrScanCancelled(error)) failure = message(error) } finally { scanning = false } }
+    // A device that is not connected chooses its asset storage with the connection; a connected one keeps its group.
+    async function connect(newDevice = false) {
+        if (!candidate) return
+        const choice = connected ? undefined : policy
+        const kept = storedPolicy
+        try { await connectTarget(candidate, newDevice, choice) }
+        catch (error) {
+            // A refused code is put away so a new one can be entered.
+            if (usedRegistrationCodes.includes(errorCode(error))) candidate = undefined
+            throw error
+        }
+        candidate = undefined; codeOpen = false
+        // Connecting applies only a remote choice, so a device that kept assets on the server and chose full downloads them here.
+        if (choice === 'full' && kept === 'remote' && connected) return downloadHeld()
+    }
+    async function downloadAll() { downloading = true; try { return await controller.track('assets', () => setAssetResidencyPolicy('full')) } finally { downloading = false } }
+    async function downloadHeld() { const release = await holdServerSync(); try { return await downloadAll() } finally { await release() } }
     async function disconnect() {
-        let serverObjects = 0
-        try { serverObjects = (await getAssetResidencyStatus()).serverObjects } catch {}
-        if (!serverObjects) return disconnectServerSync()
-        const choice = await alertCheckboxConfirm({ title: copy.disconnectTitle, description: copy.disconnectRemoteOnly, checkboxLabel: copy.downloadThenDisconnect, actionLabel: copy.disconnect, cancelLabel: language.cancel, requireChecked: false })
+        let serverObjects: number | undefined
+        let timer: ReturnType<typeof setTimeout> | undefined
+        checkingFiles = true
+        try {
+            serverObjects = await Promise.race([
+                getAssetResidencyStatus().then(status => status.serverObjects),
+                new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), SERVER_ONLY_CHECK_MS) }),
+            ])
+        } catch {} finally {
+            clearTimeout(timer)
+            checkingFiles = false
+        }
+        if (serverObjects === 0) {
+            if (await alertActionConfirm({ title: copy.disconnectTitle, description: copy.disconnectDescription, actionLabel: copy.disconnect, cancelLabel: language.cancel })) await disconnectServerSync()
+            return
+        }
+        const choice = await alertCheckboxConfirm({ title: copy.disconnectTitle, description: serverObjects === undefined ? copy.disconnectRemoteOnlyUnknown : copy.disconnectRemoteOnly, checkboxLabel: copy.downloadThenDisconnect, actionLabel: copy.disconnect, cancelLabel: language.cancel, requireChecked: false })
         if (!choice.confirmed) return
         if (!choice.checked) return disconnectServerSync()
         const release = await holdServerSync()
@@ -125,8 +183,8 @@
     }
     async function cleanCache() { if (await alertConfirm(copy.management.cleanConfirm)) await cleanupServerSyncCache() }
     // A refused change puts the control back on the stored policy.
-    function choosePolicy(next: AssetResidencyPolicy) { void run(() => next === 'full' ? downloadAll() : setAssetResidencyPolicy(next)).finally(() => { if (residency) policy = residency.policy }) }
-    $effect(() => { if (residency) policy = residency.policy })
+    function choosePolicy(next: AssetResidencyPolicy) { void run(() => next === 'full' ? downloadAll() : setAssetResidencyPolicy(next)).finally(() => { if (storedPolicy) policy = storedPolicy }) }
+    $effect(() => { if (storedPolicy) policy = storedPolicy })
     $effect(() => {
         if (!view.progress) return
         now = Date.now()
@@ -148,14 +206,13 @@
 </script>
 
 {#snippet statusPill()}
-    <span class="status" data-tone={status.tone} aria-live="polite"><span class="status-dot" aria-hidden="true"></span>{status.label}</span>
+    <StatusBadge label={status.label} tone={status.tone} />
 {/snippet}
 
 {#snippet connection()}
     {#if !connected}
-        <div class="notice">
-            <TriangleAlertIcon size={16} class="mt-0.5 shrink-0" aria-hidden="true" />
-            <p>{language.lwwSync.concurrentEditNotice}</p>
+        <div class="sync-block">
+            <SettingNotice text={language.lwwSync.concurrentEditNotice} />
         </div>
     {/if}
     {#if view.bindingIncomplete}
@@ -171,8 +228,8 @@
         <div class="sync-block">
             {#if connected && (view.status.libraryId || view.status.deviceId || pending !== undefined)}
                 <dl class="kv">
-                    {#if view.status.libraryId}<dt>{copy.libraryId}</dt><dd>{view.status.libraryId}</dd>{/if}
-                    {#if view.status.deviceId}<dt>{copy.deviceId}</dt><dd>{view.status.deviceId}</dd>{/if}
+                    {#if view.status.libraryId}<dt>{copy.libraryId}</dt><dd class="mono">{view.status.libraryId}</dd>{/if}
+                    {#if view.status.deviceId}<dt>{copy.deviceId}</dt><dd class="mono">{view.status.deviceId}</dd>{/if}
                     {#if pending !== undefined}<dt>{copy.pendingChanges}</dt><dd>{copy.count.replace('{0}', pending.toLocaleString())}</dd>{/if}
                     {#if view.lastSuccessAt !== undefined && !progress}<dt>{copy.lastSuccess}</dt><dd>{new Date(view.lastSuccessAt).toLocaleString()}</dd>{/if}
                 </dl>
@@ -180,7 +237,7 @@
             {#if progressPlace === 'bound'}{@render progressPanel()}{/if}
             <div class="actions">
                 {#if !view.bindingIncomplete}<SettingButton onclick={() => void run(retryServerSync)} disabled={busy}>{copy.syncNow}</SettingButton>{/if}
-                <SettingButton variant="danger" onclick={() => void run(disconnect)} disabled={busy}>{copy.disconnect}</SettingButton>
+                <SettingButton variant="danger" class="ml-auto" onclick={() => void run(disconnect)} busy={checkingFiles} disabled={busy}>{copy.disconnect}</SettingButton>
             </div>
             {@render alert()}
         </div>
@@ -188,11 +245,18 @@
     {#if codeShown}
         <div class="sync-block">
             {#if candidate}
-                <p class="text-[15px]">{copy.reviewTitle}</p>
+                <p class="block-title">{copy.reviewTitle}</p>
                 <dl class="kv review">
                     <dt>{copy.endpoint}</dt><dd>{candidate.endpoint}</dd>
-                    <dt>{copy.libraryId}</dt><dd>{candidate.libraryId}</dd>
+                    <dt>{copy.libraryId}</dt><dd class="mono">{candidate.libraryId}</dd>
                 </dl>
+                {#if !connected}
+                    <div class="field-head">
+                        <p class="block-title">{copy.residency.title}</p>
+                        <p class="help">{copy.residency.description}</p>
+                    </div>
+                    {@render residencyChoices()}
+                {/if}
                 <div class="actions">
                     <SettingButton onclick={() => void run(() => connect())} busy={busy} disabled={busy}>{copy.connect}</SettingButton>
                     {#if writerRecovery}<SettingButton variant="secondary" onclick={() => void run(() => connect(true))} disabled={busy}>{language.lwwSync.newDeviceAction}</SettingButton>{/if}
@@ -200,15 +264,16 @@
                 </div>
                 {#if progressPlace === 'candidate'}{@render progressPanel()}{:else}<p class="help">{copy.connectHint}</p>{/if}
             {:else}
-                <label class="text-[15px]" for="server-registration">{copy.registrationCode}</label>
-                {#if tone === 'settings'}<p class="help">{canScanServerRegistration ? copy.connectRowHelpScan : copy.connectRowHelp}</p>{/if}
+                <div class="field-head">
+                    <label class="block-title" for="server-registration">{copy.registrationCode}</label>
+                    {#if tone === 'settings'}<p class="help">{canScanServerRegistration ? copy.connectRowHelpScan : copy.connectRowHelp}</p>{/if}
+                </div>
                 <textarea id="server-registration" class="code" rows="3" spellcheck="false" autocapitalize="none" bind:value={code} disabled={busy || scanning}></textarea>
                 <div class="actions">
                     <SettingButton onclick={readCode} disabled={busy || !code}>{copy.readRegistration}</SettingButton>
                     {#if canScanServerRegistration}
                         <SettingButton variant="secondary" onclick={() => void scan()} busy={scanning} disabled={busy}>{copy.scanRegistration}</SettingButton>
                     {/if}
-                    {#if scanning}<SettingButton variant="secondary" onclick={() => scanner.cancel()}>{copy.cancelScan}</SettingButton>{/if}
                 </div>
             {/if}
             {#if !view.status.bound}{@render alert()}{/if}
@@ -221,7 +286,23 @@
 {/snippet}
 
 {#snippet alert()}
-    {#if view.error || failure}<p role="alert" class="text-sm text-danger-400">{failure || message({ code: view.error })}</p>{/if}
+    {#if view.error || failure}<SettingNotice role="alert" text={failure || message({ code: view.error })} />{/if}
+{/snippet}
+
+{#snippet residencyChoices(apply?: (next: AssetResidencyPolicy) => void)}
+    <div class="choices" role="radiogroup" aria-label={copy.residency.title} aria-disabled={busy ? 'true' : undefined}>
+        {#each residencyOptions as option (option.value)}
+            {@const checked = policy === option.value}
+            <label class="choice" data-checked={checked} data-disabled={busy}>
+                <input class="sr-only" type="radio" name="risunest-asset-residency" value={option.value} {checked} disabled={busy} onchange={() => { policy = option.value; apply?.(option.value) }} />
+                <span class="choice-icon" aria-hidden="true">
+                    {#if option.value === 'full'}<HardDriveIcon size={18} />{:else}<CloudDownloadIcon size={18} />{/if}
+                </span>
+                <span class="choice-label">{option.label}</span>
+                <span class="choice-radio" aria-hidden="true"></span>
+            </label>
+        {/each}
+    </div>
 {/snippet}
 
 {#snippet progressSteps(steps: ServerSyncProgressView)}
@@ -263,6 +344,13 @@
     {/if}
 {/snippet}
 
+{#snippet place(part: 'local' | 'server' | 'external' | 'missing', label: string, value?: string)}
+    <div class="place" data-part={part}>
+        <span class="place-label"><i class="place-dot" aria-hidden="true"></i><span>{label}</span></span>
+        {#if value === undefined}<span class="value-pending motion-safe:animate-pulse"></span>{:else}<span class="value">{value}</span>{/if}
+    </div>
+{/snippet}
+
 {#if isTauri}
     {#if tone === 'onboarding'}
         <div class="embedded">
@@ -274,18 +362,45 @@
             {@render connection()}
         </SettingGroup>
     {/if}
-    {#if residency && connected}
+    {#if connected && storedPolicy}
         <SettingGroup title={copy.residency.title} description={copy.residency.description}>
             <div class="sync-block">
-                <SegmentedButtons bind:value={policy} options={residencyOptions} label={copy.residency.title} role="radiogroup" disabled={busy} onchange={choosePolicy} />
+                {@render residencyChoices(choosePolicy)}
             </div>
-            <SettingRow inline label={copy.residency.local}><span class="value">{bytes(residency.localBytes)}</span></SettingRow>
-            <SettingRow inline label={copy.residency.remoteOnly}><span class="value">{bytes(residency.serverBytes)}</span></SettingRow>
-            {#if residency.remoteObjects > residency.serverObjects}<SettingRow inline label={copy.residency.externalOnly}><span class="value">{bytes(residency.remoteBytes - residency.serverBytes)}</span></SettingRow>{/if}
-            <SettingRow inline label={copy.residency.unavailable}><span class="value">{copy.count.replace('{0}', residency.unavailableObjects.toLocaleString())}</span></SettingRow>
+            {#if residency}
+                {@const externalBytes = residency.remoteObjects > residency.serverObjects ? residency.remoteBytes - residency.serverBytes : 0}
+                {@const shares = [
+                    { part: 'local', bytes: residency.localBytes },
+                    { part: 'server', bytes: residency.serverBytes },
+                    { part: 'external', bytes: externalBytes },
+                ].filter(share => share.bytes > 0)}
+                <div class="sync-block">
+                    {#if shares.length > 0}
+                        <div class="distribution" aria-hidden="true">
+                            {#each shares as share (share.part)}<span data-part={share.part} style:flex-grow={share.bytes}></span>{/each}
+                        </div>
+                    {/if}
+                    <div class="places">
+                        {@render place('local', copy.residency.local, bytes(residency.localBytes))}
+                        {@render place('server', copy.residency.remoteOnly, bytes(residency.serverBytes))}
+                        {#if residency.remoteObjects > residency.serverObjects}{@render place('external', copy.residency.externalOnly, bytes(externalBytes))}{/if}
+                        {@render place('missing', copy.residency.unavailable, copy.count.replace('{0}', residency.unavailableObjects.toLocaleString()))}
+                    </div>
+                </div>
+            {:else if !residencyFailed}
+                <!-- The placeholder keeps the loaded shape: the status line stands where the bar goes, above the same rows. -->
+                <div class="sync-block" data-residency-loading role="status" aria-live="polite">
+                    <p class="checking"><LoaderCircleIcon size={14} class="shrink-0 motion-safe:animate-spin" aria-hidden="true" /><span>{copy.residency.checking}</span></p>
+                    <div class="places" aria-hidden="true">
+                        {@render place('local', copy.residency.local)}
+                        {@render place('server', copy.residency.remoteOnly)}
+                        {@render place('missing', copy.residency.unavailable)}
+                    </div>
+                </div>
+            {/if}
             <div class="sync-block">
                 <div class="actions">
-                    {#if residency.policy === 'full' && residency.remoteObjects > 0}<SettingButton onclick={() => void run(downloadHeld)} busy={downloading} disabled={busy}>{copy.residency.download}</SettingButton>{/if}
+                    {#if residency?.policy === 'full' && residency.remoteObjects > 0}<SettingButton onclick={() => void run(downloadHeld)} busy={downloading} disabled={busy}>{copy.residency.download}</SettingButton>{/if}
                     <SettingButton variant="secondary" onclick={() => void run(evictLocalAssets)} disabled={busy}>{copy.residency.clean}</SettingButton>
                     {#if busy}<SettingButton variant="secondary" onclick={() => void cancelAssetResidencyOperation()}>{copy.residency.cancel}</SettingButton>{/if}
                 </div>
@@ -313,9 +428,9 @@
 <style>
     .sync-block {
         display: grid;
-        gap: 0.625rem;
+        gap: 0.75rem;
         min-width: 0;
-        padding: 0.75rem 1rem;
+        padding: 0.875rem 1rem;
         overflow-wrap: anywhere;
     }
     .actions {
@@ -326,24 +441,21 @@
     }
     .help {
         max-width: 62ch;
-        font-size: 13px;
-        line-height: 1.5;
+        font-size: 12.5px;
+        line-height: 1.55;
         color: color-mix(in srgb, var(--risu-theme-textcolor2) 62%, var(--risu-theme-textcolor) 38%);
     }
-    .notice {
-        display: flex;
-        gap: 0.625rem;
-        margin: 0.75rem 1rem;
-        padding: 0.625rem 0.75rem;
-        border: 1px solid color-mix(in srgb, var(--risu-theme-danger-400) 40%, transparent);
-        border-radius: 0.5rem;
-        background: color-mix(in srgb, var(--risu-theme-danger-400) 7%, transparent);
-        color: var(--risu-theme-textcolor);
-        font-size: 13px;
-        line-height: 1.5;
+    .block-title {
+        font-size: 14px;
+        font-weight: 600;
     }
-    .notice :global(svg) {
-        color: var(--risu-theme-danger-400);
+    .field-head {
+        display: grid;
+        gap: 0.25rem;
+    }
+    .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12.5px;
     }
     .code {
         width: 100%;
@@ -369,12 +481,14 @@
     .kv {
         display: grid;
         grid-template-columns: auto minmax(0, 1fr);
-        gap: 0.25rem 1rem;
+        gap: 0.375rem 1.25rem;
         margin: 0;
         font-size: 13px;
+        line-height: 1.45;
     }
     .kv dt {
         color: var(--risu-theme-textcolor2);
+        white-space: nowrap;
     }
     .kv dd {
         margin: 0;
@@ -441,54 +555,145 @@
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
     }
-    .status {
+    .choices {
+        display: grid;
+        gap: 0.5rem;
+    }
+    @container (min-width: 36rem) {
+        .choices {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+    .choice {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        min-width: 0;
+        padding: 0.75rem 0.875rem;
+        border: 1px solid var(--risu-theme-darkborderc);
+        border-radius: 0.5rem;
+        background: var(--risu-theme-bgcolor);
+        cursor: pointer;
+        transition: border-color 0.2s, background-color 0.2s;
+    }
+    .choice:hover {
+        border-color: color-mix(in srgb, var(--risu-theme-textcolor2) 55%, var(--risu-theme-darkborderc));
+    }
+    .choice[data-checked='true'] {
+        border-color: var(--risu-theme-primary-500);
+        background: color-mix(in srgb, var(--risu-theme-primary-500) 9%, var(--risu-theme-bgcolor));
+    }
+    .choice[data-disabled='true'] {
+        cursor: not-allowed;
+        opacity: 0.6;
+    }
+    .choice:has(input:focus-visible) {
+        outline: 2px solid var(--risu-theme-selected);
+        outline-offset: 2px;
+    }
+    .choice-icon {
+        display: grid;
+        flex: none;
+        place-items: center;
+        width: 2.25rem;
+        height: 2.25rem;
+        border-radius: 0.5rem;
+        background: var(--risu-theme-darkbg);
+        color: var(--risu-theme-textcolor2);
+    }
+    .choice[data-checked='true'] .choice-icon {
+        background: color-mix(in srgb, var(--risu-theme-primary-500) 18%, var(--risu-theme-bgcolor));
+        color: var(--risu-theme-textcolor);
+    }
+    .choice-label {
+        flex: 1;
+        min-width: 0;
+        font-size: 14px;
+        line-height: 1.4;
+    }
+    .choice[data-checked='true'] .choice-label {
+        font-weight: 600;
+    }
+    .choice-radio {
+        flex: none;
+        width: 1.125rem;
+        height: 1.125rem;
+        border: 2px solid var(--risu-theme-darkborderc);
+        border-radius: 50%;
+    }
+    .choice[data-checked='true'] .choice-radio {
+        border-color: var(--risu-theme-primary-500);
+        box-shadow: inset 0 0 0 3px var(--risu-theme-bgcolor);
+        background: var(--risu-theme-primary-500);
+    }
+    .distribution {
+        display: flex;
+        gap: 2px;
+        height: 0.5rem;
+        overflow: hidden;
+        border-radius: 99px;
+        background: var(--risu-theme-darkbutton);
+    }
+    .distribution span {
+        flex-basis: 0;
+        min-width: 3px;
+    }
+    .places {
+        display: grid;
+        gap: 0.5rem;
+    }
+    .checking {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        min-width: 0;
+        font-size: 12.5px;
+        line-height: 1rem;
+        color: color-mix(in srgb, var(--risu-theme-textcolor2) 62%, var(--risu-theme-textcolor) 38%);
+    }
+    .value-pending {
+        flex: none;
+        align-self: center;
+        width: 3.5rem;
+        height: 0.875rem;
+        border-radius: 0.25rem;
+        background: var(--risu-theme-darkbutton);
+    }
+    .place {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 1rem;
+        min-width: 0;
+        font-size: 13.5px;
+    }
+    .place-label {
         display: inline-flex;
         align-items: center;
         gap: 0.5rem;
-        padding: 0.3rem 0.75rem;
-        border: 1px solid var(--risu-theme-darkborderc);
-        border-radius: 99px;
-        font-size: 0.75rem;
-        white-space: nowrap;
+        min-width: 0;
+        color: color-mix(in srgb, var(--risu-theme-textcolor2) 45%, var(--risu-theme-textcolor));
     }
-    .status[data-tone='attention'] {
-        color: var(--risu-theme-danger-400);
-        border-color: color-mix(in srgb, var(--risu-theme-danger-400) 50%, transparent);
+    .place-dot {
+        flex: none;
+        width: 0.625rem;
+        height: 0.625rem;
+        border-radius: 3px;
     }
-    .status-dot {
-        width: 0.45rem;
-        height: 0.45rem;
-        border-radius: 50%;
-        background: currentColor;
-        opacity: 0.35;
-    }
-    .status[data-tone='connected'] .status-dot {
-        background: var(--risu-theme-success-500);
-        opacity: 1;
-    }
-    .status[data-tone='attention'] .status-dot {
-        opacity: 1;
-    }
-    .status[data-tone='paused'] .status-dot {
-        background: transparent;
-        box-shadow: inset 0 0 0 1.5px currentColor;
-        opacity: 0.7;
-    }
-    .status[data-tone='working'] .status-dot {
+    .distribution [data-part='local'],
+    .place[data-part='local'] .place-dot {
         background: var(--risu-theme-primary-500);
-        opacity: 1;
-        animation: status-pulse 1.5s ease-in-out infinite;
     }
-    @keyframes status-pulse {
-        50% {
-            opacity: 0.3;
-        }
+    .distribution [data-part='server'],
+    .place[data-part='server'] .place-dot {
+        background: var(--risu-theme-primary-300);
     }
-    @media (prefers-reduced-motion: reduce) {
-        .status-dot,
-        .progress[data-mode='routine'] :global([role='progressbar'] > div) {
-            animation: none;
-        }
+    .distribution [data-part='external'],
+    .place[data-part='external'] .place-dot {
+        background: var(--risu-theme-success-500);
+    }
+    .place[data-part='missing'] .place-dot {
+        border: 1.5px dashed var(--risu-theme-textcolor2);
     }
     .embedded {
         display: grid;
@@ -499,10 +704,14 @@
         display: flex;
         padding: 0 0 0.25rem;
     }
-    .embedded .notice {
-        margin: 0 0 0.5rem;
-    }
     .embedded .sync-block {
         padding: 0.5rem 0;
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .choice,
+        .progress[data-mode='routine'] :global([role='progressbar'] > div) {
+            animation: none;
+            transition: none;
+        }
     }
 </style>

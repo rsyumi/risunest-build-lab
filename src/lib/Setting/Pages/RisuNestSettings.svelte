@@ -25,6 +25,7 @@
     import RisuNestUpdateSettings from './RisuNestUpdateSettings.svelte'
     import ExternalStorageSettings from '../ExternalStorage/ExternalStorageSettings.svelte'
     import LocalDataReset from '../RisuNest/LocalDataReset.svelte'
+    import RisuNestStartupExclusions from './RisuNestStartupExclusions.svelte'
 
     const tabLabels: Record<RisuNestSettingsTab, string> = {
         settings: language.risuNest.tabs.settings,
@@ -68,7 +69,7 @@
     <div
         role="tablist"
         aria-label={language.risuNest.tabList}
-        class="-mx-4 mt-3 flex overflow-x-auto border-b border-darkborderc px-4 [scrollbar-width:none] @xl:mx-0 @xl:px-0"
+        class="-mx-4 mt-3 flex overflow-x-auto border-b border-darkborderc px-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden @xl:mx-0 @xl:px-0"
     >
         {#each RISUNEST_SETTINGS_TABS as tab, index (tab)}
             {@const active = activeTab === tab}
@@ -89,6 +90,7 @@
     </div>
     <div role="tabpanel" id="risunest-panel-{activeTab}" aria-labelledby="risunest-tab-{activeTab}" data-risunest-panel={activeTab}>
         {#if activeTab === 'settings'}
+            <RisuNestStartupExclusions />
             <RisuNestPerformanceSettings />
             <RisuNestSettingRows items={risuNestUiSettingsItems} />
             <RisuNestSettingRows items={risuNestStreamingSettingsItems} />

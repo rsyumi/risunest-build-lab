@@ -131,7 +131,7 @@ pub(crate) fn scan_live_library(
     collect(
         LibraryView {
             db,
-            objects: cas,
+            objects: &LivePayloads::open(cas)?,
         },
         sink,
         probe,
@@ -263,11 +263,67 @@ pub(crate) fn validate_live_library(
     fail_fast(
         LibraryView {
             db,
-            objects: cas,
+            objects: &LivePayloads::open(cas)?,
         },
         probe,
     )
 }
+
+/// The live library's payloads. A body this device does not hold still counts as stored while
+/// the Sync server or a live external storage connection holds it, so it is neither reported as
+/// missing nor offered for removal. Every lookup reads this device's own records.
+struct LivePayloads<'a> {
+    cas: &'a PayloadCas,
+    holders: std::cell::RefCell<crate::persistent_store::asset_residency::RemoteHolders>,
+}
+
+impl<'a> LivePayloads<'a> {
+    fn open(cas: &'a PayloadCas) -> Result<Self> {
+        let holders = crate::persistent_store::asset_residency::RemoteHolders::open(cas.repository_root())
+            .map_err(custody_failure)?;
+        Ok(Self {
+            cas,
+            holders: std::cell::RefCell::new(holders),
+        })
+    }
+
+    fn held_elsewhere(&self, hashes: &[String]) -> Result<Vec<bool>> {
+        self.holders.borrow_mut().held(hashes).map_err(custody_failure)
+    }
+
+    /// Records the waiting alias findings in their scan order, leaving out the absent bodies
+    /// another storage holds. Returns false once the report stops.
+    fn flush(
+        &self,
+        waiting: &mut Vec<(Finding, Option<usize>)>,
+        absent: &mut Vec<String>,
+        report: &mut Report<'_>,
+    ) -> Result<bool> {
+        let held = match absent.is_empty() {
+            true => Vec::new(),
+            false => self.held_elsewhere(absent)?,
+        };
+        absent.clear();
+        for (finding, body) in waiting.drain(..) {
+            if body.is_some_and(|body| held[body]) {
+                continue;
+            }
+            if !report.record(finding) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// A residency record that cannot be read stops the scan: guessing would either hide a missing
+/// body or report a held one for removal.
+fn custody_failure(error: crate::server_sync::SyncError) -> Error {
+    Error::Io(std::io::Error::other(error.code))
+}
+
+/// Absent bodies classified per residency question.
+const ABSENT_PAGE: usize = 1024;
 
 trait LibraryObjects {
     fn read_object(&self, hash: &str) -> Result<(Box<dyn Read>, u64)>;
@@ -315,9 +371,10 @@ impl LibraryObjects for Catalog {
         catalog_has_object(db, hash)
     }
 }
-impl LibraryObjects for PayloadCas {
+impl LibraryObjects for LivePayloads<'_> {
     fn read_object(&self, hash: &str) -> Result<(Box<dyn Read>, u64)> {
         let file = self
+            .cas
             .open_object(hash)?
             .ok_or(Error::Invalid("library object is missing"))?;
         let size = file.metadata()?.len();
@@ -329,35 +386,51 @@ impl LibraryObjects for PayloadCas {
         report: &mut Report<'_>,
         probe: &dyn CancellationProbe,
     ) -> Result<()> {
-        for sql in
-            ["SELECT kind,logical_key,object_hash,size FROM asset_aliases ORDER BY kind,logical_key"]
-        {
-            let mut statement = db.prepare(sql)?;
-            let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? {
-                check(probe)?;
-                let kind: String = row.get(0)?;
-                let key: String = row.get(1)?;
-                let hash: Option<String> = row.get(2)?;
-                let size = sql_u64(row.get(3)?)?;
-                let stored = match &hash {
-                    Some(hash) => self.stat_object(hash)?,
-                    None => None,
-                };
-                let finding = match stored {
-                    Some(actual) if actual == size => continue,
-                    Some(_) => alias_finding(true, &kind, &key),
-                    None => alias_finding(false, &kind, &key),
-                };
-                if !report.record(finding) {
-                    return Ok(());
+        // A finding waits with its absent body's position until a page of absent bodies is
+        // classified, so the report keeps the scan order.
+        let mut waiting = Vec::new();
+        let mut absent = Vec::new();
+        let mut statement = db.prepare(
+            "SELECT kind,logical_key,object_hash,size FROM asset_aliases ORDER BY kind,logical_key",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            check(probe)?;
+            let kind: String = row.get(0)?;
+            let key: String = row.get(1)?;
+            let hash: Option<String> = row.get(2)?;
+            let size = sql_u64(row.get(3)?)?;
+            let stored = match &hash {
+                Some(hash) => self.cas.stat_object(hash)?,
+                None => None,
+            };
+            let (finding, body) = match (stored, hash) {
+                (Some(actual), _) if actual == size => continue,
+                (Some(_), _) => (alias_finding(true, &kind, &key), None),
+                (None, Some(hash)) => {
+                    absent.push(hash);
+                    (alias_finding(false, &kind, &key), Some(absent.len() - 1))
                 }
+                (None, None) => (alias_finding(false, &kind, &key), None),
+            };
+            waiting.push((finding, body));
+            // Nothing to classify ahead of it, so a fail-fast caller still stops here.
+            let settled = body.is_none() && absent.is_empty();
+            if (settled || absent.len() == ABSENT_PAGE)
+                && !self.flush(&mut waiting, &mut absent, report)?
+            {
+                return Ok(());
             }
         }
+        self.flush(&mut waiting, &mut absent, report)?;
         Ok(())
     }
     fn has_object(&self, _db: &rusqlite::Connection, hash: &[u8]) -> Result<bool> {
-        Ok(self.stat_object(&hex::encode(hash))?.is_some())
+        let hash = hex::encode(hash);
+        if self.cas.stat_object(&hash)?.is_some() {
+            return Ok(true);
+        }
+        Ok(self.held_elsewhere(std::slice::from_ref(&hash))?[0])
     }
 }
 
@@ -511,11 +584,7 @@ impl LibraryView<'_> {
         if !report.running() {
             return Ok(counts);
         }
-        let selected = selected_row(
-            self.db,
-            "SELECT value FROM bot_presets ORDER BY configured_index LIMIT 1 OFFSET ?1",
-            root.get("botPresetsId"),
-        )?;
+        let selected = selected_preset(self.db, root.get("botPresetsId"))?;
         self.validate_fragment(
             PortableFragment::Root {
                 value: &root,
@@ -782,18 +851,21 @@ impl LibraryView<'_> {
         probe: &dyn CancellationProbe,
     ) -> Result<()> {
         let present: bool = row.get(2)?;
-        let character: Option<Value> = if kind == "character-additional-assets" {
-            self.db
+        let (character, archived): (Option<Value>, bool) = if kind == "character-additional-assets" {
+            match self
+                .db
                 .query_row(
-                    "SELECT detail FROM characters WHERE character_id=?1",
+                    "SELECT detail,archived_object IS NOT NULL FROM characters WHERE character_id=?1",
                     [locator],
-                    |r| r.get::<_, String>(0),
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
                 )
                 .optional()?
-                .map(|v| serde_json::from_str(&v))
-                .transpose()?
+            {
+                Some((detail, archived)) => (Some(serde_json::from_str(&detail)?), archived),
+                None => (None, false),
+            }
         } else {
-            None
+            (None, false)
         };
         let owner = crate::persistent_store::AssetOwnerLocator::from_storage(kind, locator)
             .map_err(|_| Error::Invalid("invalid owner identity"))?;
@@ -804,7 +876,9 @@ impl LibraryView<'_> {
         let parent = parent
             .and_then(Value::as_object)
             .ok_or(Error::Invalid("owner parent is missing"))?;
-        if parent.contains_key(property) != present {
+        // An archived character's additional assets are listed in its archive. Its owner manifest
+        // stays, and only the manifest itself can be checked.
+        if !archived && parent.contains_key(property) != present {
             return Err(Error::Invalid("owner property presence differs"));
         }
         if !present {
@@ -822,30 +896,37 @@ impl LibraryView<'_> {
         }
         let entries = crate::asset_repository::owner_manifest_codec::decode_owner_manifest(&bytes)
             .map_err(|_| Error::Invalid("invalid owner manifest"))?;
-        let tuples = parent
-            .get(property)
-            .and_then(Value::as_array)
-            .ok_or(Error::Invalid("owner property is not an array"))?;
+        let tuples = match archived {
+            true => None,
+            false => Some(
+                parent
+                    .get(property)
+                    .and_then(Value::as_array)
+                    .ok_or(Error::Invalid("owner property is not an array"))?,
+            ),
+        };
         if entries.len()
             != usize::try_from(row.get::<_, i64>(4)?)
                 .map_err(|_| Error::Invalid("owner count overflow"))?
-            || entries.len() != tuples.len()
+            || tuples.is_some_and(|tuples| entries.len() != tuples.len())
         {
             return Err(Error::Invalid("owner entry count differs"));
         }
-        for (entry, tuple) in entries.iter().zip(tuples) {
+        for (index, entry) in entries.iter().enumerate() {
             check(probe)?;
-            let tuple = tuple
-                .as_array()
-                .ok_or(Error::Invalid("invalid owner tuple"))?;
-            if tuple.len() < 3
-                || (kind == "character-additional-assets" && tuple.len() != 3)
-                || !tuple[..3]
-                    .iter()
-                    .zip(&entry.tuple)
-                    .all(|(a, b)| a.as_str() == Some(b))
-            {
-                return Err(Error::Invalid("owner tuples differ"));
+            if let Some(tuples) = tuples {
+                let tuple = tuples[index]
+                    .as_array()
+                    .ok_or(Error::Invalid("invalid owner tuple"))?;
+                if tuple.len() < 3
+                    || (kind == "character-additional-assets" && tuple.len() != 3)
+                    || !tuple[..3]
+                        .iter()
+                        .zip(&entry.tuple)
+                        .all(|(a, b)| a.as_str() == Some(b))
+                {
+                    return Err(Error::Invalid("owner tuples differ"));
+                }
             }
             if let Some(hash) = entry.payload_hash {
                 if !self.objects.has_object(self.db, hash.as_slice())? {
@@ -896,19 +977,29 @@ mod tests {
     }
 }
 
-fn selected_row(
-    db: &rusqlite::Connection,
-    sql: &str,
-    index: Option<&Value>,
-) -> Result<Option<Value>> {
-    let Some(index) = index
-        .and_then(Value::as_u64)
-        .and_then(|n| i64::try_from(n).ok())
-    else {
-        return Ok(None);
+/// The stored root selects a preset by its `id`; an index selects by configured order.
+fn selected_preset(db: &rusqlite::Connection, selection: Option<&Value>) -> Result<Option<Value>> {
+    let row = match selection {
+        Some(Value::String(id)) => db.query_row(
+            "SELECT value FROM bot_presets WHERE preset_id=?1",
+            [id],
+            |r| r.get::<_, String>(0),
+        ),
+        selection => {
+            let Some(index) = selection
+                .and_then(Value::as_u64)
+                .and_then(|n| i64::try_from(n).ok())
+            else {
+                return Ok(None);
+            };
+            db.query_row(
+                "SELECT value FROM bot_presets ORDER BY configured_index LIMIT 1 OFFSET ?1",
+                [index],
+                |r| r.get::<_, String>(0),
+            )
+        }
     };
-    Ok(db
-        .query_row(sql, [index], |r| r.get::<_, String>(0))
+    Ok(row
         .optional()?
         .map(|v| serde_json::from_str(&v))
         .transpose()?)

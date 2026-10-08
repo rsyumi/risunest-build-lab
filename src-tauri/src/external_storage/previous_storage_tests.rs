@@ -31,7 +31,7 @@ fn run<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 
 /// The connection the fixture's receiving store would hold for the repository.
-pub(super) fn receiver_connection(f: &CycleFixture) -> ConnectedRepository {
+pub(crate) fn receiver_connection(f: &CycleFixture) -> ConnectedRepository {
     ConnectedRepository {
         stored: StoredConnection {
             id: "receiver".into(),
@@ -206,6 +206,31 @@ fn status_counts_bodies_by_holder_and_forgets_a_removed_connection() {
     assert_eq!(removed["externalObjects"], serde_json::json!([]));
 }
 
+/// The aliases the quick data check finds without a body, and how many findings block.
+fn absent_aliases(store: &mut PersistentStore) -> (Vec<String>, u64) {
+    let revision = store.revision().unwrap();
+    let lease = store.acquire_revision(revision).unwrap().lease;
+    let findings = store.data_health_reader(&lease).unwrap().scan(2000, &crate::local_backup::NeverCancelled).unwrap();
+    store.release_revision(&lease).unwrap();
+    let absent = findings.items.iter()
+        .filter(|finding| finding.code == crate::data_health::codes::ALIAS_OBJECT_ABSENT)
+        .map(|finding| finding.owner.id.clone())
+        .collect();
+    (absent, crate::data_health::SeverityCounts::of(&findings.items).blocking)
+}
+
+#[test]
+fn the_data_check_reports_only_a_body_no_live_storage_holds() {
+    let mut f = CycleFixture::new();
+    let (_server, _held, _external) = split_holders(&mut f);
+    // The connection that holds the external body is not on this device yet.
+    let (gone, blocking) = absent_aliases(&mut f.b);
+    assert_eq!(gone, ["external-held"], "the server-held body is not reported");
+    assert_eq!(blocking, 1);
+    ConnectionStore::open(f.directory_b.path()).unwrap().insert(&receiver_connection(&f).stored).unwrap();
+    assert_eq!(absent_aliases(&mut f.b), (Vec::new(), 0));
+}
+
 /// Two bodies only the fixture's repository holds, the second of them
 /// registered as well for a second live connection.
 fn shared_holders(f: &mut CycleFixture) -> (ConnectedRepository, String, String) {
@@ -368,4 +393,70 @@ fn removing_a_connection_forgets_catalog_rows_only_it_held() {
     assert!(lww_residency::stat(&root, &external).unwrap().is_none());
     assert_eq!(lww_residency::stat(&root, &shared).unwrap(), Some(size));
     f.b.asset_gc_dry_run(1024, None, super::runtime::now_ms() as i64, 0).unwrap();
+}
+
+/// The status's count for `id`, or zero when it lists none.
+fn status_objects(store: &PersistentStore, id: &str) -> u64 {
+    status(store)["externalObjects"].as_array().unwrap().iter()
+        .find(|entry| entry["connectionId"] == id)
+        .map_or(0, |entry| entry["objects"].as_u64().unwrap())
+}
+
+/// The narrow count for each connection, checked against the status.
+fn connection_counts(store: &PersistentStore) -> [u64; 3] {
+    ["receiver", "second", "other"].map(|id| {
+        let counted = store.asset_residency_connection_objects(id).unwrap();
+        assert_eq!(counted, status_objects(store, id), "{id} differs from the status");
+        counted
+    })
+}
+
+fn registered_root_collections() -> usize {
+    crate::external_storage::capture::REGISTERED_ROOT_COLLECTIONS.with(|count| count.get())
+}
+
+#[test]
+fn a_connection_count_matches_the_status_for_every_holder() {
+    let mut f = CycleFixture::new();
+    let (_server, held, external) = split_holders(&mut f);
+    let root = f.directory_b.path().to_owned();
+    // Registered only through a connection this device does not have.
+    assert_eq!(connection_counts(&f.b), [0, 0, 0]);
+    let connection = receiver_connection(&f);
+    ConnectionStore::open(&root).unwrap().insert(&connection.stored).unwrap();
+    assert_eq!(connection_counts(&f.b), [1, 0, 0]);
+    // A body the server also holds, and one no record references.
+    copy_source(&root, &external, &held, "receiver");
+    let unreferenced = format!("{:064x}", 3);
+    copy_source(&root, &external, &unreferenced, "receiver");
+    assert!(!f.b.external_lww_object_is_local(&unreferenced).unwrap());
+    assert_eq!(connection_counts(&f.b), [1, 0, 0]);
+    let _resolver = lww_residency::install_test_source_connection(&root, Arc::new(connection)).unwrap();
+    f.b.asset_residency_download_remote(Some("receiver"), None, None, || Ok(())).unwrap();
+    assert!(f.b.external_lww_object_is_local(&external).unwrap());
+    assert_eq!(connection_counts(&f.b), [0, 0, 0]);
+    f.b.asset_residency_set_policy(AssetPolicy::Full, || Ok(())).unwrap();
+    assert!(f.b.external_lww_object_is_local(&held).unwrap());
+    assert_eq!(connection_counts(&f.b), [0, 0, 0]);
+}
+
+#[test]
+fn a_connection_count_reads_the_library_only_for_a_body_that_connection_alone_holds() {
+    let mut f = CycleFixture::new();
+    let (_connection, _exclusive, _shared) = shared_holders(&mut f);
+    let before = registered_root_collections();
+    assert_eq!(f.b.asset_residency_connection_objects("second").unwrap(), 0);
+    assert_eq!(f.b.asset_residency_connection_objects("other").unwrap(), 0);
+    assert_eq!(registered_root_collections(), before, "no body qualified, so the library was not read");
+    assert_eq!(f.b.asset_residency_connection_objects("receiver").unwrap(), 1);
+    assert_eq!(registered_root_collections(), before + 1);
+}
+
+#[test]
+fn a_status_collects_the_registered_capture_roots_once() {
+    let mut f = CycleFixture::new();
+    let (_connection, _exclusive, _shared) = shared_holders(&mut f);
+    let before = registered_root_collections();
+    status(&f.b);
+    assert_eq!(registered_root_collections(), before + 1);
 }

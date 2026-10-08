@@ -37,7 +37,8 @@
                 refreshFailed = outcome?.projection === 'refresh-required'
             }
         } catch {
-            refreshFailed = true
+            // An operation that settled as not applied closes the dialog before its error arrives.
+            refreshFailed = open
         } finally {
             refreshing = false
         }

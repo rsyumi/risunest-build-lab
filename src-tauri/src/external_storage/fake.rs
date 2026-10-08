@@ -104,6 +104,7 @@ pub(super) struct FakeState {
     sent_body_bytes: u64,
     received_body_bytes: u64,
     read_barrier: Option<(String,Arc<FakeReadBarrier>)>,
+    requests: usize,
 }
 /// One actual exact-object read is held before delivering bytes to its real sink.
 pub(crate) struct FakeReadBarrier {
@@ -271,6 +272,14 @@ impl FakeProvider {
     pub(crate) fn listing_count(&self) -> usize {
         self.state.lock().unwrap().listings
     }
+    /// Every call that reached the provider, of any kind and however it ended.
+    #[cfg(test)]
+    pub(crate) fn request_count(&self) -> usize {
+        self.state.lock().unwrap().requests
+    }
+    fn requested(&self) {
+        self.state.lock().unwrap().requests += 1;
+    }
     pub(crate) fn deletion_order(&self) -> Vec<String> {
         self.state.lock().unwrap().delete_attempts.clone()
     }
@@ -356,6 +365,7 @@ impl Provider for FakeProvider {
         c: &'a Cancellation,
     ) -> ProviderFuture<'a, (RepositoryHandle, Capabilities)> {
         Box::pin(async move {
+            self.requested();
             c.check()?;
             let mut capabilities = capabilities(self.cas);
             capabilities.max_stored_bytes = Some(self.object_limit);
@@ -372,6 +382,7 @@ impl Provider for FakeProvider {
     ) -> ProviderFuture<'a, ReadReceipt> {
         Box::pin(async move {
             use tokio::io::AsyncWriteExt;
+            self.requested();
             c.check()?;
             l.validate_for(r)?;
             let cancel_after_read = {
@@ -438,6 +449,7 @@ impl Provider for FakeProvider {
         c: &'a Cancellation,
     ) -> ProviderFuture<'a, Option<ResumeState>> {
         Box::pin(async move {
+            self.requested();
             c.check()?;
             intent.validate(r)?;
             Ok(None)
@@ -453,6 +465,7 @@ impl Provider for FakeProvider {
     ) -> ProviderFuture<'a, ObjectReceipt> {
         Box::pin(async move {
             use tokio::io::AsyncReadExt;
+            self.requested();
             c.check()?;
             intent.validate(r)?;
             {
@@ -526,6 +539,7 @@ impl Provider for FakeProvider {
         c: &'a Cancellation,
     ) -> ProviderFuture<'a, HeadReceipt> {
         Box::pin(async move {
+            self.requested();
             c.check()?;
             l.validate_for(r)?;
             self.write(l, Some(e), h.as_bytes())
@@ -539,6 +553,7 @@ impl Provider for FakeProvider {
         c: &'a Cancellation,
     ) -> ProviderFuture<'a, HeadReceipt> {
         Box::pin(async move {
+            self.requested();
             c.check()?;
             l.validate_for(r)?;
             self.write(l, None, h.as_bytes())
@@ -551,6 +566,7 @@ impl Provider for FakeProvider {
         c: &'a Cancellation,
     ) -> ProviderFuture<'a, ()> {
         Box::pin(async move {
+            self.requested();
             c.check()?;
             l.validate_for(r)?;
             let refused = l.object == HEAD_OBJECT
@@ -614,6 +630,7 @@ impl Provider for FakeProvider {
         cancel: &'a Cancellation,
     ) -> ProviderFuture<'a, ObjectPage> {
         Box::pin(async move {
+            self.requested();
             cancel.check()?;
             if limit == 0 || limit > 1000 {
                 return Err(ProviderError::new(ErrorKind::Unsupported));
@@ -678,6 +695,7 @@ impl Provider for FakeProvider {
         cancel: &'a Cancellation,
     ) -> ProviderFuture<'a, UploadResolution> {
         Box::pin(async move {
+            self.requested();
             cancel.check()?;
             intent.validate(repository)?;
             let mut state = self.state.lock().unwrap();
@@ -713,6 +731,7 @@ impl Provider for FakeProvider {
         cancel: &'a Cancellation,
     ) -> ProviderFuture<'a, Option<ObjectReceipt>> {
         Box::pin(async move {
+            self.requested();
             cancel.check()?;
             intent.validate(repository)?;
             if let Some(locator) = known {

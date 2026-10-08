@@ -223,6 +223,15 @@ describe('repairing from the model', () => {
         expect(deps.applyRepair).toHaveBeenCalledOnce()
         expect(deps.undoRepair).not.toHaveBeenCalled()
     })
+    it('marks the result outdated when a repair is refused for a changed library', async () => {
+        const conflict = { code: 'revision-conflict', expected: 3, actual: 4 }
+        const { model } = harness({ getResult: vi.fn().mockResolvedValue(damaged), applyRepair: vi.fn().mockRejectedValue(conflict) })
+        await model.load(); await model.loadRepairs()
+        await expect(model.apply(false)).rejects.toBe(conflict)
+        expect(model.snapshot()).toMatchObject({ outdated: true, failure: null, result: damaged, candidates: [], selection: [], preview: null })
+        await model.quickScan()
+        expect(model.snapshot()).toMatchObject({ outdated: false, result: result() })
+    })
     it('mutually excludes scanning and repair while preserving accepted results', async () => {
         let finishScan!: (value: DataHealthResult) => void
         let finishRepair!: (value: { result: DataHealthResult }) => void

@@ -116,7 +116,7 @@ describe('RisuNestInlayInventory', () => {
         expect(target.querySelector('[data-inlay-inventory-summary]')?.textContent).toBe('6 files, 9.5 KiB')
         expect(rows(target)).toEqual([
             'webp 3 3.0 KiB',
-            'No extension 1 512 bytes',
+            'No extension 1 512 B',
             'png 1 2.0 KiB',
             'mp3 1 4.0 KiB',
         ])

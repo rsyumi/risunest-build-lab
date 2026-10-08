@@ -308,6 +308,7 @@ fn cancelling_streamed_archive_keeps_the_live_character_and_revision() {
             revision,
             10,
             &is_cancelled,
+            None,
         )
         .expect_err("cancel archive while streaming");
 
@@ -340,7 +341,7 @@ fn cancelling_streamed_restore_keeps_the_archive_object_and_cleans_staging() {
     };
 
     let error = store
-        .restore_character_with_cancellation("middle-archived", revision, &is_cancelled)
+        .restore_character_with_cancellation("middle-archived", revision, &is_cancelled, None)
         .expect_err("cancel restore while staging");
 
     assert!(error.to_string().contains("cancelled"));

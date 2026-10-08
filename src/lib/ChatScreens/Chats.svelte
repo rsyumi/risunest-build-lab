@@ -1054,6 +1054,15 @@
                 role: message.role,
                 messageGenerationInfo: message.generationInfo,
             }))
+            const candidatePage = message.responseVariants
+                ? message.responseVariants.candidates.findIndex(
+                      (candidate) => candidate.id === message.responseVariants.selectedId,
+                  ) + 1
+                : 1
+            const candidateTotal = message.responseVariants?.candidates.length ?? 1
+            // The candidate position is not part of the render signature, so rows
+            // refreshed in place would otherwise keep their previous position.
+            untrack(() => mountInstances.get(key)?.updateCandidatePosition?.(candidatePage, candidateTotal))
             renderedMessageIds.set(key, message.chatId)
             const sourceHandoff = sourceHandoffRuntimeKeys.has(key)
             const requiresRemount =
@@ -1203,12 +1212,8 @@
                                     '',
                                 onReroll,
                                 onNextReroll,
-                                currentPage: message.responseVariants
-                                    ? message.responseVariants.candidates.findIndex(
-                                          (candidate) => candidate.id === message.responseVariants.selectedId,
-                                      ) + 1
-                                    : 1,
-                                totalPages: message.responseVariants?.candidates.length ?? 1,
+                                currentPage: candidatePage,
+                                totalPages: candidateTotal,
                                 unReroll,
                                 rerollIcon: 'dynamic',
                                 character: simpleChar,
@@ -1258,14 +1263,6 @@
                         totalMessages,
                     })
                 }
-                instance?.updateCandidatePosition?.(
-                    message.responseVariants
-                        ? message.responseVariants.candidates.findIndex(
-                              (candidate) => candidate.id === message.responseVariants.selectedId,
-                          ) + 1
-                        : 1,
-                    message.responseVariants?.candidates.length ?? 1,
-                )
                 instance?.updateStreamingDisplay?.({
                     isOptimizedStreamingMessage: activeStreamingMessage,
                     streamingOptimizationMode: performanceMode,

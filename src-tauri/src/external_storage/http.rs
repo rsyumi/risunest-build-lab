@@ -42,7 +42,7 @@ impl NativeHttpTransport {
         })
     }
     pub fn with_user_endpoint(mut self, config: &ConnectionConfig) -> Result<Self> {
-        if matches!(config.provider.as_str(), "webdav" | "s3" | "gitlab_packages") {
+        if accepts_user_http(&config.provider) {
             let endpoint = url::Url::parse(&config.endpoint).map_err(|_| ProviderError::new(ErrorKind::Unsupported))?;
             if !user_endpoint_allowed(&endpoint) { return Err(ProviderError::new(ErrorKind::Unsupported)); }
             if endpoint.scheme() == "http" {
@@ -68,6 +68,10 @@ impl NativeHttpTransport {
             loopback_http: true,
         }
     }
+}
+/// Providers whose endpoint the user types, and so may be a plain `http` server.
+pub(crate) fn accepts_user_http(provider: &str) -> bool {
+    matches!(provider, "webdav" | "s3" | "gitlab_packages")
 }
 pub(crate) fn user_endpoint_allowed(url: &url::Url) -> bool {
     matches!(url.scheme(), "https" | "http") && url.host_str().is_some()
@@ -570,10 +574,12 @@ async fn dispatch_ready(
 ) -> Result<HttpResponse> {
     cancel.check()?;
     let account = request.account.clone();
-    let bypass = has_cache_bypass(&request.headers);
+    let propfind = request.method.as_str() == "PROPFIND";
+    // HTTP caches never store a PROPFIND response, so it is always the origin's own.
+    let bypass = propfind || has_cache_bypass(&request.headers);
     let body_deadline = if request.operation == ProviderOperation::DownloadUrl { None } else { deadline };
     let api_response = request.api_request
-        && matches!(request.method, reqwest::Method::GET | reqwest::Method::HEAD);
+        && (propfind || matches!(request.method, reqwest::Method::GET | reqwest::Method::HEAD));
     let before = clock.now_ms();
     let started = Instant::now();
     let result = within_deadline(transport.send(request, cancel), cancel, deadline).await;
@@ -623,8 +629,9 @@ mod tests {
     #[test]
     fn configured_http_is_exact_and_s3_uses_its_validated_bucket_origin() {
         let parse = |value: &str| url::Url::parse(value).unwrap();
+        // A connection being committed has no account yet.
         let config = |provider: &str, endpoint: &str, addressing: &str| serde_json::from_value::<ConnectionConfig>(serde_json::json!({
-            "provider":provider,"endpoint":endpoint,"accountId":"synthetic","profile":"generic",
+            "provider":provider,"endpoint":endpoint,"accountId":"","profile":"generic",
             "location":{"bucket":"chosen","region":"us-east-1","addressing":addressing}
         })).unwrap();
         let default = NativeHttpTransport::new().unwrap();
@@ -847,6 +854,44 @@ mod tests {
         state.observe(&account, &response, true, now, now, started, Instant::now()).unwrap();
         assert!(state.clock_sample_after(&account, started).unwrap().is_some());
         assert!(state.clock_sample_after(&account, Instant::now() + Duration::from_millis(1)).unwrap().is_none());
+    }
+
+    #[test]
+    fn propfind_responses_sample_the_clock_without_a_cache_directive_but_keep_the_cache_guards() {
+        struct Dated(BTreeMap<String, String>);
+        impl HttpTransport for Dated {
+            fn send<'a>(&'a self, _: HttpRequest, _: &'a Cancellation) -> ProviderFuture<'a, HttpResponse> {
+                Box::pin(async move { Ok(HttpResponse { status: 207, headers: self.0.clone(),
+                    body: Box::pin(std::io::Cursor::new(Vec::new())) }) })
+            }
+        }
+        let boundary = Boundary::default();
+        let date = httpdate::fmt_http_date(std::time::UNIX_EPOCH + Duration::from_millis(boundary.now_ms()));
+        let propfind = reqwest::Method::from_bytes(b"PROPFIND").unwrap();
+        let dated = |extra: Option<(&str, &str)>| {
+            let mut headers = BTreeMap::from([("date".to_owned(), date.clone())]);
+            if let Some((name, value)) = extra { headers.insert(name.into(), value.into()); }
+            Dated(headers)
+        };
+        runtime().block_on(async {
+            for (method, extra, api, usable) in [
+                (propfind.clone(), None, true, true),
+                (propfind.clone(), Some(("age", "3")), true, false),
+                (propfind.clone(), Some(("x-cache", "HIT")), true, false),
+                (propfind.clone(), None, false, false),
+                (reqwest::Method::GET, None, true, false),
+                (reqwest::Method::PUT, None, true, false),
+            ] {
+                let state = RequestState::default();
+                let mut sent = request("webdav", "synthetic");
+                sent.method = method.clone();
+                sent.api_request = api;
+                let account = sent.account.clone();
+                let started = Instant::now();
+                dispatch_ready(&dated(extra), &boundary, &state, sent, &Cancellation::default(), None).await.unwrap();
+                assert_eq!(state.clock_sample_after(&account, started).unwrap().is_some(), usable, "{method} {extra:?} api={api}");
+            }
+        });
     }
 
     #[test]

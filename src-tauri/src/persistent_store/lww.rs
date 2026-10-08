@@ -857,6 +857,23 @@ impl PersistentStore {
     ) -> StoreResult<Option<RevisionResult>> {
         completed_device_replacement_receipt(&self.connection, self.device_store()?.connection(), header, staging_id)
     }
+    /// Whether neither store holds an intent, a receipt or a written unit of `request_id`, so
+    /// nothing under it was applied and nothing can be recovered from it.
+    pub(crate) fn lww_request_unreserved(&self, request_id: &str) -> StoreResult<bool> {
+        let device = self.device_store()?.connection();
+        let reserved: bool = device.query_row(
+            "SELECT EXISTS(SELECT 1 FROM lww_intents WHERE request_id=?1)", [request_id], |row| row.get(0),
+        )?;
+        if reserved || self.lww_request_recorded(request_id)? { return Ok(false); }
+        for db in [&self.connection, device] {
+            let written: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM lww_units WHERE version=?1) OR EXISTS(SELECT 1 FROM lww_outbox WHERE version=?1)",
+                [request_id], |row| row.get(0),
+            )?;
+            if written { return Ok(false); }
+        }
+        Ok(true)
+    }
     pub(crate) fn lww_acquire_backup_capture(
         &mut self,
         revision: i64,
@@ -904,6 +921,7 @@ impl PersistentStore {
             let sections = if let Some(snapshot) = snapshot {
                 let sections = device_store::sections::capture_backup_sections_snapshot(
                     &snapshot, &[SectionKind::Hypa, SectionKind::LocalPlugins, SectionKind::LocalSettings],
+                    &crate::external_storage::leftovers::scratch_directory(&self.repository_root)?,
                 )?;
                 snapshot.execute_batch("COMMIT;")?;
                 sections
@@ -1246,9 +1264,18 @@ impl PersistentStore {
         let authority = self.lww_binding_authority()?;
         let rows: Vec<(String, String, String, String, String)> = {
             let db = self.device_store()?.connection();
-            intent_rows::delete_settled(db)?;
-            db.execute("DELETE FROM lww_intent_proofs WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0)", [])?;
-            db.execute("DELETE FROM lww_intent_failures WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0)", [])?;
+            // Completion already removes these rows, so most calls find nothing to delete and
+            // take no write lock, which another connection may hold for a long write.
+            let settled: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM lww_intent_rows WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0))
+                    OR EXISTS(SELECT 1 FROM lww_intent_proofs WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0))
+                    OR EXISTS(SELECT 1 FROM lww_intent_failures WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0))",
+                [], |r| r.get(0))?;
+            if settled {
+                intent_rows::delete_settled(db)?;
+                db.execute("DELETE FROM lww_intent_proofs WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0)", [])?;
+                db.execute("DELETE FROM lww_intent_failures WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0)", [])?;
+            }
             let mut s=db.prepare("SELECT request_id,authority,stamp,body,digest FROM lww_intents i WHERE complete=0 AND NOT EXISTS(SELECT 1 FROM lww_intent_failures f WHERE f.request_id=i.request_id AND f.quarantined=1) ORDER BY rowid")?;
             let v = s
                 .query_map([], |r| {
@@ -1526,8 +1553,11 @@ impl PersistentStore {
         at_ms: i64,
         restore: bool,
         cancel: &dyn Fn() -> bool,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> StoreResult<RevisionResult> {
         self.lww_recover_intents()?;
+        // A body fetched here is in place before the intent exists, so a replay never fetches.
+        super::archive::fetch_operation_body(&self.connection, &self.repository_root, char_id, restore, cancel, cancellation)?;
         let header = Header {
             binding_authority: self.lww_binding_authority()?,
             request_id: Uuid::new_v4().to_string(),
@@ -2031,41 +2061,83 @@ impl PersistentStore {
         }
         Ok(result)
     }
+    /// Whether an incoming `archive` change restores (`Some(true)`) or archives (`Some(false)`)
+    /// the character on this device, or changes nothing here.
+    fn incoming_archive_transition(&self, change: &Change) -> StoreResult<Option<bool>> {
+        let p = change.key.components();
+        if p[0] != "archive" || parent_status(&self.connection, &change.key)? != "ready" {
+            return Ok(None);
+        }
+        if let Some((stamp, value)) = read_unit(&self.connection, &change.key)? {
+            if wire({
+                let result = compare_version(
+                    &stamp,
+                    &value,
+                    &change.stamp,
+                    &change.value,
+                );
+                #[cfg(test)]
+                crate::persistent_store::hash_work::comparison(&value, &change.value, &result);
+                result
+            })? != LwwDecision::ApplyRemote
+            {
+                return Ok(None);
+            }
+        }
+        let generation = active_generation(&self.connection)?;
+        let archived = super::archive::is_archived(&self.connection, &generation, &p[1])?;
+        let restore = matches!(change.value, UnitValue::Deleted);
+        Ok((restore == archived).then_some(restore))
+    }
+    /// The stored bodies the archives and restores in `changes` read on this device and that
+    /// are not here: the archive a restore reads, or the owner manifest an archive lists.
+    pub(crate) fn lww_incoming_archive_bodies(&self, changes: &[Change]) -> StoreResult<Vec<String>> {
+        let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
+        let mut missing = BTreeSet::new();
+        for change in changes {
+            let Some(restore) = self.incoming_archive_transition(change)? else {
+                continue;
+            };
+            let character_id = &change.key.components()[1];
+            let body = if restore {
+                let generation = active_generation(&self.connection)?;
+                super::archive::read_archived_object(&self.connection, &generation, character_id)?
+                    .map(|archived| archived.object_hash)
+            } else {
+                super::archive::owner_manifest_hash(&self.connection, character_id)?
+            };
+            if let Some(body) = body.filter(|body| !missing.contains(body)) {
+                if cas.stat_object(&body)?.is_none() {
+                    missing.insert(body);
+                }
+            }
+        }
+        Ok(missing.into_iter().collect())
+    }
     fn restore_incoming_archives(&mut self, staged: &StageReceive) -> StoreResult<Vec<UnitKey>> {
         self.lww_recover_intents()?;
         let mut affected = Vec::new();
         for change in &staged.changes {
+            let Some(restore) = self.incoming_archive_transition(change)? else {
+                continue;
+            };
             let p = change.key.components();
-            if p[0] != "archive" || parent_status(&self.connection, &change.key)? != "ready" {
-                continue;
-            }
-            if let Some((stamp, value)) = read_unit(&self.connection, &change.key)? {
-                if wire({
-                    let result = compare_version(
-                        &stamp,
-                        &value,
-                        &change.stamp,
-                        &change.value,
-                    );
-                    #[cfg(test)]
-                    crate::persistent_store::hash_work::comparison(&value, &change.value, &result);
-                    result
-                })? != LwwDecision::ApplyRemote
-                {
-                    continue;
-                }
-            }
-            let generation = active_generation(&self.connection)?;
-            let archived =
-                super::archive::read_archived_object(&self.connection, &generation, &p[1])?;
-            let restore = matches!(change.value, UnitValue::Deleted);
-            if restore == archived.is_none() {
-                continue;
-            }
-            if let Some(archived) = archived {
-                let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
-                if cas.open_object(&archived.object_hash)?.is_none() {
+            // A receive brings these bodies here before it is applied, so one that is still
+            // missing fails the apply before anything changes.
+            let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
+            if restore {
+                let generation = active_generation(&self.connection)?;
+                let archived =
+                    super::archive::read_archived_object(&self.connection, &generation, &p[1])?
+                        .ok_or_else(|| error("archive-object-missing"))?;
+                if cas.stat_object(&archived.object_hash)?.is_none() {
                     return Err(error("archive-object-missing"));
+                }
+            } else if let Some(manifest) =
+                super::archive::owner_manifest_hash(&self.connection, &p[1])?
+            {
+                if cas.stat_object(&manifest)?.is_none() {
+                    return Err(error("archive-manifest-missing"));
                 }
             }
             let header = Header {
@@ -2975,6 +3047,12 @@ fn replacement_changes(
         }
         let value = source_value.clone().or_else(|| staged.cloned()).unwrap_or(UnitValue::Deleted);
         if !matches!(value, UnitValue::Deleted) && parent_status(tx, &key)? == "retired" {
+            // The identity remap moved every record the stage holds, so a
+            // source unit still under a retired ID belongs to no restored
+            // record and stays covered by its tombstone.
+            if staged.is_none() {
+                return Ok(());
+            }
             return Err(error("retired-record-id"));
         }
         let prior = read_unit(tx, &key)?

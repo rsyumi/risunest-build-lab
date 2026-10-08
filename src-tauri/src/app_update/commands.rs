@@ -131,11 +131,11 @@ pub(crate) async fn app_update_check(
     app: AppHandle,
     state: tauri::State<'_, AppUpdateState>,
 ) -> Result<UpdateCheckResult, String> {
-    logged("app_update_check", async move {
+    logged("app_update_check", Box::pin(async move {
         tokio::time::timeout(Duration::from_secs(30), run_app_update_check(app, state))
             .await
             .map_err(|_| "update check timed out".to_owned())?
-    }.await)
+    }).await)
 }
 
 async fn run_app_update_check(
@@ -306,7 +306,7 @@ pub(crate) async fn app_update_install(
     state: tauri::State<'_, AppUpdateState>,
     handle_id: String,
 ) -> Result<(), String> {
-    logged("app_update_install", async move {
+    logged("app_update_install", Box::pin(async move {
         #[cfg(not(desktop))]
         {
             let _ = (app, state, handle_id);
@@ -331,7 +331,7 @@ pub(crate) async fn app_update_install(
             let _ = app.emit("app-update://applying", &handle_id);
             update.install(&bytes).map_err(|error| error.to_string())
         }
-    }.await)
+    }).await)
 }
 
 #[tauri::command]
@@ -340,7 +340,7 @@ pub(crate) async fn app_update_stage_deb(
     state: tauri::State<'_, AppUpdateState>,
     handle_id: String,
 ) -> Result<StagedDeb, String> {
-    logged("app_update_stage_deb", async move {
+    logged("app_update_stage_deb", Box::pin(async move {
         #[cfg(not(desktop))]
         {
             let _ = (app, state, handle_id);
@@ -373,7 +373,7 @@ pub(crate) async fn app_update_stage_deb(
                 .ok_or("signed DEB filename is invalid")?;
             stage_verified_deb(&directory, &file_name, &bytes)
         }
-    }.await)
+    }).await)
 }
 
 #[cfg(desktop)]

@@ -14,7 +14,15 @@ describe('app cleanup startup gate', () => {
     afterEach(() => {
         delete nativeWindow.__TAURI_INTERNALS__
         document.body.innerHTML = ''
+        for (const key of ['userAgent', 'language']) Reflect.deleteProperty(navigator, key)
     })
+    const stubNavigator = (values: { userAgent: string, language?: string }) => {
+        for (const [key, value] of Object.entries(values)) Object.defineProperty(navigator, key, { value, configurable: true })
+    }
+    const windowsAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+    const androidAgent = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36'
+    const statusText = () => document.querySelector('[role="status"]')?.textContent
+    const cancelButton = () => Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Cancel reset' || button.textContent === '초기화 취소')!
     it('skips native calls on web', async () => {
         delete nativeWindow.__TAURI_INTERNALS__
         await appCleanupBeforeBootstrap()
@@ -48,6 +56,29 @@ describe('app cleanup startup gate', () => {
         document.querySelector('button')!.click()
         await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(4))
         expect(bootstrap).not.toHaveBeenCalled()
+    })
+    it('covers the viewport with the reset page', async () => {
+        // The page keeps #app at full height and does not let the body scroll.
+        document.body.insertAdjacentHTML('afterbegin', '<div id="app"></div>')
+        vi.mocked(invoke).mockResolvedValue({ pending: true, mode: 'reset', error: 'cleanup-files-busy-or-denied', canCancel: true })
+        void appCleanupBeforeBootstrap()
+        const page = await vi.waitFor(() => {
+            const found = document.querySelector<HTMLElement>('main')
+            expect(found).not.toBeNull()
+            return found!
+        })
+        expect(page.style.position).toBe('fixed')
+        expect(page.style.inset).toBe('0')
+        expect(page.style.overflow).toBe('auto')
+        expect(page.style.background).toContain('--risu-theme-bgcolor')
+        expect(page.style.color).toContain('--risu-theme-textcolor')
+        // The app stylesheet strips the default button look, so both buttons have to bring their own.
+        for (const button of page.querySelectorAll('button')) {
+            expect(button.classList).toContain('border')
+            expect(button.classList).toContain('bg-darkbutton')
+            expect(button.classList).toContain('disabled:opacity-50')
+        }
+        expect(page.querySelectorAll('button')).toHaveLength(2)
     })
     it('blocks normal startup when cleanup status is unavailable', async () => {
         vi.mocked(invoke).mockRejectedValue(new Error('status-unavailable'))
@@ -115,14 +146,48 @@ describe('app cleanup startup gate', () => {
         expect(invoke).not.toHaveBeenCalledWith('app_cleanup_cancel')
     })
 
-    it('keeps a corrupt journal fail closed without a cancellation control', async () => {
+    it('keeps a corrupt journal fail closed and names the record to remove outside the app', async () => {
+        stubNavigator({ userAgent: windowsAgent, language: 'en-US' })
         vi.mocked(invoke).mockResolvedValue({ pending: true, mode: null, error: 'cleanup-journal-corrupt', canCancel: false })
         const bootstrap = vi.fn()
         void appCleanupBeforeBootstrap().then(bootstrap)
-        await vi.waitFor(() => expect(document.body.textContent).toContain('deletion record is damaged'))
-        const cancel = Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Cancel reset')!
-        expect(cancel.hidden).toBe(true)
+        await vi.waitFor(() => expect(statusText()).toBe(
+            'The deletion record is damaged, so the reset cannot continue. Quit the app, delete the %LOCALAPPDATA%\\RisuNest-cleanup folder, and start RisuNest again. You can then run the reset again from the settings.',
+        ))
+        expect(cancelButton().hidden).toBe(true)
         expect(bootstrap).not.toHaveBeenCalled()
+    })
+
+    it('tells Android users to clear the app data when the record is damaged', async () => {
+        stubNavigator({ userAgent: androidAgent, language: 'ko-KR' })
+        vi.mocked(invoke).mockResolvedValue({ pending: true, mode: null, error: 'cleanup-journal-corrupt', canCancel: false })
+        void appCleanupBeforeBootstrap()
+        await vi.waitFor(() => expect(statusText()).toBe(
+            '삭제 기록이 손상되어 초기화를 진행할 수 없습니다. 앱 정보 > 저장공간에서 데이터를 삭제해주세요.',
+        ))
+        expect(cancelButton().hidden).toBe(true)
+    })
+
+    it('points to Cancel reset when a damaged credential record left the data intact', async () => {
+        stubNavigator({ userAgent: windowsAgent, language: 'ko-KR' })
+        vi.mocked(invoke).mockResolvedValueOnce({ pending: true, mode: 'reset', error: 'secret-index-corrupt', canCancel: true })
+            .mockResolvedValue(undefined)
+        void appCleanupBeforeBootstrap()
+        await vi.waitFor(() => expect(statusText()).toBe(
+            '삭제 기록이 손상되어 초기화를 완료하지 못했습니다. 초기화 취소를 눌러 앱을 시작해주세요.',
+        ))
+        expect(cancelButton().hidden).toBe(false)
+        cancelButton().click()
+        await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('app_cleanup_cancel'))
+    })
+
+    it('falls back to removing the record outside the app when cancellation is unavailable', async () => {
+        stubNavigator({ userAgent: windowsAgent, language: 'en-US' })
+        vi.mocked(invoke).mockResolvedValue({ pending: true, mode: 'reset', error: 'secret-index-corrupt', canCancel: false })
+        void appCleanupBeforeBootstrap()
+        await vi.waitFor(() => expect(statusText()).toContain('Quit the app, delete the %LOCALAPPDATA%\\RisuNest-cleanup folder'))
+        expect(statusText()).not.toContain('Cancel reset')
+        expect(cancelButton().hidden).toBe(true)
     })
 
     it('reloads safely if cancellation cleared the journal but navigation failed', async () => {

@@ -10,6 +10,12 @@ import subprocess
 import tempfile
 import time
 
+from sync_controller import DEPENDENCIES as SYNC_DEPENDENCIES, PHASES as SYNC_PHASES, SyncEnvironmentError, SyncSession
+from external_controller import (DEPENDENCIES as EXTERNAL_DEPENDENCIES, FILE_PHASES, GROUPS as EXTERNAL_GROUPS,
+                                 ExternalStorageSession, file_markers)
+
+EXTERNAL_PHASES = tuple(phase for group in EXTERNAL_GROUPS for phase in group)
+
 
 def records(path):
     # A report can be large; the reader may observe an unfinished final write.
@@ -195,7 +201,8 @@ def run_phase(app, phase, artifacts, fixtures, expected=None):
             required = ({'session-dispatch-ready', 'session-dispatch-sent', 'session-dispatch-exit'}
                         if phase.startswith('session-dispatch-') else
                         {phase} if phase.startswith('appearance-') else
-                        {'session-upgrade': {'session-deadline-started', 'session-deadline-reply', 'session-deadline-exit'}, 'session-deadline': {'session-deadline-started', 'session-deadline-reply', 'session-deadline-exit'}, 'termination-probe': {'termination-probe-cancel', 'termination-probe-reload', 'termination-probe-approved'}, 'contracts': {'persistence', 'regex', 'tokenizer', 'reload', 'closed', 'reopened', 'finder', 'quit-cancelled', 'quit-saved'}, 'restart': {'restart'}, 'app': {'app', 'app-native-saving', 'app-native-reload-cancelled', 'app-native-stale-rejected', 'app-native-saved', 'app-native-exit'}, 'app-restart': {'app-restart'}, 'streaming': {'streaming'}, 'quit-escape': {'quit-escape-delivered', 'quit-escape-exit'}}[phase])
+                        {'session-upgrade': {'session-deadline-started', 'session-deadline-reply', 'session-deadline-exit'}, 'session-deadline': {'session-deadline-started', 'session-deadline-reply', 'session-deadline-exit'}, 'termination-probe': {'termination-probe-cancel', 'termination-probe-reload', 'termination-probe-approved'}, 'contracts': {'persistence', 'regex', 'tokenizer', 'reload', 'closed', 'reopened', 'finder', 'quit-cancelled', 'quit-saved'}, 'restart': {'restart'}, 'app': {'app', 'app-native-saving', 'app-native-reload-cancelled', 'app-native-stale-rejected', 'app-native-saved', 'app-native-exit'}, 'app-restart': {'app-restart'}, 'streaming': {'streaming'}, 'quit-escape': {'quit-escape-delivered', 'quit-escape-exit'},
+                         **{name: {name} for name in (*SYNC_PHASES, *EXTERNAL_PHASES)}}[phase])
             stages = {entry['stage'] for entry in result}
             if not required <= stages or 'failure' in stages:
                 raise RuntimeError(f'{phase}: incomplete results {stages}')
@@ -271,6 +278,9 @@ def main():
     parser.add_argument('--capture-bgra-experiment', action='store_true')
     parser.add_argument('--capture-input')
     parser.add_argument('--system-theme', choices=['light', 'dark'])
+    parser.add_argument('--sync-server', type=Path)
+    parser.add_argument('--webdav-server', type=Path)
+    parser.add_argument('--webdav-scheme', choices=['https', 'http'], default='https')
     args = parser.parse_args()
     if args.appearance and args.capture_codec_experiment:
         parser.error('Select appearance capture or the paired codec experiment')
@@ -394,35 +404,83 @@ def main():
     ]
     allowed_phases = {'session-upgrade', 'session-deadline', 'termination-probe', 'contracts', 'restart', 'app', 'app-restart', 'streaming', 'quit-escape',
                       'session-dispatch-initial', 'session-dispatch-local', 'session-dispatch-drain', 'session-dispatch-dialog',
-                      'appearance-seed-light', 'appearance-app-light', 'appearance-seed-dark', 'appearance-app-dark'}
+                      'appearance-seed-light', 'appearance-app-light', 'appearance-seed-dark', 'appearance-app-dark',
+                      *SYNC_PHASES, *EXTERNAL_PHASES}
     if not phases or any(phase not in allowed_phases for phase in phases):
         raise RuntimeError('invalid RISUNEST_MACOS_PHASES')
+    if any(phase in SYNC_PHASES for phase in phases):
+        # Each phase is one device of a single round trip on one loopback server.
+        if [phase for phase in phases if phase in SYNC_PHASES] != list(SYNC_PHASES):
+            raise RuntimeError('Sync phases run together and in order')
+        if os.environ.get('GITHUB_ACTIONS') != 'true':
+            raise RuntimeError('The Sync round trip is restricted to a fresh hosted CI user')
+        if not args.sync_server:
+            parser.error('Sync phases require --sync-server')
+    external_phases = [phase for phase in phases if phase in EXTERNAL_PHASES]
+    if external_phases:
+        if not any(external_phases == list(group) for group in EXTERNAL_GROUPS):
+            raise RuntimeError('External storage phases run as one group, together and in order')
+        if os.environ.get('GITHUB_ACTIONS') != 'true':
+            raise RuntimeError('The external storage round trip is restricted to a fresh hosted CI user')
+        if not args.webdav_server and external_phases[0] not in FILE_PHASES:
+            parser.error('External storage phases require --webdav-server')
     # A failed phase skips only the phases that read the data it leaves; the rest still run.
     dependencies = {'restart': 'contracts', 'app': 'contracts', 'app-restart': 'app',
-                    'appearance-app-light': 'appearance-seed-light', 'appearance-app-dark': 'appearance-seed-dark'}
+                    'appearance-app-light': 'appearance-seed-light', 'appearance-app-dark': 'appearance-seed-dark',
+                    **SYNC_DEPENDENCIES, **EXTERNAL_DEPENDENCIES}
     results = {}
     failures = {}
-    for phase in phases:
-        if dependencies.get(phase) in failures:
-            failures[phase] = f'skipped because {dependencies[phase]} did not pass'
-            print(f'{phase}: {failures[phase]}', flush=True)
-            continue
-        try:
-            expected = None
-            if phase == 'restart' and 'contracts' in results:
-                expected = next(entry['result'] for entry in results['contracts'] if entry['stage'] == 'quit-saved')
-            if phase == 'app-restart' and 'app' in results:
-                expected = next(entry['result'] for entry in results['app'] if entry['stage'] == 'app-native-saved')
-            results[phase] = run_phase(app, phase, artifacts, fixtures, expected)
-        except Exception as error:
-            failures[phase] = f'{type(error).__name__}: {error}'
-            print(f'{phase}: FAILED {failures[phase]}', flush=True)
-    if 'app' in results and 'app-restart' in results:
-        saved = next(entry['result']['revision'] for entry in results['app'] if entry['stage'] == 'app-native-saved')
-        restarted = next(entry['result']['revision'] for entry in results['app-restart'] if entry['stage'] == 'app-restart')
-        if saved != restarted:
-            failures['app-restart'] = 'Product restart revision differs from the native-approved saved revision'
-    (artifacts / 'result.json').write_text(json.dumps({'passed': not failures, 'phases': results, 'failures': failures}, indent=2))
+    sync = None
+    external = None
+    backup_file = file_markers()
+    try:
+        for phase in phases:
+            if dependencies.get(phase) in failures:
+                failures[phase] = f'skipped because {dependencies[phase]} did not pass'
+                print(f'{phase}: {failures[phase]}', flush=True)
+                continue
+            launched = False
+            try:
+                expected = None
+                if phase == 'restart' and 'contracts' in results:
+                    expected = next(entry['result'] for entry in results['contracts'] if entry['stage'] == 'quit-saved')
+                if phase == 'app-restart' and 'app' in results:
+                    expected = next(entry['result'] for entry in results['app'] if entry['stage'] == 'app-native-saved')
+                if phase in SYNC_PHASES:
+                    if sync is None:
+                        sync = SyncSession(args.sync_server, artifacts)
+                        sync.start()
+                    expected = sync.before(phase)
+                if phase in FILE_PHASES:
+                    expected = backup_file
+                elif phase in EXTERNAL_PHASES:
+                    if external is None:
+                        external = ExternalStorageSession(args.webdav_server, artifacts, args.webdav_scheme)
+                        external.start()
+                    expected = external.before(phase)
+                launched = True
+                results[phase] = run_phase(app, phase, artifacts, fixtures, expected)
+            except SyncEnvironmentError as error:
+                failures[phase] = f'sync-env: {error}'
+                print(f'{phase}: FAILED {failures[phase]}', flush=True)
+            except Exception as error:
+                failures[phase] = f'{type(error).__name__}: {error}'
+                print(f'{phase}: FAILED {failures[phase]}', flush=True)
+            if launched and phase in SYNC_PHASES:
+                failure = sync.summarize(phase)
+                if failure and phase in failures:
+                    failures[phase] = f"{failure['label']}: {failure['step']}: {failure['message']}"
+        if 'app' in results and 'app-restart' in results:
+            saved = next(entry['result']['revision'] for entry in results['app'] if entry['stage'] == 'app-native-saved')
+            restarted = next(entry['result']['revision'] for entry in results['app-restart'] if entry['stage'] == 'app-restart')
+            if saved != restarted:
+                failures['app-restart'] = 'Product restart revision differs from the native-approved saved revision'
+        (artifacts / 'result.json').write_text(json.dumps({'passed': not failures, 'phases': results, 'failures': failures}, indent=2))
+    finally:
+        if sync is not None:
+            sync.close()
+        if external is not None:
+            external.close()
     if failures:
         raise RuntimeError(f'Failed phases: {json.dumps(failures, indent=2)}')
     print('Mac WKWebView contracts, restart and product app passed', flush=True)

@@ -157,7 +157,9 @@ impl GithubReleases {
         mut response: HttpResponse,
         cancel: &Cancellation,
     ) -> Result<T> {
-        common::require_status(&response, &[200, 201], self.now())?;
+        if !matches!(response.status, 200 | 201) {
+            return Err(api::classify(response.status, &response.headers, self.now()));
+        }
         let bytes =
             common::read_bounded(&mut response.body, common::MAX_CONTROL_BODY, cancel).await?;
         // A response body may quote a token or a signed URL; only the shape is read.

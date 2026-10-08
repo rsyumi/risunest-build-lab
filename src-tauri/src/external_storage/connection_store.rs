@@ -161,15 +161,20 @@ impl ConnectionStore {
         Ok(result)
     }
     /// The connection that already holds this remote repository, if there is
-    /// one. Retention settings and the one-job-per-connection rule are per
-    /// connection while the repository is not, so a repository two connections
-    /// already hold is a state this build cannot produce and is reported.
-    pub fn identity_holder(&self, identity: &str) -> Result<Option<String>> {
-        let mut held: BTreeMap<String, String> = BTreeMap::new();
+    /// one. A repository is its descriptor at its location, whichever address
+    /// reaches it. Retention settings and the one-job-per-connection rule are
+    /// per connection while the repository is not, so a repository two
+    /// connections already hold is a state this build cannot produce and is
+    /// reported.
+    pub fn identity_holder(&self, repository_id: &str, identity: &str) -> Result<Option<String>> {
+        let mut held: BTreeMap<(String, String), String> = BTreeMap::new();
         for connection in self.list()? {
             if held
                 .insert(
-                    connection.descriptor_locator.connection_identity,
+                    (
+                        connection.descriptor.repository_id,
+                        connection.descriptor_locator.connection_identity,
+                    ),
                     connection.id,
                 )
                 .is_some()
@@ -177,17 +182,20 @@ impl ConnectionStore {
                 return Err(corrupt());
             }
         }
-        Ok(held.remove(identity))
+        Ok(held.remove(&(repository_id.to_owned(), identity.to_owned())))
     }
-    fn require_unheld_identity(&self, identity: &str) -> Result<()> {
-        match self.identity_holder(identity)? {
+    fn require_unheld_identity(&self, connection: &StoredConnection) -> Result<()> {
+        match self.identity_holder(
+            &connection.descriptor.repository_id,
+            &connection.descriptor_locator.connection_identity,
+        )? {
             Some(_) => Err(ProviderError::new(ErrorKind::PreconditionFailed)),
             None => Ok(()),
         }
     }
     pub fn insert(&mut self, connection: &StoredConnection) -> Result<()> {
         connection.descriptor.validate().map_err(|_| corrupt())?;
-        self.require_unheld_identity(&connection.descriptor_locator.connection_identity)?;
+        self.require_unheld_identity(connection)?;
         let encoded = serde_json::to_string(connection).map_err(storage)?;
         decode(&encoded)?;
         self.0
@@ -374,7 +382,7 @@ impl ConnectionStore {
             last_backup_at_ms: None,
         };
         connection.descriptor.validate().map_err(|_| corrupt())?;
-        self.require_unheld_identity(&connection.descriptor_locator.connection_identity)?;
+        self.require_unheld_identity(&connection)?;
         let encoded = serde_json::to_string(&connection).map_err(storage)?;
         decode(&encoded)?;
         let tx = self.0.transaction().map_err(storage)?;
@@ -969,10 +977,11 @@ mod tests {
             })
         ));
         assert_eq!(
-            store.identity_holder("shared").unwrap().as_deref(),
+            store.identity_holder(&first.repository_id, "shared").unwrap().as_deref(),
             Some(first.id.as_str())
         );
-        assert_eq!(store.identity_holder("elsewhere").unwrap(), None);
+        assert_eq!(store.identity_holder(&first.repository_id, "elsewhere").unwrap(), None);
+        assert_eq!(store.identity_holder("synthetic-other-repository", "shared").unwrap(), None);
         assert_eq!(store.list().unwrap().len(), 1);
 
         let promoted = store
@@ -986,6 +995,20 @@ mod tests {
                 ..
             })
         ));
+
+        // Another server can hold a different repository at the same account
+        // and root, which is not the repository the first connection holds.
+        let mut third = pending();
+        third.id = "synthetic-third".into();
+        third.repository_id = "synthetic-other-repository".into();
+        third.descriptor = Some(
+            Descriptor::new(third.repository_id.clone(), None).unwrap(),
+        );
+        store.put_pending(&third).unwrap();
+        store
+            .promote_pending(&third.id, locator("shared"), Capabilities::default())
+            .unwrap();
+        assert_eq!(store.list().unwrap().len(), 3);
     }
     /// A synchronization connection holds backup points too, so it carries a
     /// retention policy as well. Until one is set the connection has none and

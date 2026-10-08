@@ -110,6 +110,8 @@
                 label={model.overallPercent === null && !model.terminal ? copy.preparing : model.title}
                 detail={model.overallText}
                 fraction={model.indeterminate ? null : (model.overallPercent ?? 0) / 100}
+                done={model.terminal?.state === 'succeeded'}
+                stopped={model.terminal !== null && model.terminal.state !== 'succeeded'}
             />
 
             {#if model.stages.length > 0}

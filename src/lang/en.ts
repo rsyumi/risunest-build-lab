@@ -79,7 +79,7 @@ export const languageEnglish = {
     },
     portableBackup: {
         preservedSourceHelp:
-            'These files are kept separately because the restored library does not need them. They do not sync automatically and can be deleted from the source preservation area.',
+            'These files are kept separately because the restored library does not need them. You can delete them from the source preservation area.',
         export: 'RisuNest full backup (.risunest)',
         restore: 'Restore backup file',
         localStorage: 'Plugin local storage',
@@ -90,6 +90,7 @@ export const languageEnglish = {
         pocket: 'Export for PocketRisu (.bin)',
         report: 'Compatibility export report',
         preserved: 'Preserved',
+        preservedSummary: 'Preserved {0} files · {1}',
         converted: 'Converted',
         excluded: 'Excluded',
         unknown: 'Not determined',
@@ -138,7 +139,7 @@ export const languageEnglish = {
     togglesUnbound: 'Toggles unbound.',
     saveToggleChanges: 'Save the changed toggle values to the binding',
     saveTogglesLabel: 'Save',
-    toggleBindingDisabled: 'Toggle binding is temporarily off. Saved values are kept.',
+    toggleBindingDisabled: 'Toggle binding is temporarily off.',
     localTogglePriority: 'Chat local overrides take priority.',
     disableToggleBinding: 'Temporarily disable toggle binding',
     saveDefaultToggles: 'Save current values as the new chat default',
@@ -997,7 +998,7 @@ export const languageEnglish = {
     risuSaveImportCommittedRefreshFailed: "The RisuSave import was committed, but the screen could not be refreshed. Select Refresh screen before making more changes.",
     risuSaveImportComplete: "RisuSave import completed.",
     risuSaveExportComplete: "RisuSave export completed.",
-    risuSaveCleanupWarning: "The operation completed, but a temporary native file could not be cleaned up. It will be retried at startup.",
+    risuSaveCleanupWarning: "The operation completed, but a temporary file could not be cleaned up. It will be retried at startup.",
     risuSaveRevisionConflict: "The database changed while the operation was starting. Please try again.",
     accountUnmigration: {
         preparing: "Preparing to store account data locally",
@@ -1025,7 +1026,6 @@ export const languageEnglish = {
     syncBackupDatabaseOnly: "database only, excludes assets, cold storage, and inlays",
     syncBackupSideLocal: "this device",
     syncBackupSideRemote: "account",
-    exitSyncPendingWarning: "Some changes are not synced to the account yet. Exit anyway?",
     others: "Others",
     presets: "Presets",
     imageGeneration: "Image Generation",
@@ -1275,7 +1275,6 @@ export const languageEnglish = {
     webdeeplwarn: "This option is not recommended for use with web version, as it can cause CORS errors.",
     saveBackupLocal: "Save Backup Locally",
     loadBackupLocal: "Load Backup Locally",
-    restoreLocalSnapshotConfirm: "Replace the current data with this local snapshot and restart the app?",
     topP: "Top P",
     genTimes: "Generation Choices",
     cot: "Chain of Thoughts",
@@ -1915,12 +1914,14 @@ export const languageEnglish = {
     skipSavingAssetsOnWebSync: "Skip Saving Assets on Web Sync",
     applyAdditionalParamsToAll: "Apply Additional Parameters to All Models",
     risuNest: {
+        backgroundDataFailed: 'Some changes to the data could not be completed.',
         localSaveFailure: {
             failed: 'Changes could not be saved. Retry saving before closing the app.',
             invalid: '{0} could not be saved. Check this data, then retry saving.',
             storage: 'Changes could not be saved. Free storage space, then retry saving.',
             tooLarge: 'Changes are too large to save. Delete the large chat or data you just added, then retry saving.',
             currentChat: 'Changes to the current chat could not be saved. Retry saving. If saving keeps failing, restart the app; unsaved changes will be lost.',
+            deleted: 'Changes to data deleted on another device could not be saved. Delete that data, then retry saving.',
             settings: 'Settings', conversation: 'Chat', presets: 'Presets', plugins: 'Plugin data', assets: 'Assets', data: 'Data',
         },
         account: {
@@ -1948,16 +1949,14 @@ export const languageEnglish = {
         persistentData: {
             followupFailed: 'The restore is saved, but a follow-up step could not finish. Do not import the backup again. Check sync status or restart the app.',
             confirmApplicationTitle: 'The external operation still needs confirmation',
-            confirmApplicationHelp: 'The operation may still be running or may have applied only part of the data. Editing is paused to protect it. Retry checks or resumes the same operation; it does not start a new restore.',
+            confirmApplicationHelp: 'The operation may still be running or may have applied only part of the data, so editing is paused. Checking again checks or resumes the same operation.',
             confirmApplication: 'Check the same operation again',
-            confirmApplicationFailed: 'The result is still unconfirmed. Check your connection and available storage, then retry. No successful rollback has been confirmed.',
+            confirmApplicationFailed: 'The result is still unconfirmed. Check your connection and available storage, then retry.',
             refreshTitle: 'Saved changes need a screen refresh',
-            refreshHelp: 'Your changes are saved. Editing is paused until the saved data can be read back into the screen. Refreshing does not save or import the data again.',
+            refreshHelp: 'Your changes are saved. Editing is paused until the saved data can be read back into the screen.',
             refresh: 'Refresh screen',
             refreshFailed: 'The saved data could not be displayed. You can retry refreshing or restart the app.',
         },
-        exitSaveFailedWarning:
-            'Saving failed. Choose Yes to exit without saving, or No to keep the app open and retry.',
         archive: {
             tab: 'Archive',
             action: 'Archive',
@@ -1968,7 +1967,7 @@ export const languageEnglish = {
             archivedAt: '{0} chats · archived on {1}',
             confirmTitle: 'Archive this character?',
             confirmBody: 'Archiving compresses the chats and reduces the space they take. The character stays in the list in grayscale and you can bring it back at any time. While it is archived you cannot use or view the character.',
-            confirmCounts: '{0} chats · {1} messages · images stay as they are.',
+            confirmCounts: '{0} chats · {1} messages',
             accountOnlyTitle: 'A RisuAI account backup does not store archived characters.',
             accountOnlyBody: 'Only a RisuAI account is connected, so an archived character cannot be restored if this device loses its data. Back up to a file, or connect a sync server or external storage, before you continue.',
             restoreTitle: 'Restore this character?',
@@ -1978,6 +1977,10 @@ export const languageEnglish = {
             "restoreFailed": 'The character could not be restored.',
             "archiveRefreshFailed": 'The character was archived, but the list could not be refreshed. Please restart the app.',
             "restoreRefreshFailed": 'The character was restored, but the list could not be refreshed. Please restart the app.',
+            "archiveRemoteAssetUnavailable": 'Files kept only on the server or external storage could not be fetched, so the character was not archived. Check the connection and try again.',
+            "archiveAssetMissing": 'Some files are gone, so the character was not archived. Review them in Data check.',
+            "restoreRemoteAssetUnavailable": 'Files kept only on the server or external storage could not be fetched, so the character was not restored. Check the connection and try again.',
+            "restoreAssetMissing": 'Some files are gone, so the character was not restored. Review them in Data check.',
         },
         exportExcluded: {
             title: 'Export finished',
@@ -1986,7 +1989,6 @@ export const languageEnglish = {
             archivedHelp: 'To store archived characters as well, restore them and run the export again.',
             collidingPluginValues: '{0} plugin values with the same name',
             collidingHelp: 'Different plugins use the same name. A plugin could stop working, so these were excluded from the backup. Check the plugins and back them up manually.',
-            copyList: 'Copy list',
         },
         pluginData: {
             title: 'Plugin data',
@@ -2028,7 +2030,6 @@ export const languageEnglish = {
             reassign: 'Move to another plugin',
             prefixGroup: '{1} starting with {0} · {2}',
             ungrouped: '{0} ungrouped items · {1}',
-            andMore: '{0} more',
             choosePlugin: 'Choose a plugin',
             openValue: 'Open value',
             detailOwner: 'Plugin',
@@ -2042,7 +2043,7 @@ export const languageEnglish = {
                 warning: 'A wrong assignment can make a plugin fail, so check before you assign.',
                 summary: '{0} items · {1}',
                 autoAssign: 'Assign values you leave here to the first plugin that asks for them',
-                autoAssignHelp: 'This applies only to the first load after the import finishes. It does not apply to plugins installed later, and the result is shown on the plugin data tab in RisuNest settings.',
+                autoAssignHelp: 'This applies only to the first load after the import finishes, not to plugins installed later. The result is shown on the plugin data tab in RisuNest settings.',
                 autoAssignOffNotice: 'Automatic assignment is off. Only what you assign here is applied, and the rest stays under plugin data in RisuNest settings. You can assign them later, but plugins have to be loaded again then.',
                 skipAll: 'Skip all and continue',
                 applyAndContinue: 'Apply and continue',
@@ -2054,8 +2055,6 @@ export const languageEnglish = {
                 confirmAction: 'Assign',
                 collisionTitle: '{0} values have the same name',
                 collisionBody: '{0} already holds values with the same names. Choose what happens to the imported ones. The {1} that do not collide are assigned to {0} either way.',
-                collisionCurrent: 'Now {0}',
-                collisionIncoming: 'Imported {0}',
                 collisionReplace: 'Replace with the imported values',
                 collisionReplaceHelp: 'The current values are lost.',
                 collisionDiscard: 'Delete the imported values',
@@ -2076,9 +2075,6 @@ export const languageEnglish = {
             description:
                 'Choose whether to synchronize plugin local data with your other devices. The choice applies to both the sync server and external storage.',
             notConnected: 'No sync server or external storage is connected yet.',
-            hypaTitle: 'Hypa embedding data',
-            hypaDescription:
-                'The embedding data Hypa uses. Synchronizing it keeps Hypa data intact on your other devices, and leaving it out means they have to call the embedding API to build the data again.',
             pluginTitle: 'Local plugin data',
             pluginDescription:
                 'The values plugins store per device. Plugins differ in how they use them, and changing this during a synchronization can overwrite the plugin data on another device.',
@@ -2112,8 +2108,8 @@ export const languageEnglish = {
             editBlockedTitle: 'Waiting for changes to finish',
             editBlocked: 'Another save, import, or replacement is still using the library. Keep waiting, or return to the app.',
             saving: 'Saving local changes before the app closes.',
-            capturing: 'Locking the saved revision for this exit.',
-            syncing: 'Publishing saved changes before the app closes.',
+            capturing: 'Checking which changes to sync before the app closes.',
+            syncing: 'Syncing saved changes before the app closes.',
             delayed: 'Synchronization is taking longer than usual. The app will stay open until you choose what to do.',
             blocked: 'Synchronization needs attention before it can finish. You can retry, exit without syncing, or return to the app.',
             saveFailed: 'Local changes could not be saved. Retry saving, exit without saving, or return to the app.',
@@ -2131,7 +2127,7 @@ export const languageEnglish = {
             title: 'App updates',
             description: 'Check signed RisuNest releases and choose when to install them.',
             automatic: 'Check automatically',
-            automaticHelp: 'Checks after the app is ready, at most once every six hours. Installation always waits for you.',
+            automaticHelp: 'Checks after the app is ready, at most once every six hours.',
             currentVersion: 'Current version',
             installMethod: 'Install method',
             lastChecked: 'Last checked',
@@ -2142,7 +2138,7 @@ export const languageEnglish = {
             clearSkipped: 'Clear skipped version',
             releasePage: 'Product release',
             openRelease: 'Open release page',
-            settingsError: 'Stored update settings are invalid and were left unchanged',
+            settingsError: 'Stored update settings are invalid',
             dialogTitle: 'RisuNest update',
             current: 'This app is up to date.',
             notConfigured: 'Release verification is not configured in this build.',
@@ -2164,7 +2160,7 @@ export const languageEnglish = {
             exitApp: 'Exit RisuNest',
             strategies: {
                 'self-install': 'Automatic update',
-                'stage-deb': 'Verified DEB download',
+                'stage-deb': 'Signed DEB download',
                 'open-link': 'Download and install with the operating system',
                 disabled: 'Release page instructions',
             },
@@ -2189,7 +2185,6 @@ export const languageEnglish = {
             compatibility: 'Preparing plugin compatibility data',
             plugins: 'Preparing plugins',
             account: 'Preparing account sync',
-            update: 'Checking for updates',
             serviceWorker: 'Preparing offline support',
             ui: 'Preparing the interface',
             elapsed: (seconds: number) => `${seconds}s elapsed`,
@@ -2197,109 +2192,61 @@ export const languageEnglish = {
         },
         serverSync: {
             registrationCode: 'Registration code',
-            registrationCodeHelp:
-                'Paste the registration code from the server. Each device needs its own registration code.',
-            codeNote: 'Each device needs its own registration code.',
             readRegistration: 'Read code',
             scanRegistration: 'Scan QR code',
-            scanRegistrationHelp: 'Point the camera at the registration QR code.',
-            cancelScan: 'Cancel scanning',
             registrationInvalid: 'The registration code is invalid.',
             cameraDenied:
                 'Camera access was not allowed. Try again or paste the code.',
             cameraUnavailable:
                 'The camera could not scan this code. Try again or paste the code.',
-            registrationBlocked:
-                'Disconnect the current server before entering a new registration code.',
             discardRegistration: 'Clear input',
-            directoryEnabled: 'Server address lookup',
-            manualEntry: 'Enter manually',
-            endpointPlaceholder: 'https://sync.example.com',
             reviewTitle: 'Check the server',
-            reviewLead: 'These server details were read from the registration code. Check them, then connect.',
-            otherCode: 'Another code',
             connectHint:
                 'Connecting brings the library on the sync server to this device. A large library can take a while.',
-            connectRow: 'Server connection',
             connectRowHelp:
                 'Paste the registration code from the server. Each device needs its own registration code.',
             enterCode: 'Enter registration code',
-            viewList: 'View list',
-            register: 'Register',
             residency: {
                 title: 'Asset storage',
                 description:
-                    'The asset storage mode is chosen separately for each device. Keeping files locally loads assets faster but increases sync time and the space used. Using remote files saves space, but loading an asset can take longer.',
+                    'Keeping all assets on this device loads them faster but increases sync time and storage use. Loading them from the server when needed saves space, and the current character icon of each character not in the trash stays on this device.',
                 full: 'Keep everything on this device',
                 remote: 'Load from the server when needed',
                 local: 'Files on this device',
                 remoteOnly: 'Files only on the server',
                 externalOnly: 'Files only in external storage',
                 unavailable: 'Files not found',
+                checking: 'Checking files…',
                 cleanupNote:
-                    'Downloaded files stay on this device. Cleanup removes only local copies of files on the server. Files needed by a snapshot stay until that snapshot is deleted.',
+                    'Cleanup removes this device’s copies of files that are on the server, except the current character icons of characters not in the trash.',
                 clean: 'Clear copies on this device',
                 cancel: 'Cancel',
                 working:
                     'Processing files… Cancellation takes effect after the current request.',
-                freed: 'Space cleared',
             
                 "download": 'Download',
             },
             management: {
                 title: 'Storage used by sync',
-                disk: 'Space used on this device',
-                complete: 'Finished backups',
-                incomplete: 'Unfinished backups (never cleaned up automatically)',
                 cache: 'Temporary files',
                 protected: 'Still needed',
                 reclaimable: 'Can be cleared',
                 clean: 'Clear unneeded temporary files',
                 ledger: 'Asset storage records',
-                ledgerHelp: 'Needed for asset storage and never cleared.',
-                more: 'Older backups',
-                refresh: 'Refresh list',
+                ledgerHelp: 'Records the asset storage mode needs.',
                 blockedReasons: {
                     'server-sync-busy': 'Sync is running',
-                    'incomplete-preservation': 'This backup is not fully preserved yet',
-                    'backup-in-use': 'This backup is in use',
-                    'cache-references-unavailable': 'Temporary files cannot be checked right now',
                 },
                 blockedReasonUnknown: 'Unavailable right now',
-                restoreConfirm:
-                    'Restore this backup? It replaces the current library and pauses synchronization. No automatic backup is created.',
-                deleteConfirm: 'Delete this conflict backup from this device?',
-                deleteCleanupPending:
-                    'The local backup was deleted. Server cleanup will continue later.',
                 cleanConfirm:
-                    'Clear unneeded temporary files? Files the running operation needs and the library files on this device are kept.',
+                    'Clear unneeded temporary files?',
             },
-            backups: 'Conflict backups',
-            backupHelp:
-                'Restore the library from a conflict backup. Restoring replaces the current library without creating an automatic backup.',
-            backupCount: '{0} conflict backups',
-            noBackups: 'No conflict backups.',
-            restoreLocalBackup: 'Restore this device’s backup',
-            restoreRemoteBackup: 'Restore server backup',
-            exportLocalBackup: 'Save this device’s backup',
-            exportRemoteBackup: 'Save server backup',
-            reregister: 'Register a new device',
-            reregisterHelp:
-                'Register this device again on the server, then enter the new registration code. Edits on this device are kept and matched with the server.',
-            reconcile: 'Compare restored server',
-            reconcileHelp:
-                'The server was restored to a different history. This device’s data is backed up and both sides are compared before continuing.',
-            activationHelp:
-                'Check that saving finished before editing. Select Refresh screen to check again.',
             title: 'Personal sync server',
             description:
                 'Keep this library in sync across your devices. Your edits are saved locally first.',
             endpoint: 'Server address',
             libraryId: 'Library ID',
             deviceId: 'Device ID',
-            token: 'Device token',
-            credentialsHelp:
-                'Enter the address and this device’s credentials made in the server admin screen. Each device needs its own.',
             credentialUnavailable:
                 'The operating system could not open this device’s credentials. Unlock its key storage, or register this device again on the server and enter the new registration code.',
             credentialUnavailableLinux:
@@ -2307,14 +2254,15 @@ export const languageEnglish = {
             connect: 'Connect and sync',
             disconnect: 'Disconnect',
             disconnectTitle: 'Disconnect from the server?',
+            disconnectDescription: 'This device stops syncing with the server.',
             disconnectRemoteOnly:
                 'Some files are stored only on the server. If you need them, download them before disconnecting.',
+            disconnectRemoteOnlyUnknown:
+                'Files could not be checked. Download any files stored only on the server before disconnecting if you need them.',
             downloadThenDisconnect: 'Download, then disconnect',
             downloadFailedKeptConnection:
                 'The files could not be downloaded, so the server was not disconnected. Try again, or disconnect without downloading.',
             syncNow: 'Sync now',
-            pause: 'Pause',
-            refresh: 'Refresh screen',
             disconnected: 'Not connected',
             ready: 'Connected',
             lastSuccess: 'Last sync',
@@ -2327,11 +2275,11 @@ export const languageEnglish = {
             progressFiles: 'Files processed',
             pendingChanges: 'Changes to upload',
             elapsed: 'Elapsed',
+            remaining: 'Remaining',
             count: '{0}',
             itemsCount: '{0} items',
-            activity: { enumerating: 'Counting items', preparing: 'Preparing changes on this device', downloadingMetadata: 'Downloading library data, including characters and chats', downloadingBackupMetadata: 'Downloading library and asset information for conflict backups', downloading: 'Downloading and checking incoming data', preserving: 'Saving and checking conflict backups', syncingSections: 'Downloading and checking Hypa and plugin data', verifying: 'Checking items on the server', uploading: 'Uploading', confirming: 'Waiting for server confirmation', staging: 'Saving received data' },
+            activity: { enumerating: 'Counting items', preparing: 'Preparing changes on this device', downloading: 'Downloading and checking incoming data', verifying: 'Checking items on the server', uploading: 'Uploading', confirming: 'Waiting for server confirmation', staging: 'Saving received data' },
             progress: {
-                saving: 'Saving changes on this device',
                 preparing: 'Comparing changes on this device and the server',
                 downloading: 'Receiving server content',
                 applying: 'Applying received changes',
@@ -2341,49 +2289,15 @@ export const languageEnglish = {
             },
             stage: { preparing: 'Compare changes', downloading: 'Download server content', applying: 'Apply received changes', refreshing: 'Update the screen', publishing: 'Upload changes', assets: 'Download assets' },
             paused: 'Paused',
-            pending: 'Finishing sync',
             registrationRequired: 'New registration code required',
-            refreshPending: 'Screen refresh needed',
-            initialScan: 'Waiting for the first full comparison with the server',
             blocked: 'Automatic sync stopped',
-            blockedHelp:
-                'The server is not accepting this device’s changes, so automatic sync has stopped. Your edits on this device are unchanged. If the same error repeats when you sync again, update the server and the app to the latest version.',
-            incompatible: 'Server and app versions do not match',
-            incompatibleHelp:
-                'The server and the app are different versions, so they cannot sync. Update both the server and the app to the latest version and try again.',
-            pendingHelp:
-                'The sync in progress has to finish before disconnecting. Select Sync now.',
-            conflict: 'Conflicts need attention',
-            busyHelp: 'Another operation is using the library. Wait for it to finish and try again.',
             errorHelp:
                 'Sync could not finish. Your edits on this device are unchanged. Try again.',
-            refreshHelp:
-                'The received changes are saved. Refresh the screen to continue editing.',
-        
-            "retryStatus": 'Retry',
-            "waitingForLocal": 'Waiting for local changes to finish.',
-            "storageFullHelp": 'This device has insufficient storage space. Free up space, then synchronize again.',
-            "conflictKinds": {
-                "root": 'Settings',
-                "preset": 'Presets',
-                "plugin": 'Plugin data',
-                "character": 'Characters',
-                "conversation": 'Chats',
-                "asset": 'Assets',
-                "inlay": 'Inlays',
-                "cold": 'Cold storage',
-                "unknown": 'Items',
-            },
-            "statusUnknown": 'Sync status unavailable',
-            "registrationRefusedHelp": 'The server refused this registration. Create a new registration code on the server and enter it under Register as a new device. If you recreated the server, disconnect and connect again.',
-            "revokeBeforeRegistration": 'Revoke the existing device on the server, then enter a new registration code.',
-            "conflictRefreshed": 'The conflicting items changed. Choose which version to keep again.',
-            "continuingHelp": 'The remaining changes will be sent in the next synchronization.',
-            "cameraBlocked": 'Camera access is blocked. Allow camera access in settings or paste the code.',
-            "cameraTimeout": 'No QR code was found. Try again or paste the code.',
-            "openCameraSettings": 'Open settings',
-            "registrationCodeHelpScan": 'Paste the registration code from the server or scan its QR code. Each device needs its own registration code.',
             "connectRowHelpScan": 'Paste the registration code from the server or scan its QR code. Each device needs its own registration code.',
+        },
+        qrScan: {
+            instruction: 'Fit the QR code inside the square.',
+            instructionOnboarding: 'Fit the QR code inside the square.',
         },
         menuTitle: 'RisuNest',
         tabList: 'RisuNest settings tabs',
@@ -2419,6 +2333,9 @@ export const languageEnglish = {
         },
         ui: {
             title: 'UI',
+            messageSendKey: 'Message send key',
+            messageSendKeyHelp: 'With Enter, Enter sends a message and Shift+Enter inserts a newline. With Ctrl/Shift+Enter, Ctrl+Enter or Shift+Enter sends a message and Enter inserts a newline. With Send button, Enter inserts a newline and only the send button sends a message.',
+            messageSendKeyButton: 'Send button',
             chatEditPopup: 'Edit chat messages in a popup',
             chatEditPopupHelp: 'Pressing the chat edit button lets you edit the message in a popup.',
         },
@@ -2456,10 +2373,10 @@ export const languageEnglish = {
             inventorySize: 'Size',
             inventoryNoExtension: 'No extension',
             optimize: 'Convert to WebP',
-            optimizeHelp: 'Saves images that are not WebP again to use less space. Images that are already WebP and images that cannot be converted stay as they are.',
+            optimizeHelp: 'Saves images that are not WebP again as WebP to use less space.',
             optimizeNone: 'There is nothing to convert',
             optimizeConfirm: '{count} images ({size}) will be converted to WebP. You cannot get the original files back, so back them up first.',
-            optimizeFormatNotice: 'Your storage format is not WebP right now, but this converts to WebP. The setting itself stays as it is.',
+            optimizeFormatNotice: 'Your storage format is not WebP right now, but this converts to WebP.',
             optimizeSyncNotice: 'Converted images are uploaded to the server again.',
             optimizeRemoteNotice: 'Files that are not on this device are downloaded from the server.',
             optimizeProgress: 'Working on {done} of {total}',
@@ -2505,13 +2422,13 @@ export const languageEnglish = {
             exportPartial: 'The available files were exported, but some source files could not be captured completely.',
             exportCancelled: 'The export was cancelled.',
             exportFailed: 'The original files could not be exported.',
-            exportUnavailable: 'Original data export is unavailable because native setup did not finish.',
             startNormally: 'Start normally',
-            keepTitle: 'Keep these off?',
-            keepBody:
-                'The app started with {0} left off. Keep them off from now on?',
-            keepConfirm: 'Keep off',
-            keptNothing: 'Everything is back on for the next start.',
+            keepTitle: 'Keep these off from now on?',
+            keepDescription: 'Left off for this start: {0}',
+            keepAction: 'Keep off',
+            keptTitle: 'Kept off',
+            keptHelp: 'Items you turn on take effect when the app restarts.',
+            turnOn: 'Turn on',
         },
         storage: {
             snapshotSizeNote:
@@ -2521,8 +2438,6 @@ export const languageEnglish = {
             total: 'Total data',
             media: 'Images & media',
             database: 'Database',
-            inlays: 'Chat attachments',
-            plugins: 'Plugin data',
             snapshots: 'Snapshots',
             conflictBackups: 'Conflict backups',
             restoreSnapshot: 'Restore',
@@ -2539,15 +2454,6 @@ export const languageEnglish = {
             createSnapshotHelp:
                 'Saves the current state so you can return to it later.',
             createSnapshot: 'Create now',
-            tempTitle: 'Sync temp files',
-            cleanSyncTemp: 'Clean up',
-            cleanSyncTempConfirm: 'Clean up sync temp files?',
-            calculateSize: 'Calculate size',
-            calculateSizeFailed:
-                "Couldn't calculate temporary file size. Refresh the information and try again.",
-            tempUsage: '{size} used',
-            gcSeparation:
-                'Clearing a broken link in the data check does not delete the file. Find and delete unused files here when needed.',
             gcSearching: 'Looking for unused files',
             gcDeleting: 'Deleting unused files',
             gcListTitle: 'Files to delete',
@@ -2574,18 +2480,12 @@ export const languageEnglish = {
                 "Delete this snapshot? You won't be able to restore to this point.",
             deleteConflictBackupConfirm:
                 'Delete this conflict backup? This conflict backup cannot be recovered after deletion.',
-            syncBackups: 'Sync backups',
-            deleteSyncBackupConfirm:
-                "Delete this sync backup? You won't be able to roll back to the state before that sync.",
-            syncBackupInUse:
-                "This backup is used by a sync in progress and can't be deleted.",
             trashedCount: '({0} in trash)',
             loadFailed: "Couldn't load storage information.",
             staleTotals:
                 'Storage totals may be out of date. Refresh the information and try again.',
             emptyList: 'Nothing saved yet.',
             listSummary: '{0} items · {1}',
-            retry: 'Retry',
             actionFailed:
                 "Couldn't complete the action. Some changes may already have been applied. Refresh the information and try again.",
         
@@ -2595,6 +2495,7 @@ export const languageEnglish = {
         dataHealth: {
             saveFailed: 'The report could not be saved. Try another location.',
             loadFailed: "Could not load the data check.",
+            outdated: 'The data changed after this check. Check again.',
             openFailed: "Could not open the database.",
             repairFailed: "Could not repair the data. Try again.",
             undoFailed: "Could not undo the changes. Try again.",
@@ -2682,7 +2583,7 @@ export const languageEnglish = {
             codeIntentQuarantined: 'Incomplete recovery records',
             discardIntent: 'Discard recovery record',
             discardIntentTitle: 'Discard this recovery record?',
-            discardIntentDescription: 'The selected recovery record will be deleted and will no longer be retried. Current data is preserved.',
+            discardIntentDescription: 'The selected recovery record will be deleted and will no longer be retried.',
             discardIntentAcknowledge: 'Delete the selected recovery record',
             discardIntentFailed: 'The recovery record could not be discarded. Check the data again.',
             completeIntent: 'Complete recovery',
@@ -2709,7 +2610,6 @@ export const languageEnglish = {
             accountRestoreFailed: "Could not restore the account backup.",
             officialAssetsMissing: "Some account assets could not be restored: {count}.",
             officialAssetsRestoreFailed: "Some account assets could not be restored. Restart to retry.",
-            officialPublishCancelled: "Backup upload cancelled.",
 
             generationBusy:
                 'A response is being generated. Finish or stop it, then try the backup or restore again.',
@@ -2729,22 +2629,20 @@ export const languageEnglish = {
             exportFile: 'Export',
             groupRestore: 'Restore',
             restoreHelp:
-                "Restores from another app's backup. Snapshots kept on this device are restored from the snapshot list under Storage.",
+                'Restores data from an account sync conflict backup.',
+            restoreHelpWeb:
+                'Restores data from a PocketRisu backup or an account sync conflict backup.',
             groupAccount: 'Official account',
             accountHelp:
                 'Uploads a backup to your RisuAI account or downloads it. Chat attachments are not included.',
             officialPublish: 'Create backup',
             officialRestore: 'Restore backup',
-            officialCancel: 'Cancel backup upload',
-            officialRestoreConfirm:
-                'Replace local data with the official account backup? No automatic backup will be created. Back up your current data first if you want to keep it.',
             officialRestoreInlayWarning:
-                'Official snapshots do not include separate chat attachments. Referenced images, audio, video, and signatures may not be restored. The app will restart after restoring the backup. Continue?',
+                'Official account backups do not include separate chat attachments. Referenced images, audio, video, and signatures may not be restored. The app will restart after restoring the backup. Continue?',
             officialMissing:
                 'No official account backup was found. Local data was not changed.',
             officialPublishConfirm:
                 'Overwrite the official account backup with current local data?',
-            officialPublished: 'Official account backup published.',
             actionFailed:
                 "Couldn't complete the backup operation. Some changes may already have been applied.",
             progressPreparing: 'Preparing',
@@ -2759,8 +2657,6 @@ export const languageEnglish = {
                 'This data requires repair. A recovery backup may include account information. Save a recovery backup?',
             originalDataAccountConfirm:
                 'The original database and files will be exported without changes and may include account information. Export original data?',
-            sourceRepairRequired:
-                'The source archive was verified, but data repair is required before it can replace a library. Your current data has not changed.',
         
             "restoreInterrupted": 'The restore was interrupted. Select the backup again to retry.',
         },
@@ -2839,7 +2735,6 @@ export const languageEnglish = {
             titleExport: 'Export',
             titleExportRisuSave: 'Export RisuSave',
             titleExportBackup: 'Export RisuNest backup',
-            titleExportLocalBackup: 'Export local backup',
             titleExportCompatible: 'Export compatible backup',
             stagePreparingExport: 'Preparing data',
             stageWritingExport: 'Writing backup file',
@@ -2870,6 +2765,8 @@ export const languageEnglish = {
             "reasonBusy": 'Another operation is using the data. Try again after it finishes.',
             "reasonPendingOperation": 'Resolve the pending synchronization operation and try again.',
             "reasonServerStatus": 'The synchronization server status could not be checked. Check the connection and try again.',
+            "reasonRemoteAssetUnavailable": 'Files kept only on the server or external storage could not be fetched, so nothing was exported. Check the connection and try again.',
+            "reasonAssetMissing": 'Some files are gone, so nothing was exported. Review them in Data check.',
             "warningSourceProblems": 'Some source data could not be read. Check the exported recovery file.',
             "warningRepairRequired": 'The source was preserved, but requires repair before it can be restored.',
             "warningCompatibilityLosses": 'Some data is not supported by the selected backup format and was excluded or converted.',
@@ -2884,7 +2781,7 @@ export const languageEnglish = {
             webViewUpdateRequired: 'Update Android System WebView, then retry deleting local data.',
             cancel: 'Cancel',
             title: 'Reset',
-            scope: 'Deletes local chats, characters, settings, plugins, connection information, internal backups and cache on this device. Remote data and exported backups remain.',
+            scope: 'Deletes local chats, characters, settings, plugins, connection information, internal backups and cache on this device.',
             resetHelp: 'Returns to onboarding after deleting local data.',
             prepareRemoval: 'Prepare for app removal',
             removalHelp: 'Deletes local data folders and exits the app. Remove the program using your operating system.',
@@ -2915,8 +2812,6 @@ export const languageEnglish = {
                 "This feature doesn't work while notifications are off.",
             operatingSystem: 'Operating system',
             webView: 'WebView',
-        
-            "backgroundExpired": 'Work stopped after switching apps or locking the screen. Try again.',
             "iosBackgroundLabel": 'Background tasks',
         },
         boot: {
@@ -3001,30 +2896,9 @@ export const languageEnglish = {
             },
             hub: {
                 title: 'Connect to a sync server',
-                lead: 'Create a registration code for this device under Device management on the sync server and paste it below.',
+                lead: 'Register this device on the sync server, then paste its registration code below.',
                 leadScan:
-                    'Create a registration code for this device under Device management on the sync server, then scan its QR code or paste it below.',
-                stepLink:
-                    'You can create a new device registration code under Device management on the sync server.',
-                stepPaste:
-                    'Paste the code below. On mobile you can scan the QR code instead.',
-                stepReview: 'Check the server details, then connect.',
-                unsupported: 'Connecting to a sync server is available in the Android and desktop apps.',
-                linkHint: 'Opening a registration link also leads here.',
-                reviewLead: 'These server details were read from the registration code. Check them, then connect.',
-                serverTag: 'Sync server',
-                syncingLead: 'Do not close the app until it finishes.',
-                pauseNote: 'If you stop, you can continue syncing later from the settings.',
-                pausedSummary: 'Sync is paused.',
-                pausedReason:
-                    'You can continue now, or start RisuNest and continue syncing later from the settings.',
-                resume: 'Continue',
-                errorSummary: 'Sync could not finish.',
-                errorReason:
-                    'The data on this device is unchanged. Check your internet connection and try again.',
-                pendingReason:
-                    'The server is still processing. Try again in a moment.',
-                retry: 'Try again',
+                    'Register this device on the sync server, then scan its QR code or paste its registration code below.',
             },
             external: {
                 title: 'Connect external storage',
@@ -3033,10 +2907,6 @@ export const languageEnglish = {
                 stepCode: 'Enter the saved recovery key.',
                 stepPick: 'Check the service and folder, then sign in and connect.',
                 unsupported: 'External storage is available in the Android and desktop apps.',
-                syncTitle: 'Bring the repository contents over',
-                syncDesc:
-                    'This device joins the repository and receives the characters, chats and attachments in it.',
-                syncStart: 'Bring the contents over',
                 syncingLead: 'Do not close the app until it finishes.',
                 restoreTitle: 'Choose a backup',
                 restoreLead:
@@ -3049,13 +2919,8 @@ export const languageEnglish = {
                 restoreRestartNote:
                     'Everything on this device is replaced by the backup. The app restarts once the restore finishes.',
                 restoring: 'Restoring',
-                conflictTitle: 'The repository already holds other contents',
-                conflictLead:
-                    'This device has its own starting data, so the repository was not opened by itself. Bringing the repository over replaces what is on this device.',
-                conflictReceive: 'Read the repository contents',
-                conflictTake: 'Use the repository contents',
                 errorSummary: 'This could not finish.',
-                errorReason: 'The data on this device is unchanged. Check your internet connection and try again.',
+                errorReason: 'Check your internet connection and try again.',
                 retry: 'Try again',
                 other: 'Another way',
             },
@@ -3076,7 +2941,7 @@ export const languageEnglish = {
                 note: 'Chat attachments and inlay images are not included. The app restarts once the restore finishes.',
                 restore: 'Restore and start',
                 other: 'Another way',
-                notRestored: 'The account backup was not applied. Local data was kept, so you can retry or choose another way.',
+                notRestored: 'The account backup was not applied. You can retry or choose another way.',
             },
             done: {
                 title: 'Ready',
@@ -3106,7 +2971,7 @@ export const languageEnglish = {
         replaceAction: "Replace",
         cancelAction: "Cancel",
         clockBlocked: "Sync stopped because the device and remote times differ. Correct the time and try again.",
-        writerCollision: "Sync stopped because another device uses the same identity. Reconnect as a new device.",
+        writerCollision: "Sync stopped because another device uses the same identity. Register a new device on the sync server, enter the new registration code, then press Connect as new device.",
         unitTooLarge: "Sync stopped because an item on this device is too large to send to the server. Make the large item smaller and try again.",
         newDeviceAction: "Connect as new device",
         restoreTitle: "Restore the backup?",
@@ -3121,8 +2986,11 @@ export const languageEnglish = {
         downloadFailedNotConnected: "The files could not be downloaded, so the connection was not made. Try again, or connect without downloading.",
         previousStorageUnavailable: "Files kept only on the server or external storage used before could not be fetched, so sync stopped. Try again when it can be reached.",
         registrationRevoked: "This device's registration was removed on the server, so it cannot sync. Register this device again on the server, then enter the new registration code.",
+        registrationUsed: "This registration code was already used, so this device cannot connect with it. Register a new device on the sync server, then enter the new registration code.",
+        registrationUsedOnboarding: "This registration code was already used, so this device cannot connect with it. Register a new device on the sync server, then enter the new registration code.",
         bindingIncomplete: "The connection was not completed. Press Connect and sync to finish it.",
     },
+    navigationBlockedWhileEditingPaused: "Editing is paused, so a character cannot be selected.",
 } satisfies I18nTranslation;
 
 type I18nTranslationFunction = (...args: any[]) => string;

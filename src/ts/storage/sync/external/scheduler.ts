@@ -141,7 +141,8 @@ export function createExternalStorageScheduler(
                 const causeKind = externalErrorKind('cause' in result ? result.cause : undefined) ?? result.reason
                 if (!result.error && ['endpointRejected', 'unauthorized', 'reauthRequired',
                     'repositoryKeyUnavailable', 'deviceVaultUnavailable', 'clockSkew', 'storageFull',
-                    'localStorageFull', 'localPermissionDenied', 'unsupported', 'corrupt', 'notFound'].includes(causeKind)) return
+                    'localStorageFull', 'localPermissionDenied', 'unsupported', 'corrupt', 'notFound',
+                    'repositoryMismatch'].includes(causeKind)) return
                 if (!result.error && result.reason === 'preconditionFailed') {
                     const count = (refusals.get(key) ?? 0) + 1
                     refusals.set(key, count)

@@ -92,10 +92,44 @@ describe('RecoveryShell', () => {
         const body = await setup()
         const summary = body.querySelector('[data-recovery-summary]')
         expect(summary?.textContent).toContain(strings.failures.replace('{0}', '2'))
-        expect(summary?.textContent).toContain(strings.stage.replace('{0}', 'plugins'))
+        expect(summary?.textContent).toContain(strings.stage.replace('{0}', languageEnglish.risuNest.startup.plugins))
         expect(summary?.textContent).toContain(
             strings.suspect.replace('{0}', 'plugin:translator'),
         )
+    })
+
+    it.each([
+        ['app-data-directories', 'storage'],
+        ['persistent-storage', 'storage'],
+        ['plugin-compatibility-data', 'compatibility'],
+        ['persistent-database', 'data'],
+        ['format-update', 'data'],
+        ['account-bootstrap', 'account'],
+        ['drive-sync', 'account'],
+        ['account-data', 'account'],
+        ['service-worker', 'serviceWorker'],
+        ['plugins', 'plugins'],
+        ['ui-state', 'ui'],
+    ] as const)('names the %s stage by the loading text it showed', async (stage, label) => {
+        markBootStage(stage)
+        await decideBoot({
+            begin: vi.fn().mockResolvedValue({ consecutiveFailures: 2 }),
+            complete: vi.fn(),
+        })
+        const summary = (await setup()).querySelector('[data-recovery-summary]')?.textContent
+        expect(summary).toContain(strings.stage.replace('{0}', languageEnglish.risuNest.startup[label]))
+        expect(summary).not.toContain(strings.stage.replace('{0}', stage))
+    })
+
+    it('does not show a stage it has no name for', async () => {
+        markBootStage('unknown-stage')
+        await decideBoot({
+            begin: vi.fn().mockResolvedValue({ consecutiveFailures: 2 }),
+            complete: vi.fn(),
+        })
+        const summary = (await setup()).querySelector('[data-recovery-summary]')?.textContent
+        expect(summary).toContain(strings.stageUnknown)
+        expect(summary).not.toContain('unknown-stage')
     })
 
     it('says so when the trail was lost', async () => {

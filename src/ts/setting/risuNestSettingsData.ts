@@ -1,5 +1,6 @@
 import type { SettingItem } from './types'
 import { MAX_INLAY_DIMENSION, normalizeInlayEncodeOptions } from '../storage/blobStore'
+import { getDeviceSettings, subscribeDeviceSettings, updateDeviceSettings, type MessageSendKey } from '../storage/deviceSettings'
 
 /** Unit shown beside a numeric control, keyed by setting id. */
 export const risuNestSettingUnits: Record<string, string> = {
@@ -12,6 +13,23 @@ export const risuNestUiSettingsItems: SettingItem[] = [
         type: 'header',
         labelKey: 'risuNest.ui.title',
         options: { level: 'h2' },
+    },
+    {
+        id: 'risunest.ui.messageSendKey',
+        type: 'segmented',
+        labelKey: 'risuNest.ui.messageSendKey',
+        helpKey: 'risuNest.ui.messageSendKeyHelp',
+        getValue: () => getDeviceSettings().messageSendKey,
+        setValue: (_db, value: MessageSendKey) => { updateDeviceSettings({ messageSendKey: value }) },
+        subscribeValue: subscribeDeviceSettings,
+        options: {
+            segmentOptions: [
+                { value: 'enter', label: 'Enter' },
+                { value: 'ctrl-shift-enter', label: 'Ctrl/Shift+Enter' },
+                { value: 'button', labelKey: 'risuNest.ui.messageSendKeyButton' },
+            ],
+        },
+        keywords: ['send', 'enter', 'keyboard', 'submit'],
     },
     {
         id: 'risunest.ui.chatEditPopup',

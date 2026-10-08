@@ -30,8 +30,6 @@ const NATIVE_RESIDUAL: Record<string, string> = {
         'risunest-boot-stage and risunest-boot-suspect are written while the native store is unavailable',
     'localStorage strongBan_*':
         'token bias recomputed from the current input',
-    'localStorage risuNestServerSyncRestoreHold':
-        'the device maintenance that writes it runs before any store opens',
     'indexedDB DPoPDB':
         'holds a key pair that cannot leave the browser',
     'indexedDB LLMTranslateCache':

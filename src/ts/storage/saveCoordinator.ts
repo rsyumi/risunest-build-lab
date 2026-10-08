@@ -986,6 +986,17 @@ export class SaveCoordinator {
         this.pendingCharacterRecency = null
     }
 
+    /** Applied units removed the selected conversation, or its character, so the ownership adopted for it has nothing left to persist. */
+    releaseRemovedSelectedConversation(characterRemoved: boolean): void {
+        this.windowedCharacterBaseline = null
+        this.pendingWindowedActivationChange = null
+        this.pendingWindowedChatListChange = null
+        this.pendingCharacterRecency = null
+        if (!characterRemoved) return
+        this.characterBaseline = null
+        this.characterBaselineId = null
+    }
+
     advanceWindowedSelectedConversationRevision(
         revision: DataRevision,
         authority: WindowedConversationPersistenceAuthority,
@@ -1447,6 +1458,8 @@ export class SaveCoordinator {
                 presets,
             }
             const presetRootBaseline = canonicalClone(state.root)
+            // Operations edit `state.presets` in place, so the stored list is diffed from a copy.
+            const storedPresets = canonicalClone(presets)
             await mutate(state)
 
             const liveBeforeCommit = this.capture()
@@ -1460,8 +1473,8 @@ export class SaveCoordinator {
                 mutatedRoot,
             )
             const committedPresets = canonicalClone(state.presets)
-            const presetUnits = committedPresets.every((value) => typeof value['id'] === 'string') && presets.every((value) => typeof value['id'] === 'string')
-                ? this.diffPresets(presets, committedPresets) : null
+            const presetUnits = committedPresets.every((value) => typeof value['id'] === 'string') && storedPresets.every((value) => typeof value['id'] === 'string')
+                ? this.diffPresets(storedPresets, committedPresets) : null
             const presetRootMutations = diffRootMutations(rootValue.value, committedRoot)
             if (!presetRootMutations.length && presetUnits?.length === 0) return
             const committed = await this.commitRoutine({
@@ -2749,11 +2762,6 @@ export class SaveCoordinator {
                     ? this.captureDetachedCharacter()
                     : null
             const addition = this.capturePendingAddition()
-            if (windowedCapture && addition) {
-                throw new WindowedConversationRequiresCompatibilityError(
-                    'character addition requires a complete selected character',
-                )
-            }
             let conversationProjection: ConversationMutationProjection | null
             try {
                 conversationProjection = windowedCapture
@@ -3446,6 +3454,8 @@ export class SaveCoordinator {
                 this.setCharacterBaseline(published)
             }
         }
+        // A character kept in the catalog as a stub holds no detail to diff against.
+        if (result.kind !== 'delete') this.forgetMaterializedCharacter(result.characterId)
         if (
             options.committedSelectedCharacter !== undefined &&
             this.capture().character?.chaId === options.committedSelectedCharacter.id
@@ -4891,6 +4901,13 @@ export class SaveCoordinator {
         return [...baselines.values()].map((value) => ({...value, chats: value.chats.map((chat) => ({...chat}))} as CompleteCharacter))
     }
 
+    /** Drops the baselines of a character the working set no longer holds; hydration captures new ones. */
+    forgetMaterializedCharacter(characterId: string): void {
+        if (this.dependencies.captureCharacter(characterId)) return
+        this.materializedBaselines.delete(characterId)
+        this.materializedCanonicalBaselines.delete(characterId)
+    }
+
     capturePresetRecordBaseline(): botPreset[] {
         return (this.dependencies.capturePresetRecords?.() ?? []).flatMap((value) => {
             const baseline = this.presetRecordBaselines.get(value['id'] as string)
@@ -5075,7 +5092,9 @@ export class SaveCoordinator {
     }
 
     private reportBackgroundError(error: unknown): void {
-        const message = error instanceof Error ? error.message : String(error)
+        // Native errors are plain objects, which would all repeat as one string.
+        const native = typeof error === 'object' && error !== null ? error as { code?: unknown; message?: unknown } : null
+        const message = error instanceof Error ? error.message : native ? `${String(native.code)}:${String(native.message)}` : String(error)
         if (message === this.lastBackgroundErrorMessage) return
         this.lastBackgroundErrorMessage = message
         try {

@@ -10,6 +10,8 @@
     import { onDestroy } from 'svelte';
     import { ChatComposerState, chatScreenState, type SubmittedChatComposer } from '../../ts/ui/chatScreenState.svelte';
     import { isCompositionKey } from 'src/ts/hotkeyModifier';
+    import { getDeviceSettings } from 'src/ts/storage/deviceSettings';
+    import { shouldSendMessage } from 'src/ts/ui/messageSendKey';
     import { type Chat as ChatRecord, type Database, type character, type Message } from "../../ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
     import { chatProcessStage, doingChat, sendChat, notifyGenerationCompletion, getSelectedBoundedGenerationFallbackReason, getHistoryWindowMemoryMode, openSelectedHistoryWindow } from "../../ts/process/index.svelte";
@@ -1477,14 +1479,9 @@
                           bind:this={inputEle}
                           onkeydown={(e) => {
                         if (isCompositionKey(e)) return;
-                        if(e.key.toLocaleLowerCase() === "enter"){
-                            if(DBState.db.sendWithEnter && (!e.shiftKey)){
-                                send()
-                                e.preventDefault()
-                            }else if(!DBState.db.sendWithEnter && e.shiftKey){
-                                send()
-                                e.preventDefault()
-                            }
+                        if(shouldSendMessage(e, getDeviceSettings().messageSendKey)){
+                            send()
+                            e.preventDefault()
                         }
                         if(e.key.toLocaleLowerCase() === "m" && (e.ctrlKey)){
                             reroll()
@@ -1584,11 +1581,9 @@
                               bind:this={inputTranslateEle}
                               onkeydown={(e) => {
                             if (isCompositionKey(e)) return;
-                            if(e.key.toLocaleLowerCase() === "enter" && (!e.shiftKey)){
-                                if(DBState.db.sendWithEnter){
-                                    send()
-                                    e.preventDefault()
-                                }
+                            if(shouldSendMessage(e, getDeviceSettings().messageSendKey)){
+                                send()
+                                e.preventDefault()
                             }
                             if(e.key.toLocaleLowerCase() === "m" && (e.ctrlKey)){
                                 reroll()

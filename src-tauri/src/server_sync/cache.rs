@@ -448,18 +448,22 @@ impl Cache {
         }
         Ok(hash)
     }
+    /// A failure names the line that asked for the body, which tells what was
+    /// being read.
+    #[track_caller]
     pub fn read(&self, hash: &str, limit: usize) -> Result<Vec<u8>> {
-        let body = self
-            .open_object(hash)?
-            .ok_or_else(|| SyncError::new("cached-object-missing", 409))?;
-        if body.len()? > limit as u64 {
-            return Err(SyncError::new("cached-object-too-large", 413));
+        let Some(body) = self.open_object(hash)? else {
+            return Err(SyncError::new("cached-object-missing", 409));
+        };
+        let size = body.len()?;
+        if size > limit as u64 {
+            return Err(too_large(size, limit));
         }
         let mut bytes = Vec::new();
         body.take((limit as u64).saturating_add(1))
             .read_to_end(&mut bytes)?;
         if bytes.len() > limit {
-            return Err(SyncError::new("cached-object-too-large", 413));
+            return Err(too_large(bytes.len() as u64, limit));
         }
         #[cfg(test)]
         super::hash_metrics::record("c_cache_verify", bytes.len());
@@ -812,6 +816,15 @@ impl Cache {
         }
         Ok(hashes.into_iter().collect())
     }
+}
+
+#[track_caller]
+fn too_large(size: u64, limit: usize) -> SyncError {
+    SyncError::caused(
+        "cached-object-too-large",
+        413,
+        format!("object is {size} bytes, limit {limit}"),
+    )
 }
 
 #[track_caller]

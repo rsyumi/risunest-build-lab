@@ -4,7 +4,7 @@ use crate::persistent_store::sync_selection::CaptureIdentity;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, path::Path, sync::{Arc, Mutex}};
+use std::{collections::{HashMap, HashSet}, path::Path, sync::{Arc, Mutex}};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -474,6 +474,38 @@ impl JobStore {
         }).collect()
     }
 
+    /// Rewrites each unfinished job of a connection that `end` changes, in one
+    /// transaction, so a removal never leaves some of them behind.
+    pub fn end_connection_jobs(&self, connection: &str, end: impl Fn(&mut DurableJob) -> bool) -> Result<()> {
+        let tx = self.0.unchecked_transaction().map_err(failure)?;
+        let rows = {
+            let mut statement = tx
+                .prepare(
+                    "SELECT value FROM external_requests WHERE connection_id=?1
+                     AND COALESCE(json_extract(value,'$.summary.state'),'')
+                        NOT IN ('succeeded','failed','cancelled')",
+                )
+                .map_err(failure)?;
+            let rows = statement
+                .query_map([connection], |row| row.get::<_, String>(0))
+                .map_err(failure)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>().map_err(failure)?
+        };
+        for encoded in rows {
+            let mut job = Self::decode(encoded)?;
+            if !end(&mut job) {
+                continue;
+            }
+            let encoded = serde_json::to_string(&job).map_err(failure)?;
+            tx.execute(
+                "UPDATE external_requests SET value=?2 WHERE id=?1 AND connection_id=?3",
+                rusqlite::params![job.id, encoded, connection],
+            )
+            .map_err(failure)?;
+        }
+        tx.commit().map_err(failure)
+    }
+
     /// Every live job plus a bounded recent terminal history for renderer state.
     pub fn list_for_state(&self) -> Result<Vec<DurableJob>> {
         let mut result = self.list_pending()?;
@@ -534,8 +566,13 @@ pub(crate) struct JobCommandState {
     pub root: std::sync::OnceLock<std::path::PathBuf>,
     lease_ledger: Mutex<Option<Arc<super::lease_ledger::LocalLeaseLedger>>>,
     pub active: ActiveJobs,
+    /// Connections being removed. No job of theirs may start meanwhile.
+    removing: Arc<Mutex<HashSet<String>>>,
     pub session: Mutex<Session>,
     blocking_tasks: Mutex<HashMap<String, Vec<tokio::sync::oneshot::Receiver<()>>>>,
+    /// The selection last read from the store, for a state read while device
+    /// maintenance holds the store.
+    pub shown_selection: Mutex<Option<Value>>,
 }
 pub(crate) struct BackgroundWorker(Arc<std::sync::atomic::AtomicUsize>);
 impl Drop for BackgroundWorker {
@@ -627,7 +664,9 @@ impl JobCommandState {
             return Err(ProviderError::new(ErrorKind::Cancelled));
         }
         if active.contains_key(&job.id)
-            || (!local_settlement && active.values().any(|(connection, _)| connection == &job.request.connection_id))
+            || (!local_settlement
+                && (active.values().any(|(connection, _)| connection == &job.request.connection_id)
+                    || self.removing.lock().map_err(failure)?.contains(&job.request.connection_id)))
         {
             return Err(ProviderError::new(ErrorKind::PreconditionFailed));
         }
@@ -637,6 +676,29 @@ impl JobCommandState {
         }) }))
     }
 
+    /// Refuses while a job of the connection runs, and keeps any from starting
+    /// until the returned hold is dropped. Both happen under the lock a claim
+    /// takes, so no job can start between the check and the hold.
+    pub(crate) fn hold_connection_removal(&self, connection: &str) -> Result<ConnectionRemovalHold> {
+        let active = self.active.lock().map_err(failure)?;
+        let mut removing = self.removing.lock().map_err(failure)?;
+        if active.values().any(|(held, _)| held == connection) || !removing.insert(connection.to_owned()) {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        Ok(ConnectionRemovalHold { connection: connection.to_owned(), removing: self.removing.clone() })
+    }
+}
+
+pub(crate) struct ConnectionRemovalHold {
+    connection: String,
+    removing: Arc<Mutex<HashSet<String>>>,
+}
+impl Drop for ConnectionRemovalHold {
+    fn drop(&mut self) {
+        if let Ok(mut removing) = self.removing.lock() {
+            removing.remove(&self.connection);
+        }
+    }
 }
 
 
@@ -685,6 +747,28 @@ mod tests {
             drop(claim);
             assert!(state.claim(&job).is_ok());
         });
+    }
+
+    /// A removal waits for a running job of its connection, and no job of that
+    /// connection starts until the removal lets go.
+    #[test]
+    fn a_connection_removal_and_its_jobs_exclude_each_other() {
+        let state = JobCommandState::default();
+        let job = DurableJob::new(request(), 1, identity());
+        let refused = |result: Result<_>| result.err().map(|error: ProviderError| error.kind);
+        let (_, claim) = state.claim(&job).unwrap();
+        assert_eq!(refused(state.hold_connection_removal("synthetic").map(|_| ())), Some(ErrorKind::PreconditionFailed));
+        drop(claim);
+
+        let hold = state.hold_connection_removal("synthetic").unwrap();
+        assert_eq!(refused(state.claim(&job).map(|_| ())), Some(ErrorKind::PreconditionFailed));
+        assert_eq!(refused(state.hold_connection_removal("synthetic").map(|_| ())), Some(ErrorKind::PreconditionFailed));
+        let mut other = DurableJob::new(request(), 1, identity());
+        other.request.connection_id = "synthetic-other".into();
+        assert!(state.claim(&other).is_ok());
+
+        drop(hold);
+        assert!(state.claim(&job).is_ok());
     }
 
     fn request() -> StartJobRequest {

@@ -37,6 +37,7 @@ const deviceSettings = {
   nativeFileLogEnabled: true,
   generationHistoryLimitEnabled: false,
   generationHistoryLimitMultiplier: 2,
+  messageSendKey: "enter",
 };
 
 describe("application startup performance profile", () => {

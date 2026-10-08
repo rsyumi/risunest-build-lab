@@ -474,7 +474,7 @@ fn stable_state_pin_pages_in_key_byte_order_while_tail_continues() {
         )
         .unwrap();
     let pin = store.create_state_pin(&a).unwrap();
-    assert_eq!(pin.start_seq.0, 2);
+    assert_eq!((pin.start_seq.0, pin.unit_count.0), (2, 2));
     store
         .push(
             &a,

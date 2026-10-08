@@ -16,9 +16,6 @@ it('keeps RisuNest Korean and English keys aligned', () => {
 })
 it('uses the required question form for owned Korean confirmations', () => {
     const inherited = new Set(['setup.finally', 'remindLaterQuestion', 'askLoadFirstMsg'])
-    expect(languageKorean.risuNest.serverSync.management.restoreConfirm).toBe(
-        '이 백업으로 복원하시겠습니까? 현재 라이브러리는 이 백업의 내용으로 교체되며, 동기화는 일시 중지됩니다. 자동 백업은 만들지 않습니다.',
-    )
     for (const [path, value] of leaves(languageKorean)) {
         let text: unknown = value
         if (typeof value === 'function') {
@@ -26,4 +23,20 @@ it('uses the required question form for owned Korean confirmations', () => {
         }
         if (typeof text === 'string' && text.includes('까요?')) expect(inherited.has(path), path).toBe(true)
     }
+})
+it('describes only the reset and restore actions in their help', () => {
+    expect(languageKorean.risuNest.cleanup.scope).toBe('이 기기의 대화, 캐릭터, 설정, 플러그인, 연결 정보, 내부 백업과 캐시를 삭제합니다.')
+    expect(languageEnglish.risuNest.cleanup.scope).toBe('Deletes local chats, characters, settings, plugins, connection information, internal backups and cache on this device.')
+    expect(languageKorean.risuNest.backup.restoreHelp).toBe('계정 동기화 충돌 백업으로 데이터를 복원합니다.')
+    expect(languageEnglish.risuNest.backup.restoreHelp).toBe('Restores data from an account sync conflict backup.')
+})
+it('describes only finding and deleting unused files in their help', () => {
+    expect(languageKorean.risuNest.storage.gcHelp).toBe('어디에서도 사용하지 않는 파일을 찾아 삭제합니다.')
+    expect(languageEnglish.risuNest.storage.gcHelp).toBe('Finds and deletes files that nothing refers to.')
+    for (const storage of [languageKorean.risuNest.storage, languageEnglish.risuNest.storage]) expect(storage).not.toHaveProperty('gcSeparation')
+})
+it('names toggle presets without a particle placeholder', () => {
+    expect(languageKorean.togglePresetRenamed('기본', '전투')).toBe('"기본" 프리셋 이름을 바꿨으며, 새 이름은 "전투"입니다.')
+    expect(languageKorean.togglePresetDuplicated('기본 사본')).toBe('"기본 사본" 프리셋으로 복제했습니다.')
+    for (const text of [languageKorean.togglePresetRenamed('A', 'B'), languageKorean.togglePresetDuplicated('B')]) expect(text).not.toMatch(/\((으|이|을|를|은|는|과|와)\)|[을은이과와]\([를는가와과]\)/)
 })

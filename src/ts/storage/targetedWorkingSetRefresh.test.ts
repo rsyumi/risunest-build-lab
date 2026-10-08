@@ -9,6 +9,7 @@ import type {
     ContentChangeWindow,
     DataRevision,
     PersistentDataStore,
+    PersistentRoot,
 } from './persistentDataStore'
 import {
     capturePersistentPluginStorage,
@@ -188,7 +189,10 @@ function makeState(database: Database): PersistentDataRuntimeStateAdapter & {
     }
 }
 
-async function makeRuntime(name: string) {
+async function makeRuntime(
+    name: string,
+    prepareRoot?: (root: PersistentRoot) => Promise<PersistentRoot>,
+) {
     const raw = new IndexedDbPersistentDataStore(name, indexedDB, IDBKeyRange)
     await raw.open()
     const database = makeDatabase('Initial')
@@ -201,6 +205,7 @@ async function makeRuntime(name: string) {
         state,
         onBackgroundError: errors,
         prepareDatabase: async (candidate) => candidate,
+        prepareRoot,
     })
     await runtime.initializeActiveWorkingSet(database)
     return { runtime, state, store: raw, scripted, errors }
@@ -480,5 +485,40 @@ describe('the working-set refresh drives the content change cursor', () => {
         expect(state.current().username).toBe('Recovered')
         expect(scripted.queryCharacterCalls()).toBeGreaterThan(0)
         expect(scripted.cursors).toEqual([1, 2, 3])
+    })
+
+    it('prepares the stored root on reprojection, targeted root refresh and inactive release', async () => {
+        const prepareRoot = vi.fn(async (root: PersistentRoot) => ({
+            ...structuredClone(root),
+            characterOrder: root.characterOrder ?? [],
+            customSidebarItems: root.customSidebarItems ?? [],
+        }))
+        const { runtime, state, store, scripted } = await makeRuntime(
+            `targeted-prepared-root-${crypto.randomUUID()}`,
+            prepareRoot,
+        )
+        expect((await store.readRoot()).value).not.toHaveProperty('characterOrder')
+        await store.replaceFromDatabase(makeDatabase('Projected'), 1)
+        scripted.script(null, [])
+        await refresh(runtime, 2)
+
+        expect(state.current().characterOrder).toEqual([])
+        expect(state.current().customSidebarItems).toEqual([])
+
+        const root = await store.readRoot()
+        await store.commit({ expectedRevision: 2, root: { ...root.value, username: 'Targeted' } })
+        scripted.script({ revision: 3, afterRevision: 2 }, [{ kind: 'root', key1: '', key2: '' }])
+        scripted.resetCounts()
+        await refresh(runtime, 3)
+
+        expect(state.current().username).toBe('Targeted')
+        expect(scripted.queryCharacterCalls()).toBe(0)
+        expect(state.current().characterOrder).toEqual([])
+        expect(state.current().customSidebarItems).toEqual([])
+
+        expect(await runtime.releaseInactiveWorkingSet()).toBe(true)
+        expect(state.current().characterOrder).toEqual([])
+        expect(state.current().customSidebarItems).toEqual([])
+        expect((await store.readRoot()).value).not.toHaveProperty('characterOrder')
     })
 })

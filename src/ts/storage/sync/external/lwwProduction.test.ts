@@ -45,6 +45,28 @@ describe('native external LWW adapter', () => {
         await refreshExternalLwwAdapters(state()); await settle()
         expect(fixture.resumeCurrent).toHaveBeenCalledOnce()
     })
+    it('registers the transports but leaves a bound target stopped when the start left sync off', async () => {
+        dispose = await installExternalLwwAdapters(state(), false); await settle()
+        expect(fixture.registrations.has('sync')).toBe(true)
+        await refreshExternalLwwAdapters(state()); await vi.advanceTimersByTimeAsync(60_000); await settle()
+        expect(fixture.resumeCurrent).not.toHaveBeenCalled()
+        expect(fixture.invoke).not.toHaveBeenCalled()
+        // Turning the switch on in settings resumes the target through the registered transport.
+        await fixture.registrations.get('sync')!.resumeBinding(context()); await settle()
+        expect(fixture.invoke.mock.calls.map(call => call[0])).toContain('external_lww_resume')
+        dispose(); dispose = undefined
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        expect(fixture.resumeCurrent).toHaveBeenCalledExactlyOnceWith(binding.target)
+    })
+    it('manual Sync Now resumes a bound target the start left stopped before it publishes', async () => {
+        dispose = await installExternalLwwAdapters(state(), false); await settle()
+        fixture.resumeCurrent.mockClear(); fixture.invoke.mockClear()
+        await requestExternalLwwNow('sync')
+        expect(fixture.resumeCurrent).toHaveBeenCalledExactlyOnceWith(binding.target)
+        const commands = fixture.invoke.mock.calls.map(call => call[0])
+        expect(commands.indexOf('external_lww_resume')).toBeGreaterThanOrEqual(0)
+        expect(commands.indexOf('external_lww_resume')).toBeLessThan(commands.indexOf('external_lww_publish'))
+    })
     it('registers four eligible native providers and guards the web', async () => {
         dispose = await installExternalLwwAdapters(state(['webdav', 's3', 'google_drive', 'onedrive', 'mybox', 'github_releases', 'gitlab_packages']))
         expect([...fixture.registrations.keys()]).toEqual(['sync', 's3', 'google_drive', 'onedrive'])
@@ -93,6 +115,16 @@ describe('native external LWW adapter', () => {
         const corrupt = receives()
         await vi.advanceTimersByTimeAsync(600_000); await settle()
         expect(receives()).toBe(corrupt)
+    })
+    it('stops when the connection reaches another repository', async () => {
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        const receives = () => fixture.invoke.mock.calls.filter(call => call[0] === 'external_lww_receive').length
+        fixture.invoke.mockImplementation(async command => { if (command === 'external_lww_receive') throw { kind: 'repositoryMismatch' } })
+        await vi.advanceTimersByTimeAsync(20_000); await settle()
+        const refused = receives()
+        expect(refused).toBeGreaterThan(0)
+        await vi.advanceTimersByTimeAsync(600_000); await settle()
+        expect(receives()).toBe(refused)
     })
     it('publishes the actual generation-complete revision cause immediately over a pending ordinary debounce', async () => {
         dispose = await installExternalLwwAdapters(state()); await settle()

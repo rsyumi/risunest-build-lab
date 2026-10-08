@@ -171,6 +171,39 @@ fn publication_segment_exists(store: &PersistentStore, job_id: &str) -> Result<b
         .map_err(|error| error.to_string())
 }
 
+fn release_abandoned<R: tauri::Runtime>(app: &AppHandle<R>, abandoned: AbandonedCasJobs) -> Result<(), String> {
+    let operation = app
+        .state::<PersistentStoreState>()
+        .admit_renderer_operation()
+        .map_err(|error| error.to_string())?;
+    let native_jobs = || match app.try_state::<NativeFileJobState>() {
+        Some(native) => native.list().map_err(|error| error.message),
+        None => Ok(Vec::new()),
+    };
+    let open_store = || {
+        persistent_store::commands::with_store_mut_admitted(
+            app.state(),
+            &operation,
+            |store| store.open_native_job_store(),
+        )
+        .map_err(|error| error.to_string())
+    };
+    let device_job_owned = |id: &str| match app.try_state::<crate::device_backup::DeviceBackupState>() {
+        Some(state) => state.owns_native_restore_job(id).map_err(|error| error.to_string()),
+        None => Ok(false),
+    };
+    let external_job_active = |id: &str| match app.try_state::<crate::external_storage::job_store::JobCommandState>() {
+        Some(state) => state.job_is_active(id).map_err(|error| error.to_string()),
+        None => Ok(false),
+    };
+    abandoned.release(&CasJobOwnerProbe {
+        native_jobs: &native_jobs,
+        device_job_owned: &device_job_owned,
+        external_job_active: &external_job_active,
+        open_store: &open_store,
+    })
+}
+
 impl DurableCasJobState {
     pub(crate) fn close_for_cleanup(&self) -> Result<(), String> {
         self.clear_uploads()?;
@@ -201,39 +234,7 @@ impl DurableCasJobState {
         if !abandoned.journal_ids.is_empty() || abandoned.listing_failure.is_some() {
             let app = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
-                let persistent = app.state::<PersistentStoreState>();
-                let released = persistent
-                    .admit_renderer_operation()
-                    .map_err(|error| error.to_string())
-                    .and_then(|operation| {
-                        let native_jobs = || match app.try_state::<NativeFileJobState>() {
-                            Some(native) => native.list().map_err(|error| error.message),
-                            None => Ok(Vec::new()),
-                        };
-                        let open_store = || {
-                            persistent_store::commands::with_store_mut_admitted(
-                                app.state(),
-                                &operation,
-                                |store| store.open_native_job_store(),
-                            )
-                            .map_err(|error| error.to_string())
-                        };
-                        let device_job_owned = |id: &str| match app.try_state::<crate::device_backup::DeviceBackupState>() {
-                            Some(state) => state.owns_native_restore_job(id).map_err(|error| error.to_string()),
-                            None => Ok(false),
-                        };
-                        let external_job_active = |id: &str| match app.try_state::<crate::external_storage::job_store::JobCommandState>() {
-                            Some(state) => state.job_is_active(id).map_err(|error| error.to_string()),
-                            None => Ok(false),
-                        };
-                        abandoned.release(&CasJobOwnerProbe {
-                            native_jobs: &native_jobs,
-                            device_job_owned: &device_job_owned,
-                            external_job_active: &external_job_active,
-                            open_store: &open_store,
-                        })
-                    });
-                if let Err(error) = released {
+                if let Err(error) = release_abandoned(&app, abandoned) {
                     crate::nlog!("error", "failed to release abandoned CAS jobs: {error}");
                 }
             });
@@ -1505,6 +1506,46 @@ mod tests {
             external_job_active:&|_| Ok(false), open_store:&open_store };
         assert!(DurableCasJobState::default().sweep_after_page_start(root, &probe).is_err());
         assert_eq!(journal_ids(root), ["unknown-device".to_owned()].into());
+    }
+
+    #[test]
+    fn opening_the_store_releases_the_journals_a_page_start_could_not_judge() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        {
+            let mut store = PersistentStore::open(root).unwrap();
+            // A saved publication whose segment row is gone has ended, which only the store shows.
+            let owner = CasJobOwner::from_another_process(CasJobOwnerKind::ExternalPublication, "publication");
+            drop(journal(&mut store, "publication", owner, true));
+        }
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        app.manage(crate::app_paths::AppPaths {
+            data: root.to_owned(),
+            webview: None,
+            logs: root.join("logs"),
+            cache: root.join("cache"),
+            cleanup_control: root.join("cleanup"),
+            tauri_derived: Vec::new(),
+            install: None,
+            integration: None,
+        });
+        app.manage(PersistentStoreState::unopened_without_purge());
+        app.manage(DurableCasJobState::default());
+
+        // A page that starts before the renderer opens the store cannot judge the journal.
+        let error = release_abandoned(app.handle(), AbandonedCasJobs::snapshot(root)).unwrap_err();
+        assert!(error.contains("has not been opened"), "{error}");
+        assert_eq!(journal_ids(root), ["publication".to_owned()].into());
+
+        persistent_store::commands::open_for_renderer(app.handle(), &app.state()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !journal_ids(root).is_empty() {
+            assert!(Instant::now() < deadline, "the journal stayed after the store opened");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

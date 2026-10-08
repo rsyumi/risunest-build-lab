@@ -5,7 +5,8 @@ const startup = vi.hoisted(() => ({
     native: true, exclusions: [] as string[], database: {} as any, reachUi: false,
     takeRendererRecovery: vi.fn(async () => false),
     credential: { id: 'synthetic-account', token: 'synthetic-token' },
-    readVault: vi.fn(), reconcile: vi.fn(), external: vi.fn(), stages: vi.fn(),
+    readVault: vi.fn(), reconcile: vi.fn(), external: vi.fn(), transports: vi.fn(), stages: vi.fn(),
+    serverPaused: true, lwwRunning: false, exitDrain: vi.fn(), serverDrain: vi.fn(),
     stop: new Error('synthetic bootstrap test reached UI'),
     markers: { getItem: vi.fn(() => null), setItem: vi.fn(), removeItem: vi.fn(), flush: vi.fn(async () => {}) },
 }))
@@ -81,12 +82,13 @@ vi.mock('./storage/workingSetResidency', () => ({
     workingSetResidency: { clear: vi.fn(), markCharacterReleased: vi.fn(), reconcileConversationResidency: vi.fn() },
 }))
 vi.mock('./storage/persistentDataRuntime.svelte', () => ({
-    getPersistentDataRuntime: () => ({ store: {}, revision: 1, flushPendingData: vi.fn(), expirePersistentTrash: vi.fn(async () => {}) }),
+    getPersistentDataRuntime: () => ({ store: {}, revision: 1, flushPendingData: vi.fn(), expirePersistentTrash: vi.fn(async () => {}),
+        capturePersistentMutationToken: vi.fn(async () => ({ revision: 5 })), acquireDestructiveReplacementFence: vi.fn(async () => ({ revision: 5 })) }),
     initializeActiveWorkingSet: vi.fn(), configurePersistentDataRuntime: vi.fn(),
     hasPendingOfficialPublication: vi.fn(() => false), publishCurrentOfficialRevision: vi.fn(),
 }))
 vi.mock('./plugins/plugins.svelte', () => ({
-    loadPlugins: vi.fn(), pluginCompatibility: { initialize: vi.fn(), profile: 'default' },
+    keepPluginsOffForThisStart: vi.fn(), loadPlugins: vi.fn(), pluginCompatibility: { initialize: vi.fn(), profile: 'default' },
 }))
 vi.mock('./plugins/pluginCompatibility', () => ({ shouldProjectScalableWorkingSet: vi.fn(() => false) }))
 vi.mock('./storage/accountStorage', () => ({
@@ -158,11 +160,16 @@ vi.mock('./storage/bootAttempt', () => ({ markBootStage: startup.stages, markBoo
 vi.mock('./ui/yieldToUi', () => ({ yieldToUi: async () => {} }))
 vi.mock('./nativeLocalUrls', () => ({ initializeNativeLocalUrls: vi.fn() }))
 vi.mock('./iosNative', () => ({ initializeIOSNative: vi.fn(), installIOSPersistenceLifecycle: vi.fn() }))
-vi.mock('./storage/sync/external/production', () => ({ installExternalStorageProduction: startup.external }))
+vi.mock('./storage/sync/external/production', () => ({
+    installExternalStorageProduction: startup.external, installExternalSyncTransports: startup.transports,
+    getExternalStorageSyncExitDrainAdapter: startup.exitDrain,
+}))
+vi.mock('./storage/sync/external/lwwProduction', () => ({ isExternalLwwRunning: () => startup.lwwRunning }))
 vi.mock('./storage/syncExitCoordinator', () => ({ createSyncExitCoordinator: vi.fn(() => ({})) }))
 vi.mock('./storage/syncExitProduction', () => ({ configureSyncExitCoordinator: vi.fn(), registerWindowCloseDrain: vi.fn() }))
 vi.mock('./storage/sync/serverSyncProduction', () => ({
-    createServerSyncExitDrainAdapter: vi.fn(), initializeNativeSyncBindings: vi.fn(),
+    createServerSyncExitDrainAdapter: startup.serverDrain, initializeNativeSyncBindings: vi.fn(),
+    getServerSyncController: () => ({ snapshot: () => ({ paused: startup.serverPaused }) }),
     installServerSyncProduction: vi.fn(), disposeNativeSyncBindings: vi.fn(),
 }))
 vi.mock('./storage/sync/external/bridge', () => ({ getExternalStorageBridge: vi.fn() }))
@@ -170,11 +177,14 @@ vi.mock('./process/transformers', () => ({ releaseIdleTransformerModels: vi.fn()
 vi.mock('./process/files/inlayProviderImage', () => ({ forgetInlayProviderImages: vi.fn() }))
 
 import { loadData } from './bootstrap'
+import { keepPluginsOffForThisStart, loadPlugins } from './plugins/plugins.svelte'
 import { alertNormal, alertToast, alertTOS, waitAlert } from './alert'
 import { bootFailure } from './stores.svelte'
 import { loadRisuAccountData } from './drive/accounter'
 import { initializeOfficialAccountBootstrap } from './storage/sync/officialAccountBootstrap'
 import { initializeNativeSyncBindings, installServerSyncProduction } from './storage/sync/serverSyncProduction'
+import { createSyncExitCoordinator } from './storage/syncExitCoordinator'
+import { getExternalStorageBridge } from './storage/sync/external/bridge'
 
 beforeEach(() => {
     vi.clearAllMocks()
@@ -202,18 +212,52 @@ describe('bootstrap recovery exclusions', () => {
         expect(initializeOfficialAccountBootstrap).not.toHaveBeenCalled()
         expect(loadRisuAccountData).not.toHaveBeenCalled()
         expect(startup.reconcile).not.toHaveBeenCalled()
-        expect(installServerSyncProduction).not.toHaveBeenCalled()
         expect(startup.external).not.toHaveBeenCalled()
         expect(startup.stages.mock.calls.flat()).not.toContain('account-bootstrap')
-        expect(startup.stages.mock.calls.flat()).not.toContain('drive-sync')
         expect(startup.stages.mock.calls.flat()).not.toContain('service-worker')
         if (native) {
             expect(initializeNativeSyncBindings).toHaveBeenCalledOnce()
+            // The sync switches in settings need the transports even while sync stays stopped.
+            expect(installServerSyncProduction).toHaveBeenCalledExactlyOnceWith({ resumeBound: false })
+            expect(startup.transports).toHaveBeenCalledOnce()
+            expect(startup.stages.mock.calls.flat()).toContain('drive-sync')
             expect(startup.readVault).toHaveBeenCalledOnce()
             expect(startup.database.account).toBe(startup.credential)
         } else {
             expect(initializeNativeSyncBindings).not.toHaveBeenCalled()
+            expect(installServerSyncProduction).not.toHaveBeenCalled()
+            expect(startup.transports).not.toHaveBeenCalled()
+            expect(startup.stages.mock.calls.flat()).not.toContain('drive-sync')
         }
+    })
+
+    it.each([true, false])('keeps plugins off for the whole run when they are excluded (native=%s)', async (native) => {
+        startup.native = native
+        startup.exclusions = ['plugins']
+        await loadData()
+        expect(bootFailure.set).toHaveBeenLastCalledWith(expect.objectContaining({ stage: 'ui-state' }))
+        expect(keepPluginsOffForThisStart).toHaveBeenCalledOnce()
+        expect(loadPlugins).not.toHaveBeenCalled()
+    })
+
+    it('leaves plugins on when they are not excluded', async () => {
+        startup.native = true
+        startup.exclusions = []
+        await loadData()
+        expect(keepPluginsOffForThisStart).not.toHaveBeenCalled()
+        expect(loadPlugins).toHaveBeenCalledOnce()
+    })
+
+    it('reaches UI when registering the sync transports fails while sync is left off', async () => {
+        startup.native = true
+        startup.exclusions = ['sync']
+        vi.mocked(installServerSyncProduction).mockRejectedValueOnce(new Error('synthetic transport failure'))
+        await loadData()
+        expect(bootFailure.set).toHaveBeenLastCalledWith(expect.objectContaining({
+            stage: 'ui-state', message: startup.stop.message,
+        }))
+        expect(startup.external).not.toHaveBeenCalled()
+        expect(startup.transports).toHaveBeenCalledOnce()
     })
 
     it.each([true, false])('runs account and sync startup work when enabled (native=%s)', async (native) => {
@@ -230,6 +274,7 @@ describe('bootstrap recovery exclusions', () => {
             expect(installServerSyncProduction).toHaveBeenCalledOnce()
             expect(startup.reconcile).toHaveBeenCalledOnce()
             expect(startup.external).toHaveBeenCalledOnce()
+            expect(startup.transports).not.toHaveBeenCalled()
             expect(startup.stages.mock.calls.flat()).toContain('drive-sync')
         } else {
             expect(initializeNativeSyncBindings).not.toHaveBeenCalled()
@@ -248,6 +293,66 @@ describe('bootstrap recovery exclusions', () => {
         expect(bootFailure.set).toHaveBeenLastCalledWith(expect.objectContaining({
             stage: 'drive-sync', message: failure.message,
         }))
+        expect(startup.external).not.toHaveBeenCalled()
+    })
+})
+
+describe('exit sync after a start that left sync off', () => {
+    type ExitDependencies = Parameters<typeof createSyncExitCoordinator>[0]
+    const selection = (kind: 'server' | 'external', connectionId: string) => ({ kind, connectionId, selectionEpoch: '2', paused: false })
+    async function exitTarget(current: ReturnType<typeof selection>, clearedDuringSession = false) {
+        startup.native = true
+        startup.exclusions = ['sync']
+        startup.exitDrain.mockImplementation(() => ({ id: `external:${current.connectionId}:2` }))
+        startup.serverDrain.mockImplementation((id: string) => ({ id }))
+        vi.mocked(getExternalStorageBridge).mockReturnValue({
+            captureExitTarget: async () => ({ revision: '5', libraryEpoch: '1', selection: current }),
+        } as never)
+        await loadData()
+        const dependencies = vi.mocked(createSyncExitCoordinator).mock.calls.at(-1)![0] as ExitDependencies
+        if (clearedDuringSession) startup.exclusions = []
+        await dependencies.acquireEditFence()
+        const target = await dependencies.captureTarget()
+        return { target, drain: await dependencies.selectedDrain() }
+    }
+    beforeEach(() => {
+        startup.serverPaused = true
+        startup.lwwRunning = false
+    })
+
+    it('drains an external target the user started during the session without starting automatic backups', async () => {
+        startup.lwwRunning = true
+        const { target, drain } = await exitTarget(selection('external', 'connection-1'))
+        expect(target.selectionId).toBe('external:connection-1:2')
+        expect(drain?.id).toBe('external:connection-1:2')
+        expect(startup.external).not.toHaveBeenCalled()
+        expect(startup.transports).toHaveBeenCalled()
+    })
+
+    it('leaves an external target alone when it was never started', async () => {
+        const { target, drain } = await exitTarget(selection('external', 'connection-1'))
+        expect(target.selectionId).toBe('none:2')
+        expect(drain).toBeNull()
+        expect(startup.exitDrain).not.toHaveBeenCalled()
+    })
+
+    it('drains a server target the user started during the session', async () => {
+        startup.serverPaused = false
+        const { target, drain } = await exitTarget(selection('server', 'server-1'))
+        expect(target.selectionId).toBe('server:server-1:2')
+        expect(drain?.id).toBe('server:server-1:2')
+    })
+
+    it('leaves a server target alone when it was never started', async () => {
+        const { target, drain } = await exitTarget(selection('server', 'server-1'))
+        expect(target.selectionId).toBe('none:2')
+        expect(drain).toBeNull()
+    })
+
+    it('does not start sync at exit when the exclusion was cleared during the session', async () => {
+        const { target, drain } = await exitTarget(selection('external', 'connection-1'), true)
+        expect(target.selectionId).toBe('none:2')
+        expect(drain).toBeNull()
         expect(startup.external).not.toHaveBeenCalled()
     })
 })

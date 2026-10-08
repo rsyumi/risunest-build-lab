@@ -3,12 +3,30 @@ import { externalErrorMessage, externalFolderErrorKind, externalStorageStrings }
 
 const strings = externalStorageStrings('en')
 
+describe('the storage usage copy', () => {
+    it('names the repository data this device knows of without calling it a lower bound', () => {
+        expect(externalStorageStrings('ko')).toMatchObject({ uploadedLowerBound: '이 기기에서 확인한 저장소 데이터', files: '파일 {0}개' })
+        expect(strings).toMatchObject({ uploadedLowerBound: 'Repository data known to this device', files: '{0} files' })
+    })
+
+    it('says only what cleanup removes under the retention settings', () => {
+        expect(externalStorageStrings('ko').retentionHelp).toBe('정리할 때 이 기기에서 만든 자동 백업 중 보관 개수와 보관 기간을 모두 넘긴 백업을 지웁니다.')
+        expect(strings.retentionHelp).toBe('Cleanup removes automatic backups made on this device once they are past both the number of backups to keep and the days to keep them.')
+    })
+})
+
 describe('externalErrorMessage', () => {
     it('reads the kind of a rejected command and the code of a job error', () => {
         expect(externalErrorMessage(strings, { kind: 'storageFull', httpStatus: null, retryAtMs: null }))
             .toBe(strings.freeSpace)
         expect(externalErrorMessage(strings, { code: 'corrupt', message: 'x', action: 'none', retryable: false }))
             .toBe(strings.corrupted)
+    })
+
+    it('tells a wrong recovery key apart from another repository at the location', () => {
+        expect(externalErrorMessage(strings, { kind: 'recoveryKeyMismatch' })).toBe(strings.recoveryKeyMismatch)
+        expect(externalErrorMessage(strings, { code: 'repositoryMismatch', message: 'x', action: 'none', retryable: false }))
+            .toBe(strings.repositoryMismatch)
     })
 
     it('names a repository this device has already connected', () => {
@@ -54,7 +72,7 @@ describe('externalErrorMessage', () => {
             'folderNotRepository', 'folderUnsupportedLocation',
             'endpointRejected', 'deviceVaultUnavailable', 'clockSkew', 'folderTooLarge',
             'repositoryBusy', 'locationOccupied', 'authorizationTimedOut', 'localStorageFull',
-            'localPermissionDenied', 'repositoryKeyUnavailable', 'authorizationUnavailable',
+            'localPermissionDenied', 'localFailure', 'repositoryKeyUnavailable', 'authorizationUnavailable',
         ]
         for (const kind of kinds) {
             expect(externalErrorMessage(korean, { kind })).not.toBe(korean.errorGeneric)

@@ -13,6 +13,8 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 const ARCHIVE_PAYLOAD_VERSION: u32 = 1;
 const MAX_DECODED_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(crate) const ARCHIVE_CANCELLED_MESSAGE: &str = "character archive operation cancelled";
+pub(crate) const ARCHIVE_DATA_MISSING_MESSAGE: &str = "character archive data is missing";
+pub(crate) const ARCHIVE_DATA_UNAVAILABLE_MESSAGE: &str = "character archive data could not be fetched";
 
 fn ensure_not_cancelled(is_cancelled: &dyn Fn() -> bool) -> StoreResult<()> {
     if is_cancelled() {
@@ -150,6 +152,61 @@ pub(super) fn read_archived_object(
         .transpose()
 }
 
+/// Brings the one stored body an archive or a restore reads (the owner manifest it lists, or the
+/// archive itself) to this device from the storage that holds it, before anything changes.
+pub(super) fn fetch_operation_body(
+    connection: &Connection,
+    root: &std::path::Path,
+    character_id: &str,
+    restore: bool,
+    is_cancelled: &dyn Fn() -> bool,
+    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> StoreResult<()> {
+    let generation = super::active_generation(connection)?;
+    let hash = if restore {
+        read_archived_object(connection, &generation, character_id)?.map(|archived| archived.object_hash)
+    } else {
+        owner_manifest_hash(connection, character_id)?
+    };
+    let Some(hash) = hash else { return Ok(()) };
+    if PayloadCas::new(root)?.stat_object(&hash)?.is_some() {
+        return Ok(());
+    }
+    let check = || {
+        if is_cancelled() {
+            Err(crate::server_sync::SyncError::new("cancelled", 499))
+        } else {
+            Ok(())
+        }
+    };
+    let fetched = crate::server_sync::residency::HydrationSession::new(root, cancellation)
+        .and_then(|mut session| session.hydrate_many(&[hash], &check));
+    match fetched {
+        Ok(unavailable) if unavailable.is_empty() => Ok(()),
+        Ok(_) => validation(ARCHIVE_DATA_MISSING_MESSAGE),
+        Err(_) if is_cancelled() => validation(ARCHIVE_CANCELLED_MESSAGE),
+        Err(_) => validation(ARCHIVE_DATA_UNAVAILABLE_MESSAGE),
+    }
+}
+
+/// The owner manifest that lists the character's additional assets, which archiving reads.
+pub(super) fn owner_manifest_hash(
+    connection: &Connection,
+    character_id: &str,
+) -> StoreResult<Option<String>> {
+    let generation = super::active_generation(connection)?;
+    Ok(connection
+        .query_row(
+            "SELECT manifest_hash FROM asset_owner_heads
+             WHERE generation = ?1 AND owner_kind = 'character-additional-assets'
+               AND owner_locator = ?2 AND present = 1",
+            params![generation, character_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
 pub(super) fn is_archived(
     connection: &Connection,
     generation: &str,
@@ -188,7 +245,6 @@ pub(super) fn marker_detail(character_id: &str, name: &str, character_type: &str
         "chaId": character_id,
         "name": name,
         "type": character_type,
-        "chats": [],
         "risuNestArchived": true,
     })
 }
@@ -755,9 +811,9 @@ impl<'de> Visitor<'de> for MessagesVisitor<'_> {
     }
 }
 
-fn create_restore_staging(connection: &Connection) -> StoreResult<tempfile::NamedTempFile> {
-    let staging = tempfile::NamedTempFile::new()?;
-    connection.execute("ATTACH DATABASE ?1 AS archive_restore", [staging.path().to_string_lossy().as_ref()])?;
+fn create_restore_staging(connection: &Connection, scratch_root: &std::path::Path) -> StoreResult<tempfile::TempDir> {
+    let staging = crate::external_storage::leftovers::local_scratch(scratch_root, "archive-restore-")?;
+    connection.execute("ATTACH DATABASE ?1 AS archive_restore", [staging.path().join("restore.sqlite").to_string_lossy().as_ref()])?;
     let created = (|| -> StoreResult<()> {
     connection.execute_batch("PRAGMA archive_restore.journal_mode=OFF; PRAGMA archive_restore.synchronous=OFF; PRAGMA archive_restore.cache_size=-2048;")?;
     connection.execute_batch(&format!(
@@ -1011,11 +1067,9 @@ pub(super) fn restore_character_with_cancellation_lww(
         return validation(format!("Character {character_id} is not archived"));
     };
     let Some(file) = cas.open_object(&archived.object_hash)? else {
-        return validation(format!(
-            "Archived character {character_id} is missing its stored data"
-        ));
+        return validation(ARCHIVE_DATA_MISSING_MESSAGE);
     };
-    let _staging = create_restore_staging(connection)?;
+    let _staging = create_restore_staging(connection, cas.repository_root())?;
     let result = (|| {
         let mut payload = stage_payload(connection, file, is_cancelled)?;
         for remap in &archived.identity_remap {

@@ -12,6 +12,7 @@ import {
     type RepairJournalSummary,
     type RepairPreview,
 } from './dataHealth'
+import { RevisionConflictError } from './persistentDataStore'
 
 export type DataHealthRun = 'quick' | 'deep' | null
 
@@ -27,6 +28,8 @@ export interface DataHealthSnapshot {
     applied: { remaining: number } | null
     activity: 'quick' | 'deep' | 'repair' | 'undo' | 'preview' | 'load' | 'discard' | 'complete' | null
     failed: boolean
+    /** The library changed after the shown result, so it can only be checked again. */
+    outdated: boolean
     /** What the diagnosis can be answered with, and what the reader has chosen. */
     candidates: RepairCandidate[]
     selection: string[]
@@ -83,6 +86,7 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
         running: null,
         failed: false,
         failure: null,
+        outdated: false,
         applied: null,
         activity: null,
         candidates: [],
@@ -98,24 +102,31 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
         state = { ...state, ...next, ...("failure" in next ? { failed: next.failure !== null } : {}) }
         listeners.forEach((listener) => listener(state))
     }
+    const errorCode = (error: unknown) => error && typeof error === 'object' && 'code' in error ? error.code : null
+    /** A refusal for a changed library leaves the result on screen and only a new check to offer. */
+    const outdatedBy = (error: unknown): boolean => {
+        if (!(error instanceof RevisionConflictError) && errorCode(error) !== 'revision-conflict') return false
+        update({ outdated: true, candidates: [], selection: [], preview: null })
+        return true
+    }
     const mutationFailed = (error: unknown, action: 'repair' | 'undo' | 'complete') => {
-        const code = error && typeof error === 'object' && 'code' in error ? error.code : null
+        const code = errorCode(error)
         if (code === 'committed' || code === 'activation-committed-refresh-failed') {
             update({ failure: 'refresh', candidates: [], selection: [], preview: null, journals: [], ...derive(null) })
-        } else update({ failure: action })
+        } else if (!outdatedBy(error)) update({ failure: action })
     }
     let cancelRequested = false
 
     const finish = (result: DataHealthResult | null) =>
-        update({ ...derive(result), candidates: [], selection: [], preview: null })
+        update({ ...derive(result), outdated: false, candidates: [], selection: [], preview: null })
 
     /** A scan replaces the diagnosis, so the repair choices are read again for the new one. */
     const finishScan = async (result: DataHealthResult): Promise<void> => {
         finish(result)
         try {
             await loadPlan()
-        } catch {
-            update({ failure: 'preview' })
+        } catch (error) {
+            if (!outdatedBy(error)) update({ failure: 'preview' })
         }
     }
 
@@ -205,8 +216,8 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
             try {
                 await loadPlan()
                 update({ journals: await deps.listJournals() })
-            } catch {
-                update({ failure: "load" })
+            } catch (error) {
+                if (!outdatedBy(error)) update({ failure: "load" })
             } finally { update({ activity: null }) }
         },
         /** One choice per finding: picking one drops the other answers to the same finding. */
@@ -221,8 +232,8 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
             update({ selection })
             try {
                 await refreshPreview(selection)
-            } catch {
-                update({ failure: "preview" })
+            } catch (error) {
+                if (!outdatedBy(error)) update({ failure: "preview" })
             } finally { update({ activity: null }) }
         },
         /** Chooses one answer for every finding, or clears the selection. */
@@ -233,8 +244,8 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
             update({ selection })
             try {
                 await refreshPreview(selection)
-            } catch {
-                update({ failure: "preview" })
+            } catch (error) {
+                if (!outdatedBy(error)) update({ failure: "preview" })
             } finally { update({ activity: null }) }
         },
         async apply(snapshot: boolean): Promise<void> {

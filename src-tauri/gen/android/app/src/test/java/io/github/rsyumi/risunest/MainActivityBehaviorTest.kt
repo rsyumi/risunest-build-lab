@@ -1,13 +1,16 @@
 package io.github.rsyumi.risunest
 
 import android.content.ComponentCallbacks2
+import android.os.Build
 import androidx.core.view.WindowInsetsCompat
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -420,6 +423,29 @@ class MainActivityBehaviorTest {
   @Test
   fun `keyboard inset remains available to the web view`() {
     assertEquals(0, nativeMarginInsetTypes() and WindowInsetsCompat.Type.ime())
+  }
+
+  @Test
+  fun `keyboard shrinks the web view only before Android 11`() {
+    val margins = WebViewMargins(left = 0, top = 24, right = 0, bottom = 126)
+
+    assertEquals(126, resolveWebViewBottomMargin(Build.VERSION_CODES.P, margins, imeBottom = 0))
+    assertEquals(904, resolveWebViewBottomMargin(Build.VERSION_CODES.P, margins, imeBottom = 904))
+    assertEquals(904, resolveWebViewBottomMargin(Build.VERSION_CODES.Q, margins, imeBottom = 904))
+    assertEquals(126, resolveWebViewBottomMargin(Build.VERSION_CODES.R, margins, imeBottom = 904))
+    assertEquals(126, resolveWebViewBottomMargin(36, margins, imeBottom = 904))
+  }
+
+  @Test
+  fun `root back is offered to the page as a cancelable event`() {
+    val script = rootBackScript()
+
+    assertTrue(script.contains("new Event('risunest-root-back',{cancelable:true})"))
+    assertTrue(script.contains("window.dispatchEvent(e);return e.defaultPrevented"))
+    assertTrue(pageUsedRootBack("true"))
+    assertFalse(pageUsedRootBack("false"))
+    assertFalse(pageUsedRootBack("null"))
+    assertFalse(pageUsedRootBack(null))
   }
 
   @Test

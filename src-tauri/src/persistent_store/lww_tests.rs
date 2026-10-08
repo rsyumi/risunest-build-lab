@@ -426,7 +426,7 @@ fn full_device_backup(label: Option<&str>) -> Vec<device_store::sections::Prepar
     let (_dir, mut source) = store();
     if let Some(label) = label { write_restore_device_fixture(&mut source, label); }
     source.device_store_mut().unwrap().capture_backup_sections(
-        &[SectionKind::Hypa, SectionKind::LocalPlugins, SectionKind::LocalSettings],
+        &[SectionKind::Hypa, SectionKind::LocalPlugins, SectionKind::LocalSettings], &std::env::temp_dir(),
     ).unwrap()
 }
 
@@ -562,7 +562,7 @@ fn full_restore_rejects_missing_duplicate_and_versioned_device_sections_before_r
     assert!(store.lww_commit_replacement_with_device_sections(&header,&stage,None,&sections[..2].iter().collect::<Vec<_>>()).is_err());
     assert!(store.lww_commit_replacement_with_device_sections(&header,&stage,None,&[&sections[0],&sections[0],&sections[2]]).is_err());
     let empty_fingerprint=risunest_external_storage_format::format::FingerprintBuilder::new(&SectionKind::Hypa.fingerprint_domain()).finish();
-    let versioned=device_store::sections::SectionSpoolBuilder::new(device_store::Section::Hypa).unwrap().finish(&empty_fingerprint).unwrap();
+    let versioned=device_store::sections::SectionSpoolBuilder::new(device_store::Section::Hypa,&std::env::temp_dir()).unwrap().finish(&empty_fingerprint).unwrap();
     assert_eq!(versioned.kind(),SectionKind::Hypa);
     assert!(store.lww_commit_replacement_with_device_sections(&header,&stage,None,&[&versioned,&sections[1],&sections[2]]).is_err());
     assert_eq!(store.lww_clock_state().unwrap().issued,before);
@@ -736,6 +736,17 @@ fn backup_capture_pins_both_stores_before_releasing_concurrent_reservation_and_d
     target.lww_commit_replacement_with_device_sections(&Header{binding_authority:0.into(),request_id:"capture-boundary-restore".into()},&stage,None,&sections.iter().collect::<Vec<_>>()).unwrap();
     assert_device_restore_label(&target,"before");
     store.release_revision(&lease.lease).unwrap(); assert!(store.revision_leases.is_empty());
+}
+
+#[test]
+fn backup_capture_spools_device_sections_in_app_scratch_and_removes_them_with_the_capture() {
+    let (dir,mut store)=store(); write_restore_device_fixture(&mut store,"scratch");
+    let scratch=dir.path().join("external-storage").join("scratch");
+    let spools=|| std::fs::read_dir(&scratch).unwrap().filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().starts_with("section-spool-")).count();
+    let (lease,sections)=store.lww_acquire_backup_capture(store.revision().unwrap()).unwrap();
+    assert_eq!(sections.len(),3); assert_eq!(spools(),3);
+    drop(sections); assert_eq!(spools(),0);
+    store.release_revision(&lease.lease).unwrap();
 }
 
 #[test]
@@ -1173,6 +1184,26 @@ fn independent_fields_converge_in_both_delivery_orders() {
 }
 
 #[test]
+fn a_received_persona_joins_the_root_with_its_membership_unit() {
+    let (_dir, mut store) = store();
+    let persona = |store: &PersistentStore| {
+        store.read_root(None).unwrap().value["personas"].as_array().cloned().unwrap_or_default()
+            .into_iter().find(|value| value["id"] == "received-persona")
+    };
+    // A replacement pages its units in key order, so membership can arrive
+    // in an earlier receive than any field of the record.
+    receive(&mut store, "membership", vec![change(&["exists", "persona", "received-persona"], 10, serde_json::json!(true))], vec![]);
+    assert_eq!(persona(&store), Some(serde_json::json!({"id": "received-persona"})));
+    receive(&mut store, "fields", vec![change(&["persona", "received-persona", "name"], 10, serde_json::json!("Received"))], vec![]);
+    receive(&mut store, "repeat", vec![change(&["exists", "persona", "received-persona"], 20, serde_json::json!(true))], vec![]);
+    assert_eq!(persona(&store), Some(serde_json::json!({"id": "received-persona", "name": "Received"})));
+    receive(&mut store, "removal", vec![Change {
+        key: unit_key(&["exists", "persona", "received-persona"]).unwrap(), stamp: stamp(30), value: UnitValue::Deleted,
+    }], vec![]);
+    assert_eq!(persona(&store), None);
+}
+
+#[test]
 fn echo_and_empty_receives_keep_the_revision_and_still_acknowledge() {
     let (_dir, mut store) = store();
     save(
@@ -1499,6 +1530,62 @@ fn order_preserves_folders_filters_retired_ids_and_appends_concurrent_additions(
         store.read_root(None).unwrap().value["characterOrder"][0]["data"],
         serde_json::json!([])
     );
+}
+
+fn character_order(store: &PersistentStore) -> Value {
+    store.read_root(None).unwrap().value["characterOrder"].clone()
+}
+
+#[test]
+fn trashed_characters_stay_out_of_the_character_order() {
+    let (_, mut store) = store();
+    save(&mut store, vec![
+        mutation(&["exists", "character", "a"], serde_json::json!({"type":"character"})),
+        mutation(&["exists", "character", "b"], serde_json::json!({"type":"character"})),
+        mutation(&["exists", "character", "c"], serde_json::json!({"type":"character"})),
+        mutation(&["order", "characters"], serde_json::json!([{"name":"folder","data":["c"]},"a","b"])),
+    ]);
+    assert_eq!(character_order(&store), serde_json::json!([{"name":"folder","data":["c"]},"a","b"]));
+    // The renderer trashes a character by dropping it from the order.
+    save(&mut store, vec![
+        mutation(&["character", "b", "trashTime"], serde_json::json!(1)),
+        mutation(&["order", "characters"], serde_json::json!([{"name":"folder","data":["c"]},"a"])),
+    ]);
+    assert_eq!(character_order(&store), serde_json::json!([{"name":"folder","data":["c"]},"a"]));
+    // A trashed character the order still lists stays out as well.
+    save(&mut store, vec![mutation(&["character", "c", "trashTime"], serde_json::json!(2))]);
+    assert_eq!(character_order(&store), serde_json::json!([{"name":"folder","data":[]},"a"]));
+    // Restoring from the trash brings the character back.
+    save(&mut store, vec![
+        UnitMutation::Delete { key: unit_key(&["character", "b", "trashTime"]).unwrap() },
+        mutation(&["order", "characters"], serde_json::json!([{"name":"folder","data":["c"]},"a","b"])),
+    ]);
+    assert_eq!(character_order(&store), serde_json::json!([{"name":"folder","data":[]},"a","b"]));
+    let trash = store.query_characters(&crate::persistent_store::CharacterQuery {
+        search: None, order: crate::persistent_store::QueryOrder::Configured, trash: true, limit: 10, cursor: None,
+    }, None).unwrap();
+    assert_eq!(trash.items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), ["c"]);
+}
+
+#[test]
+fn a_received_trash_leaves_the_character_order() {
+    let (_, mut store) = store();
+    receive(&mut store, "library", vec![
+        change(&["exists", "character", "a"], 1, serde_json::json!({"type":"character"})),
+        change(&["exists", "character", "b"], 2, serde_json::json!({"type":"character"})),
+        change(&["exists", "character", "c"], 3, serde_json::json!({"type":"character"})),
+        change(&["order", "characters"], 4, serde_json::json!(["a", "b", "c"])),
+    ], vec![]);
+    assert_eq!(character_order(&store), serde_json::json!(["a", "b", "c"]));
+    receive(&mut store, "trash", vec![
+        change(&["character", "c", "trashTime"], 5, serde_json::json!(5)),
+        change(&["order", "characters"], 5, serde_json::json!(["a", "b"])),
+    ], vec![]);
+    assert_eq!(character_order(&store), serde_json::json!(["a", "b"]));
+    receive(&mut store, "trash-listed", vec![
+        change(&["character", "b", "trashTime"], 6, serde_json::json!(6)),
+    ], vec![]);
+    assert_eq!(character_order(&store), serde_json::json!(["a"]));
 }
 
 #[test]

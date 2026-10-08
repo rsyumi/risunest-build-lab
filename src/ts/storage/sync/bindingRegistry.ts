@@ -1,6 +1,7 @@
 import type { BindingTarget, SyncBindingOptions, SyncBindingTransport } from './bindingFlow'
 import { createSyncBindingFlow } from './bindingFlow'
 import { createNativeSyncBindingBridge } from './bindingNative'
+import { notifySyncBindingChanged } from './bindingChanges'
 
 type Flow = ReturnType<typeof createSyncBindingFlow>
 let bindingFlow: Flow | undefined
@@ -65,10 +66,12 @@ export function registerSyncBindingTransport(target: Exclude<BindingTarget, { ki
 export async function bindSyncTarget(target: Exclude<BindingTarget, { kind: 'none' }>, options: SyncBindingOptions = {}) {
     const transport = transports.get(key(target))
     if (!bindingFlow || !transport) throw new Error('Sync binding transport is unavailable')
-    return bindingFlow.bind(target, transport, options)
+    try { return await bindingFlow.bind(target, transport, options) }
+    finally { notifySyncBindingChanged() }
 }
 
 export async function unbindSyncTarget() {
     if (!bindingFlow) throw new Error('Sync binding flow is unavailable')
-    return bindingFlow.unbind()
+    try { return await bindingFlow.unbind() }
+    finally { notifySyncBindingChanged() }
 }

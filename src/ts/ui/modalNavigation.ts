@@ -82,7 +82,9 @@ function navigationLayer(node: HTMLElement, initial: NavigationOptions, trapFocu
         live.delete(token)
         token = null
         scheduleCleanup()
-        if (opener?.isConnected) opener.focus()
+        // Focus the user already moved elsewhere, such as a text field tapped to close a menu, stays there.
+        const focused = document.activeElement
+        if (opener?.isConnected && (!focused || focused === document.body || node.contains(focused))) opener.focus()
     }
     window.addEventListener('popstate', closeOnBack)
     window.addEventListener('keydown', keydown, true)
@@ -99,6 +101,20 @@ function navigationLayer(node: HTMLElement, initial: NavigationOptions, trapFocu
             window.removeEventListener('keydown', keydown, true)
             deactivate()
         },
+    }
+}
+
+/**
+ * Android Back that the WebView cannot take itself. A dialog shown outside every layer is cancelled
+ * instead of leaving the app, except RisuNest's own terms, where a refusal only reloads the same dialog.
+ * A layer whose entry the WebView skips, because it was added without a tap, closes through the page.
+ */
+export function handleRootBack(event: Event) {
+    if (get(alertStore).type === 'tos') return
+    if (cancelVisibleAlert()) event.preventDefault()
+    else if (historyTokens().some(token => live.has(token))) {
+        event.preventDefault()
+        history.back()
     }
 }
 

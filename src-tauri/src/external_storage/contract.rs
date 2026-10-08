@@ -27,6 +27,8 @@ pub(crate) enum ErrorKind {
     RepositoryBusy,
     LocalStorageFull,
     LocalPermissionDenied,
+    /// Any other failure of a file, store or worker on this device.
+    LocalFailure,
     NotFound,
     PreconditionFailed,
     RateLimited,
@@ -45,6 +47,11 @@ pub(crate) enum ErrorKind {
     /// A body this device does not hold could not be fetched from the server
     /// or external storage that holds it.
     PreviousStorageUnavailable,
+    /// The recovery key is malformed or does not open the repository at this
+    /// location.
+    RecoveryKeyMismatch,
+    /// The location holds a repository other than the one expected.
+    RepositoryMismatch,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

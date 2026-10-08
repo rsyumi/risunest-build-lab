@@ -228,6 +228,18 @@ impl Residency {
     pub fn object(&self, digest: &str, context: Option<&str>) -> Result<Option<RemoteObject>> {
         self.lookup(digest, context, true)
     }
+    /// The digests among `digests` that `object` finds, asked in pages.
+    pub(crate) fn active_among(&self, digests: &[String]) -> Result<std::collections::BTreeSet<String>> {
+        let mut found = std::collections::BTreeSet::new();
+        for page in digests.chunks(512) {
+            let marks = (1..=page.len()).map(|index| format!("?{index}")).collect::<Vec<_>>().join(",");
+            let mut query = self.db.prepare(&format!("SELECT DISTINCT o.hash FROM objects o JOIN contexts c ON c.id=o.context WHERE o.state='active' AND o.hash IN ({marks})"))?;
+            for hash in query.query_map(rusqlite::params_from_iter(page), |row| row.get::<_, String>(0))? {
+                found.insert(hash?);
+            }
+        }
+        Ok(found)
+    }
     pub(crate) fn target_holds(&self, digest: &str, library_id: &str, target_id: &str) -> Result<bool> {
         validate_hash(digest)?;
         validate_hash(target_id)?;
@@ -582,6 +594,8 @@ impl HydrationSession {
         let mut seen = std::collections::BTreeSet::new();
         let digests = digests.iter().filter(|hash| seen.insert((*hash).clone())).cloned().collect::<Vec<_>>();
         let scope = lane.as_ref().map(|lane| lane.asset_plan(Some(digests.len())));
+        // Finding what is already here comes before the downloads this scope plans below.
+        if let Some(lane) = &lane { lane.step(super::progress::Step::Preparing); }
         let mut completed = std::collections::BTreeSet::new();
         let mut opened = |hash: &str, outcome| {
             if completed.insert(hash.to_owned()) {
@@ -630,6 +644,10 @@ impl HydrationSession {
             std::thread::yield_now();
         }
         let external = digests.iter().filter(|hash| external.remove(hash.as_str())).cloned().collect::<Vec<_>>();
+        // Every server body's size is known before the first download, so its byte total is planned
+        // once, on the lane the downloading clients report to.
+        let planned_bytes = server_pages.iter().flatten().map(|object| object.size).sum::<u64>();
+        if let Some(lane) = super::progress::current().filter(|_| planned_bytes > 0) { lane.plan_files(0, planned_bytes); }
         for selected in [true, false] {
             for page in &server_pages {
                 let objects = page.iter().filter(|object| {
@@ -683,7 +701,6 @@ impl HydrationSession {
                     }
                     let cache = self.cache.as_ref().unwrap();
                     let client = self.clients.get(&key).unwrap();
-                    client.lane().plan_files(0, objects.iter().map(|object| object.size).sum());
                     super::transfer::Transfer::new(client, cache)?.with_check(check)
                         .download(&objects.iter().map(|object| object.hash.clone()).collect::<Vec<_>>(), &[])?;
                     for object in objects {

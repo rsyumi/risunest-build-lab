@@ -78,6 +78,7 @@ import {
     installPersistentSaveNotifications,
 } from "./storage/persistentSaveNotifications";
 import { observePersistentSaveChanges } from './storage/persistentSaveObserver.svelte';
+import { backgroundErrorMessage } from './storage/backgroundErrorMessage';
 import { configureBlobStoreStorageProvider, readBlobForFacade, resolveBlobStore, subscribeNativeMediaEndpointChanges } from "./storage/platformBlobStore";
 import { inferBlobMime } from "./storage/blobStore";
 import { selectAssetSourceRoute } from "./storage/assetSourceRoute";
@@ -442,7 +443,7 @@ export async function saveDb() {
             setSaving: (value) => {
                 saving.state = value
             },
-            reportError: (error) => alertError(error instanceof Error ? error : String(error)),
+            reportError: (error) => alertError(backgroundErrorMessage(error)),
             onSaveCommitted: saveDbKei,
         })
         const disposeEffects = observePersistentSaveChanges({

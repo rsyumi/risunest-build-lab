@@ -753,16 +753,18 @@ pub(crate) fn restore_frozen_backup_sections(
 }
 
 impl SectionSpoolBuilder {
-    pub(crate) fn new(section: Section) -> StoreResult<Self> {
-        Self::open(kind_of_section(section), true)
+    /// `scratch` is an app-owned directory; the spool keeps its rows in a
+    /// temporary directory inside it.
+    pub(crate) fn new(section: Section, scratch: &std::path::Path) -> StoreResult<Self> {
+        Self::open(kind_of_section(section), true, scratch)
     }
 
-    pub(crate) fn new_backup(kind: SectionKind) -> StoreResult<Self> {
-        Self::open(kind, false)
+    pub(crate) fn new_backup(kind: SectionKind, scratch: &std::path::Path) -> StoreResult<Self> {
+        Self::open(kind, false, scratch)
     }
 
-    fn open(kind: SectionKind, versioned: bool) -> StoreResult<Self> {
-        let directory = tempfile::tempdir()?;
+    fn open(kind: SectionKind, versioned: bool, scratch: &std::path::Path) -> StoreResult<Self> {
+        let directory = tempfile::Builder::new().prefix("section-spool-").tempdir_in(scratch)?;
         let connection = Connection::open(directory.path().join("rows.sqlite"))?;
         connection.execute_batch(
             "PRAGMA cache_size=-4096;
@@ -1209,12 +1211,13 @@ fn capture_backup_rows(
 pub(crate) fn capture_backup_sections_snapshot(
     snapshot: &Connection,
     kinds: &[SectionKind],
+    scratch: &std::path::Path,
 ) -> StoreResult<Vec<PreparedSectionRows>> {
     let mut seen = BTreeSet::new();
     let mut spools = Vec::with_capacity(kinds.len());
     for kind in kinds {
         if !seen.insert(kind.id()) { return Err(invalid("Backup section kind is repeated")); }
-        spools.push((*kind, SectionSpoolBuilder::new_backup(*kind)?));
+        spools.push((*kind, SectionSpoolBuilder::new_backup(*kind, scratch)?));
     }
     for (kind, spool) in &mut spools { capture_backup_rows(snapshot, *kind, spool)?; }
     spools.into_iter().map(|(_, spool)| spool.finish_captured()).collect()
@@ -1246,6 +1249,7 @@ impl DeviceStore {
     pub(crate) fn capture_backup_sections(
         &mut self,
         kinds: &[SectionKind],
+        scratch: &std::path::Path,
     ) -> StoreResult<Vec<PreparedSectionRows>> {
         if kinds.is_empty() { return Ok(Vec::new()); }
         let path: String = self.connection.query_row(
@@ -1259,7 +1263,7 @@ impl DeviceStore {
         snapshot.execute_batch(
             "PRAGMA busy_timeout=5000; PRAGMA query_only=ON; PRAGMA mmap_size=0; BEGIN;",
         )?;
-        let sections = capture_backup_sections_snapshot(&snapshot, kinds)?;
+        let sections = capture_backup_sections_snapshot(&snapshot, kinds, scratch)?;
         snapshot.execute_batch("COMMIT;")?;
         Ok(sections)
     }

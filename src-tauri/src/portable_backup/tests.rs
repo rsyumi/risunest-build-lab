@@ -161,13 +161,50 @@ fn independent_backup_reads_server_held_body_without_source_promotion_or_outbox_
     assert_eq!(copied,body);
 }
 
+/// A store with one asset alias whose body was removed from this device.
+fn store_without_local_body() -> (tempfile::TempDir, crate::persistent_store::PersistentStore, String, u64) {
+    use crate::server_sync::lww_tests::{local, put_asset};
+    let (root, mut store) = local();
+    let initial = store.replace_begin().unwrap();
+    store.replace_put_root(&initial.staging_id, &serde_json::json!({"language":"ko"})).unwrap();
+    store.replace_commit(&initial.staging_id, Some(0)).unwrap();
+    let body = b"synthetic body kept elsewhere";
+    let hash = put_asset(&mut store, "assets/synthetic-elsewhere.bin", body).object_hash.unwrap();
+    let cas = crate::asset_repository::PayloadCas::new(root.path()).unwrap();
+    fs::remove_file(cas.object_path(&hash).unwrap().unwrap()).unwrap();
+    (root, store, hash, body.len() as u64)
+}
+
+fn capture_outcome(root: &std::path::Path, store: &mut crate::persistent_store::PersistentStore) -> Result<CapturedLibrary> {
+    let revision = store.revision().unwrap();
+    let job = tempfile::tempdir_in(root).unwrap();
+    let mut pins = crate::asset_repository::job_pins::DurableCasJob::begin(root, "synthetic-unfetched-backup", crate::asset_repository::job_pins::CasJobKind::OfficialPublicationOrExportPreparation, crate::asset_repository::job_pins::CasJobOwner::for_test(), 0).unwrap();
+    let outcome = capture_library(store, revision, job.path(), &mut pins, false, &Never, "synthetic");
+    pins.release(crate::asset_repository::job_pins::CasReleaseOutcome::Aborted).unwrap();
+    outcome
+}
+
+#[test]
+fn a_backup_stops_before_writing_when_a_server_held_body_cannot_be_fetched() {
+    let (root, mut store, hash, size) = store_without_local_body();
+    // Custody is recorded, but the server cannot be reached.
+    crate::server_sync::residency::test_remote::hold(root.path(), &[(&hash, size)]);
+    assert!(matches!(capture_outcome(root.path(), &mut store), Err(Error::RemotePayloadUnavailable)));
+}
+
+#[test]
+fn a_backup_stops_before_writing_when_no_storage_holds_a_body() {
+    let (root, mut store, _, _) = store_without_local_body();
+    assert!(matches!(capture_outcome(root.path(), &mut store), Err(Error::PayloadMissing)));
+}
+
 #[test]
 fn archived_payload_roots_are_installed_and_missing_payload_is_attributed_to_character() {
     let directory = tempfile::tempdir().unwrap();
     let catalog = fixture(directory.path());
     let hash = hex::encode(Sha256::digest(b"synthetic file bytes"));
     let archived = serde_json::json!({"objectHash":hash,"archivedAt":1,"conversationCount":1,"messageCount":1,"assetHashes":[],"sharedObjectHash":hash,"sharedAssetHashes":[],"identityRemap":[]});
-    catalog.db.execute("INSERT INTO characters VALUES('archived',0,0,0,'Archived',NULL,0,'character',NULL,NULL,?1,?2)", rusqlite::params![r#"{"chaId":"archived","name":"Archived","type":"character"}"#,archived.to_string()]).unwrap();
+    catalog.db.execute("INSERT INTO characters VALUES('archived',0,0,0,'Archived',NULL,0,'character',NULL,NULL,?1,?2)", rusqlite::params![r#"{"chaId":"archived","name":"Archived","type":"character","risuNestArchived":true}"#,archived.to_string()]).unwrap();
     let path = directory.path().join("archived.risunest");
     catalog.write_candidate(&path, false, &Never).unwrap();
     let archive = VerifiedArchive::open(File::open(path).unwrap(), directory.path(), &Never).unwrap();
@@ -177,7 +214,7 @@ fn archived_payload_roots_are_installed_and_missing_payload_is_attributed_to_cha
     let missing = "f".repeat(64);
     let catalog = fixture(directory.path());
     let archived = serde_json::json!({"objectHash":missing,"archivedAt":1,"conversationCount":1,"messageCount":1,"assetHashes":[],"sharedObjectHash":hash,"sharedAssetHashes":[],"identityRemap":[]});
-    catalog.db.execute("INSERT INTO characters VALUES('archived',0,0,0,'Archived',NULL,0,'character',NULL,NULL,?1,?2)", rusqlite::params![r#"{"chaId":"archived","name":"Archived","type":"character"}"#,archived.to_string()]).unwrap();
+    catalog.db.execute("INSERT INTO characters VALUES('archived',0,0,0,'Archived',NULL,0,'character',NULL,NULL,?1,?2)", rusqlite::params![r#"{"chaId":"archived","name":"Archived","type":"character","risuNestArchived":true}"#,archived.to_string()]).unwrap();
     let path = directory.path().join("missing.risunest");
     catalog.write_candidate(&path, false, &Never).unwrap();
     let archive = VerifiedArchive::open(File::open(path).unwrap(), directory.path(), &Never).unwrap();

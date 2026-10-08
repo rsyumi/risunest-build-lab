@@ -120,6 +120,9 @@ it.each(['desktop', 'android', 'ios'])('offers one generic native import on %s',
     const imports = buttons.filter(button => button.textContent?.trim() === language.risuNest.backup.importFile)
     expect(imports).toHaveLength(1)
     expect(buttons.some(button => button.textContent?.includes(language.loadPocketRisuBackup))).toBe(false)
+    const restoreRow = target.querySelector('[data-backup-group="restore"]')?.textContent
+    expect(restoreRow).toContain(language.risuNest.backup.restoreHelp)
+    expect(restoreRow).not.toContain(language.risuNest.backup.restoreHelpWeb)
     imports[0].click()
     await tick()
     expect(restoreBackupFromSystemPicker).toHaveBeenCalledOnce()
@@ -133,6 +136,9 @@ it('preserves the distinct web PocketRisu importer', async () => {
     document.body.append(target)
     mounted = mount(RisuNestBackupRestore, { target })
     await tick()
+    const restoreRow = target.querySelector('[data-backup-group="restore"]')?.textContent
+    expect(restoreRow).toContain(language.risuNest.backup.restoreHelpWeb)
+    expect(restoreRow).not.toContain(language.risuNest.backup.restoreHelp)
     const button = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === language.loadPocketRisuBackup)!
     button.click()
     await vi.waitFor(() => expect(LoadLocalBackup).toHaveBeenCalledOnce())

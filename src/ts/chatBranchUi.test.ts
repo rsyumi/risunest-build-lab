@@ -61,7 +61,7 @@ function makeDatabase(messages: Message[] = [
     } as unknown as Database
 }
 
-async function createHarness(name: string, initial = makeDatabase()) {
+async function createHarness(name: string, initial = makeDatabase(), onLocalRevision?: (revision: number) => void) {
     const store = new IndexedDbPersistentDataStore(name, new IDBFactory(), IDBKeyRange)
     await store.open()
     const imported = await store.replaceFromDatabase(structuredClone(initial))
@@ -111,6 +111,7 @@ async function createHarness(name: string, initial = makeDatabase()) {
             },
         },
         prepareDatabase: async (value) => value,
+        onLocalRevision,
     })
     await runtime.initializeActiveWorkingSet(database)
 
@@ -215,6 +216,29 @@ describe('captured conversation branch UI', () => {
             ],
         })
         expect(harness.context.captureCurrent()?.conversation.id).toBe('branch-id')
+    })
+
+    it('reports the committed branch once as a local revision before navigating to it', async () => {
+        const onLocalRevision = vi.fn()
+        const harness = await createHarness('captured-branch-local-revision', makeDatabase(), onLocalRevision)
+        const before = harness.runtime.revision
+        const target = captureChatMessageTarget({ ...harness.context, absoluteIndex: 1 })!
+        let reportedBeforeNavigation: unknown[][] = []
+
+        await expect(createCapturedConversationBranch({
+            target,
+            context: harness.context,
+            runtime: harness.runtime,
+            createFolderOnBranch: false,
+            createId: idSequence('branch-id', 'marker-id'),
+            createBranchName: () => 'Source (Branch)',
+            navigateToBranch: (id) => {
+                reportedBeforeNavigation = [...onLocalRevision.mock.calls]
+                return harness.navigate(id)
+            },
+        })).resolves.toBe(true)
+
+        expect(reportedBeforeNavigation).toEqual([[before + 1]])
     })
 
     it('persists the inserted branch as the selected conversation from a nonzero source index', async () => {

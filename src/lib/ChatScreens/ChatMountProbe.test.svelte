@@ -13,6 +13,8 @@
         character,
         rawStreamingText,
         bookmarked = false,
+        currentPage = 1,
+        totalPages = 1,
         parserProjection,
         parserAbortSignal,
         restoredEditor,
@@ -24,6 +26,8 @@
         character: unknown
         rawStreamingText: string
         bookmarked?: boolean
+        currentPage?: number
+        totalPages?: number
         parserProjection?: BoundedLiveChatParserProjection
         parserAbortSignal?: AbortSignal
         restoredEditor?: ChatEditorDraft
@@ -70,6 +74,10 @@
     export function updatePresentation(state: ChatPresentationRefresh) {
         img = state.img
         bookmarked = state.bookmarked
+    }
+    export function updateCandidatePosition(page: number, total: number) {
+        currentPage = page
+        totalPages = total
     }
     export function captureEditorDraft() {
         const open = chatMountProbe.editorDrafts.get(instanceId) ?? restored
@@ -139,6 +147,8 @@
     data-image={img}
     data-streaming-text={displayedStreamingText}
     data-bookmarked={bookmarked}
+    data-candidate-page={currentPage}
+    data-candidate-total={totalPages}
     data-refresh-count={refreshCount}
     data-restored-draft={restored?.draft}
 ></div>

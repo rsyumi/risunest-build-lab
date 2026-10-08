@@ -9,10 +9,11 @@ import { fetchNative, globalFetch, readImage, saveAsset } from "../globalApi.sve
 import { DBState, hotReloading } from "../stores.svelte";
 import type { ScriptMode } from "../process/scripts";
 import { reconcilePluginListUpdate } from "./pluginListUpdate";
-import { customV3ProviderMetaStore, loadV3Plugins } from "./apiV3/v3.svelte";
+import { areV3PluginsIdle, canInterruptV3Plugins, customV3ProviderMetaStore, loadV3Plugins, prepareV3PluginsForReload, subscribeV3PluginActivity } from "./apiV3/v3.svelte";
 import { pluginCodeTranspiler } from "./apiV3/transpiler";
 import {
     createPluginLoadOrchestrator,
+    createDeferredPluginReload,
     createPluginLoadReentrancyGuard,
     runPluginUnloadCallbacks,
 } from "./pluginCompatibility";
@@ -449,6 +450,26 @@ const applyPluginLoad = createPluginLoadOrchestrator<RisuPlugin>({
     loadV3: loadV3Plugins,
 })
 const pluginLoadReentrancy = createPluginLoadReentrancyGuard((error) => console.error(error))
+let syncReload: ReturnType<typeof createDeferredPluginReload> | undefined
+
+/** How long a received plugin change waits for plugin work before interrupting it. */
+export const PLUGIN_SYNC_RELOAD_WAIT_LIMIT_MS = 60_000
+
+export function requestPluginReloadAfterSync(): void {
+    syncReload ??= createDeferredPluginReload({
+        isIdle: areV3PluginsIdle,
+        canInterrupt: canInterruptV3Plugins,
+        subscribe: subscribeV3PluginActivity,
+        reload: (isCurrent, interrupt) => loadPlugins(true, isCurrent, interrupt),
+        onError: (error) => console.error(error),
+        waitLimitMs: PLUGIN_SYNC_RELOAD_WAIT_LIMIT_MS,
+    })
+    syncReload.request()
+}
+
+export function cancelPluginReloadAfterSync(): void {
+    syncReload?.cancel()
+}
 
 function isSupportedPluginVersion(plugin: RisuPlugin): boolean {
     return plugin.version === '3.0'
@@ -479,7 +500,16 @@ async function reportUnsupportedPlugins(plugins: readonly RisuPlugin[]): Promise
     else alertError(message)
 }
 
-export async function loadPlugins() {
+let pluginsOffForThisStart = false
+
+/** Startup left plugins off, so nothing loads them until the app starts again. */
+export function keepPluginsOffForThisStart() {
+    pluginsOffForThisStart = true
+}
+
+export async function loadPlugins(whenIdle = false, isCurrent: () => boolean = () => true, interrupt = false) {
+    if (!whenIdle) cancelPluginReloadAfterSync()
+    if (pluginsOffForThisStart) return
     console.log('Loading plugins...')
     let db = getDatabase()
 
@@ -489,7 +519,12 @@ export async function loadPlugins() {
         enabledPlugins.filter((plugin: RisuPlugin) => !isSupportedPluginVersion(plugin)),
     )
 
-    await applyPluginLoad(enabledPlugins.filter(isSupportedPluginVersion))
+    await applyPluginLoad(enabledPlugins.filter(isSupportedPluginVersion), () => {
+        if (!isCurrent()) return false
+        if (!whenIdle || prepareV3PluginsForReload(interrupt)) return true
+        requestPluginReloadAfterSync()
+        return false
+    }, isCurrent)
 }
 
 export async function loadPluginsAfterAuthoritativeRestore(alreadyRestarted = false) {

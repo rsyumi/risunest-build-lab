@@ -1893,6 +1893,86 @@ impl Provider for FlakyRemote {
     }
     fn head_locator(&self, repository: &RepositoryHandle) -> Result<RemoteLocator> { self.inner.head_locator(repository) }
 }
+/// Uploads large bodies through a session, as S3 multipart and OneDrive
+/// upload sessions do. The first transfer lands without an answer, and the
+/// finished session then refuses every later fragment.
+struct SessionRemote {
+    inner: Arc<FakeProvider>,
+    landed: std::sync::Mutex<bool>,
+}
+impl Provider for SessionRemote {
+    fn open_repository<'a>(&'a self, config: &'a ConnectionConfig, secret: &'a SecretRef, mode: OpenMode, cancel: &'a Cancellation)
+        -> ProviderFuture<'a, (RepositoryHandle, super::capabilities::Capabilities)> {
+        self.inner.open_repository(config, secret, mode, cancel)
+    }
+    fn read_object<'a>(&'a self, repository: &'a RepositoryHandle, locator: &'a RemoteLocator, unchanged: Option<&'a VersionToken>, sink: &'a mut dyn TransferSink, cancel: &'a Cancellation)
+        -> ProviderFuture<'a, ReadReceipt> {
+        self.inner.read_object(repository, locator, unchanged, sink, cancel)
+    }
+    fn begin_upload<'a>(&'a self, repository: &'a RepositoryHandle, intent: &'a ObjectIntent, cancel: &'a Cancellation)
+        -> ProviderFuture<'a, Option<ResumeState>> {
+        Box::pin(async move {
+            if intent.role != ObjectRole::Pack { return self.inner.begin_upload(repository, intent, cancel).await; }
+            Ok(Some(ResumeState { sealed_state: SecretRef("synthetic-session".into()), confirmed_offset: 0, expires_at_ms: None }))
+        })
+    }
+    fn create_object<'a>(&'a self, repository: &'a RepositoryHandle, intent: &'a ObjectIntent, source: &'a dyn TransferSource, resume: Option<&'a ResumeState>, cancel: &'a Cancellation)
+        -> ProviderFuture<'a, ObjectReceipt> {
+        Box::pin(async move {
+            if resume.is_none() { return self.inner.create_object(repository, intent, source, None, cancel).await; }
+            let landed = std::mem::replace(&mut *self.landed.lock().unwrap(), true);
+            if landed { return Err(ProviderError::new(ErrorKind::NotFound)); }
+            self.inner.create_object(repository, intent, source, None, cancel).await?;
+            Err(ProviderError::new(ErrorKind::Transient))
+        })
+    }
+    fn compare_exchange_head<'a>(&'a self, repository: &'a RepositoryHandle, locator: &'a RemoteLocator, expected: &'a ExpectedHead, head: &'a HeadBytes, cancel: &'a Cancellation)
+        -> ProviderFuture<'a, HeadReceipt> {
+        self.inner.compare_exchange_head(repository, locator, expected, head, cancel)
+    }
+    fn replace_head<'a>(&'a self, repository: &'a RepositoryHandle, locator: &'a RemoteLocator, head: &'a HeadBytes, cancel: &'a Cancellation)
+        -> ProviderFuture<'a, HeadReceipt> {
+        self.inner.replace_head(repository, locator, head, cancel)
+    }
+    fn list_objects<'a>(&'a self, repository: &'a RepositoryHandle, collection: Collection, cursor: Option<&'a str>, limit: u16, cancel: &'a Cancellation)
+        -> ProviderFuture<'a, ObjectPage> {
+        self.inner.list_objects(repository, collection, cursor, limit, cancel)
+    }
+    fn delete_object<'a>(&'a self, repository: &'a RepositoryHandle, locator: &'a RemoteLocator, cancel: &'a Cancellation)
+        -> ProviderFuture<'a, ()> {
+        self.inner.delete_object(repository, locator, cancel)
+    }
+    fn reconcile_upload<'a>(&'a self, repository: &'a RepositoryHandle, intent: &'a ObjectIntent, resume: Option<&'a ResumeState>, cancel: &'a Cancellation)
+        -> ProviderFuture<'a, UploadResolution> {
+        self.inner.reconcile_upload(repository, intent, resume, cancel)
+    }
+    fn lookup_metadata<'a>(&'a self, repository: &'a RepositoryHandle, intent: &'a ObjectIntent, known: Option<&'a RemoteLocator>, cancel: &'a Cancellation)
+        -> ProviderFuture<'a, Option<ObjectReceipt>> {
+        self.inner.lookup_metadata(repository, intent, known, cancel)
+    }
+    fn head_locator(&self, repository: &RepositoryHandle) -> Result<RemoteLocator> { self.inner.head_locator(repository) }
+}
+
+#[test]
+fn a_large_body_whose_finished_session_lost_its_answer_publishes_on_the_next_attempt() {
+    run(async {
+        let mut f = CycleFixture::new();
+        let body = vec![71; 5 * 1024 * 1024];
+        let hash = small_asset(&mut f.a, "synthetic-session-body", &body);
+        f.sender.provider = Arc::new(SessionRemote { inner: f.provider.clone(), landed: Default::default() });
+        let cancel = Cancellation::default();
+        let lost = f.sender.publish(&mut f.a, DecimalU64(0), &[], &cancel).await;
+        assert_eq!(lost.err().unwrap().kind, ErrorKind::Transient);
+        f.sender.publish(&mut f.a, DecimalU64(0), &[], &cancel).await.unwrap();
+        f.sender.provider = f.provider.clone();
+        assert_eq!(f.provider.objects_with_role(ObjectRole::Pack).len(), 1);
+        f.receive_b().await;
+        let inputs = tempfile::tempdir().unwrap();
+        let state = f.receiver.published_state(&mut f.b, inputs.path(), &cancel).await.unwrap();
+        assert!(state.standalone.contains_key(&hash));
+    });
+}
+
 /// Leaves the next segment sent without an answer: `landed` decides whether
 /// the repository kept it.
 async fn send_unconfirmed(f: &mut CycleFixture, authority: DecimalU64, landed: bool) -> crate::persistent_store::external_lww::SealedPublication {

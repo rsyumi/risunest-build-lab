@@ -106,6 +106,9 @@ describe('SaveCoordinator', () => {
                 captureRoot: () => captureRoot(database),
                 captureSelectedCharacter: () => selected,
                 captureSelectedConversationAuthority: () => authority,
+                captureCharacter: (id) => selected?.chaId === id
+                    ? selected
+                    : database.characters.find((item) => item.chaId === id) ?? null,
                 replaceDatabase: () => undefined,
                 onConversationMutationPersisted: onPersisted,
                 onWindowedSelectedConversationRevision: (revision) => {
@@ -200,6 +203,86 @@ describe('SaveCoordinator', () => {
             expect(() => harness.coordinator.retireWindowedSelectedConversation()).toThrow('pending persistence')
             await harness.coordinator.flushPendingDataLocally('complete-before-leaving')
             expect(() => harness.coordinator.retireWindowedSelectedConversation()).not.toThrow()
+        })
+
+        it('commits a character addition beside the windowed selection and keeps later saves to their own changes', async () => {
+            const harness = makeWindowedHarness()
+            const added = {
+                type: 'character',
+                chaId: 'char-added',
+                name: 'Added',
+                chats: [{ id: 'added-chat', name: 'Chat 1', note: '', localLore: [], message: [] }],
+            } as unknown as character
+            harness.database.username = 'Changed with the addition'
+            await harness.coordinator.commitCharacterAddition({
+                characterId: added.chaId,
+                estimatedBytes: 1,
+                install: () => harness.database.characters.push(added),
+            }, 'create-character')
+
+            expect(harness.commit).toHaveBeenCalledOnce()
+            const [addition] = harness.commit.mock.calls[0]
+            expect(addition).toMatchObject({
+                expectedRevision: 2,
+                addCharacter: { chaId: 'char-added', name: 'Added' },
+                rootMutations: [{ type: 'set', key: 'username', value: 'Changed with the addition' }],
+            })
+            expect(addition).not.toHaveProperty('character')
+            expect(addition).not.toHaveProperty('replaceCharacter')
+            expect(harness.readConversationWindow).not.toHaveBeenCalled()
+            expect(harness.authority()?.storeRevision).toBe(3)
+            expect(harness.coordinator.hasPendingPersistenceWork).toBe(false)
+
+            harness.database.username = 'Changed after the addition'
+            harness.coordinator.markPersistentDataDirty(1)
+            await harness.coordinator.flushPendingDataLocally('after-addition')
+            expect(harness.commit).toHaveBeenCalledTimes(2)
+            expect(harness.commit.mock.calls[1][0]).toEqual({
+                expectedRevision: 3,
+                rootMutations: [{ type: 'set', key: 'username', value: 'Changed after the addition' }],
+            })
+            expect(harness.coordinator.hasPendingPersistenceWork).toBe(false)
+            expect(() => harness.coordinator.retireWindowedSelectedConversation()).not.toThrow()
+        })
+
+        it('saves an edit made to the added character while its windowed addition commit is pending', async () => {
+            const first = deferred<{ revision: number }>()
+            const started = deferred<void>()
+            const commit = vi.fn(async ({ expectedRevision }: WorkingSetCommit) => {
+                if (commit.mock.calls.length === 1) { started.resolve(); return first.promise }
+                return { revision: expectedRevision + 1 }
+            })
+            const harness = makeWindowedHarness({ commit })
+            const added = {
+                type: 'character',
+                chaId: 'char-added',
+                name: 'Added',
+                chats: [{ id: 'added-chat', name: 'Chat 1', note: '', localLore: [], message: [] }],
+            } as unknown as character
+            const saving = harness.coordinator.commitCharacterAddition({
+                characterId: added.chaId,
+                estimatedBytes: 1,
+                install: () => harness.database.characters.push(added),
+            }, 'create-character')
+            await Promise.race([started.promise, saving])
+            added.name = 'Renamed during the addition'
+            harness.coordinator.markPersistentDataDirty(1)
+            first.resolve({ revision: 3 })
+            await saving
+
+            expect(commit).toHaveBeenCalledTimes(2)
+            expect(commit.mock.calls[0][0].addCharacter).toMatchObject({ chaId: 'char-added', name: 'Added' })
+            expect(commit.mock.calls[1][0]).toMatchObject({
+                expectedRevision: 3,
+                replaceCharacter: { chaId: 'char-added', name: 'Renamed during the addition' },
+            })
+            expect(commit.mock.calls[1][0]).not.toHaveProperty('character')
+            expect(harness.readConversationWindow).not.toHaveBeenCalled()
+            expect(harness.authority()?.storeRevision).toBe(4)
+            // The edit armed a debounce; draining it finds nothing left to commit.
+            await harness.coordinator.flushPendingDataLocally('drain-debounce')
+            expect(commit).toHaveBeenCalledTimes(2)
+            expect(harness.coordinator.hasPendingPersistenceWork).toBe(false)
         })
 
         function recordWindowedMutation(

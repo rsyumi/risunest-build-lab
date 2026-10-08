@@ -63,7 +63,11 @@ export function installPersistentSaveNotifications(
             dependencies.onSaveCommitted?.()
         },
         onFlushPromise: (promise) => dependencies.setSaving(promise !== null),
-        onBackgroundError: (error) => dependencies.reportError?.(error),
+        onBackgroundError: (error) => {
+            // The save failure notice already describes a save refused for a deleted record.
+            if (error instanceof Error && error.message === 'retired-record-id') return
+            dependencies.reportError?.(error)
+        },
     })
     return () => {
         dependencies.configureRuntime({

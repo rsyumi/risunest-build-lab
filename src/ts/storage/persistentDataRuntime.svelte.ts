@@ -20,9 +20,9 @@ import type {
 } from './activeWorkingSet.svelte'
 import type { ConversationViewportSource } from '../conversationViewportSource'
 import type { Chat, Database, botPreset, character } from './database.svelte'
-import { getDatabase, setDatabase, setEffectivePresetOverride } from './database.svelte'
+import { fillRootFieldDefaults, getDatabase, setDatabase, setEffectivePresetOverride } from './database.svelte'
 import { getEffectivePresetOverride } from './effectiveIdentityState'
-import { prepareDatabaseForPersistence } from './databasePreparation'
+import { prepareDatabaseForPersistence, preparePersistentRootForWorkingSet } from './databasePreparation'
 import { getPersistentDataStore, getPersistentStorageAuthority } from './persistentDataStoreFactory'
 import type {
     CharacterDetail,
@@ -44,6 +44,7 @@ import type {
 import type { CharacterActivationOptions } from './activeWorkingSet.svelte'
 import { notifyLocalPersistentRevision } from './persistentRevisionEvents'
 import { retryCommittedWorkingSetRefreshWithContinuation } from './committedWorkingSetContinuation'
+import { invalidatePluginDeviceKeyspaces } from '../plugins/pluginDeviceKeyspace'
 import {
     capturePersistentRoot,
     capturePersistentPluginStorage,
@@ -152,8 +153,15 @@ export function createProductionStateAdapter(options: {
         canonicalCapture,
         beforeCapture: flushPersistentIdentityEdits,
         afterRemoteApply: derivePersistentIdentityMirrors,
+        fillRootFieldDefaults(fields) {
+            fillRootFieldDefaults(getDatabase(), fields)
+        },
         afterRemoteRootChange(fields) {
             void applyReceivedDisplaySettings(fields).catch((error) => console.error(error))
+        },
+        afterRemotePluginChange() {
+            void import('../plugins/plugins.svelte').then(({ requestPluginReloadAfterSync }) => requestPluginReloadAfterSync())
+                .catch((error) => productionConfiguration.onBackgroundError?.(error))
         },
         captureCharacterIndex: () => characterIndex,
         captureCharacters() {
@@ -408,6 +416,9 @@ export function createProductionStateAdapter(options: {
         onPluginStorageChanged(owner) {
             notifyPluginStorageOwnerChanged(owner)
         },
+        onPluginDeviceStorageChanged(owner) {
+            invalidatePluginDeviceKeyspaces(owner)
+        },
         getGeneratingConversations: () => generatingConversations.snapshot(),
         subscribeConversationOperationActive(listener) {
             return doingChat.subscribe(listener)
@@ -424,7 +435,12 @@ export function createProductionStateAdapter(options: {
             return !character?.chats.some((chat) => chat.isStreaming || isConversationStreaming(chat.id))
         },
         releaseInactiveCharacter(id) {
-            workingSetResidency.releaseCharacterToCatalog(getDatabase(), id)
+            const database = getDatabase()
+            if (!workingSetResidency.canReleaseCharacterToCatalog(database, id)) return
+            // A released character has no chats loaded, so views of the
+            // selection must leave it in the same update that releases it.
+            if (database.characters[get(selectedCharID)]?.chaId === id) selectedCharID.set(-1)
+            workingSetResidency.releaseCharacterToCatalog(database, id)
         },
     }
 }
@@ -480,6 +496,7 @@ export function getPersistentDataRuntime(): PersistentDataRuntime {
             onWorkingSetRefreshRequired: (revision) => workingSetRefreshRevision.set(revision),
             onDestructiveReplacementFenceChanged: (active) => destructiveReplacementActive.set(active),
             prepareDatabase: prepareDatabaseForPersistence,
+            prepareRoot: (root) => preparePersistentRootForWorkingSet(root),
         })
     }
     return productionRuntime

@@ -1,5 +1,6 @@
 import { DBState } from './stores.svelte'
 import { alertError } from './alert'
+import { backgroundErrorMessage } from './storage/backgroundErrorMessage'
 import type { character } from './storage/database.svelte'
 import { mutatePersistentCharacterDetail } from './storage/persistentDataRuntime.svelte'
 import {
@@ -13,7 +14,7 @@ import {
 // so these go through the explicit binding and detail mutations instead.
 
 function reportFailure(error: unknown) {
-    alertError(error instanceof Error ? error : String(error))
+    alertError(backgroundErrorMessage(error))
 }
 
 export async function setToggleValue(key: string, value: string): Promise<void> {

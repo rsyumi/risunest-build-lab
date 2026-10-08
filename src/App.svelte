@@ -1,7 +1,7 @@
 <script lang="ts">
     import LazyScreenError from "./lib/UI/LazyScreenError.svelte";
     import ChatBindingLifecycle from './lib/SideBars/ChatBindingLifecycle.svelte'
-    import { DynamicGUI, settingsOpen, sideBarStore, ShowRealmFrameStore, openPresetList, openPersonaList, MobileGUI, CustomGUISettingMenuStore, loadedStore, alertStore, LoadingStatusState, bookmarkListOpen, popupStore, easyPanelStore, popUpEditorStore, loadoutModalStore, irisStore, customSideBarConfigDialogStore, bootFailure, recoveryStart } from './ts/stores.svelte';
+    import { DynamicGUI, settingsOpen, sideBarStore, sideBarClosing, ShowRealmFrameStore, openPresetList, openPersonaList, MobileGUI, CustomGUISettingMenuStore, loadedStore, alertStore, LoadingStatusState, bookmarkListOpen, popupStore, easyPanelStore, popUpEditorStore, loadoutModalStore, irisStore, customSideBarConfigDialogStore, bootFailure, recoveryStart } from './ts/stores.svelte';
     import Sidebar from './lib/SideBars/Sidebar.svelte';
     import { DBState } from './ts/stores.svelte';
     import ChatScreen from './lib/ChatScreens/ChatScreen.svelte';
@@ -13,7 +13,7 @@
     import { showRealmInfoStore, importCharacterProcess } from './ts/characterCards';
     import { importPreset, getDatabase, setDatabase } from './ts/storage/database.svelte';
     import { readModule } from './ts/process/modules';
-    import { alertConfirm, alertNormal } from './ts/alert';
+    import { alertNormal } from './ts/alert';
     import { language } from './lang';
     import RealmFrame from './lib/UI/Realm/RealmFrame.svelte';
     import SavePopupIconComp from './lib/Others/SavePopupIcon.svelte';
@@ -42,19 +42,16 @@
     import UpdatePopup from './lib/Others/UpdatePopup.svelte';
     import RecoveryShell from './lib/Others/RecoveryShell.svelte';
     import BootFailurePanel from './lib/Others/BootFailurePanel.svelte';
-    import {
-        confirmRecoveryExclusions,
-        isStartupExcluded,
-        RECOVERY_EXCLUSIONS,
-        type RecoveryExclusion,
-    } from './ts/storage/recoveryMode.svelte';
-    import { getStartupExclusions, updateStartupExclusions } from './ts/storage/deviceSettings';
+    import { isStartupExcluded, type RecoveryExclusion } from './ts/storage/recoveryMode.svelte';
+    import { offerToKeepRecoveryExclusions } from './ts/storage/recoveryExclusionPrompt';
+    import { getStartupExclusions } from './ts/storage/deviceSettings';
     import LoadingIndicator from './lib/UI/GUI/LoadingIndicator.svelte';
     import SyncExitDialog from './lib/Others/SyncExitDialog.svelte';
     import PersistentLocalSaveFailure from './lib/Others/PersistentLocalSaveFailure.svelte';
     import PersistentWorkingSetRecovery from './lib/Others/PersistentWorkingSetRecovery.svelte';
     import { persistentWorkingSetInputBlocked } from './ts/storage/persistentDataRuntime.svelte';
     import { restoreFocusAfterInputBlock } from './ts/ui/restoreFocusAfterInputBlock';
+    import { backNavigationLayer, handleRootBack } from './ts/ui/modalNavigation';
 
     import {
         serverSyncNavigation,
@@ -68,6 +65,11 @@
     import { openRisuNestSettingsTab } from './ts/setting/risuNestSettingsTabs'
 
     $effect(() => restoreFocusAfterInputBlock(persistentWorkingSetInputBlocked))
+
+    $effect(() => {
+        window.addEventListener('risunest-root-back', handleRootBack)
+        return () => window.removeEventListener('risunest-root-back', handleRootBack)
+    })
 
     $effect(() => {
         if (!isTauri || !$loadedStore) return
@@ -96,35 +98,13 @@
     })
 
     let recoveryExcluded: RecoveryExclusion[] = $state([])
-    const exclusionName = (exclusion: RecoveryExclusion): string =>
-        ({
-            plugins: language.risuNest.recovery.excludePlugins,
-            modules: language.risuNest.recovery.excludeModules,
-            regex: language.risuNest.recovery.excludeRegex,
-            theme: language.risuNest.recovery.excludeTheme,
-            sync: language.risuNest.recovery.excludeSync,
-            autoUpdate: language.risuNest.recovery.excludeAutoUpdate,
-            account: language.risuNest.recovery.excludeAccount,
-        })[exclusion]
     // A start that finished is the proof the exclusions helped, so the offer to keep them comes
     // only then, and only the reader's answer writes anything.
     $effect(() => {
         if (!$loadedStore || recoveryExcluded.length === 0) return
         const excluded = recoveryExcluded
         recoveryExcluded = []
-        void confirmRecoveryExclusions(
-            excluded,
-            alertConfirm,
-            (exclusions) => {
-                const kept = new Set([
-                    ...getStartupExclusions(),
-                    ...exclusions,
-                ])
-                updateStartupExclusions(RECOVERY_EXCLUSIONS.filter((item) => kept.has(item)))
-            },
-            exclusionName,
-            language.risuNest.recovery.keepBody,
-        )
+        void offerToKeepRecoveryExclusions(excluded)
     })
 
     let startupElapsedSeconds = $state(0)
@@ -408,7 +388,8 @@
             {#if (!$DynamicGUI)}
                 <Sidebar openGrid={() => {gridOpen = true}} hidden={!$sideBarStore} />
             {:else}
-                <div class="top-0 w-full h-full left-0 z-30 flex flex-row items-center" class:fixed={$sideBarStore} class:hidden={!$sideBarStore} >
+                <!-- Back closes the open sidebar; Escape stays with the editors inside it. -->
+                <div class="top-0 w-full h-full left-0 z-30 flex flex-row items-center" class:fixed={$sideBarStore} class:hidden={!$sideBarStore} use:backNavigationLayer={{ enabled: $sideBarStore, close: () => sideBarClosing.set(true), leaveEscape: () => true }}>
                     <!-- svelte-ignore a11y_click_events_have_key_events -->
                     <Sidebar openGrid={() => {gridOpen = true}}  hidden={false} />
 

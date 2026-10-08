@@ -1,15 +1,21 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { formatBytes } from '../gui/nativeFileJobDialogModel'
 import {
     createRisuNestStorageDashboard,
     formatRisuNestStorageBytes,
     storageDashboardRollup,
+    storageOffDeviceParts,
 } from './risuNestStorageDashboard'
+import type { AssetResidencyStatus } from './sync/serverAssetResidency'
 
 const stats = {
     snapshotBytes: 2 * 1024 * 1024,
     databaseBytes: 2 * 1024 * 1024,
     assetObjects: { count: 4, bytes: 3 * 1024 * 1024 },
+    assetBodies: { count: 4, bytes: 3 * 1024 * 1024 },
+    missingAssetBodies: { count: 0, bytes: 0 },
+    inlayBodies: { count: 2, bytes: 3 * 1024 * 1024 },
     assetAliases: [
         { kind: 'inlay', inlayType: null, count: 1, bytes: 1024 * 1024 },
         { kind: 'image', inlayType: 'image', count: 1, bytes: 2 * 1024 * 1024 },
@@ -63,7 +69,7 @@ describe('RisuNest storage dashboard view model', () => {
         )
         expect(rollup.snapshotBytes).toBe(1024)
         expect(rollup.cards.find((card) => card.id === 'total')?.bytes).toBe(
-            stats.databaseBytes + stats.assetObjects.bytes + 1024,
+            stats.databaseBytes + stats.assetBodies.bytes + 1024,
         )
     })
 
@@ -87,6 +93,49 @@ describe('RisuNest storage dashboard view model', () => {
         expect(formatRisuNestStorageBytes(1024 * 1024 * 1024)).toBe('1.0 GiB')
     })
 
+    it('counts only the files this device stores as images and media and in the total', () => {
+        const offloaded = {
+            ...stats,
+            assetObjects: { count: 4, bytes: 1024 * 1024 * 1024 },
+            assetBodies: { count: 1, bytes: 1024 * 1024 },
+            missingAssetBodies: { count: 3, bytes: 1023 * 1024 * 1024 },
+            inlayBodies: { count: 1, bytes: 512 * 1024 },
+        }
+        const rollup = storageDashboardRollup(offloaded, [], [], null)
+        const card = (id: string) => rollup.cards.find((entry) => entry.id === id)?.bytes
+        expect(card('media')).toBe(1024 * 1024)
+        expect(card('total')).toBe(offloaded.databaseBytes + 1024 * 1024 + offloaded.snapshotBytes)
+        // Chat attachments stay a part of images and media.
+        expect(card('inlays')).toBe(512 * 1024)
+        expect(card('inlays')!).toBeLessThanOrEqual(card('media')!)
+    })
+
+    it('names the server, external storage and unfound files the way the asset residency group does', () => {
+        const residency = (overrides: Partial<AssetResidencyStatus>): AssetResidencyStatus => ({
+            policy: 'remote', localBytes: 0, remoteBytes: 0, remoteObjects: 0, serverBytes: 0, serverObjects: 0,
+            externalObjects: [], unavailableObjects: 0, evictedBytes: 0, ...overrides,
+        })
+        expect(storageOffDeviceParts(residency({ remoteBytes: 900, remoteObjects: 3, serverBytes: 900, serverObjects: 3 })))
+            .toEqual([{ part: 'server', value: 900 }])
+        expect(storageOffDeviceParts(residency({
+            remoteBytes: 1000, remoteObjects: 4, serverBytes: 900, serverObjects: 3, unavailableObjects: 2,
+            externalObjects: [{ connectionId: 'synthetic', objects: 1 }],
+        }))).toEqual([
+            { part: 'server', value: 900 },
+            { part: 'external', value: 100 },
+            { part: 'unavailable', value: 2 },
+        ])
+        expect(storageOffDeviceParts(residency({ localBytes: 500 }))).toEqual([])
+    })
+
+    it('prints sizes in the shared file size format', () => {
+        for (const value of [0, 512, 1536, 150 * 1024 * 1024, 2.5 * 1024 ** 4]) {
+            expect(formatRisuNestStorageBytes(value)).toBe(formatBytes(value))
+        }
+        expect(formatRisuNestStorageBytes(0)).toBe('0 B')
+        expect(formatRisuNestStorageBytes(-1)).toBe('0 B')
+    })
+
     it('keeps the asset storage records apart from the temporary files but in the total', () => {
         const rollup = storageDashboardRollup(stats, [], [], {
             ...cacheUsage(3072),
@@ -97,7 +146,7 @@ describe('RisuNest storage dashboard view model', () => {
         expect(rollup.cacheBytes).toBe(3072)
         expect(rollup.ledgerBytes).toBe(1024)
         expect(rollup.cards.find((card) => card.id === 'total')?.bytes).toBe(
-            stats.databaseBytes + stats.assetObjects.bytes + stats.snapshotBytes + 3072 + 1024,
+            stats.databaseBytes + stats.assetBodies.bytes + stats.snapshotBytes + 3072 + 1024,
         )
     })
 
@@ -112,6 +161,7 @@ describe('RisuNest storage dashboard view model', () => {
             listSnapshots: vi.fn().mockResolvedValue(snapshots),
             listConflictBackups: vi.fn().mockResolvedValue(conflictBackups),
             getTemp,
+            getResidency: vi.fn(),
             cleanupTemp: vi.fn(),
             previewGc: vi.fn(),
             executeGc: vi.fn(),
@@ -147,6 +197,7 @@ describe('RisuNest storage dashboard view model', () => {
             listSnapshots: vi.fn().mockResolvedValue(snapshots),
             listConflictBackups: vi.fn().mockResolvedValue(conflictBackups),
             getTemp,
+            getResidency: vi.fn(),
             cleanupTemp: vi.fn(),
             previewGc: vi.fn(),
             executeGc: vi.fn(),
@@ -196,6 +247,7 @@ describe('RisuNest storage dashboard view model', () => {
                 .fn()
                 .mockResolvedValueOnce(cacheUsage(1024))
                 .mockResolvedValueOnce(cacheUsage(0)),
+            getResidency: vi.fn(),
             cleanupTemp,
             previewGc,
             executeGc,
@@ -234,6 +286,7 @@ describe('RisuNest storage dashboard view model', () => {
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
             getTemp,
+            getResidency: vi.fn(),
             cleanupTemp,
             previewGc: vi.fn(),
             executeGc: vi.fn(),
@@ -260,6 +313,7 @@ describe('RisuNest storage dashboard view model', () => {
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
             getTemp,
+            getResidency: vi.fn(),
             cleanupTemp: vi.fn().mockResolvedValue(cacheUsage(4096)),
             previewGc: vi.fn(),
             executeGc: vi.fn(),
@@ -280,6 +334,7 @@ describe('RisuNest storage dashboard view model', () => {
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
             getTemp: vi.fn().mockResolvedValue(cacheUsage(4096)),
+            getResidency: vi.fn(),
             cleanupTemp: vi
                 .fn()
                 .mockRejectedValue(new Error('partial cleanup failed')),
@@ -318,6 +373,7 @@ describe('RisuNest storage dashboard view model', () => {
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
             getTemp,
+            getResidency: vi.fn(),
             cleanupTemp: vi.fn(),
             previewGc,
             executeGc: vi.fn(),
@@ -345,6 +401,7 @@ describe('RisuNest storage dashboard view model', () => {
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
             getTemp: vi.fn(),
+            getResidency: vi.fn(),
             cleanupTemp: vi.fn(),
             previewGc: vi.fn(),
             executeGc: vi.fn(),
@@ -369,6 +426,7 @@ describe('RisuNest storage dashboard view model', () => {
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
             getTemp: vi.fn(),
+            getResidency: vi.fn(),
             cleanupTemp: vi.fn(),
             previewGc: vi.fn(),
             executeGc: vi.fn(),
@@ -398,6 +456,7 @@ describe('RisuNest storage dashboard view model', () => {
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
             getTemp: vi.fn(),
+            getResidency: vi.fn(),
             cleanupTemp: vi.fn(),
             previewGc: vi.fn(),
             executeGc: vi.fn().mockResolvedValue({}),
@@ -436,6 +495,7 @@ describe('RisuNest storage dashboard view model', () => {
                 .mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
             getTemp: vi.fn(),
+            getResidency: vi.fn(),
             cleanupTemp: vi.fn(),
             previewGc: vi.fn(),
             executeGc: vi.fn(),
@@ -454,5 +514,113 @@ describe('RisuNest storage dashboard view model', () => {
         await reload
         expect(dashboard.snapshot()).toMatchObject({ snapshots: [], loadFailed: false, loading: false })
         expect(dashboard.snapshot().stats?.snapshotBytes).toBe(0)
+    })
+
+    describe('files this device does not store', () => {
+        const offloaded = { ...stats, missingAssetBodies: { count: 3, bytes: 3 * 1024 } }
+        const residency: AssetResidencyStatus = {
+            policy: 'remote', localBytes: 0, remoteBytes: 3 * 1024, remoteObjects: 3, serverBytes: 3 * 1024, serverObjects: 3,
+            externalObjects: [], unavailableObjects: 0, evictedBytes: 0,
+        }
+        const create = (getStats: () => Promise<typeof stats>, getResidency: () => Promise<AssetResidencyStatus>) =>
+            createRisuNestStorageDashboard({
+                getStats,
+                listSnapshots: vi.fn().mockResolvedValue([]),
+                listConflictBackups: vi.fn().mockResolvedValue([]),
+                getTemp: vi.fn().mockResolvedValue(cacheUsage(0)),
+                getResidency,
+                cleanupTemp: vi.fn(),
+                previewGc: vi.fn(),
+                executeGc: vi.fn(),
+                deleteSnapshot: vi.fn(),
+                deleteConflictBackup: vi.fn(),
+                createSnapshot: vi.fn(),
+            })
+
+        it('reads where they are after the totals load, without holding the load', async () => {
+            let resolveResidency: ((value: AssetResidencyStatus) => void) | undefined
+            const getResidency = vi.fn(() => new Promise<AssetResidencyStatus>((resolve) => { resolveResidency = resolve }))
+            const dashboard = create(vi.fn().mockResolvedValue(offloaded), getResidency)
+
+            await dashboard.load()
+            expect(dashboard.snapshot()).toMatchObject({ loading: false, stats: offloaded, residency: null, residencyLoading: true })
+            expect(getResidency).toHaveBeenCalledOnce()
+
+            resolveResidency?.(residency)
+            await vi.waitFor(() => expect(dashboard.snapshot()).toMatchObject({ residency, residencyLoading: false }))
+        })
+
+        it('does not ask when every catalogued file is on this device', async () => {
+            const getResidency = vi.fn()
+            const dashboard = create(vi.fn().mockResolvedValue(stats), getResidency)
+
+            await dashboard.load()
+            expect(getResidency).not.toHaveBeenCalled()
+            expect(dashboard.snapshot()).toMatchObject({ residency: null, residencyLoading: false })
+        })
+
+        it('shares one pending request between reloads and keeps the newest answer', async () => {
+            let resolveResidency: ((value: AssetResidencyStatus) => void) | undefined
+            const getResidency = vi.fn(() => new Promise<AssetResidencyStatus>((resolve) => { resolveResidency = resolve }))
+            const dashboard = create(vi.fn().mockResolvedValue(offloaded), getResidency)
+
+            await dashboard.load()
+            await dashboard.load()
+            expect(getResidency).toHaveBeenCalledOnce()
+            resolveResidency?.(residency)
+            await vi.waitFor(() => expect(dashboard.snapshot().residency).toBe(residency))
+
+            const next = { ...residency, serverBytes: 1024 }
+            getResidency.mockImplementationOnce(() => Promise.resolve(next))
+            await dashboard.load()
+            expect(getResidency).toHaveBeenCalledTimes(2)
+            await vi.waitFor(() => expect(dashboard.snapshot().residency).toBe(next))
+        })
+
+        it('clears the answer once a reload finds every file on this device', async () => {
+            const getStats = vi.fn().mockResolvedValueOnce(offloaded).mockResolvedValue(stats)
+            const dashboard = create(getStats, vi.fn().mockResolvedValue(residency))
+
+            await dashboard.load()
+            await vi.waitFor(() => expect(dashboard.snapshot().residency).toBe(residency))
+            await dashboard.load()
+            expect(dashboard.snapshot()).toMatchObject({ residency: null, residencyLoading: false })
+        })
+
+        it('applies the answer after a pending reload was set aside', async () => {
+            let resolveResidency: ((value: AssetResidencyStatus) => void) | undefined
+            const getResidency = vi.fn(() => new Promise<AssetResidencyStatus>((resolve) => { resolveResidency = resolve }))
+            const getStats = vi.fn()
+                .mockResolvedValueOnce(offloaded)
+                .mockImplementationOnce(() => new Promise<typeof stats>(() => {}))
+            const dashboard = createRisuNestStorageDashboard({
+                getStats,
+                listSnapshots: vi.fn().mockResolvedValue([]),
+                listConflictBackups: vi.fn().mockResolvedValue([conflictBackups[0]]),
+                getTemp: vi.fn().mockResolvedValue(cacheUsage(0)),
+                getResidency,
+                cleanupTemp: vi.fn(),
+                previewGc: vi.fn(),
+                executeGc: vi.fn(),
+                deleteSnapshot: vi.fn(),
+                deleteConflictBackup: vi.fn().mockResolvedValue(undefined),
+                createSnapshot: vi.fn(),
+            })
+            await dashboard.load()
+            void dashboard.load()
+            await vi.waitFor(() => expect(dashboard.snapshot().loading).toBe(true))
+            await dashboard.deleteConflictBackup('conflict')
+
+            resolveResidency?.(residency)
+            await vi.waitFor(() => expect(dashboard.snapshot()).toMatchObject({ residency, residencyLoading: false }))
+        })
+
+        it('leaves the totals intact when the residency status fails', async () => {
+            const dashboard = create(vi.fn().mockResolvedValue(offloaded), vi.fn().mockRejectedValue(new Error('not connected')))
+
+            await dashboard.load()
+            await vi.waitFor(() => expect(dashboard.snapshot().residencyLoading).toBe(false))
+            expect(dashboard.snapshot()).toMatchObject({ residency: null, loadFailed: false, stats: offloaded })
+        })
     })
 })

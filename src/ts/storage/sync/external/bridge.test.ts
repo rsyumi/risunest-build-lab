@@ -126,6 +126,21 @@ describe('ExternalStorageBridge', () => {
         })
     })
 
+    it('sends the app stop mark with a job cancellation only when it is given', async () => {
+        const invoke = vi.fn(async () => ({ id: 'job', state: 'cancelled' }))
+        const bridge = new ExternalStorageBridge({ supported: () => true, invoke })
+
+        await bridge.cancelJob('job')
+        await bridge.cancelJob('job', true)
+        await bridge.cancelJob('job', false)
+
+        expect(invoke.mock.calls).toEqual([
+            ['external_storage_cancel_job', { jobId: 'job' }],
+            ['external_storage_cancel_job', { jobId: 'job', stoppedByApp: true }],
+            ['external_storage_cancel_job', { jobId: 'job', stoppedByApp: false }],
+        ])
+    })
+
     it('returns an explicit non-consuming pending completion result', async () => {
         const pending = { authorizationPending: true as const, callbackRejected: true as const }
         const invoke = vi.fn(async () => pending)

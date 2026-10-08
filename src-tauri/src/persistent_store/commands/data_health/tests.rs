@@ -420,6 +420,37 @@ fn apply_selected(state: &PersistentStoreState, health: &DataHealthState, select
 }
 
 #[test]
+fn a_stored_diagnosis_cannot_drop_an_alias_whose_body_the_sync_server_now_holds() {
+    let (directory, state, hash) = damaged_payload_fixture();
+    let health = DataHealthState::default();
+    let object = directory.path().join(crate::asset_repository::object_physical_key(&hash));
+    let size = fs::metadata(&object).unwrap().len();
+    fs::remove_file(&object).unwrap();
+    let before = quick_scan(&state, &health).unwrap();
+    assert!(has(&before, codes::ALIAS_OBJECT_ABSENT));
+    let drops = |plan: Vec<RepairCandidate>| {
+        plan.into_iter()
+            .filter(|candidate| matches!(candidate.action, RepairAction::DropAlias { .. }))
+            .map(|candidate| candidate.id)
+            .collect::<Vec<_>>()
+    };
+    let selection = drops(repair_plan(&state).unwrap());
+    assert_eq!(selection.len(), 1, "a body nothing holds is answered by removing the alias");
+
+    // Custody arrives without a new revision, so the stored diagnosis still names the alias.
+    crate::server_sync::residency::test_remote::hold(directory.path(), &[(&hash, size)]);
+    assert_eq!(last_result(&state).unwrap().unwrap().revision, before.revision);
+    assert_eq!(drops(repair_plan(&state).unwrap()), Vec::<String>::new());
+    assert!(matches!(
+        apply_selected(&state, &health, &selection, false).unwrap_err(),
+        StoreError::Validation { .. }
+    ));
+    let after = quick_scan(&state, &health).unwrap();
+    assert_eq!(after.revision, before.revision, "nothing was repaired");
+    assert!(!has(&after, codes::ALIAS_OBJECT_ABSENT), "{:?}", after.items);
+}
+
+#[test]
 fn diagnosis_identity_rejects_a_replaced_scan_at_the_same_revision() {
     let (_directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();

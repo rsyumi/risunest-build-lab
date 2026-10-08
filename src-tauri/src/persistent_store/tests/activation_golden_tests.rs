@@ -217,7 +217,7 @@ fn device_sections() -> Vec<crate::persistent_store::device_store::sections::Pre
         .unwrap();
     device.write_setting("accountst", &json!("golden")).unwrap();
     device
-        .capture_backup_sections(&[SectionKind::Hypa, SectionKind::LocalPlugins, SectionKind::LocalSettings])
+        .capture_backup_sections(&[SectionKind::Hypa, SectionKind::LocalPlugins, SectionKind::LocalSettings], &std::env::temp_dir())
         .unwrap()
 }
 
@@ -352,11 +352,15 @@ fn bind_new_device(store: &mut PersistentStore) {
 
 // Captured at 9e3b21122, before activation stopped renaming the staged
 // generation. Every path must keep producing the same library and unit state.
-const PLAIN: &str = "c12b61487c8105f48d1ec1ed2849d91ad9231da4f85ec14e1c259d42b1d94375";
-const SOURCE_UNITS: &str = "e00456ebbb726f381130ae756420d10e0b453ac50dc6036e975eee95e093d878";
-const DEVICE_SECTIONS: &str = "1451d67a2fcf592cd1d0642665fb31459b635c0c7a18d10a071a1d9ccd342a6c";
-const TARGET: &str = "b1fb41fafb1fcd3f0f878ca457eedad663cc0832eea90812666f40b4039d8d09";
-const NEW_DEVICE: &str = "b1fb41fafb1fcd3f0f878ca457eedad663cc0832eea90812666f40b4039d8d09";
+// TARGET and NEW_DEVICE were captured again once a binding stage counted the
+// conversations it projects and gave each new character a chat page.
+// PLAIN, SOURCE_UNITS and DEVICE_SECTIONS were captured again once an archived character's
+// marker stopped carrying an empty chat list.
+const PLAIN: &str = "5d804626bb1cb949c37f61b84f7cad4c87f08d89c84c974862aea7f4b918192e";
+const SOURCE_UNITS: &str = "d37977329186380cb151ddd347342c3f7e407e46f3e1abfe7f1557981e578384";
+const DEVICE_SECTIONS: &str = "bcd7ffc3a14af5ed5700ff89ba7adb8dba40089d2859dca370a159e7ddc7b660";
+const TARGET: &str = "908e9c6ddf880f41998c8a2f977a82c36e9a06dfc40d743bcd44b52a084e7de8";
+const NEW_DEVICE: &str = "908e9c6ddf880f41998c8a2f977a82c36e9a06dfc40d743bcd44b52a084e7de8";
 
 #[test]
 fn plain_replacement_matches_the_golden_state() {

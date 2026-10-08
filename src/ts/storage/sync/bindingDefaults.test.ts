@@ -92,3 +92,20 @@ it('native backing views do not make default data non-default', () => {
     const data = defaults(); Object.assign(data.library,{explicitGlobalChatVariables:{},protectedPresetValues:{}})
     expect(hasNonDefaultBindingData(data)).toBe(false)
 })
+
+describe('library content without root settings', () => {
+    it('leaves out root strings, numbers, booleans and nulls on either side', () => {
+        const data = defaults()
+        Object.assign(data.library, { language: 'ko', formatversion: 5, jailbreakToggle: true, upstreamExtension: null })
+        data.factoryLibrary.loreBookToken = 800
+        expect(hasNonDefaultBindingData(data)).toBe(true)
+        expect(hasNonDefaultBindingData(data, { rootScalars: false })).toBe(false)
+    })
+    it('still counts root lists and objects, records and counts', () => {
+        const list = defaults(); list.library.loreBook = [{ name: 'Lore', data: [] }]
+        const object = defaults(); object.library.upstreamExtension = { value: 'user value' }
+        const record = defaults(); (record.library.botPresets as any[])[0].name = 'User edit'
+        const character = defaults(); character.characterCount = '1'
+        for (const data of [list, object, record, character]) expect(hasNonDefaultBindingData(data, { rootScalars: false })).toBe(true)
+    })
+})

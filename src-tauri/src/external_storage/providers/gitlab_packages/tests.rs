@@ -1399,6 +1399,35 @@ fn deleting_resolves_the_numeric_package_file_and_refuses_descriptors() {
 }
 
 #[test]
+fn deleting_removes_every_file_stored_under_the_object_name() {
+    runtime().block_on(async {
+        let token = encoded("pack-1");
+        let packs = format!("{PACKAGE}.pack");
+        let name = format!("pack-{token}");
+        let duplicate = file_json(&name, 20, None).replace("\"id\":7", "\"id\":8");
+        let harness = fixture(vec![
+            marker_present(),
+            json(200, "[]"),
+            json(200, &format!("[{}]", package_json(1, &packs, &format!("v0-{token}")))),
+            json(200, &format!("[{},{}]", file_json(&name, 20, None), duplicate)),
+            raw(204, b""),
+            raw(204, b""),
+        ]);
+        let (repository, _) = harness.open(OpenMode::Existing).await.unwrap();
+        let locator = RemoteLocator {
+            connection_identity: repository.connection_identity.clone(),
+            collection: None,
+            object: format!("{PACKAGE}.pack/v0-{token}/pack-{token}"),
+        };
+        harness.provider.delete_object(&repository, &locator, &harness.cancel).await.unwrap();
+        let lines = harness.lines();
+        assert_eq!(lines.len(), 6);
+        assert_eq!(lines[4], format!("DELETE {PROJECT_PATH}/packages/1/package_files/7 HTTP/1.1"));
+        assert_eq!(lines[5], format!("DELETE {PROJECT_PATH}/packages/1/package_files/8 HTTP/1.1"));
+    });
+}
+
+#[test]
 fn resume_create_reconciles_only_the_exact_root_marker() {
     runtime().block_on(async {
         let existing = fixture(

@@ -481,18 +481,28 @@ fn hydration_groups_reuse_one_identity_per_custody_and_skip_local_objects() {
         .prepare_bytes(b"first synthetic 0").unwrap();
     let mut downloaded = Vec::new();
     let mut samples = Vec::new();
+    let mut byte_totals = Vec::new();
     let mut duplicated = hashes.clone();
     duplicated.push(hashes[0].clone());
     super::progress::within(&lane, || {
         assert!(hydration.hydrate_many_outcomes_prioritized(&duplicated, &priority, &|| Ok(()), |hash, outcome| {
-            let scope = lane.snapshot("hydrate").asset_scope.unwrap();
+            let progress = lane.snapshot("hydrate");
+            let scope = progress.asset_scope.unwrap();
             assert_eq!(scope.total, Some(130));
             assert!(!scope.settled);
             samples.push(scope.done);
-            if outcome == super::residency::HydrationOutcome::Downloaded { downloaded.push(hash.to_owned()); }
+            if outcome == super::residency::HydrationOutcome::Downloaded {
+                downloaded.push(hash.to_owned());
+                byte_totals.push(progress.bytes_total);
+            }
         }).unwrap().is_empty());
     });
     assert_eq!(samples, (1..=130).collect::<Vec<_>>());
+    // The byte total of every group, across both custodies and all three pages, is planned before the first download.
+    let progress = lane.snapshot("hydrate");
+    assert!(progress.bytes_total > 0);
+    assert_eq!(byte_totals, vec![progress.bytes_total; 129]);
+    assert_eq!(progress.bytes_done, progress.bytes_total);
     assert_eq!(&downloaded[..2], &[hashes[64].clone(), hashes[129].clone()]);
     assert_eq!(downloaded.len(), 129, "already-local bodies count as items without downloads");
     let first_scope = lane.snapshot("hydrate").asset_scope.unwrap();

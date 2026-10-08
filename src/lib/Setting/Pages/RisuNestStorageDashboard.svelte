@@ -21,6 +21,7 @@
         restoreNativePersistentSnapshot,
     } from 'src/ts/storage/nativePersistentMaintenance'
     import { getSyncConflictBackupStore } from 'src/ts/storage/sync/syncConflictBackup'
+    import { getAssetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency'
     import { describeBlockedReason } from 'src/ts/storage/sync/blockedReasonText'
     import { openDataHealthScreen } from 'src/ts/storage/dataHealthNavigation'
     import type { NativeAssetGcCandidate } from 'src/ts/storage/nativePersistentMaintenance'
@@ -28,7 +29,9 @@
         createRisuNestStorageDashboard,
         formatRisuNestStorageBytes,
         storageDashboardRollup,
+        storageOffDeviceParts,
         type RisuNestStorageCardId,
+        type StorageOffDevicePart,
     } from 'src/ts/storage/risuNestStorageDashboard'
 
     const conflictStore = getSyncConflictBackupStore()
@@ -37,6 +40,7 @@
         listSnapshots: listNativePersistentSnapshots,
         listConflictBackups: () => conflictStore.list(),
         getTemp: getServerSyncCacheUsage,
+        getResidency: () => getAssetResidencyStatus(),
         cleanupTemp: cleanupServerSyncCache,
         previewGc: previewNativePersistentAssetGc,
         executeGc: executeNativePersistentAssetGc,
@@ -60,12 +64,28 @@
     const strings = language.risuNest.storage
     const syncText = language.risuNest.serverSync
     const syncLabels = syncText.management
+    const offDeviceLabels: Record<StorageOffDevicePart, string> = {
+        server: syncText.residency.remoteOnly,
+        external: syncText.residency.externalOnly,
+        unavailable: syncText.residency.unavailable,
+    }
     const formatCount = (value: number): string => value.toLocaleString()
     const listSummary = (count: number, bytes: number): string => strings.listSummary
         .replace('{0}', formatCount(count))
         .replace('{1}', formatRisuNestStorageBytes(bytes))
     const cardBytes = (id: RisuNestStorageCardId): number => rollup?.cards.find((card) => card.id === id)?.bytes ?? 0
     let totalBytes = $derived(cardBytes('total'))
+    // Built as one string so the separators keep their spaces.
+    let offDeviceNote = $derived(
+        view.residency
+            ? storageOffDeviceParts(view.residency)
+                  .map(({ part, value }) => `${offDeviceLabels[part]} ${part === 'unavailable'
+                      ? syncText.count.replace('{0}', formatCount(value))
+                      : formatRisuNestStorageBytes(value)}`)
+                  .join(' · ')
+            : '',
+    )
+    let mediaNote = $derived(view.residencyLoading || offDeviceNote !== '')
     let segments = $derived(
         rollup && view.stats
             ? [
@@ -252,7 +272,7 @@
         <div data-storage-summary-placeholder class="p-4" role="status" aria-live="polite" aria-label={language.loading}>
             <div class="h-9 w-40 animate-pulse rounded-md bg-darkbutton" aria-hidden="true"></div>
             <div class="mt-3 h-3 w-full animate-pulse rounded-full bg-darkbutton" aria-hidden="true"></div>
-            <div class="mt-3 grid grid-cols-1 gap-x-5 gap-y-1.5 @md:grid-cols-3" aria-hidden="true">
+            <div class="mt-3 grid grid-cols-[repeat(auto-fit,minmax(min(100%,14rem),1fr))] gap-x-5 gap-y-1.5" aria-hidden="true">
                 {#each Array(3) as _}
                     <div class="h-4 animate-pulse rounded-xs bg-darkbutton"></div>
                 {/each}
@@ -282,12 +302,24 @@
                     {/if}
                 {/each}
             </div>
-            <ul data-storage-legend class="mt-3 grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-x-5 gap-y-1.5 text-sm">
+            <!-- Each column fits a label and its value on one line; a narrow panel shows one column. -->
+            <ul data-storage-legend class="mt-3 grid grid-cols-[repeat(auto-fit,minmax(min(100%,14rem),1fr))] gap-x-5 gap-y-1.5 text-sm">
                 {#each segments as segment (segment.id)}
-                    <li class="flex items-center gap-2">
-                        <span class="h-2.5 w-2.5 shrink-0 rounded-xs {segment.color}" aria-hidden="true"></span>
-                        <span class="flex-1 text-textcolor2 break-keep">{segment.label}</span>
-                        <span class="tabular-nums">{formatRisuNestStorageBytes(segment.bytes)}</span>
+                    <!-- The media row takes the whole line while it carries the note, so the note stays on one line. -->
+                    <li class="flex flex-col {segment.id === 'media' && mediaNote ? 'col-span-full' : ''}">
+                        <div class="flex items-center gap-2">
+                            <span class="h-2.5 w-2.5 shrink-0 rounded-xs {segment.color}" aria-hidden="true"></span>
+                            <span class="min-w-0 flex-1 text-textcolor2 break-keep">{segment.label}</span>
+                            <span class="shrink-0 whitespace-nowrap tabular-nums">{formatRisuNestStorageBytes(segment.bytes)}</span>
+                        </div>
+                        <!-- The placeholder holds the note's line so the legend does not move when the note arrives. -->
+                        {#if segment.id === 'media' && view.residencyLoading}
+                            <div data-storage-off-device-placeholder class="flex h-4 items-center pl-[18px]" aria-hidden="true">
+                                <span class="h-2.5 w-32 max-w-full animate-pulse rounded-xs bg-darkbutton"></span>
+                            </div>
+                        {:else if segment.id === 'media' && offDeviceNote}
+                            <div data-storage-off-device class="pl-[18px] text-xs text-textcolor2 tabular-nums">{offDeviceNote}</div>
+                        {/if}
                     </li>
                 {/each}
             </ul>
@@ -354,7 +386,7 @@
         <SettingRow data-storage-action="snapshot" label={strings.createSnapshotTitle} help={strings.createSnapshotHelp}>
             <SettingButton busy={isBusy('create-snapshot')} onclick={createSnapshot}>{strings.createSnapshot}</SettingButton>
         </SettingRow>
-        <SettingRow data-storage-action="gc" label={strings.gcTitle} help={`${strings.gcHelp} ${strings.gcSeparation}`}>
+        <SettingRow data-storage-action="gc" label={strings.gcTitle} help={strings.gcHelp}>
             {#snippet below()}
                 <!-- The controls stay above the lists they produce instead of beside them. -->
                 <div class="mt-2 flex flex-wrap items-center gap-2">

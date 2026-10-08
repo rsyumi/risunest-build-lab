@@ -1,5 +1,7 @@
 //! Provider-independent native external storage boundaries. No test provider is
 //! compiled into the product; unimplemented services remain absent from the UI.
+#[cfg(test)]
+mod address_change_tests;
 pub(crate) mod admission;
 pub(crate) mod auth;
 pub(crate) mod cache_hydration;
@@ -72,4 +74,4 @@ pub(crate) mod lww_tests;
 #[cfg(test)]
 mod lww_large_unit_tests;
 #[cfg(test)]
-mod previous_storage_tests;
+pub(crate) mod previous_storage_tests;

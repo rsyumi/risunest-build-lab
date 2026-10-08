@@ -454,7 +454,7 @@ impl ExternalLwwEngine {
             if !retained.contains(&snapshot.snapshot_id) { continue; }
             let data=RemoteObject::from_stored(&snapshot.library.record_catalog,&self.repository)?;
             let stage=directory.join(format!("c{index}"));
-            let (records,objects)=super::snapshot_restore::download_checkpoint_data(&data,&stage,&self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
+            let (records,objects)=super::snapshot_restore::download_checkpoint_data(&data,&stage,&self.root_key,self.provider.as_ref(),&self.repository,&super::phase_progress::PhaseProgress::silent(),cancel).await?;
             let mut proof=PublishedCatalog::create(&stage.join("proof.sqlite"))?;
             let content=super::content_store::ContentStore::open(&stage.join("external-storage")).map_err(error)?;
             for record in records {

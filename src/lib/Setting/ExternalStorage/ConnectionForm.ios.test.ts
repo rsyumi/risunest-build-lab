@@ -112,6 +112,12 @@ describe('iOS native authorization', () => {
             props: { strings, onconnected, oncancel: vi.fn() },
         })
         await settle()
+        for (const id of ['projectId', 'clientId']) {
+            const input = target.querySelector<HTMLInputElement>(`#external-storage-field-${id}`)!
+            input.value = `synthetic-${id}`
+            input.dispatchEvent(new Event('change', { bubbles: true }))
+        }
+        await settle()
 
         button(strings.prepare).click()
         await settle()

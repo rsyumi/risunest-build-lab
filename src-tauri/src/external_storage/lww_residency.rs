@@ -248,6 +248,17 @@ impl RemoteBodies {
         }
         Ok(found)
     }
+    /// Every hash with a source registered through `connection_id`, in any
+    /// library or root.
+    pub(crate) fn connection_hashes(&mut self,connection_id:&str)->Result<BTreeSet<String>> {
+        let mut found=BTreeSet::new();
+        let Some(db)=self.db()? else {return Ok(found)};
+        let mut statement=db.prepare("SELECT hash FROM sources WHERE json_extract(source,'$.connectionId')=?1
+            UNION SELECT hash FROM packed_sources WHERE json_extract(source,'$.connectionId')=?1").map_err(local)?;
+        let mut rows=statement.query([connection_id]).map_err(local)?;
+        while let Some(row)=rows.next().map_err(local)? {found.insert(row.get(0).map_err(local)?);}
+        Ok(found)
+    }
     /// The hashes in `hashes` that have any registered source.
     fn present(&mut self,hashes:&[&str])->Result<BTreeSet<String>> {
         let mut found=BTreeSet::new();
@@ -467,7 +478,7 @@ pub(crate) fn hydrate_registered_many(root:&Path,digests:&[String],priority:&BTr
     use crate::server_sync::residency::HydrationOutcome;
     let cancel=cancellation.map(Cancellation::with_external_flag).unwrap_or_default();
     let cas=crate::asset_repository::PayloadCas::new(root)?;
-    let scratch=tempfile::tempdir()?;
+    let scratch=super::leftovers::local_scratch(root,"asset-hydration-")?;
     #[cfg(test)]
     hydration_tests::observe("scratch",root,scratch.path());
     let created_at_ms=i64::try_from(super::runtime::now_ms()).map_err(hydration_error)?;

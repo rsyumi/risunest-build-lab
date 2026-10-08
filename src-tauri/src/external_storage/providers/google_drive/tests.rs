@@ -2724,3 +2724,25 @@ fn retained_drive_session_reports_only_confirmed_offsets_and_verifies_completion
         assert_eq!(receipt.locator.object, "fixed-session");
     });
 }
+
+/// The external LWW opening admits its clock from the listing it requests.
+#[test]
+fn segment_listing_yields_a_usable_clock_sample() {
+    runtime().block_on(async {
+        let date = httpdate::fmt_http_date(std::time::UNIX_EPOCH + std::time::Duration::from_millis(NOW_MS));
+        let dated = |body: Value| json_reply_with(200, &[("Content-Type", "application/json"), ("Date", &date)], body);
+        let server = WireServer::start(vec![
+            dated(json!({ "user": { "permissionId": ACCOUNT } })),
+            dated(json!({ "id": FOLDER, "mimeType": "application/vnd.google-apps.folder", "trashed": false })),
+            dated(json!({ "files": [head_file("head-file", "7"), descriptor_file("desc-1")] })),
+            dated(json!({ "files": [] })),
+        ]);
+        let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+        let cancel = Cancellation::default();
+        let (provider, repository) = opened(&server, &test, &cancel).await;
+        let started = std::time::Instant::now();
+        provider.list_objects(&repository, Collection::Segments, None, 1, &cancel).await.unwrap();
+        assert!(test.dependencies.requests.clock_sample_after(&repository.account, started).unwrap().is_some());
+        assert!(request_lines(&server).iter().all(|line| line.starts_with("GET ")));
+    });
+}

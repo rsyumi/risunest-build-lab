@@ -238,6 +238,7 @@ impl FrozenRows {
                 }),
                 "record" => Some(super::unit_key(&["order", &p[1]])?),
                 "plugin" => Some(super::unit_key(&["order", "plugin-storage", &p[1]])?),
+                "character" if p.get(2).is_some_and(|field| field == "trashTime") => Some(super::unit_key(&["order", "characters"])?),
                 _ => None,
             };
             if let Some(scope) = scope { self.db.execute("INSERT OR IGNORE INTO scopes VALUES(?1)", [scope.as_str()])?; }

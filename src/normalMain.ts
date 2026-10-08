@@ -11,6 +11,7 @@ import { mount } from "svelte";
 import { yieldToUi } from "./ts/ui/yieldToUi";
 import { decideBoot } from "./ts/storage/recoveryMode.svelte";
 import { recoveryStart } from "./ts/stores.svelte";
+import { changeLanguage } from "./lang";
 
 preLoadCheck();
 const app = mount(App, {
@@ -35,6 +36,10 @@ function startNormally(): void {
 // boot decision says this start may run it.
 void decideBoot().then((mode) => {
   if (mode === "normal") startNormally();
-  else recoveryStart.set(startNormally);
+  else {
+    // The library's language setting has not loaded, so the recovery shell follows the device's.
+    changeLanguage(navigator.language.split("-")[0]);
+    recoveryStart.set(startNormally);
+  }
 });
 export default app;
