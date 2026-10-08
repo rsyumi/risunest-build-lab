@@ -1165,6 +1165,20 @@ fn apply_value(
                             ],
                         )?;
                     }
+                    "persona" => {
+                        // Fields can arrive in a later receive than the membership.
+                        let mut v = root(tx, generation)?;
+                        let present = v
+                            .get("personas")
+                            .and_then(Value::as_array)
+                            .is_some_and(|items| {
+                                items.iter().any(|r| r.get("id").and_then(Value::as_str) == Some(&p[2]))
+                            });
+                        if !present {
+                            patch_array(&mut v, "personas", "id", &p[2], None, Some(json!({"id":p[2]})))?;
+                            write_root(tx, generation, &v)?;
+                        }
+                    }
                     _ => {}
                 }
             }

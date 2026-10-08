@@ -128,6 +128,11 @@ export async function applyLwwWorkingSetUnits(
             patchField(database, before, remote, id)
             if (Object.hasOwn(root, id)) (baseline.root as unknown as Record<string, unknown>)[id] = canonicalClone((root as unknown as Record<string, unknown>)[id])
             else delete (baseline.root as unknown as Record<string, unknown>)[id]
+            // The fallback for a received selection this working set cannot resolve is not a local selection to save.
+            if (id === 'selectedPersona' && typeof root.selectedPersona === 'string' && database.selectedPersona === remote[id] &&
+                !database.personas?.some((value) => value.id === root.selectedPersona)) {
+                (baseline.root as unknown as Record<string, unknown>).selectedPersona = database.personas?.[database.selectedPersona]?.id ?? database.selectedPersona
+            }
         } else if (kind === 'character') {
             const live = charactersById.get(id)
             const before = baselineById.get(id)

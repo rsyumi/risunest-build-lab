@@ -184,10 +184,11 @@ fn validate_message_references(
                 validate_cold_ids(&Value::String(id.into()), inventory)?;
             }
             for id in inlay_references(text) {
-                if target == CompatibilityTarget::RisuAi {
+                // PocketRisu shows a placeholder for a reference without data.
+                if target == CompatibilityTarget::RisuAi
+                    || !inventory.contains(&format!("inlay_sidecar/{id}"))
+                {
                     losses.add("unsupported-inlay-references", 1)
-                } else if !inventory.contains(&format!("inlay_sidecar/{id}")) {
-                    return Err(error("referenced inlay is missing from target inventory"));
                 }
             }
         }
@@ -685,12 +686,6 @@ mod tests {
         assert!(projector
             .project(
                 "Message",
-                &json!({"role":"char","data":"{{inlay::missing}}"})
-            )
-            .is_err());
-        assert!(projector
-            .project(
-                "Message",
                 &json!({"role":"char","data":"\u{ef01}COLDSTORAGE\u{ef01}missing"})
             )
             .is_err());
@@ -699,6 +694,15 @@ mod tests {
         let source = json!({"role":"char","data":"user text {{inlay::missing}} untouched"});
         assert_eq!(projector.project("Message", &source).unwrap(), source);
         assert_eq!(projector.losses.0["unsupported-inlay-references"], 1);
+    }
+
+    #[test]
+    fn pocket_keeps_inlay_references_without_data_and_reports_them() {
+        let mut projector = Projector::new(CompatibilityTarget::PocketRisu).unwrap();
+        projector.set_inventory(HashSet::from(["inlay_sidecar/present".to_owned()]));
+        let source = json!({"role":"char","data":"user text {{inlay::missing}} {{inlay::present}} {{inlayed::gone}}"});
+        assert_eq!(projector.project("Message", &source).unwrap(), source);
+        assert_eq!(projector.losses.0["unsupported-inlay-references"], 2);
     }
 
     #[test]

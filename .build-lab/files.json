@@ -6645,8 +6645,8 @@
     {
       "path": "src-tauri/src/native_file_jobs/legacy_backup/compatible_projection.rs",
       "mode": "100644",
-      "bytes": 32008,
-      "sha256": "46aafd39e30c9553dbc23056d65af4024b17b8ff737804c38aec690c49f926d5"
+      "bytes": 32359,
+      "sha256": "bcd2a017a16bc71c790490593b5a2ed950aebf6c9fd523885e85700bb03305d3"
     },
     {
       "path": "src-tauri/src/native_file_jobs/legacy_backup/fixtures/expected.json",
@@ -6693,8 +6693,8 @@
     {
       "path": "src-tauri/src/native_file_jobs/mod.rs",
       "mode": "100644",
-      "bytes": 366193,
-      "sha256": "839e058fafb8ed4466f5e8817f3a79dfc861e1e6eb4a0ce61f349552062e2847"
+      "bytes": 366562,
+      "sha256": "10a677f1ded22f0152a99b35edf4718f55470530e34f6b867ef5bd9bb6782f86"
     },
     {
       "path": "src-tauri/src/native_file_jobs/official_snapshot.rs",
@@ -7149,8 +7149,8 @@
     {
       "path": "src-tauri/src/persistent_store/lww_projection.rs",
       "mode": "100644",
-      "bytes": 73272,
-      "sha256": "b9803cbc894b0902f4864417a4650bbb5c9e428f3f53e4af4ede1dc121182a16"
+      "bytes": 74033,
+      "sha256": "36b075be6adc166f6d1752a2134be6b4d186e627f354f0a2024a638f75bcd31a"
     },
     {
       "path": "src-tauri/src/persistent_store/lww_quarantine.rs",
@@ -7179,8 +7179,8 @@
     {
       "path": "src-tauri/src/persistent_store/lww_tests.rs",
       "mode": "100644",
-      "bytes": 154575,
-      "sha256": "631b5c81442cbf5e3d2c830222969af59431dc4153fd3a681e02d76ddb5f2412"
+      "bytes": 155863,
+      "sha256": "0c76beab657497d2da6ccd026922a2953bf07e3cdc067eb07396f174320b20c6"
     },
     {
       "path": "src-tauri/src/persistent_store/message_pages.rs",
@@ -9483,8 +9483,8 @@
     {
       "path": "src/lib/Setting/Pages/UserSettings.backupActions.test.ts",
       "mode": "100644",
-      "bytes": 6958,
-      "sha256": "7250cb82e54eedecb79150ee67f21e49033293424e13cf6f5cb793bf65578485"
+      "bytes": 7379,
+      "sha256": "fc5e11ce3843105506aa369738634be82ecef7b14470f828b1394eaccd6754da"
     },
     {
       "path": "src/lib/Setting/Pages/UserSettings.localBackupRoute.test.ts",
@@ -9495,8 +9495,8 @@
     {
       "path": "src/lib/Setting/Pages/UserSettings.svelte",
       "mode": "100644",
-      "bytes": 15132,
-      "sha256": "e9b5f263436b8531931fdb052404bd0e94d732b0113a1f18cce3f484f98cab5d"
+      "bytes": 15250,
+      "sha256": "59a38aa471614163997e173195559897bb2f2fab215f0c0be6147f3b9d3a6015"
     },
     {
       "path": "src/lib/Setting/RisuNest/LocalDataReset.svelte",
@@ -14385,8 +14385,8 @@
     {
       "path": "src/ts/storage/lwwWorkingSetApply.ts",
       "mode": "100644",
-      "bytes": 22106,
-      "sha256": "b93d9731446775a2416655173c37fd80301a8d928a82d127f0c392b3a4f8d72c"
+      "bytes": 22626,
+      "sha256": "ff5420452ef014f370cd92307090d25416dfd669f7fd9bb6a3f04cf2a846e40c"
     },
     {
       "path": "src/ts/storage/macosLifecycle.test.ts",
@@ -14877,8 +14877,8 @@
     {
       "path": "src/ts/storage/persistentDataRuntime.production.test.ts",
       "mode": "100644",
-      "bytes": 92737,
-      "sha256": "6bdb9131968e92f0b8d5d30cbe1eee441293adcb20f31a183d1c59cb74e8580f"
+      "bytes": 98609,
+      "sha256": "53ea7f9468a9389b17561df293169a032c9686f8b994b2b711bebd2c45d1a22f"
     },
     {
       "path": "src/ts/storage/persistentDataRuntime.svelte.ts",
