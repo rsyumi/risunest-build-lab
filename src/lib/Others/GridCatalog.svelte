@@ -1,5 +1,6 @@
 <script lang="ts">
     import { alertError } from "../../ts/alert";
+    import { backgroundErrorMessage } from "../../ts/storage/backgroundErrorMessage";
     import { changeChar, getCharImage, removeChar } from "../../ts/characters";
     import { mutatePersistentCharacterDetail } from "../../ts/storage/persistentDataRuntime.svelte";
     import { DBState } from 'src/ts/stores.svelte';
@@ -275,7 +276,7 @@
                                         },
                                     )
                                 } catch (error) {
-                                    alertError(error instanceof Error ? error : String(error))
+                                    alertError(backgroundErrorMessage(error))
                                 }
                             }}>
                                 <Undo2Icon />
@@ -284,7 +285,7 @@
                                 try {
                                     await removeChar(char.chaId, char.name, 'permanent')
                                 } catch (error) {
-                                    alertError(error instanceof Error ? error : String(error))
+                                    alertError(backgroundErrorMessage(error))
                                 }
                             }}>
                                 <TrashIcon />

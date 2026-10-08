@@ -60,10 +60,10 @@ pub(crate) fn create(dependencies: Dependencies) -> Result<Arc<dyn Provider>> {
 #[cfg(test)]
 mod tests;
 
-/// Uses the same validated addressing rule as signed requests.
+/// Uses the same validated addressing rule as signed requests. A connection
+/// being committed has no account yet, and needs none for this.
 pub(crate) fn configured_origin(config: &crate::external_storage::contract::ConnectionConfig) -> Result<url::Url> {
-    let context = config::validate(config, &crate::external_storage::contract::SecretRef(String::new()))?;
-    context.url(config::Target::Bucket, &[])
+    config::bucket_url(config)
 }
 
 

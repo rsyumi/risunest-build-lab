@@ -16,7 +16,12 @@ export interface DeviceMaintenanceEntryDependencies {
   reload?: () => void;
 }
 
+/** The app stylesheet resets buttons to bare text, so the button carries the panel buttons' look. */
+const STARTUP_BUTTON_CLASS =
+  "rounded-md border border-darkborderc bg-darkbutton px-4 py-2 text-textcolor hover:bg-selected disabled:cursor-not-allowed disabled:opacity-50";
+
 function showStartupFailure(retry: () => void): void {
+  const ko = navigator.language.startsWith("ko");
   const host = document.createElement("main");
   host.setAttribute("role", "status");
   // The body does not scroll and #app fills it, so the panel covers the viewport itself.
@@ -26,13 +31,16 @@ function showStartupFailure(retry: () => void): void {
   panel.style.cssText =
     "font:16px system-ui;padding:2rem;max-width:42rem;margin:auto;line-height:1.6";
   const heading = document.createElement("h1");
-  heading.textContent = "RisuNest backup maintenance";
+  heading.className = "mb-2 text-2xl font-bold";
+  heading.textContent = ko ? "RisuNest 백업 복원" : "RisuNest backup maintenance";
   const message = document.createElement("p");
-  message.textContent =
-    "Device storage recovery could not finish. Normal app startup is blocked. Retry recovery to continue.";
+  message.className = "mb-4";
+  message.textContent = ko
+    ? "백업 복원을 완료하지 못해 앱을 시작할 수 없습니다. 다시 시도해주세요."
+    : "Device storage recovery could not finish. Normal app startup is blocked. Retry recovery to continue.";
   const action = document.createElement("button");
-  action.textContent = "Retry recovery";
-  action.style.cssText = "font:inherit;padding:.5rem 1rem;cursor:pointer";
+  action.textContent = ko ? "다시 시도" : "Retry recovery";
+  action.className = STARTUP_BUTTON_CLASS;
   action.onclick = () => {
     action.disabled = true;
     retry();
@@ -73,8 +81,6 @@ export async function deviceMaintenanceBeforeBootstrap(
     )
       throw new Error("Native device restore completion has no session ID");
     const sessionId = session.sessionId;
-    if (session.includesLibrary === true)
-      localStorage.setItem("risuNestServerSyncRestoreHold", "true");
     await invoke("native_device_backup_recovery_complete", { sessionId });
     bootstrap = await invoke<NativeDeviceBackupBootstrap>(
       "native_device_backup_bootstrap",

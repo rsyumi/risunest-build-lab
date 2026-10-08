@@ -13,7 +13,7 @@
     import { showRealmInfoStore, importCharacterProcess } from './ts/characterCards';
     import { importPreset, getDatabase, setDatabase } from './ts/storage/database.svelte';
     import { readModule } from './ts/process/modules';
-    import { alertConfirm, alertNormal } from './ts/alert';
+    import { alertNormal } from './ts/alert';
     import { language } from './lang';
     import RealmFrame from './lib/UI/Realm/RealmFrame.svelte';
     import SavePopupIconComp from './lib/Others/SavePopupIcon.svelte';
@@ -42,13 +42,9 @@
     import UpdatePopup from './lib/Others/UpdatePopup.svelte';
     import RecoveryShell from './lib/Others/RecoveryShell.svelte';
     import BootFailurePanel from './lib/Others/BootFailurePanel.svelte';
-    import {
-        confirmRecoveryExclusions,
-        isStartupExcluded,
-        RECOVERY_EXCLUSIONS,
-        type RecoveryExclusion,
-    } from './ts/storage/recoveryMode.svelte';
-    import { getStartupExclusions, updateStartupExclusions } from './ts/storage/deviceSettings';
+    import { isStartupExcluded, type RecoveryExclusion } from './ts/storage/recoveryMode.svelte';
+    import { offerToKeepRecoveryExclusions } from './ts/storage/recoveryExclusionPrompt';
+    import { getStartupExclusions } from './ts/storage/deviceSettings';
     import LoadingIndicator from './lib/UI/GUI/LoadingIndicator.svelte';
     import SyncExitDialog from './lib/Others/SyncExitDialog.svelte';
     import PersistentLocalSaveFailure from './lib/Others/PersistentLocalSaveFailure.svelte';
@@ -102,35 +98,13 @@
     })
 
     let recoveryExcluded: RecoveryExclusion[] = $state([])
-    const exclusionName = (exclusion: RecoveryExclusion): string =>
-        ({
-            plugins: language.risuNest.recovery.excludePlugins,
-            modules: language.risuNest.recovery.excludeModules,
-            regex: language.risuNest.recovery.excludeRegex,
-            theme: language.risuNest.recovery.excludeTheme,
-            sync: language.risuNest.recovery.excludeSync,
-            autoUpdate: language.risuNest.recovery.excludeAutoUpdate,
-            account: language.risuNest.recovery.excludeAccount,
-        })[exclusion]
     // A start that finished is the proof the exclusions helped, so the offer to keep them comes
     // only then, and only the reader's answer writes anything.
     $effect(() => {
         if (!$loadedStore || recoveryExcluded.length === 0) return
         const excluded = recoveryExcluded
         recoveryExcluded = []
-        void confirmRecoveryExclusions(
-            excluded,
-            alertConfirm,
-            (exclusions) => {
-                const kept = new Set([
-                    ...getStartupExclusions(),
-                    ...exclusions,
-                ])
-                updateStartupExclusions(RECOVERY_EXCLUSIONS.filter((item) => kept.has(item)))
-            },
-            exclusionName,
-            language.risuNest.recovery.keepBody,
-        )
+        void offerToKeepRecoveryExclusions(excluded)
     })
 
     let startupElapsedSeconds = $state(0)

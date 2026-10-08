@@ -337,7 +337,8 @@ export async function retryServerSync(): Promise<void> {
     }
     foreground = false; await scheduler.fence(); await hydrating; await retryNativeClock(); await scheduler.retry(); await updateForeground(document.visibilityState !== 'hidden'); changed()
 }
-export async function installServerSyncProduction(): Promise<void> {
+/** With `resumeBound` false, the server transport is registered for settings but a bound server stays stopped. */
+export async function installServerSyncProduction({ resumeBound = true }: { resumeBound?: boolean } = {}): Promise<void> {
     if (!isTauri || disposeServer) return
     const disposers = [registerSyncBindingTransport({ kind: 'server', connectionId: 'server' }, transport)]
     disposers.push(subscribeLocalPersistentRevision((_revision,cause) => scheduler.localChange(cause === 'generation-complete')))
@@ -363,6 +364,7 @@ export async function installServerSyncProduction(): Promise<void> {
     disposers.push(() => document.removeEventListener('visibilitychange', visibility))
     disposeServer = () => { scheduler.dispose(); for (const dispose of disposers) dispose(); context = undefined; persistedBinding = undefined; foreground = false; hydrationPending = false; hydrationAgain = false; attempt = undefined; clearFinished(); watchSamples() }
     await controller.ensureStatus()
+    if (!resumeBound) return
     const current = await invoke<BindingContext['state']>('pds_lww_binding_state')
     if (current.target.kind === 'server' && status.configured) {
         try { await resumeCurrentServerBinding(current) }

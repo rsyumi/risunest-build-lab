@@ -387,16 +387,14 @@ pub(crate) async fn external_lww_publish(
                 .map_err(runtime::local_error)?;
         }
         let Session { engine, cancel, .. } = &mut *session;
-        let result = engine
-            .as_mut()
-            .ok_or_else(lww_segment::corrupt)?
-            .publish(
-                &mut store,
-                request.header.binding_authority,
-                &request.generating,
-                cancel,
-            )
-            .await?;
+        let result = publish_round(
+            engine.as_mut().ok_or_else(lww_segment::corrupt)?,
+            &mut store,
+            request.header.binding_authority,
+            &request.generating,
+            cancel,
+        )
+        .await?;
         if result.segments.0 > 0 {
             context.turn.lock().map_err(runtime::local_error)?.published(Instant::now());
         }
@@ -427,20 +425,16 @@ pub(crate) async fn external_lww_receive(
         let mut session = context.session.lock().await;
         open(&app, &request.connection_id, &mut session).await?;
         let mut store = check(&app, &request, true)?;
-        let authority = request.header.binding_authority;
-        // One page per call: pages from the last listing come first, and a
-        // new listing runs only once every one of them is finished.
-        let mut page = next_receive_page(&store, &mut session.receive_pages, authority)?;
-        if page.is_none() {
-            session.receive_pages = session
-                .engine
-                .as_ref()
-                .ok_or_else(lww_segment::corrupt)?
-                .receive_requests_cached(&mut store, authority, &context.checkpoints, &session.cancel)
-                .await?
-                .into();
-            page = next_receive_page(&store, &mut session.receive_pages, authority)?;
-        }
+        let Session { engine, receive_pages, cancel, .. } = &mut *session;
+        let (page, _) = receive_page(
+            &mut store,
+            engine.as_ref().ok_or_else(lww_segment::corrupt)?,
+            receive_pages,
+            &context.checkpoints,
+            request.header.binding_authority,
+            cancel,
+        )
+        .await?;
         let own = store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
         if page.as_ref().is_some_and(|page| page.progress.writer_id.as_deref() != Some(own.as_str())) {
             context.turn.lock().map_err(runtime::local_error)?.observed_foreign(Instant::now());
@@ -449,12 +443,60 @@ pub(crate) async fn external_lww_receive(
     }).await)
 }
 
-/// The first unfinished page in `queue`, dropping finished ones. A page of
-/// another binding empties the queue.
+/// A publication that sent segments or a receive page the renderer finished
+/// completes a sync round, so only those record the connection's sync time.
+fn record_sync_round(engine: &ExternalLwwEngine) {
+    runtime::record_connection_completion_at(
+        &engine.connection_root,
+        &engine.connection_id,
+        super::connection_store::CompletionKind::Sync,
+    );
+}
+
+async fn publish_round(
+    engine: &mut ExternalLwwEngine,
+    store: &mut crate::persistent_store::PersistentStore,
+    authority: risunest_sync_wire::stamp::DecimalU64,
+    generating: &[MessageLocator],
+    cancel: &Cancellation,
+) -> Result<PublicationResult> {
+    let result = engine.publish(store, authority, generating, cancel).await?;
+    if result.segments.0 > 0 {
+        record_sync_round(engine);
+    }
+    Ok(result)
+}
+
+/// One page per call: pages from the last listing come first, and a new
+/// listing runs only once every one of them is finished. Returns the page
+/// and whether this call found a page finished and recorded the sync time.
+async fn receive_page(
+    store: &mut crate::persistent_store::PersistentStore,
+    engine: &ExternalLwwEngine,
+    queue: &mut VecDeque<String>,
+    checkpoints: &tokio::sync::Mutex<super::lww_compaction::CheckpointSummaries>,
+    authority: risunest_sync_wire::stamp::DecimalU64,
+    cancel: &Cancellation,
+) -> Result<(Option<StageReceive>, bool)> {
+    let mut finished = 0;
+    let mut page = next_receive_page(store, queue, authority, &mut finished)?;
+    if page.is_none() {
+        *queue = engine.receive_requests_cached(store, authority, checkpoints, cancel).await?.into();
+        page = next_receive_page(store, queue, authority, &mut finished)?;
+    }
+    if finished > 0 {
+        record_sync_round(engine);
+    }
+    Ok((page, finished > 0))
+}
+
+/// The first unfinished page in `queue`, dropping finished ones and counting
+/// them in `finished`. A page of another binding empties the queue.
 fn next_receive_page(
     store: &crate::persistent_store::PersistentStore,
     queue: &mut VecDeque<String>,
     authority: risunest_sync_wire::stamp::DecimalU64,
+    finished: &mut usize,
 ) -> Result<Option<StageReceive>> {
     while let Some(id) = queue.front() {
         match store.external_lww_unfinished_receive(id).map_err(runtime::local_error)? {
@@ -462,6 +504,7 @@ fn next_receive_page(
             Some(_) => queue.clear(),
             None => {
                 queue.pop_front();
+                *finished += 1;
             }
         }
     }
@@ -861,6 +904,59 @@ mod tests {
                 assert!(requests[1].headers.starts_with("PROPFIND /synthetic/sync/segments/ "), "{}", requests[1].headers.lines().next().unwrap_or_default());
             });
         }
+    }
+
+    #[test]
+    fn only_a_publication_that_sent_segments_or_a_finished_receive_page_records_the_sync_time() {
+        use super::super::connection_store::ConnectionStore;
+        use crate::persistent_store::{lww::{ApplyReceive, UnitMutation}, WorkingSetCommit};
+        use risunest_sync_wire::{stamp::DecimalU64, unit::UnitKey};
+        tauri::async_runtime::block_on(async {
+            let mut f = super::super::lww_tests::CycleFixture::new();
+            let receiver = super::super::previous_storage_tests::receiver_connection(&f).stored;
+            let mut sender = receiver.clone();
+            sender.id = "sender".into();
+            ConnectionStore::open(f.directory_a.path()).unwrap().insert(&sender).unwrap();
+            ConnectionStore::open(f.directory_b.path()).unwrap().insert(&receiver).unwrap();
+            let last_sync = |root: &std::path::Path, id: &str| ConnectionStore::open(root).unwrap().read(id).unwrap().last_sync_at_ms;
+            let cancel = Cancellation::default();
+
+            assert_eq!(publish_round(&mut f.sender, &mut f.a, DecimalU64(0), &[], &cancel).await.unwrap().segments.0, 0);
+            assert_eq!(last_sync(f.directory_a.path(), "sender"), None);
+            f.a.commit(&WorkingSetCommit {
+                expected_revision: f.a.revision().unwrap(),
+                unit_mutations: Some(vec![UnitMutation::Set {
+                    key: UnitKey::new(&["root", "language"]).unwrap(), value: serde_json::json!("ko"),
+                }]),
+                ..Default::default()
+            }).unwrap();
+            assert_eq!(publish_round(&mut f.sender, &mut f.a, DecimalU64(0), &[], &cancel).await.unwrap().segments.0, 1);
+            assert!(last_sync(f.directory_a.path(), "sender").is_some());
+
+            let mut queue = VecDeque::new();
+            let checkpoints = Default::default();
+            let (page, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), &cancel).await.unwrap();
+            let page = page.expect("the published segment is offered");
+            assert!(!recorded);
+            assert_eq!(last_sync(f.directory_b.path(), "receiver"), None);
+            let (unfinished, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), &cancel).await.unwrap();
+            assert_eq!(unfinished.map(|page| page.header.request_id), Some(page.header.request_id.clone()));
+            assert!(!recorded);
+            f.b.lww_stage_receive(&page).unwrap();
+            f.b.lww_apply_receive(&ApplyReceive { header: page.header.clone(), generating: Vec::new() }).unwrap();
+            f.b.lww_finish_receive(&page.header).unwrap();
+            let (next, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), &cancel).await.unwrap();
+            assert!(next.is_none());
+            assert!(recorded);
+            let recorded_at = last_sync(f.directory_b.path(), "receiver").expect("a finished page records the sync time");
+            let (quiet, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), &cancel).await.unwrap();
+            assert!(quiet.is_none() && !recorded);
+            assert_eq!(last_sync(f.directory_b.path(), "receiver"), Some(recorded_at));
+
+            let summary = serde_json::to_value(super::super::connection::summary(
+                &ConnectionStore::open(f.directory_b.path()).unwrap().read("receiver").unwrap())).unwrap();
+            assert_eq!(summary["lastSyncAtMs"], serde_json::json!(recorded_at.to_string()));
+        });
     }
 
     #[test]

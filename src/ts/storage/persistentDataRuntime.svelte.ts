@@ -20,7 +20,7 @@ import type {
 } from './activeWorkingSet.svelte'
 import type { ConversationViewportSource } from '../conversationViewportSource'
 import type { Chat, Database, botPreset, character } from './database.svelte'
-import { getDatabase, setDatabase, setEffectivePresetOverride } from './database.svelte'
+import { fillRootFieldDefaults, getDatabase, setDatabase, setEffectivePresetOverride } from './database.svelte'
 import { getEffectivePresetOverride } from './effectiveIdentityState'
 import { prepareDatabaseForPersistence, preparePersistentRootForWorkingSet } from './databasePreparation'
 import { getPersistentDataStore, getPersistentStorageAuthority } from './persistentDataStoreFactory'
@@ -152,6 +152,9 @@ export function createProductionStateAdapter(options: {
         canonicalCapture,
         beforeCapture: flushPersistentIdentityEdits,
         afterRemoteApply: derivePersistentIdentityMirrors,
+        fillRootFieldDefaults(fields) {
+            fillRootFieldDefaults(getDatabase(), fields)
+        },
         afterRemoteRootChange(fields) {
             void applyReceivedDisplaySettings(fields).catch((error) => console.error(error))
         },

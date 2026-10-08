@@ -123,14 +123,50 @@ pub(crate) fn collection_folder(collection: Collection) -> &'static str {
     }
 }
 
+/// Where a connection's requests go. The account is not part of it, so a
+/// connection that has not been given one yet resolves to the same place.
+struct Location {
+    profile: &'static Profile,
+    origin: url::Url,
+    base_path: String,
+    bucket: String,
+    prefix: String,
+    region: String,
+    addressing: Addressing,
+}
+
 pub(crate) fn validate(config: &ConnectionConfig, secret: &SecretRef) -> Result<RepositoryContext> {
+    let Location { profile, origin, base_path, bucket, prefix, region, addressing } = locate(config)?;
+    if config.account_id.is_empty() || config.account_id.len() > 256 {
+        return Err(unsupported());
+    }
+    let connection_identity = format!("{PROVIDER_ID}/{bucket}/{prefix}");
+    let account = crate::external_storage::quota::AccountKey::new(PROVIDER_ID, &origin, &config.account_id)?;
+    Ok(RepositoryContext {
+        profile,
+        origin,
+        base_path,
+        bucket,
+        prefix,
+        region,
+        addressing,
+        account,
+        connection_identity,
+        secret: secret.clone(),
+    })
+}
+
+/// The bucket URL of a connection, with or without its account.
+pub(crate) fn bucket_url(config: &ConnectionConfig) -> Result<url::Url> {
+    let location = locate(config)?;
+    request_url(&location.origin, &location.base_path, &location.bucket, location.addressing, Target::Bucket, &[])
+}
+
+fn locate(config: &ConnectionConfig) -> Result<Location> {
     if config.provider != PROVIDER_ID || config.oauth_profile.is_some() {
         return Err(unsupported());
     }
     let profile = profiles::lookup(config.profile.as_deref().ok_or_else(unsupported)?)?;
-    if config.account_id.is_empty() || config.account_id.len() > 256 {
-        return Err(unsupported());
-    }
     for key in config.location.keys() {
         if !matches!(key.as_str(), "bucket" | "prefix" | "region" | "addressing") {
             return Err(unsupported());
@@ -150,20 +186,7 @@ pub(crate) fn validate(config: &ConnectionConfig, secret: &SecretRef) -> Result<
     }
     let prefix = normalize_prefix(config.location.get("prefix").map(String::as_str))?;
     let region = region(config.location.get("region").map(String::as_str), profile)?;
-    let connection_identity = format!("{PROVIDER_ID}/{bucket}/{prefix}");
-    let account = crate::external_storage::quota::AccountKey::new(PROVIDER_ID, &origin, &config.account_id)?;
-    Ok(RepositoryContext {
-        profile,
-        origin,
-        base_path,
-        bucket: bucket.clone(),
-        prefix,
-        region,
-        addressing,
-        account,
-        connection_identity,
-        secret: secret.clone(),
-    })
+    Ok(Location { profile, origin, base_path, bucket: bucket.clone(), prefix, region, addressing })
 }
 
 fn endpoint(endpoint: &str, profile: &Profile) -> Result<(url::Url, String)> {
@@ -263,42 +286,49 @@ impl RepositoryContext {
     }
 
     pub(crate) fn url(&self, target: Target<'_>, query: &[(String, String)]) -> Result<url::Url> {
-        let mut url = self.origin.clone();
-        let mut path = self.base_path.clone();
-        match self.addressing {
-            Addressing::Path => {
-                path.push('/');
-                path.push_str(&uri_encode(&self.bucket, true));
-            }
-            Addressing::Virtual => {
-                let host = format!(
-                    "{}.{}",
-                    self.bucket,
-                    self.origin.host_str().ok_or_else(corrupt)?
-                );
-                url.set_host(Some(&host)).map_err(|_| corrupt())?;
-            }
-        }
-        if let Target::Object(key) = target {
-            path.push('/');
-            path.push_str(&uri_encode(key, false));
-        }
-        if path.is_empty() {
-            path.push('/');
-        }
-        url.set_path(&path);
-        if !query.is_empty() {
-            let mut pairs: Vec<String> = query
-                .iter()
-                .map(|(name, value)| {
-                    format!("{}={}", uri_encode(name, true), uri_encode(value, true))
-                })
-                .collect();
-            pairs.sort();
-            url.set_query(Some(&pairs.join("&")));
-        }
-        Ok(url)
+        request_url(&self.origin, &self.base_path, &self.bucket, self.addressing, target, query)
     }
+}
+
+fn request_url(
+    origin: &url::Url,
+    base_path: &str,
+    bucket: &str,
+    addressing: Addressing,
+    target: Target<'_>,
+    query: &[(String, String)],
+) -> Result<url::Url> {
+    let mut url = origin.clone();
+    let mut path = base_path.to_owned();
+    match addressing {
+        Addressing::Path => {
+            path.push('/');
+            path.push_str(&uri_encode(bucket, true));
+        }
+        Addressing::Virtual => {
+            let host = format!("{}.{}", bucket, origin.host_str().ok_or_else(corrupt)?);
+            url.set_host(Some(&host)).map_err(|_| corrupt())?;
+        }
+    }
+    if let Target::Object(key) = target {
+        path.push('/');
+        path.push_str(&uri_encode(key, false));
+    }
+    if path.is_empty() {
+        path.push('/');
+    }
+    url.set_path(&path);
+    if !query.is_empty() {
+        let mut pairs: Vec<String> = query
+            .iter()
+            .map(|(name, value)| {
+                format!("{}={}", uri_encode(name, true), uri_encode(value, true))
+            })
+            .collect();
+        pairs.sort();
+        url.set_query(Some(&pairs.join("&")));
+    }
+    Ok(url)
 }
 
 /// Reads the connection's access keys. A missing or unreadable payload is a

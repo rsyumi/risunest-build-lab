@@ -44,9 +44,18 @@ pub(crate) fn record_connection_completion(
     connection_id: &str,
     kind: super::connection_store::CompletionKind,
 ) {
-    let result = root(app).and_then(|root| {
-        ConnectionStore::open(&root)?.record_completion(connection_id, kind, now_ms())
-    });
+    match root(app) {
+        Ok(root) => record_connection_completion_at(&root, connection_id, kind),
+        Err(_) => crate::nlog!("warn", "External connection completion timestamp could not be recorded"),
+    }
+}
+pub(crate) fn record_connection_completion_at(
+    root: &std::path::Path,
+    connection_id: &str,
+    kind: super::connection_store::CompletionKind,
+) {
+    let result = ConnectionStore::open(root)
+        .and_then(|mut store| store.record_completion(connection_id, kind, now_ms()));
     if result.is_err() {
         crate::nlog!("warn", "External connection completion timestamp could not be recorded");
     }
@@ -161,15 +170,44 @@ pub(crate) fn external_storage_get_state<R: Runtime>(app: AppHandle<R>) -> Resul
         let jobs = JobStore::open(&root)?
             .list_for_state()?
             .into_iter()
-            .map(|job| reconcile_job(&app, job).map(|job| {
+            .map(|job| reconcile_job_for_read(&app, job).map(|job| {
                 job_summary(&root, job)
             }))
             .collect::<Result<Vec<_>>>()?;
         for connection in &mut connections { apply_job_connection_status(connection, &jobs); }
-        Ok(
-            json!({"supported":true,"selection":selection_dto(native_store(&app)?.external_selection().map_err(local_error)?),"connections":connections,"jobs":jobs}),
-        )
+        let state = app.state::<JobCommandState>();
+        let selection = match native_store(&app).and_then(|store| store.external_selection().map_err(local_error)) {
+            Ok(selection) => shown_selection(&state, selection)?,
+            Err(error) => match state.shown_selection.lock().map_err(local_error)?.clone() {
+                Some(selection) if store_held(&app, &error) => selection,
+                _ => return Err(error),
+            },
+        };
+        Ok(json!({"supported":true,"selection":selection,"connections":connections,"jobs":jobs}))
     })())
+}
+
+fn shown_selection(state: &JobCommandState, selection: Selection) -> Result<Value> {
+    let selection = selection_dto(selection);
+    *state.shown_selection.lock().map_err(local_error)? = Some(selection.clone());
+    Ok(selection)
+}
+
+/// Device maintenance refuses the store while it holds it, as a restore commit
+/// does.
+fn store_held<R: Runtime>(app: &AppHandle<R>, error: &ProviderError) -> bool {
+    matches!(error.kind, ErrorKind::Transient | ErrorKind::LocalFailure)
+        && app.state::<persistent_store::commands::PersistentStoreState>().maintenance_active()
+}
+
+/// A job as stored while device maintenance holds the store. The first read
+/// after it reconciles the job.
+fn reconcile_job_for_read<R: Runtime>(app: &AppHandle<R>, job: DurableJob) -> Result<DurableJob> {
+    let stored = job.clone();
+    match reconcile_job(app, job) {
+        Err(error) if store_held(app, &error) => Ok(stored),
+        reconciled => reconciled,
+    }
 }
 
 #[derive(Deserialize)]
@@ -210,7 +248,7 @@ pub(crate) async fn external_storage_set_sync_target(
             .external_select(&request.expected_selection_epoch, &target)
             .map_err(local_error)?;
         drop(active);
-        Ok(selection_dto(selected))
+        shown_selection(&state, selected)
     }.await)
 }
 #[derive(Deserialize)]
@@ -223,7 +261,7 @@ pub(crate) struct SetPausedRequest {
 pub(crate) fn external_storage_set_sync_paused(app: AppHandle, request: SetPausedRequest) -> Result<Value> {
     logged("external_storage_set_sync_paused", (|| {
         let selected = native_store(&app)?.external_set_paused(&request.expected_selection_epoch, request.paused).map_err(local_error)?;
-        Ok(selection_dto(selected))
+        shown_selection(&app.state::<JobCommandState>(), selected)
     })())
 }
 #[tauri::command]
@@ -234,7 +272,7 @@ pub(crate) fn external_storage_set_automatic_backup_paused(app: AppHandle, conne
 pub(crate) fn external_storage_get_job<R: Runtime>(app: AppHandle<R>, job_id: String) -> Result<Value> {
     logged("external_storage_get_job", (|| {
         let directory = root(&app)?;
-        let job = reconcile_job(&app, JobStore::open(&directory)?.read(&job_id)?)?;
+        let job = reconcile_job_for_read(&app, JobStore::open(&directory)?.read(&job_id)?)?;
         Ok(job_summary(&directory, job))
     })())
 }
@@ -1361,6 +1399,36 @@ pub(crate) fn transfer_progress(
     job_phase_progress(root, job_id, "transferred")
 }
 
+/// Continues the transfer reading an earlier phase of `job` recorded, for a
+/// phase whose downloads that phase already planned.
+pub(crate) fn resumed_transfer_progress(
+    root: &std::path::Path,
+    job: &DurableJob,
+) -> std::sync::Arc<super::phase_progress::PhaseProgress> {
+    let summary = &job.summary;
+    let count = |name: &str| {
+        summary[name]
+            .as_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let reading = if summary["counters"] == "transferred" {
+        super::phase_progress::PhaseCounters {
+            items: count("completedItems"),
+            total_items: count("totalItems"),
+            bytes: count("completedBytes"),
+            total_bytes: count("totalBytes"),
+        }
+    } else {
+        super::phase_progress::PhaseCounters::default()
+    };
+    let root = root.to_path_buf();
+    let job_id = job.id.clone();
+    super::phase_progress::PhaseProgress::resumed(reading, move |reading| {
+        let _ = record_counters(&root, &job_id, "transferred", reading);
+    })
+}
+
 fn record_check_progress(
     root: &std::path::Path,
     job_id: &str,
@@ -1712,6 +1780,24 @@ mod tests {
         assert_eq!(dto["code"], "localFailure");
         assert_eq!(dto["action"], "retry");
         assert_eq!(dto["retryable"], true);
+    }
+
+    /// A long device-store write elsewhere, such as a publication persisting
+    /// its segment, does not fail a state read.
+    #[test]
+    fn a_held_device_store_write_does_not_fail_the_state_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        app.manage(persistent_store::commands::PersistentStoreState::with_test_store(PersistentStore::open(root).unwrap()));
+        let jobs = JobCommandState::default();
+        jobs.root.set(root.to_owned()).unwrap();
+        app.manage(jobs);
+        let holder = rusqlite::Connection::open(root.join("persistent").join("device.sqlite")).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let state = external_storage_get_state(app.handle().clone());
+        holder.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(state.unwrap()["supported"], true);
     }
 
     #[test]

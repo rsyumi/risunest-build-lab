@@ -27,7 +27,7 @@ vi.mock('../committedWorkingSetContinuation', () => ({ registerCommittedWorkingS
 vi.mock('src/ts/plugins/apiV3/v3.svelte', () => ({ fencePluginExecutionForAuthorityReplacement: async () => {}, invalidatePluginCachesAfterAuthorityReplacement: async () => {}, restartPluginsAfterAuthorityReplacement: async () => {} }))
 vi.mock('../persistentRevisionEvents', () => ({ subscribeLocalPersistentRevision: () => () => {} }))
 vi.mock('../generatingConversationRegistry', () => ({ generatingConversations: { snapshot: () => [] } }))
-vi.mock('src/ts/alert', () => ({ alertConfirm: async () => false }))
+vi.mock('src/ts/alert', () => ({ alertConfirm: async () => false, alertActionConfirm: vi.fn(async () => true), alertCheckboxConfirm: vi.fn(async () => ({ confirmed: true, checked: false })) }))
 vi.mock('@lucide/svelte', () => ({ CheckIcon: () => {}, LoaderCircleIcon: () => {}, TriangleAlertIcon: () => {} }))
 vi.mock('./serverSyncRegistrationInbox', () => ({ serverRegistrationInbox: { changed: { subscribe: () => () => {} }, releaseConsumed() {}, take: () => undefined } }))
 vi.mock('./serverSyncQr', () => ({ canScanServerRegistration: false, createServerQrScanner: () => ({ cancel() {} }) }))
@@ -104,6 +104,8 @@ describe('persisted server offline startup', () => {
     it('disconnects the actual persisted binding while activation remains offline, without starting services', async () => {
         await offlineStartup(); await settings()
         button('Disconnect')!.click(); await settle()
+        // The file check cannot answer here, so the disconnect is confirmed before it unbinds.
+        expect((await import('src/ts/alert')).alertCheckboxConfirm).toHaveBeenCalledOnce()
         expect(f.binding.target).toEqual({ kind: 'none' })
         expect(production.getServerSyncController().snapshot().status.bound).toBe(false)
         expect(button('Sync now')).toBeUndefined(); expect(button('Disconnect')).toBeUndefined()

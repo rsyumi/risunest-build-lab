@@ -15,6 +15,7 @@ vi.mock('svelte', () => ({ mount: vi.fn(() => ({})) }))
 vi.mock('./ts/storage/deviceBackup/jobRecovery', () => ({
     resumePortableExportsAfterBootstrap: vi.fn(async () => {}),
 }))
+vi.mock('./lang', () => ({ changeLanguage: vi.fn() }))
 vi.mock('./ts/storage/recoveryMode.svelte', () => ({
     decideBoot: vi.fn(async () => 'recovery'),
 }))
@@ -35,6 +36,7 @@ describe('the recovery shell holds the ordinary start', () => {
         async () => {
             document.body.innerHTML =
                 '<div id="app"></div><div id="preloading"></div>'
+            vi.spyOn(navigator, 'language', 'get').mockReturnValue('ko-KR')
             await import('./normalMain')
             await new Promise((resolve) => setTimeout(resolve, 0))
 
@@ -45,6 +47,9 @@ describe('the recovery shell holds the ordinary start', () => {
             const { get } = await import('svelte/store')
             const start = get(recoveryStart)
             expect(start).toBeTypeOf('function')
+            // The shell shows before the library's language loads, so it follows the device's.
+            const { changeLanguage } = await import('./lang')
+            expect(changeLanguage).toHaveBeenCalledExactlyOnceWith('ko')
 
             start?.()
             // The ordinary start yields to the UI first, so give that a few turns to land.

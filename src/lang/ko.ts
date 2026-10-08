@@ -170,9 +170,9 @@ export const languageKorean = {
     overwriteTogglePresetConfirm: (name: string) => `"${name}" 프리셋을 현재 토글 값으로 덮어쓰시겠습니까?`,
     togglePresetOverwritten: (name: string) => `"${name}" 프리셋을 덮어썼습니다.`,
     renameTogglePreset: '이름 변경',
-    togglePresetRenamed: (from: string, to: string) => `"${from}" 프리셋 이름을 "${to}"(으)로 바꿨습니다.`,
+    togglePresetRenamed: (from: string, to: string) => `"${from}" 프리셋 이름을 바꿨으며, 새 이름은 "${to}"입니다.`,
     duplicateTogglePreset: '복제',
-    togglePresetDuplicated: (name: string) => `"${name}"(으)로 복제했습니다.`,
+    togglePresetDuplicated: (name: string) => `"${name}" 프리셋으로 복제했습니다.`,
     exportTogglePreset: '내보내기',
     togglePresetExported: (name: string) => `"${name}" 프리셋을 내보냈습니다.`,
     deleteTogglePreset: '삭제',
@@ -1730,6 +1730,7 @@ export const languageKorean = {
     nanoGPTManualInput: "수동 입력",
     nanoGPTManualModelSelect: "수동 모델 선택",
     risuNest: {
+        backgroundDataFailed: '일부 데이터 변경을 완료하지 못했습니다.',
         localSaveFailure: {
             failed: '변경 사항을 저장하지 못했습니다. 앱을 종료하기 전에 저장을 다시 시도해주세요.',
             invalid: '{0} 데이터를 저장하지 못했습니다. 해당 데이터를 확인한 후 저장을 다시 시도해주세요.',
@@ -2064,8 +2065,11 @@ export const languageKorean = {
             connect: '연결하고 동기화',
             disconnect: '연결 해제',
             disconnectTitle: '연결을 해제하시겠습니까?',
+            disconnectDescription: '이 기기와 서버의 동기화를 중지합니다.',
             disconnectRemoteOnly:
                 '서버에만 있는 파일이 있습니다. 필요한 경우 다운로드한 뒤 연결을 해제하세요.',
+            disconnectRemoteOnlyUnknown:
+                '파일을 확인할 수 없습니다. 필요한 경우 서버에만 있는 파일을 다운로드한 뒤 연결을 해제하세요.',
             downloadThenDisconnect: '다운로드 후 연결 해제',
             downloadFailedKeptConnection:
                 '파일을 다운로드하지 못해 연결을 해제하지 않았습니다. 다시 시도하거나 다운로드하지 않고 연결을 해제하세요.',
@@ -2222,7 +2226,12 @@ export const languageKorean = {
             exportCancelled: '내보내기가 취소되었습니다.',
             exportFailed: '원본 파일을 내보내지 못했습니다.',
             startNormally: '그대로 시작',
-            keepBody: '{0}을(를) 끈 채로 시작했습니다. 앞으로도 꺼 두시겠습니까?',
+            keepTitle: '앞으로도 꺼 두시겠습니까?',
+            keepDescription: '이번 시작에서 끈 항목: {0}',
+            keepAction: '앞으로도 끄기',
+            keptTitle: '앞으로도 끈 항목',
+            keptHelp: '켠 항목은 앱을 다시 시작하면 적용됩니다.',
+            turnOn: '켜기',
         },
         storage: {
             snapshotSizeNote:

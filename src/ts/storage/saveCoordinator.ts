@@ -2762,11 +2762,6 @@ export class SaveCoordinator {
                     ? this.captureDetachedCharacter()
                     : null
             const addition = this.capturePendingAddition()
-            if (windowedCapture && addition) {
-                throw new WindowedConversationRequiresCompatibilityError(
-                    'character addition requires a complete selected character',
-                )
-            }
             let conversationProjection: ConversationMutationProjection | null
             try {
                 conversationProjection = windowedCapture
@@ -5097,7 +5092,9 @@ export class SaveCoordinator {
     }
 
     private reportBackgroundError(error: unknown): void {
-        const message = error instanceof Error ? error.message : String(error)
+        // Native errors are plain objects, which would all repeat as one string.
+        const native = typeof error === 'object' && error !== null ? error as { code?: unknown; message?: unknown } : null
+        const message = error instanceof Error ? error.message : native ? `${String(native.code)}:${String(native.message)}` : String(error)
         if (message === this.lastBackgroundErrorMessage) return
         this.lastBackgroundErrorMessage = message
         try {

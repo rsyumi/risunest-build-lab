@@ -37,6 +37,19 @@ fn next_time(store: &PersistentStore) -> u64 {
 }
 
 #[test]
+fn recovery_still_removes_rows_left_by_an_intent_that_is_gone() {
+    let (_dir, mut store) = store();
+    let db = store.device_store().unwrap().connection();
+    db.execute("INSERT INTO lww_intent_proofs VALUES('gone-intent','identity')", []).unwrap();
+    db.execute("INSERT INTO lww_intent_failures VALUES('gone-intent',1,'synthetic-failure',0)", []).unwrap();
+    db.execute("INSERT INTO lww_intent_rows VALUES('gone-intent',1,?1,NULL,'1',0)", [unit_key(&["root", "username"]).unwrap().as_str()]).unwrap();
+    store.lww_recover_intents().unwrap();
+    for table in ["lww_intent_proofs", "lww_intent_failures", "lww_intent_rows"] {
+        assert_eq!(device_count(&store, &format!("SELECT count(*) FROM {table}")), 0, "{table}");
+    }
+}
+
+#[test]
 fn completed_writes_leave_no_intent_and_their_receipt_still_answers_a_retry() {
     let (_dir, mut store) = store();
     for index in 0..20 {

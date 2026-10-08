@@ -629,8 +629,9 @@ mod tests {
     #[test]
     fn configured_http_is_exact_and_s3_uses_its_validated_bucket_origin() {
         let parse = |value: &str| url::Url::parse(value).unwrap();
+        // A connection being committed has no account yet.
         let config = |provider: &str, endpoint: &str, addressing: &str| serde_json::from_value::<ConnectionConfig>(serde_json::json!({
-            "provider":provider,"endpoint":endpoint,"accountId":"synthetic","profile":"generic",
+            "provider":provider,"endpoint":endpoint,"accountId":"","profile":"generic",
             "location":{"bucket":"chosen","region":"us-east-1","addressing":addressing}
         })).unwrap();
         let default = NativeHttpTransport::new().unwrap();

@@ -19,6 +19,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, LoadingStatusState, bootFailure } from "./stores.svelte";
 import { loadPlugins, loadPluginsAfterAuthoritativeRestore } from "./plugins/plugins.svelte";
 import { alertConfirm, alertError, alertInput, alertLogin, alertMd, alertNormal, alertSelect, alertToast, alertTOS, waitAlert } from "./alert";
+import { backgroundErrorMessage } from "./storage/backgroundErrorMessage";
 import { applyHubSelection, characterURLImport, downloadRisuHub, hubURL } from "./characterCards";
 import { initializeNativeLocalUrls } from "./nativeLocalUrls";
 import { loadRisuAccountData } from "./drive/accounter";
@@ -492,7 +493,7 @@ export async function loadData() {
             initializeWorkingSet: (database) => initializeActiveWorkingSet(database),
             onRemoteError: (error) => {
                 console.error(error)
-                alertError(error instanceof Error ? error : String(error))
+                alertError(backgroundErrorMessage(error))
             },
             onPullSkipped: ({ conflict }) => {
                 officialReconcilePublish = true
@@ -595,7 +596,9 @@ export async function loadData() {
             initializeNativeSyncBindings()
             window.addEventListener('pagehide', disposeNativeSyncBindings, { once: true })
         }
-        if (isTauri && !excluded('sync')) {
+        // The exit drain follows what this start did, not an exclusion cleared later in the session.
+        const syncExcludedAtStart = excluded('sync')
+        if (isTauri && !syncExcludedAtStart) {
             await transition('drive-sync', language.risuNest.startup.account)
             await installServerSyncProduction()
             try {
@@ -605,6 +608,22 @@ export async function loadData() {
                 await installExternalStorageProduction()
             } catch (error) {
                 console.error('External storage scheduler failed to start', error)
+            }
+        } else if (isTauri) {
+            // Sync stays stopped, but its settings can still turn a sync target on or off.
+            await transition('drive-sync', language.risuNest.startup.account)
+            try {
+                await installServerSyncProduction({ resumeBound: false })
+            } catch (error) {
+                console.error('Server sync transport failed to register', error)
+            }
+            try {
+                const { installExternalSyncTransports } = await import(
+                    './storage/sync/external/production'
+                )
+                await installExternalSyncTransports()
+            } catch (error) {
+                console.error('External sync transports failed to register', error)
             }
         }
         let heldExitRevision: number | undefined
@@ -641,7 +660,14 @@ export async function loadData() {
                     throw new Error('Normal exit revision changed after the edit fence')
                 }
                 const selection = capture.selection
-                const syncDisabled = excluded('sync') || (
+                // A start that left sync off drains only a target the user started during the session.
+                const syncStopped = syncExcludedAtStart && !(
+                    selection.kind === 'server'
+                        ? !getServerSyncController().snapshot().paused
+                        : selection.kind === 'external' && !!selection.connectionId
+                            && (await import('./storage/sync/external/lwwProduction')).isExternalLwwRunning(selection.connectionId)
+                )
+                const syncDisabled = syncStopped || (
                     selection.kind !== 'none' && (selection.paused || (
                         selection.kind === 'server' && getServerSyncController().snapshot().paused
                     ))
@@ -670,10 +696,12 @@ export async function loadData() {
                     const {
                         getExternalStorageSyncExitDrainAdapter,
                         installExternalStorageProduction,
+                        installExternalSyncTransports,
                     } = await import(
                         './storage/sync/external/production'
                     )
-                    await installExternalStorageProduction()
+                    // A start that left sync off also left automatic backups off, so exit needs only the transports.
+                    await (syncExcludedAtStart ? installExternalSyncTransports() : installExternalStorageProduction())
                     selectedExitDrain = getExternalStorageSyncExitDrainAdapter(
                         capture,
                         heldExitFence,

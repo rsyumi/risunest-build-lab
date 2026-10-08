@@ -5200,7 +5200,7 @@ mod tests {
             crate::asset_repository::body_io::reset_body_io();
             crate::asset_repository::body_io::register_object_purpose(&hash,crate::asset_repository::body_io::BodyPurpose::Asset);
             crate::external_storage::worker_observation::begin();
-            let database=snapshot_restore::download_snapshot_database_first(&completed.reference,&root.path().join("db-first-read"),destination.path(),root.path(),"synthetic-connection",&key,&provider,&repository,&Cancellation::default()).await.unwrap();
+            let database=snapshot_restore::download_snapshot_database_first(&completed.reference,&root.path().join("db-first-read"),destination.path(),root.path(),"synthetic-connection",&key,&provider,&repository,&crate::external_storage::phase_progress::PhaseProgress::silent(),&Cancellation::default()).await.unwrap();
             let workers=crate::external_storage::worker_observation::take();
             let work=crate::asset_repository::body_io::take_body_io();
             assert!(work.complete());assert_eq!(work.asset_work(),Default::default());
@@ -5211,7 +5211,7 @@ mod tests {
             for (pack,reads) in asset_packs {assert_eq!(provider.read_attempts(&pack),reads);}
             let object=destination.path().join("assets/objects").join(&hash[..2]).join(&hash[2..]);
             fs::write(object,b"synthetic wrong size").unwrap();
-            assert!(snapshot_restore::download_snapshot_database_first(&completed.reference,&root.path().join("db-first-invalid"),destination.path(),root.path(),"synthetic-connection",&key,&provider,&repository,&Cancellation::default()).await.is_err());
+            assert!(snapshot_restore::download_snapshot_database_first(&completed.reference,&root.path().join("db-first-invalid"),destination.path(),root.path(),"synthetic-connection",&key,&provider,&repository,&crate::external_storage::phase_progress::PhaseProgress::silent(),&Cancellation::default()).await.is_err());
             assert!(super::super::lww_residency::packed_source(destination.path(),&hash).unwrap().is_none());
         });
     }
@@ -5640,7 +5640,7 @@ mod tests {
                     wire::ObjectRole::BackupBundle,&completed.reference.repository_id,
                 ).unwrap();
                 let original = RemoteObject::from_stored(view.original_units.as_ref().unwrap(),&repository).unwrap();
-                let units = snapshot_restore::download_original_backup_units(&original,&stage,&key,&provider,&repository,&Cancellation::default()).await.unwrap();
+                let units = snapshot_restore::download_original_backup_units(&original,&stage,&key,&provider,&repository,&crate::external_storage::phase_progress::PhaseProgress::silent(),&Cancellation::default()).await.unwrap();
                 let content = crate::external_storage::content_store::ContentStore::open(&stage.join("external-storage")).unwrap();
                 let units = units.units(&content).map(|unit| unit.unwrap()).collect::<Vec<_>>();
                 assert_eq!(units.len(),1);

@@ -51,6 +51,7 @@ interface ProductionRuntime {
 
 let runtime: ProductionRuntime | undefined
 let installation: Promise<() => void> | undefined
+let transportsOnly: Promise<() => void> | undefined
 // A receive during an exit drain applies under the fence the exit holds.
 
 function assertNoPendingApplication(): void {
@@ -198,10 +199,31 @@ export function installExternalStorageProduction(): Promise<() => void> {
     return installation
 }
 
+/** Registers the sync connections' transports without starting sync or automatic backups. */
+export function installExternalSyncTransports(): Promise<() => void> {
+    if (installation) return installation
+    if (transportsOnly) return transportsOnly
+    transportsOnly = (async () => {
+        const bridge = getExternalStorageBridge()
+        if (!bridge.supported) return () => {}
+        const dispose = await installExternalLwwAdapters(await bridge.getState(), false)
+        return () => { dispose(); transportsOnly = undefined }
+    })().catch(error => {
+        transportsOnly = undefined
+        throw error
+    })
+    return transportsOnly
+}
+
 /** Refreshes scheduler routing after an explicit settings mutation. */
 export async function refreshExternalStorageProductionState(): Promise<void> {
     const current = runtime
-    if (!current) return
+    if (!current) {
+        if (transportsOnly && await transportsOnly.then(() => true, () => false)) {
+            await refreshExternalLwwAdapters(await getExternalStorageBridge().getState())
+        }
+        return
+    }
     const state = await getExternalStorageBridge().getState()
     current.state = state
     current.controller.replaceState(state)

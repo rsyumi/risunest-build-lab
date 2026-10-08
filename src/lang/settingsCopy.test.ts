@@ -30,3 +30,8 @@ it('describes only the reset and restore actions in their help', () => {
     expect(languageKorean.risuNest.backup.restoreHelp).toBe('계정 동기화 충돌 백업으로 데이터를 복원합니다.')
     expect(languageEnglish.risuNest.backup.restoreHelp).toBe('Restores data from an account sync conflict backup.')
 })
+it('names toggle presets without a particle placeholder', () => {
+    expect(languageKorean.togglePresetRenamed('기본', '전투')).toBe('"기본" 프리셋 이름을 바꿨으며, 새 이름은 "전투"입니다.')
+    expect(languageKorean.togglePresetDuplicated('기본 사본')).toBe('"기본 사본" 프리셋으로 복제했습니다.')
+    for (const text of [languageKorean.togglePresetRenamed('A', 'B'), languageKorean.togglePresetDuplicated('B')]) expect(text).not.toMatch(/\((으|이|을|를|은|는|과|와)\)|[을은이과와]\([를는가와과]\)/)
+})

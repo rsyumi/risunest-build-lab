@@ -570,6 +570,9 @@ pub(crate) struct JobCommandState {
     removing: Arc<Mutex<HashSet<String>>>,
     pub session: Mutex<Session>,
     blocking_tasks: Mutex<HashMap<String, Vec<tokio::sync::oneshot::Receiver<()>>>>,
+    /// The selection last read from the store, for a state read while device
+    /// maintenance holds the store.
+    pub shown_selection: Mutex<Option<Value>>,
 }
 pub(crate) struct BackgroundWorker(Arc<std::sync::atomic::AtomicUsize>);
 impl Drop for BackgroundWorker {

@@ -1264,9 +1264,18 @@ impl PersistentStore {
         let authority = self.lww_binding_authority()?;
         let rows: Vec<(String, String, String, String, String)> = {
             let db = self.device_store()?.connection();
-            intent_rows::delete_settled(db)?;
-            db.execute("DELETE FROM lww_intent_proofs WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0)", [])?;
-            db.execute("DELETE FROM lww_intent_failures WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0)", [])?;
+            // Completion already removes these rows, so most calls find nothing to delete and
+            // take no write lock, which another connection may hold for a long write.
+            let settled: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM lww_intent_rows WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0))
+                    OR EXISTS(SELECT 1 FROM lww_intent_proofs WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0))
+                    OR EXISTS(SELECT 1 FROM lww_intent_failures WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0))",
+                [], |r| r.get(0))?;
+            if settled {
+                intent_rows::delete_settled(db)?;
+                db.execute("DELETE FROM lww_intent_proofs WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0)", [])?;
+                db.execute("DELETE FROM lww_intent_failures WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0)", [])?;
+            }
             let mut s=db.prepare("SELECT request_id,authority,stamp,body,digest FROM lww_intents i WHERE complete=0 AND NOT EXISTS(SELECT 1 FROM lww_intent_failures f WHERE f.request_id=i.request_id AND f.quarantined=1) ORDER BY rowid")?;
             let v = s
                 .query_map([], |r| {

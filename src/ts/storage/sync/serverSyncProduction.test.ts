@@ -121,6 +121,16 @@ describe('production server LWW composition', () => {
         expect(f.resumeCurrent).toHaveBeenCalledExactlyOnceWith(state.target)
         expect(f.invoke.mock.calls.some(([command]) => command === 'server_sync_lww_activate')).toBe(false)
     })
+    it.each([true, false])('registers the server transport but leaves a bound server stopped when the start left sync off (configured=%s)', async configured => {
+        const state = bindingContext().state
+        f.invoke.mockImplementation(async command => command === 'server_sync_status' ? { configured, writerId: 'writer', bindingAuthority: '0' } : command === 'pds_lww_binding_state' ? state : command === 'server_sync_lww_pending_binding' ? { endpoint: 'synthetic', libraryId: 'library', epoch: '1', serverEmpty: true } : null)
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction({ resumeBound: false }); await settle()
+        expect(f.register).toHaveBeenCalledOnce()
+        expect(f.resumeCurrent).not.toHaveBeenCalled()
+        expect(f.invoke.mock.calls.some(([command]) => command === 'server_sync_lww_pending_binding')).toBe(false)
+        expect(production.getServerSyncController().snapshot().status.bound).toBe(true)
+        expect(production.getServerSyncController().snapshot().paused).toBe(true)
+    })
     it('reads the server status again once another sync target takes over', async () => {
         const state = bindingContext().state
         let target: { kind: string; connectionId?: string } = state.target

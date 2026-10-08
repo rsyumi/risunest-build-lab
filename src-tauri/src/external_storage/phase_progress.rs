@@ -23,7 +23,7 @@ pub(crate) struct PhaseProgress {
 }
 
 /// One reading of the counters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PhaseCounters {
     pub items: u64,
     pub total_items: u64,
@@ -33,11 +33,20 @@ pub(crate) struct PhaseCounters {
 
 impl PhaseProgress {
     pub(crate) fn new(sink: impl Fn(PhaseCounters) + Send + Sync + 'static) -> Arc<Self> {
+        Self::resumed(PhaseCounters::default(), sink)
+    }
+
+    /// Continues the reading an earlier phase of the same job left, for a
+    /// phase whose work that reading already planned.
+    pub(crate) fn resumed(
+        reading: PhaseCounters,
+        sink: impl Fn(PhaseCounters) + Send + Sync + 'static,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            completed_items: AtomicU64::new(0),
-            completed_bytes: AtomicU64::new(0),
-            planned_items: AtomicU64::new(0),
-            planned_bytes: AtomicU64::new(0),
+            completed_items: AtomicU64::new(reading.items),
+            completed_bytes: AtomicU64::new(reading.bytes),
+            planned_items: AtomicU64::new(reading.total_items),
+            planned_bytes: AtomicU64::new(reading.total_bytes),
             // Far enough back that the first reading reports.
             reported: Mutex::new(Instant::now() - REPORT_INTERVAL),
             sink: Box::new(sink),
@@ -62,6 +71,14 @@ impl PhaseProgress {
         self.completed_items.fetch_add(1, Ordering::Relaxed);
         self.completed_bytes.fetch_add(bytes, Ordering::Relaxed);
         self.report();
+    }
+
+    /// An item found and done in one step, such as a catalog node read as the
+    /// walk reaches it.
+    pub(crate) fn found_completed(&self, bytes: u64) {
+        self.planned_items.fetch_add(1, Ordering::Relaxed);
+        self.planned_bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.completed(bytes);
     }
 
     pub(crate) fn read(&self) -> PhaseCounters {

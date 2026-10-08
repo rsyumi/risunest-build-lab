@@ -129,9 +129,14 @@ export async function applyLwwWorkingSetUnits(
             if (Object.hasOwn(root, id)) (baseline.root as unknown as Record<string, unknown>)[id] = canonicalClone((root as unknown as Record<string, unknown>)[id])
             else delete (baseline.root as unknown as Record<string, unknown>)[id]
             // The fallback for a received selection this working set cannot resolve is not a local selection to save.
-            if (id === 'selectedPersona' && typeof root.selectedPersona === 'string' && database.selectedPersona === remote[id] &&
-                !database.personas?.some((value) => value.id === root.selectedPersona)) {
-                (baseline.root as unknown as Record<string, unknown>).selectedPersona = database.personas?.[database.selectedPersona]?.id ?? database.selectedPersona
+            if (id === 'botPresetsId' || id === 'selectedPersona') {
+                const records: readonly ({ id?: unknown } | undefined)[] = (id === 'botPresetsId' ? database.botPresets : database.personas) ?? []
+                const received = root[id], index = database[id]
+                if (typeof received === 'string' && index === remote[id] && !records.some((value) => value?.id === received)) {
+                    const fallbackId = records[index]?.id
+                    const baselineRoot = baseline.root as unknown as Record<string, unknown>
+                    baselineRoot[id] = typeof fallbackId === 'string' ? fallbackId : index
+                }
             }
         } else if (kind === 'character') {
             const live = charactersById.get(id)
