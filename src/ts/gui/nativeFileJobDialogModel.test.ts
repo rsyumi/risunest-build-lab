@@ -181,12 +181,38 @@ describe('nativeFileJobDialogModel', () => {
         'converted-inlay-provenance', 'inlay-ids-remapped', 'asset-paths-remapped',
         'opaque-plugin-inlay-references-unverified', 'opaque-plugin-asset-references-unverified',
         'inlay-codec-playback-unverified', 'asset-playback-unverified',
-        'android-saf-provider-not-atomic', 'android-saf-unavailable', 'post-refresh-followup-failed', 'unknown-future-code'])
+        'android-saf-unavailable', 'post-refresh-followup-failed', 'unknown-future-code'])
     ('never uses a warning identifier as primary text: %s', code => {
         const model = buildNativeFileJobDialogModel(null, outcome({ warningCodes: [code] }), 0)
         expect(model.warnings[0]).not.toContain(code)
         expect(model.terminal?.details).toContain(`[${code}]`)
         if (code !== 'unknown-future-code') expect(model.warnings[0]).not.toBe(copy.warningUnknown)
+    })
+
+    it('shows the non-atomic save warning only while an Android save runs', () => {
+        const saving = buildNativeFileJobDialogModel(
+            running({
+                kind: 'export',
+                format: 'library-backup',
+                status: status({ kind: 'export-portable-backup', phase: 'publishing-destination', warningCodes: ['android-saf-provider-not-atomic'] }),
+                observedStages: ['preparing-export', 'writing-export', 'finalizing-export', 'publishing-destination'],
+            }),
+            null,
+            0,
+        )
+        expect(saving.warnings).toEqual([copy.warningProviderNotAtomic])
+        const saved = buildNativeFileJobDialogModel(null, outcome({
+            kind: 'export', format: 'library-backup', warningCodes: ['android-saf-provider-not-atomic'],
+        }), 0)
+        expect(saved.terminal?.summary).toBe(copy.resultExportSucceeded)
+        expect(saved.warnings).toEqual([])
+        expect(saved.terminal?.details).toBe('')
+        const interrupted = buildNativeFileJobDialogModel(null, outcome({
+            kind: 'export', format: 'library-backup', state: 'cancelled', partialWritesPossible: true,
+            warningCodes: ['android-saf-provider-not-atomic', 'partial-destination-may-remain'],
+        }), 0)
+        expect(interrupted.warnings).toEqual([languageEnglish.screenshotPartialDestinationMayRemain])
+        expect(interrupted.terminal?.details).toBe('[partial-destination-may-remain]')
     })
 
     it('is closed when nothing is running and nothing finished', () => {

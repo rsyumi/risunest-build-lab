@@ -87,9 +87,34 @@ async function publishNow(step: string, connectionId: string, observer: ReturnTy
   return { publishCalls: calls, observed: observer.observed, queued };
 }
 
+/** Turns on sync for the connection with the sync switch's call, answering a confirmation as a person would. */
+async function turnSyncOn(driver: SyncDriver, step: string, connectionId: string) {
+  const { native, production, registry } = await modules();
+  const { get } = await import("svelte/store");
+  const { alertStore } = await import("../../src/ts/stores.svelte");
+  const dialogs = { replacementShown: false, replacementGatedByCheckbox: null as boolean | null, previousFilesShown: false };
+  const binding = guarded(step, () => registry.bindSyncTarget({ kind: "external", connectionId }));
+  let settled = false;
+  binding.then(() => { settled = true; }, () => { settled = true; });
+  const deadline = Date.now() + 180_000;
+  while (!settled) {
+    if (alertStore.dialogVisible()) await driver.answerDialog(get(alertStore), "refuse", dialogs);
+    if (Date.now() > deadline) missing(step, "turning on sync did not finish", dialogs);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const outcome = await binding;
+  await guarded(step, () => production.refreshExternalStorageProductionState());
+  if (outcome.kind !== "bound") missing(step, "turning on sync was cancelled");
+  const state = await native.state();
+  if (state.target.kind !== "external" || state.target.connectionId !== connectionId)
+    missing(step, "the connection did not become the sync target", { target: state.target.kind });
+  return { action: outcome.kind === "bound" ? outcome.action : null, target: state.target.kind, ...dialogs };
+}
+
 /**
  * Seeds an unbound profile, connects a new WebDAV sync repository, turns on sync so it becomes the
- * sync target, changes the last message and publishes it.
+ * sync target, changes the last message and publishes it, then turns sync off and on again and
+ * publishes once more.
  */
 export async function webDavSyncPublish(driver: SyncDriver, input: {
   seed: Seed; platform: "macos" | "ios"; characterId: string; webdav: WebDavInput; first: string;
@@ -125,35 +150,23 @@ export async function webDavSyncPublish(driver: SyncDriver, input: {
       recoveryKeyIssued: Boolean(result.recovery?.key), remoteVerified: prepared.endpoint.remoteVerified,
     };
   });
-  await driver.step("sync-result", "sync-on", async () => {
-    const { native, production, registry } = await modules();
-    const { get } = await import("svelte/store");
-    const { alertStore } = await import("../../src/ts/stores.svelte");
-    const calls = observer.calls.length;
-    const dialogs = { replacementShown: false, replacementGatedByCheckbox: null as boolean | null, previousFilesShown: false };
-    // The same call as the sync switch; a confirmation it raises is answered as a person would.
-    const binding = guarded("sync-on", () => registry.bindSyncTarget({ kind: "external", connectionId }));
-    let settled = false;
-    binding.then(() => { settled = true; }, () => { settled = true; });
-    const deadline = Date.now() + 180_000;
-    while (!settled) {
-      if (alertStore.dialogVisible()) await driver.answerDialog(get(alertStore), "refuse", dialogs);
-      if (Date.now() > deadline) missing("sync-on", "turning on sync did not finish", dialogs);
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    const outcome = await binding;
-    await guarded("sync-on", () => production.refreshExternalStorageProductionState());
-    if (outcome.kind !== "bound") missing("sync-on", "turning on sync was cancelled");
-    const state = await native.state();
-    if (state.target.kind !== "external" || state.target.connectionId !== connectionId)
-      missing("sync-on", "the connection did not become the sync target", { target: state.target.kind });
-    return { action: outcome.kind === "bound" ? outcome.action : null, target: state.target.kind, ...dialogs, initialPublishCalls: observer.calls.slice(calls) };
-  });
+  await driver.step("sync-result", "sync-on", () => turnSyncOn(driver, "sync-on", connectionId));
   await driver.step("sync-result", "changed", async () => {
     await driver.editLastMessage(input.characterId, input.first, "external-sync-change");
     return { persisted: true };
   });
-  const published = await driver.step("sync-result", "published", () => publishNow("published", connectionId, observer));
+  await driver.step("sync-result", "published", () => publishNow("published", connectionId, observer));
+  // Turning the switch off and on again in one session must bind again.
+  await driver.step("sync-result", "sync-off", async () => {
+    const { native, production, registry } = await modules();
+    await guarded("sync-off", () => registry.unbindSyncTarget());
+    await guarded("sync-off", () => production.refreshExternalStorageProductionState());
+    const state = await native.state();
+    if (state.target.kind !== "none") missing("sync-off", "sync stayed on after turning it off", { target: state.target.kind });
+    return { target: state.target.kind };
+  });
+  await driver.step("sync-result", "sync-on-again", () => turnSyncOn(driver, "sync-on-again", connectionId));
+  const published = await driver.step("sync-result", "republished", () => publishNow("republished", connectionId, observer));
   const location = await driver.step("sync-result", "marker-kept", async () => {
     const found = await driver.findMarker(input.first);
     if (!found.location) missing("marker-kept", "the published message is not in the library");

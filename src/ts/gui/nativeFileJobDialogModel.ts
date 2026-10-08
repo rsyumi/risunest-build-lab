@@ -766,6 +766,9 @@ export function buildNativeFileJobDialogModel(
         if (outcome.interruption === 'background-expired') {
             summary = outcome.partialWritesPossible ? copy.resultBackgroundExpiredPartial : copy.resultBackgroundExpired
         }
+        // The non-atomic save warning only matters while saving; an interrupted
+        // save reports the partial file with its own code.
+        const warningCodes = outcome.warningCodes.filter((code) => code !== 'android-saf-provider-not-atomic')
         return {
             compact: format === 'content',
             open: true,
@@ -797,14 +800,14 @@ export function buildNativeFileJobDialogModel(
                       outcome.result,
                       outcome.state === 'succeeded',
                   ),
-            warnings: outcome.warningCodes.map(warningText),
+            warnings: warningCodes.map(warningText),
             terminal: {
                 state: outcome.state,
                 summary,
                 reason,
                 details: [
                     outcome.error ? `[${outcome.error.code}] ${outcome.error.message}` : '',
-                    ...outcome.warningCodes.map((code) => `[${code}]`),
+                    ...warningCodes.map((code) => `[${code}]`),
                 ].filter(Boolean).join('\n'),
                 restarting,
             },

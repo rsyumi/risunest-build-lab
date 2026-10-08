@@ -1,3 +1,4 @@
+import { get } from 'svelte/store'
 import type { PersistentDataRuntime, PersistentDestructiveReplacementFence } from './persistentDataRuntime'
 import type {PersistentMutationToken} from './saveCoordinator'
 
@@ -48,7 +49,18 @@ export async function acquireUpstreamImportPause(runtime: UpstreamReplacementRun
 }
 
 export async function confirmUpstreamLibraryReplacement(bound: boolean, warnings: string[] = []): Promise<boolean> {
-    const [{ alertCheckboxConfirm }, { language }] = await Promise.all([import('../alert'), import('../../lang')])
+    const [{ alertActionConfirm, alertCheckboxConfirm }, { language }, { nativeFileJobHost }] = await Promise.all([
+        import('../alert'), import('../../lang'), import('./nativeFileJobManager'),
+    ])
+    // The onboarding runs on a device without data, so an unbound restore there replaces nothing.
+    if (!bound && get(nativeFileJobHost) === 'onboarding') {
+        return warnings.length === 0 || await alertActionConfirm({
+            title: language.lwwSync.restoreTitle,
+            description: warnings.join('\n\n'),
+            actionLabel: language.lwwSync.restoreAction,
+            cancelLabel: language.lwwSync.cancelAction,
+        })
+    }
     return (await alertCheckboxConfirm({
         title: language.lwwSync.restoreTitle,
         description: [bound ? language.lwwSync.restoreDescriptionBound : language.lwwSync.restoreDescription, ...warnings].join('\n\n'),

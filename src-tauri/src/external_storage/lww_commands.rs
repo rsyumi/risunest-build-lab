@@ -235,6 +235,16 @@ fn check_store(
     }
     Ok(())
 }
+/// The connection's cancellation for a new binding attempt. Turning sync off
+/// leaves the old token cancelled, so the attempt takes a fresh one; a live
+/// token is kept so a fence during the attempt still stops it.
+fn binding_cancellation(context: &Context) -> Result<Cancellation> {
+    let mut cancel = context.cancel.lock().map_err(runtime::local_error)?;
+    if cancel.check().is_err() {
+        *cancel = Cancellation::default();
+    }
+    Ok(cancel.clone())
+}
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Inspection {
@@ -251,7 +261,7 @@ pub(crate) async fn external_lww_inspect(app: AppHandle, request: Request) -> Re
     logged("external_lww_inspect", Box::pin(async move {
         let context = context(&request.connection_id)?;
         let mut session = context.session.lock().await;
-        session.cancel = context.cancel.lock().map_err(runtime::local_error)?.clone();
+        session.cancel = binding_cancellation(&context)?;
         open(&app, &request.connection_id, &mut session).await?;
         let store = check(&app, &request, false)?;
         let engine = session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
@@ -844,6 +854,22 @@ mod tests {
             connect_with(root.path(), &stored, &mut session, open_fixture(&stored, &opens)).await.unwrap();
             assert_eq!(opens.get(), 1);
         });
+    }
+
+    #[test]
+    fn binding_after_a_fence_takes_a_fresh_cancellation_that_a_later_fence_stops() {
+        let context = context("synthetic-binding-cancellation").unwrap();
+        let first = binding_cancellation(&context).unwrap();
+        assert!(first.check().is_ok());
+        assert!(binding_cancellation(&context).unwrap().same(&first));
+        // Turning sync off cancels the connection's token and leaves it cancelled.
+        context.cancel.lock().unwrap().cancel();
+        assert!(first.check().is_err());
+        let again = binding_cancellation(&context).unwrap();
+        assert!(again.check().is_ok());
+        assert!(!again.same(&first));
+        context.cancel.lock().unwrap().cancel();
+        assert!(again.check().is_err());
     }
 
     fn webdav_collection(href: &str) -> String {

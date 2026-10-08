@@ -362,9 +362,10 @@ final class NativeUITests: XCTestCase {
         let step = texts.containing(NSPredicate(format: "label BEGINSWITH %@", "sync-step:")).firstMatch
         var lastStep = "sync-step:unknown"
         // An app that stops running ends the wait at once, with the last step it showed.
+        // The step label is replaced as the phase advances, so it is read without failing when it is gone.
         let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             if result.exists || failure.exists || app.state == .notRunning { return true }
-            if step.exists { lastStep = step.label }
+            if let label = try? step.snapshot().label { lastStep = label }
             return false
         }, object: nil)
         let outcome = XCTWaiter().wait(for: [settled], timeout: 600)
@@ -378,7 +379,7 @@ final class NativeUITests: XCTestCase {
         }
         guard outcome == .completed, result.exists || failure.exists else {
             let stopped = app.state == .notRunning
-            let last = step.exists ? step.label : lastStep
+            let last = (try? step.snapshot().label) ?? lastStep
             let attachment = XCTAttachment(string: "\(stopped ? "app-stopped" : "timeout") \(last)")
             attachment.name = "\(phase)-last-step"
             attachment.lifetime = .keepAlways
