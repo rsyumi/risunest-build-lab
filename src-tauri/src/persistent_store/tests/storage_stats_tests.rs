@@ -1,4 +1,5 @@
 use super::*;
+use crate::persistent_store::StorageCountBytes;
 
 #[test]
 fn storage_stats_reports_database_file_bytes_and_zero_global_catalogs_for_a_new_store() {
@@ -10,6 +11,9 @@ fn storage_stats_reports_database_file_bytes_and_zero_global_catalogs_for_a_new_
     assert!(stats.database_bytes > 0);
     assert_eq!(stats.asset_objects.count, 0);
     assert_eq!(stats.asset_objects.bytes, 0);
+    assert_eq!(stats.asset_bodies, StorageCountBytes { count: 0, bytes: 0 });
+    assert_eq!(stats.missing_asset_bodies, StorageCountBytes { count: 0, bytes: 0 });
+    assert_eq!(stats.inlay_bodies, StorageCountBytes { count: 0, bytes: 0 });
     assert_eq!(stats.plugin_storage.count, 0);
     assert_eq!(stats.characters.active.count, 0);
     assert_eq!(stats.characters.trashed_count, 0);
@@ -43,5 +47,74 @@ fn storage_stats_only_counts_active_generation_rows() {
     assert_eq!(stats.plugin_storage.bytes, 7);
     assert_eq!(stats.asset_aliases[0].bytes, 17);
     assert_eq!(stats.asset_objects.bytes, 23);
+    assert_eq!(stats.asset_bodies, StorageCountBytes { count: 0, bytes: 0 });
+    assert_eq!(stats.missing_asset_bodies, StorageCountBytes { count: 1, bytes: 23 });
     assert_eq!(stats.asset_object_deletions[0].bytes, 29);
+}
+
+fn put_body(store: &mut PersistentStore, key: &str, inlay: bool, bytes: &[u8]) -> String {
+    let object = crate::asset_repository::PayloadCas::new(store.repository_root())
+        .unwrap()
+        .prepare_bytes(bytes)
+        .unwrap();
+    store
+        .asset_object_catalog()
+        .register(
+            &[asset_object_catalog::AssetObjectRegistration {
+                object_hash: object.content_hash.clone(),
+                byte_size: object.byte_size,
+            }],
+            1,
+        )
+        .unwrap();
+    let alias = AssetAlias {
+        key: key.into(),
+        object_hash: Some(object.content_hash.clone()),
+        kind: if inlay { "inlay" } else { "asset" }.into(),
+        size: bytes.len() as i64,
+        mime: "image/png".into(),
+        name: "synthetic".into(),
+        ext: "png".into(),
+        inlay_type: inlay.then(|| "image".into()),
+        width: None,
+        height: None,
+        metadata: serde_json::json!({}),
+    };
+    store.commit_asset_alias(&alias, store.revision().unwrap()).unwrap();
+    object.content_hash
+}
+
+#[test]
+fn storage_stats_counts_the_bodies_this_device_stores_apart_from_the_catalog() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let mut store = PersistentStore::open(directory.path()).expect("open store");
+    let asset = put_body(&mut store, "assets/synthetic-asset.png", false, &[1; 300]);
+    let inlay = put_body(&mut store, "synthetic-inlay", true, &[2; 50]);
+    // A second alias for the same inlay body counts it once.
+    let shared = put_body(&mut store, "synthetic-inlay-copy", true, &[2; 50]);
+    assert_eq!(shared, inlay);
+    // A body with no catalog row is still stored here; other names are not bodies.
+    let cas = crate::asset_repository::PayloadCas::new(store.repository_root()).unwrap();
+    let orphan = cas.prepare_bytes(&[3; 7]).unwrap();
+    let shard = store.repository_root().join("assets").join("objects").join(&asset[..2]);
+    std::fs::write(shard.join("not-a-body.tmp"), [0; 11]).unwrap();
+
+    let stats = store.storage_stats().expect("storage stats");
+    assert_eq!(stats.asset_objects, StorageCountBytes { count: 2, bytes: 350 });
+    assert_eq!(stats.asset_bodies, StorageCountBytes { count: 3, bytes: 357 });
+    assert_eq!(stats.missing_asset_bodies, StorageCountBytes { count: 0, bytes: 0 });
+    assert_eq!(stats.inlay_bodies, StorageCountBytes { count: 1, bytes: 50 });
+
+    for (hash, size) in [(&inlay, 50), (&orphan.content_hash, 7)] {
+        assert!(matches!(
+            cas.unlink_exact_object(hash, size, &crate::asset_repository::object_physical_key(hash))
+                .unwrap(),
+            crate::asset_repository::ExactObjectUnlink::Removed { .. }
+        ));
+    }
+    let stats = store.storage_stats().expect("storage stats");
+    assert_eq!(stats.asset_objects, StorageCountBytes { count: 2, bytes: 350 });
+    assert_eq!(stats.asset_bodies, StorageCountBytes { count: 1, bytes: 300 });
+    assert_eq!(stats.missing_asset_bodies, StorageCountBytes { count: 1, bytes: 50 });
+    assert_eq!(stats.inlay_bodies, StorageCountBytes { count: 0, bytes: 0 });
 }

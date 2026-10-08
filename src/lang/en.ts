@@ -1977,6 +1977,10 @@ export const languageEnglish = {
             "restoreFailed": 'The character could not be restored.',
             "archiveRefreshFailed": 'The character was archived, but the list could not be refreshed. Please restart the app.',
             "restoreRefreshFailed": 'The character was restored, but the list could not be refreshed. Please restart the app.',
+            "archiveRemoteAssetUnavailable": 'Files kept only on the server or external storage could not be fetched, so the character was not archived. Check the connection and try again.',
+            "archiveAssetMissing": 'Some files are gone, so the character was not archived. Review them in Data check.',
+            "restoreRemoteAssetUnavailable": 'Files kept only on the server or external storage could not be fetched, so the character was not restored. Check the connection and try again.',
+            "restoreAssetMissing": 'Some files are gone, so the character was not restored. Review them in Data check.',
         },
         exportExcluded: {
             title: 'Export finished',
@@ -2190,7 +2194,6 @@ export const languageEnglish = {
             registrationCode: 'Registration code',
             readRegistration: 'Read code',
             scanRegistration: 'Scan QR code',
-            cancelScan: 'Cancel scanning',
             registrationInvalid: 'The registration code is invalid.',
             cameraDenied:
                 'Camera access was not allowed. Try again or paste the code.',
@@ -2206,15 +2209,16 @@ export const languageEnglish = {
             residency: {
                 title: 'Asset storage',
                 description:
-                    'The asset storage mode is chosen separately for each device. Keeping files locally loads assets faster but increases sync time and the space used. Using remote files saves space, but loading an asset can take longer.',
+                    'Keeping all assets on this device loads them faster but increases sync time and storage use. Loading them from the server when needed saves space, and the current character icon of each character not in the trash stays on this device.',
                 full: 'Keep everything on this device',
                 remote: 'Load from the server when needed',
                 local: 'Files on this device',
                 remoteOnly: 'Files only on the server',
                 externalOnly: 'Files only in external storage',
                 unavailable: 'Files not found',
+                checking: 'Checking files…',
                 cleanupNote:
-                    'Cleanup removes this device’s copies of files that are on the server.',
+                    'Cleanup removes this device’s copies of files that are on the server, except the current character icons of characters not in the trash.',
                 clean: 'Clear copies on this device',
                 cancel: 'Cancel',
                 working:
@@ -2271,6 +2275,7 @@ export const languageEnglish = {
             progressFiles: 'Files processed',
             pendingChanges: 'Changes to upload',
             elapsed: 'Elapsed',
+            remaining: 'Remaining',
             count: '{0}',
             itemsCount: '{0} items',
             activity: { enumerating: 'Counting items', preparing: 'Preparing changes on this device', downloading: 'Downloading and checking incoming data', verifying: 'Checking items on the server', uploading: 'Uploading', confirming: 'Waiting for server confirmation', staging: 'Saving received data' },
@@ -2289,6 +2294,10 @@ export const languageEnglish = {
             errorHelp:
                 'Sync could not finish. Your edits on this device are unchanged. Try again.',
             "connectRowHelpScan": 'Paste the registration code from the server or scan its QR code. Each device needs its own registration code.',
+        },
+        qrScan: {
+            instruction: 'Fit the QR code inside the square.',
+            instructionOnboarding: 'Fit the QR code inside the square.',
         },
         menuTitle: 'RisuNest',
         tabList: 'RisuNest settings tabs',
@@ -2324,6 +2333,9 @@ export const languageEnglish = {
         },
         ui: {
             title: 'UI',
+            messageSendKey: 'Message send key',
+            messageSendKeyHelp: 'With Enter, Enter sends a message and Shift+Enter inserts a newline. With Ctrl/Shift+Enter, Ctrl+Enter or Shift+Enter sends a message and Enter inserts a newline. With Send button, Enter inserts a newline and only the send button sends a message.',
+            messageSendKeyButton: 'Send button',
             chatEditPopup: 'Edit chat messages in a popup',
             chatEditPopupHelp: 'Pressing the chat edit button lets you edit the message in a popup.',
         },
@@ -2442,8 +2454,6 @@ export const languageEnglish = {
             createSnapshotHelp:
                 'Saves the current state so you can return to it later.',
             createSnapshot: 'Create now',
-            gcSeparation:
-                'Clearing a broken link in the data check does not delete the file. Find and delete unused files here when needed.',
             gcSearching: 'Looking for unused files',
             gcDeleting: 'Deleting unused files',
             gcListTitle: 'Files to delete',
@@ -2755,6 +2765,8 @@ export const languageEnglish = {
             "reasonBusy": 'Another operation is using the data. Try again after it finishes.',
             "reasonPendingOperation": 'Resolve the pending synchronization operation and try again.',
             "reasonServerStatus": 'The synchronization server status could not be checked. Check the connection and try again.',
+            "reasonRemoteAssetUnavailable": 'Files kept only on the server or external storage could not be fetched, so nothing was exported. Check the connection and try again.',
+            "reasonAssetMissing": 'Some files are gone, so nothing was exported. Review them in Data check.',
             "warningSourceProblems": 'Some source data could not be read. Check the exported recovery file.',
             "warningRepairRequired": 'The source was preserved, but requires repair before it can be restored.',
             "warningCompatibilityLosses": 'Some data is not supported by the selected backup format and was excluded or converted.',
@@ -2884,9 +2896,9 @@ export const languageEnglish = {
             },
             hub: {
                 title: 'Connect to a sync server',
-                lead: 'Create a registration code for this device under Device management on the sync server and paste it below.',
+                lead: 'Register this device on the sync server, then paste its registration code below.',
                 leadScan:
-                    'Create a registration code for this device under Device management on the sync server, then scan its QR code or paste it below.',
+                    'Register this device on the sync server, then scan its QR code or paste its registration code below.',
             },
             external: {
                 title: 'Connect external storage',
@@ -2959,7 +2971,7 @@ export const languageEnglish = {
         replaceAction: "Replace",
         cancelAction: "Cancel",
         clockBlocked: "Sync stopped because the device and remote times differ. Correct the time and try again.",
-        writerCollision: "Sync stopped because another device uses the same identity. Reconnect as a new device.",
+        writerCollision: "Sync stopped because another device uses the same identity. Register a new device on the sync server, enter the new registration code, then press Connect as new device.",
         unitTooLarge: "Sync stopped because an item on this device is too large to send to the server. Make the large item smaller and try again.",
         newDeviceAction: "Connect as new device",
         restoreTitle: "Restore the backup?",
@@ -2974,6 +2986,8 @@ export const languageEnglish = {
         downloadFailedNotConnected: "The files could not be downloaded, so the connection was not made. Try again, or connect without downloading.",
         previousStorageUnavailable: "Files kept only on the server or external storage used before could not be fetched, so sync stopped. Try again when it can be reached.",
         registrationRevoked: "This device's registration was removed on the server, so it cannot sync. Register this device again on the server, then enter the new registration code.",
+        registrationUsed: "This registration code was already used, so this device cannot connect with it. Register a new device on the sync server, then enter the new registration code.",
+        registrationUsedOnboarding: "This registration code was already used, so this device cannot connect with it. Register a new device on the sync server, then enter the new registration code.",
         bindingIncomplete: "The connection was not completed. Press Connect and sync to finish it.",
     },
     navigationBlockedWhileEditingPaused: "Editing is paused, so a character cannot be selected.",

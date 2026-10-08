@@ -1,14 +1,20 @@
-import { registeredCustomPluginMCPs, registerMCPModule } from '../process/mcp/pluginmcp'
+import { registeredCustomPluginMCPs, registerMCPModule, unregisterMCPModule } from '../process/mcp/pluginmcp'
 import { captureSelectedConversationTarget } from '../storage/persistentDataRuntime.svelte'
 import { createHostToolBridge, type HostToolSource } from './hostToolBridge'
 
-const pluginSourceOwners = new Map<string, string>()
+const pluginSourceOwners = new WeakMap<object, string>()
 const builtInSources = ['internal:risuai', 'internal:aiaccess', 'internal:googlesearch', 'internal:graphmem', 'internal:dice']
 
 /** `registerMCP` for one plugin; the bridge leaves a plugin's own MCPs out of its tools. */
-export async function registerOwnedPluginMCP(owner: string, ...args: Parameters<typeof registerMCPModule>): Promise<void> {
-    await registerMCPModule(...args)
-    pluginSourceOwners.set(args[0].identifier, owner)
+export async function registerOwnedPluginMCP(owner: string, ...args: Parameters<typeof registerMCPModule>): Promise<() => void> {
+    const client = await registerMCPModule(...args)
+    const id = args[0].identifier
+    pluginSourceOwners.set(client, owner)
+    return () => {
+        if (registeredCustomPluginMCPs.get(id) !== client) return
+        void unregisterMCPModule(id)
+        pluginSourceOwners.delete(client)
+    }
 }
 
 async function createBuiltInSource(id: string): Promise<HostToolSource | null> {
@@ -32,7 +38,10 @@ export const hostToolBridge = createHostToolBridge({
     builtInSourceIds: () => 'showDirectoryPicker' in window ? ['internal:fs', ...builtInSources] : builtInSources,
     createBuiltInSource,
     pluginSources: () => registeredCustomPluginMCPs,
-    pluginSourceOwner: (id) => pluginSourceOwners.get(id),
+    pluginSourceOwner: (id) => {
+        const client = registeredCustomPluginMCPs.get(id)
+        return client ? pluginSourceOwners.get(client) : undefined
+    },
     captureSelectedConversation: () => {
         const selected = captureSelectedConversationTarget()
         return selected ? { characterId: selected.characterId, conversationId: selected.conversationId } : null

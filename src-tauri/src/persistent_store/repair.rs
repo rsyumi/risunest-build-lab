@@ -709,6 +709,38 @@ fn reference_edits(
 }
 
 impl PersistentStore {
+    /// Whether each alias's body is on this device or held by the Sync server or a live external
+    /// storage connection. An alias the live generation no longer has has no body.
+    pub(crate) fn alias_bodies_available(&self, aliases: &[(String, String)]) -> StoreResult<Vec<bool>> {
+        let generation = super::active_generation(&self.connection)?;
+        let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
+        let mut available = vec![false; aliases.len()];
+        let mut absent = Vec::new();
+        for (index, (kind, key)) in aliases.iter().enumerate() {
+            let hash: Option<String> = rusqlite::OptionalExtension::optional(self.connection.query_row(
+                "SELECT object_hash FROM asset_aliases WHERE generation=?1 AND kind=?2 AND logical_key=?3",
+                rusqlite::params![generation, kind, key],
+                |row| row.get(0),
+            ))?
+            .flatten();
+            let Some(hash) = hash else { continue };
+            match cas.stat_object(&hash)? {
+                Some(_) => available[index] = true,
+                None => absent.push((index, hash)),
+            }
+        }
+        if !absent.is_empty() {
+            let hashes = absent.iter().map(|(_, hash)| hash.clone()).collect::<Vec<_>>();
+            let held = super::asset_residency::RemoteHolders::open(&self.repository_root)
+                .and_then(|mut holders| holders.held(&hashes))
+                .map_err(|error| StoreError::Store { message: error.code })?;
+            for ((index, _), held) in absent.into_iter().zip(held) {
+                available[index] = held;
+            }
+        }
+        Ok(available)
+    }
+
     /// Stages the chosen repair, re-checks it with the gate a backup uses, and activates it in
     /// one transaction. The journal it returns is what an undo replays.
     pub(crate) fn apply_repair(

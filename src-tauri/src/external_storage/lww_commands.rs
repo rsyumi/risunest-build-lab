@@ -497,6 +497,9 @@ async fn receive_page(
     if finished > 0 {
         record_sync_round(engine);
     }
+    if let Some(page) = &page {
+        ExternalLwwEngine::prepare_archive_bodies(store, page, cancel).await?;
+    }
     Ok((page, finished > 0))
 }
 

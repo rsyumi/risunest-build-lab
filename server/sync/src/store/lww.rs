@@ -504,7 +504,7 @@ impl Store {
             "INSERT INTO state_pins VALUES(?1,?2,?3,?4)",
             params![id, device.id, head.seq.as_str(), expires],
         )?;
-        tx.execute(
+        let units = tx.execute(
             "INSERT INTO state_pin_units SELECT ?1,key,body FROM units",
             [&id],
         )?;
@@ -513,6 +513,7 @@ impl Store {
             pin_id: id,
             start_seq: head.seq.as_str().to_owned().try_into()?,
             expires_at_ms: (expires as u64 * 1000).into(),
+            unit_count: (units as u64).into(),
         })
     }
 

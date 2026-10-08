@@ -162,7 +162,7 @@ pub(crate) fn confirmed_restore_activation<R: Runtime>(app:&AppHandle<R>,job:&Du
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn external_storage_confirm_restore_adoption<R: Runtime>(app:AppHandle<R>,request:RestoreAdoptionRequest)->Result<Value> {
     logged("external_storage_confirm_restore_adoption", (|| confirm_restore_adoption_in_store(&runtime::native_store(&app)?,&runtime::root(&app)?,&request))())
 }
@@ -417,27 +417,55 @@ pub(crate) async fn prepare_database_first_backup(
     jobs.put(&current)?;
     remote
     };
-    let staging_root = staging_directory(&root, job);
     let transferred = runtime::transfer_progress(&root, &job.id);
-    let database=snapshot_restore::download_snapshot_database_first(&remote,&staging_root,&root,&root,
-        &job.request.connection_id,&connected.root_key,connected.provider.as_ref(),&connected.handle,&transferred,cancel).await?;
-    let snapshot=&database.snapshot;
-    cancel.check()?;
-    validate_download(connected, snapshot_id, snapshot)?;
+    download_database_first_backup(root, connected, job, snapshot_id, &remote, &transferred, cancel).await
+}
+
+/// Reads every catalog the restore needs before it fetches a pack, so the
+/// transfer it reports is planned once, the asset bodies it receives after
+/// adoption included, and its total does not move from the first reading on.
+async fn download_database_first_backup(
+    root:&Path,connected:&ConnectedRepository,job:&DurableJob,snapshot_id:&str,
+    remote:&super::packaging::RemoteObject,transferred:&super::phase_progress::PhaseProgress,cancel:&Cancellation,
+)->Result<(snapshot_restore::DatabaseFirstSnapshot,Vec<super::sections::CapturedSection>)> {
+    let staging_root = staging_directory(root, job);
+    let walked = super::phase_progress::PhaseProgress::silent();
+    let walk=snapshot_restore::walk_snapshot_database_first(remote,&staging_root,root,root,
+        &job.request.connection_id,&connected.root_key,connected.provider.as_ref(),&connected.handle,&walked,cancel).await?;
     let selection = restore_selection(job.request.restore_areas.as_deref())?;
-    require_restorable_sections(&selection, snapshot, &job.admission_identity.store_id)?;
-    let sections = snapshot_restore::download_sections(
-        &remote,
+    let walked_sections = snapshot_restore::walk_sections(
+        remote,
         &selection.sections,
         &staging_root,
         &connected.root_key,
-        None,
         connected.provider.as_ref(),
         &connected.handle,
-        &transferred,
+        &walked,
         cancel,
     )
     .await?;
+    let (items, bytes) = walk.remaining()?;
+    let (section_items, section_bytes) = walked_sections.remaining();
+    transferred.plan_after(
+        walked.read(),
+        items.saturating_add(section_items),
+        bytes.saturating_add(section_bytes),
+    );
+    let database=snapshot_restore::fetch_snapshot_database_first(walk,&connected.root_key,connected.provider.as_ref(),&connected.handle,transferred,cancel).await?;
+    let snapshot=&database.snapshot;
+    cancel.check()?;
+    validate_download(connected, snapshot_id, snapshot)?;
+    require_restorable_sections(&selection, snapshot, &job.admission_identity.store_id)?;
+    let sections = walked_sections
+        .fetch(
+            &staging_root,
+            &connected.root_key,
+            connected.provider.as_ref(),
+            &connected.handle,
+            transferred,
+            cancel,
+        )
+        .await?;
     transferred.flush();
     if sections.len() != selection.sections.len() {
         return Err(ProviderError::new(ErrorKind::NotFound));
@@ -1726,6 +1754,60 @@ pub(super) mod tests {
             let settled=runtime::external_storage_get_job(app.handle().clone(),job.id.clone()).unwrap();
             assert_eq!(settled["state"],"succeeded");
             assert_eq!((settled["completedBytes"].as_str(),settled["totalBytes"].as_str()),(Some(total.to_string().as_str()),Some(total.to_string().as_str())));
+        });
+    }
+
+    /// A restore reads every catalog it needs before it fetches a pack, so its
+    /// transfer is planned once across the original units, the records, the
+    /// device sections and the asset bodies it receives after adoption. The
+    /// first reading already carries the total the restore ends at, no reading
+    /// runs past it, and no object is read twice to get there.
+    #[test]
+    fn a_restore_plans_its_whole_transfer_before_the_first_pack() {
+        use super::super::phase_progress::{PhaseCounters,PhaseProgress};
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let backup=packaged_backup_seeded(&[vec![51;4096],vec![52;8192]],|store| {
+                store.device_store_mut().unwrap().write_setting("accountst",&json!("synthetic-planned")).unwrap();
+            }).await;
+            let destination=tempfile::tempdir().unwrap();
+            let root=destination.path();
+            let store=PersistentStore::open(root).unwrap();
+            let job=admit(root,&store,&backup);
+            let job=JobStore::open(root).unwrap().read(&job.id).unwrap();
+            let stored:risunest_external_storage_format::snapshot::StoredObject=serde_json::from_value(backup.restore_source.clone()).unwrap();
+            let remote=super::super::packaging::RemoteObject::from_stored(&stored,&backup.connected.handle).unwrap();
+            let readings:std::sync::Arc<std::sync::Mutex<Vec<PhaseCounters>>>=Default::default();
+            let collected=readings.clone();
+            let progress=PhaseProgress::new(move|reading|collected.lock().unwrap().push(reading));
+            let ids=backup.provider.uploaded_ids();
+            let attempts=||ids.iter().map(|id|backup.provider.read_attempts(id)).collect::<Vec<_>>();
+            let (attempts_before,received_before)=(attempts(),backup.provider.transferred_body_bytes().1);
+            let (database,sections)=download_database_first_backup(root,&backup.connected,&job,&backup.backup_id,&remote,&progress,&Cancellation::default()).await.unwrap();
+            assert!(sections.iter().any(|section|!section.sources.is_empty()));
+            assert!(!database.missing.is_empty());
+            for (before,after) in attempts_before.iter().zip(attempts()) {assert!(after-before<=1);}
+
+            let last=progress.read();
+            let readings=readings.lock().unwrap().clone();
+            let first=readings.first().copied().unwrap();
+            assert_eq!((first.total_items,first.total_bytes),(last.total_items,last.total_bytes));
+            for reading in &readings {
+                assert_eq!((reading.total_items,reading.total_bytes),(last.total_items,last.total_bytes));
+                assert!(reading.items<=reading.total_items && reading.bytes<=reading.total_bytes);
+            }
+            // Everything read so far is counted, and what is left is exactly
+            // the packs of the asset bodies this device lacks.
+            assert_eq!(last.bytes,backup.provider.transferred_body_bytes().1-received_before);
+            let mut asset_packs=std::collections::BTreeMap::new();
+            for source in database.sources.iter().filter(|source|database.missing.contains(&source.hash)) {
+                for chunk in &source.chunks {
+                    let pack=source.packs.iter().find(|pack|pack.header.object_id==chunk.pack_id).unwrap();
+                    asset_packs.insert(chunk.pack_id.clone(),pack.ciphertext_length);
+                }
+            }
+            assert_eq!(last.total_items-last.items,asset_packs.len() as u64);
+            assert_eq!(last.total_bytes-last.bytes,asset_packs.values().sum::<u64>());
+            drop(store);
         });
     }
 

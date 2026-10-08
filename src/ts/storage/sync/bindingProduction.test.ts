@@ -62,13 +62,16 @@ it('asks about files held only by the previous storage before switching to an em
     const switchTarget = vi.fn<SyncBindingDependencies['native']['switchTarget']>(async (_expected, target, inspection) => {
         state = { ...state, target, libraryId: inspection?.libraryId ?? null, targetAuthority: '1' }; return state
     })
-    previousFiles.confirm.mockResolvedValue('download-then-connect')
-    previousFiles.download.mockResolvedValue(undefined)
+    // The question runs inside `whileAsking`, and the download it chose does not.
+    let asking = 0
+    previousFiles.confirm.mockImplementation(async () => { expect(asking).toBe(1); return 'download-then-connect' })
+    previousFiles.download.mockImplementation(async () => { expect(asking).toBe(0) })
     const installed = installSyncBindingFlow({
         native: { state: async () => structuredClone(state), assertAuthority: async () => {}, switchTarget },
         plugins: { fenceExecution: async () => {}, invalidateCaches: async () => {}, restart: async () => {} },
         withPausedWrites: operation => operation(), beginActivatedLibraryGuard: () => ({ complete() {}, async abortUnchanged() {} }),
         refreshActivatedLibrary: async () => {}, recovery: { setLifecycle() {}, registerFailure() {} },
+        whileAsking: async ask => { asking++; try { return await ask() } finally { asking-- } },
     })
     try {
         expect(await bindSyncTarget(incoming)).toMatchObject({ kind: 'bound' })

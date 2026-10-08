@@ -62,6 +62,35 @@ function gate() {
 }
 
 describe('host tool bridge wiring', () => {
+    it('revokes plugin MCP callbacks and refreshes selected MCP clients on restart', async () => {
+        state.moduleMcps = ['plugin:restart']
+        const disposeOld = await registerOwnedPluginMCP('owner', ...plugin('plugin:restart'))
+        await initializeMCPs()
+        const old = MCPs['plugin:restart']
+        const disposeNew = await registerOwnedPluginMCP('owner', ...plugin('plugin:restart'))
+        disposeOld()
+        await initializeMCPs()
+        expect(MCPs['plugin:restart']).not.toBe(old)
+        await expect(old.getToolList()).resolves.toEqual([])
+        await expect(old.callTool('echo', {})).rejects.toThrow('no longer registered')
+        expect(registeredCustomPluginMCPs.has('plugin:restart')).toBe(true)
+        disposeNew()
+        await initializeMCPs()
+        expect(MCPs['plugin:restart']).toBeUndefined()
+        expect(registeredCustomPluginMCPs.has('plugin:restart')).toBe(false)
+    })
+
+    it('keeps an enabled plugin MCP usable after its module is deselected and reselected', async () => {
+        await registerOwnedPluginMCP('owner', ...plugin('plugin:module'))
+        state.moduleMcps = ['plugin:module']
+        await initializeMCPs()
+        state.moduleMcps = []
+        await initializeMCPs()
+        state.moduleMcps = ['plugin:module']
+        await initializeMCPs()
+        await expect(MCPs['plugin:module'].getToolList()).resolves.toHaveLength(1)
+    })
+
     afterEach(async () => {
         registeredCustomPluginMCPs.clear()
         Reflect.deleteProperty(window, 'showDirectoryPicker')

@@ -161,6 +161,34 @@ pub(crate) fn save(store: &mut PersistentStore, parts: &[&str], value: serde_jso
         })
         .unwrap();
 }
+/// Inserts `messages` at `start` in the synthetic chat `char`/`chat`, which a
+/// start of 0 creates.
+pub(crate) fn insert_messages(
+    store: &mut PersistentStore,
+    start: i64,
+    messages: Vec<serde_json::Value>,
+) {
+    use crate::persistent_store::ConversationMutation;
+    if start == 0 {
+        save(store, &["exists", "character", "char"], serde_json::json!({"type":"character"}));
+        save(store, &["exists", "conversation", "char", "chat"], serde_json::json!(true));
+    }
+    store
+        .commit(&WorkingSetCommit {
+            expected_revision: store.revision().unwrap(),
+            conversations: Some(vec![ConversationMutation::ReplaceRange {
+                character_id: "char".into(),
+                conversation_id: "chat".into(),
+                start,
+                delete_count: 0,
+                messages,
+                conversation: None,
+                configured_index: None,
+            }]),
+            ..Default::default()
+        })
+        .unwrap();
+}
 fn push(client: &LwwClient, store: &mut PersistentStore) {
     assert!(publish_cycle(client, store, &[]).unwrap().is_some());
 }
@@ -1291,7 +1319,7 @@ fn a_new_target_initialization_preserves_received_issuers_under_its_authenticate
     assert_ne!(publisher, original_issuer);
     let c = new_target.client(&target);
     let original = target.lww_binding_state().unwrap();
-    let inspected = super::binding::inspect(&target, &header(&target)).unwrap();
+    let inspected = super::binding::inspect(&target, &header(&target), false).unwrap();
     let request = header(&target);
     target
         .switch_lww_binding(
@@ -1422,6 +1450,41 @@ fn bootstrap_keeps_a_lower_stamped_retirement_from_the_journal_tail() {
     let existence = changes.iter().find(|change| change.key == key).unwrap();
     assert_eq!(existence.value, UnitValue::Deleted);
     assert_eq!(existence.stamp.physical_ms.0, 20);
+}
+
+#[test]
+fn a_state_read_plans_its_listing_from_the_units_its_pin_holds() {
+    let lane = Arc::new(super::progress::ProgressLane::default());
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (watched, totals) = (lane.clone(), seen.clone());
+    let server = LocalServerFixture::with_router(move |router| {
+        router.layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                if request.uri().path() == "/state" {
+                    totals.lock().unwrap().push(watched.snapshot("binding").listed_total);
+                }
+                next.run(request)
+            },
+        ))
+    });
+    let writer = ServerWriter::new(&server.server);
+    for index in 0..300 {
+        let key = UnitKey::new(&["exists", "character", &format!("synthetic-{index}")]).unwrap();
+        writer.push(&format!("create-{index}"), &key, 100, UnitValue::inline(br#"{"type":"character"}"#).unwrap());
+    }
+    let (_root, mut store) = local();
+    let changes = super::progress::within(&lane, || {
+        let client = server.client(&store);
+        let upper = client.admission().unwrap();
+        client.state(&mut store, upper).unwrap().1
+    });
+    assert_eq!(changes.len(), 300);
+    let read = lane.snapshot("binding");
+    assert_eq!((read.listed, read.listed_total), (300, 300));
+    // Every state page was requested with the whole total already planned.
+    let seen = seen.lock().unwrap();
+    assert!(seen.len() >= 2);
+    assert!(seen.iter().all(|total| *total == 300));
 }
 
 fn publication_ids(client: &LwwClient) -> Vec<String> {

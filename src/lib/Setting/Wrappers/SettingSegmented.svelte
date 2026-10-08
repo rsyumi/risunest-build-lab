@@ -1,9 +1,9 @@
 <script lang="ts">
     import type { SettingItem, SettingContext } from 'src/ts/setting/types';
-    import { getLabel, getSettingValue, resolveLanguagePath, setSettingValue } from 'src/ts/setting/utils';
+    import { UNINITIALIZED, getLabel, getSettingValue, resolveLanguagePath, setSettingValue } from 'src/ts/setting/utils';
+    import { untrack } from 'svelte';
     import SegmentedControl from 'src/lib/UI/GUI/SegmentedControl.svelte';
     import Help from 'src/lib/Others/Help.svelte';
-    import { DBState } from 'src/ts/stores.svelte';
 
     interface Props {
         item: SettingItem;
@@ -11,6 +11,26 @@
     }
 
     let { item, ctx }: Props = $props();
+
+    let localValue: any = $state(untrack(() => getSettingValue(item, ctx)));
+
+    $effect(() => {
+        localValue = getSettingValue(item, ctx);
+    });
+
+    $effect(() => item.subscribeValue?.(() => {
+        localValue = getSettingValue(item, ctx);
+    }));
+
+    $effect(() => {
+        const val = localValue;
+        if (val === UNINITIALIZED) return;
+        untrack(() => {
+            if (val !== getSettingValue(item, ctx)) {
+                setSettingValue(item, val, ctx);
+            }
+        });
+    });
 
     // Transform options: filter by condition + resolve labelKey translations
     let processedOptions = $derived((item.options?.segmentOptions ?? [])
@@ -42,6 +62,6 @@
     {#if item.helpKey}<Help key={item.helpKey as any} unrecommended={item.helpUnrecommended ?? false}/>{/if}
 </span>
 <SegmentedControl
-    bind:value={(DBState.db as any)[item.bindKey]}
+    bind:value={localValue}
     options={processedOptions}
 />

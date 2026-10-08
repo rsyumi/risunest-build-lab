@@ -580,6 +580,10 @@ export function failureReason(code: string, direction: 'import' | 'export' = 'im
             return copy.reasonPendingOperation
         case 'server-status-unavailable':
             return copy.reasonServerStatus
+        case 'remote-asset-unavailable':
+            return copy.reasonRemoteAssetUnavailable
+        case 'asset-missing':
+            return copy.reasonAssetMissing
         case 'sync-unavailable':
             return language.risuNest.backup.syncUnavailable
         default:

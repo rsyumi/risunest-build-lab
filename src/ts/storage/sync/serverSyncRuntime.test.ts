@@ -8,6 +8,7 @@ const h = vi.hoisted(() => ({
     runtime: undefined as unknown as PersistentDataRuntime,
     events: new Map<string, () => void>(),
     applyError: undefined as unknown,
+    receivedChange: undefined as string | undefined,
 }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: h.invoke }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: async (name: string, handler: () => void) => { h.events.set(name, handler); return () => { h.events.delete(name) } } }))
@@ -32,13 +33,17 @@ vi.mock('../persistentDataRuntime.svelte', () => ({
 import type { Chat, Database, character } from '../database.svelte'
 import { IndexedDbPersistentDataStore } from '../indexedDbPersistentDataStore'
 import { capturePersistentRoot, createPersistentDataRuntime, type PersistentDataRuntimeStateAdapter } from '../persistentDataRuntime'
-import { notifyLocalPersistentRevision } from '../persistentRevisionEvents'
 import { SqlitePersistentDataStore } from '../sqlitePersistentDataStore'
 
 let production: typeof import('./serverSyncProduction')
 let workingCopy: Database
+let runtimeStore: IndexedDbPersistentDataStore
 const binding = { target: { kind: 'server', connectionId: 'server' }, targetAuthority: '4', selectionEpoch: 'persisted', libraryId: 'library', progress: null }
 const pulls = () => h.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_pull').length
+const pushes = () => h.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_push').length
+// A local change is sent after the scheduler's quiet period.
+const afterSendDelay = async () => { await new Promise(resolve => setTimeout(resolve, 2_200)); await settle() }
+const notesKey = JSON.stringify(['character', 'char-a', 'notes'])
 const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); await new Promise(resolve => setTimeout(resolve, 0)) }
 
 function conversation(messages: number): Chat {
@@ -54,6 +59,7 @@ async function createRuntime() {
     const store = new IndexedDbPersistentDataStore(`server-sync-runtime-${crypto.randomUUID()}`, indexedDB, IDBKeyRange)
     await store.open()
     await store.replaceFromDatabase(database)
+    runtimeStore = store
     const sqlite = new SqlitePersistentDataStore()
     Object.assign(store, {
         lwwStageReceive: sqlite.lwwStageReceive.bind(sqlite),
@@ -75,6 +81,8 @@ async function createRuntime() {
         canUseWindowedSelectedConversation: () => true,
         isConversationOperationActive: () => false,
     }
+    // Modules are reset per test, so the notifier comes from the registry the production module loads from.
+    const { notifyLocalPersistentRevision } = await import('../persistentRevisionEvents')
     h.runtime = createPersistentDataRuntime({ store, state, prepareDatabase: async candidate => candidate, onLocalRevision: revision => notifyLocalPersistentRevision(revision) })
     await h.runtime.initializeActiveWorkingSet(workingCopy)
     expect(h.runtime.getSelectedConversationMode()).toBe('windowed')
@@ -87,15 +95,23 @@ async function edit(name: string) {
 }
 
 beforeEach(async () => {
-    vi.resetModules(); h.invoke.mockReset(); h.events.clear(); h.applyError = undefined
+    vi.resetModules(); h.invoke.mockReset(); h.events.clear(); h.applyError = undefined; h.receivedChange = undefined
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
     h.invoke.mockImplementation(async (command: string) => {
         if (command === 'pds_lww_binding_state') return structuredClone(binding)
         if (command === 'server_sync_status') return { configured: true, writerId: 'writer', bindingAuthority: binding.targetAuthority, libraryId: 'library', deviceId: 'device' }
-        if (command === 'server_sync_lww_pull') return { bindingAuthority: binding.targetAuthority, requestId: `pull-${pulls()}`, changes: [] }
+        if (command === 'server_sync_lww_pull') return { bindingAuthority: binding.targetAuthority, requestId: `pull-${pulls()}`, changes: h.receivedChange === undefined ? [] : [
+            { key: notesKey, stamp: { physicalMs: '1', logical: '0', writerId: 'remote' }, value: { kind: 'inline', bytes: 'InJlbW90ZSI=' } },
+        ] }
         if (command === 'pds_lww_apply_receive') {
             // Native errors cross the IPC boundary as plain objects.
             if (h.applyError) throw h.applyError
+            if (h.receivedChange !== undefined) {
+                const value = h.receivedChange
+                h.receivedChange = undefined
+                const committed = await runtimeStore.commit({ expectedRevision: h.runtime.revision, unitMutations: [{ type: 'set', key: notesKey, value }] })
+                return { revision: committed.revision, affectedKeys: [notesKey], heldKeys: [], deferredKeys: [] }
+            }
             return { revision: h.runtime.revision, affectedKeys: [], heldKeys: [], deferredKeys: [] }
         }
         return null
@@ -132,3 +148,28 @@ it('tries again after a native storage failure instead of stopping', async () =>
     await production.installServerSyncProduction(); await settle()
     expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: 'local-storage' })
 })
+
+it('sends a change committed under a replacement fence, as archiving and restoring a character commit, once', async () => {
+    await production.installServerSyncProduction(); await afterSendDelay()
+    const sent = pushes()
+    const token = await h.runtime.capturePersistentMutationToken('character-archive')
+    const fence = await h.runtime.acquireDestructiveReplacementFence(token)
+    try {
+        const committed = await runtimeStore.commit({ expectedRevision: token.revision, unitMutations: [{ type: 'set', key: notesKey, value: 'archived' }] })
+        await fence.refreshCommittedWorkingSet(committed.revision)
+    } finally { fence.release() }
+    await afterSendDelay()
+    expect(h.runtime.revision).toBe(token.revision + 1)
+    expect(pushes()).toBe(sent + 1)
+}, 15_000)
+
+it('does not send a received change back', async () => {
+    await production.installServerSyncProduction(); await afterSendDelay()
+    const sent = pushes()
+    const revision = h.runtime.revision
+    h.receivedChange = 'remote'
+    h.events.get('risu-server-sync-remote-hint')!()
+    await afterSendDelay()
+    expect(h.runtime.revision).toBe(revision + 1)
+    expect(pushes()).toBe(sent)
+}, 15_000)

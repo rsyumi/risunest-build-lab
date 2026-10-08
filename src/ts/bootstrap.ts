@@ -17,7 +17,7 @@ import { recordNativeLogError, setNativeLogFileEnabled } from "./nativeLog";
 import { registerRuntimeErrorHandlers } from "./runtimeErrors";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, LoadingStatusState, bootFailure } from "./stores.svelte";
-import { loadPlugins, loadPluginsAfterAuthoritativeRestore } from "./plugins/plugins.svelte";
+import { keepPluginsOffForThisStart, loadPlugins, loadPluginsAfterAuthoritativeRestore } from "./plugins/plugins.svelte";
 import { alertConfirm, alertError, alertInput, alertLogin, alertMd, alertNormal, alertSelect, alertToast, alertTOS, waitAlert } from "./alert";
 import { backgroundErrorMessage } from "./storage/backgroundErrorMessage";
 import { applyHubSelection, characterURLImport, downloadRisuHub, hubURL } from "./characterCards";
@@ -232,6 +232,8 @@ export async function loadData() {
         const markers = getDeviceMarkers()
         applyHubSelection(markers)
         const deviceSettings = loadDeviceSettings(markers)
+        // A restore or a received change later in this run must not start the plugins either.
+        if (excluded('plugins')) keepPluginsOffForThisStart()
         if (isTauri) {
             stage = 'native-log'
             try {

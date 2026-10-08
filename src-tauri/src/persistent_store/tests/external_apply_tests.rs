@@ -211,13 +211,99 @@ fn external_snapshot_stages_streamed_records_and_preserves_local_view_fields() {
         json!([["asset", "owner.bin", "binary"]])
     );
     assert_eq!(staged["characters"][0]["name"], "Remote character");
-    assert_eq!(staged["characters"][0]["chatPage"], 7);
+    // The local chat page names no restored conversation, so the first one is selected.
+    assert_eq!(staged["characters"][0]["chatPage"], 0);
     assert_eq!(staged["characters"][0]["lastInteraction"], 700);
     assert_eq!(
         staged["characters"][0]["chats"][0]["message"][0]["data"],
         "remote"
     );
     assert_eq!(store.finish_prepared_replace(prepared).unwrap().revision, 2);
+}
+
+#[test]
+fn a_restored_character_keeps_its_local_chat_page_while_it_names_a_restored_conversation() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let stage = store.replace_begin().unwrap();
+    store.replace_put_root(&stage.staging_id, &json!({})).unwrap();
+    store
+        .replace_add_characters(
+            &stage.staging_id,
+            &[
+                json!({"chaId":"kept","name":"Kept","chatPage":1,"chats":[]}),
+                json!({"chaId":"stale","name":"Stale","chatPage":2,"chats":[]}),
+            ],
+        )
+        .unwrap();
+    store.replace_commit(&stage.staging_id, Some(0)).unwrap();
+    let staging = directory.path().join("download");
+    fs::create_dir(&staging).unwrap();
+    let mut records = vec![root_record(&staging, "remote")];
+    for (index, character) in ["kept", "stale"].into_iter().enumerate() {
+        records.push(write_record(
+            &staging,
+            LogicalRecordLocator::Character { character_id: character.into() },
+            LogicalRecordEnvelope::Character {
+                configured_index: index as u64,
+                detail: json!({"chaId":character,"name":character,"chatPage":0}),
+                owner_heads: vec![LogicalOwnerHead::absent(
+                    LogicalOwnerLocator::CharacterAdditional { character_id: character.into() },
+                )],
+            },
+        ));
+        for (position, conversation) in ["first", "second"].into_iter().enumerate() {
+            records.push(write_record(
+                &staging,
+                LogicalRecordLocator::Conversation {
+                    character_id: character.into(),
+                    conversation_id: conversation.into(),
+                },
+                LogicalRecordEnvelope::Conversation {
+                    configured_index: position as u64,
+                    recent_at: 0,
+                    detail: json!({"id":conversation,"name":conversation}),
+                    message_page_hashes: vec![],
+                },
+            ));
+        }
+    }
+    let hashes: BTreeMap<_, _> = records
+        .iter()
+        .map(|(record, hash)| (record.key.clone(), *hash))
+        .collect();
+    let scope_id = library_fingerprint_domain();
+    let fingerprint = fingerprint(&scope_id, &hashes);
+    let prepared = store
+        .prepare_external_snapshot_application(
+            &application(&staging, &scope_id, &fingerprint, 1),
+            records.into_iter().map(|(record, _)| Ok(record)),
+            Vec::<StoreResult<ExternalSnapshotObject>>::new(),
+        )
+        .unwrap();
+    let staged = store.materialize_staging(&prepared.staging_id).unwrap();
+    let pages: BTreeMap<_, _> = staged["characters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|character| (character["chaId"].as_str().unwrap().to_owned(), character["chatPage"].clone()))
+        .collect();
+    assert_eq!(pages["kept"], 1);
+    assert_eq!(pages["stale"], 0);
+    store.finish_prepared_replace(prepared).unwrap();
+    let lease = store.acquire_revision(store.revision().unwrap()).unwrap().lease;
+    let findings = store
+        .data_health_reader(&lease)
+        .unwrap()
+        .scan(256, &NeverCancelled)
+        .unwrap()
+        .items;
+    store.release_revision(&lease).unwrap();
+    // The fixture root names no preset or persona, so only character findings count here.
+    assert!(
+        findings.iter().all(|finding| finding.owner.kind != "character" && finding.owner.kind != "characters"),
+        "{findings:?}"
+    );
 }
 
 #[test]

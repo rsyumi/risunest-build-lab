@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { SyncBindingTransport, SyncBindingDependencies } from './bindingFlow'
+import type { SyncBindingTransport, SyncBindingDependencies, SyncBindingNative } from './bindingFlow'
+import { languageKorean } from 'src/lang/ko'
+import { serverSyncProgressView, serverSyncRoutineView } from './serverSyncProgress'
 
 const f = vi.hoisted(() => ({
     native: true,
@@ -7,6 +9,7 @@ const f = vi.hoisted(() => ({
     database: { characters: [{ chaId: 'selected-stable-id' }] },
     invoke: vi.fn(),
     install: vi.fn(),
+    switchTarget: vi.fn(),
     register: vi.fn(),
     resumeCurrent: vi.fn(),
     viewport: undefined as undefined | ((source?: unknown) => void),
@@ -30,7 +33,8 @@ const f = vi.hoisted(() => ({
         markCommittedWorkingSetRefreshRequired: vi.fn(),
     },
     transport: undefined as SyncBindingTransport | undefined,
-    dependencies: undefined as Pick<SyncBindingDependencies, 'withPausedWrites' | 'beginActivatedLibraryGuard' | 'refreshActivatedLibrary' | 'recovery'> | undefined,
+    dependencies: undefined as (Pick<SyncBindingDependencies, 'withPausedWrites' | 'beginActivatedLibraryGuard' | 'refreshActivatedLibrary' | 'recovery'>
+        & { native: SyncBindingNative; whileAsking<T>(ask: () => Promise<T>): Promise<T> }) | undefined,
 }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: f.invoke }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
@@ -45,7 +49,7 @@ vi.mock('../committedWorkingSetContinuation', () => ({ registerCommittedWorkingS
 vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: vi.fn(), confirmPreviousStorageFiles: vi.fn(async () => 'connect'), downloadPreviousStorageFiles: vi.fn() }))
 vi.mock('./bindingLocalData', () => ({ hasLocalBindingData: vi.fn(), hasLocalSharedBindingData: vi.fn() }))
 vi.mock('./bindingRegistry', () => ({ registerSyncBindingTransport: f.register, resumeCurrentSyncBinding: f.resumeCurrent, getSyncBindingTransport: vi.fn(), bindSyncTarget: vi.fn(), unbindSyncTarget: vi.fn() }))
-vi.mock('./bindingNative', () => ({ replaceNativeSyncBinding: vi.fn(), replaceNativeSyncBindingAsNewDevice: vi.fn() }))
+vi.mock('./bindingNative', () => ({ createNativeSyncBindingBridge: () => ({ state: vi.fn(), assertAuthority: vi.fn(), switchTarget: f.switchTarget }), replaceNativeSyncBinding: vi.fn(), replaceNativeSyncBindingAsNewDevice: vi.fn() }))
 vi.mock('../persistentDataRuntime.svelte', () => ({
     withPausedPersistentWrites: f.paused,
     beginActivatedLibraryGuard: f.guard,
@@ -54,7 +58,7 @@ vi.mock('../persistentDataRuntime.svelte', () => ({
     flushPendingDataLocally: f.flush,
     getPersistentDataRuntime: () => f.runtime,
 }))
-vi.mock('../../mobileBackgroundTask', () => ({ runWithMobileBackgroundTask: f.mobile }))
+vi.mock('../../mobileBackgroundTask', () => ({ runWithMobileBackgroundTask: f.mobile, beginMobileBackgroundTask: vi.fn() }))
 vi.mock('src/ts/plugins/apiV3/v3.svelte', () => ({ fencePluginExecutionForAuthorityReplacement: vi.fn(), invalidatePluginCachesAfterAuthorityReplacement: vi.fn(), restartPluginsAfterAuthorityReplacement: vi.fn() }))
 vi.mock('../persistentRevisionEvents', () => ({ subscribeLocalPersistentRevision: (callback: (revision: number, cause?: string) => void) => { f.revision = callback; return () => {} } }))
 vi.mock('../generatingConversationRegistry', () => ({ generatingConversations: { snapshot: () => f.generating } }))
@@ -144,6 +148,17 @@ describe('production server LWW composition', () => {
         notifySyncBindingChanged(); await settle()
         expect(bound.at(-1)).toBe(false)
     })
+    it('reads the stored asset policy with every status request', async () => {
+        let assetPolicy = 'remote'
+        f.invoke.mockImplementation(async command => command === 'server_sync_status' ? { configured: false, writerId: 'writer', bindingAuthority: '0', assetPolicy }
+            : command === 'pds_lww_binding_state' ? { target: { kind: 'none' }, targetAuthority: '0', selectionEpoch: '0', libraryId: null, progress: null } : null)
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const controller = production.getServerSyncController()
+        expect(controller.snapshot().status.assetPolicy).toBe('remote')
+        assetPolicy = 'full'
+        await controller.ensureStatus()
+        expect(controller.snapshot().status.assetPolicy).toBe('full')
+    })
     it('resumes interrupted Full hydration on foreground after the cancelled lane settles', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
         let reject!: (error: unknown) => void
@@ -198,6 +213,94 @@ describe('production server LWW composition', () => {
             return command === 'server_sync_lww_pull' ? emptyReceive() : null
         })
         await production.receiveAvailableServerChanges(); await settle(); expect(hydrationCalls()).toHaveLength(0)
+    })
+    const representativeChanges = [
+        { key: ['character', 'first', 'image'], value: { kind: 'inline', bytes: btoa(JSON.stringify('assets/main.png')) } },
+        { key: ['character', 'first', 'trashTime'], value: { kind: 'deleted' } },
+        { key: ['exists', 'character', 'first'], value: { kind: 'inline', bytes: 'dHJ1ZQ==' } },
+        { key: ['archive', 'first'], value: { kind: 'deleted' } },
+    ]
+    const receiveUnder = async (assetPolicy: string, key: string[], value: unknown) => {
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => command === 'server_sync_status'
+            ? { configured: true, writerId: 'writer', bindingAuthority: '0', assetPolicy } : base(command, args))
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle(); f.invoke.mockClear()
+        let page = true
+        f.invoke.mockImplementation(async command => {
+            if (command === 'server_sync_lww_pull' && page) {
+                page = false
+                return { ...emptyReceive(), changes: [{ key: JSON.stringify(key), value }] }
+            }
+            return command === 'server_sync_lww_pull' ? emptyReceive() : null
+        })
+        await production.receiveAvailableServerChanges(); await settle()
+    }
+    it.each(representativeChanges)('refreshes representatives after receiving $key without downloading the full inventory', async ({ key, value }) => {
+        await receiveUnder('remote', key, value)
+        expect(hydrationCalls()).toEqual([['server_sync_lww_hydrate', {
+            request: expect.objectContaining({ bindingAuthority: '0' }), selectedCharacterId: 'selected-stable-id', representativesOnly: true,
+        }]])
+    })
+    it.each(representativeChanges)('asks nothing of a device that keeps every asset after receiving $key', async ({ key, value }) => {
+        await receiveUnder('full', key, value)
+        expect(hydrationCalls()).toHaveLength(0)
+    })
+    it('coalesces local remote-policy edits and preserves another edit during representative hydration', async () => {
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => command === 'server_sync_status'
+            ? { configured: true, writerId: 'writer', bindingAuthority: '0', assetPolicy: 'remote' } : base(command, args))
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle(); f.invoke.mockClear()
+        let finish!: () => void
+        const original = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation((command, args) => command === 'server_sync_lww_hydrate'
+            ? new Promise<void>(resolve => { finish = resolve }) : original(command, args))
+        f.revision!(32); f.revision!(33)
+        await vi.advanceTimersByTimeAsync(2000); await settle()
+        expect(hydrationCalls()).toHaveLength(1)
+        expect(hydrationCalls()[0][1]).toMatchObject({ representativesOnly: true })
+        f.revision!(34)
+        await vi.advanceTimersByTimeAsync(2000); await settle()
+        expect(hydrationCalls()).toHaveLength(1)
+        finish(); await settle()
+        expect(hydrationCalls()).toHaveLength(2)
+        finish(); await settle()
+    })
+    it('checks character icons once a burst of local saves settles', async () => {
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => command === 'server_sync_status'
+            ? { configured: true, writerId: 'writer', bindingAuthority: '0', assetPolicy: 'remote' } : base(command, args))
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle(); f.invoke.mockClear()
+        for (const revision of [32, 33, 34]) { f.revision!(revision); await vi.advanceTimersByTimeAsync(1500); await settle() }
+        expect(hydrationCalls()).toHaveLength(0)
+        await vi.advanceTimersByTimeAsync(500); await settle()
+        expect(hydrationCalls()).toEqual([['server_sync_lww_hydrate', {
+            request: expect.objectContaining({ bindingAuthority: '0' }), selectedCharacterId: 'selected-stable-id', representativesOnly: true,
+        }]])
+    })
+    it('does not scan the full asset inventory on local edits in full mode', async () => {
+        const base = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => command === 'server_sync_status'
+            ? { configured: true, writerId: 'writer', bindingAuthority: '0', assetPolicy: 'full' } : base(command, args))
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle(); f.invoke.mockClear()
+        f.revision!(32)
+        await vi.advanceTimersByTimeAsync(2000); await settle()
+        expect(hydrationCalls()).toHaveLength(0)
+    })
+    it('fills representatives when settings switch an active binding to remote storage', async () => {
+        const base = f.invoke.getMockImplementation()!
+        let assetPolicy = 'full'
+        f.invoke.mockImplementation(async (command, args) => command === 'server_sync_status'
+            ? { configured: true, writerId: 'writer', bindingAuthority: '0', assetPolicy } : base(command, args))
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle(); f.invoke.mockClear()
+        assetPolicy = 'remote'
+        await production.getServerSyncController().ensureStatus(); await settle()
+        expect(hydrationCalls()).toHaveLength(1)
+        expect(hydrationCalls()[0][1]).toMatchObject({ representativesOnly: true })
     })
     it('rechecks an outgoing clock block through native settlement on open, and leaves accepted correction blocked', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
@@ -499,6 +602,79 @@ describe('production server LWW composition', () => {
         await production.retryServerSync()
         expect(f.resumeCurrent).toHaveBeenCalledExactlyOnceWith(state.target)
     })
+    describe('asset storage chosen with the connection', () => {
+        const config = { endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }
+        const residency = (policy: string) => ({ policy, localBytes: 0, remoteBytes: 0, remoteObjects: 0, serverBytes: 0, serverObjects: 0, externalObjects: [], unavailableObjects: 0, evictedBytes: 0 })
+        const policyCalls = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_asset_policy')
+        const contextFor = (libraryId: string) => ({ ...bindingContext(), state: { ...bindingContext().state, libraryId } })
+        // The shared flow is mocked; each case drives the transport the way a binding to `libraryId` would.
+        async function bindWith(newDevice: boolean, libraryId = 'library') {
+            const { bindSyncTarget } = await import('./bindingRegistry')
+            vi.mocked(bindSyncTarget).mockImplementation(async () => {
+                const context = contextFor(libraryId)
+                if (newDevice) await f.transport!.resumeNewDeviceBinding!({ authorizationId: 'authorization', writerId: 'writer' }, { revision: 32, writerId: 'writer', bindingAuthority: '0' }, context)
+                else await f.transport!.resumeBinding(context)
+                return { kind: 'bound', action: newDevice ? 'new-device' : 'replaced', state: context.state }
+            })
+        }
+        let base: (command: string, args?: unknown) => Promise<unknown>
+        beforeEach(async () => {
+            base = f.invoke.getMockImplementation()!
+            f.invoke.mockImplementation(async (command, args) => command === 'server_sync_asset_policy' ? residency('remote') : base(command, args))
+            production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+            visible(true)
+        })
+        it.each([false, true])('keeps assets on the server from before the first hydration (new device=%s)', async newDevice => {
+            await bindWith(newDevice)
+            await production.connectServerSync(config, newDevice, 'remote'); await settle()
+            expect(policyCalls()).toEqual([['server_sync_asset_policy', { policy: 'remote' }]])
+            expect(callOrder(newDevice ? 'server_sync_lww_activate_new_device' : 'server_sync_lww_activate')).toBeLessThan(callOrder('server_sync_asset_policy'))
+            expect(callOrder('server_sync_asset_policy')).toBeLessThan(callOrder('server_sync_lww_hydrate'))
+        })
+        it.each([
+            { policy: 'full' as const, newDevice: false },
+            { policy: 'full' as const, newDevice: true },
+            { policy: undefined, newDevice: false },
+        ])('leaves the stored policy to native hydration with $policy (new device=$newDevice)', async ({ policy, newDevice }) => {
+            await bindWith(newDevice)
+            await production.connectServerSync(config, newDevice, policy); await settle()
+            expect(policyCalls()).toHaveLength(0)
+            expect(hydrationCalls()).toHaveLength(1)
+        })
+        it('applies the choice once, so a later resume of the same binding hydrates under the stored policy', async () => {
+            await bindWith(false)
+            await production.connectServerSync(config, false, 'remote'); await settle()
+            await f.transport!.fenceOldJobs(bindingContext()); await f.transport!.resumeBinding(bindingContext()); await settle()
+            expect(policyCalls()).toHaveLength(1)
+        })
+        it('forgets the choice when the binding fails', async () => {
+            const { bindSyncTarget } = await import('./bindingRegistry')
+            vi.mocked(bindSyncTarget).mockRejectedValue({ code: 'server-unreachable', retryable: true })
+            await expect(production.connectServerSync(config, false, 'remote')).rejects.toMatchObject({ code: 'server-unreachable' })
+            await f.transport!.resumeBinding(bindingContext()); await settle()
+            expect(policyCalls()).toHaveLength(0)
+            expect(hydrationCalls()).toHaveLength(1)
+        })
+        it('forgets the choice when the configuration is refused', async () => {
+            f.invoke.mockImplementation(async (command, args) => { if (command === 'server_sync_configure') throw { code: 'unauthorized' }; return base(command, args) })
+            await expect(production.connectServerSync(config, false, 'remote')).rejects.toMatchObject({ code: 'unauthorized' })
+            await f.transport!.resumeBinding(bindingContext()); await settle()
+            expect(policyCalls()).toHaveLength(0)
+        })
+        it('leaves another library, such as the binding a cancelled connection resumes, on its own policy', async () => {
+            await bindWith(false, 'previous-library')
+            await production.connectServerSync(config, false, 'remote'); await settle()
+            expect(policyCalls()).toHaveLength(0)
+            expect(hydrationCalls()).toHaveLength(1)
+        })
+        it('stops the binding before any hydration when the policy is refused', async () => {
+            f.invoke.mockImplementation(async (command, args) => { if (command === 'server_sync_asset_policy') throw { code: 'library-operation-busy' }; return base(command, args) })
+            await bindWith(false)
+            await expect(production.connectServerSync(config, false, 'remote')).rejects.toMatchObject({ code: 'library-operation-busy' })
+            await settle()
+            expect(hydrationCalls()).toHaveLength(0)
+        })
+    })
     it('guards native initialization and transport registration on the web', async () => {
         f.native = false
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
@@ -507,10 +683,10 @@ describe('production server LWW composition', () => {
 })
 describe('server sync progress', () => {
     const lanes = (sent: number) => ['send', 'receive', 'hydrate', 'binding', 'assets'].map(lane => ({
-        lane, active: lane === 'send', step: lane === 'send' ? 'uploading' : 'idle', listed: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: lane === 'send' ? sent : 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0,
+        lane, active: lane === 'send', step: lane === 'send' ? 'uploading' : 'idle', listed: 0, listedTotal: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: lane === 'send' ? sent : 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0,
     }))
     const sendLanes = (send: Record<string, unknown>) => ['send', 'receive', 'hydrate', 'binding', 'assets'].map(lane => ({
-        lane, active: false, step: 'idle', listed: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...(lane === 'send' ? send : {}),
+        lane, active: false, step: 'idle', listed: 0, listedTotal: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...(lane === 'send' ? send : {}),
     }))
     const pendingReads = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_pending_count').length
     /** A push that waits; each lanes read takes the next of `reads` and repeats the last. */
@@ -534,7 +710,7 @@ describe('server sync progress', () => {
         const finish = hangingPush([])
         visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
         const controller = production.getServerSyncController()
-        expect(controller.snapshot().progress?.stages).toEqual(expect.arrayContaining(['downloading', 'applying', 'publishing']))
+        expect(controller.snapshot().progress?.stages).toEqual(['downloading', 'publishing', 'assets'])
         expect(controller.snapshot().progress?.active).toEqual(['publishing'])
         expect(progressReads()).toBe(0)
         finish(); await settle()
@@ -594,6 +770,35 @@ describe('server sync progress', () => {
         expect(controller.snapshot().finished).toBeUndefined()
         stop()
     })
+    it('fixes the upload and the receive of a connection once, as automatic sync does', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const reads: Array<Record<string, Record<string, unknown>>> = [{}, { send: { active: true, step: 'preparing' }, receive: { backlogDone: 40, backlogLeft: 60 } }, { send: { active: true, step: 'confirming', itemsDone: 256, itemsTotal: 256 }, receive: { backlogDone: 90, backlogLeft: 20 } }, { send: { active: true, step: 'confirming', itemsDone: 512, itemsTotal: 512 }, receive: { backlogDone: 150, backlogLeft: 10 } }]
+        let finish!: () => void
+        f.invoke.mockImplementation(async command => {
+            if (command === 'server_sync_lww_push') return new Promise(resolve => { finish = () => resolve(null) })
+            if (command === 'server_sync_progress') { const read = reads.length > 1 ? reads.shift()! : reads[0]; return sendLanes({}).map(lane => ({ ...lane, ...read[lane.lane] })) }
+            if (command === 'server_sync_status') return { configured: true, writerId: 'writer', bindingAuthority: '0' }
+            if (command === 'pds_lww_binding_state') return bindingContext().state
+            return command === 'server_sync_lww_pending_count' ? 600 : null
+        })
+        const controller = production.getServerSyncController()
+        const stop = controller.watchProgress()
+        const { bindSyncTarget } = await import('./bindingRegistry')
+        vi.mocked(bindSyncTarget).mockImplementation(async () => { await f.transport!.publishInitialSharedState(bindingContext()); return { kind: 'bound' } as never })
+        const connecting = production.connectServerSync({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' })
+        await settle()
+        await vi.advanceTimersByTimeAsync(500); await settle()
+        expect(controller.snapshot().progress).toMatchObject({ mode: 'full', plannedSend: 600, plannedReceive: 100 })
+        await vi.advanceTimersByTimeAsync(1000); await settle()
+        const progress = controller.snapshot().progress!
+        expect(progress).toMatchObject({ mode: 'full', plannedSend: 600, plannedReceive: 100 })
+        const view = serverSyncProgressView(progress, languageKorean.risuNest.serverSync, Date.now())
+        expect(view.detail).toBe('512 / 600')
+        expect(view.counters.find(counter => counter.key === 'items')?.value).toBe('612 / 700')
+        expect(pendingReads()).toBe(1)
+        finish(); await connecting
+        stop()
+    })
     it.each([
         { name: 'moved nothing', reads: [{}], watched: true, failure: undefined },
         { name: 'failed', reads: [{}, { itemsDone: 1, itemsTotal: 2 }], watched: true, failure: { code: 'server-unreachable', retryable: true } },
@@ -610,6 +815,27 @@ describe('server sync progress', () => {
         expect(controller.snapshot().finished).toBeUndefined()
         stop()
     })
+    it('estimates the time left of an asset download from its own rate once it ran for five seconds', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        let reads = 0
+        f.invoke.mockImplementation(async command => {
+            if (command !== 'server_sync_progress') return null
+            const index = reads++
+            return sendLanes({}).map(lane => lane.lane === 'assets' && index > 0 ? { ...lane, active: true, step: 'downloading', bytesDone: 100 * index, bytesTotal: 10_000, assetScope: { id: 1, done: index, total: 100, settled: false } } : lane)
+        })
+        const controller = production.getServerSyncController()
+        const stop = controller.watchProgress()
+        let finish!: () => void
+        const download = controller.track('assets', () => new Promise<void>(resolve => { finish = resolve }))
+        await settle()
+        await vi.advanceTimersByTimeAsync(5000); await settle()
+        expect(controller.snapshot().progress?.remainingMs).toBeUndefined()
+        await vi.advanceTimersByTimeAsync(500); await settle()
+        // 1,000 bytes over five seconds, with 8,900 left, and the files it counts predict the same.
+        expect(controller.snapshot().progress?.remainingMs).toBe(44_500)
+        finish(); await download
+        stop()
+    })
     it('shows no finished bar after an asset download', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
         countedPush([{}, { itemsDone: 2, itemsTotal: 2 }])
@@ -619,6 +845,114 @@ describe('server sync progress', () => {
         expect(controller.snapshot().progress).toBeUndefined()
         expect(controller.snapshot().finished).toBeUndefined()
         stop()
+    })
+    it('shows the pages read after connecting as automatic sync under one stage', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+        const pages: Array<() => void> = []
+        let served = 0, reads = 0
+        const page = (index: number) => ({ bindingAuthority: '0', requestId: `page-${index}`, changes: index < 3 ? [{ key: JSON.stringify(['root', `key-${index}`]), value: { kind: 'inline' } }] : [], progress: { kind: 'server', cursor: String(index) }, admittedTimeUpperMs: '0' })
+        f.invoke.mockImplementation(async command => {
+            if (command === 'server_sync_lww_pull') { const index = served++; return index < 3 ? new Promise(resolve => pages.push(() => resolve(page(index)))) : page(index) }
+            // Each read reports more of a receive whose backlog is known.
+            if (command === 'server_sync_progress') return sendLanes({}).map(lane => lane.lane === 'receive' ? { ...lane, active: true, step: 'downloading', backlogDone: 10 * reads++, backlogLeft: 30 } : lane)
+            if (command === 'server_sync_status') return { configured: true, writerId: 'writer', bindingAuthority: '0' }
+            if (command === 'pds_lww_binding_state') return bindingContext().state
+            return command === 'server_sync_lww_pending_count' ? 0 : null
+        })
+        const controller = production.getServerSyncController()
+        const stop = controller.watchProgress()
+        const { bindSyncTarget } = await import('./bindingRegistry')
+        let bindingMode: string | undefined
+        vi.mocked(bindSyncTarget).mockImplementation(async () => {
+            const context = bindingContext()
+            await f.transport!.inspectTarget(context)
+            await f.transport!.resumeBinding(context)
+            await settle()
+            bindingMode = controller.snapshot().progress?.mode
+            return { kind: 'bound' } as never
+        })
+        await production.connectServerSync({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' })
+        expect(bindingMode).toBe('full')
+        expect(served).toBe(1)
+        const seen: unknown[] = []
+        let applying!: () => void
+        f.apply.mockImplementationOnce(() => new Promise(resolve => { applying = () => resolve({ revision: 31, affectedKeys: [], heldKeys: [], deferredKeys: [] }) }))
+        for (let index = 0; index < 3; index++) {
+            await vi.advanceTimersByTimeAsync(500); await settle()
+            const progress = controller.snapshot().progress!
+            seen.push({ mode: progress.mode, stages: progress.stages, label: serverSyncRoutineView(progress, languageKorean.risuNest.serverSync, false)?.label })
+            pages.shift()!(); await settle()
+            if (index === 0) { expect(controller.snapshot().progress?.active).toEqual(['downloading']); applying(); await settle() }
+        }
+        expect(seen).toEqual(Array(3).fill({ mode: 'routine', stages: ['preparing', 'downloading', 'publishing', 'assets'], label: languageKorean.risuNest.serverSync.running }))
+        expect(served).toBeGreaterThanOrEqual(4)
+        stop()
+    })
+    it.each(['replaceFromTarget', 'replaceAsNewDevice'] as const)('shows a running %s as applying what was received', async method => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const native = await import('./bindingNative')
+        let finish!: () => void
+        const replace = vi.mocked<(...args: unknown[]) => Promise<unknown>>(method === 'replaceFromTarget' ? native.replaceNativeSyncBinding : native.replaceNativeSyncBindingAsNewDevice)
+        replace.mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve(undefined) }))
+        const replaced = (f.transport![method] as (...args: unknown[]) => Promise<unknown>)({}, {}, bindingContext())
+        await settle()
+        expect(production.getServerSyncController().snapshot().progress).toMatchObject({ stages: ['applying'], active: ['applying'] })
+        finish(); await replaced
+    })
+    it('shows the switch to a received server state as applying it, and a switch with nothing received as no stage', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const { bindSyncTarget } = await import('./bindingRegistry')
+        const controller = production.getServerSyncController()
+        const state = bindingContext().state
+        let switched!: () => void
+        f.switchTarget.mockImplementation(() => new Promise(resolve => { switched = () => resolve(state) }))
+        const seen: unknown[] = []
+        vi.mocked(bindSyncTarget).mockImplementation(async () => {
+            await f.transport!.inspectTarget(bindingContext())
+            const pending = f.dependencies!.native.switchTarget(state, state.target, null, 'switch', false)
+            await settle(); seen.push(controller.snapshot().progress?.active); switched(); await pending
+            await f.transport!.pullAvailableState({ inspectionId: 'inspection' } as never, bindingContext())
+            const staged = f.dependencies!.native.switchTarget(state, state.target, null, 'switch', false)
+            await settle(); seen.push(controller.snapshot().progress?.active); switched(); await staged
+            return { kind: 'cancelled' }
+        })
+        await production.connectServerSync({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' })
+        expect(seen).toEqual([[], ['applying']])
+        expect(f.switchTarget).toHaveBeenCalledTimes(2)
+    })
+    it('does not count the time a binding waits for the user to answer as elapsed', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const { bindSyncTarget } = await import('./bindingRegistry')
+        const controller = production.getServerSyncController()
+        const elapsed = () => serverSyncProgressView(controller.snapshot().progress!, languageKorean.risuNest.serverSync, Date.now()).counters.find(counter => counter.key === 'elapsed')?.value
+        let ask!: () => void
+        let answer!: (value: boolean) => void
+        let work!: () => void
+        vi.mocked(bindSyncTarget).mockImplementation(async () => {
+            await f.transport!.inspectTarget(bindingContext())
+            await new Promise<void>(resolve => { ask = resolve })
+            await f.dependencies!.whileAsking(() => new Promise<boolean>(resolve => { answer = resolve }))
+            await f.transport!.pullAvailableState({ inspectionId: 'inspection' } as never, bindingContext())
+            await new Promise<void>(resolve => { work = resolve })
+            return { kind: 'cancelled' }
+        })
+        const connected = production.connectServerSync({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' })
+        await settle()
+        await vi.advanceTimersByTimeAsync(3_000)
+        expect(elapsed()).toBe('00:03')
+        ask(); await settle()
+        await vi.advanceTimersByTimeAsync(600_000)
+        expect(elapsed()).toBe('00:03')
+        const startedAt = controller.snapshot().progress!.startedAt
+        answer(true); await settle()
+        await vi.advanceTimersByTimeAsync(2_000)
+        expect(elapsed()).toBe('00:05')
+        // The attempt keeps its start, so the panel that waits for it to run a moment stays shown.
+        expect(controller.snapshot().progress!.startedAt).toBe(startedAt)
+        // An answer outside a binding runs without touching any attempt.
+        await expect(f.dependencies!.whileAsking(async () => 'answer')).resolves.toBe('answer')
+        work(); await connected
     })
     it('keeps the last successful time when an attempt fails', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()

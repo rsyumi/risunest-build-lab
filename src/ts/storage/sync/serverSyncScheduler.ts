@@ -175,6 +175,8 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         reset() { blocked = false; blockedCode = ''; sendRetryAttempt = 0; reconnectAttempt = 0; failedLanes.clear() },
         reportFailure: fail,
         isBlocked: () => blocked,
+        /** The failure that stopped sync until a retry, or '' while it is not stopped. */
+        blockedCode: () => blocked ? blockedCode : '',
         isRunning: () => !!sending || !!receiving || !!checkingClock,
         async fence() { foreground = false; pushAgain = false; pullAgain = false; clear(); await disconnect(); await Promise.allSettled([sending, receiving, checkingClock]) },
         dispose() { foreground = false; clear(); void disconnect().catch(fail) },

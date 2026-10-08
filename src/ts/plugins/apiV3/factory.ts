@@ -594,6 +594,9 @@ await (async function() {
 })();
 `;
 
+// risuFetch takes GlobalFetchArgs, which names its signal abortSignal.
+const requestSignalKeys = new Map([['nativeFetch', 'signal'], ['risuFetch', 'abortSignal']]);
+
 export class SandboxHost {
     private iframe: HTMLIFrameElement;
     private apiFactory: any;
@@ -606,7 +609,7 @@ export class SandboxHost {
     private messageHandlerRef: ((event: MessageEvent) => void) | null = null;
     private callbackWrapperCache = new Map<string, Function>();
 
-    private pendingCallbacks = new Map<string, { resolve: Function, reject: Function }>();
+    private pendingCallbacks = new Map<string, { resolve: Function, reject: Function, dispose: () => void }>();
     private pendingStorageMutations = 0;
     private storageDrainWaiters = new Set<() => void>();
 
@@ -621,6 +624,28 @@ export class SandboxHost {
     private scriptSettledReported = false;
     private guestReportedSettled = false;
     private pendingHostCalls = 0;
+    private unloading = false;
+    private invokingUnload = false;
+    private activityListener: (() => void) | null = null;
+
+    public onActivityChanged(listener: () => void) {
+        this.activityListener = listener;
+    }
+
+    public isIdle(): boolean {
+        return this.terminated || (this.guestReportedSettled && this.pendingHostCalls === 0
+            && this.pendingCallbacks.size === 0 && this.activeStreamCleanups.size === 0);
+    }
+
+    public beginUnload(): void {
+        this.unloading = true;
+    }
+
+    public invokeUnloadCallback(callback: Function): unknown {
+        this.invokingUnload = true;
+        try { return callback(); }
+        finally { this.invokingUnload = false; }
+    }
 
     // Teardown hooks for streams bridged over MessagePort. MessagePort has no
     // 'close' event in stable browsers, so without these the other side of an
@@ -748,52 +773,65 @@ export class SandboxHost {
                 const cached = this.callbackWrapperCache.get(cbRef.id);
                 if (cached) return cached;
 
-                const wrapper = async (...innerArgs: any[]) => {
+                const wrapper = (...innerArgs: any[]) => {
+                    // After terminate() the iframe is gone; posting would be a
+                    // no-op and the promise would never settle, hanging callers
+                    // (e.g. chat output dispatch) that await this callback.
+                    if (this.terminated || (this.unloading && !this.invokingUnload) || !this.iframe?.contentWindow) {
+                        const rejected = Promise.reject(new Error('Plugin sandbox terminated'));
+                        // DOM notifications have no caller awaiting their callback.
+                        void rejected.catch(() => {});
+                        return rejected;
+                    }
                     return new Promise((resolve, reject) => {
-                        // After terminate() the iframe is gone; posting would be a
-                        // no-op and the promise would never settle, hanging callers
-                        // (e.g. chat output dispatch) that await this callback.
-                        if (!this.iframe?.contentWindow) {
-                            reject(new Error('Plugin sandbox terminated'));
-                            return;
-                        }
                         const reqId = 'cb_req_' + Math.random().toString(36).substring(2);
-                        this.pendingCallbacks.set(reqId, { resolve, reject });
-
-                        // AbortSignal cannot be structured-cloned for postMessage.
-                        // Convert to a serializable ref and forward abort events
-                        // via a separate ABORT_SIGNAL message.
-                        const sanitizedArgs = innerArgs.map(arg => {
-                            if (arg instanceof AbortSignal) {
-                                const abortId = 'abort_' + Math.random().toString(36).substring(2);
-                                const ref: AbortSignalRef = {
-                                    __type: 'ABORT_SIGNAL_REF',
-                                    abortId,
-                                    aborted: arg.aborted
-                                };
-                                if (!arg.aborted) {
-                                    arg.addEventListener('abort', () => {
-                                        try {
-                                            this.iframe.contentWindow?.postMessage({
-                                                type: 'ABORT_SIGNAL',
-                                                abortId
-                                            } as RpcMessage, '*');
-                                        } catch (_) { /* iframe already removed */ }
-                                    }, { once: true });
+                        const abortListeners: Array<() => void> = [];
+                        const dispose = () => abortListeners.forEach(remove => remove());
+                        this.pendingCallbacks.set(reqId, { resolve, reject, dispose });
+                        this.activityListener?.();
+                        try {
+                            // AbortSignal cannot be structured-cloned for postMessage.
+                            // Convert to a serializable ref and forward abort events
+                            // via a separate ABORT_SIGNAL message.
+                            const sanitizedArgs = innerArgs.map(arg => {
+                                if (arg instanceof AbortSignal) {
+                                    const abortId = 'abort_' + Math.random().toString(36).substring(2);
+                                    const ref: AbortSignalRef = {
+                                        __type: 'ABORT_SIGNAL_REF',
+                                        abortId,
+                                        aborted: arg.aborted
+                                    };
+                                    if (!arg.aborted) {
+                                        const forwardAbort = () => {
+                                            try {
+                                                this.iframe.contentWindow?.postMessage({
+                                                    type: 'ABORT_SIGNAL',
+                                                    abortId
+                                                } as RpcMessage, '*');
+                                            } catch (_) { /* iframe already removed */ }
+                                        };
+                                        arg.addEventListener('abort', forwardAbort, { once: true });
+                                        abortListeners.push(() => arg.removeEventListener('abort', forwardAbort));
+                                    }
+                                    return ref;
                                 }
-                                return ref;
-                            }
-                            return this.serialize(arg);
-                        });
+                                return this.serialize(arg);
+                            });
 
-                        const message = {
-                            type: 'INVOKE_CALLBACK',
-                            id: cbRef.id,
-                            reqId,
-                            args: sanitizedArgs
-                        };
-                        const transferables = this.collectTransferables(message);
-                        this.iframe.contentWindow?.postMessage(message, '*', transferables);
+                            const message = {
+                                type: 'INVOKE_CALLBACK',
+                                id: cbRef.id,
+                                reqId,
+                                args: sanitizedArgs
+                            };
+                            const transferables = this.collectTransferables(message);
+                            this.iframe.contentWindow?.postMessage(message, '*', transferables);
+                        } catch (error) {
+                            dispose();
+                            this.pendingCallbacks.delete(reqId);
+                            this.activityListener?.();
+                            reject(error);
+                        }
                     });
                 };
                 this.callbackWrapperCache.set(cbRef.id, wrapper);
@@ -848,6 +886,7 @@ export class SandboxHost {
                 ch.port1.onmessage = null;
                 ch.port1.close();
                 this.activeStreamCleanups.delete(cleanup);
+                this.activityListener?.();
             };
 
             const cleanup = () => {
@@ -856,6 +895,7 @@ export class SandboxHost {
                 finish();
             };
             this.activeStreamCleanups.add(cleanup);
+            this.activityListener?.();
             cleanups.push(cleanup);
 
             const pump = async () => {
@@ -915,9 +955,11 @@ export class SandboxHost {
                 if (cleanup) {
                     cleanups.delete(cleanup);
                     cleanup = null;
+                    this.activityListener?.();
                 }
             };
 
+            const activityChanged = () => this.activityListener?.();
             return new ReadableStream({
                 start(controller) {
                     port.onmessage = (e: MessageEvent) => {
@@ -937,6 +979,7 @@ export class SandboxHost {
                         port.close();
                     };
                     cleanups.add(cleanup);
+                    activityChanged();
                 },
                 pull() {
                     port.postMessage({ pull: true });
@@ -1022,6 +1065,7 @@ export class SandboxHost {
             if (data.type === 'CALLBACK_RETURN') {
                 const req = this.pendingCallbacks.get(data.reqId!);
                 if (req) {
+                    req.dispose();
                     if (data.error) req.reject(new Error(data.error));
                     else {
                         try {
@@ -1031,6 +1075,7 @@ export class SandboxHost {
                         }
                     }
                     this.pendingCallbacks.delete(data.reqId!);
+                    this.activityListener?.();
                 }
                 return;
             }
@@ -1053,6 +1098,7 @@ export class SandboxHost {
             if (data.type === 'SCRIPT_SETTLED') {
                 this.guestReportedSettled = true;
                 this.reportScriptSettled();
+                this.activityListener?.();
                 return;
             }
 
@@ -1071,6 +1117,7 @@ export class SandboxHost {
                 };
 
                 this.pendingHostCalls += 1;
+                this.activityListener?.();
                 const storageMutation = data.type === 'CALL_INSTANCE'
                     ? ['setItem', 'removeItem', 'clear'].includes(String(data.method))
                     : ['setChar', 'setCharacter', 'setCharacterToIndex', 'setChatToIndex', 'risunestPatchConversation', 'setDatabase', 'setDatabaseLite', '_setPluginStorage', '_removePluginStorage', '_clearPluginStorage', '_setSafeLocalStorage', '_removeSafeLocalStorage', '_clearSafeLocalStorage'].includes(String(data.method));
@@ -1078,6 +1125,14 @@ export class SandboxHost {
                 try {
 
                     const args = this.deserializeArgs(data.args || [], usedAbortIds);
+                    const signalKey = data.type === 'CALL_ROOT' ? requestSignalKeys.get(String(data.method)) : undefined;
+                    if (signalKey && !args[1]?.[signalKey]) {
+                        const id = crypto.randomUUID();
+                        const controller = new AbortController();
+                        this.abortControllers.set(id, controller);
+                        usedAbortIds.push(id);
+                        args[1] = { ...args[1], [signalKey]: controller.signal };
+                    }
                     if (Array.isArray(data.argProvenance)) {
                         args.forEach((arg, index) => attachPluginReadProvenance(arg, data.argProvenance![index] ?? []));
                     }
@@ -1121,6 +1176,7 @@ export class SandboxHost {
                         this.storageDrainWaiters.clear();
                     }
                     this.reportScriptSettled();
+                    this.activityListener?.();
                 }
 
                 if (import.meta.env.DEV) {
@@ -1192,6 +1248,7 @@ export class SandboxHost {
 
     public terminate() {
         this.terminated = true;
+        for (const controller of this.abortControllers.values()) controller.abort();
         if (this.messageHandlerRef) {
             window.removeEventListener('message', this.messageHandlerRef);
             this.messageHandlerRef = null;
@@ -1202,10 +1259,13 @@ export class SandboxHost {
         this.closeActiveStreams();
         this.instanceRegistry.clear();
         for (const pending of this.pendingCallbacks.values()) {
+            pending.dispose();
             pending.reject(new Error('Plugin sandbox terminated'));
         }
         this.pendingCallbacks.clear();
         this.abortControllers.clear();
         this.callbackWrapperCache.clear();
+        this.activityListener?.();
+        this.activityListener = null;
     }
 }

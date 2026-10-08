@@ -10,6 +10,7 @@
     import { openUrl } from '@tauri-apps/plugin-opener'
     import { type as osType } from '@tauri-apps/plugin-os'
     import { isTauriAndroid, isTauriIOS } from 'src/ts/platform'
+    import { createQrScanner, isQrScanCancelled } from 'src/ts/ui/qrScanner'
     import { getExternalStorageBridge } from 'src/ts/storage/sync/external/bridge'
     import {
         buildPrepareConnectionRequest,
@@ -65,6 +66,7 @@
         tone = 'settings',
     }: Props = $props()
     const bridge = getExternalStorageBridge()
+    const qrScanner = createQrScanner()
     const FIELD_ID = 'external-storage-field-'
     const platform = isTauriAndroid
         ? 'android'
@@ -93,6 +95,7 @@
     let manualOAuthCallback = $state('')
     let providerDescriptors = $state<ExternalProviderDescriptor[]>([])
     let busy = $state(false)
+    let scanning = $state(false)
     let error = $state('')
     let authorizationStatus = $state('')
     let destroyed = false
@@ -181,6 +184,7 @@
             void cancelNativeAuthorization(authorizationId)
         }
         if (folderSelector) void bridge.cancelFolderSelection(folderSelector.selectionId).catch(() => {})
+        qrScanner.cancel()
         onbusychange(false)
     })
 
@@ -298,17 +302,14 @@
     }
 
     async function scanConnectionSettings(): Promise<void> {
+        scanning = true
         try {
-            const { checkPermissions, requestPermissions, scan, Format } = await import('@tauri-apps/plugin-barcode-scanner')
-            let permission = await checkPermissions()
-            if (permission === 'prompt') permission = await requestPermissions()
-            if (permission !== 'granted') throw new Error('qr-camera-permission-denied')
-            const result = await scan({ formats: [Format.QRCode], windowed: true, cameraDirection: 'back' })
-            if (result.format !== Format.QRCode) throw new Error('invalid-connection-settings')
-            connectionSettingsPayload = result.content.trim()
+            connectionSettingsPayload = (await qrScanner.scan(tone)).trim()
             error = ''
         } catch (reason) {
-            error = externalErrorMessage(strings, reason)
+            if (!isQrScanCancelled(reason)) error = externalErrorMessage(strings, reason)
+        } finally {
+            scanning = false
         }
     }
 
@@ -695,7 +696,7 @@
         <p class="sub-help">{strings.connectionSettingsImportHelp}</p>
         <div class="actions">
             <SettingButton variant="secondary" disabled={busy} onclick={loadConnectionSettingsFile}>{strings.openConnectionSettingsFile}</SettingButton>
-            {#if isTauriAndroid || isTauriIOS}<SettingButton variant="secondary" disabled={busy} onclick={scanConnectionSettings}>{strings.scanConnectionSettings}</SettingButton>{/if}
+            {#if isTauriAndroid || isTauriIOS}<SettingButton variant="secondary" disabled={busy} busy={scanning} onclick={scanConnectionSettings}>{strings.scanConnectionSettings}</SettingButton>{/if}
         </div>
         <label class="field"><span>{strings.connectionSettingsPayload}</span><textarea class="textarea rounded-md border border-darkborderc bg-transparent px-4 py-2 text-textcolor shadow-xs transition-colors duration-200 focus:border-borderc focus:ring-2 focus:ring-borderc focus:outline-hidden disabled:opacity-50" placeholder={strings.connectionSettingsPayloadPlaceholder} bind:value={connectionSettingsPayload}></textarea></label>
         <label class="field"><span>{strings.recoveryCode}</span><TextInput className="disabled:opacity-50" fullwidth hideText bind:value={recoveryKey} /></label>

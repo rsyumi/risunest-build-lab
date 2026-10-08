@@ -54,6 +54,8 @@ pub(crate) struct ProgressLane {
     step: AtomicU8,
     /// Units read from the server, before their bodies are fetched.
     listed: AtomicU64,
+    /// Units a state read will list, as its pin reported them.
+    listed_total: AtomicU64,
     items_done: AtomicU64,
     items_total: AtomicU64,
     files_done: AtomicU64,
@@ -75,6 +77,9 @@ impl ProgressLane {
     }
     pub(crate) fn listed(&self, count: usize) {
         self.listed.fetch_add(count as u64, Relaxed);
+    }
+    pub(crate) fn plan_listing(&self, count: u64) {
+        self.listed_total.fetch_add(count, Relaxed);
     }
     pub(crate) fn plan_items(&self, count: usize) {
         self.items_total.fetch_add(count as u64, Relaxed);
@@ -124,6 +129,7 @@ impl ProgressLane {
             active,
             step: if active { Step::name(self.step.load(Relaxed)) } else { "idle" },
             listed: self.listed.load(Relaxed),
+            listed_total: self.listed_total.load(Relaxed),
             items_done: self.items_done.load(Relaxed),
             items_total: self.items_total.load(Relaxed),
             files_done: self.files_done.load(Relaxed),
@@ -146,6 +152,7 @@ pub(crate) struct LaneSnapshot {
     pub active: bool,
     pub step: &'static str,
     pub listed: u64,
+    pub listed_total: u64,
     pub items_done: u64,
     pub items_total: u64,
     pub files_done: u64,

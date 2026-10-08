@@ -142,7 +142,7 @@ pub(crate) fn external_storage_set_execution_session(
         Ok(())
     })())
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn external_storage_capture_exit_target(app: AppHandle) -> Result<Value> {
     logged("external_storage_capture_exit_target", (|| {
         let store = native_store(&app)?;
@@ -152,7 +152,7 @@ pub(crate) fn external_storage_capture_exit_target(app: AppHandle) -> Result<Val
         )
     })())
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn external_storage_get_state<R: Runtime>(app: AppHandle<R>) -> Result<Value> {
     logged("external_storage_get_state", (|| {
         let root = root(&app)?;
@@ -257,7 +257,7 @@ pub(crate) struct SetPausedRequest {
     paused: bool,
     expected_selection_epoch: String,
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn external_storage_set_sync_paused(app: AppHandle, request: SetPausedRequest) -> Result<Value> {
     logged("external_storage_set_sync_paused", (|| {
         let selected = native_store(&app)?.external_set_paused(&request.expected_selection_epoch, request.paused).map_err(local_error)?;
@@ -268,7 +268,7 @@ pub(crate) fn external_storage_set_sync_paused(app: AppHandle, request: SetPause
 pub(crate) fn external_storage_set_automatic_backup_paused(app: AppHandle, connection_id: String, paused: bool) -> Result<()> {
     logged("external_storage_set_automatic_backup_paused", (|| ConnectionStore::open(&root(&app)?)?.set_automatic_backup_paused(&connection_id, paused))())
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn external_storage_get_job<R: Runtime>(app: AppHandle<R>, job_id: String) -> Result<Value> {
     logged("external_storage_get_job", (|| {
         let directory = root(&app)?;
@@ -318,10 +318,18 @@ fn job_summary(root: &std::path::Path, mut job: DurableJob) -> Value {
         // carries once the job is settled.
         job.summary["checkRequest"] = json!({"snapshotId": job.request.snapshot_id});
     }
-    if !job.terminal() {
+    // A publication uploads packs while it still prepares the rest, so its
+    // preparation keeps the counters until it has done all it planned.
+    if !job.terminal() && !preparing(&job.summary) {
         refresh_transfer_counters(root, &mut job);
     }
     job.summary
+}
+
+fn preparing(summary: &Value) -> bool {
+    let count = |name: &str| summary[name].as_str().and_then(|value| value.parse::<u64>().ok());
+    summary["counters"] == "prepared"
+        && matches!((count("completedItems"), count("totalItems")), (Some(done), Some(total)) if done < total)
 }
 
 fn refresh_transfer_counters(root: &std::path::Path, job: &mut DurableJob) {
@@ -1607,6 +1615,7 @@ async fn run_backup(
         },
     };
     let cache = package_cache_root(&directory)?;
+    let prepared = preparation_progress(&root, &job.id);
     let completed = super::packaging::package_and_upload(
         capture,
         sections,
@@ -1620,10 +1629,11 @@ async fn run_backup(
         &mut journal,
         connected.provider.as_ref(),
         &connected.handle,
-        &preparation_progress(&root, &job.id),
+        &prepared,
         cancel,
     )
     .await?;
+    prepared.flush();
     match super::packaging::verify_publication(
         &completed,
         &root,
@@ -1921,12 +1931,13 @@ mod tests {
         })
     }
 
-    /// Invariant 23. A publication registers nothing for the longest part of
-    /// its own work, so an empty journal must not overwrite what preparation
-    /// counted. The first registration is what hands the counters over, and
-    /// the summary says which of the two the numbers are.
+    /// Invariant 23. An empty journal must not overwrite what preparation
+    /// counted, and a publication uploads packs while it still prepares the
+    /// rest. The first registration after preparation did all it planned is
+    /// what hands the counters over, and the summary says which of the two
+    /// the numbers are.
     #[test]
-    fn a_summary_keeps_prepared_counters_until_the_journal_holds_a_transfer() {
+    fn a_summary_keeps_prepared_counters_until_preparation_finishes_and_the_journal_holds_a_transfer() {
         use super::super::journal::{JobIdentity, TransferJournal};
         let root = tempfile::tempdir().unwrap();
         let store = JobStore::open(root.path()).unwrap();
@@ -1979,6 +1990,23 @@ mod tests {
         // is the one that was already counted.
         journal.register(&intent).unwrap();
         drop(journal);
+        let preparing = job_summary(root.path(), store.read(&job.id).unwrap());
+        assert_eq!(preparing["counters"], "prepared");
+        assert_eq!(preparing["completedItems"], "7");
+        assert_eq!(preparing["totalItems"], "9");
+
+        record_counters(
+            root.path(),
+            &job.id,
+            "prepared",
+            super::super::phase_progress::PhaseCounters {
+                items: 9,
+                total_items: 9,
+                bytes: 90,
+                total_bytes: 90,
+            },
+        )
+        .unwrap();
         let transferred = job_summary(root.path(), store.read(&job.id).unwrap());
         assert_eq!(transferred["counters"], "transferred");
         assert_eq!(transferred["totalItems"], "1");

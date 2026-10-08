@@ -540,6 +540,7 @@ where
 
     let mut hashes = BTreeMap::new();
     let mut deferred_conversations = Vec::new();
+    let mut selections = Vec::new();
     let mut saw_root = false;
     let mut batch = StageBatch {
         writes: Vec::new(),
@@ -572,6 +573,16 @@ where
             local_root.as_ref(),
             probe,
         )?;
+        if let (
+            LogicalRecordLocator::Character { character_id },
+            LogicalRecordEnvelope::Character { detail, .. },
+        ) = (&prepared.locator, &prepared.envelope)
+        {
+            selections.push((
+                character_id.clone(),
+                detail.get("chatPage").and_then(serde_json::Value::as_u64),
+            ));
+        }
         batch.push(
             connection,
             generation,
@@ -624,6 +635,22 @@ where
          ) WHERE generation=?1",
         [generation],
     )?;
+    // A chat page kept from this device can name a conversation the snapshot does not have.
+    for (character_id, selected) in &selections {
+        let count: Option<i64> = transaction
+            .query_row(
+                "SELECT conversation_count FROM characters
+                 WHERE generation=?1 AND character_id=?2 AND archived_object IS NULL",
+                params![generation, character_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if count.is_some_and(|count| {
+            count > 0 && !selected.is_some_and(|index| index < count as u64)
+        }) {
+            super::commit::reset_stale_chat_page(&transaction, generation, character_id)?;
+        }
+    }
     rows::validate_configured_index_uniqueness(&transaction, generation)?;
     let duplicate_plugin_ordinals: bool = transaction.query_row(
         "SELECT EXISTS(

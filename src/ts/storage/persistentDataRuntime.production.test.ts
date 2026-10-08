@@ -14,7 +14,8 @@ vi.mock('../parser/parser.svelte', () => ({
 const displaySettings = vi.hoisted(() => ({ apply: vi.fn(async () => undefined) }))
 vi.mock('../gui/receivedDisplaySettings', () => ({ applyReceivedDisplaySettings: displaySettings.apply }))
 const pluginRuntime = vi.hoisted(() => ({ load: vi.fn(async () => undefined) }))
-vi.mock('../plugins/plugins.svelte', async (importOriginal) => ({ ...await importOriginal<typeof import('../plugins/plugins.svelte')>(), loadPlugins: pluginRuntime.load }))
+vi.mock('../plugins/plugins.svelte', async (importOriginal) => ({ ...await importOriginal<typeof import('../plugins/plugins.svelte')>(), requestPluginReloadAfterSync: pluginRuntime.load }))
+import { createBrowserPluginDeviceBackend, getPluginDeviceKeyspace } from '../plugins/pluginDeviceKeyspace'
 import { selectedCharID } from '../stores.svelte'
 import { doingChat } from '../process/generationState'
 import { getRuntimePerformanceBudgets } from '../runtimePerformanceProfile'
@@ -52,6 +53,17 @@ afterEach(() => {
 })
 
 describe('production persistent working-set publication', () => {
+    it('invalidates the actual shared device keyspace after a remote plugin-local change', async () => {
+        const owner = `received-device-plugin-${crypto.randomUUID()}`
+        const keyspace = getPluginDeviceKeyspace(owner)
+        const backend = createBrowserPluginDeviceBackend()
+        await backend.write(owner, [{type:'set', space:'string', key:'key', value:'before'}])
+        expect(await keyspace.getItem('string', 'key')).toBe('before')
+        await backend.write(owner, [{type:'set', space:'string', key:'key', value:'received'}])
+        createProductionStateAdapter().onPluginDeviceStorageChanged!(owner)
+        expect(await keyspace.getItem('string', 'key')).toBe('received')
+        await backend.write(owner, [{type:'clear', space:'string'}])
+    })
     it('applies received root changes as display settings', () => {
         createProductionStateAdapter().afterRemoteRootChange!(new Set(['colorSchemeName']))
 
@@ -1734,7 +1746,7 @@ describe('received plugin records', () => {
         ['a changed API version', [record('plugin-a', plugin('plugin-a', {version: '2.1'}))], ['plugin-a', 'plugin-b']],
         ['changed argument values', [record('plugin-a', plugin('plugin-a', {realArg: {limit: 2}}))], ['plugin-a', 'plugin-b']],
         ['changed arguments', [record('plugin-a', plugin('plugin-a', {arguments: {limit: 'string'}}))], ['plugin-a', 'plugin-b']],
-    ] as const)('reloads plugins once after receiving %s', async (_, mutations, names) => {
+    ] as const)('requests an idle plugin reload once after receiving %s', async (_, mutations, names) => {
         const {store, runtime} = await pluginHarness()
         await receiveCommit(store, runtime, {unitMutations: [...mutations]}, mutations.map((value) => value.key))
         await vi.dynamicImportSettled()

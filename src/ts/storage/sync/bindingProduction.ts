@@ -1,10 +1,11 @@
+import { get } from 'svelte/store'
 import { createStorageMutationGate } from '../storageMutationGate'
 import { createSyncBindingFlow, type BindingActivationGuard, type BindingPluginLifecycle, type BindingRecoveryRegistration, type SyncBindingNative } from './bindingFlow'
 import type { PersistentDataRuntime } from '../persistentDataRuntime'
 import type { PersistentMutationToken } from '../saveCoordinator'
 import { registerCommittedWorkingSetContinuation } from '../committedWorkingSetContinuation'
 import { confirmPreviousStorageFiles, confirmSyncBindingReplacement, downloadPreviousStorageFiles } from './bindingDialog'
-import { hasLocalBindingData, hasLocalSharedBindingData } from './bindingLocalData'
+import { hasLocalBindingData, hasLocalLibraryContent, hasLocalSharedBindingData } from './bindingLocalData'
 import { createNativeSyncBindingBridge } from './bindingNative'
 import { getSyncBindingTransport, registerSyncBindingFlow } from './bindingRegistry'
 
@@ -30,16 +31,21 @@ export function installSyncBindingFlow(dependencies: {
     refreshActivatedLibrary(): Promise<void>
     beginActivatedLibraryGuard(): BindingActivationGuard
     recovery: BindingRecoveryRegistration
+    /** Runs each question the binding asks the user, such as whether to replace this library. */
+    whileAsking?<T>(ask: () => Promise<T>): Promise<T>
 }) {
+    const { whileAsking = ask => ask(), ...rest } = dependencies
     const flow = createSyncBindingFlow({
-        ...dependencies,
+        ...rest,
         native: dependencies.native ?? createNativeSyncBindingBridge(),
         resolveTransport: getSyncBindingTransport,
         gate: createStorageMutationGate(),
-        hasNonDefaultData: hasLocalBindingData,
+        // The onboarding compares with what a new device stores and leaves out the settings it writes, such as the language.
+        hasNonDefaultData: async () => get((await import('../nativeFileJobManager')).nativeFileJobHost) === 'onboarding'
+            ? hasLocalLibraryContent() : hasLocalBindingData(),
         hasNonDefaultSharedData: hasLocalSharedBindingData,
-        confirmReplacement: confirmSyncBindingReplacement,
-        confirmPreviousStorageFiles,
+        confirmReplacement: reason => whileAsking(() => confirmSyncBindingReplacement(reason)),
+        confirmPreviousStorageFiles: context => whileAsking(() => confirmPreviousStorageFiles(context)),
         downloadPreviousStorageFiles,
     })
     return { flow, dispose: registerSyncBindingFlow(flow) }

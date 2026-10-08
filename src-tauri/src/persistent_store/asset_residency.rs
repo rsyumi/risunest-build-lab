@@ -73,6 +73,42 @@ impl Connections {
         Ok(self.0[root].contains(id))
     }
 }
+/// Whether the Sync server or a live external storage connection holds a body
+/// this device does not, by the same rules as the residency status. It reads
+/// only this device's records and creates none.
+pub(crate) struct RemoteHolders {
+    residency: Option<Residency>,
+    remote: RemoteBodies,
+    connections: Connections,
+}
+impl RemoteHolders {
+    pub(crate) fn open(root: &std::path::Path) -> Result<Self> {
+        Ok(Self {
+            residency: Residency::exists(root).then(|| Residency::open(root)).transpose()?,
+            remote: RemoteBodies::deferred(root),
+            connections: Connections::default(),
+        })
+    }
+    /// One answer per hash, in order. None of `hashes` may be held here.
+    pub(crate) fn held(&mut self, hashes: &[String]) -> Result<Vec<bool>> {
+        // Server custody is asked per page; `residency_holders` asks per body.
+        let server = match &self.residency {
+            Some(residency) => residency.active_among(hashes)?,
+            None => BTreeSet::new(),
+        };
+        let rest = hashes.iter().filter(|hash| !server.contains(*hash)).cloned().collect::<Vec<_>>();
+        let mut external = Vec::with_capacity(rest.len());
+        for page in rest.chunks(HOLDER_PAGE) {
+            let holders = PersistentStore::residency_holders(None, &mut self.remote, &mut self.connections, page)?;
+            external.extend(holders.iter().map(|holder| !matches!(holder, Holder::Unavailable)));
+        }
+        let mut external = external.into_iter();
+        Ok(hashes
+            .iter()
+            .map(|hash| server.contains(hash) || external.next().unwrap_or(false))
+            .collect())
+    }
+}
 struct Inventory {
     referenced: BTreeSet<String>,
     local: BTreeSet<String>,
@@ -86,8 +122,104 @@ impl ResidencyStatus {
         self.remote_objects > 0
     }
 }
+/// The bytes of the referenced bodies this device holds, and the hashes of those it does not.
+/// The inventory is sorted, so each page reaches only a few shard folders.
+fn split_local(cas: &PayloadCas, referenced: BTreeSet<String>, check: &impl Fn() -> Result<()>) -> Result<(u64, Vec<String>)> {
+    let referenced = referenced.into_iter().collect::<Vec<_>>();
+    let mut local_bytes = 0;
+    let mut missing = Vec::new();
+    for page in referenced.chunks(HOLDER_PAGE) {
+        check()?;
+        for (hash, size) in page.iter().zip(cas.stat_objects(page.iter().map(String::as_str))?) {
+            match size {
+                Some(size) => local_bytes += size,
+                None => missing.push(hash.clone()),
+            }
+        }
+    }
+    Ok((local_bytes, missing))
+}
+/// Of `page`, bodies this device does not hold, those another storage holds and `target` does not.
+fn previous_storage_wanted(
+    target: &PreviousStorageTarget,
+    residency: &Residency,
+    remote: &mut RemoteBodies,
+    connections: &mut Connections,
+    page: &[String],
+    holders: &[Holder],
+) -> Result<Vec<String>> {
+    let mut external = if matches!(target, PreviousStorageTarget::External { .. }) {
+        remote.holders(&page.iter().map(String::as_str).collect::<Vec<_>>())
+            .map_err(|_| std::io::Error::other("external-source-invalid"))?
+    } else { Default::default() };
+    let mut wanted = Vec::new();
+    for (hash, holder) in page.iter().zip(holders) {
+        if matches!(holder, Holder::Unavailable) { continue; }
+        let held = match target {
+            PreviousStorageTarget::Server { library_id, target_id } => residency.target_holds(hash, library_id, target_id)?,
+            PreviousStorageTarget::External { connection_id: id } => {
+                let mut held = false;
+                if let Some(registration) = external.remove(hash) {
+                    for (root, candidate) in registration.connections {
+                        if candidate == *id && connections.contains(&root, &candidate)? { held = true; break; }
+                    }
+                }
+                held
+            }
+        };
+        if !held { wanted.push(hash.clone()); }
+    }
+    Ok(wanted)
+}
 
 impl PersistentStore {
+    fn representative_image_hashes(&self, selected_character_id: Option<&str>) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+        let generation = super::active_generation(&self.connection)?;
+        let mut images = BTreeSet::new();
+        let mut priority = BTreeSet::new();
+        let mut query = self.connection.prepare_cached(
+            "SELECT c.character_id, a.object_hash FROM characters c
+             JOIN asset_aliases a ON a.generation=c.generation AND a.kind='asset' AND a.logical_key=c.image
+             WHERE c.generation=?1 AND c.trashed=0 AND a.object_hash IS NOT NULL",
+        )?;
+        let rows = query.query_map([generation], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (character_id, hash) = row?;
+            if selected_character_id == Some(character_id.as_str()) { priority.insert(hash.clone()); }
+            images.insert(hash);
+        }
+        Ok((images, priority))
+    }
+
+    pub(crate) fn hydrate_representative_images(
+        &self,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        selected_character_id: Option<&str>,
+        check: impl Fn() -> Result<()>,
+        on_object_done: impl Fn(),
+    ) -> Result<()> {
+        check()?;
+        let generation = super::active_generation(&self.connection)?;
+        let (images, priority) = self.representative_image_hashes(selected_character_id)?;
+        let check = || {
+            check()?;
+            if super::active_generation(&self.connection)? != generation {
+                return Err(SyncError::new("binding-authority-changed", 409));
+            }
+            Ok(())
+        };
+        let (_, missing) = split_local(&PayloadCas::new(&self.repository_root)?, images, &check)?;
+        if missing.is_empty() { return check(); }
+        // An icon no storage holds is skipped and left to the data check, which reports it.
+        let held = RemoteHolders::open(&self.repository_root)?.held(&missing)?;
+        let missing = missing.into_iter().zip(held).filter_map(|(hash, held)| held.then_some(hash)).collect::<Vec<_>>();
+        if missing.is_empty() { return check(); }
+        let mut hydration = crate::server_sync::residency::HydrationSession::new(&self.repository_root, cancellation)?;
+        // One whose last holder went away during the pass is skipped the same way.
+        hydration.hydrate_many_outcomes_prioritized(&missing, &priority, &check, |_, _| on_object_done())?;
+        check()
+    }
+
     pub(crate) fn asset_object_byte_size(&self, hash: &str) -> super::StoreResult<Option<u64>> {
         let size: Option<i64> = self.connection.query_row(
             "SELECT byte_size FROM asset_objects WHERE object_hash=?1", [hash], |row| row.get(0),
@@ -251,6 +383,8 @@ impl PersistentStore {
         let mut referenced = BTreeSet::new();
         let roots = self.collect_asset_gc_roots_with_backup_references(guarded, false, Some(&mut referenced))?;
         let mut local = BTreeSet::new();
+        // This is offload protection, not evidence that the body exists on this device.
+        local.extend(self.representative_image_hashes(None)?.0);
         let mut manifests = BTreeSet::new();
         let mut release_blocked = false;
         for (label, root) in roots {
@@ -258,6 +392,12 @@ impl PersistentStore {
             if label == "external-conflict" {
                 local.extend(root.object_hashes.iter().cloned());
                 local.extend(root.manifest_hashes.iter().cloned());
+            }
+            // External captures require their payloads, held locally or in
+            // custody, through publication, even when the source alias was
+            // removed by a later edit.
+            if label == "remote" {
+                local.extend(root.object_hashes.iter().cloned());
             }
             if label == "server-conflict" {
                 local.extend(root.object_hashes);
@@ -289,16 +429,6 @@ impl PersistentStore {
             local.extend(root.object_hashes);
             local.extend(root.manifest_hashes);
         }
-        // External captures require their payloads, held locally or in custody,
-        // through publication, even when the source alias was removed by a
-        // later edit.
-        local.extend(
-            crate::external_storage::capture::registered_roots(
-                &self.connection,
-                &self.repository_root,
-            )?
-            .object_hashes,
-        );
         let jobs = if guarded {
             crate::asset_repository::job_pins::collect_durable_cas_job_roots_already_guarded(
                 &self.repository_root,
@@ -319,8 +449,7 @@ impl PersistentStore {
     }
     /// Where each of `hashes`, none of them held here, can be fetched from.
     fn residency_holders(
-        &self,
-        residency: &Residency,
+        residency: Option<&Residency>,
         remote: &mut RemoteBodies,
         connections: &mut Connections,
         hashes: &[String],
@@ -328,7 +457,7 @@ impl PersistentStore {
         let mut server = Vec::with_capacity(hashes.len());
         let mut external = Vec::new();
         for hash in hashes {
-            let object = residency.object(hash, None)?;
+            let object = residency.map(|residency| residency.object(hash, None)).transpose()?.flatten();
             if object.is_none() {
                 external.push(hash.as_str());
             }
@@ -362,34 +491,36 @@ impl PersistentStore {
         Ok(holders)
     }
     pub(crate) fn asset_residency_status(&self) -> Result<ResidencyStatus> {
+        self.asset_residency_status_for_target(None)
+    }
+    /// The status, with what moving to `target` would download when one is given, read from
+    /// one inventory.
+    pub(crate) fn asset_residency_status_for_target(&self, target: Option<&PreviousStorageTarget>) -> Result<ResidencyStatus> {
         let residency = Residency::open(&self.repository_root)?;
         let inventory = self.residency_inventory(false)?;
         let cas = PayloadCas::new(&self.repository_root)?;
         let mut connections = Connections::default();
+        let (local_bytes, missing) = split_local(&cas, inventory.referenced, &|| Ok(()))?;
         let mut status = ResidencyStatus {
             policy: self.device_store()?.asset_residency_policy()?,
-            local_bytes: 0,
+            local_bytes,
             remote_bytes: 0,
             remote_objects: 0,
             server_bytes: 0,
             server_objects: 0,
             external_objects: Vec::new(),
             unavailable_objects: 0,
-            previous_storage_objects: None,
+            previous_storage_objects: target.map(|_| 0),
             evicted_bytes: 0,
         };
         let mut external = std::collections::BTreeMap::<String, u64>::new();
-        let mut missing = Vec::new();
-        for hash in inventory.referenced {
-            if let Some(size) = cas.stat_object(&hash)? {
-                status.local_bytes += size;
-                continue;
-            }
-            missing.push(hash);
-        }
         let mut remote = RemoteBodies::deferred(&self.repository_root);
         for page in missing.chunks(HOLDER_PAGE) {
-            for holder in self.residency_holders(&residency, &mut remote, &mut connections, page)? {
+            let holders = Self::residency_holders(Some(&residency), &mut remote, &mut connections, page)?;
+            if let (Some(target), Some(objects)) = (target, status.previous_storage_objects.as_mut()) {
+                *objects += previous_storage_wanted(target, &residency, &mut remote, &mut connections, page, &holders)?.len() as u64;
+            }
+            for holder in holders {
                 match holder {
                     Holder::Server(size) => {
                         status.server_bytes += size;
@@ -416,48 +547,49 @@ impl PersistentStore {
             .collect();
         Ok(status)
     }
-    pub(crate) fn asset_residency_status_for_target(&self, target: Option<&PreviousStorageTarget>) -> Result<ResidencyStatus> {
-        let mut status = self.asset_residency_status()?;
-        if let Some(target) = target {
-            status.previous_storage_objects = Some(self.previous_storage_assets(target, &|| Ok(()))?.len() as u64);
+    /// The status's `externalObjects` count for one connection. Only the
+    /// bodies registered to that connection are classified, and the library
+    /// is read only when one of them is held by that connection alone.
+    pub(crate) fn asset_residency_connection_objects(&self, connection_id: &str) -> Result<u64> {
+        let mut remote = RemoteBodies::deferred(&self.repository_root);
+        let registered = remote
+            .connection_hashes(connection_id)
+            .map_err(|_| std::io::Error::other("external-source-invalid"))?;
+        if registered.is_empty() {
+            return Ok(0);
         }
-        Ok(status)
+        let (_, missing) = split_local(&PayloadCas::new(&self.repository_root)?, registered, &|| Ok(()))?;
+        let residency = Residency::exists(&self.repository_root)
+            .then(|| Residency::open(&self.repository_root))
+            .transpose()?;
+        let mut connections = Connections::default();
+        let mut alone = Vec::new();
+        for page in missing.chunks(HOLDER_PAGE) {
+            let holders = Self::residency_holders(residency.as_ref(), &mut remote, &mut connections, page)?;
+            for (hash, holder) in page.iter().zip(holders) {
+                if matches!(holder, Holder::External(holder, _) if holder == connection_id) {
+                    alone.push(hash);
+                }
+            }
+        }
+        if alone.is_empty() {
+            return Ok(0);
+        }
+        let referenced = self.residency_inventory(false)?.referenced;
+        Ok(alone.into_iter().filter(|hash| referenced.contains(*hash)).count() as u64)
     }
     fn previous_storage_assets(&self, target: &PreviousStorageTarget, check: &impl Fn() -> Result<()>) -> Result<BTreeSet<String>> {
         let inventory = self.residency_inventory(false)?;
         let cas = PayloadCas::new(&self.repository_root)?;
         let residency = Residency::open(&self.repository_root)?;
-        let mut missing = Vec::new();
-        for hash in inventory.referenced {
-            check()?;
-            if cas.stat_object(&hash)?.is_none() { missing.push(hash); }
-        }
+        let (_, missing) = split_local(&cas, inventory.referenced, check)?;
         let mut remote = RemoteBodies::deferred(&self.repository_root);
         let mut connections = Connections::default();
         let mut wanted = BTreeSet::new();
         for page in missing.chunks(HOLDER_PAGE) {
             check()?;
-            let available = self.residency_holders(&residency, &mut remote, &mut connections, page)?;
-            let mut external = if matches!(target, PreviousStorageTarget::External { .. }) {
-                remote.holders(&page.iter().map(String::as_str).collect::<Vec<_>>())
-                    .map_err(|_| std::io::Error::other("external-source-invalid"))?
-            } else { Default::default() };
-            for (hash, holder) in page.iter().zip(available) {
-                if matches!(holder, Holder::Unavailable) { continue; }
-                let held = match target {
-                    PreviousStorageTarget::Server { library_id, target_id } => residency.target_holds(hash, library_id, target_id)?,
-                    PreviousStorageTarget::External { connection_id: id } => {
-                        let mut held = false;
-                        if let Some(registration) = external.remove(hash) {
-                            for (root, candidate) in registration.connections {
-                                if candidate == *id && connections.contains(&root, &candidate)? { held = true; break; }
-                            }
-                        }
-                        held
-                    }
-                };
-                if !held { wanted.insert(hash.clone()); }
-            }
+            let available = Self::residency_holders(Some(&residency), &mut remote, &mut connections, page)?;
+            wanted.extend(previous_storage_wanted(target, &residency, &mut remote, &mut connections, page, &available)?);
         }
         Ok(wanted)
     }
@@ -486,17 +618,11 @@ impl PersistentStore {
         let residency = Residency::open(&self.repository_root)?;
         let mut connections = Connections::default();
         let mut targets = BTreeSet::new();
-        let mut missing = Vec::new();
-        for hash in inventory.referenced {
-            check()?;
-            if cas.stat_object(&hash)?.is_none() {
-                missing.push(hash);
-            }
-        }
+        let (_, missing) = split_local(&cas, inventory.referenced, &check)?;
         let mut remote = RemoteBodies::deferred(&self.repository_root);
         for page in missing.chunks(HOLDER_PAGE) {
             check()?;
-            let holders = self.residency_holders(&residency, &mut remote, &mut connections, page)?;
+            let holders = Self::residency_holders(Some(&residency), &mut remote, &mut connections, page)?;
             for (hash, holder) in page.iter().zip(holders) {
                 let wanted = match holder {
                     Holder::Server(_) | Holder::Shared(_) => connection_id.is_none(),
@@ -613,8 +739,8 @@ impl PersistentStore {
         for page in candidates.chunks(128) {
             check()?;
             let mut objects = std::collections::BTreeMap::new();
-            for hash in page {
-                if let Some(size) = cas.stat_object(hash)? {
+            for (hash, size) in page.iter().zip(cas.stat_objects(page.iter().map(String::as_str))?) {
+                if let Some(size) = size {
                     objects.insert(hash.clone(), size);
                 }
             }

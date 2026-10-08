@@ -92,6 +92,7 @@ async_commands![
     app_update::commands::app_update_stage_deb,
     native_media::streaming::native_media_ensure,
     server_sync::commands::server_sync_asset_status,
+    server_sync::commands::asset_residency_connection_objects,
     server_sync::commands::server_sync_status,
     server_sync::commands::server_sync_configure,
     server_sync::commands::server_sync_lww_push,
@@ -147,6 +148,8 @@ async_commands![
     native_file_jobs::native_file_job_prepared_content,
     native_file_jobs::native_file_job_stage_inline_asset,
     native_file_jobs::screenshot_output::native_file_job_screenshot_output_publish,
+    persistent_store::commands::pds_archive_character,
+    persistent_store::commands::pds_restore_character,
     #[cfg(target_os = "android")]
     android_commit_transport::pds_commit_android_finish,
     #[cfg(target_os = "android")]

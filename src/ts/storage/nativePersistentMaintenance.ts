@@ -42,7 +42,14 @@ export interface NativePersistentStorageStats {
     snapshotBytes: number
     /** Database, WAL and SHM file lengths, including reusable pages. */
     databaseBytes: number
+    /** Every catalogued file, including those not stored on this device. */
     assetObjects: NativeStorageBytes
+    /** The asset files this device stores. */
+    assetBodies: NativeStorageBytes
+    /** Catalogued files this device does not store. */
+    missingAssetBodies: NativeStorageBytes
+    /** The chat attachment files this device stores, each counted once. */
+    inlayBodies: NativeStorageBytes
     assetAliases: NativeStorageAliasStats[]
     pluginStorage: NativeStorageBytes
     characters: { active: NativeStorageBytes; trashedCount: number }

@@ -88,7 +88,7 @@ vi.mock('./storage/persistentDataRuntime.svelte', () => ({
     hasPendingOfficialPublication: vi.fn(() => false), publishCurrentOfficialRevision: vi.fn(),
 }))
 vi.mock('./plugins/plugins.svelte', () => ({
-    loadPlugins: vi.fn(), pluginCompatibility: { initialize: vi.fn(), profile: 'default' },
+    keepPluginsOffForThisStart: vi.fn(), loadPlugins: vi.fn(), pluginCompatibility: { initialize: vi.fn(), profile: 'default' },
 }))
 vi.mock('./plugins/pluginCompatibility', () => ({ shouldProjectScalableWorkingSet: vi.fn(() => false) }))
 vi.mock('./storage/accountStorage', () => ({
@@ -177,6 +177,7 @@ vi.mock('./process/transformers', () => ({ releaseIdleTransformerModels: vi.fn()
 vi.mock('./process/files/inlayProviderImage', () => ({ forgetInlayProviderImages: vi.fn() }))
 
 import { loadData } from './bootstrap'
+import { keepPluginsOffForThisStart, loadPlugins } from './plugins/plugins.svelte'
 import { alertNormal, alertToast, alertTOS, waitAlert } from './alert'
 import { bootFailure } from './stores.svelte'
 import { loadRisuAccountData } from './drive/accounter'
@@ -228,6 +229,23 @@ describe('bootstrap recovery exclusions', () => {
             expect(startup.transports).not.toHaveBeenCalled()
             expect(startup.stages.mock.calls.flat()).not.toContain('drive-sync')
         }
+    })
+
+    it.each([true, false])('keeps plugins off for the whole run when they are excluded (native=%s)', async (native) => {
+        startup.native = native
+        startup.exclusions = ['plugins']
+        await loadData()
+        expect(bootFailure.set).toHaveBeenLastCalledWith(expect.objectContaining({ stage: 'ui-state' }))
+        expect(keepPluginsOffForThisStart).toHaveBeenCalledOnce()
+        expect(loadPlugins).not.toHaveBeenCalled()
+    })
+
+    it('leaves plugins on when they are not excluded', async () => {
+        startup.native = true
+        startup.exclusions = []
+        await loadData()
+        expect(keepPluginsOffForThisStart).not.toHaveBeenCalled()
+        expect(loadPlugins).toHaveBeenCalledOnce()
     })
 
     it('reaches UI when registering the sync transports fails while sync is left off', async () => {

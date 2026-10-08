@@ -23,6 +23,13 @@ const callOnlyMCPUrls = [
 ]
 
 export async function initializeMCPs(additionalMCPs?:string[]) {
+    for (const clients of [MCPs, callOnlyMCPs]) {
+        for (const key of Object.keys(clients)) {
+            if (key.startsWith('plugin:') && clients[key] !== registeredCustomPluginMCPs.get(key)) {
+                delete clients[key];
+            }
+        }
+    }
     const db = getDatabase()
     const mcpUrls = getModuleMcps()
     if(additionalMCPs && additionalMCPs.length > 0) {
@@ -89,6 +96,7 @@ export async function initializeMCPs(additionalMCPs?:string[]) {
                     await MCPs[mcp].checkHandshake();
                     continue;
                 }
+                continue;
             }
             if(mcp.startsWith('stdio:')){
                 const MCPJSON = mcp.slice('stdio:'.length);

@@ -2075,6 +2075,47 @@ impl ExternalLwwEngine {
         }
         Ok(())
     }
+    /// Brings the bodies the archives and restores of `request` read on this device from the
+    /// storage that holds them, so applying the page never waits on a body held elsewhere.
+    /// Pages are stored before earlier ones are applied, so this runs as each is handed out.
+    pub(crate) async fn prepare_archive_bodies(
+        store: &mut PersistentStore,
+        request: &StageReceive,
+        cancel: &Cancellation,
+    ) -> Result<()> {
+        let missing = store.lww_incoming_archive_bodies(&request.changes).map_err(store_error)?;
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let root = store.repository_root().to_owned();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // The flag also stops a transfer the hydration has in flight.
+        let watcher = {
+            let (cancel, cancelled) = (cancel.clone(), cancelled.clone());
+            tokio::spawn(async move {
+                cancel.cancelled().await;
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+            })
+        };
+        let worker = cancel.clone();
+        let fetched = spawn_blocking(move || {
+            let check = || {
+                worker.check().map_err(|_| crate::server_sync::SyncError::new("cancelled", 409))
+            };
+            crate::server_sync::residency::HydrationSession::new(&root, Some(cancelled))
+                .and_then(|mut session| session.hydrate_many(&missing, &check))
+        })
+        .await;
+        watcher.abort();
+        match fetched.map_err(transient)? {
+            Ok(unavailable) if unavailable.is_empty() => Ok(()),
+            Ok(_) => Err(ProviderError {
+                cause: ErrorCause(Some("required-asset-unavailable".into())),
+                ..ProviderError::new(ErrorKind::PreviousStorageUnavailable)
+            }),
+            Err(error) => Err(Self::held_server_body_error(error, cancel)),
+        }
+    }
     #[cfg(test)]
     pub(crate) async fn receive_and_apply(
         &self,
@@ -2087,6 +2128,7 @@ impl ExternalLwwEngine {
         let requests = self.receive_requests(store, authority, cancel).await?;
         let mut count = 0;
         for request in requests {
+            Self::prepare_archive_bodies(store, &request, cancel).await?;
             store.lww_stage_receive(&request).map_err(store_error)?;
             let applied = store
                 .lww_apply_receive(&ApplyReceive {

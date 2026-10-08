@@ -43,6 +43,10 @@ pub(crate) enum Error {
     Invalid(&'static str),
     Cancelled,
     SourceNeedsPreservation,
+    /// A body the Sync server or an external storage connection holds could not be fetched.
+    RemotePayloadUnavailable,
+    /// A body is neither on this device nor held by any storage.
+    PayloadMissing,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -68,6 +72,8 @@ impl std::fmt::Display for Error {
             Self::SourceNeedsPreservation => {
                 f.write_str("source requires a fresh preservation capture")
             }
+            Self::RemotePayloadUnavailable => f.write_str("a remotely held backup payload could not be fetched"),
+            Self::PayloadMissing => f.write_str("required backup payload is unavailable"),
         }
     }
 }

@@ -49,6 +49,15 @@ pub struct NewDeviceClaimStatus {
     pub receipt: NewDeviceClaimReceipt,
 }
 
+/// A registration's claim state, which a join reads before it reads the library.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NewDeviceClaimState {
+    pub claim: Option<NewDeviceClaimStatus>,
+    /// A writer or operation already belongs to this registration, so it cannot claim a writer.
+    pub used: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UnitChange {
@@ -172,6 +181,8 @@ pub struct StatePin {
     pub pin_id: String,
     pub start_seq: DecimalU64,
     pub expires_at_ms: DecimalU64,
+    /// Units the pin holds, so a reader knows how many state pages it will list.
+    pub unit_count: DecimalU64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

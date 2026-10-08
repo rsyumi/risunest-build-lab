@@ -1483,7 +1483,7 @@ export const languageSpanish = {
         replaceAction: "Reemplazar",
         cancelAction: "Cancelar",
         clockBlocked: "La sincronización se detuvo porque la hora del dispositivo y la remota son distintas. Corrija la hora y vuelva a intentarlo.",
-        writerCollision: "La sincronización se detuvo por una identidad de dispositivo duplicada. Vuelva a conectarse como un dispositivo nuevo.",
+        writerCollision: "La sincronización se detuvo por una identidad de dispositivo duplicada. Registre un dispositivo nuevo en el servidor, introduzca el nuevo código de registro y después elija «Conectar como dispositivo nuevo».",
         unitTooLarge: "La sincronización se detuvo porque un elemento de este dispositivo es demasiado grande para enviarlo al servidor. Reduzca el tamaño del elemento grande y vuelva a intentarlo.",
         newDeviceAction: "Conectar como dispositivo nuevo",
         restoreTitle: "¿Restaurar la copia de seguridad?",
@@ -1497,6 +1497,8 @@ export const languageSpanish = {
         downloadFailedNotConnected: "No se pudieron descargar los archivos, así que no se realizó la conexión. Vuelva a intentarlo o conecte sin descargar.",
         previousStorageUnavailable: "No se pudieron obtener archivos guardados solo en el servidor o almacenamiento externo usado antes, así que la sincronización se detuvo. Vuelva a intentarlo cuando se pueda acceder.",
         registrationRevoked: "El registro de este dispositivo se eliminó en el servidor, por lo que no puede sincronizar. Vuelva a registrar este dispositivo en el servidor y después introduzca el nuevo código de registro.",
+        registrationUsed: "Este código de registro ya se usó, por lo que este dispositivo no puede conectarse con él. Registre un dispositivo nuevo en el servidor y después introduzca el nuevo código de registro.",
+        registrationUsedOnboarding: "Este código de registro ya se usó, por lo que este dispositivo no puede conectarse con él. Registre un dispositivo nuevo en el servidor y después introduzca el nuevo código de registro.",
         bindingIncomplete: "La conexión no se completó. Pulse Connect and sync para terminarla.",
     },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>;

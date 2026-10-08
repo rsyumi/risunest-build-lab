@@ -69,6 +69,7 @@
     import { getNativeOfficialAccountFlow } from 'src/ts/storage/sync/nativeOfficialAccountFlow'
     import ServerSyncSettings from 'src/lib/Setting/Pages/ServerSyncSettings.svelte'
     import type { ServerConfig } from 'src/ts/storage/sync/serverSync'
+    import type { AssetResidencyPolicy } from 'src/ts/storage/sync/serverAssetResidency'
     import { connectServerSync, getServerSyncController } from 'src/ts/storage/sync/serverSyncProduction'
     import { canScanServerRegistration } from 'src/ts/storage/sync/serverSyncQr'
     import { createNativeSyncBindingBridge } from 'src/ts/storage/sync/bindingNative'
@@ -344,10 +345,10 @@
     let serverConnecting = false
     let serverConnectFailed = false
 
-    async function onServerConnected(config: ServerConfig, newDevice: boolean): Promise<void> {
+    async function onServerConnected(config: ServerConfig, newDevice: boolean, policy?: AssetResidencyPolicy): Promise<void> {
         serverConnecting = true
         try {
-            const outcome = await connectServerSync(config, newDevice)
+            const outcome = await connectServerSync(config, newDevice, policy)
             if (outcome.kind === 'bound' && flow.state === 'sync-server') {
                 flow = goToOnboardingState(flow, 'done', 'server')
             }

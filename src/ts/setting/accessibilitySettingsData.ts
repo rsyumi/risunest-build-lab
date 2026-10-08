@@ -32,13 +32,6 @@ export const accessibilitySettingsItems: SettingItem[] = [
         keywords: ['instant', 'remove', 'delete']
     },
     {
-        id: 'acc.sendWithEnter',
-        type: 'check',
-        labelKey: 'sendWithEnter',
-        bindKey: 'sendWithEnter',
-        keywords: ['send', 'enter', 'keyboard', 'submit']
-    },
-    {
         id: 'acc.fixedChatTextarea',
         type: 'check',
         labelKey: 'fixedChatTextarea',

@@ -9,7 +9,12 @@ import {
     executePluginV3,
     getV3PluginInstance,
     loadV3Plugins,
+    areV3PluginsIdle,
+    prepareV3PluginsForReload,
 } from './v3.svelte'
+import { registerOwnedPluginMCP } from '../hostToolHost'
+import { requestChatDataMain } from '../../process/request/request'
+import { doingChat } from '../../process/index.svelte'
 import { additionalMessageButtons } from '../messageButtons.svelte'
 import { chatViewEvents } from '../chatViewHost.svelte'
 import { beginGenerationEndRun, noteGenerationStarted, type GenerationEndStatus } from '../../process/generationEnd'
@@ -106,12 +111,10 @@ vi.mock('localforage', () => ({ default: { createInstance: () => ({
     getItem: vi.fn((key: string) => mocks.permissionValues.get(key) ?? null),
     setItem: vi.fn((key: string, value: unknown) => mocks.permissionValues.set(key, value)),
 }) } }))
-vi.mock('src/ts/process/index.svelte', () => ({
-    sendChat: vi.fn(),
-    doingChat: {
-        subscribe(run: (value: boolean) => void) { run(false); return () => undefined },
-    },
-}))
+vi.mock('src/ts/process/index.svelte', async () => {
+    const { writable } = await import('svelte/store')
+    return { sendChat: vi.fn(), doingChat: writable(false) }
+})
 vi.mock('src/ts/model/modellist', () => ({ getModelInfo: () => ({ id: 'fixture-model' }) }))
 vi.mock('src/ts/process/request/request', () => ({ requestChatDataMain: vi.fn() }))
 vi.mock('src/ts/process/modules', () => ({ getModuleLorebooks: vi.fn() }))
@@ -272,6 +275,7 @@ async function startFixture(name = pluginName, script = fixtureScript): Promise<
 describe('Plugin v3 real iframe DOM/RPC bridge', () => {
     beforeEach(() => {
         vi.clearAllMocks()
+        doingChat.set(false)
         vi.stubGlobal('ImageBitmap', class {})
         const srcdocDescriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'srcdoc')
         let frameSequence = 0
@@ -453,6 +457,124 @@ function __postToParent(message) {
         await loadV3Plugins([])
 
         expect(document.querySelectorAll('iframe[data-risu-plugin-frame]')).toHaveLength(0)
+    })
+
+    it('allows onUnload to reacquire the main document and remove its own DOM', async () => {
+        await startFixture('cleanup-dom', `
+            globalThis.rpcReady = (async () => {
+                await risuai.getRootDocument();
+                await risuai.onUnload(async () => {
+                    const root = await risuai.getRootDocument();
+                    const target = await root.querySelector('#plugin-target');
+                    await target.remove();
+                });
+            })();
+        `)
+        await loadV3Plugins([])
+        expect(document.querySelector('#plugin-target')).toBeNull()
+        expect(document.querySelectorAll('iframe[data-risu-plugin-frame]')).toHaveLength(0)
+    })
+
+    it('stays busy during a guest provider callback and during chat generation', async () => {
+        const name = 'busy-provider'
+        await startFixture(name, `
+            globalThis.rpcReady = risuai.addProvider('busy', () => new Promise(resolve => {
+                globalThis.finishProvider = () => resolve({success:true, content:'done'});
+            }));
+        `)
+        expect(areV3PluginsIdle()).toBe(true)
+        const result = mocks.providers.get('busy')!({})
+        await vi.waitFor(async () => expect(await guest(name, 'return typeof globalThis.finishProvider')).toBe('function'))
+        expect(areV3PluginsIdle()).toBe(false)
+        await guest(name, 'globalThis.finishProvider(); return true')
+        expect(await result).toEqual({success:true, content:'done'})
+        expect(areV3PluginsIdle()).toBe(true)
+        doingChat.set(true)
+        expect(areV3PluginsIdle()).toBe(false)
+        doingChat.set(false)
+        expect(areV3PluginsIdle()).toBe(true)
+    })
+
+    it('lets a reload interrupt a plugin script that never settles, but never a chat generation', async () => {
+        await startFixture('never-settles', `
+            globalThis.rpcReady = Promise.resolve();
+            await new Promise(() => {});
+        `)
+        expect(areV3PluginsIdle()).toBe(false)
+        expect(prepareV3PluginsForReload()).toBe(false)
+        doingChat.set(true)
+        expect(prepareV3PluginsForReload(true)).toBe(false)
+        doingChat.set(false)
+        expect(prepareV3PluginsForReload(true)).toBe(true)
+        await loadV3Plugins([])
+        expect(document.querySelectorAll('iframe[data-risu-plugin-frame]')).toHaveLength(0)
+    })
+
+    it('aborts a running model request when its sandbox unloads', async () => {
+        let signal: AbortSignal | undefined
+        vi.mocked(requestChatDataMain).mockImplementationOnce((_arg, _mode, abortSignal) => new Promise(resolve => {
+            signal = abortSignal
+            signal!.addEventListener('abort', () => resolve({type:'fail', result:'aborted'}), {once:true})
+        }))
+        await startFixture('model-lifetime', `
+            globalThis.rpcReady = Promise.resolve();
+            void risuai.runLLMModel({mode:'model', messages:[]});
+        `)
+        await vi.waitFor(() => expect(signal).toBeDefined())
+        expect(signal?.aborted).toBe(false)
+        await loadV3Plugins([])
+        expect(signal?.aborted).toBe(true)
+    })
+
+    it('disposes an MCP registration made through the guest API', async () => {
+        const dispose = vi.fn()
+        vi.mocked(registerOwnedPluginMCP).mockResolvedValueOnce(dispose)
+        await startFixture('mcp-lifetime', `
+            globalThis.rpcReady = risuai.registerMCP({identifier:'plugin:fixture', name:'Fixture', version:'1', description:''}, () => [], () => []);
+        `)
+        await loadV3Plugins([])
+        expect(dispose).toHaveBeenCalledOnce()
+    })
+
+    it('serializes overlapping reloads and invokes guest cleanup once', async () => {
+        await startFixture('overlapping-reload', `
+            globalThis.cleanupCalls = 0;
+            globalThis.rpcReady = risuai.onUnload(() => {
+                globalThis.cleanupCalls++;
+                return new Promise(resolve => { globalThis.finishCleanup = resolve; });
+            });
+        `)
+        const child = getV3PluginInstance('overlapping-reload')!.host
+        const first = loadV3Plugins([])
+        const second = loadV3Plugins([])
+        await vi.waitFor(async () => expect(await child.executeInIframe('return typeof globalThis.finishCleanup')).toBe('function'))
+        expect(await child.executeInIframe('return globalThis.cleanupCalls')).toBe(1)
+        await child.executeInIframe('globalThis.finishCleanup(); return true')
+        await Promise.all([first, second])
+        expect(document.querySelectorAll('iframe[data-risu-plugin-frame]')).toHaveLength(0)
+    })
+
+    it('finishes host teardown after an unload callback rejects', async () => {
+        await startFixture('cleanup-error', `
+            globalThis.rpcReady = risuai.onUnload(() => { throw new Error('synthetic cleanup failure'); });
+        `)
+        await loadV3Plugins([])
+        expect(document.querySelectorAll('iframe[data-risu-plugin-frame]')).toHaveLength(0)
+    })
+
+    it('limits an unsettled unload callback to one second', async () => {
+        await startFixture('cleanup-timeout', `
+            globalThis.rpcReady = risuai.onUnload(() => new Promise(() => {}));
+        `)
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        try {
+            const unloading = loadV3Plugins([])
+            await vi.advanceTimersByTimeAsync(999)
+            expect(document.querySelectorAll('iframe[data-risu-plugin-frame]')).toHaveLength(1)
+            await vi.advanceTimersByTimeAsync(1)
+            await unloading
+            expect(document.querySelectorAll('iframe[data-risu-plugin-frame]')).toHaveLength(0)
+        } finally { vi.useRealTimers() }
     })
 
     describe('plugin channel IPC', () => {
