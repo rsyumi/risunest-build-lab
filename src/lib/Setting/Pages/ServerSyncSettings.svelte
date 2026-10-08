@@ -2,7 +2,7 @@
     import { onMount, onDestroy } from 'svelte'
     import { CheckIcon, ChevronRightIcon, CloudDownloadIcon, HardDriveIcon, LoaderCircleIcon } from '@lucide/svelte'
     import { language } from 'src/lang'
-    import { alertCheckboxConfirm, alertConfirm } from 'src/ts/alert'
+    import { alertActionConfirm, alertCheckboxConfirm, alertConfirm } from 'src/ts/alert'
     import { isTauri } from 'src/ts/platform'
     import { platform as nativePlatform } from '@tauri-apps/plugin-os'
     import { completeServerSyncBinding, connectServerSync, disconnectServerSync, holdServerSync, retryServerSync, getServerSyncController, getServerSyncCacheUsage, cleanupServerSyncCache, type ServerSyncCacheUsage } from 'src/ts/storage/sync/serverSyncProduction'
@@ -31,6 +31,8 @@
     let { connectTarget = connectServerSync, tone = 'settings' }: Props = $props()
 
     const copy = language.risuNest.serverSync
+    /** How long disconnecting waits for the file check before it asks without the check's answer. */
+    const SERVER_ONLY_CHECK_MS = 3_000
     const controller = getServerSyncController()
     const scanner = createServerQrScanner()
     let view = $state(controller.snapshot())
@@ -42,6 +44,7 @@
     let residency = $state<AssetResidencyStatus | undefined>()
     let cache = $state<ServerSyncCacheUsage | undefined>()
     let downloading = $state(false)
+    let checkingFiles = $state(false)
     let codeOpen = $state(false)
     let policy = $state<AssetResidencyPolicy>('full')
     let pending = $state<number | undefined>()
@@ -106,10 +109,23 @@
     async function downloadAll() { downloading = true; try { await controller.track('assets', () => setAssetResidencyPolicy('full')) } finally { downloading = false } }
     async function downloadHeld() { const release = await holdServerSync(); try { await downloadAll() } finally { await release() } }
     async function disconnect() {
-        let serverObjects = 0
-        try { serverObjects = (await getAssetResidencyStatus()).serverObjects } catch {}
-        if (!serverObjects) return disconnectServerSync()
-        const choice = await alertCheckboxConfirm({ title: copy.disconnectTitle, description: copy.disconnectRemoteOnly, checkboxLabel: copy.downloadThenDisconnect, actionLabel: copy.disconnect, cancelLabel: language.cancel, requireChecked: false })
+        let serverObjects: number | undefined
+        let timer: ReturnType<typeof setTimeout> | undefined
+        checkingFiles = true
+        try {
+            serverObjects = await Promise.race([
+                getAssetResidencyStatus().then(status => status.serverObjects),
+                new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), SERVER_ONLY_CHECK_MS) }),
+            ])
+        } catch {} finally {
+            clearTimeout(timer)
+            checkingFiles = false
+        }
+        if (serverObjects === 0) {
+            if (await alertActionConfirm({ title: copy.disconnectTitle, description: copy.disconnectDescription, actionLabel: copy.disconnect, cancelLabel: language.cancel })) await disconnectServerSync()
+            return
+        }
+        const choice = await alertCheckboxConfirm({ title: copy.disconnectTitle, description: serverObjects === undefined ? copy.disconnectRemoteOnlyUnknown : copy.disconnectRemoteOnly, checkboxLabel: copy.downloadThenDisconnect, actionLabel: copy.disconnect, cancelLabel: language.cancel, requireChecked: false })
         if (!choice.confirmed) return
         if (!choice.checked) return disconnectServerSync()
         const release = await holdServerSync()
@@ -180,7 +196,7 @@
             {#if progressPlace === 'bound'}{@render progressPanel()}{/if}
             <div class="actions">
                 {#if !view.bindingIncomplete}<SettingButton onclick={() => void run(retryServerSync)} disabled={busy}>{copy.syncNow}</SettingButton>{/if}
-                <SettingButton variant="danger" class="ml-auto" onclick={() => void run(disconnect)} disabled={busy}>{copy.disconnect}</SettingButton>
+                <SettingButton variant="danger" class="ml-auto" onclick={() => void run(disconnect)} busy={checkingFiles} disabled={busy}>{copy.disconnect}</SettingButton>
             </div>
             {@render alert()}
         </div>

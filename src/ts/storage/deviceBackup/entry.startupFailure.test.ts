@@ -61,6 +61,10 @@ test('covers the viewport with the retry panel when device recovery cannot finis
     expect(panel.style.background).toContain('--risu-theme-bgcolor')
     expect(panel.style.color).toContain('--risu-theme-textcolor')
     const retry = [...panel.querySelectorAll('button')].find(button => button.textContent === 'Retry recovery')!
+    // The app stylesheet strips the default button look, so the button has to bring its own.
+    expect(retry.classList).toContain('border')
+    expect(retry.classList).toContain('bg-darkbutton')
+    expect(retry.classList).toContain('disabled:opacity-50')
     retry.click()
     expect(reload).toHaveBeenCalledOnce()
     panel.remove()

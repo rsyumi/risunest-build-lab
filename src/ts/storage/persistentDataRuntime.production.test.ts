@@ -1494,6 +1494,139 @@ describe('received persona replacement', () => {
     })
 })
 
+describe('received preset selection', () => {
+    async function presetRuntime(catalog: boolean) {
+        const initial = normalizeDatabaseDefaults({} as Database)
+        const preset = initial.botPresets[0]
+        initial.botPresets = [{...structuredClone(preset), id: 'preset-a', name: 'A'}, {...structuredClone(preset), id: 'preset-b', name: 'B'}]
+        initial.botPresetsId = 1
+        initial.personas[0].id = 'persona'
+        const store = new IndexedDbPersistentDataStore(`received-preset-selection-${catalog}-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange) as PersistentDataStore
+        await store.open()
+        const {revision} = await store.replaceFromDatabase(initial)
+        setDatabaseLite(catalog ? projectCompleteScalableWorkingSet(initial, null, revision) : structuredClone(initial))
+        selectedCharID.set(-1)
+        const saveFailures: unknown[] = []
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value,
+            onLocalSaveFailure: (error) => { if (error !== null) saveFailures.push(error) }})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        getDatabase().classicMaxWidth = true
+        await runtime.flushPendingDataLocally('received-preset-selection-settle')
+        return {store, runtime, saveFailures}
+    }
+    async function savedMutations(store: PersistentDataStore, runtime: ReturnType<typeof createPersistentDataRuntime>) {
+        const commit = vi.spyOn(store, 'commit')
+        getDatabase().classicMaxWidth = !getDatabase().classicMaxWidth
+        await runtime.flushPendingDataLocally('after-received-preset-selection')
+        const mutations = commit.mock.calls.flatMap(([input]) => [...input.rootMutations ?? [], ...input.unitMutations ?? []])
+        commit.mockRestore()
+        return mutations
+    }
+
+    it.each([false, true])('does not write back a fallback for a received selection naming a preset this device does not hold (catalog=%s)', async (catalog) => {
+        const {store, runtime, saveFailures} = await presetRuntime(catalog)
+        const selection = {key: JSON.stringify(['root', 'botPresetsId']), type: 'set' as const, value: 'preset-elsewhere'}
+        await receiveCommit(store, runtime, {unitMutations: [selection]}, [selection.key])
+        expect(getDatabase().botPresets[getDatabase().botPresetsId]).toBeDefined()
+        const mutations = await savedMutations(store, runtime)
+        expect(mutations.map((value) => value.key)).toEqual(['classicMaxWidth'])
+        expect((await store.readRoot()).value.botPresetsId).toBe('preset-elsewhere')
+        expect(saveFailures).toEqual([])
+    })
+
+    it.each([false, true])('stores a local selection made after an unresolved received selection (catalog=%s)', async (catalog) => {
+        const {store, runtime, saveFailures} = await presetRuntime(catalog)
+        const selection = {key: JSON.stringify(['root', 'botPresetsId']), type: 'set' as const, value: 'preset-elsewhere'}
+        await receiveCommit(store, runtime, {unitMutations: [selection]}, [selection.key])
+        getDatabase().botPresetsId = getDatabase().botPresets.findIndex((value) => value.id === 'preset-b')
+        runtime.markPersistentDataDirty(1)
+        await runtime.flushPendingDataLocally('after-local-preset-selection')
+        expect((await store.readRoot()).value.botPresetsId).toBe('preset-b')
+        expect(saveFailures).toEqual([])
+    })
+})
+
+describe('received unit projection', () => {
+    it('reports no background error when the content change cursor cannot be committed', async () => {
+        const initial = normalizeDatabaseDefaults({} as Database)
+        initial.botPresets[0].id = 'preset'
+        initial.personas[0].id = 'persona'
+        const store = new IndexedDbPersistentDataStore(`cursor-commit-failure-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange) as PersistentDataStore
+        await store.open()
+        await store.replaceFromDatabase(initial)
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(-1)
+        const backgroundErrors: unknown[] = []
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value,
+            onBackgroundError: (error) => { backgroundErrors.push(error) }})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        const cursor = vi.fn(async () => { throw new Error('database is locked') })
+        store.commitWorkingSetChangeCursor = cursor
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        try {
+            const key = JSON.stringify(['root', 'language'])
+            await receiveCommit(store, runtime, {unitMutations: [{key, type: 'set', value: 'ko'}]}, [key])
+            expect(getDatabase().language).toBe('ko')
+            expect(cursor).toHaveBeenCalled()
+            expect(backgroundErrors).toEqual([])
+            expect(warn).toHaveBeenCalled()
+        } finally {
+            warn.mockRestore()
+        }
+    })
+})
+
+describe('received root fields without a value', () => {
+    async function rootRuntime(catalog: boolean) {
+        const initial = normalizeDatabaseDefaults({} as Database)
+        initial.botPresets[0].id = 'preset'
+        initial.personas[0].id = 'persona'
+        initial.askRemoval = false
+        initial.sendWithEnter = false
+        initial.animationSpeed = 0.8
+        const store = new IndexedDbPersistentDataStore(`received-root-defaults-${catalog}-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange) as PersistentDataStore
+        await store.open()
+        const {revision} = await store.replaceFromDatabase(initial)
+        setDatabase(catalog ? projectCompleteScalableWorkingSet(structuredClone(initial), null, revision) : structuredClone(initial))
+        selectedCharID.set(-1)
+        const saveFailures: unknown[] = []
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value,
+            onLocalSaveFailure: (error) => { if (error !== null) saveFailures.push(error) }})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        await runtime.flushPendingDataLocally('received-root-defaults-settle')
+        return {store, runtime, saveFailures}
+    }
+    async function savedKeys(store: PersistentDataStore, runtime: ReturnType<typeof createPersistentDataRuntime>) {
+        const commit = vi.spyOn(store, 'commit')
+        getDatabase().classicMaxWidth = !getDatabase().classicMaxWidth
+        await runtime.flushPendingDataLocally('after-received-root-defaults')
+        const keys = commit.mock.calls.flatMap(([input]) => [...input.rootMutations ?? [], ...input.unitMutations ?? []]).map((value) => value.key)
+        commit.mockRestore()
+        return keys
+    }
+
+    it.each([false, true].flatMap((catalog) => (['askRemoval', 'sendWithEnter'] as const).map((field) => ({catalog, field}))))(
+        'gives a removed $field the value a load gives it without saving it (catalog=$catalog)', async ({catalog, field}) => {
+            const {store, runtime, saveFailures} = await rootRuntime(catalog)
+            const key = JSON.stringify(['root', field])
+            await receiveCommit(store, runtime, {unitMutations: [{key, type: 'delete'}]}, [key])
+            expect(getDatabase()[field]).toBe(normalizeDatabaseDefaults({} as Database)[field])
+            expect(await savedKeys(store, runtime)).toEqual(['classicMaxWidth'])
+            expect((await store.readRoot()).value[field]).toBeUndefined()
+            expect(saveFailures).toEqual([])
+        })
+
+    it.each([false, true])('keeps a local edit made while a removal is received (catalog=%s)', async (catalog) => {
+        const {store, runtime, saveFailures} = await rootRuntime(catalog)
+        const key = JSON.stringify(['root', 'animationSpeed'])
+        await receiveCommit(store, runtime, {unitMutations: [{key, type: 'delete'}]}, [key], () => { getDatabase().animationSpeed = 1.2 })
+        expect(getDatabase().animationSpeed).toBe(1.2)
+        expect(await savedKeys(store, runtime)).toEqual(['animationSpeed', 'classicMaxWidth'])
+        expect((await store.readRoot()).value.animationSpeed).toBe(1.2)
+        expect(saveFailures).toEqual([])
+    })
+})
+
 describe('received fields the working set did not have', () => {
     async function fieldRuntime() {
         const initial = normalizeDatabaseDefaults({} as Database)

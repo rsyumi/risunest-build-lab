@@ -267,6 +267,8 @@ export interface PersistentDataRuntimeStateAdapter {
     captureCharacterIndex?(): ReadonlyMap<string, CompleteCharacter>
     beforeCapture?(): void
     afterRemoteApply?(): void
+    /** Root fields that projected units left without a value take the value a load gives them. */
+    fillRootFieldDefaults?(fields: readonly string[]): void
     /** Root fields whose working-set value changed when stored units were projected into it. */
     afterRemoteRootChange?(fields: ReadonlySet<string>): void
     /** A received plugin record changed which plugins run or how they are loaded. */
@@ -771,8 +773,8 @@ export function createPersistentDataRuntime(
         } catch (error) {
             if (strict) throw error
             // The projection is installed either way; a stale cursor only costs
-            // the next window an idempotent replay.
-            dependencies.onBackgroundError?.(error)
+            // the next window an idempotent replay, so the user has nothing to act on.
+            console.warn('The content change cursor was not committed', error)
         }
     }
     /// The change window and every record reprojected for it are read through
@@ -1132,6 +1134,7 @@ export function createPersistentDataRuntime(
                 pluginsChanged = receivedPlugins.length > 0 && pluginLoadInputs() !== pluginsBefore
                 const canonicalCapture = dependencies.state.canonicalCapture
                 const beforeDerive = canonicalCapture?.root() ?? canonicalJson(dependencies.state.captureRoot())
+                if (rootFields.length > 0) dependencies.state.fillRootFieldDefaults?.(rootFields)
                 dependencies.state.afterRemoteApply?.()
                 const afterDerive = canonicalCapture?.root() ?? canonicalJson(dependencies.state.captureRoot())
                 const derivedMutations = beforeDerive === afterDerive ? [] : canonicalCapture

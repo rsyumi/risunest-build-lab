@@ -10,6 +10,7 @@
     import RisuNestDataHealth from 'src/lib/Setting/Pages/RisuNestDataHealth.svelte'
     import LocalDataReset from 'src/lib/Setting/RisuNest/LocalDataReset.svelte'
     import { isTauri } from 'src/ts/platform'
+    import type { BootStage } from 'src/ts/bootFailureClassification'
     import { exportOriginalData } from 'src/ts/storage/rawRecoveryExport'
     import {
         RECOVERY_EXCLUSIONS,
@@ -68,6 +69,22 @@
         account: strings.excludeAccount,
     }
 
+    const startup = language.risuNest.startup
+    /** The loading text the start showed at each recorded stage. */
+    const stageLabels: Partial<Record<BootStage, string>> = {
+        'app-data-directories': startup.storage,
+        'persistent-storage': startup.storage,
+        'plugin-compatibility-data': startup.compatibility,
+        'persistent-database': startup.data,
+        'format-update': startup.data,
+        'account-bootstrap': startup.account,
+        'drive-sync': startup.account,
+        'account-data': startup.account,
+        'service-worker': startup.serviceWorker,
+        plugins: startup.plugins,
+        'ui-state': startup.ui,
+    }
+
     interface SummaryLine {
         key: string
         /** The message around the recorded value, so only the value breaks. */
@@ -87,6 +104,7 @@
     }
 
     let summary = $derived.by(() => {
+        const stageLabel = recovery.trail.stage ? stageLabels[recovery.trail.stage as BootStage] : undefined
         const lines: SummaryLine[] = [
             plain(
                 'failures',
@@ -95,8 +113,8 @@
                     (recovery.decision?.consecutiveFailures ?? 0).toLocaleString(),
                 ),
             ),
-            recovery.trail.stage
-                ? around('stage', strings.stage, recovery.trail.stage)
+            stageLabel
+                ? around('stage', strings.stage, stageLabel)
                 : plain('stage', strings.stageUnknown),
         ]
         if (recovery.trail.suspect)

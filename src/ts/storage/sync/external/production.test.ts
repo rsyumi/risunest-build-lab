@@ -557,6 +557,30 @@ describe('external storage production integration', () => {
         }
     })
 
+    it('registers only the sync transports for a start that left sync off and refreshes them after a settings change', async () => {
+        vi.useFakeTimers()
+        const lww = { install: vi.fn(async () => () => {}), refresh: vi.fn(async () => {}) }
+        vi.doMock('./lwwProduction', () => ({
+            installExternalLwwAdapters: lww.install, refreshExternalLwwAdapters: lww.refresh, externalLwwExitDrain: vi.fn(),
+        }))
+        try {
+            const { installExternalSyncTransports, refreshExternalStorageProductionState } = await import('./production')
+            const dispose = await installExternalSyncTransports()
+            expect(lww.install).toHaveBeenCalledExactlyOnceWith(initialState, false)
+            expect(mocks.bridge.setExecutionSession).not.toHaveBeenCalled()
+            await vi.advanceTimersByTimeAsync(60_000)
+            expect(mocks.bridge.startJob).not.toHaveBeenCalled()
+            const added = { ...initialState, connections: [...initialState.connections, { ...initialState.connections[0], id: 'new-sync', purpose: 'sync' as const }] }
+            mocks.bridge.getState.mockResolvedValue(added)
+            await refreshExternalStorageProductionState()
+            expect(lww.refresh).toHaveBeenCalledExactlyOnceWith(added)
+            dispose()
+        } finally {
+            vi.doUnmock('./lwwProduction')
+            vi.useRealTimers()
+        }
+    })
+
     it('queues the already-saved revision for a new destination without another edit', async () => {
         vi.useFakeTimers()
         try {

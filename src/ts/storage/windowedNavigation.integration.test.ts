@@ -180,6 +180,7 @@ async function bootProductionApp(indexedDB: IDBFactory, seed?: Database) {
     return {
         svelte, stores, runtime, characters, generation, mutations, residency, Harness, chatListRows,
         getDatabase: databaseModule.getDatabase,
+        localSaveFailure: runtimeModule.persistentLocalSaveFailure,
         appendDefaultChatInput, saveCapturedChatMessage, createSelectedConversationOperations,
     }
 }
@@ -896,6 +897,88 @@ describe('selected chat list edits', () => {
             expect((await reader.readConversation(ownerId, added))?.value.message
                 .map((message) => message.saying ?? null))
                 .toEqual([])
+        } finally {
+            consoleError.mockRestore()
+            Object.assign(globalThis, previousGlobals)
+        }
+    })
+
+    it.each(['create', 'import'] as const)('adds a character by %s while a windowed conversation is open and keeps saving and navigating', async (route) => {
+        const indexedDB = new IDBFactory()
+        const previousGlobals = { indexedDB: globalThis.indexedDB, IDBKeyRange: globalThis.IDBKeyRange }
+        const ownerId = 'edited-owner'
+        const selectedId = `${ownerId}-chat`
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const reader = new IndexedDbPersistentDataStore('risuai-persistent-data', indexedDB, IDBKeyRange)
+        const history = Array.from({ length: 300 }, (_, index) => ({
+            role: index % 2 === 0 ? 'user' : 'char',
+            data: `Synthetic windowed message ${index}`,
+            chatId: `synthetic-windowed-${index}`,
+        })) as Message[]
+        const library = syntheticLibrary('character')
+        library.characters[0].chats[0].message = history
+        const importedHistory: Message[] = [{ role: 'char', data: 'Synthetic imported greeting' }]
+        try {
+            const app = await bootProductionApp(indexedDB, library)
+            const { stores, runtime, characters } = app
+            const selected = () => stores.DBState.db.characters[get(stores.selectedCharID)] as character
+            const indexOf = (id: string) => stores.DBState.db.characters.findIndex((candidate) => candidate.chaId === id)
+            expect(await characters.changeChar(indexOf(ownerId))).toBe(true)
+            expect(runtime.getSelectedConversationMode()).toBe('windowed')
+            await runtime.flushPendingData('activation')
+            const readConversation = vi.spyOn(runtime.store, 'readConversation')
+            const committed: { keys: string[], units: string[], added?: string, replaced?: string }[] = []
+            const commit = runtime.store.commit.bind(runtime.store)
+            vi.spyOn(runtime.store, 'commit').mockImplementation(async (request) => {
+                committed.push({
+                    keys: Object.keys(request).filter((key) => key !== 'expectedRevision').sort(),
+                    units: (request.unitMutations ?? []).map((mutation) => mutation.key),
+                    added: request.addCharacter?.chaId,
+                    replaced: request.replaceCharacter?.chaId,
+                })
+                return commit(request)
+            })
+
+            // The sidebar's 새 캐릭터 생성 and 캐릭터 가져오기 add the character, then select it.
+            const addedId = route === 'create'
+                ? await characters.createNewCharacter()
+                : await characters.commitDetachedCharacter(
+                    syntheticCharacter('imported-character', importedHistory),
+                    'import-character-card',
+                )
+            expect(selected().chaId).toBe(ownerId)
+            expect(runtime.getSelectedConversationMode()).toBe('windowed')
+            expect(get(app.localSaveFailure)).toBeNull()
+            expect(committed.map((entry) => entry.added)).toEqual([addedId])
+
+            stores.DBState.db.username = 'Saved beside the windowed chat'
+            runtime.markPersistentDataDirty(1)
+            await runtime.flushPendingData('settings-change')
+            // A later save carries only its own change, not the added character again.
+            expect(committed.slice(1)).toHaveLength(1)
+            expect(committed[1].keys.filter((key) => key !== 'rootMutations' && key !== 'unitMutations')).toEqual([])
+            expect(committed[1].units.filter((key) => key.includes(addedId))).toEqual([])
+
+            expect(await characters.changeChar(indexOf(addedId))).toBe(true)
+            expect(selected().chaId).toBe(addedId)
+            stores.DBState.db.username = 'Saved after the addition'
+            runtime.markPersistentDataDirty(1)
+            await runtime.flushPendingData('settings-change')
+            expect(get(app.localSaveFailure)).toBeNull()
+            expect(await runtime.deactivateActiveWorkingSet()).toBe(true)
+            expect(readConversation.mock.calls.filter(([, id]) => id === selectedId)).toEqual([])
+            expect(consoleError.mock.calls.map((args) => args.map((value) =>
+                value instanceof Error ? `${value.name}: ${value.message}` : String(value).slice(0, 200)))).toEqual([])
+
+            await runtime.flushPendingData('exit')
+            await reader.open()
+            expect((await reader.readRoot()).revision).toBe(runtime.revision)
+            expect((await reader.readRoot()).value.username).toBe('Saved after the addition')
+            expect((await reader.readCharacter(addedId))?.value.chaId).toBe(addedId)
+            if (route === 'import') {
+                expect((await reader.readConversation(addedId, `${addedId}-chat`))?.value.message).toEqual(importedHistory)
+            }
+            expect((await reader.readConversation(ownerId, selectedId))?.value.message).toEqual(history)
         } finally {
             consoleError.mockRestore()
             Object.assign(globalThis, previousGlobals)

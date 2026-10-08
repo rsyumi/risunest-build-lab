@@ -1914,6 +1914,7 @@ export const languageEnglish = {
     skipSavingAssetsOnWebSync: "Skip Saving Assets on Web Sync",
     applyAdditionalParamsToAll: "Apply Additional Parameters to All Models",
     risuNest: {
+        backgroundDataFailed: 'Some changes to the data could not be completed.',
         localSaveFailure: {
             failed: 'Changes could not be saved. Retry saving before closing the app.',
             invalid: '{0} could not be saved. Check this data, then retry saving.',
@@ -2249,8 +2250,11 @@ export const languageEnglish = {
             connect: 'Connect and sync',
             disconnect: 'Disconnect',
             disconnectTitle: 'Disconnect from the server?',
+            disconnectDescription: 'This device stops syncing with the server.',
             disconnectRemoteOnly:
                 'Some files are stored only on the server. If you need them, download them before disconnecting.',
+            disconnectRemoteOnlyUnknown:
+                'Files could not be checked. Download any files stored only on the server before disconnecting if you need them.',
             downloadThenDisconnect: 'Download, then disconnect',
             downloadFailedKeptConnection:
                 'The files could not be downloaded, so the server was not disconnected. Try again, or disconnect without downloading.',
@@ -2407,8 +2411,12 @@ export const languageEnglish = {
             exportCancelled: 'The export was cancelled.',
             exportFailed: 'The original files could not be exported.',
             startNormally: 'Start normally',
-            keepBody:
-                'The app started with {0} left off. Keep them off from now on?',
+            keepTitle: 'Keep these off from now on?',
+            keepDescription: 'Left off for this start: {0}',
+            keepAction: 'Keep off',
+            keptTitle: 'Kept off',
+            keptHelp: 'Items you turn on take effect when the app restarts.',
+            turnOn: 'Turn on',
         },
         storage: {
             snapshotSizeNote:

@@ -427,7 +427,20 @@ pub(super) async fn open_object(
     repository: &RepositoryHandle,
     cancel: &Cancellation,
 ) -> Result<PathBuf> {
-    open_object_with(object, root_key, staging_root, provider, repository, Durability::Durable, cancel).await
+    open_object_with(object, root_key, staging_root, provider, repository, Durability::Durable, None, cancel).await
+}
+
+/// `open_object`, counting in `progress` an object it had to fetch.
+async fn open_object_counted(
+    object: &RemoteObject,
+    root_key: &[u8; 32],
+    staging_root: &Path,
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    progress: &PhaseProgress,
+    cancel: &Cancellation,
+) -> Result<PathBuf> {
+    open_object_with(object, root_key, staging_root, provider, repository, Durability::Durable, Some(progress), cancel).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -438,6 +451,7 @@ async fn open_object_with(
     provider: &dyn Provider,
     repository: &RepositoryHandle,
     durability: Durability,
+    progress: Option<&PhaseProgress>,
     cancel: &Cancellation,
 ) -> Result<PathBuf> {
     let downloads = staging_root.join("downloads");
@@ -527,6 +541,9 @@ async fn open_object_with(
         &object.plaintext_sha256,
         durability,
     )?;
+    if let Some(progress) = progress {
+        progress.found_completed(object.receipt.byte_length);
+    }
     Ok(destination)
 }
 
@@ -600,6 +617,25 @@ pub(super) async fn read_catalog(
     BTreeMap<String, RemoteObject>,
     Vec<(RemoteObject, CatalogRange)>,
 )> {
+    read_catalog_with(root, expected_kind, root_key, staging_root, provider, repository, &PhaseProgress::silent(), cancel).await
+}
+
+/// `read_catalog`, counting in `progress` each node the walk had to fetch.
+#[allow(clippy::too_many_arguments)]
+async fn read_catalog_with(
+    root: &RemoteObject,
+    expected_kind: wire::CatalogKind,
+    root_key: &[u8; 32],
+    staging_root: &Path,
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    progress: &PhaseProgress,
+    cancel: &Cancellation,
+) -> Result<(
+    Vec<CompleteEntry>,
+    BTreeMap<String, RemoteObject>,
+    Vec<(RemoteObject, CatalogRange)>,
+)> {
     let mut stack = vec![root.clone()];
     let mut nodes = Vec::new();
     let mut visited = BTreeSet::new();
@@ -613,12 +649,13 @@ pub(super) async fn read_catalog(
         {
             return Err(corrupt("duplicate or invalid catalog node"));
         }
-        let path = open_object(
+        let path = open_object_counted(
             &object,
             root_key,
             staging_root,
             provider,
             repository,
+            progress,
             cancel,
         )
         .await?;
@@ -1359,7 +1396,7 @@ async fn turn_over_packs_with(
                 continue;
             }
             let plaintext =
-                open_object_with(pack, root_key, staging_root, provider, repository, durability, cancel).await?;
+                open_object_with(pack, root_key, staging_root, provider, repository, durability, None, cancel).await?;
             #[cfg(test)]
             record_turnover(staging_root, &required);
             // Decrypting was all the ciphertext was for.
@@ -1628,13 +1665,14 @@ pub(crate) async fn download_sections(
         if entries_root.repository_id != snapshot.repository_id {
             return Err(corrupt("section catalog repository differs"));
         }
-        let (complete, packs, nodes) = read_catalog(
+        let (complete, packs, nodes) = read_catalog_with(
             &entries_root,
             wire::CatalogKind::Section,
             root_key,
             staging_root,
             provider,
             repository,
+            progress,
             cancel,
         )
         .await?;
@@ -1674,13 +1712,13 @@ pub(crate) async fn download_sections(
 
 pub(crate) async fn download_checkpoint_data(
     root: &RemoteObject, staging_root: &Path, root_key: &[u8;32],
-    provider: &dyn Provider, repository: &RepositoryHandle, cancel: &Cancellation,
+    provider: &dyn Provider, repository: &RepositoryHandle, progress: &PhaseProgress, cancel: &Cancellation,
 ) -> Result<(Vec<PreparedRecord>, Vec<PreparedObject>)> {
     ensure_directory(staging_root)?;
-    let (entries,packs,_) = read_catalog(root,wire::CatalogKind::Records,root_key,staging_root,provider,repository,cancel).await?;
+    let (entries,packs,_) = read_catalog_with(root,wire::CatalogKind::Records,root_key,staging_root,provider,repository,progress,cancel).await?;
     let content=content_store(staging_root)?;
     let plan=resolve_entries(entries,staging_root,&content,None,cancel)?;
-    let (records,objects)=turn_over_packs(plan,&packs,root_key,staging_root,provider,repository,&PhaseProgress::silent(),cancel).await?;
+    let (records,objects)=turn_over_packs(plan,&packs,root_key,staging_root,provider,repository,progress,cancel).await?;
     Ok((records.into_values().collect(),objects.into_values().collect()))
 }
 
@@ -1700,7 +1738,7 @@ pub(crate) async fn download_control_catalogs(
         }
         let remote=RemoteObject::from_stored(catalog,repository)?;
         let stage=staging_root.join(index.to_string());
-        let (records,controls)=download_checkpoint_data(&remote,&stage,root_key,provider,repository,cancel).await?;
+        let (records,controls)=download_checkpoint_data(&remote,&stage,root_key,provider,repository,&PhaseProgress::silent(),cancel).await?;
         if !records.is_empty() {return Err(corrupt("control catalog contains unit records"));}
         for mut control in controls {
             if let ObjectSource::Captured(hash)=&control.source {
@@ -1964,7 +2002,19 @@ impl RestoreBodyPlan {
         drop(self.db);
         fs::remove_dir_all(self.directory).map_err(transient)
     }
-    pub(crate) async fn next_pack(&mut self,key:&[u8;32],provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation)->Result<bool> {
+    /// The packs still to fetch, and their bytes.
+    pub(crate) fn remaining_packs(&self)->Result<(u64,u64)> {
+        let mut query=self.db.prepare("SELECT body FROM packs WHERE done=0").map_err(transient)?;
+        let mut rows=query.query([]).map_err(transient)?;
+        let (mut count,mut bytes)=(0u64,0u64);
+        while let Some(row)=rows.next().map_err(transient)? {
+            let remote:RemoteObject=serde_json::from_str(&row.get::<_,String>(0).map_err(transient)?).map_err(corrupt)?;
+            count+=1;
+            bytes=bytes.saturating_add(remote.receipt.byte_length);
+        }
+        Ok((count,bytes))
+    }
+    pub(crate) async fn next_pack(&mut self,key:&[u8;32],provider:&dyn Provider,repository:&RepositoryHandle,progress:&PhaseProgress,cancel:&Cancellation)->Result<bool> {
         let encoded:Option<String>=self.db.query_row("SELECT body FROM packs WHERE done=0 ORDER BY priority,id LIMIT 1",[],|row|row.get(0)).optional().map_err(transient)?;
         let Some(encoded)=encoded else {
             let remaining:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM bodies WHERE settled=0)",[],|row|row.get(0)).map_err(transient)?;
@@ -1973,7 +2023,7 @@ impl RestoreBodyPlan {
         };
         let remote:RemoteObject=serde_json::from_str(&encoded).map_err(corrupt)?;
         cancel.check()?;
-        let path=open_object_with(&remote,key,&self.directory,provider,repository,Durability::Durable,cancel).await?;
+        let path=open_object_with(&remote,key,&self.directory,provider,repository,Durability::Durable,None,cancel).await?;
         let mut input=crate::trust_boundary::open_regular_source(&path).map_err(transient)?;
         let tx=self.db.transaction().map_err(transient)?;
         {
@@ -2003,6 +2053,7 @@ impl RestoreBodyPlan {
         tx.execute("UPDATE chunks SET done=1 WHERE pack=?1",[&remote.object_id]).map_err(transient)?;
         tx.execute("UPDATE packs SET done=1 WHERE id=?1",[&remote.object_id]).map_err(transient)?;
         tx.commit().map_err(transient)?;
+        progress.completed(remote.receipt.byte_length);
         drop(input);
         discard_object(&self.directory,&remote);
         Ok(true)
@@ -2094,6 +2145,7 @@ pub(crate) async fn download_original_backup_units(
     key: &[u8; 32],
     provider: &dyn Provider,
     repository: &RepositoryHandle,
+    progress: &PhaseProgress,
     cancel: &Cancellation,
 ) -> Result<OriginalUnits> {
     ensure_directory(staging_root)?;
@@ -2109,7 +2161,7 @@ pub(crate) async fn download_original_backup_units(
         let Some(encoded)=encoded else {break;};
         let object:RemoteObject=serde_json::from_str(&encoded).map_err(corrupt)?;
         if object.role!=ObjectRole::Catalog || object.repository_id!=root.repository_id {return Err(corrupt("invalid original unit catalog"));}
-        let path=open_object(&object,key,staging_root,provider,repository,cancel).await?;
+        let path=open_object_counted(&object,key,staging_root,provider,repository,progress,cancel).await?;
         let bytes=read_bytes(&path,wire::MAX_METADATA_BYTES)?;
         let document=wire::CatalogDocument::decode(&bytes,usize::try_from(object.plaintext_length).map_err(corrupt)?).map_err(corrupt)?;
         if document.kind!=wire::CatalogKind::Records {return Err(corrupt("original unit catalog kind"));}
@@ -2178,6 +2230,8 @@ pub(crate) async fn download_original_backup_units(
         },false,repository)?;
     }
     plan.seal()?;
+    let (packs,bytes)=plan.remaining_packs()?;
+    progress.plan(packs,bytes);
     let mut content=content_store(staging_root)?;
     loop {
         cancel.check()?;
@@ -2191,7 +2245,7 @@ pub(crate) async fn download_original_backup_units(
             unit.value.validate().map_err(corrupt)?;
             plan.settled_retained(&hash)?;
         }
-        if !plan.next_pack(key,provider,repository,cancel).await? {break;}
+        if !plan.next_pack(key,provider,repository,progress,cancel).await? {break;}
     }
     content.commit().map_err(transient)?;
     plan.finish()?;
@@ -2208,7 +2262,7 @@ pub(crate) async fn download_backup_original_units(
     let document=super::control::SnapshotView::read(&read_bytes(&root,wire::MAX_METADATA_BYTES)?,wire::ObjectRole::BackupBundle,&snapshot.repository_id)?;
     if snapshot.object_id != format!("snapshot-{}",document.snapshot_id) {return Err(corrupt("backup identity differs"))}
     let original=RemoteObject::from_stored(document.original_units.as_ref().ok_or_else(|| corrupt("complete original unit root is required"))?,repository)?;
-    download_original_backup_units(&original,staging_root,key,provider,repository,cancel).await
+    download_original_backup_units(&original,staging_root,key,provider,repository,&PhaseProgress::silent(),cancel).await
 }
 
 pub(crate) struct DatabaseFirstSnapshot {
@@ -2282,22 +2336,25 @@ pub(crate) async fn admit_asset_catalogs(
     }
     Ok(planned.into_keys().collect())
 }
-pub(crate) async fn download_snapshot_database_first(snapshot:&RemoteObject,staging_root:&Path,library_root:&Path,connection_root:&Path,connection_id:&str,key:&[u8;32],provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation)->Result<DatabaseFirstSnapshot> {
+/// Counts in `progress` what it downloads, and plans the packs of the asset
+/// bodies this device lacks, which the restore receives once it is adopted.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn download_snapshot_database_first(snapshot:&RemoteObject,staging_root:&Path,library_root:&Path,connection_root:&Path,connection_id:&str,key:&[u8;32],provider:&dyn Provider,repository:&RepositoryHandle,progress:&PhaseProgress,cancel:&Cancellation)->Result<DatabaseFirstSnapshot> {
     if snapshot.role!=ObjectRole::BackupBundle {return Err(corrupt("full backup required"));}
     ensure_directory(staging_root)?;
-    let root_path=open_object(snapshot,key,staging_root,provider,repository,cancel).await?;
+    let root_path=open_object_counted(snapshot,key,staging_root,provider,repository,progress,cancel).await?;
     let document=super::control::SnapshotView::read(&read_bytes(&root_path,wire::MAX_METADATA_BYTES)?,wire::ObjectRole::BackupBundle,&snapshot.repository_id)?;
     if snapshot.object_id!=format!("snapshot-{}",document.snapshot_id) {return Err(corrupt("backup identity"));}
     let original_root = document.original_units.as_ref()
         .ok_or_else(|| corrupt("full backup original unit root is required"))?;
     let original_root = RemoteObject::from_stored(original_root, repository)?;
     let original_units = download_original_backup_units(
-        &original_root, staging_root, key, provider, repository, cancel,
+        &original_root, staging_root, key, provider, repository, progress, cancel,
     ).await?;
     let records_root=RemoteObject::from_stored(&document.library.record_catalog,repository)?;
-    let (records,mut objects)=download_checkpoint_data(&records_root,staging_root,key,provider,repository,cancel).await?;
+    let (records,mut objects)=download_checkpoint_data(&records_root,staging_root,key,provider,repository,progress,cancel).await?;
     let assets_root=RemoteObject::from_stored(&document.library.asset_catalog,repository)?;
-    let (entries,packs,_)=read_catalog(&assets_root,wire::CatalogKind::Assets,key,staging_root,provider,repository,cancel).await?;
+    let (entries,packs,_)=read_catalog_with(&assets_root,wire::CatalogKind::Assets,key,staging_root,provider,repository,progress,cancel).await?;
     let cas=PayloadCas::new(library_root).map_err(transient)?;
     let metadata = rusqlite::Connection::open_with_flags(
         library_root.join("persistent/persistent.sqlite"),
@@ -2305,6 +2362,7 @@ pub(crate) async fn download_snapshot_database_first(snapshot:&RemoteObject,stag
     ).map_err(transient)?;
     let mut required=BTreeSet::new();let mut present=BTreeSet::new();let mut missing=BTreeSet::new();
     let mut sources=Vec::new();let mut stored_packs=BTreeMap::<String,super::lww_residency::SharedObject>::new();
+    let mut missing_packs=BTreeMap::<String,u64>::new();
     let mut interner=super::lww_residency::ObjectInterner::default();
     let catalog=interner.intern(document.library.asset_catalog.clone());
     for entry in entries {
@@ -2322,12 +2380,12 @@ pub(crate) async fn download_snapshot_database_first(snapshot:&RemoteObject,stag
         if local_size.is_some_and(|size|size!=entry.byte_length) {
             return Err(corrupt("local immutable body size differs from backup"));
         }
-        if local_size==Some(entry.byte_length) {present.insert(hash.clone());} else {
-            missing.insert(hash.clone());
-        }
+        let lacking=local_size!=Some(entry.byte_length);
+        if lacking {missing.insert(hash.clone());} else {present.insert(hash.clone());}
         let ids=entry.chunks.iter().map(|chunk|chunk.pack_id.as_str()).collect::<BTreeSet<_>>();
         let mut references=Vec::with_capacity(ids.len());
         for id in ids {
+            if let Some(pack)=packs.get(id).filter(|_|lacking) {missing_packs.insert(id.to_owned(),pack.receipt.byte_length);}
             if let Some(stored)=stored_packs.get(id) {references.push(stored.clone());continue;}
             let Some(pack)=packs.get(id) else {continue};
             let stored=interner.intern(pack.stored(repository)?);
@@ -2338,6 +2396,7 @@ pub(crate) async fn download_snapshot_database_first(snapshot:&RemoteObject,stag
         sources.push(source);
         objects.push(PreparedObject{content_hash:hash.clone(),byte_length:entry.byte_length,source:ObjectSource::Library(hash)});
     }
+    progress.plan(missing_packs.len() as u64,missing_packs.values().sum());
     Ok(DatabaseFirstSnapshot{snapshot:PreparedRemoteSnapshot{snapshot_id:document.snapshot_id,repository_id:snapshot.repository_id.clone(),fingerprint:hex::encode(document.library.content_fingerprint),library_fingerprint:hex::encode(document.library.content_fingerprint),logical_revision:document.revision.parse().map_err(corrupt)?,staging_root:staging_root.into(),records,objects,captured_by_device:document.captured_by_device},original_units,required,present,missing,sources})
 }
 pub(crate) async fn download_snapshot(
@@ -2518,20 +2577,20 @@ mod tests {
             for (index,interruption) in [ErrorKind::DailyQuotaExhausted,ErrorKind::Cancelled].into_iter().enumerate() {
                 let mut plan=RestoreBodyPlan::new(&stage).unwrap();
                 plan.push(&source,false,&repository).unwrap();plan.seal().unwrap();
-                assert!(plan.next_pack(&root_key,&provider,&repository,&Cancellation::default()).await.unwrap());
+                assert!(plan.next_pack(&root_key,&provider,&repository,&PhaseProgress::silent(),&Cancellation::default()).await.unwrap());
                 assert!(plan.ready().unwrap().is_none(),"a partial multi-pack body must not settle");
                 provider.fail_read(&format!("pack-resume-{}",index+1),interruption);
-                assert_eq!(plan.next_pack(&root_key,&provider,&repository,&Cancellation::default()).await.unwrap_err().kind,interruption);
+                assert_eq!(plan.next_pack(&root_key,&provider,&repository,&PhaseProgress::silent(),&Cancellation::default()).await.unwrap_err().kind,interruption);
                 drop(plan);
                 assert!(stage.join("pack-plan/plan.sqlite").exists());
             }
             let mut plan=RestoreBodyPlan::new(&stage).unwrap();
             plan.push(&source,false,&repository).unwrap();plan.seal().unwrap();
-            assert!(plan.next_pack(&root_key,&provider,&repository,&Cancellation::default()).await.unwrap());
+            assert!(plan.next_pack(&root_key,&provider,&repository,&PhaseProgress::silent(),&Cancellation::default()).await.unwrap());
             let (hash,path)=plan.ready().unwrap().unwrap();
             assert_eq!(hash,source.hash);assert_eq!(fs::read(&path).unwrap(),body);
             plan.settled_retained(&hash).unwrap();
-            assert!(!plan.next_pack(&root_key,&provider,&repository,&Cancellation::default()).await.unwrap());
+            assert!(!plan.next_pack(&root_key,&provider,&repository,&PhaseProgress::silent(),&Cancellation::default()).await.unwrap());
             drop(plan);
             let mut plan=RestoreBodyPlan::new(&stage).unwrap();
             plan.push(&source,false,&repository).unwrap();plan.seal().unwrap();
@@ -2541,7 +2600,7 @@ mod tests {
             cas.adopt_import_payload(&path,&hash,body.len() as u64,&||false).unwrap();
             assert_eq!(cas.read_object(&hash).unwrap().unwrap(),body);
             plan.settled(&hash).unwrap();
-            assert!(!plan.next_pack(&root_key,&provider,&repository,&Cancellation::default()).await.unwrap());
+            assert!(!plan.next_pack(&root_key,&provider,&repository,&PhaseProgress::silent(),&Cancellation::default()).await.unwrap());
             plan.finish().unwrap();
             assert!(!stage.join("pack-plan").exists());
             assert_eq!(provider.read_attempts("pack-resume-0"),1,"completed prefix must not consume the next quota window");

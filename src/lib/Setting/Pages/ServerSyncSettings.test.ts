@@ -2,11 +2,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { languageEnglish } from 'src/lang/en'
-const f = vi.hoisted(() => ({ pending: vi.fn(async (): Promise<number | undefined> => undefined), connect: vi.fn(), complete: vi.fn(), configure: vi.fn(), bind: vi.fn(), disconnect: vi.fn(), hold: vi.fn(), release: vi.fn(), status: vi.fn(), policy: vi.fn(), cancel: vi.fn(), checkbox: vi.fn(), native: true, scan: false, os: 'windows', listeners: new Set<(value: Record<string, unknown>) => void>(), bindingState: vi.fn(), preset: vi.fn(), state: { db: {} as Record<string, unknown> }, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
+const f = vi.hoisted(() => ({ pending: vi.fn(async (): Promise<number | undefined> => undefined), connect: vi.fn(), complete: vi.fn(), configure: vi.fn(), bind: vi.fn(), disconnect: vi.fn(), hold: vi.fn(), release: vi.fn(), status: vi.fn(), policy: vi.fn(), cancel: vi.fn(), checkbox: vi.fn(), action: vi.fn(), native: true, scan: false, os: 'windows', listeners: new Set<(value: Record<string, unknown>) => void>(), bindingState: vi.fn(), preset: vi.fn(), state: { db: {} as Record<string, unknown> }, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
 vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish, changeLanguage: vi.fn() }))
 vi.mock('src/ts/platform', () => ({ get isTauri() { return f.native } }))
 vi.mock('@tauri-apps/plugin-os', () => ({ platform: () => f.os }))
-vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertCheckboxConfirm: f.checkbox, alertError: vi.fn(), alertNormal: vi.fn(), openRisuAccountLogin: vi.fn() }))
+vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertCheckboxConfirm: f.checkbox, alertActionConfirm: f.action, alertError: vi.fn(), alertNormal: vi.fn(), openRisuAccountLogin: vi.fn() }))
 vi.mock('src/ts/storage/sync/serverSyncProduction', () => ({
     connectServerSync: f.connect, completeServerSyncBinding: f.complete, configureServerSyncConnection: f.configure, disconnectServerSync: f.disconnect, retryServerSync: vi.fn(), holdServerSync: f.hold,
     getServerSyncCacheUsage: vi.fn(), cleanupServerSyncCache: vi.fn(),
@@ -42,7 +42,7 @@ let component: ReturnType<typeof mount> | undefined
 let host: HTMLDivElement
 beforeEach(() => {
     vi.clearAllMocks(); f.native = true; f.scan = false; f.os = 'windows'; f.listeners.clear(); f.view = { status: { configured: false }, paused: false }; host = document.createElement('div'); document.body.append(host)
-    for (const mock of [f.disconnect, f.hold, f.release, f.status, f.policy, f.cancel, f.checkbox, f.complete]) mock.mockReset()
+    for (const mock of [f.disconnect, f.hold, f.release, f.status, f.policy, f.cancel, f.checkbox, f.action, f.complete]) mock.mockReset()
     f.hold.mockResolvedValue(f.release)
     f.state.db = { language: 'en', characters: [] }
     f.preset.mockImplementation((db: Record<string, unknown>) => ({ ...db, preset: 'starting' }))
@@ -171,11 +171,52 @@ async function mountBound(status: Record<string, unknown> = residencyStatus()) {
 }
 const alertText = () => host.querySelector('[role="alert"]')?.textContent
 describe('disconnecting with files kept only on the server', () => {
-    it('disconnects without asking when no file is kept only on the server', async () => {
+    it('asks before disconnecting when no file is kept only on the server', async () => {
         await mountBound(residencyStatus({ remoteObjects: 0, remoteBytes: 0, serverObjects: 0, serverBytes: 0 }))
+        f.action.mockResolvedValue(true)
         click(sync.disconnect); await settle()
+        expect(f.action).toHaveBeenCalledExactlyOnceWith({
+            title: sync.disconnectTitle, description: sync.disconnectDescription, actionLabel: sync.disconnect, cancelLabel: languageEnglish.cancel,
+        })
         expect(f.checkbox).not.toHaveBeenCalled(); expect(f.policy).not.toHaveBeenCalled()
         expect(f.disconnect).toHaveBeenCalledOnce()
+    })
+    it('keeps the connection when the question is cancelled', async () => {
+        await mountBound(residencyStatus({ remoteObjects: 0, remoteBytes: 0, serverObjects: 0, serverBytes: 0 }))
+        f.action.mockResolvedValue(false)
+        click(sync.disconnect); await settle()
+        expect(f.action).toHaveBeenCalledOnce()
+        expect(f.disconnect).not.toHaveBeenCalled()
+    })
+    it('shows the disconnect as running while it checks the files', async () => {
+        await mountBound()
+        f.status.mockReturnValue(new Promise(() => {}))
+        click(sync.disconnect); await settle()
+        const button = host.querySelector<HTMLButtonElement>('button[aria-busy="true"]')
+        expect(button?.textContent).toContain(sync.disconnect)
+        expect(button?.disabled).toBe(true)
+        expect(f.checkbox).not.toHaveBeenCalled(); expect(f.action).not.toHaveBeenCalled()
+        expect(f.disconnect).not.toHaveBeenCalled()
+    })
+    it('asks with the unknown wording once the file check takes more than a few seconds', async () => {
+        await mountBound()
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        try {
+            f.status.mockReturnValue(new Promise(() => {}))
+            f.checkbox.mockResolvedValue({ confirmed: false, checked: false })
+            click(sync.disconnect); await settle()
+            await vi.advanceTimersByTimeAsync(2_900); await settle()
+            expect(f.checkbox).not.toHaveBeenCalled()
+            await vi.advanceTimersByTimeAsync(100); await settle()
+            expect(f.checkbox).toHaveBeenCalledExactlyOnceWith({
+                title: sync.disconnectTitle, description: sync.disconnectRemoteOnlyUnknown, checkboxLabel: sync.downloadThenDisconnect,
+                actionLabel: sync.disconnect, cancelLabel: languageEnglish.cancel, requireChecked: false,
+            })
+            expect(host.querySelector('button[aria-busy="true"]')).toBeNull()
+            expect(f.disconnect).not.toHaveBeenCalled()
+        } finally {
+            vi.useRealTimers()
+        }
     })
     it('reads the current status when disconnecting and asks once with an unchecked download option', async () => {
         await mountBound(residencyStatus({ remoteObjects: 0, remoteBytes: 0, serverObjects: 0, serverBytes: 0 }))
@@ -257,9 +298,11 @@ describe('disconnecting with files kept only on the server', () => {
         expect(f.disconnect).not.toHaveBeenCalled(); expect(f.release).toHaveBeenCalledOnce()
         expect(alertText()).toBeUndefined()
     })
-    it('disconnects without asking when the remaining files are kept only in external storage', async () => {
+    it('asks without the download option when the remaining files are kept only in external storage', async () => {
         await mountBound(residencyStatus(externalOnly))
+        f.action.mockResolvedValue(true)
         click(sync.disconnect); await settle()
+        expect(f.action).toHaveBeenCalledOnce()
         expect(f.checkbox).not.toHaveBeenCalled(); expect(f.policy).not.toHaveBeenCalled()
         expect(f.disconnect).toHaveBeenCalledOnce()
     })
@@ -295,18 +338,29 @@ describe('disconnecting with files kept only on the server', () => {
         failMount({ code: 'server-unreachable' }); await settle()
         expect(alertText()).toBe(sync.downloadFailedKeptConnection)
     })
-    it('disconnects without asking when the status cannot be read', async () => {
+    it('asks with the unknown wording when the status cannot be read', async () => {
         await mountBound()
         f.status.mockRejectedValueOnce(new Error('status-unavailable'))
+        f.checkbox.mockResolvedValue({ confirmed: true, checked: false })
         click(sync.disconnect); await settle()
-        expect(f.checkbox).not.toHaveBeenCalled(); expect(f.policy).not.toHaveBeenCalled()
+        expect(f.checkbox).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ description: sync.disconnectRemoteOnlyUnknown, requireChecked: false }))
+        expect(f.action).not.toHaveBeenCalled(); expect(f.policy).not.toHaveBeenCalled()
         expect(f.disconnect).toHaveBeenCalledOnce()
+    })
+    it('keeps the connection when the unknown question is cancelled', async () => {
+        await mountBound()
+        f.status.mockRejectedValueOnce(new Error('status-unavailable'))
+        f.checkbox.mockResolvedValue({ confirmed: false, checked: false })
+        click(sync.disconnect); await settle()
+        expect(f.checkbox).toHaveBeenCalledOnce()
+        expect(f.disconnect).not.toHaveBeenCalled()
     })
 })
 it('removes the asset storage controls once the server is disconnected', async () => {
     await mountBound(residencyStatus({ policy: 'full', remoteObjects: 0, remoteBytes: 0, serverObjects: 0, serverBytes: 0 }))
     expect(host.textContent).toContain(sync.residency.title)
     f.disconnect.mockImplementation(async () => { publish({ status: { configured: true, bound: false }, paused: true, error: '' }) })
+    f.action.mockResolvedValue(true)
     click(sync.disconnect); await settle()
     expect(f.disconnect).toHaveBeenCalledOnce()
     expect(host.textContent).not.toContain(sync.residency.title)

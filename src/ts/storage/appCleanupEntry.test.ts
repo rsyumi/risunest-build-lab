@@ -57,6 +57,29 @@ describe('app cleanup startup gate', () => {
         await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(4))
         expect(bootstrap).not.toHaveBeenCalled()
     })
+    it('covers the viewport with the reset page', async () => {
+        // The page keeps #app at full height and does not let the body scroll.
+        document.body.insertAdjacentHTML('afterbegin', '<div id="app"></div>')
+        vi.mocked(invoke).mockResolvedValue({ pending: true, mode: 'reset', error: 'cleanup-files-busy-or-denied', canCancel: true })
+        void appCleanupBeforeBootstrap()
+        const page = await vi.waitFor(() => {
+            const found = document.querySelector<HTMLElement>('main')
+            expect(found).not.toBeNull()
+            return found!
+        })
+        expect(page.style.position).toBe('fixed')
+        expect(page.style.inset).toBe('0')
+        expect(page.style.overflow).toBe('auto')
+        expect(page.style.background).toContain('--risu-theme-bgcolor')
+        expect(page.style.color).toContain('--risu-theme-textcolor')
+        // The app stylesheet strips the default button look, so both buttons have to bring their own.
+        for (const button of page.querySelectorAll('button')) {
+            expect(button.classList).toContain('border')
+            expect(button.classList).toContain('bg-darkbutton')
+            expect(button.classList).toContain('disabled:opacity-50')
+        }
+        expect(page.querySelectorAll('button')).toHaveLength(2)
+    })
     it('blocks normal startup when cleanup status is unavailable', async () => {
         vi.mocked(invoke).mockRejectedValue(new Error('status-unavailable'))
         const bootstrap = vi.fn()

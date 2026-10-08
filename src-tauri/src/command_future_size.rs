@@ -192,8 +192,10 @@ fn async_command_futures_stay_small() {
 
 /// Handler entries without their attributes, as written in `lib.rs`.
 fn handler_entries() -> Vec<String> {
+    // Built from pieces so the harness command scan does not read this line as the macro.
+    const OPENING: &str = concat!("tauri::generate_handler", "![");
     let source = include_str!("lib.rs");
-    let start = source.find("tauri::generate_handler![").expect("handler list") + "tauri::generate_handler![".len();
+    let start = source.find(OPENING).expect("handler list") + OPENING.len();
     let end = start + source[start..].find("]);").expect("handler list end");
     let mut text = String::new();
     let mut depth = 0usize;

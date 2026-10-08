@@ -24,6 +24,9 @@ function damagedRecordInstruction(ko: boolean): string {
         : `Quit the app, delete the ${folder} folder, and start RisuNest again. You can then run the reset again from the settings.`)
 }
 
+/** The app stylesheet resets buttons to bare text, so the buttons carry the panel buttons' look. */
+const STARTUP_BUTTON_CLASS = 'rounded-md border border-darkborderc bg-darkbutton px-4 py-2 text-textcolor hover:bg-selected disabled:cursor-not-allowed disabled:opacity-50'
+
 /** This entry must remain independent of application storage and plugins. */
 export async function appCleanupBeforeBootstrap(): Promise<void> {
     if (!(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return
@@ -36,18 +39,24 @@ export async function appCleanupBeforeBootstrap(): Promise<void> {
     }
     const ko = navigator.language.startsWith('ko')
     const host = document.createElement('main')
-    host.style.cssText = 'font:16px system-ui;padding:2rem;max-width:42rem;margin:auto;line-height:1.6;color:var(--risu-theme-textcolor,inherit);background:var(--risu-theme-bgcolor,transparent)'
+    // The body does not scroll and #app fills it, so the page covers the viewport itself.
+    host.style.cssText = 'position:fixed;inset:0;z-index:100;overflow:auto;color:var(--risu-theme-textcolor,inherit);background:var(--risu-theme-bgcolor,transparent)'
+    const panel = document.createElement('section')
+    panel.style.cssText = 'font:16px system-ui;padding:2rem;max-width:42rem;margin:auto;line-height:1.6'
     const heading = document.createElement('h1')
+    heading.className = 'mb-2 text-2xl font-bold'
     heading.textContent = ko ? 'RisuNest 초기화' : 'RisuNest reset'
     const message = document.createElement('p')
+    message.className = 'mb-4'
     message.setAttribute('role', 'status')
     const action = document.createElement('button')
     action.textContent = ko ? '다시 시도' : 'Retry'
-    action.style.cssText = 'font:inherit;padding:.5rem 1rem;cursor:pointer'
+    action.className = STARTUP_BUTTON_CLASS
     const cancel = document.createElement('button')
     cancel.textContent = ko ? '초기화 취소' : 'Cancel reset'
-    cancel.style.cssText = action.style.cssText
+    cancel.className = STARTUP_BUTTON_CLASS
     const cancellation = document.createElement('p')
+    cancellation.className = 'mt-6 mb-2'
     cancellation.textContent = ko
         ? '초기화를 취소하면 동기화와 외부 저장소를 다시 연결해야 할 수 있습니다.'
         : 'After cancelling reset, you may need to reconnect sync and external storage.'
@@ -101,7 +110,8 @@ export async function appCleanupBeforeBootstrap(): Promise<void> {
         action.disabled = cancel.disabled = true
         void invoke('app_cleanup_cancel').catch(refreshFailure)
     }
-    host.append(heading, message, action, cancellation, cancel)
+    panel.append(heading, message, action, cancellation, cancel)
+    host.append(panel)
     document.getElementById('preloading')?.remove()
     document.body.append(host)
     if (status?.pending && status.error !== null) showFailure(status.error)

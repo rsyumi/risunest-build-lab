@@ -98,7 +98,7 @@ vi.mock('src/ts/process/index.svelte', async () => ({
 }))
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({ deactivateActiveWorkingSet: vi.fn() }))
 
-import { alertCheckboxConfirm } from 'src/ts/alert'
+import { alertActionConfirm, alertCheckboxConfirm } from 'src/ts/alert'
 import { initHotkey } from 'src/ts/hotkey'
 import AlertComp from './AlertComp.svelte'
 
@@ -195,5 +195,33 @@ describe('checkbox confirmations', () => {
             for (const [type, handler] of listening.mock.calls) document.removeEventListener(type, handler as EventListener)
             listening.mockRestore()
         }
+    })
+})
+
+describe('action confirmations', () => {
+    const choice = { title: 'Keep these off?', description: 'Left off: Sync', actionLabel: 'Keep off', cancelLabel: 'Only this time' }
+    async function ask() {
+        const result = alertActionConfirm(choice)
+        target = document.createElement('div')
+        document.body.append(target)
+        mounted = mount(AlertComp, { target })
+        await tick()
+        return { result }
+    }
+    it('shows the title, description and both labeled actions without a checkbox', async () => {
+        const { result } = await ask()
+        expect(target.querySelector('#checkbox-confirm-title')?.textContent).toBe(choice.title)
+        expect(target.querySelector('#checkbox-confirm-description')?.textContent).toBe(choice.description)
+        expect(target.querySelector('input[type="checkbox"]')).toBeNull()
+        expect(action('Keep off').disabled).toBe(false)
+        action('Keep off').click()
+        await expect(result).resolves.toBe(true)
+    })
+    it.each(['button', 'Escape', 'overlay'])('answers no when cancelled by %s', async mode => {
+        const { result } = await ask()
+        if (mode === 'button') action('Only this time').click()
+        else if (mode === 'Escape') window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+        else target.querySelector<HTMLButtonElement>('button[aria-label="Only this time"]')!.click()
+        await expect(result).resolves.toBe(false)
     })
 })

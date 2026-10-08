@@ -234,10 +234,12 @@
         <div role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="checkbox-confirm-title" aria-describedby="checkbox-confirm-description" class="relative bg-darkbg text-textcolor p-4 rounded-md flex flex-col gap-4 w-full max-w-lg max-h-full overflow-y-auto">
             <h2 id="checkbox-confirm-title" class="text-xl font-bold whitespace-pre-wrap">{dialog.title}</h2>
             <p id="checkbox-confirm-description" class="whitespace-pre-wrap break-words">{dialog.description}</p>
-            <label class="flex items-start gap-2">
-                <input type="checkbox" bind:checked={checkboxChecked} class="mt-1 accent-selected" />
-                <span>{dialog.checkboxLabel}</span>
-            </label>
+            {#if dialog.checkboxLabel}
+                <label class="flex items-start gap-2">
+                    <input type="checkbox" bind:checked={checkboxChecked} class="mt-1 accent-selected" />
+                    <span>{dialog.checkboxLabel}</span>
+                </label>
+            {/if}
             <div class="flex gap-2">
                 <Button className="grow" styled="outlined" onclick={() => finishCheckboxConfirm(false)}>{dialog.cancelLabel}</Button>
                 <Button className="grow" disabled={dialog.requireChecked && !checkboxChecked} onclick={() => finishCheckboxConfirm(true)}>{dialog.actionLabel}</Button>

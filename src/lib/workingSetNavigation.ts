@@ -14,6 +14,7 @@ import { findCharacterIndexbyId } from 'src/ts/util'
 import { get } from 'svelte/store'
 import { doingChat } from 'src/ts/process/generationState'
 import { language } from 'src/lang'
+import { backgroundErrorMessage } from 'src/ts/storage/backgroundErrorMessage'
 
 const PLAYGROUND_CHARACTER_ID = '§playground'
 
@@ -38,7 +39,7 @@ export async function clearCharacterSelection(): Promise<boolean> {
         return true
     } catch (error) {
         const { alertError } = await import('src/ts/alert')
-        alertError(error instanceof Error ? error : String(error))
+        alertError(backgroundErrorMessage(error))
         return false
     }
 }

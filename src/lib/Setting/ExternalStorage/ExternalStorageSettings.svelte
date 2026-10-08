@@ -53,6 +53,8 @@
     const EMPTY_HISTORY_STEPS = 4
     /** What a repository accepts for each retention limit. */
     const RETENTION_LIMITS = { keepCount: [1, 1000], keepDays: [7, 3650] } as const
+    /** How long disconnecting waits for the file check before it asks without the check's answer. */
+    const REMOTE_ONLY_CHECK_MS = 3_000
     const strings = $derived(externalStorageStrings(DBState.db.language))
     let storageState = $state<ExternalStorageState | null>(null)
     let adding = $state(false)
@@ -69,8 +71,12 @@
     let error = $state('')
     /** A failed background refresh, which the next successful refresh clears. */
     let pollError = $state('')
-    let expanded = $state<Record<string, 'history' | 'quota' | ''>>({})
+    /** The details tab picked on each card. A card shows its history until another tab is picked. */
+    let expanded = $state<Record<string, 'history' | 'quota'>>({})
     let history = $state<Record<string, ExternalHistoryItem[]>>({})
+    let historyError = $state<Record<string, string>>({})
+    /** Cards whose history was read once, so a failing remote is not read again on every poll. */
+    const historyRequested = new Set<string>()
     let historyCursor = $state<Record<string, string | undefined>>({})
     let historyLoading = $state<Record<string, boolean>>({})
     let quota = $state<Record<string, ExternalQuotaSummary>>({})
@@ -88,6 +94,8 @@
     let pollTimer: ReturnType<typeof setTimeout> | undefined
     /** The state a sync switch was set to while its change runs. Otherwise it shows the device's sync target. */
     let syncRequest = $state<Record<string, boolean>>({})
+    /** The state an automatic backup switch was set to while its change runs. Otherwise it shows the stored setting. */
+    let automaticRequest = $state<Record<string, boolean>>({})
     let stopBindingChanges: (() => void) | undefined
 
     async function setSyncBinding(connection: ExternalConnectionSummary, enabled: boolean): Promise<void> {
@@ -145,6 +153,11 @@
         }
         try {
             storageState = await bridge.getState()
+            for (const connection of storageState.connections) {
+                if (historyRequested.has(connection.id)) continue
+                historyRequested.add(connection.id)
+                void loadHistory(connection, false)
+            }
             for (const job of storageState.jobs) {
                 if (job.kind === 'backup' && externalJobIsActive(job)) historyJobs.set(job.id, job.connectionId)
             }
@@ -153,7 +166,7 @@
                 if (!completed || externalJobIsActive(completed)) continue
                 historyJobs.delete(jobId)
                 const connection = storageState.connections.find(item => item.id === connectionId)
-                if (completed.state === 'succeeded' && connection && expanded[connectionId] === 'history') {
+                if (completed.state === 'succeeded' && connection && selectedTab(connectionId) === 'history') {
                     await loadHistory(connection, false)
                 }
             }
@@ -172,7 +185,7 @@
 
     async function refreshWithHistory(): Promise<void> {
         await refresh()
-        const open = storageState?.connections.filter(connection => expanded[connection.id] === 'history') ?? []
+        const open = storageState?.connections.filter(connection => selectedTab(connection.id) === 'history') ?? []
         await Promise.all(open.map(connection => loadHistory(connection, false)))
     }
 
@@ -198,13 +211,6 @@
         if (renewed) {
             const job = activeJob(result.connection)
             if (job && externalJobIsPaused(job)) await resumeJob(result.connection, job)
-            return
-        }
-        // An already existing repository is opened to read what is in it, so
-        // its contents are shown without asking for the history tab first.
-        if (result.connection.mode === 'existing') {
-            expanded[result.connection.id] = 'history'
-            await loadHistory(result.connection, false)
         }
     }
 
@@ -324,7 +330,7 @@
                 const answer = await alertCheckboxConfirm({
                     title: strings.deleteHistoryConfirm,
                     description: descriptions.join(' '),
-                    checkboxLabel: strings.deleteHistory,
+                    checkboxLabel: strings.deleteHistoryAcknowledge,
                     actionLabel: strings.deleteHistory,
                     cancelLabel: strings.cancel,
                     requireChecked: true,
@@ -371,12 +377,17 @@
     async function setAutomaticWork(connection: ExternalConnectionSummary, enabled: boolean): Promise<void> {
         if (!storageState || busy) return
         busy = true
+        automaticRequest[connection.id] = enabled
         try {
             await bridge.setAutomaticBackupPaused(connection.id, !enabled)
             await refreshExternalStorageProductionState()
-            await refresh(true)
+            error = ''
         } catch (reason) { error = externalErrorMessage(strings, reason) }
-        finally { busy = false }
+        finally {
+            await refresh(true)
+            delete automaticRequest[connection.id]
+            busy = false
+        }
     }
 
     async function unlock(): Promise<void> {
@@ -395,6 +406,10 @@
         if (!unlockConnection && job && externalJobIsPaused(job)) await resumeJob(connection, job)
     }
 
+
+    function selectedTab(connectionId: string): 'history' | 'quota' {
+        return expanded[connectionId] ?? 'history'
+    }
 
     async function openDetails(connection: ExternalConnectionSummary, kind: 'history' | 'quota'): Promise<void> {
         expanded[connection.id] = kind
@@ -440,9 +455,9 @@
             }
             history[connection.id] = items
             historyCursor[connection.id] = cursor
-            error = ''
+            delete historyError[connection.id]
         } catch (reason) {
-            error = externalErrorMessage(strings, reason)
+            historyError[connection.id] = externalErrorMessage(strings, reason)
         } finally {
             historyLoading[connection.id] = false
         }
@@ -481,17 +496,27 @@
     }
 
     async function removeConnection(connection: ExternalConnectionSummary): Promise<void> {
+        busy = true
+        activeAction = `remove:${connection.id}`
         let held: number | undefined
+        let timer: ReturnType<typeof setTimeout> | undefined
         try {
-            held = await remoteOnlyFiles(connection)
-        } catch {}
+            held = await Promise.race([
+                remoteOnlyFiles(connection),
+                new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), REMOTE_ONLY_CHECK_MS) }),
+            ])
+        } catch {} finally {
+            clearTimeout(timer)
+            busy = false
+            activeAction = ''
+        }
         const remoteOnly = held !== 0
         // The card's own two lines tell apart connections to one service and account.
         const name = `${externalConnectionTitle(strings, connection)}\n${connectionPlace(connection)}`
         const choice = await alertCheckboxConfirm({
             title: strings.removeTitle,
             description: remoteOnly ? `${name}\n\n${held === undefined ? strings.removeRemoteOnlyUnknown : strings.removeRemoteOnly}` : name,
-            checkboxLabel: remoteOnly ? strings.downloadThenRemove : strings.remove,
+            checkboxLabel: remoteOnly ? strings.downloadThenRemove : strings.removeAcknowledge,
             actionLabel: strings.remove,
             cancelLabel: strings.cancel,
             requireChecked: !remoteOnly,
@@ -621,9 +646,13 @@
         return externalErrorMessage(strings, value)
     }
 
+    /** A connection whose automatic backup is off reports `paused`, and it runs every other job. */
+    function connectionUsable(connection: ExternalConnectionSummary): boolean {
+        return connection.status === 'ready' || connection.status === 'paused'
+    }
+
     function connectionStatusLabel(status: ExternalConnectionSummary['status']): string {
-        if (status === 'ready') return strings.statusReady
-        if (status === 'paused') return strings.statusPaused
+        if (status === 'ready' || status === 'paused') return strings.statusReady
         if (status === 'reauth-required') return strings.statusReauth
         if (status === 'key-locked') return strings.statusLocked
         return strings.statusError
@@ -644,12 +673,11 @@
             && connection.lastError?.reason === job?.error?.reason
     }
 
-    function connectionTone(connection: ExternalConnectionSummary): 'connected' | 'working' | 'paused' | 'attention' {
+    function connectionTone(connection: ExternalConnectionSummary): 'connected' | 'working' | 'attention' {
         const job = activeJob(connection)
         if (job && (externalJobIsPaused(job) || job.state === 'uncertain')) return 'attention'
         if (job && externalJobIsActive(job)) return 'working'
-        if (connection.status === 'ready') return 'connected'
-        if (connection.status === 'paused') return 'paused'
+        if (connectionUsable(connection)) return 'connected'
         return 'attention'
     }
 
@@ -660,6 +688,17 @@
         if (job && externalJobIsPaused(job)) return ['reauth-required', 'key-locked'].includes(connection.status) ? connectionStatusLabel(connection.status) : strings.statusError
         if (job && externalJobIsActive(job)) return strings.jobActive[job.kind]
         return connectionStatusLabel(connection.status)
+    }
+
+    // Restore phases after the download apply data locally, so their progress has no byte fraction.
+    const RESTORE_APPLY_PHASES = new Set(['preparing-local', 'applying-local', 'awaiting-adoption'])
+
+    function activeJobLabel(job: ExternalJobSummary): string {
+        return (job.kind === 'restore' && strings.restorePhases[job.phase]) || strings.jobActive[job.kind]
+    }
+
+    function activeJobFraction(job: ExternalJobSummary): number | null {
+        return job.kind === 'restore' && RESTORE_APPLY_PHASES.has(job.phase) ? null : externalJobProgress(job)
     }
 
     function jobSize(job: ExternalJobSummary): string {
@@ -767,6 +806,7 @@
             {@const remedy = renewable || lockable || recheckable || retryable}
             {@const syncTarget = storageState.selection.kind === 'external' && storageState.selection.connectionId === connection.id}
             {@const backedUp = connection.purpose === 'backup' || !!connection.lastBackupAtMs}
+            {@const synced = connection.purpose === 'sync' && !!connection.lastSyncAtMs}
             <article class="card">
                 <header class="card-head">
                     <span class="provider" aria-hidden="true"><ProviderIcon size={18} /></span>
@@ -804,16 +844,16 @@
                         <div class="actions"><SettingButton variant="secondary" size="sm" onclick={() => exportRun && bridge.cancelExport(exportRun.id)}>{strings.cancel}</SettingButton></div>
                     </div>
                 {/if}
-                {#if backedUp || job?.state === 'succeeded'}
+                {#if backedUp || synced || job?.state === 'succeeded'}
                     <dl class="kv">
+                        {#if synced}<dt>{language.risuNest.serverSync.lastSuccess}</dt><dd>{when(connection.lastSyncAtMs)}</dd>{/if}
                         {#if backedUp}<dt>{strings.lastBackup}</dt><dd>{when(connection.lastBackupAtMs)}</dd>{/if}
                         {#if job && job.state === 'succeeded'}<dt>{strings.progress}</dt><dd role="status" aria-live="polite">{jobSummary(job)}</dd>{/if}
                     </dl>
                 {/if}
                 {#if job && externalJobIsPaused(job) && job.error?.retryAtMs}<p class="note">{strings.retryAt.replace('{0}', when(job.error.retryAtMs))}</p>{/if}
                 {#if job && externalJobIsActive(job) && !externalJobIsPaused(job)}
-                    {@const progress = externalJobProgress(job)}
-                    <SettingProgress label={strings.jobActive[job.kind]} detail={jobSize(job)} fraction={progress} />
+                    <SettingProgress label={activeJobLabel(job)} detail={jobSize(job)} fraction={activeJobFraction(job)} />
                 {/if}
 
                 {#if unlockConnection?.id === connection.id}
@@ -828,7 +868,7 @@
 
                 <div class="controls">
                     {#if connection.purpose === 'backup'}
-                        <SettingToggle showLabel label={strings.automaticBackup} disabled={busy} checked={!connection.automaticBackupPaused} onchange={enabled => setAutomaticWork(connection, enabled)} />
+                        <SettingToggle showLabel label={strings.automaticBackup} disabled={busy} checked={automaticRequest[connection.id] ?? !connection.automaticBackupPaused} onchange={enabled => setAutomaticWork(connection, enabled)} />
                     {:else}
                         <SettingToggle showLabel label={strings.makeSyncTarget} disabled={busy} checked={syncRequest[connection.id] ?? syncTarget} onchange={enabled => setSyncBinding(connection, enabled)} />
                     {/if}
@@ -847,14 +887,15 @@
                 <div class="details">
                     <div class="tabs" role="tablist">
                         {#each (['history', 'quota'] as const) as tab (tab)}
-                            <button type="button" role="tab" id="{connection.id}-{tab}-tab" aria-controls="{connection.id}-{tab}-panel" aria-selected={expanded[connection.id] === tab} class="tab" onclick={() => openDetails(connection, tab)}>{tab === 'history' ? strings.history : strings.quota}</button>
+                            <button type="button" role="tab" id="{connection.id}-{tab}-tab" aria-controls="{connection.id}-{tab}-panel" aria-selected={selectedTab(connection.id) === tab} class="tab" onclick={() => openDetails(connection, tab)}>{tab === 'history' ? strings.history : strings.quota}</button>
                         {/each}
                     </div>
 
-                    {#if expanded[connection.id] === 'history'}
+                    {#if selectedTab(connection.id) === 'history'}
                         {@const items = history[connection.id] ?? []}
                         <div class="panel" role="tabpanel" id="{connection.id}-history-panel" aria-labelledby="{connection.id}-history-tab">
                             {#if historyLoading[connection.id]}<p class="empty">{strings.loading}</p>
+                            {:else if historyError[connection.id]}<SettingNotice role="status" text={historyError[connection.id]} />
                             {:else if items.length === 0}<p class="empty">{strings.noHistory}</p>{/if}
                             {#if items.length > 0}
                                 <ul class="rows">
@@ -880,22 +921,22 @@
                             {/if}
                             {#if historyCursor[connection.id]}<div class="more"><SettingButton variant="secondary" size="sm" busy={historyLoading[connection.id]} onclick={() => loadHistory(connection, true)}>{strings.loadMore}</SettingButton></div>{/if}
                         </div>
-                    {:else if expanded[connection.id] === 'quota'}
+                    {:else}
                         {@const usage = quota[connection.id]}
                         {@const retention = connection.retentionPolicy}
                         <div class="panel usage" role="tabpanel" id="{connection.id}-quota-panel" aria-labelledby="{connection.id}-quota-tab">
                             {#if usage || remoteOnly[connection.id] !== undefined}
                                 <dl class="stats">
                                     {#if usage}
-                                        {@const known = usage.storage.providerPhysicalKnown && usage.storage.providerPhysicalBytes !== null}
-                                        <div class="stat">
-                                            <dt>{strings.usedByService}</dt>
-                                            <dd class="stat-value" data-unknown={!known}>{known ? bytes(usage.storage.providerPhysicalBytes ?? undefined) : strings.unknownUsage}</dd>
-                                            {#if !known}<dd class="stat-note">{strings.unknownUsageHelp}</dd>{/if}
-                                        </div>
+                                        {#if usage.storage.providerPhysicalKnown && usage.storage.providerPhysicalBytes !== null}
+                                            <div class="stat">
+                                                <dt>{strings.usedByService}</dt>
+                                                <dd class="stat-value">{bytes(usage.storage.providerPhysicalBytes)}</dd>
+                                            </div>
+                                        {/if}
                                         <div class="stat">
                                             <dt>{strings.uploadedLowerBound}</dt>
-                                            <dd class="stat-value">{atLeast(usage.storage.locallyUploadedBytesLowerBound)}</dd>
+                                            <dd class="stat-value">{bytes(usage.storage.locallyUploadedBytesLowerBound)}</dd>
                                             <dd class="stat-note">{strings.files.replace('{0}', Number(usage.storage.locallyUploadedObjectCountLowerBound).toLocaleString())}</dd>
                                         </div>
                                         {#if usage.storage.latestReachable}
@@ -947,12 +988,12 @@
                                         </span>
                                     </label>
                                 </div>
-                                <p class="help">{strings.retentionHelp} {strings.retentionOtherDevices}</p>
+                                <p class="help">{strings.retentionHelp}</p>
                             </section>
                             <section class="usage-section">
                                 {#if connection.capabilities.snapshotDiscovery && connection.capabilities.leaseOperations && connection.capabilities.deleteObjects}
                                     <div class="actions">
-                                        <SettingButton variant="secondary" busy={activeAction === `cleanup:${connection.id}`} disabled={busy || connection.status !== 'ready' || storageState.jobs.some(job => job.connectionId === connection.id && externalJobIsActive(job))} onclick={() => runJob(connection, 'cleanup')}>{strings.cleanup}</SettingButton>
+                                        <SettingButton variant="secondary" busy={activeAction === `cleanup:${connection.id}`} disabled={busy || !connectionUsable(connection) || storageState.jobs.some(job => job.connectionId === connection.id && externalJobIsActive(job))} onclick={() => runJob(connection, 'cleanup')}>{strings.cleanup}</SettingButton>
                                     </div>
                                 {/if}
                                 <p class="help">{strings.cleanupTrashNotice} {strings.providerCapacityHelp}</p>
@@ -1293,7 +1334,7 @@
     }
     .stats {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(min(100%, 7.5rem), 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
         gap: 0.5rem;
         margin: 0;
     }
@@ -1308,7 +1349,7 @@
         background: var(--risu-theme-darkbg);
     }
     .stat dt {
-        font-size: 12px;
+        font-size: 13px;
         line-height: 1.4;
         color: var(--risu-theme-textcolor2);
     }
@@ -1324,14 +1365,13 @@
         font-variant-numeric: tabular-nums;
     }
     .stat-value[data-unknown='true'] {
-        font-size: 14px;
         font-weight: 500;
-        color: var(--risu-theme-textcolor2);
+        color: color-mix(in srgb, var(--risu-theme-textcolor2) 62%, var(--risu-theme-textcolor) 38%);
     }
     .stat-note {
-        font-size: 12px;
-        line-height: 1.4;
-        color: var(--risu-theme-textcolor2);
+        font-size: 13px;
+        line-height: 1.45;
+        color: color-mix(in srgb, var(--risu-theme-textcolor2) 62%, var(--risu-theme-textcolor) 38%);
     }
     .usage-section {
         display: grid;
@@ -1415,8 +1455,8 @@
     .help {
         max-width: 62ch;
         margin: 0;
-        font-size: 12.5px;
-        line-height: 1.55;
+        font-size: 13px;
+        line-height: 1.5;
         color: color-mix(in srgb, var(--risu-theme-textcolor2) 62%, var(--risu-theme-textcolor) 38%);
     }
     .foot {
