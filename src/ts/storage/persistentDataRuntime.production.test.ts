@@ -1409,6 +1409,91 @@ describe('received record deletions', () => {
     })
 })
 
+describe('received persona replacement', () => {
+    const persona = (id: string, name: string) => ({id, name, icon: '', personaPrompt: `${name} prompt`, note: '', largePortrait: false})
+    async function personaRuntime() {
+        const initial = normalizeDatabaseDefaults({} as Database)
+        initial.botPresets[0].id = 'preset'
+        initial.personas = [persona('persona-b-old', 'Old B'), persona('persona-d-old', 'Old D')]
+        initial.selectedPersona = 1
+        const store = new IndexedDbPersistentDataStore(`received-persona-replacement-${crypto.randomUUID()}`, new IDBFactory(), IDBKeyRange) as PersistentDataStore
+        await store.open()
+        await store.replaceFromDatabase(initial)
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(-1)
+        const saveFailures: unknown[] = []
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value,
+            onLocalSaveFailure: (error) => { if (error !== null) saveFailures.push(error) }})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        getDatabase().classicMaxWidth = true
+        await runtime.flushPendingDataLocally('received-persona-replacement-settle')
+        return {store, runtime, saveFailures}
+    }
+    const selected = () => getDatabase().personas[getDatabase().selectedPersona]
+    async function savedMutations(store: PersistentDataStore, runtime: ReturnType<typeof createPersistentDataRuntime>) {
+        const commit = vi.spyOn(store, 'commit')
+        getDatabase().classicMaxWidth = !getDatabase().classicMaxWidth
+        await runtime.flushPendingDataLocally('after-received-personas')
+        const mutations = commit.mock.calls.flatMap(([input]) => [...input.rootMutations ?? [], ...input.unitMutations ?? []])
+        commit.mockRestore()
+        return mutations
+    }
+
+    it('keeps a live persona selected and writes no selection while a replacement arrives in key-ordered receives', async () => {
+        const {store, runtime, saveFailures} = await personaRuntime()
+        const added = [persona('persona-c-new', 'New C'), persona('persona-a-new', 'New A')]
+        const noSelectionWrite = async () => expect((await savedMutations(store, runtime)).map((value) => value.key)).toEqual(['classicMaxWidth'])
+        // Units page in key order, so a replacement's membership units arrive in
+        // an earlier receive than the fields and the selection.
+        const membership = ['persona-a-new', 'persona-b-old', 'persona-c-new', 'persona-d-old'].map((id) => JSON.stringify(['exists', 'persona', id]))
+        await receiveCommit(store, runtime, {unitMutations: membership.map((key) => key.includes('-old')
+            ? {key, type: 'delete' as const} : {key, type: 'set' as const, value: true})}, membership)
+        expect(getDatabase().personas.map((value) => value.id).sort()).toEqual(['persona-a-new', 'persona-c-new'])
+        expect(selected()).toBeDefined()
+        await noSelectionWrite()
+
+        const fields = added.flatMap((value) => Object.entries(value).filter(([field]) => field !== 'id')
+            .map(([field, fieldValue]) => ({key: JSON.stringify(['persona', value.id, field]), type: 'set' as const, value: fieldValue})))
+        const order = {key: JSON.stringify(['order', 'personas']), type: 'set' as const, value: added.map((value) => value.id)}
+        await receiveCommit(store, runtime, {unitMutations: [...fields, order]}, [order.key, ...fields.map((value) => value.key)].sort())
+        expect(getDatabase().personas).toEqual(added)
+        expect(added).toContainEqual(selected())
+        await noSelectionWrite()
+
+        const selection = {key: JSON.stringify(['root', 'selectedPersona']), type: 'set' as const, value: 'persona-a-new'}
+        await receiveCommit(store, runtime, {unitMutations: [selection]}, [selection.key])
+        expect(selected()).toEqual(added[1])
+        expect(getDatabase().username).toBe('New A')
+        await noSelectionWrite()
+        expect((await store.readRoot()).value.selectedPersona).toBe('persona-a-new')
+        expect(saveFailures).toEqual([])
+    })
+
+    it('does not write back a fallback for a received selection naming a persona this device does not hold', async () => {
+        const {store, runtime, saveFailures} = await personaRuntime()
+        const selection = {key: JSON.stringify(['root', 'selectedPersona']), type: 'set' as const, value: 'persona-elsewhere'}
+        await receiveCommit(store, runtime, {unitMutations: [selection]}, [selection.key])
+        expect(selected()).toBeDefined()
+        const mutations = await savedMutations(store, runtime)
+        expect(mutations.map((value) => value.key)).toEqual(['classicMaxWidth'])
+        expect((await store.readRoot()).value.selectedPersona).toBe('persona-elsewhere')
+        expect(saveFailures).toEqual([])
+    })
+
+    it('does not write back an index for a received selection after every persona was removed', async () => {
+        const {store, runtime, saveFailures} = await personaRuntime()
+        const membership = ['persona-b-old', 'persona-d-old'].map((id) => JSON.stringify(['exists', 'persona', id]))
+        await receiveCommit(store, runtime, {unitMutations: membership.map((key) => ({key, type: 'delete' as const}))}, membership)
+        const selection = {key: JSON.stringify(['root', 'selectedPersona']), type: 'set' as const, value: 'persona-elsewhere'}
+        await receiveCommit(store, runtime, {unitMutations: [selection]}, [selection.key])
+        expect(getDatabase().personas).toEqual([])
+        const mutations = await savedMutations(store, runtime)
+        expect(mutations.map((value) => value.key)).toEqual(['classicMaxWidth'])
+        expect((await store.readRoot()).value.selectedPersona).toBe('persona-elsewhere')
+        expect(saveFailures).toEqual([])
+    })
+})
+
 describe('received fields the working set did not have', () => {
     async function fieldRuntime() {
         const initial = normalizeDatabaseDefaults({} as Database)

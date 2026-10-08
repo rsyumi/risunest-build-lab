@@ -3875,7 +3875,9 @@ pub(crate) struct JobStatus {
     pub(crate) expected_revision: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) export_capture_revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) activation_revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) activation_authority: Option<String>,
     pub(crate) restore_adoption_confirmed: bool,
     pub(crate) warning_codes: Vec<String>,
@@ -5517,6 +5519,9 @@ mod tests {
         let job = registry
             .create_with_context(JobKind::RestorePortableBackup, Some(4), Vec::new())
             .unwrap();
+        // A restore that has not activated reports no receipt at all, not a null one.
+        let queued = serde_json::to_value(job.status()).unwrap();
+        assert!(queued.get("activationRevision").is_none() && queued.get("activationAuthority").is_none());
         job.start(JobPhase::ReadingSource).unwrap();
         job.set_replaces_library(true).unwrap();
         job.set_phase(JobPhase::StagingDatabase).unwrap();

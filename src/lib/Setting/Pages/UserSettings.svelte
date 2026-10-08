@@ -151,7 +151,8 @@
 
 </script>
 
-{#if risuSaveOperation !== null}
+<!-- An operation with the progress dialog shows itself there. -->
+{#if risuSaveOperation !== null && $nativeFileOperation?.presentation !== 'dialog'}
     <p class="text-sm opacity-70">{language.risuNest.backup.fileBusy}</p>
 {/if}
 

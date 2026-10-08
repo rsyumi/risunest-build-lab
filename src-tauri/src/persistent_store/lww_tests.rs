@@ -1184,6 +1184,26 @@ fn independent_fields_converge_in_both_delivery_orders() {
 }
 
 #[test]
+fn a_received_persona_joins_the_root_with_its_membership_unit() {
+    let (_dir, mut store) = store();
+    let persona = |store: &PersistentStore| {
+        store.read_root(None).unwrap().value["personas"].as_array().cloned().unwrap_or_default()
+            .into_iter().find(|value| value["id"] == "received-persona")
+    };
+    // A replacement pages its units in key order, so membership can arrive
+    // in an earlier receive than any field of the record.
+    receive(&mut store, "membership", vec![change(&["exists", "persona", "received-persona"], 10, serde_json::json!(true))], vec![]);
+    assert_eq!(persona(&store), Some(serde_json::json!({"id": "received-persona"})));
+    receive(&mut store, "fields", vec![change(&["persona", "received-persona", "name"], 10, serde_json::json!("Received"))], vec![]);
+    receive(&mut store, "repeat", vec![change(&["exists", "persona", "received-persona"], 20, serde_json::json!(true))], vec![]);
+    assert_eq!(persona(&store), Some(serde_json::json!({"id": "received-persona", "name": "Received"})));
+    receive(&mut store, "removal", vec![Change {
+        key: unit_key(&["exists", "persona", "received-persona"]).unwrap(), stamp: stamp(30), value: UnitValue::Deleted,
+    }], vec![]);
+    assert_eq!(persona(&store), None);
+}
+
+#[test]
 fn echo_and_empty_receives_keep_the_revision_and_still_acknowledge() {
     let (_dir, mut store) = store();
     save(
