@@ -45,7 +45,7 @@ impl RootSpool {
         let file=directory.map(tempfile::NamedTempFile::new_in).transpose()?;
         // An empty filename asks SQLite to own a private, automatically removed
         // temporary database when no enclosing file job owns a scratch directory.
-        let db=match &file { Some(file)=>Connection::open(file.path())?, None=>Connection::open("")? };
+        let db=match &file { Some(file)=>crate::sqlite_open::open(file.path())?, None=>crate::sqlite_open::open("")? };
         db.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-2048;
             CREATE TABLE fields (key TEXT UNIQUE NOT NULL, kind INTEGER NOT NULL, value TEXT, array_index INTEGER);
             CREATE TABLE members (field TEXT NOT NULL, key TEXT NOT NULL, value TEXT, array_index INTEGER, UNIQUE(field,key));

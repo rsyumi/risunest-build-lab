@@ -128,7 +128,7 @@ fn database(root: &Path, create: bool) -> Result<Option<Connection>> {
     }
     #[cfg(test)]
     hydration_tests::observe("remote-bodies", root, &path);
-    let db = Connection::open(path).map_err(local)?;
+    let db = crate::sqlite_open::open(path).map_err(local)?;
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
         CREATE TABLE IF NOT EXISTS sources(hash TEXT NOT NULL,library TEXT NOT NULL,source TEXT NOT NULL,PRIMARY KEY(hash,library));
         CREATE TABLE IF NOT EXISTS packed_sources(hash TEXT NOT NULL,library TEXT NOT NULL,source TEXT NOT NULL,PRIMARY KEY(hash,library));").map_err(local)?;

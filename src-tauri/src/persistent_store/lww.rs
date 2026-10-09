@@ -775,7 +775,7 @@ impl PersistentStore {
         let rows = statement.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?;
         let scratch = crate::external_storage::leftovers::managed_scratch(&self.repository_root, "backup-units-")
             .map_err(|error| StoreError::Store { message: error.to_string() })?;
-        let values = Connection::open(scratch.path().join("units.sqlite"))?;
+        let values = crate::sqlite_open::open(scratch.path().join("units.sqlite"))?;
         values.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
             CREATE TABLE units(key TEXT PRIMARY KEY,stamp TEXT NOT NULL,value TEXT NOT NULL); BEGIN")?;
         for row in rows {
@@ -893,7 +893,7 @@ impl PersistentStore {
             "SELECT file FROM pragma_database_list WHERE name='main'", [], |row| row.get(0),
         )?;
         if path.is_empty() { return Err(error("backup-device-path-unavailable")); }
-        let mut barrier = Connection::open(&path)?;
+        let mut barrier = crate::sqlite_open::open(&path)?;
         let tx = barrier.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| match error {
             rusqlite::Error::SqliteFailure(ref code, _) if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => StoreError::CommitBusy,
             error => error.into(),
@@ -902,7 +902,7 @@ impl PersistentStore {
             return Err(StoreError::CommitBusy);
         }
         let snapshot = if device_sections {
-            let snapshot = Connection::open_with_flags(
+            let snapshot = crate::sqlite_open::open_with_flags(
                 &path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )?;
             snapshot.execute_batch("PRAGMA busy_timeout=5000; PRAGMA query_only=ON; PRAGMA mmap_size=0; BEGIN;")?;

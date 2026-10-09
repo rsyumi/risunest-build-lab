@@ -85,6 +85,29 @@ test('the manifests are the modules that do resolve roots', async () => {
     assert.match(sync, /"LOCALAPPDATA"/)
 })
 
+test('every native SQLite open names its database through the shared helper', async () => {
+    // On Windows SQLite takes the locks of a database named by a \\?\ path
+    // through one handle for the whole process, which can strand a read lock,
+    // so every open goes through the helper that names it by its drive path.
+    const native = join('src-tauri', 'src') + sep
+    const helper = join('src-tauri', 'src', 'sqlite_open.rs')
+    const offences = []
+    let scanned = 0
+    for (const path of await sources()) {
+        if (!path.startsWith(native) || !path.endsWith('.rs') || path === helper) continue
+        if (/(^|[\\/_])tests\.rs$/.test(path) || path.includes(`${sep}tests${sep}`)) continue
+        const source = await readFile(join(ROOT, path), 'utf8')
+        const product = source.split(/^#\[cfg\(test\)\]\r?\n(?:pub(?:\([^)]*\))? )?mod \w+ \{/m)[0]
+        scanned += 1
+        for (const match of product.matchAll(/\bConnection::open(?:_with_flags)?(?:_and_vfs)?\s*\(/g)) {
+            const line = product.slice(0, match.index).split('\n').length
+            offences.push(`${path.split(sep).join(posix.sep)}:${line}`)
+        }
+    }
+    assert.ok(scanned > 100, `expected a full native source scan, saw ${scanned} files`)
+    assert.deepEqual(offences, [])
+})
+
 test('the iOS staging root is received from Rust rather than derived in Swift', async () => {
     const swift = await readFile(
         join(ROOT, 'crates', 'tauri-plugin-ios-native', 'ios', 'Sources', 'IosNativePlugin.swift'),

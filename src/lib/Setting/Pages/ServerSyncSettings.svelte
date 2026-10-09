@@ -5,7 +5,7 @@
     import { alertActionConfirm, alertCheckboxConfirm, alertConfirm } from 'src/ts/alert'
     import { isTauri } from 'src/ts/platform'
     import { platform as nativePlatform } from '@tauri-apps/plugin-os'
-    import { completeServerSyncBinding, connectServerSync, disconnectServerSync, holdServerSync, retryServerSync, getServerSyncController, getServerSyncCacheUsage, cleanupServerSyncCache, type ServerSyncCacheUsage } from 'src/ts/storage/sync/serverSyncProduction'
+    import { completeServerSyncBinding, connectServerSync, disconnectServerSync, dismissServerSyncConnectionFailure, holdServerSync, retryServerSync, getServerSyncController, getServerSyncCacheUsage, cleanupServerSyncCache, type ServerSyncCacheUsage } from 'src/ts/storage/sync/serverSyncProduction'
     import { parseServerRegistration } from 'src/ts/storage/sync/serverSyncRegistration'
     import { serverRegistrationInbox } from 'src/ts/storage/sync/serverSyncRegistrationInbox'
     import { canScanServerRegistration, createServerQrScanner } from 'src/ts/storage/sync/serverSyncQr'
@@ -130,8 +130,13 @@
         // A failure the operation already explained stays over a later refresh error.
         try { await refresh(await operation()) } catch (error) { failure ||= message(error) } finally { busy = false }
     }
-    function readCode() { try { candidate = parseServerRegistration(code); code = ''; failure = '' } catch { failure = copy.registrationInvalid } }
-    async function scan() { scanning = true; try { candidate = await scanner.scan(tone); failure = '' } catch (error) { if (!isQrScanCancelled(error)) failure = message(error) } finally { scanning = false } }
+    // A new code replaces the refusal of the previous one. Other connection failures stay.
+    function replaceCandidate(next: ServerConfig) {
+        candidate = next; failure = ''
+        if (usedRegistrationCodes.includes(view.error)) dismissServerSyncConnectionFailure()
+    }
+    function readCode() { try { replaceCandidate(parseServerRegistration(code)); code = '' } catch { failure = copy.registrationInvalid } }
+    async function scan() { scanning = true; try { replaceCandidate(await scanner.scan(tone)) } catch (error) { if (!isQrScanCancelled(error)) failure = message(error) } finally { scanning = false } }
     // A device that is not connected chooses its asset storage with the connection; a connected one keeps its group.
     async function connect(newDevice = false) {
         if (!candidate) return

@@ -2067,7 +2067,7 @@ impl RestoreBodyPlan {
             let path=PathBuf::from(format!("{}{suffix}",path.display()));
             if path.exists() {crate::trust_boundary::open_regular_source(&path).map_err(transient)?;}
         }
-        let db=rusqlite::Connection::open(path).map_err(transient)?;
+        let db=crate::sqlite_open::open(path).map_err(transient)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
             CREATE TABLE IF NOT EXISTS bodies(hash TEXT PRIMARY KEY,bytes INTEGER NOT NULL,remaining INTEGER NOT NULL,priority INTEGER NOT NULL,source TEXT NOT NULL,settled INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS ready_bodies ON bodies(settled,remaining,priority,hash);
@@ -2240,7 +2240,7 @@ pub(crate) struct OriginalUnits {
 impl OriginalUnits {
     fn new(directory: &Path) -> Result<Self> {
         let file = tempfile::NamedTempFile::new_in(directory).map_err(transient)?;
-        let db = rusqlite::Connection::open(file.path()).map_err(transient)?;
+        let db = crate::sqlite_open::open(file.path()).map_err(transient)?;
         db.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
             CREATE TABLE records(key TEXT PRIMARY KEY,hash TEXT NOT NULL,bytes INTEGER NOT NULL); CREATE UNIQUE INDEX original_control_hash ON records(hash)").map_err(transient)?;
         Ok(Self { db, _file: file })
@@ -2490,7 +2490,7 @@ pub(crate) async fn admit_asset_catalogs(
     provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation,
 ) -> Result<Vec<String>> {
     let scratch=super::leftovers::managed_scratch(store.repository_root(),"asset-catalog-")?;
-    let metadata=rusqlite::Connection::open_with_flags(store.repository_root().join("persistent/persistent.sqlite"),
+    let metadata=crate::sqlite_open::open_with_flags(store.repository_root().join("persistent/persistent.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(transient)?;
     let cas=PayloadCas::new(store.repository_root()).map_err(transient)?;
     let mut planned=BTreeMap::<String,super::lww_residency::SharedPackedSource>::new();let mut proofs=Vec::new();
@@ -2612,7 +2612,7 @@ pub(crate) async fn walk_snapshot_database_first(snapshot:&RemoteObject,staging_
     let (entries,packs,_)=read_catalog_with(&assets_root,wire::CatalogKind::Assets,key,staging_root,provider,repository,walked,cancel).await?;
     let mut objects=Vec::new();
     let cas=PayloadCas::new(library_root).map_err(transient)?;
-    let metadata = rusqlite::Connection::open_with_flags(
+    let metadata = crate::sqlite_open::open_with_flags(
         library_root.join("persistent/persistent.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ).map_err(transient)?;

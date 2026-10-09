@@ -315,7 +315,7 @@ impl PersistentStore {
             writer.finish()?;
         }
         let temporary=tempfile::tempdir_in(&self.snapshots_dir)?;
-        let certified=Connection::open(temporary.path().join("certified.sqlite"))?;
+        let certified=crate::sqlite_open::open(temporary.path().join("certified.sqlite"))?;
         certified.execute_batch("PRAGMA cache_size=-16384; PRAGMA temp_store=FILE; CREATE TABLE controls(hash TEXT PRIMARY KEY,body BLOB NOT NULL)")?;
         let bounded = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
             Ok(source.query_row("SELECT body FROM backup_controls WHERE hash=?1 AND length(body)<=?2",rusqlite::params![hash,risunest_sync_wire::MAX_METADATA_BYTES as i64],|row|row.get(0)).optional()?)

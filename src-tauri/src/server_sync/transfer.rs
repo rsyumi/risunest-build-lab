@@ -247,7 +247,7 @@ impl<'a> Transfer<'a> {
         self.cache.closure(version)
     }
     pub fn new(client: &'a ServerClient, cache: &'a Cache) -> Result<Self> {
-        let db = Connection::open(cache.cas.repository_root().join("transfers.sqlite"))?;
+        let db = crate::sqlite_open::open(cache.cas.repository_root().join("transfers.sqlite"))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS uploads(hash TEXT PRIMARY KEY,id TEXT NOT NULL,size TEXT NOT NULL); CREATE TABLE IF NOT EXISTS chunks(target TEXT NOT NULL,part INTEGER NOT NULL,hash TEXT NOT NULL,size INTEGER NOT NULL,PRIMARY KEY(target,part));")?;
         Ok(Self {
             client,

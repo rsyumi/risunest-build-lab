@@ -123,7 +123,7 @@ fn run_case(name: &str, traced: bool) -> Value {
     let mut batch_lease = None;
     for run in 0..COMMITS {
         if name == "external-reader" && run % EXTERNAL_BATCH == 0 {
-            let reader = Connection::open_with_flags(&store.database_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let reader = crate::sqlite_open::open_with_flags(&store.database_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
             reader.execute_batch("BEGIN").unwrap();
             let _: i64 = reader.query_row("SELECT count(*) FROM characters", [], |row| row.get(0)).unwrap();
             external = Some(reader);

@@ -1,6 +1,6 @@
 use super::{JobControl, JobPhase, JobState, JobProgress, NativeJobError};
 use crate::{asset_repository::{PayloadCas, job_pins::{CasJobKind,CasObjectRole,CasReleaseOutcome,DurableCasJob}}, persistent_store::PersistentStore, server_sync::residency::AssetPolicy};
-use rusqlite::{Connection,OpenFlags};
+use rusqlite::OpenFlags;
 use serde::Serialize;
 use std::{fs::File,io::{self,Read},path::{Path,PathBuf}};
 
@@ -124,7 +124,7 @@ pub(crate) fn run(store:&mut PersistentStore,plan:&BodyPlan,job:&JobControl,scra
             if object.cached {
                 let file=File::open(&plan.source).map_err(error)?;
                 let identity=crate::asset_repository::exact_file_identity(&file).map_err(error)?;
-                let source=Connection::open_with_flags(&plan.source,OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(error)?;
+                let source=crate::sqlite_open::open_with_flags(&plan.source,OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(error)?;
                 source.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;").map_err(error)?;
                 let (row,size):(i64,i64)=source.query_row("SELECT rowid,length(body) FROM message_page_objects WHERE hash=?1",[&object.hash],|row|Ok((row.get(0)?,row.get(1)?))).map_err(error)?;
                 if u64::try_from(size).ok()!=Some(object.size) {return Err(error("Snapshot cached payload size differs"));}
@@ -183,6 +183,7 @@ pub(crate) fn finish(job:&JobControl,outcome:Result<BodyResult,NativeJobError>)-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     use crate::server_sync::lww_tests::{local,put_asset};
 
     #[test]

@@ -51,7 +51,7 @@ fn hold_anchor(root: &Path, path: &Path) {
     }
     // Only a connection that has read holds the shared lock that keeps the
     // log alive. Failure leaves the next open to retry.
-    anchor.db = Connection::open(path)
+    anchor.db = crate::sqlite_open::open(path)
         .and_then(|db| {
             db.query_row("PRAGMA user_version", [], |_| Ok(()))?;
             Ok(db)
@@ -121,7 +121,7 @@ impl Residency {
                 Err(error) => return Err(error.into()),
             }
         }
-        let mut db = Connection::open(&path)?;
+        let mut db = crate::sqlite_open::open(&path)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version == 0 {

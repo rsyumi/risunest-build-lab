@@ -238,6 +238,50 @@ fn an_armed_anchor_keeps_the_log_open_until_released() {
 }
 
 #[test]
+fn the_store_opens_by_a_plain_drive_path() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Residency::open(root.path()).unwrap();
+    let opened = store.db.path().unwrap();
+    assert!(!opened.starts_with(r"\\"), "{opened}");
+}
+
+/// Media requests and status reads each open their own connection while
+/// custody is confirmed, and the log must still fold back afterwards.
+#[test]
+fn concurrent_readers_leave_the_log_foldable() {
+    let root = tempfile::tempdir().unwrap();
+    let mut writer = Residency::open(root.path()).unwrap();
+    writer
+        .confirm(&config("device"), &head(), &[object(b"first")])
+        .unwrap();
+    let digest = hash(b"payload");
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                let reader = Residency::open(root.path()).unwrap();
+                for _ in 0..500 {
+                    assert!(reader.object(&digest, None).unwrap().is_some());
+                }
+            });
+        }
+        for index in 0..100 {
+            let seed = format!("renewed-{index}");
+            writer
+                .confirm(&config("device"), &head(), &[object(seed.as_bytes())])
+                .unwrap();
+        }
+    });
+    let (busy, log, checkpointed): (i64, i64, i64) = writer
+        .db
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(busy, 0, "log={log} checkpointed={checkpointed}");
+    assert_eq!(std::fs::metadata(log_path(root.path())).unwrap().len(), 0);
+}
+
+#[test]
 fn transient_fixture_rejects_corrupt_body_and_reclaims_its_scratch() {
     let root = tempfile::tempdir().unwrap();
     let scratch = tempfile::tempdir().unwrap();

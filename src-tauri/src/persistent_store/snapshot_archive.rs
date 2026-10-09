@@ -88,7 +88,7 @@ impl Archive {
         for suffix in ["", "-journal", "-wal", "-shm"] {
             reject_link_if_present(&PathBuf::from(format!("{}{suffix}", path.display())))?;
         }
-        let mut connection = Connection::open_with_flags(
+        let mut connection = crate::sqlite_open::open_with_flags(
             &path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE

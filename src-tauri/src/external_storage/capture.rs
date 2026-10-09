@@ -102,7 +102,7 @@ impl OriginalBackupUnits {
     pub(crate) fn capture(directory: &Path, produce: impl FnOnce(&mut dyn FnMut(risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue) -> Result<()>) -> Result<()>) -> Result<Self> {
         fs::create_dir_all(directory)?;
         let file = tempfile::NamedTempFile::new_in(directory)?;
-        let mut db = Connection::open(file.path())?;
+        let mut db = crate::sqlite_open::open(file.path())?;
         db.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE; CREATE TABLE original_units(key TEXT PRIMARY KEY,value TEXT NOT NULL)")?;
         let tx = db.transaction()?;
         let mut count = 0u64;
@@ -118,7 +118,7 @@ impl OriginalBackupUnits {
     }
     pub(crate) fn len(&self) -> u64 { self.count }
     pub(crate) fn units(&self) -> Result<OriginalBackupUnitRows> {
-        let db = Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let db = crate::sqlite_open::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         db.execute_batch("PRAGMA cache_size=-4096; PRAGMA temp_store=FILE")?;
         let count: i64 = db.query_row("SELECT count(*) FROM original_units", [], |row| row.get(0))?;
         if u64::try_from(count).ok() != Some(self.count) { return Err(invalid("Original backup unit count differs")); }
@@ -174,7 +174,7 @@ impl BackupDependencySpool {
         fs::create_dir_all(directory)?;
         if is_link_like(&fs::symlink_metadata(directory)?) { return Err(invalid("Backup spool directory must not be a link")); }
         let file = tempfile::NamedTempFile::new_in(directory)?;
-        let db = Connection::open(file.path())?;
+        let db = crate::sqlite_open::open(file.path())?;
         db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
             CREATE TABLE bodies(hash TEXT PRIMARY KEY,body BLOB NOT NULL,role INTEGER NOT NULL CHECK(role IN(1,2,3)));
             BEGIN IMMEDIATE;")?;
@@ -341,7 +341,7 @@ impl CaptureCatalog {
         }
         destination.sync_all()?;
         drop(destination);
-        let db = Connection::open(&path)?;
+        let db = crate::sqlite_open::open(&path)?;
         db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")?;
         if previous.is_none() {
             db.execute_batch("CREATE TABLE capture_info(singleton INTEGER PRIMARY KEY CHECK(singleton=1),identity TEXT NOT NULL);
@@ -651,7 +651,7 @@ fn verified_catalog(
     {
         return Err(invalid("Capture catalog integrity failed"));
     }
-    let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let db = crate::sqlite_open::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let encoded: String = db.query_row(
         "SELECT identity FROM capture_info WHERE singleton=1",
         [],
