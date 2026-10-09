@@ -1,6 +1,5 @@
 <script lang="ts">
     import { getFileImageSource } from 'src/ts/globalApi.svelte'
-    import { applyImageDimensionHints, observeImageDimensions } from 'src/ts/process/files/imageGeometryRender'
     import isEqual from "lodash/isEqual"
     import { DBState, selIdState } from 'src/ts/stores.svelte'
     import { sleep } from "src/ts/util"
@@ -92,7 +91,7 @@
         controller: AbortController
         removeExternalAbortListener(): void
         promise: Promise<string>
-        finalizeMarkup(value: string): string
+        finalizeMarkup(value: string, deferredInlays?: DeferredInlayMarkerRegistry): string
         deferredInlays: DeferredInlayMarkerRegistry
         disposed: boolean
         generation: number
@@ -103,7 +102,6 @@
         transitional: boolean
         onDisplaySettled?: () => void
         releaseObjectUrls: () => void
-        imageDimensionListeners: Array<() => void>
         thoughtExpansion: BoundedThoughtExpansion | null
     }
 
@@ -198,9 +196,9 @@
             : undefined
         // CSS decoding must use this job's context and publish with its HTML.
         // Re-evaluating it in the template restyles the old DOM during a refresh.
-        return (value: string) =>
+        return (value: string, deferredInlays?: DeferredInlayMarkerRegistry) =>
             addMetadataToElement(
-                trimMarkdown(value, renderContext),
+                trimMarkdown(value, { ...renderContext, deferredInlays }),
                 model,
                 frozenLawApplies,
             )
@@ -467,12 +465,12 @@
         }
     }
 
-    const checkImg = async (job: ChatBodyParseJob) => {
+    const checkImg = async (job: ChatBodyParseJob, root: ParentNode) => {
         const settings = captureContext?.settings ?? DBState.db
-        if(!settings.newImageHandlingBeta || !bodyRoot){
+        if(!settings.newImageHandlingBeta || settings.hideAllImages){
             return
         }
-        const imgs = bodyRoot.querySelectorAll('img:not([data-risu-inlay-token]):not([data-risu-managed-media]):not([src^="data:"]):not([src^="http:"]):not([src^="https:"]):not([src^="blob:"]):not([src^="file:"]):not([src^="tauri:"]):not([noimage])') as NodeListOf<HTMLImageElement>
+        const imgs = root.querySelectorAll('img[src]:not([data-risu-inlay-slot]):not([data-risu-inlay-token]):not([data-risu-managed-media]):not([src^="data:"]):not([src^="http:"]):not([src^="https:"]):not([src^="blob:"]):not([src^="file:"]):not([src^="tauri:"]):not([noimage])') as NodeListOf<HTMLImageElement>
         
         if (imgs.length > 0) {
             const currentCharacter = captureContext ? null : getCurrentCharacter()
@@ -489,21 +487,21 @@
             const exactAssets = new Map(normalizedAssets.map((asset) => [asset.name, asset.path]))
 
             async function attachImage(img: HTMLImageElement, key: string, originalName: string) {
-                const image = await getFileImageSource(key)
-                const url = image?.url ?? await getFileSrc(key)
-                const isCurrent = () => !destroyed && !job.disposed && job === activeParseJob && !job.controller.signal.aborted
-                if (!isCurrent() || img.getAttribute('src')?.toLocaleLowerCase() !== originalName) return
-                if (image) applyImageDimensionHints(img, image)
-                img.src = url
-                if (image) {
-                    const cleanup = observeImageDimensions(img, image, () => !destroyed)
-                    job.imageDimensionListeners.push(cleanup)
+                try {
+                    const image = await getFileImageSource(key)
+                    const url = image?.url ?? await getFileSrc(key)
+                    const isCurrent = () => !destroyed && !job.disposed && job === activeParseJob && !job.controller.signal.aborted
+                    if (!isCurrent() || img.getAttribute('src')?.toLocaleLowerCase() !== originalName) return
+                    img.src = url
+                    if (image) job.deferredInlays.rememberAssetImage(image)
+                } catch (error) {
+                    if (captureContext) throw error
+                    if (!job.controller.signal.aborted) console.warn('Image source could not be resolved')
                 }
             }
 
             await Promise.all(Array.from(imgs).map(async (img) => {
                 const name = img.getAttribute('src')?.toLocaleLowerCase() || ''
-                console.log(name)
 
                 if(
                     name.length > 200 ||
@@ -514,7 +512,6 @@
                 }
                 
                 const foundAsset = exactAssets.get(name)
-                console.log('Checking image:', name, 'Assets:', assets)
                 if(foundAsset){
                     img.classList.add('root-loaded-image')
                     img.classList.add('root-loaded-image-' + styl)
@@ -554,6 +551,7 @@
                     img.setAttribute('noimage', 'true')
                 }
             }))
+            job.deferredInlays.applyAssetImageHints(root)
         }
     }
 
@@ -578,7 +576,6 @@
             transitional: false,
             onDisplaySettled,
             releaseObjectUrls: () => {},
-            imageDimensionListeners: [],
             thoughtExpansion: null,
         }
         job.promise = markParsing(msgDisplay, character, idx, job)
@@ -592,8 +589,6 @@
         job.removeExternalAbortListener()
         job.releaseObjectUrls()
         job.releaseObjectUrls = () => {}
-        for (const cleanup of job.imageDimensionListeners) cleanup()
-        job.imageDimensionListeners = []
         job.thoughtExpansion?.dispose()
         job.thoughtExpansion = null
         job.deferredInlays.clear()
@@ -620,7 +615,17 @@
                 return
             }
             // Keep the current DOM and its media leases until the replacement is ready.
-            const html = job.finalizeMarkup(parsed)
+            let html = job.finalizeMarkup(parsed, job.deferredInlays)
+            if ((captureContext?.settings ?? DBState.db).newImageHandlingBeta && /<img\b/i.test(html)) {
+                const template = document.createElement('template')
+                template.innerHTML = html
+                await checkImg(job, template.content)
+                if (destroyed || job.disposed || job.controller.signal.aborted || job !== markParsingResult) {
+                    if (job !== displayedParseJob) disposeParseJob(job)
+                    return
+                }
+                html = template.innerHTML
+            }
             const previousDisplay = displayedParseJob
             const openThoughts = Array.from(
                 renderRoot?.querySelectorAll<HTMLDetailsElement>(
@@ -634,8 +639,6 @@
             if (retainMarkup) {
                 job.releaseObjectUrls = previousDisplay.releaseObjectUrls
                 previousDisplay.releaseObjectUrls = () => {}
-                job.imageDimensionListeners = previousDisplay.imageDimensionListeners
-                previousDisplay.imageDimensionListeners = []
                 job.thoughtExpansion = previousDisplay.thoughtExpansion
                 previousDisplay.thoughtExpansion = null
                 job.deferredInlays.clear()
@@ -683,7 +686,6 @@
                 return
             }
             job.releaseObjectUrls = releaseObjectUrls
-            await checkImg(job)
             await tick()
             if (
                 destroyed ||

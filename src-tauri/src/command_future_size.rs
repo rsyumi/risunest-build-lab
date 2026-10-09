@@ -150,6 +150,9 @@ async_commands![
     native_file_jobs::screenshot_output::native_file_job_screenshot_output_publish,
     persistent_store::commands::pds_archive_character,
     persistent_store::commands::pds_restore_character,
+    persistent_store::commands::image_geometry::pds_read_image_geometry,
+    persistent_store::commands::image_geometry::pds_write_image_geometry,
+    persistent_store::commands::image_geometry::pds_compute_image_geometry,
     #[cfg(target_os = "android")]
     android_commit_transport::pds_commit_android_finish,
     #[cfg(target_os = "android")]

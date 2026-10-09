@@ -60,7 +60,7 @@
     }
 </script>
 
-<SettingGroup id="risunest-update" title={text.title} description={text.description}>
+<SettingGroup id="risunest-update" title={text.title}>
     <SettingRow label={text.automatic} help={text.automaticHelp} inline>
         <SettingToggle
             id="risunest-update-automatic"

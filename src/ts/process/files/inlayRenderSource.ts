@@ -1,6 +1,6 @@
-import { observeImageDimensions } from './imageGeometryRender'
+import { applyImageDimensionHints, observeImageDimensions } from './imageGeometryRender'
 import { ScreenshotPreparationError } from '../../chatScreenshotErrors'
-import type { InlayBlobType, InlayBlobMetadata } from 'src/ts/storage/blobStore'
+import type { BlobImageSource, InlayBlobType, InlayBlobMetadata } from 'src/ts/storage/blobStore'
 import { getInlayAssetBlob, getInlayAssetMetadata, getInlayAssetRenderUrl } from './inlays'
 import { getBlobStore } from '../../storage/platformBlobStore'
 import { validImageDimensions } from '../../storage/imageGeometry'
@@ -25,6 +25,7 @@ interface DeferredInlayMarker {
 
 export class DeferredInlayMarkerRegistry {
     readonly #markers = new Map<string, DeferredInlayMarker>()
+    readonly #assetImages = new Map<string, BlobImageSource>()
     #nextSlot = 0
     #disposed = false
 
@@ -41,9 +42,33 @@ export class DeferredInlayMarkerRegistry {
         return marker ? { ...marker, token: crypto.randomUUID() } : undefined
     }
 
+    rememberAssetImage(source: BlobImageSource): void {
+        if (!this.#disposed) this.#assetImages.set(source.url, source)
+    }
+
+    get hasAssetImages(): boolean {
+        return this.#assetImages.size > 0
+    }
+
+    applyAssetImageHints(root: ParentNode): void {
+        for (const element of root.querySelectorAll<HTMLImageElement>('img[src]')) {
+            const source = this.#assetImages.get(element.getAttribute('src') ?? '')
+            if (!source || element.hasAttribute('srcset') || element.closest('picture')?.querySelector('source[srcset]')) continue
+            applyImageDimensionHints(element, source)
+            if (element.hasAttribute('data-risu-inlay-slot')) continue
+            const slot = this.register(`asset:${source.contentHash}`, {
+                url: source.url, mime: source.metadata.mime, type: 'image', name: source.metadata.name,
+                size: source.metadata.size, objectUrl: false, width: source.width, height: source.height,
+                recordDimensions: source.recordDimensions,
+            })
+            if (slot !== undefined) element.setAttribute('data-risu-inlay-slot', slot)
+        }
+    }
+
     clear(): void {
         this.#disposed = true
         this.#markers.clear()
+        this.#assetImages.clear()
     }
 }
 
