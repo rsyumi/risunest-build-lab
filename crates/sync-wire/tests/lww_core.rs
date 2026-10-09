@@ -158,6 +158,36 @@ fn unit_value_strict_decode_preserves_canonical_wire_roundtrips() {
 }
 
 #[test]
+fn inline_validation_reports_the_first_failing_check() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    for (bytes, code) in [
+        ("!".to_owned(), "invalid-inline-value"),
+        (URL_SAFE_NO_PAD.encode(b"not json"), "invalid-payload-json"),
+        (URL_SAFE_NO_PAD.encode(br#"{"a":1,"a":2}"#), "invalid-payload-json"),
+        (URL_SAFE_NO_PAD.encode(br#"{"b":1,"a":2}"#), "noncanonical-inline-value"),
+        (URL_SAFE_NO_PAD.encode(b"[1, 2]"), "noncanonical-inline-value"),
+        (format!("{}=", URL_SAFE_NO_PAD.encode(b"null")), "invalid-inline-value"),
+    ] {
+        let value = UnitValue::Inline { bytes };
+        assert_eq!(value.validate(), Err(WireError(code)), "{value:?}");
+        assert_eq!(value.validated_inline(), Err(WireError(code)), "{value:?}");
+    }
+}
+
+#[test]
+fn validated_inline_returns_the_decoded_bytes_and_the_json_they_canonicalize_from() {
+    let value = UnitValue::inline(br#"{"b":[1,"x"],"a":null}"#).unwrap();
+    let (decoded, json) = value.validated_inline().unwrap().unwrap();
+    assert_eq!(decoded, br#"{"a":null,"b":[1,"x"]}"#);
+    assert_eq!(json, json!({ "a": null, "b": [1.0, "x"] }));
+    assert_eq!(payload_value::encode(&json).unwrap(), decoded);
+    assert_eq!(payload_value::parse(&decoded).unwrap(), json);
+    assert_eq!(UnitValue::Deleted.validated_inline(), Ok(None));
+    let object = UnitValue::object(risunest_sync_wire::descriptor::RecordDescriptor::content("a".repeat(64))).unwrap();
+    assert_eq!(object.validated_inline(), Ok(None));
+}
+
+#[test]
 fn inline_values_are_bounded_by_decoded_canonical_bytes() {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     let string = |len: usize| format!("\"{}\"", "a".repeat(len - 2)).into_bytes();

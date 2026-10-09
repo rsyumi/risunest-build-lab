@@ -382,6 +382,22 @@ impl PersistentStore {
         let cas = PayloadCas::new(&self.repository_root)?;
         let mut referenced = BTreeSet::new();
         let roots = self.collect_asset_gc_roots_with_backup_references(guarded, false, Some(&mut referenced))?;
+        self.residency_inventory_from(cas, roots, referenced, guarded)
+    }
+    /// The inventory a residency status reports, which may reuse the library roots an
+    /// earlier status read.
+    fn residency_status_inventory(&self) -> Result<Inventory> {
+        let cas = PayloadCas::new(&self.repository_root)?;
+        let roots = self.collect_status_asset_gc_roots()?;
+        self.residency_inventory_from(cas, roots, BTreeSet::new(), false)
+    }
+    fn residency_inventory_from(
+        &self,
+        cas: PayloadCas,
+        roots: Vec<(&'static str, crate::asset_repository::migration_gc::AssetRootSet)>,
+        mut referenced: BTreeSet<String>,
+        guarded: bool,
+    ) -> Result<Inventory> {
         let mut local = BTreeSet::new();
         // This is offload protection, not evidence that the body exists on this device.
         local.extend(self.representative_image_hashes(None)?.0);
@@ -454,14 +470,17 @@ impl PersistentStore {
         connections: &mut Connections,
         hashes: &[String],
     ) -> Result<Vec<Holder>> {
+        let sizes = match residency {
+            Some(residency) => residency.active_sizes(hashes)?,
+            None => vec![None; hashes.len()],
+        };
         let mut server = Vec::with_capacity(hashes.len());
         let mut external = Vec::new();
-        for hash in hashes {
-            let object = residency.map(|residency| residency.object(hash, None)).transpose()?.flatten();
-            if object.is_none() {
+        for (hash, size) in hashes.iter().zip(sizes) {
+            if size.is_none() {
                 external.push(hash.as_str());
             }
-            server.push(object.map(|object| Holder::Server(object.size)));
+            server.push(size.map(Holder::Server));
         }
         let mut registered = remote
             .holders(&external)
@@ -497,7 +516,7 @@ impl PersistentStore {
     /// one inventory.
     pub(crate) fn asset_residency_status_for_target(&self, target: Option<&PreviousStorageTarget>) -> Result<ResidencyStatus> {
         let residency = Residency::open(&self.repository_root)?;
-        let inventory = self.residency_inventory(false)?;
+        let inventory = self.residency_status_inventory()?;
         let cas = PayloadCas::new(&self.repository_root)?;
         let mut connections = Connections::default();
         let (local_bytes, missing) = split_local(&cas, inventory.referenced, &|| Ok(()))?;
@@ -575,7 +594,7 @@ impl PersistentStore {
         if alone.is_empty() {
             return Ok(0);
         }
-        let referenced = self.residency_inventory(false)?.referenced;
+        let referenced = self.residency_status_inventory()?.referenced;
         Ok(alone.into_iter().filter(|hash| referenced.contains(*hash)).count() as u64)
     }
     fn previous_storage_assets(&self, target: &PreviousStorageTarget, check: &impl Fn() -> Result<()>) -> Result<BTreeSet<String>> {

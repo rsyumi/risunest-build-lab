@@ -117,14 +117,25 @@ fn capture_root(
     generation: &str,
     out: &mut BTreeMap<UnitKey, UnitValue>,
 ) -> StoreResult<()> {
+    capture_root_fields(db, generation, None, out)
+}
+fn capture_root_fields(
+    db: &Connection,
+    generation: &str,
+    selected: Option<&BTreeSet<String>>,
+    out: &mut BTreeMap<UnitKey, UnitValue>,
+) -> StoreResult<()> {
+    let includes = |field: &str| selected.is_none_or(|fields| fields.contains(field));
     let value = root(db, generation)?;
-    fields(db, out, &["root"], &value, ROOT_FIELDS)?;
+    let root_fields: Vec<_> = ROOT_FIELDS.iter().copied().filter(|field| includes(field)).collect();
+    fields(db, out, &["root"], &value, &root_fields)?;
     for (collection, id_field) in [
         ("modules", "id"),
         ("plugins", "name"),
         ("loadouts", "id"),
         ("customModels", "id"),
     ] {
+        if !includes(collection) { continue; }
         let mut order = Vec::new();
         let mut seen = BTreeSet::new();
         for record in value
@@ -156,7 +167,7 @@ fn capture_root(
     }
     let mut personas = Vec::new();
     for persona in value
-        .get("personas")
+        .get("personas").filter(|_| includes("personas"))
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -172,11 +183,11 @@ fn capture_root(
         fields(db, out, &["persona", id], persona, PERSONA_FIELDS)?;
         personas.push(id.to_owned());
     }
-    if value.get("personas").is_some() {
+    if includes("personas") && value.get("personas").is_some() {
         add(db, out, &["order", "personas"], &json!(personas))?;
     }
     if let Some(vars) = value
-        .get("explicitGlobalChatVariables")
+        .get("explicitGlobalChatVariables").filter(|_| includes("explicitGlobalChatVariables"))
         .and_then(Value::as_object)
     {
         for (key, value) in vars {
@@ -195,10 +206,10 @@ fn capture_root(
             )?;
         }
     }
-    if let Some(values) = value.get("protectedPresetValues") {
+    if let Some(values) = value.get("protectedPresetValues").filter(|_| includes("protectedPresetValues")) {
         fields(db, out, &["preset-protected"], values, PROTECTED_FIELDS)?;
     }
-    if let Some(order) = value.get("characterOrder") {
+    if let Some(order) = value.get("characterOrder").filter(|_| includes("characterOrder")) {
         add(db, out, &["order", "characters"], order)?;
     }
     Ok(())
@@ -309,6 +320,27 @@ fn capture_character(
     }
     Ok(())
 }
+fn capture_character_fields(
+    db: &Transaction<'_>,
+    generation: &str,
+    id: &str,
+    fields: &BTreeSet<String>,
+    out: &mut BTreeMap<UnitKey, UnitValue>,
+) -> StoreResult<()> {
+    if let Some(detail) = text_value(db,
+        "SELECT detail FROM characters WHERE generation=?1 AND character_id=?2", params![generation, id],
+    )? {
+        for field in fields {
+            if let Some(mut value) = detail.get(field).cloned() {
+                if field == "statics" {
+                    if let Some(object) = value.as_object_mut() { object.shift_remove("messages"); }
+                }
+                add(db, out, &["character", id, field], &value)?;
+            }
+        }
+    }
+    Ok(())
+}
 fn capture_conversation(
     db: &Transaction<'_>,
     generation: &str,
@@ -337,6 +369,11 @@ pub(in crate::persistent_store) fn capture_targets(
     let mut out = BTreeMap::new();
     if input.root.is_some() {
         capture_root(db, generation, &mut out)?;
+    } else if let Some(mutations) = &input.root_mutations {
+        let fields = mutations.iter().map(|mutation| match mutation {
+            super::super::RootMutation::Set { key, .. } | super::super::RootMutation::Delete { key } => key.clone(),
+        }).collect();
+        capture_root_fields(db, generation, Some(&fields), &mut out)?;
     }
     if input.replace_presets.is_some() {
         capture_presets(db, generation, &mut out)?;
@@ -438,9 +475,15 @@ pub(in crate::persistent_store) fn capture_targets(
             &mut out,
         )?;
     }
+    let mut character_fields: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for mutation in input.unit_mutations.iter().flatten() {
         let key = mutation.key();
         if known(key) {
+            let parts = key.components();
+            if parts[0] == "character" {
+                character_fields.entry(parts[1].clone()).or_default().insert(parts[2].clone());
+                continue;
+            }
             if !before && key.components()[0] == "order" {
                 out.insert(
                     key.clone(),
@@ -453,6 +496,9 @@ pub(in crate::persistent_store) fn capture_targets(
                 capture_key(db, generation, key, &mut out)?;
             }
         }
+    }
+    for (id, fields) in character_fields {
+        capture_character_fields(db, generation, &id, &fields, &mut out)?;
     }
     for mutation in input.plugin_storage.iter().flatten() {
         match mutation {
@@ -515,9 +561,8 @@ fn capture_key(
 ) -> StoreResult<()> {
     let p = key.components();
     match p[0].as_str() {
-        "character" | "archive" => {
-            capture_character(db, generation, &p[1], false, true, out)?
-        }
+        "character" => capture_character_fields(db, generation, &p[1], &BTreeSet::from([p[2].clone()]), out)?,
+        "archive" => capture_character(db, generation, &p[1], false, true, out)?,
         "order" if p[1] == "conversations" => {
             let ids: Vec<String> = {
                 let mut q=db.prepare("SELECT conversation_id FROM conversations WHERE generation=?1 AND character_id=?2 ORDER BY configured_index,conversation_id")?;

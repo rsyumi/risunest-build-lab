@@ -70,7 +70,7 @@
     import ServerSyncSettings from 'src/lib/Setting/Pages/ServerSyncSettings.svelte'
     import type { ServerConfig } from 'src/ts/storage/sync/serverSync'
     import type { AssetResidencyPolicy } from 'src/ts/storage/sync/serverAssetResidency'
-    import { connectServerSync, getServerSyncController } from 'src/ts/storage/sync/serverSyncProduction'
+    import { connectServerSync, dismissServerSyncConnectionFailure, getServerSyncController } from 'src/ts/storage/sync/serverSyncProduction'
     import { canScanServerRegistration } from 'src/ts/storage/sync/serverSyncQr'
     import { createNativeSyncBindingBridge } from 'src/ts/storage/sync/bindingNative'
     import ConnectionForm from 'src/lib/Setting/ExternalStorage/ConnectionForm.svelte'
@@ -362,16 +362,21 @@
 
     // A device already connected to the server has nothing left to set up
     // here. After a connection on this screen fails, its error stays up until
-    // sync runs.
+    // sync runs. Leaving the screen without connecting drops that error, so
+    // the sync settings do not show it later.
     $effect(() => {
         if (flow.state !== 'sync-server' || !isTauri) return
         serverConnectFailed = false
-        return getServerSyncController().subscribe((view) => {
+        const unsubscribe = getServerSyncController().subscribe((view) => {
             if (flow.state !== 'sync-server' || serverConnecting) return
             if (!view.status.bound || view.bindingIncomplete) return
             if (serverConnectFailed && (view.paused || view.error)) return
             flow = goToOnboardingState(flow, 'done', 'server')
         })
+        return () => {
+            unsubscribe()
+            dismissServerSyncConnectionFailure()
+        }
     })
 
     async function onExternalConnected(result: ExternalConnectionResult): Promise<void> {

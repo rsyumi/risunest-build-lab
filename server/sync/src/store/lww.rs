@@ -206,17 +206,13 @@ impl Store {
         }
         let validation = (|| -> Result<Vec<UnitChange>> {
             preparation?;
-            let claimed_writer: Option<String> = tx
-                .query_row(
-                    "SELECT writer FROM device_writer_claims WHERE device=?1",
-                    [&device.id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if claimed_writer
-                .as_ref()
-                .is_some_and(|writer| writer != &request.writer_id)
-            {
+            // A device publishes with the one writer that joined, claimed or first published with it.
+            let other_writer: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM writers WHERE device=?1 AND writer<>?2)",
+                params![device.id, request.writer_id],
+                |row| row.get(0),
+            )?;
+            if other_writer {
                 return Err(Error::new("writer-collision", 409));
             }
             let writer: Option<String> = tx

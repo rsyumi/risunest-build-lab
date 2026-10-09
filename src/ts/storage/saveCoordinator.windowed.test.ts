@@ -357,7 +357,7 @@ describe('SaveCoordinator', () => {
             )).toBe(false)
         })
 
-        it('retains and persists only the exact character detail and conversation metadata adopted during activation', async () => {
+        it.each([false, true])('persists activation differences and retries without losing asset-owner updates (%s)', async (assetsChanged) => {
             const database = makeDatabase()
             const beforeCharacter = {
                 type: 'character',
@@ -365,12 +365,17 @@ describe('SaveCoordinator', () => {
                 name: 'Alpha',
                 chatPage: 0,
                 lastInteraction: 10,
+                desc: 'synthetic unchanged description'.repeat(40_000),
+                creatorNotes: 'remove during normalization',
             } as unknown as CharacterDetail
             const afterCharacter = {
                 ...beforeCharacter,
                 chatPage: 1,
                 lastInteraction: 20,
+                firstMessage: 'normalized greeting',
             } as CharacterDetail
+            delete afterCharacter.creatorNotes
+            if (assetsChanged) afterCharacter.additionalAssets = []
             const beforeConversation = {
                 id: 'two',
                 name: 'Two',
@@ -439,6 +444,7 @@ describe('SaveCoordinator', () => {
                 ),
             ).toBe(true)
             expect(coordinator.hasPendingPersistenceWork).toBe(true)
+            expect(coordinator.recordSelectedCharacterLastInteraction(authority, 20, 25)).toBe(true)
 
             await expect(
                 coordinator.flushPendingData('windowed-activation-failure'),
@@ -449,7 +455,12 @@ describe('SaveCoordinator', () => {
             expect(commit).toHaveBeenCalledTimes(2)
             expect(commit.mock.calls[1][0]).toEqual({
                 expectedRevision: 2,
-                character: afterCharacter,
+                ...(assetsChanged ? { character: { ...afterCharacter, lastInteraction: 25 } } : { unitMutations: [
+                    { key: '["character","char-a","chatPage"]', type: 'set', value: 1 },
+                    { key: '["character","char-a","lastInteraction"]', type: 'set', value: 25 },
+                    { key: '["character","char-a","creatorNotes"]', type: 'delete' },
+                    { key: '["character","char-a","firstMessage"]', type: 'set', value: 'normalized greeting' },
+                ] }),
                 conversations: [
                     {
                         type: 'replace-range',
@@ -462,6 +473,7 @@ describe('SaveCoordinator', () => {
                     },
                 ],
             })
+            if (!assetsChanged) expect(JSON.stringify(commit.mock.calls[1][0]).length).toBeLessThan(1_024)
             expect(commit.mock.calls[1][0]).toEqual(commit.mock.calls[0][0])
             expect(commit.mock.calls[1][0]).not.toHaveProperty(
                 'replaceCharacter',
@@ -608,7 +620,7 @@ describe('SaveCoordinator', () => {
             expect(commit).toHaveBeenCalledOnce()
             expect(commit.mock.calls[0][0]).toEqual({
                 expectedRevision: 2,
-                character: afterCharacter,
+                unitMutations: [{ key: '["character","char-a","lastInteraction"]', type: 'set', value: 20 }],
                 conversations: [
                     {
                         type: 'replace-range',

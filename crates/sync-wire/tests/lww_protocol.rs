@@ -248,3 +248,35 @@ fn new_device_claim_binds_exact_intent_and_strict_receipt_shape() {
         );
     }
 }
+
+#[test]
+fn writer_binding_names_one_valid_writer_and_nothing_else() {
+    let request = WriterBindingRequest {
+        writer_id: "00000000-0000-4000-8000-000000000001".into(),
+    };
+    request.validate().unwrap();
+    let encoded = canonical::encode(&request).unwrap();
+    assert_eq!(
+        encoded,
+        br#"{"writerId":"00000000-0000-4000-8000-000000000001"}"#
+    );
+    assert_eq!(
+        canonical::decode::<WriterBindingRequest>(&encoded, 4096).unwrap(),
+        request
+    );
+    assert!(WriterBindingRequest {
+        writer_id: "invalid".into()
+    }
+    .validate()
+    .is_err());
+    for invalid in [
+        serde_json::json!({}),
+        serde_json::json!({"writerId":"00000000-0000-4000-8000-000000000001","authorizationId":"a"}),
+    ] {
+        assert!(canonical::decode::<WriterBindingRequest>(
+            &serde_json::to_vec(&invalid).unwrap(),
+            4096
+        )
+        .is_err());
+    }
+}
