@@ -7,6 +7,9 @@ export interface RuntimePerformanceBudgets {
     hypaCacheBatchEntries: number
     localEmbeddingBatchEntries: number
     chatMountedMessageBudget: number
+    chatPreparationScreens: number
+    chatRetentionScreens: number
+    chatActiveRowPreparations: number
     regexPlanCacheEntries: number
     scriptResultCacheBytes: number
     scriptResultCacheEntries: number
@@ -21,6 +24,9 @@ const runtimePerformanceBudgets: Record<RuntimePerformanceProfile, RuntimePerfor
         hypaCacheBatchEntries: 1024,
         localEmbeddingBatchEntries: Number.POSITIVE_INFINITY,
         chatMountedMessageBudget: 64,
+        chatPreparationScreens: 1,
+        chatRetentionScreens: 3,
+        chatActiveRowPreparations: 2,
         regexPlanCacheEntries: 32,
         scriptResultCacheBytes: 8 * 1024 * 1024,
         scriptResultCacheEntries: 1000,
@@ -33,6 +39,9 @@ const runtimePerformanceBudgets: Record<RuntimePerformanceProfile, RuntimePerfor
         hypaCacheBatchEntries: 64,
         localEmbeddingBatchEntries: 8,
         chatMountedMessageBudget: 40,
+        chatPreparationScreens: 1,
+        chatRetentionScreens: 2,
+        chatActiveRowPreparations: 2,
         regexPlanCacheEntries: 8,
         scriptResultCacheBytes: 2 * 1024 * 1024,
         scriptResultCacheEntries: 250,

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { copyFile, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -7,12 +7,17 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { REALM_BLOCKED_URL_PATTERNS } from "../../scripts/realmBlocklist.mjs";
+import { sharedCargoTarget } from "../../scripts/testNative.mjs";
 
 const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
 );
-const target = "E:/Programming/Github/RisuNest/src-tauri/target";
+const target = sharedCargoTarget(
+  execFileSync("git", ["rev-parse", "--git-common-dir"], { cwd: root, encoding: "utf8" }),
+  process.env.CARGO_TARGET_DIR,
+  root,
+);
 const title = "RisuNest synthetic device backup smoke";
 const timeoutMs = 120_000;
 const delay = (milliseconds) =>

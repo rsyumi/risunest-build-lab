@@ -194,6 +194,7 @@
     .state [role='alert'] { color: var(--risu-theme-danger-400); }
     .sentinel { height: 1px; }
     .select-error { margin: 0; padding: 0.6rem 1.25rem 0; font-size: 0.8125rem; line-height: 1.45; color: var(--risu-theme-danger-400); }
+    [role='alert'] { white-space: pre-line; overflow-wrap: anywhere; }
     .foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.5rem; padding: 0.85rem 1.25rem 1.1rem; }
     @media (max-width: 40rem) {
         .backdrop { padding: 0; align-items: stretch; }

@@ -63,14 +63,17 @@ pub(crate) struct ProviderError {
     pub oauth_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_error_description: Option<String>,
-    /// The local failure behind the kind, for the device log only.
-    #[serde(skip)]
+    /// A redacted cause shared by command replies, job failures and device logs.
+    #[serde(default, rename = "detail", skip_serializing_if = "ErrorCause::is_none")]
     pub cause: ErrorCause,
 }
-/// Kept beside an error for the device log. Two errors that differ only in
-/// their cause are equal.
-#[derive(Clone, Debug, Default)]
+/// Diagnostic wording does not change an error's classification or equality.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub(crate) struct ErrorCause(pub Option<String>);
+impl ErrorCause {
+    fn is_none(&self) -> bool { self.0.is_none() }
+}
 impl PartialEq for ErrorCause {
     fn eq(&self, _: &Self) -> bool {
         true
@@ -88,9 +91,20 @@ impl ProviderError {
             cause: ErrorCause::default(),
         }
     }
-    /// Keeps the failure that produced this error for the device log.
+    /// Retains the failure reason without credentials or signed URL parameters.
     pub fn caused<E: std::fmt::Display + ?Sized>(mut self, error: &E) -> Self {
-        self.cause = ErrorCause(Some(crate::native_log::failure_text(error)));
+        static URLS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(||
+            regex::Regex::new(r#"(?i)https?://[^\s<>"']+"#).unwrap());
+        let text = crate::native_log::failure_text(error);
+        let text = URLS.replace_all(&text, |captures: &regex::Captures<'_>| {
+            let Ok(mut url) = url::Url::parse(&captures[0]) else { return "[invalid URL]".to_owned(); };
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        });
+        self.cause = ErrorCause(Some(crate::native_log::mask(&text)));
         self
     }
 }
@@ -506,10 +520,33 @@ pub(crate) struct HeadReceipt {
     pub version: Option<VersionToken>,
     pub complete: bool,
 }
-/// Opaque provider state is sealed before journal storage. Offset is remote-confirmed.
+/// Capability URLs stay in the vault; S3 progress alone cannot authorize requests.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) enum ResumeData {
+    Secret(String),
+    S3Multipart(String),
+}
+impl From<SecretRef> for ResumeData {
+    fn from(reference: SecretRef) -> Self { Self::Secret(reference.0) }
+}
+impl ResumeData {
+    pub(crate) fn secret(&self) -> Result<SecretRef> {
+        match self {
+            Self::Secret(reference) if !reference.is_empty() => Ok(SecretRef(reference.clone())),
+            _ => Err(ProviderError::new(ErrorKind::Corrupt)),
+        }
+    }
+    pub(crate) fn valid(&self) -> bool {
+        match self {
+            Self::Secret(value) => !value.is_empty() && value.len() <= 1024,
+            Self::S3Multipart(value) => !value.is_empty() && value.len() <= 4 * 1024 * 1024,
+        }
+    }
+}
 #[derive(Clone)]
 pub(crate) struct ResumeState {
-    pub sealed_state: SecretRef,
+    pub data: ResumeData,
     pub confirmed_offset: u64,
     pub expires_at_ms: Option<u64>,
 }
@@ -678,7 +715,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_kept_cause_stays_out_of_the_reply_and_equality() {
+    fn a_kept_cause_reaches_replies_without_payload_values_and_preserves_equality() {
         let shape = serde_json::from_str::<u32>("\"private-payload-value\"").unwrap_err();
         let kept = ProviderError::new(ErrorKind::Corrupt).caused(&shape);
         let cause = kept.cause.0.clone().unwrap();
@@ -686,10 +723,10 @@ mod tests {
         assert!(!cause.contains("private-payload-value"));
         assert_eq!(kept, ProviderError::new(ErrorKind::Corrupt));
         let reply = serde_json::to_value(&kept).unwrap();
-        assert_eq!(reply, serde_json::to_value(ProviderError::new(ErrorKind::Corrupt)).unwrap());
+        assert_eq!(reply["detail"], cause);
         assert!(reply.get("cause").is_none());
         let returned: ProviderError = serde_json::from_value(reply).unwrap();
-        assert!(returned.cause.0.is_none());
+        assert_eq!(returned.cause.0, Some(cause));
         let poisoned: std::sync::LockResult<()> = Err(std::sync::PoisonError::new(()));
         let error = poisoned.map_err(|error| ProviderError::new(ErrorKind::Transient).caused(&error)).unwrap_err();
         assert!(error.cause.0.unwrap().contains("poisoned"));
@@ -708,6 +745,23 @@ mod tests {
         }
         assert!(!ProviderError::new(ErrorKind::Corrupt).expected());
         assert_eq!(ProviderError::new(ErrorKind::DailyQuotaExhausted).code(), "dailyQuotaExhausted");
+    }
+
+    #[test]
+    fn command_and_job_errors_keep_details_and_status_without_credentials() {
+        let error = ProviderError { http_status: Some(502), ..ProviderError::new(ErrorKind::EndpointRejected)
+            .caused("TLS handshake failed for https://synthetic-user:synthetic-password@storage.invalid/dav?signature=synthetic-signature#synthetic-fragment: certificate expired") };
+        let reply = serde_json::to_value(&error).unwrap();
+        let job = crate::external_storage::runtime::error_dto(&error);
+        for value in [reply, job] {
+            assert_eq!(value["httpStatus"], 502);
+            let detail = value["detail"].as_str().unwrap();
+            assert!(detail.contains("TLS handshake failed"));
+            assert!(detail.contains("https://storage.invalid/dav"));
+            for secret in ["synthetic-user", "synthetic-password", "synthetic-signature", "synthetic-fragment"] {
+                assert!(!detail.contains(secret));
+            }
+        }
     }
 
     #[test]

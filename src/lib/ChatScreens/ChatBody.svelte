@@ -1,4 +1,6 @@
 <script lang="ts">
+    import { getFileImageSource } from 'src/ts/globalApi.svelte'
+    import { applyImageDimensionHints, observeImageDimensions } from 'src/ts/process/files/imageGeometryRender'
     import isEqual from "lodash/isEqual"
     import { DBState, selIdState } from 'src/ts/stores.svelte'
     import { sleep } from "src/ts/util"
@@ -45,6 +47,7 @@
         captureParserIndex?: number
         parserProjection?: BoundedLiveChatParserProjection
         parserAbortSignal?: AbortSignal
+        onDisplaySettled?: () => void
     }
 
     let {
@@ -72,6 +75,7 @@
         captureParserIndex = idx,
         parserProjection,
         parserAbortSignal,
+        onDisplaySettled,
     }: Props =  $props()
 
     // svelte-ignore non_reactive_update
@@ -97,7 +101,9 @@
         settledNotified: boolean
         errorNotified: boolean
         transitional: boolean
+        onDisplaySettled?: () => void
         releaseObjectUrls: () => void
+        imageDimensionListeners: Array<() => void>
         thoughtExpansion: BoundedThoughtExpansion | null
     }
 
@@ -482,6 +488,19 @@
             })
             const exactAssets = new Map(normalizedAssets.map((asset) => [asset.name, asset.path]))
 
+            async function attachImage(img: HTMLImageElement, key: string, originalName: string) {
+                const image = await getFileImageSource(key)
+                const url = image?.url ?? await getFileSrc(key)
+                const isCurrent = () => !destroyed && !job.disposed && job === activeParseJob && !job.controller.signal.aborted
+                if (!isCurrent() || img.getAttribute('src')?.toLocaleLowerCase() !== originalName) return
+                if (image) applyImageDimensionHints(img, image)
+                img.src = url
+                if (image) {
+                    const cleanup = observeImageDimensions(img, image, () => !destroyed)
+                    job.imageDimensionListeners.push(cleanup)
+                }
+            }
+
             await Promise.all(Array.from(imgs).map(async (img) => {
                 const name = img.getAttribute('src')?.toLocaleLowerCase() || ''
                 console.log(name)
@@ -499,9 +518,7 @@
                 if(foundAsset){
                     img.classList.add('root-loaded-image')
                     img.classList.add('root-loaded-image-' + styl)
-                    const source = await getFileSrc(foundAsset)
-                    if (destroyed || job.disposed || job !== activeParseJob) return
-                    img.src = source
+                    await attachImage(img, foundAsset, name)
                     return
                 }
 
@@ -524,12 +541,8 @@
                     }
                 }
                 if(currentFound){
-                    const got = await getFileSrc(currentFound)
+                    await attachImage(img, currentFound, name)
                     if (destroyed || job.disposed || job !== activeParseJob) return
-                    const name2 = img.getAttribute('src')?.toLocaleLowerCase() || ''
-                    if(name === name2){
-                        img.setAttribute('src', got)
-                    }
 
                     if(img.classList.length === 0){
                         img.classList.add('root-loaded-image')
@@ -563,7 +576,9 @@
             settledNotified: false,
             errorNotified: false,
             transitional: false,
+            onDisplaySettled,
             releaseObjectUrls: () => {},
+            imageDimensionListeners: [],
             thoughtExpansion: null,
         }
         job.promise = markParsing(msgDisplay, character, idx, job)
@@ -577,6 +592,8 @@
         job.removeExternalAbortListener()
         job.releaseObjectUrls()
         job.releaseObjectUrls = () => {}
+        for (const cleanup of job.imageDimensionListeners) cleanup()
+        job.imageDimensionListeners = []
         job.thoughtExpansion?.dispose()
         job.thoughtExpansion = null
         job.deferredInlays.clear()
@@ -617,6 +634,8 @@
             if (retainMarkup) {
                 job.releaseObjectUrls = previousDisplay.releaseObjectUrls
                 previousDisplay.releaseObjectUrls = () => {}
+                job.imageDimensionListeners = previousDisplay.imageDimensionListeners
+                previousDisplay.imageDimensionListeners = []
                 job.thoughtExpansion = previousDisplay.thoughtExpansion
                 previousDisplay.thoughtExpansion = null
                 job.deferredInlays.clear()
@@ -674,6 +693,7 @@
             )
                 return
             job.settledNotified = true
+            job.onDisplaySettled?.()
             onCaptureSettled?.(job.generation)
         } catch (error) {
             if (
@@ -684,6 +704,7 @@
             )
                 return
             job.errorNotified = true
+            job.onDisplaySettled?.()
             onCaptureError?.(job.generation, error)
         }
     }
@@ -715,6 +736,10 @@
             disposeParseJob(displayedParseJob)
             displayedParseJob = null
             displayedHtml = ''
+            const settled = onDisplaySettled
+            void tick().then(() => {
+                if (!destroyed && (currentThoughtPreview || shouldRenderRawStreaming)) settled?.()
+            })
             return
         }
         if (!result) return

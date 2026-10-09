@@ -1020,6 +1020,10 @@ pub(crate) fn error_dto(error: &ProviderError) -> Value {
         _ => ("The operation could not complete.", "retry", true),
     };
     let mut value = json!({"code":error.kind,"message":message,"action":action,"retryable":retry});
+    if let Some(status) = error.http_status { value["httpStatus"] = json!(status); }
+    if let Some(detail) = &error.cause.0 { value["detail"] = json!(detail); }
+    if let Some(code) = &error.oauth_error { value["oauthError"] = json!(code); }
+    if let Some(description) = &error.oauth_error_description { value["oauthErrorDescription"] = json!(description); }
     if let Some(at) = error.retry_at_ms {
         value["retryAtMs"] = json!(at.to_string());
     }

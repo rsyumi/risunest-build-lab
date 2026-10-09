@@ -195,7 +195,7 @@ fn write_file(inner: &Inner, entry: &LogEntry) {
     );
 }
 
-fn mask(message: &str) -> String {
+pub(crate) fn mask(message: &str) -> String {
     let mut masked = without_temporary_file_paths(message);
     for key in [
         "authorization",

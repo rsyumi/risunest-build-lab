@@ -7,6 +7,7 @@ mod desktop_notifications;
 #[cfg(desktop)]
 mod startup_appearance;
 mod cleanup_secrets;
+mod device_secrets;
 mod cleanup_webview;
 mod app_cleanup;
 mod app_update;
@@ -996,7 +997,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_get_device_setting,
         persistent_store::commands::pds_set_device_setting,
         persistent_store::commands::pds_patch_device_setting,
-        persistent_store::commands::pds_read_device_settings,
+            persistent_store::commands::pds_read_device_settings,
+            persistent_store::commands::image_geometry::pds_read_image_geometry,
+            persistent_store::commands::image_geometry::pds_write_image_geometry,
+            persistent_store::commands::image_geometry::pds_compute_image_geometry,
         persistent_store::commands::pds_read_plugin_permissions,
         persistent_store::commands::pds_write_plugin_permission,
         persistent_store::commands::pds_write_plugin_permission_grant,

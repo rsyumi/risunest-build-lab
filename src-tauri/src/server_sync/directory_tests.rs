@@ -186,6 +186,51 @@ fn directory() -> risunest_sync_connect::Directory {
     }
 }
 #[test]
+fn native_directory_recovery_accepts_http_after_verifying_identity() {
+    for device in ["device", "wrong-device"] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let input = request(&mut stream);
+            assert!(input.starts_with("GET /session "));
+            assert!(input.to_lowercase().contains("authorization: bearer "));
+            let head = risunest_sync_wire::RemoteHead::genesis("library".into(), "epoch".into()).unwrap();
+            let body = serde_json::json!({
+                "head": head,
+                "deviceId": device,
+                "protocolId": risunest_sync_wire::PROTOCOL_ID,
+            }).to_string();
+            response(&mut stream, &body, "200 OK");
+        });
+        let mut directory = directory();
+        let envelope = risunest_sync_connect::seal_endpoint(&directory.uuid, &directory.key, &endpoint).unwrap();
+        let (registry, registry_task) = directory_server(envelope);
+        directory.base_url = registry;
+        let mut config = tests::config("http://127.0.0.1:1");
+        config.directory = Some(directory);
+        let mut client = ServerClient::new(config).unwrap();
+        client.http = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let result = client.resolve_identity();
+        if device == "device" {
+            assert!(result.is_ok(), "{}", result.unwrap_err().code);
+            assert_eq!(client.config().endpoint, endpoint);
+        } else {
+            assert_eq!(result.unwrap_err().code, "device-identity-mismatch");
+            assert_eq!(client.config().endpoint, "http://127.0.0.1:1");
+        }
+        registry_task.join().unwrap();
+        server.join().unwrap();
+    }
+}
+
+#[test]
 fn native_directory_recovery_verifies_identity_before_changing_endpoint() {
     for device in ["device", "wrong-device"] {
         let (endpoint, certificate, server) = tls_identity(device);

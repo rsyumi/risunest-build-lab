@@ -130,10 +130,9 @@ def main():
     shutil.copytree(product, payload / product.name)
     run(["zip", "-r", "-y", ARTIFACTS / "RisuNest-ios-device-agent.ipa", "Payload"], cwd=workspace)
     metadata = {
-        "source": json.loads((ROOT / ".build-lab/source.json").read_text()),
         "xcode": subprocess.check_output(["xcodebuild", "-version"], text=True).strip(),
         "architecture": "arm64", "platform": "iphoneos", "minimumIOS": "16.4",
-        "signing": "ad-hoc; locally verified; Test Lab re-signing acceptance unverified",
+        "signing": "ad-hoc",
         "firebaseRun": False,
         "files": {path.name: {"bytes": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
                   for path in [ARTIFACTS / "RisuNest-ios-testlab.zip", ARTIFACTS / "RisuNest-ios-device-agent.ipa"]},

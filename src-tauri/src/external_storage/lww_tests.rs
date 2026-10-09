@@ -1913,7 +1913,7 @@ impl Provider for SessionRemote {
         -> ProviderFuture<'a, Option<ResumeState>> {
         Box::pin(async move {
             if intent.role != ObjectRole::Pack { return self.inner.begin_upload(repository, intent, cancel).await; }
-            Ok(Some(ResumeState { sealed_state: SecretRef("synthetic-session".into()), confirmed_offset: 0, expires_at_ms: None }))
+            Ok(Some(ResumeState { data: SecretRef("synthetic-session".into()).into(), confirmed_offset: 0, expires_at_ms: None }))
         })
     }
     fn create_object<'a>(&'a self, repository: &'a RepositoryHandle, intent: &'a ObjectIntent, source: &'a dyn TransferSource, resume: Option<&'a ResumeState>, cancel: &'a Cancellation)

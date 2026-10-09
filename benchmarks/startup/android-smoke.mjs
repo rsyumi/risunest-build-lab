@@ -5,12 +5,11 @@ import { cutDeviceNetwork } from '../../scripts/phase3AndroidSmoke.mjs'
 import { connectSyntheticAndroid, delay, instrumentation, waitForInteractive } from './cdp.mjs'
 import { seedExpression } from './fixture.mjs'
 import { sanitizeMetrics } from './metrics.mjs'
+import { androidTarget, runnerOptions } from '../support/androidTarget.mjs'
 
-const options = Object.fromEntries(
-    process.argv.slice(2).map((arg) => arg.replace(/^--/, '').split('=')),
-)
-const adb = options.adb
-const serial = 'emulator-5580'
+const options = runnerOptions(process.argv.slice(2))
+const android = androidTarget(options)
+const { adb, serial } = android
 const packageName = 'io.github.rsyumi.risunest'
 const port = 19366
 const output = options.output ?? 'benchmarks/startup/android-result.local.json'
@@ -21,7 +20,8 @@ const apk = path.resolve(
 let phase = 'identity'
 
 function run(target, args, { allowFailure = false } = {}) {
-    const result = spawnSync(adb, ['-s', target, ...args], {
+    const result = spawnSync(adb, android.args(args, target), {
+        env: android.env,
         encoding: 'utf8',
         windowsHide: true,
         timeout: args[0] === 'install' ? 120_000 : 15_000,
@@ -53,10 +53,7 @@ const nativeObservation = `(() => {
 })()`
 
 async function main() {
-    if (!adb || process.env.ANDROID_ADB_SERVER_PORT !== '5038')
-        throw new Error('Private ADB server required')
-    const name = run(serial, ['emu', 'avd', 'name']).stdout.trim().split(/\r?\n/)[0]
-    if (name !== 'risunest_startup_synthetic') throw new Error('Unsafe Android AVD')
+    android.assertAvd(run(serial, ['emu', 'avd', 'name']).stdout)
     phase = 'network'
     console.log(JSON.stringify({ phase }))
     await cutDeviceNetwork(serial, { run, sleep: delay })
@@ -75,7 +72,7 @@ async function main() {
         run(serial, ['forward', `tcp:${port}`, `localabstract:webview_devtools_remote_${pid}`])
         phase = 'connect'
         console.log(JSON.stringify({ phase }))
-        client = await connectSyntheticAndroid(port, adb, serial)
+        client = await connectSyntheticAndroid(port, android)
         phase = 'bootstrap'
         console.log(JSON.stringify({ phase }))
         await waitForInteractive(client)

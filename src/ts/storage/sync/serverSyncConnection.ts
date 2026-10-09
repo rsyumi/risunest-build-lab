@@ -26,12 +26,8 @@ export function validateServerSyncEndpoint(value: string): string {
   ) {
     throw new ServerSyncError("invalid-endpoint");
   }
-  const loopback =
-    url.hostname === "localhost" ||
-    url.hostname === "[::1]" ||
-    /^127\.(?:\d{1,3}\.){2}\d{1,3}$/.test(url.hostname);
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
-    throw new ServerSyncError("https-required");
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new ServerSyncError("invalid-endpoint");
   }
   url.pathname = `${url.pathname.replace(/\/+$/, "")}/`;
   return url.href;

@@ -223,7 +223,7 @@ describe('the storage usage tab', () => {
         backup.click()
         await settle()
         expect(requestExternalStorageNow).toHaveBeenCalledWith('connection-1', 'backup')
-        expect([...target.querySelectorAll('[role="status"]')].some(item => item.textContent === strings.retry)).toBe(true)
+        expect([...target.querySelectorAll('[role="status"]')].some(item => item.textContent === `${strings.retry}\nThe operation could not complete.`)).toBe(true)
         expect([...target.querySelectorAll('button')].some(button => button.textContent?.trim() === strings.retryAction)).toBe(true)
     })
 
@@ -429,7 +429,7 @@ describe('the storage usage tab', () => {
             connections: [connection(10, 30)], jobs: [{ ...stoppedRestore, stoppedByApp: true }] })
         state.jobStarted?.()
         await settle()
-        expect(statusNotices()).toContainEqual(['danger', strings.retry])
+        expect(statusNotices()).toContainEqual(['danger', `${strings.retry}\nsynthetic`])
         expect(statusNotices().map(([, text]) => text)).not.toContain(strings.cancelled)
 
         state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
@@ -458,7 +458,7 @@ describe('the storage usage tab', () => {
         await settle()
         await settle()
         expect(requestExternalStorageRestore).toHaveBeenCalledWith('connection-1', 'snapshot', expect.any(Array))
-        expect(statusNotices()).toContainEqual(['danger', strings.retry])
+        expect(statusNotices()).toContainEqual(['danger', `${strings.retry}\nsynthetic`])
         expect([...target.querySelectorAll('[role="alert"]')].map(item => item.textContent?.trim())).toEqual([])
     })
 

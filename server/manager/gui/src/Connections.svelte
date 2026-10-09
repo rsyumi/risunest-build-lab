@@ -112,7 +112,7 @@
             placeholder="https://"
           /></label
         >
-        <p>등록된 기기가 이 주소로 연결합니다.</p>
+        <p>HTTP 또는 HTTPS 주소를 입력하세요. 등록된 기기가 이 주소로 연결합니다.</p>
       </div>{/if}
     <div class="setting">
       <div class="setting-heading">

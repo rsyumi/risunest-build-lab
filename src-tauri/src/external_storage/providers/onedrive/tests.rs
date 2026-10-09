@@ -1072,7 +1072,7 @@ fn a_session_opens_only_above_the_simple_upload_gate_and_seals_its_url() {
         assert_eq!(state.confirmed_offset, 0);
         assert_eq!(state.expires_at_ms, Some(1_789_430_400_000));
         // The upload URL only lives inside the vault, never in the locator.
-        let sealed = harness.vault.contents(&state.sealed_state.0).unwrap();
+        let sealed = harness.vault.contents(&state.data.secret().unwrap().0).unwrap();
         let sealed = String::from_utf8(sealed).unwrap();
         assert!(sealed.contains(&upload_url) && sealed.contains("pack-large"));
 
@@ -1121,7 +1121,7 @@ fn session_fragments_are_320_kib_aligned_and_sent_in_order_without_authorization
         })
         .unwrap();
         let resume = ResumeState {
-            sealed_state: harness.dependencies.vault.store(&sealed).await.unwrap(),
+            data: harness.dependencies.vault.store(&sealed).await.unwrap().into(),
             confirmed_offset: 0,
             expires_at_ms: None,
         };
@@ -1187,7 +1187,7 @@ fn reconciliation_reports_the_first_missing_range_as_the_confirmed_offset() {
         })
         .unwrap();
         let resume = ResumeState {
-            sealed_state: harness.dependencies.vault.store(&sealed).await.unwrap(),
+            data: harness.dependencies.vault.store(&sealed).await.unwrap().into(),
             confirmed_offset: 0,
             expires_at_ms: None,
         };
@@ -1262,7 +1262,7 @@ fn an_expired_session_restarts_completes_or_conflicts_on_the_remote_truth() {
             })
             .unwrap();
             let resume = ResumeState {
-                sealed_state: harness.dependencies.vault.store(&sealed).await.unwrap(),
+                data: harness.dependencies.vault.store(&sealed).await.unwrap().into(),
                 confirmed_offset: 0,
                 expires_at_ms: None,
             };

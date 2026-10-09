@@ -653,7 +653,7 @@ fn reconcile_resumes_from_the_confirmed_offset_and_restarts_a_spent_session() {
         };
         assert_eq!(resumed.confirmed_offset, 4);
         // The session keeps one vault reference across re-issues.
-        assert_eq!(resumed.sealed_state.0, started.sealed_state.0);
+        assert_eq!(resumed.data.secret().unwrap().0, started.data.secret().unwrap().0);
         let receipt = provider
             .create_object(&handle, &intent, &source, Some(&resumed), &cancel)
             .await

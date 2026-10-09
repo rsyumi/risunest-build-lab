@@ -19,6 +19,8 @@
     } from 'src/ts/chatRenderIdentity'
     import {
         buildChatViewport,
+        measureChatViewportRange,
+        locateChatViewportOffset,
         resolveChatViewportStep,
         type ChatViewportAnchor,
         type ChatViewportJumpOptions,
@@ -135,6 +137,7 @@
             captureViewportTarget: () => ReturnType<ConversationViewportSource['captureMessageTarget']>
             parserProjection?: BoundedLiveChatParserProjection
             totalMessages: number
+            preserveDisplay?: boolean
         }) => void
     }
 
@@ -148,12 +151,17 @@
     let measuredHeightIndexByKey = new Map<string, number>()
     let measuredHeightRecency = new Map<string, number>()
     let measuredHeightClock = 0
+    let containerWidth = 0
+    let containerHeight = 0
     let keyLookupScans = 0
     let pinReasons = new Map<string, Set<ChatViewportPinReason>>()
     let blurredEditorPins = new Set<string>()
     let playingMedia = new Map<string, Set<EventTarget>>()
     let sourcePins = new Map<string, ConversationSourcePin>()
     let sourceLoads = new Map<string, AbortController>()
+    let latestPairIndices: number[] = []
+    let latestPairLookup: Promise<number[]> | null = null
+    let latestPairController = new AbortController()
     interface RowParserProjectionState {
         readonly controller: AbortController
         readonly source: ConversationViewportSource
@@ -163,6 +171,8 @@
         readonly totalMessages: number
         readonly renderSignature: ChatRenderSignature
         projection: LiveChatParserProjection | null
+        preparationPending: boolean
+        displayStarted: boolean
         needsRemount: boolean
         preserveMountedRuntime: boolean
         failed: boolean
@@ -176,7 +186,7 @@
         readonly priority: number
         readonly order: number
         readonly isCurrent: () => boolean
-        readonly run: () => void
+        readonly run: (settled: () => void) => void
         readonly parserProjectionState?: RowParserProjectionState
     }
     interface RowMountWaiter {
@@ -184,10 +194,12 @@
         readonly resolve: (mounted: boolean) => void
     }
     let pendingRowMounts = new Map<string, PendingRowMount>()
+    const activeRowPreparations = new Map<string, object>()
     let rowMountWaiters = new Map<string, Set<RowMountWaiter>>()
     let mountQueueOrder = 0
     let mountQueueGeneration = 0
     let mountDrainActive = false
+    let mountDrainQueued = false
     let projectionReconcileQueued = false
     let projectionReconcileGeneration = 0
     let destroyed = false
@@ -197,6 +209,7 @@
     let initialRowsLoadFailed = $state(false)
     let parserProjectionLoadFailed = $state(false)
     let historyRowsLoadFailed = $state(false)
+    let latestPairLoadFailed = $state(false)
     let initialLatestFollow = false
     let initialLatestMessageCount: number | null = null
     const USER_SCROLL_INTENT_MS = 1000
@@ -480,6 +493,22 @@
             for (const reason of reasons) pins.push({ key, reason, indexHint })
         }
         const totalMessages = currentMessageCount(sourceSnapshot)
+        const pair = sourceSnapshot ? latestPairIndices : []
+        if (!sourceSnapshot) {
+            const roles = new Set<string>()
+            for (let index = totalMessages - 1; index >= 0 && roles.size < 2; index--) {
+                const message = messages?.[index]
+                if (message && !message.isComment && !message.disabled &&
+                    (message.role === 'user' || message.role === 'char') && !roles.has(message.role)) {
+                    roles.add(message.role)
+                    pair.push(index)
+                }
+            }
+        }
+        for (const index of pair) {
+            const key = currentMessageKey(index, sourceSnapshot)
+            if (key !== undefined) pins.push({ key, reason: 'latest-pair', indexHint: index + (hasConversationStart() ? 1 : 0) })
+        }
         const streamingKey = totalMessages > 0
             ? currentMessageKey(totalMessages - 1, sourceSnapshot)
             : undefined
@@ -491,6 +520,37 @@
             })
         }
         return pins
+    }
+
+    function updateLatestPair(): void {
+        const source = activeViewportSource
+        if (!source?.findLatestMessagePair || latestPairLoadFailed) return
+        const snapshot = source.snapshot()
+        if (!hasMountedUsableRow && snapshot.totalMessages > 0 && !snapshot.rowAt(snapshot.totalMessages - 1)) return
+        const lookup = source.findLatestMessagePair(latestPairController.signal)
+        if (lookup === latestPairLookup) return
+        latestPairLookup = lookup
+        void lookup.then((indices) => {
+            if (destroyed || source !== activeViewportSource || latestPairLookup !== lookup) return
+            if (source.snapshot().version !== snapshot.version) {
+                latestPairLookup = null
+                queueProjectionReconcile()
+                return
+            }
+            if (indices.length === latestPairIndices.length && indices.every((index, offset) => latestPairIndices[offset] === index)) return
+            latestPairIndices = indices
+            queueProjectionReconcile()
+        }).catch((error) => {
+            if (destroyed || source !== activeViewportSource || latestPairLookup !== lookup || latestPairController.signal.aborted) return
+            const current = source.snapshot()
+            if (error instanceof DOMException && error.name === 'AbortError' &&
+                (current.version !== snapshot.version || current.storeRevision !== snapshot.storeRevision)) {
+                latestPairLookup = null
+                queueProjectionReconcile()
+                return
+            }
+            latestPairLoadFailed = true
+        })
     }
 
     function contiguousRanges(indices: readonly number[]): Array<[number, number]> {
@@ -631,6 +691,8 @@
         if (!activeViewportSource) return
         initialRowsLoadFailed = false
         historyRowsLoadFailed = false
+        latestPairLoadFailed = false
+        latestPairLookup = null
         initialRowsLoading = !hasMountedUsableRow && currentMessageCount() > 0
         for (const [key, state] of rowParserProjections) {
             if (state.failed) releaseRowParserProjection(key)
@@ -721,6 +783,11 @@
             remapMountedSourceRows(nextSnapshot)
         }
         activeViewportSource = source
+        latestPairController.abort()
+        latestPairController = new AbortController()
+        latestPairLookup = null
+        latestPairIndices = []
+        latestPairLoadFailed = false
         activeViewportNavigationGeneration = viewportNavigationGeneration
         sourceUpdateRevision += 1
         lastMountedSourceTailKey = null
@@ -840,6 +907,7 @@
         const reloadPointerMap = get(ReloadChatPointer)
         const sourceSnapshot = currentSourceSnapshot()
         const jump = currentPendingJump()
+        updateLatestPair()
         const jumpRow = jump && !jump.message ? sourceSnapshot?.rowAt(jump.index) : null
         if (jump && jumpRow && sourceSnapshot) {
             // Loading this window can mount a history-dependent greeting and
@@ -883,6 +951,7 @@
             anchor: preservedAnchor,
             jumpTarget,
             pins: currentPins(currentChat, sourceSnapshot),
+            ...viewportGeometry(),
         })
         viewportAnchor = result.anchor
         viewportResult = result
@@ -915,6 +984,11 @@
     ): void {
         const currentRenderKeys = new Set<string>()
         const orderedElements: HTMLElement[] = []
+        const existingGaps = new Map(
+            Array.from(chatBody.children)
+                .filter((element): element is HTMLElement => element instanceof HTMLElement && !!element.dataset.chatGap)
+                .map((element) => [element.dataset.chatGap, element]),
+        )
         const configuredPerformanceMode = DBState.db.streamingDisplayOptimizationMode ?? 'off'
         const performanceMode = currentChat?.isStreaming
             ? currentChat.activeStreamingDisplayOptimizationMode ?? configuredPerformanceMode
@@ -959,14 +1033,14 @@
 
         for (const row of [...result.rows].reverse()) {
             if (row.kind === 'gap') {
-                const gap = document.createElement('div')
+                const gap = existingGaps.get(`${row.startIndex}:${row.endIndex}`) ?? document.createElement('div')
                 gap.className = 'chat-viewport-gap'
                 gap.dataset.chatGap = `${row.startIndex}:${row.endIndex}`
                 gap.dataset.chatGapStart = String(row.startIndex)
                 gap.dataset.chatGapEnd = String(row.endIndex)
                 gap.setAttribute('aria-hidden', 'true')
-                gap.style.height = `${row.height}px`
-                gap.style.flexBasis = `${row.height}px`
+                if (gap.style.height !== `${row.height}px`) gap.style.height = `${row.height}px`
+                if (gap.style.flexBasis !== `${row.height}px`) gap.style.flexBasis = `${row.height}px`
                 orderedElements.push(gap)
                 continue
             }
@@ -976,7 +1050,7 @@
                 const element = ensureElement(key, row.index)
                 currentRenderKeys.add(key)
                 renderConversationStart(key, element, totalMessages)
-                element.classList.remove('is-latest-chat-row', 'is-settled-history')
+                element.classList.remove('is-latest-chat-row')
                 orderedElements.push(element)
                 continue
             }
@@ -1028,6 +1102,17 @@
                 parserCharacterStamp,
             })
             const previousSignature = renderSignatures.get(key)
+            if (viewportRow && sourceSnapshot && activeViewportSource &&
+                (previousSignature?.index !== index || sourceHandoffRuntimeKeys.has(key))) {
+                const source = activeViewportSource
+                untrack(() => mountInstances.get(key)?.updateViewportBinding?.({
+                    viewportRow,
+                    viewportSourceToken: sourceSnapshot.sourceToken,
+                    captureViewportTarget: () => source.captureMessageTarget(viewportRow.key),
+                    totalMessages,
+                    preserveDisplay: true,
+                }))
+            }
             let parserProjection: BoundedLiveChatParserProjection | undefined
             let parserProjectionState: RowParserProjectionState | undefined
             if (sourceSnapshot && viewportRow && activeViewportSource && parserProjectionResolver) {
@@ -1039,6 +1124,7 @@
                     sourceSnapshot,
                 )
                 if (!parserProjectionState.projection) {
+                    markRowMountPending(key, element)
                     orderedElements.push(element)
                     continue
                 }
@@ -1143,7 +1229,8 @@
                             currentRow.sourceVersion === sourceRowVersion
                         )
                     },
-                    run: () => {
+                    run: (settled) => {
+                        if (parserProjectionState) parserProjectionState.displayStarted = true
                         if (refreshMountedDisplay) {
                             const instance = mountInstances.get(key)
                             // Exit the preview in the retained Chat before requesting
@@ -1164,6 +1251,7 @@
                                     totalMessages,
                                     parserProjection,
                                     parserAbortSignal: parserProjectionState?.controller.signal,
+                                    onDisplaySettled: settled,
                                     viewportBinding:
                                         viewportRow && source && sourceToken
                                             ? {
@@ -1177,9 +1265,7 @@
                             )
                             renderSignatures.set(key, renderSignature)
                             if (parserProjectionState) parserProjectionState.needsRemount = false
-                            clearQueuedRowHeight(element)
                             chatView.rendered(key, chatViewReport)
-                            settleRowMountWaiters(key, true)
                             return
                         }
                         releaseRowRuntimeState(key, true)
@@ -1195,6 +1281,7 @@
                                 onEditorOpen: () => holdOpenedEditor(instance),
                                 onEditorClose: () => queueProjectionReconcile(),
                                 onBodyRendered: () => reportBodyRendered(instance),
+                                onDisplaySettled: settled,
                                 message: message.data,
                                 viewportRow,
                                 captureViewportTarget:
@@ -1239,18 +1326,13 @@
                             parserProjectionState.failureCount = 0
                         }
                         sourceHandoffRuntimeKeys.delete(key)
-                        clearQueuedRowHeight(element)
-                        hasMountedUsableRow = true
-                        initialRowsLoading = false
-                        initialRowsLoadFailed = false
                         completePendingMissingRowsAnchor(key)
                         chatView.rendered(key, chatViewReport)
-                        settleRowMountWaiters(key, true)
                     },
                 })
             } else {
                 pendingRowMounts.delete(key)
-                clearQueuedRowHeight(element)
+                if (!activeRowPreparations.has(key)) clearQueuedRowHeight(element)
                 const instance = mountInstances.get(key)
                 let refreshedDisplay = false
                 if ((sourceHandoff || preserveMountedRuntime) && viewportRow && activeViewportSource && sourceSnapshot) {
@@ -1280,10 +1362,12 @@
                             totalMessages,
                             parserProjection,
                             parserAbortSignal: parserProjectionState.controller.signal,
+                            onDisplaySettled: () => settlePreparedRow(key, parserProjectionState!),
                         }),
                     )
                     renderSignatures.set(key, renderSignature)
                     parserProjectionState.needsRemount = false
+                    parserProjectionState.displayStarted = true
                     refreshedDisplay = true
                 }
                 if (
@@ -1301,12 +1385,15 @@
                             totalMessages,
                             parserProjection,
                             parserAbortSignal: parserProjectionState.controller.signal,
+                            onDisplaySettled: () => settlePreparedRow(key, parserProjectionState!),
                         }),
                     )
                     parserProjectionState.needsRemount = false
+                    parserProjectionState.displayStarted = true
                     refreshedDisplay = true
                 }
                 if (instance) {
+                    if (!refreshedDisplay && parserProjectionState && !parserProjectionState.displayStarted) settlePreparedRow(key, parserProjectionState)
                     if (refreshedDisplay) chatView.rendered(key, chatViewReport)
                     else chatView.updated(key, chatViewReport)
                 }
@@ -1315,10 +1402,6 @@
             const latest = index === totalMessages - 1
             element.classList.toggle('is-latest-chat-row', latest)
             element.classList.toggle('is-reroll-chat-row', index === rerollIndex)
-            element.classList.toggle(
-                'is-settled-history',
-                !latest && !activeStreamingMessage && row.pinReasons.length === 0,
-            )
             orderedElements.push(element)
         }
 
@@ -1395,6 +1478,7 @@
     function nextPendingRowMount(): PendingRowMount | undefined {
         let next: PendingRowMount | undefined
         for (const request of pendingRowMounts.values()) {
+            if (!activeRowPreparations.has(request.key) && activeRowPreparations.size >= getRuntimePerformanceBudgets().chatActiveRowPreparations) continue
             if (
                 !next ||
                 request.priority < next.priority ||
@@ -1406,43 +1490,85 @@
         return next
     }
 
+    function finishRowPreparation(key: string, token: object): void {
+        if (activeRowPreparations.get(key) !== token) return
+        activeRowPreparations.delete(key)
+        if (mountDrainQueued || destroyed) return
+        mountDrainQueued = true
+        const generation = mountQueueGeneration
+        void yieldToMainThread().then(() => {
+            if (generation !== mountQueueGeneration || destroyed) return
+            mountDrainQueued = false
+            startRowMountDrain()
+        })
+    }
+
+    function settlePreparedRow(key: string, token: object): void {
+        if (activeRowPreparations.get(key) !== token) return
+        const element = mountedElements.get(key)
+        if (element) clearQueuedRowHeight(element)
+        if (element && !element.dataset.chatConversationStartSignature) {
+            hasMountedUsableRow = true
+            initialRowsLoading = false
+            initialRowsLoadFailed = false
+            updateLatestPair()
+        }
+        settleRowMountWaiters(key, true)
+        finishRowPreparation(key, token)
+    }
+
+    function startNextRowPreparation(): boolean {
+        const priority = (key: string, state: RowParserProjectionState) => key === viewportAnchor?.key ? 0
+            : latestPairIndices.includes(state.row.absoluteIndex) ? 1 : 2
+        const candidates = activeRowPreparations.size >= getRuntimePerformanceBudgets().chatActiveRowPreparations ? []
+            : [...rowParserProjections].filter(([key, state]) =>
+                renderKeys.has(key) && state.preparationPending && !state.failed && isRowParserProjectionCurrent(key, state))
+        candidates.sort(([leftKey, left], [rightKey, right]) =>
+            priority(leftKey, left) - priority(rightKey, right) ||
+            Math.abs(left.row.absoluteIndex - (viewportAnchor?.indexHint ?? 0)) - Math.abs(right.row.absoluteIndex - (viewportAnchor?.indexHint ?? 0)))
+        const next = candidates[0]
+        const request = nextPendingRowMount()
+        if (request && (activeRowPreparations.has(request.key) || !next || request.priority < priority(...next))) {
+            pendingRowMounts.delete(request.key)
+            if (!request.isCurrent()) return true
+            const token = request.parserProjectionState ?? request
+            activeRowPreparations.set(request.key, token)
+            try {
+                request.run(() => settlePreparedRow(request.key, token))
+            } catch (error) {
+                finishRowPreparation(request.key, token)
+                if (request.parserProjectionState) handleRowParserProjectionFailure(request.key, request.parserProjectionState)
+                else console.error('Failed to mount chat row', error)
+            }
+            return true
+        }
+        if (!next) return false
+        const [key, state] = next
+        state.preparationPending = false
+        activeRowPreparations.set(key, state)
+        resolveRowParserProjection(key, state)
+        return true
+    }
+
     function startRowMountDrain(): void {
-        if (mountDrainActive || pendingRowMounts.size === 0 || destroyed) return
+        if (mountDrainActive || mountDrainQueued || destroyed) return
         const queueGeneration = mountQueueGeneration
         mountDrainActive = true
         void (async () => {
             try {
                 while (
                     !destroyed &&
-                    queueGeneration === mountQueueGeneration &&
-                    pendingRowMounts.size > 0
+                    queueGeneration === mountQueueGeneration
                 ) {
                     let mountedThisTask = 0
                     while (mountedThisTask < CHAT_MOUNT_BATCH_SIZE) {
-                        const request = nextPendingRowMount()
-                        if (!request) break
-                        pendingRowMounts.delete(request.key)
-                        if (!request.isCurrent()) continue
-                        try {
-                            request.run()
-                        } catch (error) {
-                            if (request.parserProjectionState) {
-                                handleRowParserProjectionFailure(
-                                    request.key,
-                                    request.parserProjectionState,
-                                )
-                            } else {
-                                console.error('Failed to mount chat row', error)
-                            }
-                        }
+                        if (!startNextRowPreparation()) return
                         mountedThisTask += 1
                     }
-                    if (pendingRowMounts.size > 0) await yieldToMainThread()
+                    await yieldToMainThread()
                 }
             } finally {
                 mountDrainActive = false
-                if (pendingRowMounts.size > 0 && !destroyed)
-                    startRowMountDrain()
             }
         })()
     }
@@ -1451,7 +1577,7 @@
         key: string,
         generation: number,
     ): Promise<boolean> {
-        if (mountInstances.has(key)) return Promise.resolve(true)
+        if (mountInstances.has(key) && !activeRowPreparations.has(key)) return Promise.resolve(true)
         const projection = rowParserProjections.get(key)
         if (
             projection?.failed &&
@@ -1497,6 +1623,7 @@
     }
 
     function clearPendingRowMounts(): void {
+        mountDrainQueued = false
         mountQueueGeneration += 1
         pendingRowMounts.clear()
         for (const key of [...rowMountWaiters.keys()])
@@ -1552,7 +1679,7 @@
             element.dataset.chatRenderKey = key
             element.classList.add('chat-message-container')
             mountedElements.set(key, element)
-            resizeObserver?.observe(element)
+            resizeObserver?.observe(element, { box: 'border-box' })
         }
         element.dataset.chatViewportIndex = String(viewportIndex)
         return element
@@ -1601,24 +1728,38 @@
             })
             return
         }
+        if (element.dataset.chatConversationStartSignature === signature && pendingRowMounts.has(key)) return
         unmountInstance(key)
-        element.replaceChildren()
-        const instance = mount(ChatConversationStart, {
-            target: element,
-            props: {
-                currentCharacter: character,
-                resolvedImage: resolvedCharacterImage ?? '',
-                showAiWarning,
-                totalMessages,
-                onReroll: onFirstMessageReroll,
-                unReroll: unFirstMessageReroll,
-                onRemoveCreatorQuote,
-                acquireConversationStartParserLease,
-                selectedConversationOperations,
-            },
-        })
-        mountInstances.set(key, instance)
+        const previous = activeRowPreparations.get(key)
+        if (previous) finishRowPreparation(key, previous)
         element.dataset.chatConversationStartSignature = signature
+        markRowMountPending(key, element)
+        const request: PendingRowMount = {
+            key, element,
+            priority: viewportAnchor?.key === key ? 0 : 2,
+            order: ++mountQueueOrder,
+            isCurrent: () => mountedElements.get(key) === element && element.dataset.chatConversationStartSignature === signature,
+            run(settled) {
+                element.replaceChildren()
+                const instance = mount(ChatConversationStart, {
+                    target: element,
+                    props: {
+                        currentCharacter: character,
+                        resolvedImage: resolvedCharacterImage ?? '',
+                        showAiWarning,
+                        totalMessages,
+                        onReroll: onFirstMessageReroll,
+                        unReroll: unFirstMessageReroll,
+                        onRemoveCreatorQuote,
+                        acquireConversationStartParserLease,
+                        selectedConversationOperations,
+                        onDisplaySettled: settled,
+                    },
+                })
+                mountInstances.set(key, instance)
+            },
+        }
+        pendingRowMounts.set(key, request)
     }
 
     function unmountInstance(key: string): void {
@@ -1825,6 +1966,8 @@
     }
 
     function removeMountedRow(key: string): void {
+        const preparation = activeRowPreparations.get(key)
+        if (preparation) finishRowPreparation(key, preparation)
         pendingRowMounts.delete(key)
         settleRowMountWaiters(key, false)
         releaseRowRuntimeState(key)
@@ -1901,6 +2044,8 @@
             totalMessages,
             renderSignature,
             projection: null,
+            preparationPending: true,
+            displayStarted: false,
             needsRemount: mountInstances.has(key),
             preserveMountedRuntime,
             failed: false,
@@ -1908,7 +2053,6 @@
             retryTimer: null,
         }
         rowParserProjections.set(key, state)
-        resolveRowParserProjection(key, state)
         return state
     }
 
@@ -1952,6 +2096,7 @@
         key: string,
         state: RowParserProjectionState,
     ): void {
+        finishRowPreparation(key, state)
         releaseResolvedRowParserProjection(state)
         if (
             !isRowParserProjectionCurrent(key, state) ||
@@ -1974,7 +2119,8 @@
             state.retryTimer = null
             state.failed = false
             state.needsRemount = mountInstances.has(key)
-            resolveRowParserProjection(key, state)
+            state.preparationPending = true
+            startRowMountDrain()
         }, PARSER_PROJECTION_RETRY_DELAY_MS)
     }
 
@@ -2003,6 +2149,7 @@
         const state = rowParserProjections.get(key)
         if (!state) return
         rowParserProjections.delete(key)
+        finishRowPreparation(key, state)
         state.controller.abort()
         if (state.retryTimer !== null) clearTimeout(state.retryTimer)
         releaseResolvedRowParserProjection(state)
@@ -2217,19 +2364,78 @@
         chatBody.dataset.chatMeasuredHeightCount = String(measuredHeights.size)
     }
 
+    function refreshViewportHeights(): void {
+        if (!viewportResult || !chatBody) return
+        if (scrollContainer && scrollContainer.clientHeight > 0) {
+            const sourceSnapshot = currentSourceSnapshot()
+            const budget = getRuntimePerformanceBudgets().chatMountedMessageBudget
+            const next = buildChatViewport({
+                keySource: viewportKeySource(currentChatScope(), sourceSnapshot),
+                budget,
+                overscan: VIEWPORT_OVERSCAN,
+                estimatedMessageHeight: ESTIMATED_MESSAGE_HEIGHT,
+                measuredHeightsByIndex: measuredHeightIndices,
+                anchor: initialLatestFollow ? null : viewportAnchor,
+                pins: currentPins(currentCharacter.chats[currentCharacter.chatPage], sourceSnapshot),
+                ...viewportGeometry(),
+            })
+            if (next.messageRows.length !== viewportResult.messageRows.length ||
+                next.messageRows.some((row, index) => row.key !== viewportResult!.messageRows[index]?.key)) {
+                reconcileViewport({ anchor: initialLatestFollow ? null : captureDomAnchor() })
+                return
+            }
+        }
+        for (const gap of Array.from(chatBody.children)) {
+            if (!(gap instanceof HTMLElement) || !gap.dataset.chatGap) continue
+            const height = measureChatViewportRange(
+                Number(gap.dataset.chatGapStart), Number(gap.dataset.chatGapEnd),
+                ESTIMATED_MESSAGE_HEIGHT, measuredHeightIndices,
+            )
+            if (gap.style.height !== `${height}px`) gap.style.height = `${height}px`
+            if (gap.style.flexBasis !== `${height}px`) gap.style.flexBasis = `${height}px`
+        }
+        keepInitialLatestPosition()
+    }
+
+    function viewportGeometry() {
+        const budgets = getRuntimePerformanceBudgets()
+        return {
+            viewportHeight: scrollContainer?.clientHeight ?? 0,
+            preparationScreens: budgets.chatPreparationScreens,
+            retentionScreens: budgets.chatRetentionScreens,
+            retainedIndices: [...mountInstances.keys()].flatMap((key) => {
+                const index = Number(mountedElements.get(key)?.dataset.chatViewportIndex)
+                return Number.isInteger(index) ? [index] : []
+            }),
+        }
+    }
+
     function handleResize(entries: ResizeObserverEntry[]): void {
-        const resizeNavigationGeneration = navigationGeneration
-        const resizePositionGeneration = positionGeneration
-        const anchor = initialLatestFollow
-            ? null
-            : (viewportAnchor ?? captureDomAnchor())
         let changed = false
         for (const entry of entries) {
             const element = entry.target as HTMLElement
+            if (element === scrollContainer) {
+                const width = element.clientWidth
+                const height = element.clientHeight
+                if (width !== containerWidth || height !== containerHeight) changed = true
+                if (width !== containerWidth) {
+                    // Retain old gap estimates while mounted rows report their new flow sizes.
+                    for (const row of mountedElements.values()) {
+                        resizeObserver?.unobserve(row)
+                        resizeObserver?.observe(row, { box: 'border-box' })
+                    }
+                }
+                containerWidth = width
+                containerHeight = height
+                continue
+            }
             const key = element.dataset.chatRenderKey
-            const height =
-                element.getBoundingClientRect().height || entry.contentRect.height
-            if (!key || !Number.isFinite(height) || height <= 0) continue
+            const box = entry.borderBoxSize?.[0]
+            const vertical = box && /^(vertical|sideways)/.test(getComputedStyle(element).writingMode)
+            const height = box
+                ? (vertical ? box.inlineSize : box.blockSize)
+                : element.getBoundingClientRect().height || entry.contentRect.height
+            if (!key || !Number.isFinite(height) || height < 0) continue
             const index = Number(element.dataset.chatViewportIndex)
             if (!Number.isInteger(index) || index < 0) continue
             if (Math.abs((measuredHeights.get(key) ?? 0) - height) < 0.5) continue
@@ -2244,19 +2450,11 @@
             changed = true
         }
         if (!changed) return
-        keepInitialLatestPosition()
         pruneMeasuredHeights()
-        viewportAnchor = anchor
         if (scheduledReconcileFrame !== null) return
         scheduledReconcileFrame = scheduleFrame(() => {
             scheduledReconcileFrame = null
-            if (resizeNavigationGeneration !== navigationGeneration) return
-            reconcileViewport({
-                anchor:
-                    resizePositionGeneration !== positionGeneration
-                        ? (viewportAnchor ?? captureDomAnchor())
-                        : anchor,
-            })
+            refreshViewportHeights()
         })
     }
 
@@ -2347,21 +2545,19 @@
                 rect.bottom >= containerRect.top && rect.top <= containerRect.bottom
             )
         })
-        if (!visibleGap) return
+        if (!visibleGap) {
+            refreshViewportHeights()
+            return
+        }
         const start = Number(visibleGap.dataset.chatGapStart)
         const end = Number(visibleGap.dataset.chatGapEnd)
         const gapRect = visibleGap.getBoundingClientRect()
         const distance = Math.max(0, Math.min(gapRect.height,
             movingOlder ? gapRect.bottom - containerRect.top : containerRect.bottom - gapRect.top,
         ))
-        let target = movingOlder ? end - 1 : start
-        let traversed = 0
-        let height = measuredHeightIndices.get(target) ?? ESTIMATED_MESSAGE_HEIGHT
-        while (traversed + height < distance && (movingOlder ? target > start : target < end - 1)) {
-            traversed += height
-            target += movingOlder ? -1 : 1
-            height = measuredHeightIndices.get(target) ?? ESTIMATED_MESSAGE_HEIGHT
-        }
+        const { index: target, traversed, height } = locateChatViewportOffset(
+            start, end, distance, movingOlder, ESTIMATED_MESSAGE_HEIGHT, measuredHeightIndices,
+        )
         const relativeOffset = movingOlder
             ? gapRect.bottom - traversed - height - containerRect.top
             : gapRect.top + traversed - containerRect.top
@@ -2399,8 +2595,9 @@
     }
 
     async function waitForLayout(): Promise<void> {
+        const generation = navigationGeneration
         await tick()
-        if (destroyed) return
+        if (destroyed || generation !== navigationGeneration) return
         await new Promise<void>((resolve) => {
             if (typeof requestAnimationFrame !== 'function') {
                 queueMicrotask(resolve)
@@ -2531,7 +2728,7 @@
                 const rowMounted = await waitForRowMount(key, generation)
                 if (currentPendingJump() === jump && generation !== jump.generation)
                     continue
-                if (!rowMounted) return false
+                if (!rowMounted || currentPendingJump() !== jump || generation !== navigationGeneration || scope !== currentChatScope()) return false
                 await waitForLayout()
                 if (currentPendingJump() === jump && generation !== jump.generation)
                     continue
@@ -2734,8 +2931,10 @@
         lastScrollTop = scrollContainer?.scrollTop ?? 0
         if (typeof ResizeObserver !== 'undefined') {
             resizeObserver = new ResizeObserver(handleResize)
-            for (const element of mountedElements.values()) resizeObserver.observe(element)
+            for (const element of mountedElements.values()) resizeObserver.observe(element, { box: 'border-box' })
+            if (scrollContainer) resizeObserver.observe(scrollContainer, { box: 'border-box' })
         }
+        reconcileViewport()
         chatBody.addEventListener('focusin', handleFocusIn)
         chatBody.addEventListener('focusout', handleFocusOut)
         chatBody.addEventListener('play', handleMediaPlay, true)
@@ -2777,6 +2976,7 @@
     onDestroy(() => {
         retainScreenAnchor()
         destroyed = true
+        latestPairController.abort()
         navigationGeneration += 1
         cancelStaleRowMountWaiters()
         abortSourceLoads()
@@ -2825,7 +3025,7 @@
             <LoadingIndicator label={language.loadingChatData} />
         {/if}
     </div>
-{:else if parserProjectionLoadFailed || historyRowsLoadFailed}
+{:else if parserProjectionLoadFailed || historyRowsLoadFailed || latestPairLoadFailed}
     <div
         class="absolute bottom-2 left-2 right-2 z-10 flex items-center justify-center gap-3 rounded-lg border border-borderc bg-bgcolor p-3 text-center"
         data-chat-load-error
@@ -2843,6 +3043,5 @@
 {/if}
 <div
     class="flex flex-col-reverse"
-    class:chat-history-isolated={(DBState.db.chatMessageOverflowScope ?? 'latest') !== 'all'}
     bind:this={chatBody}
 ></div>

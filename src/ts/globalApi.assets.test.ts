@@ -144,6 +144,8 @@ import {
     downloadFile,
     forageStorage,
     getFileSrc,
+    getFileImageSource,
+    clearNativeAssetSourceCache,
     invalidateAssetSourceCache,
     LocalWriter,
     saveAsset,
@@ -903,4 +905,24 @@ describe('bounded TauriWriter', () => {
         expect(chunks[1]).toBe(payload)
         expect(new DataView(chunks[0].buffer).getUint32(4 + 'entry.bin'.length, true)).toBe(payload.byteLength)
     })
+})
+
+
+test('reloads newly persisted image dimensions from the existing native URL cache after calculation', async () => {
+    state.isTauri = true
+    let known = false
+    const resolveImageSource = vi.fn(async () => ({
+        url: 'risuasset://synthetic-geometry', contentHash: 'a'.repeat(64),
+        metadata: { key: 'assets/geometry.png', kind: 'asset', mime: 'image/png', ext: 'png', name: 'synthetic', size: 1 },
+        ...(known ? { width: 640, height: 480 } : {}), recordDimensions: vi.fn(),
+    }))
+    state.blobStore = { resolveImageSource, resolveUrl: vi.fn() }
+    clearNativeAssetSourceCache()
+    expect((await getFileImageSource('assets/geometry.png'))!.width).toBeUndefined()
+    known = true
+    expect((await getFileImageSource('assets/geometry.png'))!.width).toBeUndefined()
+    clearNativeAssetSourceCache()
+    expect(await getFileImageSource('assets/geometry.png')).toMatchObject({ width: 640, height: 480 })
+    expect(resolveImageSource).toHaveBeenCalledTimes(2)
+    expect(state.blobStore.resolveUrl).not.toHaveBeenCalled()
 })

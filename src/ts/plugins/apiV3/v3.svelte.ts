@@ -652,7 +652,7 @@ type PluginPermission = 'fetchLogs' | 'db' | 'mainDom' | 'replacer' | 'provider'
 const permissionWrites = new Mutex()
 let permissionEpoch = 0
 const periodicPermissions = new Set<PluginPermission>(['db', 'replacer', 'provider', 'inlay'])
-const permissionReconfirmInterval = 3 * 24 * 60 * 60 * 1000
+const permissionReconfirmInterval = 7 * 24 * 60 * 60 * 1000
 interface PluginPermissionContext {
     name: string
     hash: Promise<string>

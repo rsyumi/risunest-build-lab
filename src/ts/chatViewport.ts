@@ -1,4 +1,4 @@
-export type ChatViewportPinReason = 'streaming' | 'editor' | 'playing-media'
+export type ChatViewportPinReason = 'streaming' | 'editor' | 'playing-media' | 'latest-pair'
 
 export interface ChatViewportAnchor {
     key: string
@@ -95,6 +95,10 @@ export interface ChatViewportInput {
     anchor?: ChatViewportAnchor | null
     jumpTarget?: number
     pins?: readonly ChatViewportPin[]
+    viewportHeight?: number
+    preparationScreens?: number
+    retentionScreens?: number
+    retainedIndices?: readonly number[]
 }
 
 export interface ChatViewportMessageRow {
@@ -177,32 +181,64 @@ function resolveAnchor(
     return { key: requireKey(source, index), indexHint: index, relativeOffset: anchor.relativeOffset }
 }
 
+export function measureChatViewportRange(
+    startIndex: number,
+    endIndex: number,
+    estimatedHeight: number,
+    measurements: ReadonlyMap<number, number>,
+    reserveZeroHeight = false,
+): number {
+    const estimate = Number.isFinite(estimatedHeight) ? Math.max(0, estimatedHeight) : 0
+    let height = (endIndex - startIndex) * estimate
+    for (const [index, measured] of measurements) {
+        if (index >= startIndex && index < endIndex && Number.isFinite(measured) && measured >= 0 && (!reserveZeroHeight || measured > 0)) {
+            height += measured - estimate
+        }
+    }
+    return height
+}
+
+export function locateChatViewportOffset(
+    startIndex: number,
+    endIndex: number,
+    distance: number,
+    movingOlder: boolean,
+    estimatedHeight: number,
+    measurements: ReadonlyMap<number, number>,
+): { index: number; traversed: number; height: number } {
+    let low = 0
+    let high = Math.max(0, endIndex - startIndex - 1)
+    const heightThrough = (offset: number) => movingOlder
+        ? measureChatViewportRange(endIndex - offset - 1, endIndex, estimatedHeight, measurements)
+        : measureChatViewportRange(startIndex, startIndex + offset + 1, estimatedHeight, measurements)
+    while (low < high) {
+        const middle = Math.floor((low + high) / 2)
+        if (heightThrough(middle) >= distance) high = middle
+        else low = middle + 1
+    }
+    const index = movingOlder ? endIndex - low - 1 : startIndex + low
+    const height = measureChatViewportRange(index, index + 1, estimatedHeight, measurements)
+    return { index, traversed: heightThrough(low) - height, height }
+}
+
 function gapHeight(
     input: ChatViewportInput,
     source: ChatViewportKeySource,
     startIndex: number,
     endIndex: number,
+    reserveZeroHeight = false,
 ): number {
     const estimate = Number.isFinite(input.estimatedMessageHeight)
         ? Math.max(0, input.estimatedMessageHeight)
         : 0
     let height = (endIndex - startIndex) * estimate
     if (input.measuredHeightsByIndex) {
-        for (const [index, measured] of input.measuredHeightsByIndex) {
-            if (
-                index < startIndex ||
-                index >= endIndex ||
-                !Number.isFinite(measured) ||
-                measured < 0
-            ) continue
-            height += measured - estimate
-        }
-        return height
+        return measureChatViewportRange(startIndex, endIndex, estimate, input.measuredHeightsByIndex, reserveZeroHeight)
     }
     if (!input.measuredHeights) return height
     for (let index = startIndex; index < endIndex; index++) {
         const measured = input.measuredHeights.get(requireKey(source, index))
-        if (measured !== undefined && Number.isFinite(measured) && measured >= 0) {
+        if (measured !== undefined && Number.isFinite(measured) && measured >= 0 && (!reserveZeroHeight || measured > 0)) {
             height += measured - estimate
         }
     }
@@ -263,7 +299,53 @@ export function buildChatViewport(input: ChatViewportInput): ChatViewportResult 
         : maxStart
     const endIndex = Math.min(source.length, startIndex + budget)
     const selectedIndices = new Set<number>()
-    for (let index = startIndex; index < endIndex; index++) selectedIndices.add(index)
+    const requiredIndices = new Set<number>()
+    const viewportHeight = input.viewportHeight ?? 0
+    if (viewportHeight > 0 && Number.isFinite(viewportHeight) && anchor) {
+        const preparation = Math.max(0, input.preparationScreens ?? 1) * viewportHeight
+        const retention = Math.max(input.preparationScreens ?? 1, input.retentionScreens ?? 3) * viewportHeight
+        const rowHeight = (index: number) => {
+            const measured = input.measuredHeightsByIndex?.get(index)
+                ?? input.measuredHeights?.get(requireKey(source, index))
+            return measured !== undefined && Number.isFinite(measured) && measured > 0
+                ? measured : Math.max(1, input.estimatedMessageHeight)
+        }
+        // A new conversation follows the bottom; navigation uses the row's top offset.
+        const offset = !input.anchor && !hasJump
+            ? viewportHeight - rowHeight(focusIndex) : anchor.relativeOffset
+        selectedIndices.add(focusIndex)
+        requiredIndices.add(focusIndex)
+        let top = offset
+        for (let index = focusIndex - 1; index >= 0 && top > -preparation; index--) {
+            const bottom = top
+            top -= rowHeight(index)
+            const visible = bottom > 0 && top < viewportHeight
+            if (visible) requiredIndices.add(index)
+            if (visible || selectedIndices.size < budget) selectedIndices.add(index)
+            else break
+        }
+        let bottom = offset + rowHeight(focusIndex)
+        for (let index = focusIndex + 1; index < source.length && bottom < viewportHeight + preparation; index++) {
+            const top = bottom
+            bottom += rowHeight(index)
+            const visible = bottom > 0 && top < viewportHeight
+            if (visible) requiredIndices.add(index)
+            if (visible || selectedIndices.size < budget) selectedIndices.add(index)
+            else break
+        }
+        for (const index of input.retainedIndices ?? []) {
+            if (!Number.isInteger(index) || index < 0 || index >= source.length) continue
+            const top = index < focusIndex
+                ? offset - gapHeight(input, source, index, focusIndex, true)
+                : offset + gapHeight(input, source, focusIndex, index, true)
+            if (top + rowHeight(index) > -retention && top < viewportHeight + retention) {
+                selectedIndices.add(index)
+            }
+        }
+    } else {
+        for (let index = startIndex; index < endIndex; index++) selectedIndices.add(index)
+        if (anchor) requiredIndices.add(focusIndex)
+    }
 
     const pinReasonsByIndex = new Map<number, ChatViewportPinReason[]>()
     for (const pin of input.pins ?? []) {
@@ -284,10 +366,11 @@ export function buildChatViewport(input: ChatViewportInput): ChatViewportResult 
         selectedIndices.add(index)
     }
 
-    const mountedLimit = Math.max(budget, pinReasonsByIndex.size)
+    const protectedIndices = new Set([...requiredIndices, ...pinReasonsByIndex.keys()])
+    const mountedLimit = viewportHeight > 0 ? selectedIndices.size : Math.max(budget, protectedIndices.size)
     while (selectedIndices.size > mountedLimit) {
         const removable = [...selectedIndices]
-            .filter((index) => !pinReasonsByIndex.has(index))
+            .filter((index) => !protectedIndices.has(index))
             .sort((left, right) => {
                 const distance = Math.abs(right - focusIndex) - Math.abs(left - focusIndex)
                 return distance || right - left

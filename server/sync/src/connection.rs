@@ -17,7 +17,7 @@ impl ConnectionOptions {
             return Err(Error::new("choose-fixed-or-managed-tunnel", 400));
         }
         if let Some(endpoint) = &self.endpoint {
-            validate_endpoint(endpoint, self.registry_url.is_none())?;
+            validate_endpoint(endpoint)?;
         }
         if let Some(path) = &self.cloudflared {
             if !path.is_absolute() || !path.is_file() {
@@ -25,7 +25,7 @@ impl ConnectionOptions {
             }
         }
         if let Some(url) = &self.registry_url {
-            validate_endpoint(url, true)?;
+            validate_endpoint(url)?;
         }
         Ok(())
     }
@@ -71,7 +71,7 @@ pub(crate) struct ConnectionState {
 impl ConnectionState {
     pub fn validate(&self) -> Result<()> {
         if let Some(endpoint) = &self.endpoint {
-            validate_endpoint(endpoint, !self.directory_enabled)?;
+            validate_endpoint(endpoint)?;
         }
         if let Some(path) = &self.cloudflared {
             if !path.is_absolute() {
@@ -92,7 +92,7 @@ impl ConnectionState {
             return Err(Error::new("invalid-connection-state", 409));
         }
         if let Some(last) = &self.last_published {
-            validate_endpoint(last, false)?;
+            validate_endpoint(last)?;
         }
         if let Some(pending) = &self.pending {
             let directory = self

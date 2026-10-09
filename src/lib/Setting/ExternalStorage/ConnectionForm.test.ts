@@ -349,7 +349,7 @@ describe('scanning connection settings', () => {
         expect(payload()).toBe('')
         button(strings.scanConnectionSettings).click()
         await settle()
-        expect(target.querySelector('[role="alert"]')?.textContent).toBe(strings.errorGeneric)
+        expect(target.querySelector('[role="alert"]')?.textContent).toBe(`${strings.errorGeneric}\nqr-camera-permission-denied`)
     })
 
     it('marks the scan button busy while the camera runs and ends the scan when the form closes', async () => {
@@ -858,6 +858,31 @@ describe('required connection fields', () => {
         typeInto(control, value)
         control.dispatchEvent(new Event('change', { bubbles: true }))
     }
+
+    it('prepares and connects WebDAV with both credential fields left empty', async () => {
+        state.prepareConnection.mockResolvedValue({ ...prepared, requiresOAuth: false,
+            endpoint: { ...prepared.endpoint, providerId: 'webdav' } })
+        state.commitConnection.mockResolvedValue({ connection: { id: 'anonymous' } })
+        const connected = vi.fn()
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: connected, oncancel: vi.fn() } })
+        await settle()
+        await selectProvider('webdav')
+        changeValue(labelControl<HTMLInputElement>(strings.endpoint), 'http://nas.test/dav')
+        changeValue(labelControl<HTMLInputElement>(strings.fields['webdav.root']), 'RisuNest')
+        await settle()
+        button(strings.prepare).click()
+        await settle()
+        expect(state.prepareConnection).toHaveBeenCalledWith(expect.objectContaining({
+            config: expect.objectContaining({ accountId: '', endpoint: 'http://nas.test/dav' }),
+        }))
+        labelControl<HTMLInputElement>(strings.confirmEndpoint).click()
+        await settle()
+        button(strings.connect).click()
+        await settle()
+        expect(state.commitConnection).toHaveBeenCalledWith('preparation-1', { kind: 'webdav', password: '' })
+        expect(connected).toHaveBeenCalledWith({ connection: { id: 'anonymous' } })
+        expect(target.querySelector('[role="alert"]')).toBeNull()
+    })
 
     it('reports an empty WebDAV folder name beside the field without preparing', async () => {
         component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })

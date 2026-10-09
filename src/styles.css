@@ -552,11 +552,6 @@ html[data-risunest-qr-scan] body > :not(.risunest-qr-scan) {
   display: block;
 }
 
-.chat-history-isolated .chat-message-container.is-settled-history {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 16rem;
-}
-
 .chat-viewport-gap {
   width: 100%;
   flex-shrink: 0;

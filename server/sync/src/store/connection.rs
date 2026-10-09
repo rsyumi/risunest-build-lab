@@ -148,7 +148,7 @@ impl Store {
         Ok(self.read_connection()?.cloudflared)
     }
     pub fn observe_tunnel_endpoint(&self, endpoint: &str) -> Result<()> {
-        validate_endpoint(endpoint, false)?;
+        validate_endpoint(endpoint)?;
         let _gate = self
             .connection_gate
             .lock()

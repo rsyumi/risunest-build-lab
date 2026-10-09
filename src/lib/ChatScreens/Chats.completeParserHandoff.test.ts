@@ -701,8 +701,8 @@ describe('Chats complete parser source handoff', () => {
                 await vi.waitFor(() =>
                     expect({ promotions, demotions, windowed }).toEqual({
                         promotions: 1,
-                        demotions: 0,
-                        windowed: false,
+                        demotions: handoffChange === 'count-after-proof' ? 1 : 0,
+                        windowed: handoffChange === 'count-after-proof',
                     }),
                 )
                 if (handoffChange === 'unchanged') {

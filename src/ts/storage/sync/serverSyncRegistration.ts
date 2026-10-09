@@ -135,12 +135,8 @@ export function validateRegistrationEndpoint(value: string): void {
     value.includes("#")
   )
     invalid("invalid-endpoint");
-  const loopback =
-    url.hostname === "localhost" ||
-    url.hostname === "[::1]" ||
-    /^127\.\d+\.\d+\.\d+$/.test(url.hostname);
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
-    invalid("https-required");
+  if (url.protocol !== "https:" && url.protocol !== "http:")
+    invalid("invalid-endpoint");
 }
 export function validateRegistration(config: ServerConfig): void {
   validateRegistrationEndpoint(config.endpoint);

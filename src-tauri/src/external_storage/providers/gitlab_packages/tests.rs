@@ -234,7 +234,7 @@ fn failure<T>(result: Result<T>) -> ProviderError {
 }
 fn resume_state() -> ResumeState {
     ResumeState {
-        sealed_state: SecretRef("unused".into()),
+        data: SecretRef("unused".into()).into(),
         confirmed_offset: 0,
         expires_at_ms: None,
     }

@@ -9,16 +9,15 @@ export async function connect(port, identifier, timeoutMs = 120_000) {
     return connectVerifiedIdentity(port, identifier, timeoutMs)
 }
 
-// Only the disposable AVD created for this task may use Android's fixed JNI package.
-export async function connectSyntheticAndroid(port, adb, serial) {
-    if (serial !== 'emulator-5580') throw new Error('Unsafe Android serial')
-    const name = execFileSync(adb, ['-s', serial, 'emu', 'avd', 'name'], {
+// Check the selected disposable AVD again before opening its WebView.
+export async function connectSyntheticAndroid(port, android) {
+    const name = execFileSync(android.adb, android.args(['emu', 'avd', 'name']), {
+        env: android.env,
         encoding: 'utf8',
         timeout: 10_000,
         windowsHide: true,
     })
-    if (name.trim().split(/\r?\n/)[0] !== 'risunest_startup_synthetic')
-        throw new Error('Unsafe Android AVD')
+    android.assertAvd(name)
     return connectVerifiedIdentity(port, 'io.github.rsyumi.risunest', 120_000)
 }
 
