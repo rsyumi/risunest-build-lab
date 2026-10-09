@@ -598,9 +598,22 @@ describe('production server LWW composition', () => {
         vi.mocked(bindSyncTarget).mockImplementation(async () => { bound = true; throw { code: 'server-unreachable', retryable: true } })
         f.resumeCurrent.mockImplementation(async () => { await f.transport!.resumeBinding(bindingContext()) })
         await expect(production.connectServerSync({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' })).rejects.toMatchObject({ code: 'server-unreachable' })
+        production.dismissServerSyncConnectionFailure()
         expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: true, error: 'server-unreachable' })
         await production.retryServerSync()
         expect(f.resumeCurrent).toHaveBeenCalledExactlyOnceWith(state.target)
+    })
+    it('drops a refused connection that was left without connecting', async () => {
+        const { bindSyncTarget } = await import('./bindingRegistry')
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        vi.mocked(bindSyncTarget).mockRejectedValue({ code: 'registration-used', retryable: false })
+        await expect(production.connectServerSync({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' })).rejects.toMatchObject({ code: 'registration-used' })
+        const views: string[] = []
+        production.getServerSyncController().subscribe(view => { views.push(view.error) })
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: false }, error: 'registration-used' })
+        production.dismissServerSyncConnectionFailure()
+        expect(production.getServerSyncController().snapshot().error).toBe('')
+        expect(views).toEqual(['registration-used', ''])
     })
     describe('asset storage chosen with the connection', () => {
         const config = { endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }

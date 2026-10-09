@@ -3838,7 +3838,16 @@ export class SaveCoordinator {
             }
             projectedShell.lastInteraction = recency.after
             if (activationCharacter) activationCharacter.lastInteraction = recency.after
-            unitMutations.push({ key: JSON.stringify(['character', authority.characterId, 'lastInteraction']), type: 'set', value: recency.after })
+            else unitMutations.push({ key: JSON.stringify(['character', authority.characterId, 'lastInteraction']), type: 'set', value: recency.after })
+        }
+        // Paged chat creation publishes the character last; asset tuple edits also need
+        // the complete detail for owner validation and retained manifests.
+        if (activationCharacter && !chatList && activationCharacter.chaId === baseline.shell.chaId &&
+            activationCharacter.type === baseline.shell.type &&
+            canonicalJson({ value: activationCharacter.additionalAssets }) === canonicalJson({ value: baseline.shell.additionalAssets })) {
+            unitMutations.push(...diffFields(['character', authority.characterId], baseline.shell, activationCharacter,
+                new Set(['chats', 'chaId', 'type'])))
+            activationCharacter = undefined
         }
         if (relevantPending.length === 0) {
             if (

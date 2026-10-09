@@ -2,13 +2,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { languageEnglish } from 'src/lang/en'
-const f = vi.hoisted(() => ({ pending: vi.fn(async (): Promise<number | undefined> => undefined), ensure: vi.fn(), connect: vi.fn(), complete: vi.fn(), configure: vi.fn(), bind: vi.fn(), disconnect: vi.fn(), hold: vi.fn(), release: vi.fn(), status: vi.fn(), policy: vi.fn(), evict: vi.fn(), cancel: vi.fn(), checkbox: vi.fn(), action: vi.fn(), native: true, scan: false, scanner: { scan: vi.fn(), cancel: vi.fn() }, os: 'windows', listeners: new Set<(value: Record<string, unknown>) => void>(), bindingState: vi.fn(), preset: vi.fn(), state: { db: {} as Record<string, unknown> }, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
+const f = vi.hoisted(() => ({ pending: vi.fn(async (): Promise<number | undefined> => undefined), ensure: vi.fn(), connect: vi.fn(), dismiss: vi.fn(), complete: vi.fn(), configure: vi.fn(), bind: vi.fn(), disconnect: vi.fn(), hold: vi.fn(), release: vi.fn(), status: vi.fn(), policy: vi.fn(), evict: vi.fn(), cancel: vi.fn(), checkbox: vi.fn(), action: vi.fn(), native: true, scan: false, scanner: { scan: vi.fn(), cancel: vi.fn() }, os: 'windows', listeners: new Set<(value: Record<string, unknown>) => void>(), bindingState: vi.fn(), preset: vi.fn(), state: { db: {} as Record<string, unknown> }, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
 vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish, changeLanguage: vi.fn() }))
 vi.mock('src/ts/platform', () => ({ get isTauri() { return f.native } }))
 vi.mock('@tauri-apps/plugin-os', () => ({ platform: () => f.os }))
 vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertCheckboxConfirm: f.checkbox, alertActionConfirm: f.action, alertError: vi.fn(), alertNormal: vi.fn(), openRisuAccountLogin: vi.fn() }))
 vi.mock('src/ts/storage/sync/serverSyncProduction', () => ({
-    connectServerSync: f.connect, completeServerSyncBinding: f.complete, configureServerSyncConnection: f.configure, disconnectServerSync: f.disconnect, retryServerSync: vi.fn(), holdServerSync: f.hold,
+    connectServerSync: f.connect, dismissServerSyncConnectionFailure: f.dismiss, completeServerSyncBinding: f.complete, configureServerSyncConnection: f.configure, disconnectServerSync: f.disconnect, retryServerSync: vi.fn(), holdServerSync: f.hold,
     getServerSyncCacheUsage: vi.fn(), cleanupServerSyncCache: vi.fn(),
     getServerSyncController: () => ({ snapshot: () => f.view, subscribe: (listener: (value: Record<string, unknown>) => void) => { f.listeners.add(listener); listener(f.view); return () => { f.listeners.delete(listener) } }, ensureStatus: f.ensure, watchProgress: () => () => {}, pendingChanges: f.pending, track: (_stage: string, operation: () => Promise<unknown>) => operation() }),
 }))
@@ -144,6 +144,15 @@ describe('a registration code the server refuses', () => {
         expect(heading()).toBe(onboarding.hub.title)
         expect(host.querySelector('[role="alert"]')?.textContent).toBe(languageEnglish.lwwSync.registrationUsedOnboarding)
         expect(host.querySelector('#server-registration')).not.toBeNull()
+        expect(f.dismiss).not.toHaveBeenCalled()
+    })
+    it('drops the refusal once onboarding leaves the server screen without connecting', async () => {
+        f.connect.mockRejectedValue(Object.assign(new Error('registration-used'), { code: 'registration-used', status: 409, retryable: false }))
+        await openOnboardingServer(); await registration(); click(languageEnglish.risuNest.serverSync.connect); await settle()
+        expect(f.dismiss).not.toHaveBeenCalled()
+        click(onboarding.back); await settle()
+        expect(heading()).not.toBe(onboarding.hub.title)
+        expect(f.dismiss).toHaveBeenCalledOnce()
     })
 })
 it('shows an unfinished connection with Connect, which finishes it with the saved registration', async () => {

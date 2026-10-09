@@ -802,7 +802,6 @@ fn collect_generation_asset_roots(
 }
 
 fn collect_lww_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet> {
-    use base64::Engine;
     use risunest_sync_wire::unit::{UnitKey, UnitValue};
     let mut roots = AssetRootSet::default();
     for table in ["lww_units", "lww_receive_rows", "snapshot_original_units"] {
@@ -813,12 +812,11 @@ fn collect_lww_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet>
             let result = (|| -> StoreResult<()> {
                 let key:UnitKey=row.get::<_,String>(0)?.try_into().map_err(|error:risunest_sync_wire::WireError|validation(error.to_string()))?;
                 let value:UnitValue=serde_json::from_str(&row.get::<_,String>(1)?)?;
-                value.validate().map_err(|error|validation(error.to_string()))?;
+                if let Some((decoded,json))=value.validated_inline().map_err(|error|validation(error.to_string()))? {
+                    observe_json_value(&inline_root_json(&decoded,json)?,None,&mut roots);
+                    return Ok(());
+                }
                 match &value {
-                    UnitValue::Inline {bytes} => {
-                        let decoded=base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(bytes).map_err(|error|validation(error.to_string()))?;
-                        observe_json_value(&serde_json::from_slice(&decoded)?,None,&mut roots);
-                    }
                     UnitValue::Object {..} if super::external_capture::is_large_unit(&key) => {
                         let value=super::lww::json_value_resolved(connection,&value)?.ok_or_else(||validation("large unit body is unavailable"))?;
                         observe_json_value(&value,None,&mut roots);
@@ -834,7 +832,7 @@ fn collect_lww_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet>
                         },&crate::local_backup::NeverCancelled,false,&mut |_,_,_|Ok(()))?;
                         roots.object_hashes.extend(inventory.payloads.into_keys());
                     }
-                    UnitValue::Deleted => {}
+                    UnitValue::Inline {..} | UnitValue::Deleted => {}
                 }
                 Ok(())
             })();
@@ -851,6 +849,28 @@ fn collect_lww_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet>
     let hashes=statement.query_map([],|row|row.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
     roots.object_hashes.extend(hashes);
     Ok(roots)
+}
+
+/// The first key with which `serde_json::Value` reads a map as embedded JSON text.
+const SERDE_JSON_RAW_VALUE_TOKEN: &str = "$serde_json::private::RawValue";
+
+/// `json`, the strict parse of a validated inline value, unless a map in it names the raw
+/// value token. The strict parse differs from `serde_json::from_slice` only there and in
+/// number representation, which roots never read.
+fn inline_root_json(decoded: &[u8], json: serde_json::Value) -> StoreResult<serde_json::Value> {
+    fn names_raw_value(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Array(values) => values.iter().any(names_raw_value),
+            serde_json::Value::Object(values) => {
+                values.contains_key(SERDE_JSON_RAW_VALUE_TOKEN) || values.values().any(names_raw_value)
+            }
+            _ => false,
+        }
+    }
+    if names_raw_value(&json) {
+        return Ok(serde_json::from_slice(decoded)?);
+    }
+    Ok(json)
 }
 
 /// Every CAS object one character's records reach, so archiving can record them
@@ -1625,5 +1645,77 @@ mod native_path_scan_tests {
             found.1 += usize::from(every.retain_all_objects);
         }
         assert!(found.0 > 1_000 && found.1 > 1_000, "the inputs must reach both outcomes: {found:?}");
+    }
+}
+
+#[cfg(test)]
+mod lww_inline_root_tests {
+    use super::*;
+    use base64::Engine;
+    use risunest_sync_wire::unit::UnitValue;
+
+    fn library() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE lww_units (key TEXT, value TEXT);
+                 CREATE TABLE lww_receive_rows (key TEXT, value TEXT, status TEXT);
+                 CREATE TABLE snapshot_original_units (key TEXT, value TEXT);
+                 CREATE TABLE asset_aliases (logical_key TEXT, kind TEXT, object_hash TEXT);
+                 CREATE TABLE snapshot_restore_payloads (hash TEXT, stage_id TEXT);
+                 CREATE TABLE snapshot_restore_body_jobs (stage_id TEXT, complete INTEGER);",
+            )
+            .unwrap();
+        connection
+    }
+
+    /// The roots of one inline row when its bytes are decoded again and parsed into a `serde_json::Value`.
+    fn decoded_value_roots(value: &UnitValue) -> AssetRootSet {
+        let mut roots = AssetRootSet::default();
+        let observed = (|| -> StoreResult<()> {
+            value.validate().map_err(|error| validation(error.to_string()))?;
+            let UnitValue::Inline { bytes } = value else { unreachable!() };
+            let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(bytes).unwrap();
+            observe_json_value(&serde_json::from_slice(&decoded)?, None, &mut roots);
+            Ok(())
+        })();
+        if observed.is_err() {
+            roots.retain_all_objects = true;
+            roots.blockers.insert("lww-source-unscannable".into());
+        }
+        roots
+    }
+
+    #[test]
+    fn inline_roots_are_those_of_a_value_parse_of_the_decoded_bytes() {
+        let hash = "0f".repeat(32);
+        let inline = |json: &str| UnitValue::inline(json.as_bytes()).unwrap();
+        let token = SERDE_JSON_RAW_VALUE_TOKEN;
+        let cases = [
+            inline(&serde_json::json!({
+                "image": "assets/one.png", "n": 1, "f": 1.5,
+                "nested": { "coldstorage": "cold-key", "object": hash, "list": [hash, "assets/two.png", 3] },
+            }).to_string()),
+            inline(&format!(r#"{{"{token}":"{{\"x\":\"assets/raw.png\"}}"}}"#)),
+            inline(&format!(r#"{{"{token}":"not json"}}"#)),
+            inline(&format!(r#"{{"0":"assets/index.png","{token}":"{{\"y\":\"assets/second.png\"}}"}}"#)),
+            inline(&format!(r#"{{"outer":[{{"{token}":"[\"assets/deep.png\"]"}}]}}"#)),
+            UnitValue::Inline { bytes: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"b":"assets/b.png","a":1}"#) },
+        ];
+        let mut reached = (0, 0);
+        for value in cases {
+            let connection = library();
+            connection
+                .execute(
+                    "INSERT INTO lww_units (key, value) VALUES ('[\"root\",\"synthetic\"]', ?1)",
+                    [serde_json::to_string(&value).unwrap()],
+                )
+                .unwrap();
+            let expected = decoded_value_roots(&value);
+            reached.0 += usize::from(!expected.legacy_asset_keys.is_empty());
+            reached.1 += usize::from(expected.retain_all_objects);
+            assert_eq!(collect_lww_asset_roots(&connection).unwrap(), expected, "{value:?}");
+        }
+        assert_eq!(reached, (4, 2), "the cases must reach both outcomes");
     }
 }

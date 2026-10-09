@@ -695,6 +695,67 @@ describe('windowed navigation integration', () => {
             completeLease.release()
         }
     })
+
+    // Server sync pulls when a conversation opens and applies the page under paused writes,
+    // so the receive reaches the coordinator queue while the bound editor promotes the chat.
+    it.each([
+        ['a sync receive is queued', async (app: ProductionApp) => {
+            await app.runtime.withPausedPersistentWrites('lww-receive', () => new Promise((resolve) => setTimeout(resolve, 20)))
+        }],
+        ['a save moves the revision', async (app: ProductionApp) => {
+            app.stores.DBState.db.username = 'Synthetic renamed user'
+            app.runtime.markPersistentDataDirty(1)
+        }],
+    ] as const)('loads the bound editor for the next character when %s during its promotion', async (_name, interrupt) => {
+        const indexedDB = new IDBFactory()
+        const previousGlobals = { indexedDB: globalThis.indexedDB, IDBKeyRange: globalThis.IDBKeyRange }
+        const target = document.createElement('div')
+        document.body.append(target)
+        let editor: ReturnType<ProductionApp['svelte']['mount']> | null = null
+        let app: ProductionApp | null = null
+        const trace: unknown[] = []
+        try {
+            app = await bootProductionApp(indexedDB, syntheticLibrary('character'))
+            const { svelte, stores, runtime, characters } = app
+            const navigate = (id: string) => settleWithin(
+                characters.changeChar(stores.DBState.db.characters.findIndex((candidate) => candidate.chaId === id)),
+                `changeChar(${id})`,
+                trace,
+            )
+            editor = svelte.mount(app.Harness, { target })
+            svelte.flushSync()
+            expect(await navigate('edited-owner')).toBe(true)
+            await vi.waitFor(() => expect(target.querySelector('input')?.value).toBe('Synthetic edited-owner'))
+
+            const acquire = runtime.acquireCompleteConversation.bind(runtime)
+            vi.spyOn(runtime, 'acquireCompleteConversation').mockImplementation(async (reason, selection) => {
+                try {
+                    return await acquire(reason, selection)
+                } catch (error) {
+                    trace.push({ stage: 'acquire-failed', reason, error: error instanceof Error ? error.message : String(error) })
+                    throw error
+                }
+            })
+            const read = runtime.store.readConversation.bind(runtime.store)
+            let interrupted: Promise<void> | null = null
+            vi.spyOn(runtime.store, 'readConversation').mockImplementation(async (characterId, conversationId) => {
+                const value = await read(characterId, conversationId)
+                if (characterId === 'second-character' && !interrupted) interrupted = interrupt(app!)
+                return value
+            })
+            expect(await navigate('second-character')).toBe(true)
+            await vi.waitFor(() => expect(target.querySelector('input')?.value).toBe('Synthetic second-character'))
+            await interrupted
+            expect(target.querySelector('[role="alert"]'), JSON.stringify(trace)).toBeNull()
+            expect(trace).toEqual([])
+            expect(runtime.captureSelectedConversationTarget()?.characterId).toBe('second-character')
+            expect(runtime.getSelectedConversationMode()).toBe('complete')
+        } finally {
+            if (editor && app) await app.svelte.unmount(editor)
+            target.remove()
+            Object.assign(globalThis, previousGlobals)
+        }
+    })
 })
 
 describe('selected chat list edits', () => {

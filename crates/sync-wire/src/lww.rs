@@ -58,6 +58,19 @@ pub struct NewDeviceClaimState {
     pub used: bool,
 }
 
+/// The writer a join that keeps its installation's writer binds to the registration before it
+/// reads the library. A registration takes one writer, so another installation cannot join with it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WriterBindingRequest {
+    pub writer_id: String,
+}
+impl WriterBindingRequest {
+    pub fn validate(&self) -> Result<()> {
+        validate_writer_id(&self.writer_id)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UnitChange {

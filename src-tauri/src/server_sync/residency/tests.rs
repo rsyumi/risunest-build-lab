@@ -272,3 +272,40 @@ fn transient_fixture_rejects_wrong_custody_size_without_publishing() {
         .stat_object(&digest).unwrap().is_none());
     assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
 }
+
+/// A page of sizes is what `object` finds one digest at a time, and a stored configuration
+/// that does not parse fails the page as it fails `object`.
+#[test]
+fn active_sizes_are_what_object_finds_for_each_digest() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = Residency::open(root.path()).unwrap();
+    let held = |seed: &[u8], size: u64| RetainedObject {
+        hash: hash(seed),
+        size: size.into(),
+        retention_id: hash(&[seed, b"-retention"].concat()),
+    };
+    store.confirm(&config("device-a"), &head(), &[held(b"one", 7), held(b"two", 9), held(b"three", 11)]).unwrap();
+    store.confirm(&config("device-b"), &head(), &[held(b"two", 13), held(b"one", 17)]).unwrap();
+    let three = store.object(&hash(b"three"), None).unwrap().unwrap();
+    assert!(store.begin_release(&three).unwrap());
+    let later_one = store.object(&hash(b"one"), None).unwrap().unwrap();
+    assert_eq!(later_one.size, 17);
+    assert!(store.begin_release(&later_one).unwrap());
+
+    let digests = vec![hash(b"one"), hash(b"two"), hash(b"three"), hash(b"absent")];
+    let one_at_a_time = digests.iter().map(|digest| store.object(digest, None).unwrap().map(|object| object.size)).collect::<Vec<_>>();
+    assert_eq!(one_at_a_time, [Some(7), Some(13), None, None]);
+    assert_eq!(store.active_sizes(&digests).unwrap(), one_at_a_time);
+    let paged = (0..1100).map(|index| hash(format!("absent-{index}").as_bytes())).chain(digests.iter().cloned()).collect::<Vec<_>>();
+    let sizes = store.active_sizes(&paged).unwrap();
+    assert!(sizes[..1100].iter().all(Option::is_none));
+    assert_eq!(sizes[1100..], one_at_a_time[..]);
+    assert_eq!(store.active_sizes(&["invalid".into()]).unwrap_err().code, store.object("invalid", None).err().unwrap().code);
+
+    store.db.execute("UPDATE contexts SET config='not json' WHERE device_id='device-b'", []).unwrap();
+    assert_eq!(store.object(&hash(b"two"), None).err().unwrap().code, "invalid-retention-config");
+    assert_eq!(store.active_sizes(&[hash(b"one"), hash(b"absent")]).unwrap(), [Some(7), None]);
+    for digests in [vec![hash(b"two")], vec![hash(b"one"), hash(b"two")]] {
+        assert_eq!(store.active_sizes(&digests).unwrap_err().code, "invalid-retention-config");
+    }
+}

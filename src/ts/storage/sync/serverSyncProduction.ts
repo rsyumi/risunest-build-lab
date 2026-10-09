@@ -385,6 +385,11 @@ export async function connectServerSync(config: ServerConfig, newDevice = false,
 /** Finishes a first binding that stopped after its target switch, with the saved registration. */
 export async function completeServerSyncBinding(): Promise<void> { await bindServer(); await controller.ensureStatus() }
 export async function disconnectServerSync(): Promise<void> { await unbindSyncTarget(); context = undefined; await controller.ensureStatus() }
+/** Drops the failure of a connection attempt that was left without connecting. A binding, even a stopped one, keeps it. */
+export function dismissServerSyncConnectionFailure(): void {
+    if (!error || binding || bindingIncomplete || persistedBinding?.target.kind === 'server' || context && !context.signal.aborted) return
+    error = ''; hydrationError = ''; changed()
+}
 /** Stops automatic sync until the returned release runs, so an asset download is not refused as busy. */
 export const holdServerSync = () => controller.beginReplacement()
 export async function retryServerSync(): Promise<void> {

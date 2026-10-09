@@ -243,6 +243,7 @@ pub fn router_with_shutdown(
             "/session/claim-writer",
             post(lww::claim_writer).get(lww::writer_claim),
         )
+        .route("/session/writer", post(lww::bind_writer))
         .route("/devices/{id}/status", get(device_status))
         .route("/head", get(head))
         .route("/time", get(lww::time))

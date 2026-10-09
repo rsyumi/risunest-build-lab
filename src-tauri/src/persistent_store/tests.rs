@@ -154,6 +154,8 @@ mod generation_state_tests;
 mod plugin_owner_tests;
 #[path = "tests/replacement_tests.rs"]
 mod replacement_tests;
+#[path = "tests/residency_status_tests.rs"]
+mod residency_status_tests;
 #[path = "tests/schema_tests.rs"]
 mod schema_tests;
 #[path = "tests/snapshot_lease_tests.rs"]
