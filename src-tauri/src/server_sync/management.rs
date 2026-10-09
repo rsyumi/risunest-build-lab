@@ -142,7 +142,7 @@ pub(crate) fn cache_usage(
         let staging = cache.join("staging");
         let transfers = if staging.is_dir() && cache.join("transfers.sqlite").is_file() {
             checked_metadata(&cache.join("transfers.sqlite"))?;
-            rusqlite::Connection::open_with_flags(cache.join("transfers.sqlite"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
+            crate::sqlite_open::open_with_flags(cache.join("transfers.sqlite"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
         } else { None };
         visit_files(&cache, &mut |file, bytes| {
             if is_object_database(&cache, file) {
@@ -231,7 +231,7 @@ fn sweep_object_database(
     if !path.is_file() {
         return Ok(false);
     }
-    let mut db = rusqlite::Connection::open(path)?;
+    let mut db = crate::sqlite_open::open(path)?;
     db.execute_batch("PRAGMA busy_timeout=5000;")?;
     let mut after = String::new();
     let mut removed = false;

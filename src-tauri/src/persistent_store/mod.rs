@@ -985,7 +985,7 @@ impl MessageObjectRootsCache {
             _ => {
                 let scratch = crate::external_storage::leftovers::managed_scratch(repository_root, "message-roots-")
                     .map_err(|error| StoreError::Store { message: error.to_string() })?;
-                let roots = read(Connection::open(scratch.path().join("roots.sqlite"))?)?;
+                let roots = read(crate::sqlite_open::open(scratch.path().join("roots.sqlite"))?)?;
                 #[cfg(test)]
                 { self.computed += 1; }
                 (token, roots, scratch)
@@ -1184,7 +1184,7 @@ impl StatusLibraryRoots {
     /// Opens the library as the revision readers do, never creating it.
     fn open_observer(database_path: &Path) -> StoreResult<Connection> {
         let open = |flags| -> StoreResult<Connection> {
-            let connection = Connection::open_with_flags(database_path, flags)?;
+            let connection = crate::sqlite_open::open_with_flags(database_path, flags)?;
             connection.execute_batch("PRAGMA query_only = ON;")?;
             Ok(connection)
         };
@@ -1552,7 +1552,7 @@ pub(crate) fn register_asset_objects_at_root(
 ) -> StoreResult<()> {
     let database_path = repository_root.join("persistent").join(DATABASE_FILE);
     let mut connection =
-        Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        crate::sqlite_open::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     AssetObjectCatalog::new(&mut connection).register(objects, created_at_ms)
 }
@@ -1584,7 +1584,7 @@ impl PersistentStore {
         std::fs::create_dir_all(&snapshots_dir)?;
 
         let database_path = persistent_dir.join(DATABASE_FILE);
-        let mut connection = Connection::open(&database_path)?;
+        let mut connection = crate::sqlite_open::open(&database_path)?;
         schema::initialize(&mut connection)?;
         plugin_claim_eligibility::close(&connection)?;
         recover_asset_object_deletions(&mut connection, app_data_dir)?;
@@ -1648,7 +1648,7 @@ impl PersistentStore {
     }
 
     pub(crate) fn open_native_job_store(&self) -> StoreResult<Self> {
-        let mut connection = Connection::open(&self.database_path)?;
+        let mut connection = crate::sqlite_open::open(&self.database_path)?;
         schema::initialize(&mut connection)?;
         let device_store = open_device_store(&self.repository_root.join("persistent"));
         Ok(Self {
@@ -3712,7 +3712,7 @@ pub(super) fn checkpoint_after_detached_release(
     database_path: &Path,
     active_readers: &snapshot::ActiveReaderRegistry,
 ) -> StoreResult<()> {
-    let connection = Connection::open(database_path)?;
+    let connection = crate::sqlite_open::open(database_path)?;
     connection.busy_timeout(Duration::ZERO)?;
     if active_readers.active_count() > 0 {
         return snapshot::checkpoint(&connection, CheckpointMode::Passive);

@@ -756,6 +756,100 @@ describe('windowed navigation integration', () => {
             Object.assign(globalThis, previousGlobals)
         }
     })
+
+    // A tap on another character fences the open promotion seconds before that character
+    // publishes on a phone. A fence can also end without moving the selection.
+    it.each([
+        ['another character is selected', 'edited-owner'],
+        ['a navigation fence keeps the selection', 'second-character'],
+    ] as const)('never shows the bound editor failure when %s during its promotion', async (_name, expected) => {
+        const indexedDB = new IDBFactory()
+        const previousGlobals = { indexedDB: globalThis.indexedDB, IDBKeyRange: globalThis.IDBKeyRange }
+        const target = document.createElement('div')
+        document.body.append(target)
+        let editor: ReturnType<ProductionApp['svelte']['mount']> | null = null
+        let app: ProductionApp | null = null
+        const trace: unknown[] = []
+        const painted: string[] = []
+        const collect = (records: MutationRecord[]) => {
+            for (const record of records) {
+                for (const node of record.addedNodes) {
+                    if (!(node instanceof Element)) continue
+                    const alert = node.matches('[role="alert"]') ? node : node.querySelector('[role="alert"]')
+                    if (alert) painted.push(alert.textContent ?? '')
+                }
+            }
+        }
+        const observer = new MutationObserver(collect)
+        try {
+            app = await bootProductionApp(indexedDB, syntheticLibrary('character'))
+            const { svelte, stores, runtime, characters } = app
+            const navigate = (id: string) => settleWithin(
+                characters.changeChar(stores.DBState.db.characters.findIndex((candidate) => candidate.chaId === id)),
+                `changeChar(${id})`,
+                trace,
+            )
+            editor = svelte.mount(app.Harness, { target })
+            svelte.flushSync()
+            expect(await navigate('edited-owner')).toBe(true)
+            await vi.waitFor(() => expect(target.querySelector('input')?.value).toBe('Synthetic edited-owner'))
+            observer.observe(target, { childList: true, subtree: true })
+
+            let refusalSeen!: () => void
+            const refused = new Promise<void>((resolve) => { refusalSeen = resolve })
+            const acquire = runtime.acquireCompleteConversation.bind(runtime)
+            vi.spyOn(runtime, 'acquireCompleteConversation').mockImplementation(async (reason, selection) => {
+                try {
+                    return await acquire(reason, selection)
+                } catch (error) {
+                    const name = error instanceof Error ? error.name : String(error)
+                    trace.push({ stage: 'acquire-failed', reason, characterId: selection?.characterId, error: name })
+                    refusalSeen()
+                    throw error
+                }
+            })
+            let interrupted = false
+            let overlapping: Promise<boolean> | null = null
+            const laterReads: string[] = []
+            const readConversation = runtime.store.readConversation.bind(runtime.store)
+            vi.spyOn(runtime.store, 'readConversation').mockImplementation(async (characterId, conversationId) => {
+                if (interrupted) laterReads.push(characterId)
+                else if (characterId === 'second-character') {
+                    interrupted = true
+                    if (expected === 'edited-owner') overlapping = navigate('edited-owner')
+                    else runtime.fenceNavigation()
+                }
+                return readConversation(characterId, conversationId)
+            })
+            // The next character publishes only after the refusal reached the editor, as on the phone.
+            const readCharacter = runtime.store.readCharacter.bind(runtime.store)
+            vi.spyOn(runtime.store, 'readCharacter').mockImplementation(async (id) => {
+                if (interrupted && id === 'edited-owner') await refused
+                return readCharacter(id)
+            })
+            await navigate('second-character')
+            await vi.waitFor(() => expect(interrupted).toBe(true))
+            if (expected === 'edited-owner') expect(await overlapping).toBe(true)
+            await vi.waitFor(() => expect(target.querySelector('input')?.value).toBe(`Synthetic ${expected}`))
+            collect(observer.takeRecords())
+            expect(painted, JSON.stringify(trace)).toEqual([])
+            expect(trace).toContainEqual({
+                stage: 'acquire-failed',
+                reason: 'bound-editor',
+                characterId: 'second-character',
+                error: 'SelectedConversationPromotionStaleError',
+            })
+            // The superseded promotion is not started again while the next character loads.
+            if (expected === 'edited-owner') expect(laterReads).not.toContain('second-character')
+            expect(runtime.captureSelectedConversationTarget()?.characterId).toBe(expected)
+            expect(runtime.getSelectedConversationMode()).toBe('complete')
+        } finally {
+            observer.disconnect()
+            if (editor && app) await app.svelte.unmount(editor)
+            target.remove()
+            Object.assign(globalThis, previousGlobals)
+        }
+    })
 })
 
 describe('selected chat list edits', () => {

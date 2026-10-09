@@ -219,7 +219,7 @@ impl VerifiedArchive {
             }
             output.sync_all()?;
         }
-        let db = Connection::open_with_flags(
+        let db = crate::sqlite_open::open_with_flags(
             &path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;

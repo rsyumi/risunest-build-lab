@@ -282,7 +282,7 @@ pub(crate) struct DeviceStore {
 impl DeviceStore {
     pub(crate) fn open(persistent_dir: &Path) -> StoreResult<Self> {
         let path = persistent_dir.join(DEVICE_DATABASE_FILE);
-        let mut connection = Connection::open(path)?;
+        let mut connection = crate::sqlite_open::open(path)?;
         connection.execute_batch(
             "
             PRAGMA journal_mode = WAL;

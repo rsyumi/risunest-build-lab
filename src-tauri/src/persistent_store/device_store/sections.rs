@@ -765,7 +765,7 @@ impl SectionSpoolBuilder {
 
     fn open(kind: SectionKind, versioned: bool, scratch: &std::path::Path) -> StoreResult<Self> {
         let directory = tempfile::Builder::new().prefix("section-spool-").tempdir_in(scratch)?;
-        let connection = Connection::open(directory.path().join("rows.sqlite"))?;
+        let connection = crate::sqlite_open::open(directory.path().join("rows.sqlite"))?;
         connection.execute_batch(
             "PRAGMA cache_size=-4096;
              PRAGMA temp_store=FILE;
@@ -869,7 +869,7 @@ impl SectionSpoolBuilder {
         }
         self.connection.execute_batch("COMMIT;")?;
         drop(self.connection);
-        let connection = Connection::open_with_flags(
+        let connection = crate::sqlite_open::open_with_flags(
             self.directory.path().join("rows.sqlite"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
@@ -1256,7 +1256,7 @@ impl DeviceStore {
             "SELECT file FROM pragma_database_list WHERE name='main'", [], |row| row.get(0),
         )?;
         if path.is_empty() { return Err(invalid("Device database path is unavailable")); }
-        let snapshot = Connection::open_with_flags(
+        let snapshot = crate::sqlite_open::open_with_flags(
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;

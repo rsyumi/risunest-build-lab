@@ -154,6 +154,45 @@ describe('a registration code the server refuses', () => {
         expect(heading()).not.toBe(onboarding.hub.title)
         expect(f.dismiss).toHaveBeenCalledOnce()
     })
+    describe('reading another code after a refusal', () => {
+        const refusal = (error: string) => vi.fn(async (): Promise<void> => {
+            publish({ status: { configured: true, bound: false }, paused: true, error })
+            throw Object.assign(new Error(error), { code: error, status: 409, retryable: false })
+        })
+        // Stands in for production, which drops the failure of an attempt that left the device unconnected.
+        beforeEach(() => { f.dismiss.mockImplementation(() => publish({ ...f.view, error: '' })) })
+        afterEach(() => { f.dismiss.mockReset() })
+        it.each(usedCodes.flatMap(error => [{ error, tone: 'settings' as const }, { error, tone: 'onboarding' as const }]))('drops the "$error" refusal once a new code is read in $tone', async ({ error, tone }) => {
+            component = mount(ServerSyncSettings, { target: host, props: { connectTarget: refusal(error), tone } })
+            await registration(); click(languageEnglish.risuNest.serverSync.connect); await settle()
+            expect(host.querySelector('[role="alert"]')?.textContent).toBe(tone === 'onboarding' ? languageEnglish.lwwSync.registrationUsedOnboarding : languageEnglish.lwwSync.registrationUsed)
+            await registration(); await settle()
+            expect(host.textContent).toContain(languageEnglish.risuNest.serverSync.reviewTitle)
+            expect(host.querySelector('[role="alert"]')).toBeNull()
+            expect(f.dismiss).toHaveBeenCalledOnce()
+        })
+        it('drops the refusal once a new code is scanned', async () => {
+            f.scan = true
+            f.scanner.scan.mockResolvedValue(registered)
+            component = mount(ServerSyncSettings, { target: host, props: { connectTarget: refusal('registration-used') } })
+            await registration(); click(languageEnglish.risuNest.serverSync.connect); await settle()
+            expect(host.querySelector('[role="alert"]')?.textContent).toBe(languageEnglish.lwwSync.registrationUsed)
+            click(languageEnglish.risuNest.serverSync.scanRegistration); await settle()
+            expect(host.textContent).toContain(languageEnglish.risuNest.serverSync.reviewTitle)
+            expect(host.querySelector('[role="alert"]')).toBeNull()
+            expect(f.dismiss).toHaveBeenCalledOnce()
+        })
+        it.each(['server-unreachable', 'device-credential-unavailable', 'clock-skew'])('keeps the "%s" connection failure when a new code is read', async error => {
+            component = mount(ServerSyncSettings, { target: host, props: { connectTarget: refusal(error) } })
+            await registration(); click(languageEnglish.risuNest.serverSync.connect); await settle()
+            const shown = host.querySelector('[role="alert"]')?.textContent
+            expect(shown).toBeTruthy()
+            click(languageEnglish.risuNest.serverSync.discardRegistration); await settle()
+            await registration(); await settle()
+            expect(host.querySelector('[role="alert"]')?.textContent).toBe(shown)
+            expect(f.dismiss).not.toHaveBeenCalled()
+        })
+    })
 })
 it('shows an unfinished connection with Connect, which finishes it with the saved registration', async () => {
     f.view = { status: { configured: false, bound: true }, paused: true, error: '', bindingIncomplete: true }

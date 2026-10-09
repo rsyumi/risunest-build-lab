@@ -166,6 +166,8 @@ mod storage_stats_tests;
 mod vault_boundary_tests;
 #[path = "tests/working_set_tests.rs"]
 mod working_set_tests;
+#[path = "tests/write_ahead_log_tests.rs"]
+mod write_ahead_log_tests;
 
 fn reconstruct_snapshot(store: &PersistentStore, id: &str) -> (tempfile::TempDir, Connection) {
     let directory = tempfile::tempdir().unwrap();

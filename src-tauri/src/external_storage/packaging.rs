@@ -1323,7 +1323,7 @@ async fn build_original_unit_catalog(
     hydration:&mut SourceHydration,cancel:&Cancellation,referenced:&mut Vec<RemoteObject>,
 )->Result<RemoteObject> {
     let index=tempfile::NamedTempFile::new_in(build_root).map_err(transient)?;
-    let nodes=rusqlite::Connection::open(index.path()).map_err(transient)?;
+    let nodes=crate::sqlite_open::open(index.path()).map_err(transient)?;
     nodes.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
         CREATE TABLE nodes(level INTEGER NOT NULL,ordinal INTEGER NOT NULL,body TEXT NOT NULL,PRIMARY KEY(level,ordinal))").map_err(transient)?;
     let size=StoredSize{limits,repository_id:format_repository_id};

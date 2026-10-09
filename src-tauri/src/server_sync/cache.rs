@@ -187,7 +187,7 @@ pub(crate) struct ProjectedRecord {
 impl Cache {
     pub fn open(root: &Path) -> Result<Self> {
         std::fs::create_dir_all(root)?;
-        let objects = rusqlite::Connection::open(root.join("objects.sqlite"))?;
+        let objects = crate::sqlite_open::open(root.join("objects.sqlite"))?;
         // Incremental, so cleanup can hand freed pages back to the filesystem
         // without rewriting the database. It must precede the first table.
         objects.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;

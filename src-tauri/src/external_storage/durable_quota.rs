@@ -92,7 +92,7 @@ impl MyboxBudget {
             let metadata = std::fs::symlink_metadata(parent).map_err(storage_error)?;
             if !metadata.is_dir() || crate::trust_boundary::is_link_like(&metadata) { return Err(corrupt()); }
             if self.path.exists() { crate::trust_boundary::open_regular_source(self.path.as_ref()).map_err(storage_error)?; }
-            let db = Connection::open(self.path.as_ref()).map_err(storage_error)?;
+            let db = crate::sqlite_open::open(self.path.as_ref()).map_err(storage_error)?;
             db.busy_timeout(Duration::from_secs(5)).map_err(storage_error)?;
             db.execute_batch(
                 "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
