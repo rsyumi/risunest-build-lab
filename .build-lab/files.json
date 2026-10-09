@@ -171,8 +171,8 @@
     {
       "path": "benchmarks/ios/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 186503,
-      "sha256": "ae80f921fdedd10fef10e69c8b4699043e43b76a361b3bbca4e1d5e674534da0"
+      "bytes": 186512,
+      "sha256": "849666ef017814303c1e3aed9f5ad49cf778b6a5ff891867dbcb788f11b63492"
     },
     {
       "path": "benchmarks/ios/native/Cargo.toml",
@@ -525,8 +525,8 @@
     {
       "path": "benchmarks/macos/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 186333,
-      "sha256": "91c80771089d4138c1d1f38c5015d35c31db83d53ad414a1b6dedb82d3e0a81a"
+      "bytes": 186342,
+      "sha256": "9e04b5a4272ba7b2a2f3c915806f945f57bb46fc9770f604c80954d9b5da461c"
     },
     {
       "path": "benchmarks/macos/native/Cargo.toml",
@@ -4401,8 +4401,8 @@
     {
       "path": "server/sync/tests/connection.rs",
       "mode": "100644",
-      "bytes": 5783,
-      "sha256": "9be113a5a8ec6ddee0ea4210d6397b338f6bbe70c428c23f10c98c169696a135"
+      "bytes": 5915,
+      "sha256": "429aa1a7f8ea9171dec01a4e74b7e7fab450ba8eb716939b62b04568d00d4038"
     },
     {
       "path": "server/sync/tests/crash_recovery.rs",
@@ -5703,8 +5703,8 @@
     {
       "path": "src-tauri/src/command_future_size.rs",
       "mode": "100644",
-      "bytes": 11915,
-      "sha256": "72b49779bb41d761b996ade1320d625904d7656197ea70ed1c614b4baf50b1df"
+      "bytes": 12138,
+      "sha256": "1664ea7c2906bf5a50a90c0693e25ae864e80d20c223cd77afa927563e5386e3"
     },
     {
       "path": "src-tauri/src/data_health/journal.rs",
@@ -5793,8 +5793,8 @@
     {
       "path": "src-tauri/src/device_secrets.rs",
       "mode": "100644",
-      "bytes": 34072,
-      "sha256": "4fd146ce9bfc72721062c81b73ae352f05d57739b7f1b094021276180043c8d9"
+      "bytes": 34458,
+      "sha256": "e794c8a7f09843005f95007fa1197d370b41b9508500558e7c19a76976efd288"
     },
     {
       "path": "src-tauri/src/external_storage/address_change_tests.rs",
@@ -8085,8 +8085,8 @@
     {
       "path": "src/lang/en.ts",
       "mode": "100644",
-      "bytes": 188614,
-      "sha256": "b6d19935da39906e22b7aad5f35ce74ed17693d454090b0894e604cc7addd57c"
+      "bytes": 188522,
+      "sha256": "1a54bca886b168d2f2328e38b668100b381970ed1abb06d2e7a0858c9e498051"
     },
     {
       "path": "src/lang/es.ts",
@@ -8103,8 +8103,8 @@
     {
       "path": "src/lang/ko.ts",
       "mode": "100644",
-      "bytes": 211504,
-      "sha256": "6aaf2b3434e2f1a47efeea9827b006f8210efb83ba4848c06fd8ec0b82721832"
+      "bytes": 211241,
+      "sha256": "ec99cd6b335c02d8f54e03bbd86384067033f7e6de9a68b18e342f4200263156"
     },
     {
       "path": "src/lang/lwwSyncCopy.test.ts",
@@ -8199,14 +8199,14 @@
     {
       "path": "src/lib/ChatScreens/ChatBody.inlayLifecycle.test.ts",
       "mode": "100644",
-      "bytes": 68102,
-      "sha256": "b44e9389fbd514df63d2abda35ea51825dcb913c5df32b3630e2534455899c09"
+      "bytes": 72309,
+      "sha256": "732b58ab156125df82d2d3a6f4016c8c2cbcb6dbece01f748e7dc7af49ac705f"
     },
     {
       "path": "src/lib/ChatScreens/ChatBody.svelte",
       "mode": "100644",
-      "bytes": 31915,
-      "sha256": "228dfa9dd7e5cf7e235109ac6fce0687fa84acbe8536f4a776bae17e9424fe40"
+      "bytes": 32187,
+      "sha256": "a6d23513193e5d4cb0c6c05f95f4e2b6416e712d770952bf3e95c96f5f70da06"
     },
     {
       "path": "src/lib/ChatScreens/ChatBodyCaptureProbe.test.svelte",
@@ -9579,8 +9579,8 @@
     {
       "path": "src/lib/Setting/Pages/RisuNestUpdateSettings.svelte",
       "mode": "100644",
-      "bytes": 4082,
-      "sha256": "d4f02c86135172e121d1f152c16c730d183165dd714c59dfb5de12057c123bc2"
+      "bytes": 4051,
+      "sha256": "9b5ea0358aceb0291569e422ea06a131e494035ca2fd79672d584128d71d6871"
     },
     {
       "path": "src/lib/Setting/Pages/RisuNestUpdateSettings.test.ts",
@@ -9747,8 +9747,8 @@
     {
       "path": "src/lib/Setting/RisuNest/messageSendKey.test.ts",
       "mode": "100644",
-      "bytes": 4369,
-      "sha256": "4068bfb8c72c30b02a9dc0f4be17965218b6bac4841ee9ca5f0a61da440052e6"
+      "bytes": 4254,
+      "sha256": "772c9ed02b9aa3c135f66b3358bc0c004093c2384d8ac9af1f3d37ef74dc0397"
     },
     {
       "path": "src/lib/Setting/RisuNest/settingControls.test.ts",
@@ -11703,8 +11703,8 @@
     {
       "path": "src/ts/parser/assetParserParity.test.ts",
       "mode": "100644",
-      "bytes": 8097,
-      "sha256": "d5afd43e5598249d5acb86f73d4e450e0293a2deec638d5d367950334c4baa39"
+      "bytes": 15912,
+      "sha256": "56803cfe90e5eb25a9b6e6b0b27e22f72c588243cb7492c683dc34a343c8c435"
     },
     {
       "path": "src/ts/parser/boundedTextUnits.test.ts",
@@ -11739,8 +11739,8 @@
     {
       "path": "src/ts/parser/parser.svelte.ts",
       "mode": "100644",
-      "bytes": 73613,
-      "sha256": "76e8c9ff6ef713d9ac95784ca1a907ef5259342776840a2352b6406144c164e4"
+      "bytes": 73425,
+      "sha256": "f61af85cfeac63478c5c1717e75f8a631f2fd33213a1fe26a0c0536fc7f1adfa"
     },
     {
       "path": "src/ts/parser/partialEdit.ts",
@@ -12483,8 +12483,8 @@
     {
       "path": "src/ts/process/files/inlayRenderSource.ts",
       "mode": "100644",
-      "bytes": 19223,
-      "sha256": "8c7d2b6d9f0e715c7960694abe04d40368eacfd593fad628cdcc68d90c74ae20"
+      "bytes": 20518,
+      "sha256": "0ce80b754cc183f4274df550f2506b265b4aae3819cb6dc12cbd1905ddc29479"
     },
     {
       "path": "src/ts/process/files/inlays.ts",
@@ -17037,8 +17037,8 @@
     {
       "path": "tests/browser/lazyAppAdapters.ts",
       "mode": "100644",
-      "bytes": 4150,
-      "sha256": "c4b28ca9a63207c4a7bcb987d32b84817f3451b33f1a7b91fbfb2a9691123501"
+      "bytes": 4163,
+      "sha256": "5327bed4c34a72512272cc448d987d5acb24fa8c4a472044c90d409305b37056"
     },
     {
       "path": "tests/browser/lazyAppMain.ts",
@@ -17271,8 +17271,8 @@
     {
       "path": "tests/native/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 186311,
-      "sha256": "2457532930dd352f1bcaa0508673a2a1b60e16bba51c7f20ec0a4f06aaa0fd11"
+      "bytes": 186320,
+      "sha256": "0ede3738e162886ce9c7472dcdd078d488a6a0c7aefa4108362fb078a797b64f"
     },
     {
       "path": "tests/native/native/Cargo.toml",

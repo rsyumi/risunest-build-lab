@@ -1941,9 +1941,8 @@ export const languageKorean = {
             environmentFailed: "버전 정보를 불러오지 못했습니다.",
 
             title: '앱 업데이트',
-            description: '서명된 RisuNest 릴리즈를 확인하고 설치 시점을 선택합니다.',
             automatic: '자동으로 확인',
-            automaticHelp: '앱 준비가 끝난 뒤 최대 6시간마다 확인합니다.',
+            automaticHelp: '6시간마다 자동으로 확인합니다.',
             currentVersion: '현재 버전',
             installMethod: '설치 방식',
             lastChecked: '마지막 확인',
@@ -2144,7 +2143,7 @@ export const languageKorean = {
         ui: {
             title: 'UI',
             messageSendKey: '메시지 보내기 키',
-            messageSendKeyHelp: 'Enter를 선택하는 경우 Enter로 메시지를 보내고 Shift+Enter로 줄바꿈합니다. Ctrl/Shift+Enter를 선택하는 경우 Ctrl+Enter나 Shift+Enter로 메시지를 보내고 Enter로 줄바꿈합니다. 전송 버튼을 선택하는 경우 Enter로 줄바꿈하고 메시지는 전송 버튼으로만 보냅니다.',
+            messageSendKeyHelp: '채팅창에서 메시지를 보내는 단축키를 결정합니다. Enter를 선택하면 Shift+Enter로 줄바꿈이 가능하고, Enter가 아닌 다른 방식은 Enter로 줄바꿈을 할 수 있게 됩니다.',
             messageSendKeyButton: '전송 버튼',
             chatEditPopup: '채팅 수정 팝업창 사용',
             chatEditPopupHelp: '채팅 수정 버튼을 누르면 팝업창에서 내용을 수정할 수 있도록 합니다.',
@@ -2272,7 +2271,7 @@ export const languageKorean = {
                 '채팅 첨부 {0} (이미지·미디어에 포함) · 플러그인 데이터 {1}',
             createSnapshotTitle: '스냅샷 만들기',
             createSnapshotHelp:
-                '지금 상태를 저장해 두고 나중에 되돌릴 수 있습니다.',
+                '지금 상태를 스냅샷으로 저장합니다.',
             createSnapshot: '지금 만들기',
             gcSearching: '사용하지 않는 파일을 찾는 중',
             gcDeleting: '사용하지 않는 파일을 삭제하는 중',
