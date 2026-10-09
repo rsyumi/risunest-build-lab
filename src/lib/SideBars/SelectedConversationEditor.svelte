@@ -1,9 +1,15 @@
 <script lang="ts">
     import { onMount, untrack, type Snippet } from 'svelte'
+    import { get } from 'svelte/store'
     import { language } from 'src/lang'
     import { DBState, selectedCharID } from 'src/ts/stores.svelte'
     import { getPersistentDataRuntime } from 'src/ts/storage/persistentDataRuntime.svelte'
-    import type { CompleteConversationLease } from 'src/ts/storage/activeWorkingSet.svelte'
+    import {
+        SelectedConversationPromotionStaleError,
+        type CompleteConversationLease,
+        type SelectedConversationTarget,
+    } from 'src/ts/storage/activeWorkingSet.svelte'
+    import { navigationActivity } from 'src/ts/ui/navigationActivity'
     import { isMetadataOnlySelectedConversation } from 'src/ts/storage/selectedConversationLifecycle'
     import { isCatalogCharacterStub } from 'src/ts/storage/workingSetCatalog'
     import { isConversationSummaryStub } from 'src/ts/storage/conversationResidency'
@@ -24,6 +30,22 @@
     let mountedCharacterId: string | undefined
     const runtime = getPersistentDataRuntime()
     let currentLease: CompleteConversationLease | undefined
+    const STALE_PROMOTION_RETRIES = 2
+
+    // Runs `next` once no navigation is in flight. Returns a cancel for a pending wait.
+    function afterNavigation(next: () => void): () => void {
+        if (!get(navigationActivity)) {
+            next()
+            return () => {}
+        }
+        let stop = () => {}
+        stop = navigationActivity.subscribe((activity) => {
+            if (activity) return
+            stop()
+            next()
+        })
+        return stop
+    }
 
     // Saves may republish the same selection as new objects; only a change of
     // identity or residency needs a new lease.
@@ -68,6 +90,7 @@
         const waiting = waitingForGeneration
         let disposed = false
         let lease: CompleteConversationLease | undefined
+        let stopWaiting = () => {}
         untrack(() => {
             const character = active
                 ? DBState.db.characters[$selectedCharID]
@@ -107,23 +130,52 @@
                 settle(false)
                 return
             }
-            void runtime
-                .acquireCompleteConversation('bound-editor', target)
-                .then((acquired) => {
-                    if (disposed) {
-                        acquired.release()
-                        return
-                    }
-                    lease = acquired
-                    currentLease = acquired
-                    settle(true)
-                })
-                .catch(() => {
-                    if (!disposed) settle(false)
-                })
+            const fail = (error: unknown) => {
+                console.error('Bound editor promotion failed', error)
+                settle(false)
+            }
+            const acquire = (
+                selection: SelectedConversationTarget,
+                retries: number,
+            ) => {
+                void runtime
+                    .acquireCompleteConversation('bound-editor', selection)
+                    .then((acquired) => {
+                        if (disposed) {
+                            acquired.release()
+                            return
+                        }
+                        lease = acquired
+                        currentLease = acquired
+                        settle(true)
+                    })
+                    .catch((error) => {
+                        if (disposed) return
+                        if (!(error instanceof SelectedConversationPromotionStaleError)) {
+                            fail(error)
+                            return
+                        }
+                        // A navigation fences the promotion long before it publishes the
+                        // next selection. A moved selection replaces this run, and the
+                        // same selection retries a few times.
+                        stopWaiting = afterNavigation(() => {
+                            if (disposed) return
+                            const current = runtime.captureSelectedConversationTarget()
+                            if (
+                                current?.characterId !== character.chaId ||
+                                current.conversationId !== conversationId
+                            )
+                                sourceVersion++
+                            else if (retries > 0) acquire(current, retries - 1)
+                            else fail(error)
+                        })
+                    })
+            }
+            acquire(target, STALE_PROMOTION_RETRIES)
         })
         return () => {
             disposed = true
+            stopWaiting()
             if (currentLease === lease) currentLease = undefined
             lease?.release()
         }

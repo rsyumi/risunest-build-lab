@@ -184,7 +184,7 @@ const FINISHED_RESTORE_PAGE_SQL: &str =
 impl JobStore {
     pub fn open(root: &Path) -> Result<Self> {
         std::fs::create_dir_all(root).map_err(failure)?;
-        let db = Connection::open(root.join("external-jobs.sqlite")).map_err(failure)?;
+        let db = crate::sqlite_open::open(root.join("external-jobs.sqlite")).map_err(failure)?;
         db.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(failure)?;
         db.execute_batch(

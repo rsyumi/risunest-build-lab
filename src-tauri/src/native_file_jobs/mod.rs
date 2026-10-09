@@ -3837,8 +3837,8 @@ fn verify_portable_body_receipt(repository:&Path,request:&PortableBodyRetryReque
     let valid=(||->crate::persistent_store::StoreResult<bool> {
         let flags=rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY|rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let persistent=repository.join("persistent");
-        let library=rusqlite::Connection::open_with_flags(persistent.join(crate::persistent_store::DATABASE_FILE),flags)?;
-        let device=rusqlite::Connection::open_with_flags(persistent.join(crate::persistent_store::device_store::DEVICE_DATABASE_FILE),flags)?;
+        let library=crate::sqlite_open::open_with_flags(persistent.join(crate::persistent_store::DATABASE_FILE),flags)?;
+        let device=crate::sqlite_open::open_with_flags(persistent.join(crate::persistent_store::device_store::DEVICE_DATABASE_FILE),flags)?;
         library.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
         device.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
         let generation:String=library.query_row("SELECT value FROM meta WHERE key='activeGeneration'",[],|row|row.get(0))?;

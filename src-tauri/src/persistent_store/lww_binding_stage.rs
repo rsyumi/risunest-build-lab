@@ -209,7 +209,7 @@ impl PersistentStore {
             #[cfg(test)]
             STAGE_SCRATCH.with(|scratch| scratch.replace(Some(temporary.path().to_owned())));
             let path = temporary.path().join("incoming.sqlite");
-            let mut isolated = Connection::open(&path)?;
+            let mut isolated = crate::sqlite_open::open(&path)?;
             schema::initialize(&mut isolated)?;
             isolated.execute_batch("INSERT INTO meta VALUES('activeGeneration','\"incoming\"'),('currentRevision','0'); INSERT INTO root VALUES('incoming','{}');")?;
             changes.visit(false, |key, stamp, value, _| {

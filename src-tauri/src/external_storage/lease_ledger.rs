@@ -24,7 +24,7 @@ impl LocalLeaseLedger {
         lock.try_lock_exclusive().map_err(|_| ProviderError::new(ErrorKind::RepositoryBusy))?;
         let path = directory.join("leases.sqlite");
         if path.exists() { crate::trust_boundary::open_regular_source(&path).map_err(failed)?; }
-        let db = Connection::open(path).map_err(failed)?;
+        let db = crate::sqlite_open::open(path).map_err(failed)?;
         db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS leases(repository TEXT NOT NULL, connection TEXT NOT NULL,
             object TEXT NOT NULL, document BLOB NOT NULL, PRIMARY KEY(repository,connection,object));").map_err(failed)?;

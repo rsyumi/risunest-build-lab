@@ -60,7 +60,7 @@ impl AssetObjectRegistrar {
     pub(crate) fn open(repository_root: &Path) -> StoreResult<Self> {
         let database_path = repository_root.join("persistent").join(super::DATABASE_FILE);
         let connection =
-            Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            crate::sqlite_open::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         Ok(Self { connection })
     }

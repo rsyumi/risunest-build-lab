@@ -575,7 +575,7 @@ impl TransferJournal {
             return Err(corrupt());
         }
         crate::trust_boundary::open_regular_source(&path).map_err(storage)?;
-        let db = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        let db = crate::sqlite_open::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(storage)?;
         db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")
             .map_err(storage)?;
@@ -598,7 +598,7 @@ impl TransferJournal {
     pub(crate) fn progress(directory: &Path, job_id: &str) -> Result<(u64, u64, u64, u64)> {
         let path = directory.join("transfers.sqlite");
         crate::trust_boundary::open_regular_source(&path).map_err(storage)?;
-        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        let db = crate::sqlite_open::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(storage)?;
         let encoded: String = db
             .query_row("SELECT value FROM identity WHERE singleton=1", [], |row| {
@@ -684,7 +684,7 @@ impl TransferJournal {
     pub(crate) fn uploaded(directory: &Path, job_id: &str) -> Result<Vec<ObjectReceipt>> {
         let path = directory.join("transfers.sqlite");
         crate::trust_boundary::open_regular_source(&path).map_err(storage)?;
-        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        let db = crate::sqlite_open::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(storage)?;
         let encoded: String = db
             .query_row("SELECT value FROM identity WHERE singleton=1", [], |row| {
@@ -745,7 +745,7 @@ impl TransferJournal {
             }
             Err(error) => return Err(storage(error)),
         };
-        let db = Connection::open(&path).map_err(storage)?;
+        let db = crate::sqlite_open::open(&path).map_err(storage)?;
         db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")
             .map_err(storage)?;
         if fresh {

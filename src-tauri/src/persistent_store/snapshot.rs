@@ -160,7 +160,7 @@ fn prepare_restore_candidate(
         .map_err(|error| path_error("copy restore candidate", &candidate, error))?;
 
     let result = (|| -> StoreResult<()> {
-        let mut connection = Connection::open(&candidate)?;
+        let mut connection = crate::sqlite_open::open(&candidate)?;
         super::schema::initialize(&mut connection)?;
         // A snapshot can hold a partly purged retired library, which restore never reads.
         while super::commit::purge_retired_batch(&mut connection, 4096)? {
@@ -363,7 +363,7 @@ fn configure_revision_reader(
     flags: OpenFlags,
     prepare: &dyn Fn(&Connection) -> StoreResult<()>,
 ) -> StoreResult<Connection> {
-    let connection = Connection::open_with_flags(database_path, flags)?;
+    let connection = crate::sqlite_open::open_with_flags(database_path, flags)?;
     connection.busy_timeout(Duration::ZERO)?;
     connection.execute_batch("PRAGMA cache_size = -2048;")?;
     prepare(&connection)?;
@@ -434,7 +434,7 @@ pub(super) fn capture_scratch(
         let units = store.lww_backup_unit_values(&lease.lease)?;
         let (connection, target) = store.read_view(Some(&lease.lease))?;
         let current_bytes = snapshot_retention_basis_bytes(connection)?;
-        let mut output = Connection::open(&scratch.path)?;
+        let mut output = crate::sqlite_open::open(&scratch.path)?;
         {
             let backup = rusqlite::backup::Backup::new(connection, &mut output)?;
             loop {
@@ -468,7 +468,7 @@ pub(super) fn archive_scratch(
     reason: &str,
     started: Instant,
 ) -> StoreResult<SnapshotCreated> {
-    let captured = Connection::open(&scratch.path)?;
+    let captured = crate::sqlite_open::open(&scratch.path)?;
     let revision = current_revision(&captured)?;
     let roots = collect_asset_roots(&captured)?;
     drop(captured);
@@ -661,7 +661,7 @@ pub(super) fn collect_preserved_source_roots(repository:&Path)->AssetRootSet {
             let path=path.join("index.sqlite");
             let metadata=fs::symlink_metadata(&path)?;
             if !metadata.is_file() || crate::trust_boundary::is_link_like(&metadata) {return Err(validation("invalid source preservation index"));}
-            let index=Connection::open_with_flags(path,OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+            let index=crate::sqlite_open::open_with_flags(path,OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
             index.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
             let mut statement=index.prepare("SELECT object_hash,storage_kind FROM source_files")?;
             let mut rows=statement.query([])?;
@@ -1297,7 +1297,7 @@ fn cas_hash_from_physical_key(value: &[u8]) -> Option<String> {
 }
 
 fn validate_restore_database(path: &Path, probe: &dyn CancellationProbe) -> StoreResult<()> {
-    let connection = Connection::open(path)?;
+    let connection = crate::sqlite_open::open(path)?;
     let integrity: String = interrupt_on_cancel(&connection, probe, || {
         Ok(connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?)
     })?;
@@ -1452,7 +1452,7 @@ impl super::PersistentStore {
         let candidate = prepare_restore_candidate(&self.snapshots_dir,&scratch.path,probe)?;
         let outcome = (|| {
             observe(SnapshotRestoreStep::Staging)?;
-            let source = Connection::open(&candidate)?;
+            let source = crate::sqlite_open::open(&candidate)?;
             let generation = active_generation(&source)?;
             let (source_revision, source_generation): (i64,String) = source.query_row("SELECT revision,generation FROM snapshot_original_meta WHERE singleton=1", [], |row|Ok((row.get(0)?,row.get(1)?)))?;
             if source_revision != current_revision(&source)? || source_generation != generation { return Err(validation("snapshot original source identity differs")); }

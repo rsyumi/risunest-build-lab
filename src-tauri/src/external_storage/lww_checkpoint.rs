@@ -156,7 +156,7 @@ impl PublishedCatalog {
     pub(crate) fn create(path: &Path) -> Result<Self> {
         let file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(sql)?;
         file.sync_all().map_err(sql)?;
-        let db = Connection::open(path).map_err(sql)?;
+        let db = crate::sqlite_open::open(path).map_err(sql)?;
         // A catalog is scratch rebuilt from the remote state and never reopened, so its writes skip durability.
         db.execute_batch("PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;
             CREATE TABLE units(key TEXT PRIMARY KEY, body TEXT NOT NULL);

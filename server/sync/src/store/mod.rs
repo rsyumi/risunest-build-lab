@@ -129,6 +129,40 @@ pub(super) fn parse<T: for<'de> Deserialize<'de>>(value: &str) -> Result<T> {
     canonical::decode(value.as_bytes(), risunest_sync_wire::MAX_METADATA_BYTES)
         .map_err(|_| Error::new("corrupt-metadata", 503))
 }
+/// SQLite's Windows VFS treats a path starting with `\\` as a network share and
+/// takes the shared-memory locks of every connection in the process through one
+/// handle. Two connections reading at once there can leave a read lock behind
+/// that no checkpoint passes, so the store is opened by its plain drive path
+/// whenever that path names the same file.
+#[cfg(windows)]
+fn sqlite_path(path: &Path) -> PathBuf {
+    let plain = path
+        .to_str()
+        .and_then(|path| path.strip_prefix(r"\\?\"))
+        .filter(|rest| {
+            let bytes = rest.as_bytes();
+            // The log and shared-memory names add four characters to MAX_PATH.
+            bytes.len() > 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1..3] == *b":\\"
+                && rest.encode_utf16().count() + 4 < 260
+        })
+        .map(PathBuf::from);
+    match plain {
+        Some(plain)
+            if fs::canonicalize(&plain).is_ok_and(|resolved| {
+                fs::canonicalize(path).is_ok_and(|exact| exact == resolved)
+            }) =>
+        {
+            plain
+        }
+        _ => path.to_owned(),
+    }
+}
+#[cfg(not(windows))]
+fn sqlite_path(path: &Path) -> PathBuf {
+    path.to_owned()
+}
 impl Store {
     fn staging_temp(&self) -> Result<StagingTemp<'_>> {
         let mut paths = self
@@ -284,6 +318,7 @@ impl Store {
                 .map_err(|_| Error::new("initialization-publication-failed", 503))?;
             objects::sync_directory(&root)?;
         }
+        let db_path = sqlite_path(&db_path);
         let db = Connection::open(&db_path)?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version != schema::VERSION {
@@ -299,10 +334,8 @@ impl Store {
             "UPDATE download_deltas SET state='queued' WHERE state='working'",
             [],
         )?;
-        let read_db = Connection::open_with_flags(
-            root.join("metadata.sqlite"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
+        let read_db =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         read_db.busy_timeout(std::time::Duration::from_secs(5))?;
         let media_key: Vec<u8> =
             db.query_row("SELECT key FROM media_secret WHERE singleton=1", [], |r| {

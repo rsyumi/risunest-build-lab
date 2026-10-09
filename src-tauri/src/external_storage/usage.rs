@@ -7,7 +7,7 @@ use super::{
     control,
     packaging::RemoteObject,
 };
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::OpenFlags;
 use std::{collections::BTreeSet, path::Path};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,7 +55,7 @@ fn known_object_lower_bound(
     ) {
         return Err(corrupt());
     }
-    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    let db = crate::sqlite_open::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|_| transient())?;
     let mut statement = db
         .prepare(
