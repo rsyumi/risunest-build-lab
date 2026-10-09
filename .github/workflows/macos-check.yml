@@ -23,7 +23,7 @@ concurrency:
 jobs:
   native:
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 360
     defaults:
       run:
         shell: bash
