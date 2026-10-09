@@ -66,7 +66,7 @@ impl DeviceStore {
         mut visit: impl FnMut(&str, &str, &str, &str) -> StoreResult<()>,
         mut visit_unit: impl FnMut(&UnitKey, &UnitValue) -> StoreResult<()>,
     ) -> StoreResult<PluginGcFence> {
-        let snapshot = Connection::open_with_flags(self.plugin_gc_path()?, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        let snapshot = crate::sqlite_open::open_with_flags(self.plugin_gc_path()?, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         snapshot.execute_batch("PRAGMA query_only=ON; PRAGMA mmap_size=0; BEGIN")?;
         let fence = read_fence(&snapshot)?;
         {
@@ -96,12 +96,12 @@ impl DeviceStore {
     }
 
     pub(crate) fn plugin_gc_fence_is_current(&self, fence: &PluginGcFence) -> StoreResult<bool> {
-        let db = Connection::open_with_flags(self.plugin_gc_path()?, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        let db = crate::sqlite_open::open_with_flags(self.plugin_gc_path()?, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         Ok(read_fence(&db)? == *fence)
     }
 
     pub(crate) fn acquire_plugin_gc_barrier(&self, fence: &PluginGcFence) -> StoreResult<PluginGcBarrier> {
-        let db = Connection::open_with_flags(self.plugin_gc_path()?, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        let db = crate::sqlite_open::open_with_flags(self.plugin_gc_path()?, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         db.busy_timeout(Duration::ZERO)?;
         db.execute_batch("BEGIN IMMEDIATE").map_err(|error| match error {
             rusqlite::Error::SqliteFailure(ref code, _) if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => StoreError::CommitBusy,

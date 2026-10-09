@@ -11,7 +11,7 @@ impl PersistentStore {
         cancellation: &dyn CancellationProbe,
     ) -> StoreResult<(u64, u64)> {
         let (source, target) = self.read_view(Some(lease))?;
-        let mut output = Connection::open(destination)?;
+        let mut output = crate::sqlite_open::open(destination)?;
         {
             let backup = rusqlite::backup::Backup::new(source, &mut output)?;
             loop {

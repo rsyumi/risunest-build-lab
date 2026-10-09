@@ -112,7 +112,7 @@ impl ContentStore {
                 return Err(invalid("Capture directory must not be a link"));
             }
         }
-        let db = rusqlite::Connection::open(root.join("content.sqlite"))?;
+        let db = crate::sqlite_open::open(root.join("content.sqlite"))?;
         // Incremental, so collection can return freed pages to the filesystem
         // without rewriting the database. It must precede the first table.
         db.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;

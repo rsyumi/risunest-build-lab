@@ -30,7 +30,7 @@ impl RestoreInventory {
         let directory = tempfile::Builder::new()
             .prefix("restore-inventory-")
             .tempdir_in(owned)?;
-        let db = Connection::open(directory.path().join("inventory.sqlite"))?;
+        let db = crate::sqlite_open::open(directory.path().join("inventory.sqlite"))?;
         db.execute_batch("PRAGMA cache_size=-16384; PRAGMA temp_store=FILE; CREATE TABLE live_objects (hash TEXT PRIMARY KEY, owner INTEGER NOT NULL); BEGIN IMMEDIATE;")?;
         let mut statement=archive.db.prepare("SELECT object_hash,0 FROM asset_aliases WHERE object_hash IS NOT NULL UNION SELECT manifest_hash,1 FROM asset_owner_heads WHERE present=1 UNION SELECT hash,0 FROM backup_payloads")?;
         let mut rows = statement.query([])?;
@@ -95,7 +95,7 @@ impl RestoreInventory {
         let stage = self.directory.path().join("preserved");
         fs::create_dir(&stage)?;
         fs::create_dir(stage.join("objects"))?;
-        let index = Connection::open(stage.join("index.sqlite"))?;
+        let index = crate::sqlite_open::open(stage.join("index.sqlite"))?;
         index.execute_batch("PRAGMA synchronous=FULL; CREATE TABLE source_files (logical_key TEXT PRIMARY KEY,object_hash TEXT NOT NULL,metadata TEXT NOT NULL,byte_length INTEGER NOT NULL,reason TEXT NOT NULL,storage_kind TEXT NOT NULL CHECK(storage_kind IN ('cas','owned'))); BEGIN IMMEDIATE;")?;
         let mut statement=archive.db.prepare("SELECT f.logical_key,lower(hex(f.object_hash)),f.metadata,o.byte_length FROM files f JOIN objects o ON o.sha256=f.object_hash WHERE f.kind='preserved' AND f.state='present' ORDER BY f.logical_key")?;
         let mut rows = statement.query([])?;
@@ -207,7 +207,7 @@ impl Catalog {
             ensure_directory(&directory)?;
             let index_path = directory.join("index.sqlite");
             check_regular(&index_path)?;
-            let index = Connection::open_with_flags(index_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let index = crate::sqlite_open::open_with_flags(index_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             index.execute_batch(
                 "PRAGMA trusted_schema=OFF; PRAGMA query_only=ON; PRAGMA cache_size=-16384",
             )?;

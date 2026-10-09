@@ -147,7 +147,7 @@ impl Catalog {
         let directory = tempfile::Builder::new()
             .prefix("portable-")
             .tempdir_in(job_directory)?;
-        let db = Connection::open(directory.path().join("archive.sqlite"))?;
+        let db = crate::sqlite_open::open(directory.path().join("archive.sqlite"))?;
         db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=-16384; PRAGMA temp_store=FILE; PRAGMA trusted_schema=OFF;")?;
         create_raw_tables(&db)?;
         for (_, sql) in SCHEMA {

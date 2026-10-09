@@ -4,6 +4,8 @@ import { writable } from 'svelte/store'
 import { languageEnglish } from '../../lang/en'
 import { DBState } from 'src/ts/stores.svelte'
 import { createMetadataOnlySelectedConversation } from 'src/ts/storage/selectedConversationLifecycle'
+import { SelectedConversationPromotionStaleError } from 'src/ts/storage/activeWorkingSet.svelte'
+import { beginNavigationActivity, navigationActivity } from 'src/ts/ui/navigationActivity'
 import SelectedConversationEditor from './SelectedConversationEditor.svelte'
 import { doingChat } from 'src/ts/process/generationState'
 
@@ -48,10 +50,36 @@ function show(active = true, close?: () => void) {
 }
 function deferred() {
     let resolve!: (value: { release: () => void }) => void
-    const promise = new Promise<{ release: () => void }>((done) => {
+    let reject!: (error: Error) => void
+    const promise = new Promise<{ release: () => void }>((done, fail) => {
         resolve = done
+        reject = fail
     })
-    return { promise, resolve }
+    return { promise, resolve, reject }
+}
+// Records every failed branch the editor paints, even one replaced before the next check.
+function recordAlerts() {
+    const painted: string[] = []
+    const collect = (records: MutationRecord[]) => {
+        for (const record of records) {
+            for (const node of record.addedNodes) {
+                if (!(node instanceof Element)) continue
+                const alert = node.matches('[role="alert"]')
+                    ? node
+                    : node.querySelector('[role="alert"]')
+                if (alert) painted.push(alert.textContent ?? '')
+            }
+        }
+    }
+    const observer = new MutationObserver(collect)
+    observer.observe(document.body, { childList: true, subtree: true })
+    return {
+        painted,
+        stop: () => {
+            collect(observer.takeRecords())
+            observer.disconnect()
+        },
+    }
 }
 
 beforeEach(() => {
@@ -75,6 +103,8 @@ beforeEach(() => {
 })
 afterEach(async () => {
     doingChat.set(false)
+    navigationActivity.set(null)
+    vi.restoreAllMocks()
     if (editor) await unmount(editor)
     editor = undefined
     document.body.replaceChildren()
@@ -283,16 +313,113 @@ it('discards stale selection and only mounts the newly acquired editor', async (
     await vi.waitFor(() => expect(mounted).toHaveBeenCalledOnce())
 })
 
-it('keeps failed promotion uneditable and allows retry', async () => {
-    mocks.acquire.mockRejectedValueOnce(new Error('synthetic read failure'))
+it('keeps failed promotion uneditable, logs it and allows retry', async () => {
+    const failure = new Error('synthetic read failure')
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mocks.acquire.mockRejectedValueOnce(failure)
     show()
     await vi.waitFor(() =>
         expect(document.querySelector('[role="alert"]')).not.toBeNull(),
     )
     expect(mounted).not.toHaveBeenCalled()
+    expect(mocks.acquire).toHaveBeenCalledOnce()
+    expect(logged).toHaveBeenCalledExactlyOnceWith(expect.any(String), failure)
     mocks.acquire.mockResolvedValueOnce({ release: vi.fn() })
     document.querySelector<HTMLButtonElement>('button')!.click()
     await vi.waitFor(() => expect(mounted).toHaveBeenCalledOnce())
+})
+
+it('stays loading when another character is selected during its promotion', async () => {
+    const first = deferred()
+    const second = deferred()
+    mocks.acquire
+        .mockReturnValueOnce(first.promise)
+        .mockReturnValueOnce(second.promise)
+    const alerts = recordAlerts()
+    show()
+    await tick()
+    // The tap fences the promotion, and the next character publishes later.
+    const navigation = beginNavigationActivity('character')
+    first.reject(new SelectedConversationPromotionStaleError())
+    for (let index = 0; index < 6; index++) await tick()
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+    expect(document.body.textContent).toContain(languageEnglish.loadingChatData)
+    expect(mocks.acquire).toHaveBeenCalledOnce()
+
+    DBState.db.characters[0] = {
+        chaId: 'char-b',
+        chatPage: 0,
+        chats: [{ id: 'chat-c', message: [] }],
+    } as any
+    mocks.capture.mockReturnValue({
+        characterId: 'char-b',
+        conversationId: 'chat-c',
+    })
+    mocks.changed()
+    await tick()
+    navigation.finish()
+    second.resolve({ release: vi.fn() })
+    await vi.waitFor(() => expect(mounted).toHaveBeenCalledOnce())
+    expect(mocks.acquire).toHaveBeenCalledTimes(2)
+    expect(mocks.acquire).toHaveBeenLastCalledWith('bound-editor', {
+        characterId: 'char-b',
+        conversationId: 'chat-c',
+    })
+    alerts.stop()
+    expect(alerts.painted).toEqual([])
+})
+
+it('loads again once a navigation that ended its promotion leaves the selection in place', async () => {
+    const release = vi.fn()
+    const navigation = beginNavigationActivity('character')
+    mocks.acquire
+        .mockRejectedValueOnce(new SelectedConversationPromotionStaleError())
+        .mockResolvedValueOnce({ release })
+    const alerts = recordAlerts()
+    show()
+    for (let index = 0; index < 6; index++) await tick()
+    expect(mocks.acquire).toHaveBeenCalledOnce()
+    expect(document.body.textContent).toContain(languageEnglish.loadingChatData)
+
+    navigation.finish()
+    await vi.waitFor(() => expect(mounted).toHaveBeenCalledOnce())
+    expect(mocks.acquire).toHaveBeenCalledTimes(2)
+    alerts.stop()
+    expect(alerts.painted).toEqual([])
+})
+
+it('retries a stale promotion while the selection still matches the editor', async () => {
+    const release = vi.fn()
+    mocks.acquire
+        .mockRejectedValueOnce(new SelectedConversationPromotionStaleError())
+        .mockResolvedValueOnce({ release })
+    const alerts = recordAlerts()
+    show()
+    await vi.waitFor(() => expect(mounted).toHaveBeenCalledOnce())
+    expect(mocks.acquire).toHaveBeenCalledTimes(2)
+    expect(mocks.acquire).toHaveBeenLastCalledWith('bound-editor', {
+        characterId: 'char-a',
+        conversationId: 'chat-a',
+    })
+    alerts.stop()
+    expect(alerts.painted).toEqual([])
+})
+
+it('shows and logs the failure once stale retries of the same selection run out', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mocks.acquire.mockImplementation(async () => {
+        throw new SelectedConversationPromotionStaleError()
+    })
+    show()
+    await vi.waitFor(() =>
+        expect(document.querySelector('[role="alert"]')).not.toBeNull(),
+    )
+    expect(mocks.acquire).toHaveBeenCalledTimes(3)
+    expect(mounted).not.toHaveBeenCalled()
+    expect(logged).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        expect.any(SelectedConversationPromotionStaleError),
+    )
 })
 
 it('allows a complete nonpersistent playground but blocks an unowned partial shell', async () => {

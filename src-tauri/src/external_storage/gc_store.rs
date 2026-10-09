@@ -38,7 +38,7 @@ impl GcStore {
             }
             Err(error) => return Err(storage(error)),
         }
-        let db = Connection::open(path).map_err(storage)?;
+        let db = crate::sqlite_open::open(path).map_err(storage)?;
         db.busy_timeout(std::time::Duration::from_secs(5)).map_err(storage)?;
         db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;

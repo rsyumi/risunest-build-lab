@@ -55,7 +55,7 @@ impl PackageCache {
         {
             return Err(corrupt("package cache database is a link"));
         }
-        let db = Connection::open(db_path).map_err(transient)?;
+        let db = crate::sqlite_open::open(db_path).map_err(transient)?;
         db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
              CREATE TABLE IF NOT EXISTS remote_objects(
@@ -509,7 +509,7 @@ pub(crate) fn known_remote_objects(
         return Err(corrupt("package cache root is a link"));
     }
     crate::trust_boundary::open_regular_source(&path).map_err(transient)?;
-    let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    let db = crate::sqlite_open::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(transient)?;
     let mut query = db.prepare(
         "SELECT object_id,plaintext_sha256,value FROM remote_objects

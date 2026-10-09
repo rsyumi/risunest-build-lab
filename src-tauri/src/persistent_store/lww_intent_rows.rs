@@ -180,7 +180,7 @@ pub(in crate::persistent_store) struct FrozenRows {
 
 impl FrozenRows {
     pub(in crate::persistent_store) fn new() -> StoreResult<Self> {
-        let db = Connection::open("")?;
+        let db = crate::sqlite_open::open("")?;
         db.execute_batch("PRAGMA temp_store=FILE; PRAGMA cache_size=-2048;
             CREATE TABLE rows(ordinal INTEGER PRIMARY KEY,key TEXT NOT NULL UNIQUE,stamp TEXT,value TEXT NOT NULL,source_override INTEGER NOT NULL); BEGIN;")?;
         Ok(Self { db })

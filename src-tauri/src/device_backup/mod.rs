@@ -447,8 +447,8 @@ impl DeviceBackupState {
         require(header.request_id==job && header.binding_authority.0.to_string()==authority,"Portable adoption authority differs")?;
         let stage=session.stage_id.as_deref().ok_or_else(||error("device-metadata-invalid","Replacement staging identity is missing"))?;
         let persistent=self.repository_root.join("persistent");
-        let library=Connection::open_with_flags(persistent.join(crate::persistent_store::DATABASE_FILE),OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-        let device=Connection::open_with_flags(persistent.join(crate::persistent_store::device_store::DEVICE_DATABASE_FILE),OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        let library=crate::sqlite_open::open_with_flags(persistent.join(crate::persistent_store::DATABASE_FILE),OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        let device=crate::sqlite_open::open_with_flags(persistent.join(crate::persistent_store::device_store::DEVICE_DATABASE_FILE),OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         library.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
         device.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
         let generation:String=library.query_row("SELECT value FROM meta WHERE key='activeGeneration'",[],|row|row.get(0))?;
@@ -751,7 +751,7 @@ fn open(root: &Path) -> Result<Connection> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    let connection = Connection::open(path)?;
+    let connection = crate::sqlite_open::open(path)?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     connection.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA auto_vacuum=INCREMENTAL;
         CREATE TABLE IF NOT EXISTS replacements(session TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,header TEXT NOT NULL);
@@ -777,7 +777,7 @@ pub(crate) fn active_native_portable_stage(root: &Path) -> Result<Option<String>
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     }
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let connection = crate::sqlite_open::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     connection.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
     let row: Option<(String, bool, Option<String>)> = connection
         .query_row(
@@ -915,7 +915,7 @@ fn read_commit_marker(root: &Path, session: &Session) -> Result<Option<CommitMar
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     }
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let connection = crate::sqlite_open::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     connection.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
     let marker:Option<(i64,Option<String>)>=connection.query_row("SELECT length(CAST(value AS BLOB)),CASE WHEN length(CAST(value AS BLOB))<=4096 THEN value ELSE NULL END FROM app_kv WHERE key=?1",[marker_key(&session.job_id)],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     let Some((length, value)) = marker else {
@@ -948,8 +948,8 @@ fn commit_exists(connection: &Connection, root: &Path, session: &Session) -> Res
             require(header.request_id==session.job_id,"Replacement request identity mismatch")?;
             let stage=session.stage_id.as_deref().ok_or_else(||error("device-metadata-invalid","Replacement staging identity is missing"))?;
             let persistent=root.join("persistent");
-            let library=Connection::open_with_flags(persistent.join(crate::persistent_store::DATABASE_FILE),OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-            let device=Connection::open_with_flags(persistent.join(crate::persistent_store::device_store::DEVICE_DATABASE_FILE),OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+            let library=crate::sqlite_open::open_with_flags(persistent.join(crate::persistent_store::DATABASE_FILE),OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+            let device=crate::sqlite_open::open_with_flags(persistent.join(crate::persistent_store::device_store::DEVICE_DATABASE_FILE),OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
             library.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
             device.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
             return crate::persistent_store::lww::completed_device_replacement_receipt(&library,&device,&header,stage)
