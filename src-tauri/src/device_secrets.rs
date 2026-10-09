@@ -497,8 +497,16 @@ mod platform {
     }
 
     #[cfg(target_os = "macos")]
-    fn write_password(purpose: Purpose, id: &str, bytes: &[u8], _: bool) -> Result<()> {
-        set_generic_password(&service(purpose), id, bytes).map_err(|_| unavailable())
+    fn write_password(purpose: Purpose, id: &str, bytes: &[u8], replace: bool) -> Result<()> {
+        if replace {
+            let (_, mut item) = security_framework::os::macos::passwords::find_generic_password(
+                None, &service(purpose), id,
+            ).map_err(read_error)?;
+            // A non-null slice pointer lets the keychain clear an existing password.
+            item.set_password(bytes).map_err(|_| unavailable())
+        } else {
+            set_generic_password(&service(purpose), id, bytes).map_err(|_| unavailable())
+        }
     }
 
     #[cfg(target_os = "ios")]

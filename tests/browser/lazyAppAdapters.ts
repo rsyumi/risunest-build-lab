@@ -23,7 +23,7 @@ export const importCharacterProcess = () => {}, importPreset = () => {}, getData
 export const readModule = () => {}, alertConfirm = () => {}, alertNormal = () => {}, alertToast = () => {}, checkCharOrder = () => {}
 export const keepFocusedInputVisible = () => {}, restoreFocusAfterInputBlock = () => {}
 export { backNavigationLayer, handleRootBack } from '../../src/ts/ui/modalNavigation'
-export const confirmRecoveryExclusions = () => {}, isStartupExcluded = () => true, getStartupExclusions = () => [], updateStartupExclusions = () => {}
+export const offerToKeepRecoveryExclusions = async () => false, isStartupExcluded = () => true, getStartupExclusions = () => [], updateStartupExclusions = () => {}
 export const exportOriginalData = () => {}, openRisuNestSettingsTab = () => {}
 export const textEditorPopup = { request: null }
 

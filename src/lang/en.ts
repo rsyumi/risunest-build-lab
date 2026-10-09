@@ -2125,7 +2125,6 @@ export const languageEnglish = {
             environmentFailed: "Could not load version information.",
 
             title: 'App updates',
-            description: 'Check signed RisuNest releases and choose when to install them.',
             automatic: 'Check automatically',
             automaticHelp: 'Checks after the app is ready, at most once every six hours.',
             currentVersion: 'Current version',

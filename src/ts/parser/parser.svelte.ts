@@ -1,5 +1,4 @@
 import DOMPurify from 'dompurify';
-import { validImageDimensions } from '../storage/imageGeometry'
 import markdownit from 'markdown-it'
 import { appVer, getCurrentCharacter, getDatabase, type Database, type character, type customscript, type loreBook, type triggerscript } from '../storage/database.svelte';
 import { DBState, selIdState } from '../stores.svelte';
@@ -480,17 +479,6 @@ $effect.root(() => {
 const imageCBS = ['img', 'image', 'emotion', 'asset', 'bg', 'raw', 'path']
 const videoExtensions = ['mp4', 'webm', 'avi', 'm4p', 'm4v']
 
-function assetImageAttributes(image: import('../storage/blobStore').BlobImageSource | null, registry?: DeferredInlayMarkerRegistry): string {
-    if (!image) return ''
-    const dimensions = validImageDimensions(image.width, image.height) ? ` width="${image.width}" height="${image.height}"` : ''
-    const slot = registry?.register(`asset:${image.contentHash}`, {
-        url: image.url, mime: image.metadata.mime, type: 'image', name: image.metadata.name,
-        size: image.metadata.size, objectUrl: false, width: image.width, height: image.height,
-        recordDimensions: image.recordDimensions,
-    })
-    return dimensions + (slot === undefined ? '' : ` data-risu-inlay-slot="${slot}"`)
-}
-
 async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|character, mode:'normal'|'back', arg:{ch:number}, renderContext:ParseMarkdownRenderContext = {}){
     const assetWidth = renderContext.assetWidth ?? DBState.db.assetWidth
     const assetWidthString = (assetWidth && assetWidth !== -1 || assetWidth === 0) ? `max-width:${assetWidth}rem;` : ''
@@ -520,6 +508,12 @@ async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|c
 
     let needsSourceAccess = false
     let cx: number|null = null
+    const resolveImage = async (path: string) => {
+        const image = isTauri ? await getFileImageSource(path) : null
+        if (image) renderContext.deferredInlays?.rememberAssetImage(image)
+        return image
+    }
+    const resolveSource = async (path: string) => (await resolveImage(path))?.url ?? await getFileSrcCached(path)
 
     data = await replaceAsync(data, assetRegex, async (full:string, type:string, name:string) => {
         name = name.toLocaleLowerCase()
@@ -532,12 +526,12 @@ async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|c
 
         if(type === 'emotion'){
             const srcPath = resolveEmotionAsset(assetLookup, name)?.srcPaths[0]
-            const image = srcPath && isTauri ? await getFileImageSource(srcPath) : null
+            const image = srcPath ? await resolveImage(srcPath) : null
             const path = image?.url ?? (srcPath ? await getFileSrcCached(srcPath) : null)
             if(!path){
                 return ''
             }
-            return `<img src="${path}" alt="${path}" style="${assetWidthString} "${assetImageAttributes(image, renderContext.deferredInlays)}/>`
+            return `<img src="${path}" alt="${path}" style="${assetWidthString} "/>`
         }
 
         if(type === 'source'){
@@ -574,16 +568,16 @@ async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|c
             pSrc = match.srcPaths[selIndex]
         }
 
-        const image = isTauri && (type === 'img' || type === 'image') ? await getFileImageSource(pSrc) : null
+        const image = ['img', 'image', 'raw', 'path', 'asset'].includes(type) ? await resolveImage(pSrc) : null
         const p = image?.url ?? await getFileSrcCached(pSrc)
         switch(type){
             case 'raw':
             case 'path':
                 return p
             case 'img':
-                return `<img src="${p}" alt="${p}" style="${assetWidthString} "${assetImageAttributes(image, renderContext.deferredInlays)}/>`
+                return `<img src="${p}" alt="${p}" style="${assetWidthString} "/>`
             case 'image':
-                return `<div class="risu-inlay-image"><img src="${p}" alt="${p}" style="${assetWidthString}"${assetImageAttributes(image, renderContext.deferredInlays)}/></div>\n`
+                return `<div class="risu-inlay-image"><img src="${p}" alt="${p}" style="${assetWidthString}"/></div>\n`
             case 'video':
                 return `<video controls autoplay loop><source src="${p}" type="video/mp4"></video>\n`
             case 'video-img':
@@ -611,22 +605,22 @@ async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|c
         if (renderContext.characterImageSource !== undefined) {
             data = data.replace(/\uE9b4CHAR\uE9b4/g,
                 renderContext.characterImageSource
-                    ? await getFileSrc(renderContext.characterImageSource)
+                    ? await resolveSource(renderContext.characterImageSource)
                     : '',
             )
             data = data.replace(/\uE9b4USER\uE9b4/g,
                 renderContext.userImageSource
-                    ? await getFileSrc(renderContext.userImageSource)
+                    ? await resolveSource(renderContext.userImageSource)
                     : '',
             )
         }
         else {
             const chara = getCurrentCharacter()
             data = data.replace(/\uE9b4CHAR\uE9b4/g,
-                chara.image ? (await getFileSrc(chara.image)) : '',
+                chara.image ? (await resolveSource(chara.image)) : '',
             )
             data = data.replace(/\uE9b4USER\uE9b4/g,
-                getUserIcon() ? (await getFileSrc(getUserIcon())) : '',
+                getUserIcon() ? (await resolveSource(getUserIcon())) : '',
             )
         }
     }
@@ -758,6 +752,7 @@ export async function ParseMarkdown(
     renderContext:ParseMarkdownRenderContext = {},
 ) {
     renderContext.signal?.throwIfAborted()
+    renderContext = { ...renderContext, deferredInlays: renderContext.deferredInlays ?? new DeferredInlayMarkerRegistry() }
     let firstParsed = ''
     const additionalAssetMode = (mode === 'back') ? 'back' : 'normal'
     let char = (typeof(charArg) === 'string') ? (findCharacterbyId(charArg)) : (charArg)
@@ -808,6 +803,7 @@ export async function ParseMarkdown(
         chatID,
         projectedChatID: renderContext.projectedChatID,
         cbsConditions,
+        deferredInlays: renderContext.deferredInlays,
     })
 }
 
@@ -817,6 +813,7 @@ const trimPurifyConfig = {
 }
 
 export interface TrimMarkdownRenderContext {
+    deferredInlays?: DeferredInlayMarkerRegistry
     hideAllImages?: boolean
     returnCSSError?: boolean
     parserContext?: ProcessScriptCaptureContext['parserContext']
@@ -839,11 +836,11 @@ export function trimMarkdown(
     const previousHideAllImages = activeSanitizeHideAllImages
     activeSanitizeHideAllImages = renderContext.hideAllImages
     try {
-        // Without a <risu-style> there is nothing to decode, so the plain string
-        // result is already final. Note the tag itself is not trusted input:
+        // Without CSS decoding or image hints, the plain string result is final.
+        // Note that the risu-style tag itself is not trusted input:
         // risu-style is in ADD_TAGS, so cards, model output and user scripts can
         // author one directly. Only its position in the parsed tree is relied on.
-        if(!data.includes('<risu-style')){
+        if(!data.includes('<risu-style') && !renderContext.deferredInlays?.hasAssetImages){
             return DOMPurify.sanitize(data, trimPurifyConfig)
         }
 
@@ -860,6 +857,9 @@ export function trimMarkdown(
         }) as HTMLElement | null
         if(!root){
             return ''
+        }
+        if (!(renderContext.hideAllImages ?? DBState.db?.hideAllImages)) {
+            renderContext.deferredInlays?.applyAssetImageHints(root)
         }
 
         // Only real <risu-style> elements are decoded. A <risu-style> that survived
