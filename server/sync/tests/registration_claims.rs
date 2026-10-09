@@ -10,6 +10,7 @@ use risunest_sync_wire::{
     canonical,
     lww::{
         CancelOperationRequest, NewDeviceClaimReceipt, NewDeviceClaimRequest, NewDeviceClaimState,
+        WriterBindingRequest,
     },
 };
 use std::{sync::Arc, time::Duration};
@@ -543,7 +544,12 @@ async fn the_claim_route_reports_each_registration_claim_and_use_without_changin
     store
         .push(
             &actor(&store, &published),
-            &request(&store, WRITER_A, "published", vec![inline("a", WRITER_A, 1, "a")]),
+            &request(
+                &store,
+                WRITER_A,
+                "published",
+                vec![inline("a", WRITER_A, 1, "a")],
+            ),
         )
         .unwrap();
     let receipt = store
@@ -596,7 +602,12 @@ async fn the_claim_route_reports_each_registration_claim_and_use_without_changin
         store
             .push(
                 &actor(&store, &claimed),
-                &request(&store, WRITER_B, "other-writer", vec![inline("b", WRITER_B, 2, "b")]),
+                &request(
+                    &store,
+                    WRITER_B,
+                    "other-writer",
+                    vec![inline("b", WRITER_B, 2, "b")]
+                ),
             )
             .unwrap_err()
             .code,
@@ -788,4 +799,272 @@ fn a_fresh_publisher_forwards_an_entry_whose_former_publication_was_rejected() {
             entry.key.as_str().to_owned()
         ]
     );
+}
+
+fn binding(writer: &str) -> WriterBindingRequest {
+    WriterBindingRequest {
+        writer_id: writer.into(),
+    }
+}
+fn device_writers(root: &tempfile::TempDir, device: &Device) -> Vec<String> {
+    let db = metadata(root);
+    let mut query = db
+        .prepare("SELECT writer FROM writers WHERE device=?1 ORDER BY writer")
+        .unwrap();
+    let writers = query
+        .query_map([&device.id], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    writers
+}
+
+#[test]
+fn a_registration_takes_one_installation_writer_however_it_joined() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::init(root.path()).unwrap();
+    let joined = device(&store);
+    store
+        .bind_device_writer(&joined, &binding(WRITER_A))
+        .unwrap();
+    // The installation that joined binds again when it reconnects.
+    store
+        .bind_device_writer(&joined, &binding(WRITER_A))
+        .unwrap();
+    assert_eq!(
+        store.new_device_writer_claim(&joined).unwrap(),
+        NewDeviceClaimState {
+            claim: None,
+            used: true
+        }
+    );
+    // Another installation is refused before it publishes, and when it publishes anyway.
+    assert_eq!(
+        store
+            .bind_device_writer(&joined, &binding(WRITER_B))
+            .unwrap_err()
+            .code,
+        "registration-used"
+    );
+    assert_eq!(
+        store
+            .push(
+                &joined,
+                &request(
+                    &store,
+                    WRITER_B,
+                    "second",
+                    vec![inline("b", WRITER_B, 1, "b")]
+                )
+            )
+            .unwrap_err()
+            .code,
+        "writer-collision"
+    );
+    assert_eq!(
+        store
+            .claim_new_device_writer(&joined, &claim(None))
+            .unwrap_err()
+            .code,
+        "registration-used"
+    );
+    store
+        .push(
+            &joined,
+            &request(
+                &store,
+                WRITER_A,
+                "first",
+                vec![inline("a", WRITER_A, 1, "a")],
+            ),
+        )
+        .unwrap();
+    store
+        .bind_device_writer(&joined, &binding(WRITER_A))
+        .unwrap();
+    assert_eq!(device_writers(&root, &joined), [WRITER_A]);
+    // A writer another registration holds cannot join with a new code, which stays unused.
+    let fresh = device(&store);
+    assert_eq!(
+        store
+            .bind_device_writer(&fresh, &binding(WRITER_A))
+            .unwrap_err()
+            .code,
+        "writer-collision"
+    );
+    assert!(!store.new_device_writer_claim(&fresh).unwrap().used);
+    store
+        .bind_device_writer(&fresh, &binding(WRITER_B))
+        .unwrap();
+    assert_eq!(device_writers(&root, &fresh), [WRITER_B]);
+    assert_eq!(
+        store
+            .bind_device_writer(&fresh, &binding("invalid"))
+            .unwrap_err()
+            .code,
+        "invalid-writer-id"
+    );
+}
+
+#[test]
+fn a_registration_used_without_a_binding_refuses_every_other_writer() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::init(root.path()).unwrap();
+    // A client that publishes without binding first takes the registration with its first push.
+    let published = device(&store);
+    store
+        .push(
+            &published,
+            &request(
+                &store,
+                WRITER_A,
+                "first",
+                vec![inline("a", WRITER_A, 1, "a")],
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .push(
+                &published,
+                &request(
+                    &store,
+                    WRITER_B,
+                    "second",
+                    vec![inline("b", WRITER_B, 2, "b")]
+                )
+            )
+            .unwrap_err()
+            .code,
+        "writer-collision"
+    );
+    assert_eq!(
+        store
+            .bind_device_writer(&published, &binding(WRITER_B))
+            .unwrap_err()
+            .code,
+        "registration-used"
+    );
+    store
+        .bind_device_writer(&published, &binding(WRITER_A))
+        .unwrap();
+    assert_eq!(device_writers(&root, &published), [WRITER_A]);
+    // An operation alone marks a registration used.
+    let rejected = device(&store);
+    assert_eq!(
+        store
+            .push(&rejected, &request(&store, WRITER_B, "empty", vec![]))
+            .unwrap_err()
+            .code,
+        "empty-push"
+    );
+    assert_eq!(
+        store
+            .bind_device_writer(&rejected, &binding(WRITER_B))
+            .unwrap_err()
+            .code,
+        "registration-used"
+    );
+    // A claimed registration rejoins only with the writer it claimed.
+    let claimed = device(&store);
+    store
+        .claim_new_device_writer(&claimed, &claim(None))
+        .unwrap();
+    assert_eq!(
+        store
+            .bind_device_writer(&claimed, &binding(WRITER_B))
+            .unwrap_err()
+            .code,
+        "registration-used"
+    );
+    store
+        .bind_device_writer(&claimed, &binding(RESERVED))
+        .unwrap();
+    assert_eq!(device_writers(&root, &claimed), [RESERVED]);
+}
+
+#[test]
+fn a_registration_already_holding_two_writers_refuses_both() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::init(root.path()).unwrap();
+    let shared = device(&store);
+    store
+        .push(
+            &shared,
+            &request(
+                &store,
+                WRITER_A,
+                "first",
+                vec![inline("a", WRITER_A, 1, "a")],
+            ),
+        )
+        .unwrap();
+    metadata(&root)
+        .execute(
+            "INSERT INTO writers(writer,device) VALUES(?1,?2)",
+            [WRITER_B, shared.id.as_str()],
+        )
+        .unwrap();
+    for (writer, operation) in [(WRITER_A, "again-a"), (WRITER_B, "again-b")] {
+        assert_eq!(
+            store
+                .push(
+                    &shared,
+                    &request(&store, writer, operation, vec![inline("c", writer, 3, "c")])
+                )
+                .unwrap_err()
+                .code,
+            "writer-collision"
+        );
+        assert_eq!(
+            store
+                .bind_device_writer(&shared, &binding(writer))
+                .unwrap_err()
+                .code,
+            "registration-used"
+        );
+    }
+    assert_eq!(store.head().unwrap().seq.as_str(), "1");
+}
+
+#[tokio::test]
+async fn the_writer_route_binds_one_installation_and_refuses_another() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::init(root.path()).unwrap());
+    let registration = store.add_device().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = http::router(store.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let bind = |token: &str, body: Vec<u8>| {
+        client
+            .post(format!("http://{address}/session/writer"))
+            .bearer_auth(token)
+            .header("x-risu-library", &registration.library_id)
+            .body(body)
+            .send()
+    };
+    let body = |writer: &str| canonical::encode(&binding(writer)).unwrap();
+    for _ in 0..2 {
+        let response = bind(&registration.token, body(WRITER_A)).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+    }
+    let response = bind(&registration.token, body(WRITER_B)).await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(
+        response.bytes().await.unwrap().as_ref(),
+        br#"{"error":"registration-used"}"#
+    );
+    let response = bind(&registration.token, br#"{"writerId":"invalid"}"#.to_vec())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let response = bind(&"0".repeat(64), body(WRITER_B)).await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        device_writers(&root, &actor(&store, &registration)),
+        [WRITER_A]
+    );
+    server.abort();
 }

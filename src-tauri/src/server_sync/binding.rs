@@ -9,7 +9,10 @@ use crate::persistent_store::{
     PersistentStore,
 };
 use risunest_sync_wire::{
-    lww::{AckRequest, NewDeviceClaimReceipt, NewDeviceClaimRequest, NewDeviceClaimState, StatePage, StatePin},
+    lww::{
+        AckRequest, NewDeviceClaimReceipt, NewDeviceClaimRequest, NewDeviceClaimState, StatePage, StatePin,
+        WriterBindingRequest,
+    },
     stamp::DecimalU64,
     MAX_METADATA_BYTES,
 };
@@ -111,15 +114,32 @@ fn first_state_page(core: &LwwClient) -> Result<StatePage> {
     Ok(page)
 }
 /// Refuses a registration the server would refuse later in this join, before the library is read.
-/// A join that keeps this installation's writer needs a registration unclaimed or claimed by that
-/// writer. A join that claims a fresh writer needs a registration nothing has used, unless it is
-/// the claim of this installation's own fresh-writer reservation.
+/// A join that keeps this installation's writer binds that writer to the registration, which the
+/// server refuses once another writer or an operation used it; a fresh installation's writer is
+/// new to the server, so every used registration is refused. A join that claims a fresh writer
+/// needs a registration nothing has used, unless it is the claim of this installation's own
+/// fresh-writer reservation.
 fn check_registration(
     core: &LwwClient,
     store: &PersistentStore,
     config: &StoredConfig,
     claims_writer: bool,
 ) -> Result<()> {
+    if !claims_writer {
+        let request = WriterBindingRequest { writer_id: store.lww_clock_state()?.writer_id };
+        let reply = core.client.request(
+            reqwest::Method::POST,
+            "session/writer",
+            &[],
+            Some(risunest_sync_wire::canonical::encode(&request)?),
+            &[],
+            MAX_METADATA_BYTES,
+        )?;
+        if !(200..300).contains(&reply.status) {
+            return Err(super::client::response_error(reply));
+        }
+        return Ok(());
+    }
     let (_, state): (_, NewDeviceClaimState) = core.client.json(
         reqwest::Method::GET,
         "session/claim-writer",
@@ -127,15 +147,7 @@ fn check_registration(
         None::<&()>,
         &[],
     )?;
-    let claimed = state.claim.map(|claim| claim.receipt.writer_id);
-    if !claims_writer {
-        let writer = store.lww_clock_state()?.writer_id;
-        return match claimed {
-            Some(claimed) if claimed != writer => Err(SyncError::new("registration-used", 409)),
-            _ => Ok(()),
-        };
-    }
-    if let Some(claimed) = claimed {
+    if let Some(claimed) = state.claim.map(|claim| claim.receipt.writer_id) {
         let reserved = claim_record::<FreshWriterReservation>(
             &core.log,
             &fresh_writer_record("fresh-writer", config),
@@ -1715,7 +1727,7 @@ mod tests {
         gone.store(true, std::sync::atomic::Ordering::SeqCst);
         let live = LocalServerFixture::new();
         let fresh = configure(&live, &a);
-        let inspected = inspect(&a, &header(&a), false).unwrap();
+        let inspected = inspect(&a, &header(&a), true).unwrap();
         assert!(!inspected.previously_bound_library);
         let request = header(&a);
         let staged = stage(&mut a, &request, &inspected.inspection_id, None).unwrap();
@@ -2318,6 +2330,17 @@ mod tests {
         let stored = StoredConfig::persist(store.repository_root(), config).unwrap();
         OperationLog::open(store.repository_root()).unwrap().save_config("candidate", &stored).unwrap();
     }
+    /// A second writer on one registration, which a store written before a registration took a
+    /// single installation can hold.
+    fn add_second_writer(server: &LocalServerFixture, config: &super::super::client::ServerConfig) {
+        rusqlite::Connection::open(server.root().join("metadata.sqlite"))
+            .unwrap()
+            .execute(
+                "INSERT INTO writers(writer,device) VALUES(?1,?2)",
+                [uuid::Uuid::new_v4().to_string(), config.device_id.clone()],
+            )
+            .unwrap();
+    }
     /// What the old installation of a registration claimed before this one received the code.
     fn claim_for_other_installation(server: &LocalServerFixture, config: &super::super::client::ServerConfig) {
         let device = server.server.authenticate(&config.library_id, &config.token).unwrap();
@@ -2330,13 +2353,15 @@ mod tests {
             })
             .unwrap();
     }
-    /// Asserts that a join was refused with `code` after reading only the registration.
+    /// Asserts that a join was refused with `code` after only the session, the clock and the
+    /// registration check, which binds this installation's writer or reads a claim. Returns the
+    /// requests the join sent.
     fn refused_before_reading_the_library(
         store: &PersistentStore,
         requests: &std::sync::Mutex<Vec<String>>,
         new_device: bool,
         code: &str,
-    ) {
+    ) -> Vec<String> {
         let inspections = || -> i64 {
             OperationLog::open(store.repository_root()).unwrap().0
                 .query_row("SELECT count(*) FROM bindings", [], |r| r.get(0))
@@ -2346,12 +2371,14 @@ mod tests {
         requests.lock().unwrap().clear();
         assert_eq!(inspect(store, &header(store), new_device).err().expect("refused").code, code);
         let seen = std::mem::take(&mut *requests.lock().unwrap());
-        assert!(seen.contains(&"GET /session/claim-writer".to_string()), "{seen:?}");
+        let checks = ["GET /session/claim-writer", "POST /session/writer"];
+        assert_eq!(seen.iter().filter(|request| checks.contains(&request.as_str())).count(), 1, "{seen:?}");
         assert!(
-            seen.iter().all(|request| ["GET /time", "GET /session", "GET /session/claim-writer"].contains(&request.as_str())),
+            seen.iter().all(|request| ["GET /time", "GET /session"].contains(&request.as_str()) || checks.contains(&request.as_str())),
             "{seen:?}"
         );
         assert_eq!(inspections(), before);
+        seen
     }
     #[test]
     fn a_registration_another_installation_claimed_is_refused_before_the_library_is_read() {
@@ -2374,24 +2401,59 @@ mod tests {
         assert_eq!(inspected.library_id, fresh.library_id);
     }
     #[test]
-    fn a_used_registration_joins_as_its_installations_but_not_as_a_new_device() {
+    fn a_registration_joins_again_only_as_the_installation_that_joined_with_it() {
         let (server, requests) = recording_server();
         let (_a_root, mut a) = local();
         let shared = configure(&server, &a);
         bind(&mut a);
-        // Nothing used the registration yet, and it is the one this device holds.
-        refused_before_reading_the_library(&a, &requests, true, "registration-not-new");
+        // Joining took the registration for this installation's writer, so it is used at once.
+        refused_before_reading_the_library(&a, &requests, true, "registration-used");
         save(&mut a, &["root", "language"], serde_json::json!("ja"));
         assert!(push_now(&bound_client(&a), &mut a).unwrap().is_some());
-        refused_before_reading_the_library(&a, &requests, true, "registration-used");
-        // An unclaimed registration takes any installation's writer, so a rejoin or a second
-        // installation joining with it is not refused.
         enter_code(&a, &shared);
         inspect(&a, &header(&a), false).unwrap();
         let (_b_root, b) = local();
         enter_code(&b, &shared);
-        inspect(&b, &header(&b), false).unwrap();
+        refused_before_reading_the_library(&b, &requests, false, "registration-used");
         refused_before_reading_the_library(&b, &requests, true, "registration-used");
+        // The installation that joined still publishes after the refusals.
+        save(&mut a, &["root", "language"], serde_json::json!("ko"));
+        assert!(push_now(&bound_client(&a), &mut a).unwrap().is_some());
+    }
+    #[test]
+    fn a_reinstalled_app_needs_a_new_code_even_when_the_old_installation_never_published() {
+        use crate::server_sync::lww_tests::{drain_publications, receive_available};
+        let (server, requests) = recording_server();
+        let (_a_root, mut a) = local();
+        let published = configure(&server, &a);
+        bind(&mut a);
+        save(&mut a, &["root", "language"], serde_json::json!("ja"));
+        drain_publications(&bound_client(&a), &mut a, &[]).unwrap();
+        let (_q_root, mut quiet) = local();
+        let joined = configure(&server, &quiet);
+        bind(&mut quiet);
+        // A reinstall has a writer the server never saw, so it is refused with either code after
+        // binding was refused, before any state or staging request.
+        for code in [&published, &joined] {
+            let (_root, reinstalled) = local();
+            enter_code(&reinstalled, code);
+            let seen = refused_before_reading_the_library(&reinstalled, &requests, false, "registration-used");
+            assert!(seen.contains(&"POST /session/writer".to_string()), "{seen:?}");
+            refused_before_reading_the_library(&reinstalled, &requests, true, "registration-used");
+        }
+        for (store, code) in [(&a, &published), (&quiet, &joined)] {
+            enter_code(store, code);
+            inspect(store, &header(store), false).unwrap();
+        }
+        let (_root, mut reinstalled) = local();
+        server.prepare_binding_candidate(&reinstalled);
+        let counters = std::sync::Arc::new(super::super::client::TestIoCounters::default());
+        first_binding_cycle(&mut reinstalled, counters, |_| {}).unwrap();
+        assert_eq!(reinstalled.read_root(None).unwrap().value["language"], "ja");
+        save(&mut reinstalled, &["root", "language"], serde_json::json!("ko"));
+        assert!(push_now(&bound_client(&reinstalled), &mut reinstalled).unwrap().is_some());
+        receive_available(&bound_client(&a), &mut a, &[]).unwrap();
+        assert_eq!(a.read_root(None).unwrap().value["language"], "ko");
     }
     #[test]
     fn a_registration_claimed_by_this_installation_rejoins_and_resumes_its_own_claim() {
@@ -2427,8 +2489,7 @@ mod tests {
         let (_root, mut reinstalled) = local();
         let reused = configure(&server, &reinstalled);
         bind(&mut reinstalled);
-        // The installation that first used the code claims it after this one joined.
-        claim_for_other_installation(&server, &reused);
+        add_second_writer(&server, &reused);
         let (_p_root, mut peer_store) = local();
         let peer = server.client(&peer_store);
         save(&mut peer_store, &["root", "language"], serde_json::json!("ja"));
@@ -2437,7 +2498,7 @@ mod tests {
         assert_eq!(push_now(&bound_client(&reinstalled), &mut reinstalled).unwrap_err().code, "writer-collision");
         // Connecting as a new device with the same code is refused before the library is read.
         enter_code(&reinstalled, &reused);
-        refused_before_reading_the_library(&reinstalled, &requests, true, "registration-integrity");
+        refused_before_reading_the_library(&reinstalled, &requests, true, "registration-used");
         let fresh = configure(&server, &reinstalled);
         let inspected = inspect(&reinstalled, &header(&reinstalled), true).unwrap();
         assert!(inspected.previously_bound_library && inspected.registration_changed);

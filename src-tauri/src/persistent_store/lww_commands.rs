@@ -121,7 +121,8 @@ mod tests {
             cmd: cmd.into(),
             callback: CallbackFn(0),
             error: CallbackFn(1),
-            url: "http://tauri.localhost".parse().unwrap(),
+            // The app origin differs by platform, and the mock runtime refuses any other origin at once.
+            url: if cfg!(any(windows, target_os = "android")) { "http://tauri.localhost" } else { "tauri://localhost" }.parse().unwrap(),
             body: InvokeBody::Json(body),
             headers: Default::default(),
             invoke_key: tauri::test::INVOKE_KEY.to_string(),

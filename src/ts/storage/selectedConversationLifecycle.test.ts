@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto'
 import { describe, expect, it, vi } from 'vitest'
-import { ActiveWorkingSet } from './activeWorkingSet.svelte'
+import { ActiveWorkingSet, SelectedConversationPromotionStaleError } from './activeWorkingSet.svelte'
 import type { Chat, Database, character } from './database.svelte'
 import type {
     ConversationWindowQuery,
@@ -665,6 +665,129 @@ describe('selected conversation lifecycle', () => {
         expect(harness.workingSet.activeConversationSession).toBeNull()
         expect(() => harness.getResident().chats[0].message).toThrow('metadata-only')
         expect(harness.workingSet.captureSelectedConversationAuthority()).not.toBeNull()
+    })
+
+    it('waits for background persistence queued during the promotion read', async () => {
+        const harness = makeHarness(3)
+        expect(harness.workingSet.tryDemoteSelectedConversation()).toBe(true)
+        const target = harness.workingSet.captureSelectedConversationTarget()!
+        harness.setReadConversation(vi.fn(async () => {
+            harness.setPendingPersistence(true)
+            return { revision: 7, value: structuredClone(harness.persistedConversation) }
+        }) as typeof harness.readConversation)
+        harness.coordinator.flushPendingData.mockImplementation(async () => {
+            harness.setPendingPersistence(false)
+        })
+
+        const lease = await harness.workingSet.acquireCompleteConversation('bound-editor', target)
+
+        expect(harness.coordinator.flushPendingData).toHaveBeenCalledTimes(2)
+        expect(harness.readConversation).toHaveBeenCalledOnce()
+        expect(harness.workingSet.selectedConversationMode).toBe('complete')
+        expect(lease.session.totalMessages).toBe(3)
+        lease.release()
+    })
+
+    it('reads the conversation again when background persistence moves the promotion revision', async () => {
+        const harness = makeHarness(3)
+        expect(harness.workingSet.tryDemoteSelectedConversation()).toBe(true)
+        const target = harness.workingSet.captureSelectedConversationTarget()!
+        let revision = 7
+        harness.setReadConversation(vi.fn(async () => {
+            if (revision === 7) harness.setPendingPersistence(true)
+            return { revision, value: structuredClone(harness.persistedConversation) }
+        }) as typeof harness.readConversation)
+        harness.coordinator.flushPendingData.mockImplementation(async () => {
+            if (!harness.coordinator.hasPendingPersistenceWork) return
+            harness.setPendingPersistence(false)
+            revision = 8
+            harness.setCoordinatorRevision(8)
+            harness.workingSet.advanceStoreRevision(8, undefined, true)
+        })
+
+        const lease = await harness.workingSet.acquireCompleteConversation('bound-editor', target)
+
+        expect(harness.readConversation).toHaveBeenCalledTimes(2)
+        expect(harness.workingSet.selectedConversationMode).toBe('complete')
+        expect(lease.target.storeRevision).toBe(8)
+        lease.release()
+    })
+
+    it('adopts the complete conversation a save published while the promotion settled', async () => {
+        const harness = makeHarness(3)
+        expect(harness.workingSet.tryDemoteSelectedConversation()).toBe(true)
+        const target = harness.workingSet.captureSelectedConversationTarget()!
+        harness.setReadConversation(vi.fn(async () => {
+            harness.setPendingPersistence(true)
+            return { revision: 7, value: structuredClone(harness.persistedConversation) }
+        }) as typeof harness.readConversation)
+        harness.coordinator.flushPendingData.mockImplementation(async () => {
+            if (!harness.coordinator.hasPendingPersistenceWork) return
+            harness.setPendingPersistence(false)
+            expect(harness.workingSet.completeWindowedConversationForSave(
+                harness.workingSet.captureSelectedConversationAuthority()!,
+                structuredClone(harness.persistedConversation.message),
+            )).not.toBeNull()
+        })
+        const publishCount = harness.published.mock.calls.length
+
+        const lease = await harness.workingSet.acquireCompleteConversation('bound-editor', target)
+
+        expect(harness.readConversation).toHaveBeenCalledOnce()
+        expect(harness.published).toHaveBeenCalledTimes(publishCount + 1)
+        expect(harness.workingSet.selectedConversationMode).toBe('complete')
+        expect(lease.session.totalMessages).toBe(3)
+        lease.release()
+    })
+
+    it('stops settling a promotion when background persistence never drains', async () => {
+        const harness = makeHarness(3)
+        expect(harness.workingSet.tryDemoteSelectedConversation()).toBe(true)
+        const target = harness.workingSet.captureSelectedConversationTarget()!
+        harness.setReadConversation(vi.fn(async () => {
+            harness.setPendingPersistence(true)
+            return { revision: 7, value: structuredClone(harness.persistedConversation) }
+        }) as typeof harness.readConversation)
+        harness.coordinator.flushPendingData.mockImplementation(async () => {
+            if (harness.coordinator.flushPendingData.mock.calls.length > 64) {
+                throw new Error('unbounded promotion settle')
+            }
+        })
+
+        await expect(harness.workingSet.acquireCompleteConversation('bound-editor', target))
+            .rejects.toThrow('selected conversation transition is busy')
+
+        expect(harness.coordinator.flushPendingData).toHaveBeenCalledTimes(9)
+        expect(harness.readConversation).toHaveBeenCalledOnce()
+        expect(harness.workingSet.selectedConversationMode).toBe('windowed')
+    })
+
+    it('refuses a promotion after bounded rereads when persistence keeps moving its revision', async () => {
+        const harness = makeHarness(3)
+        expect(harness.workingSet.tryDemoteSelectedConversation()).toBe(true)
+        const target = harness.workingSet.captureSelectedConversationTarget()!
+        let revision = 7
+        harness.setReadConversation(vi.fn(async () => {
+            if (harness.readConversation.mock.calls.length > 16) {
+                throw new Error('unbounded promotion reread')
+            }
+            harness.setPendingPersistence(true)
+            return { revision, value: structuredClone(harness.persistedConversation) }
+        }) as typeof harness.readConversation)
+        harness.coordinator.flushPendingData.mockImplementation(async () => {
+            if (!harness.coordinator.hasPendingPersistenceWork) return
+            harness.setPendingPersistence(false)
+            revision++
+            harness.setCoordinatorRevision(revision)
+            harness.workingSet.advanceStoreRevision(revision, undefined, true)
+        })
+
+        await expect(harness.workingSet.acquireCompleteConversation('bound-editor', target))
+            .rejects.toBeInstanceOf(SelectedConversationPromotionStaleError)
+
+        expect(harness.readConversation).toHaveBeenCalledTimes(4)
+        expect(harness.workingSet.selectedConversationMode).toBe('windowed')
+        expect(harness.workingSet.captureSelectedConversationTarget()?.storeRevision).toBe(revision)
     })
 
     it('keeps the windowed owner when complete adoption fails after publication', async () => {

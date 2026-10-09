@@ -101,12 +101,17 @@ impl UnitValue {
     pub fn object(descriptor: RecordDescriptor) -> Result<Self> {
         Ok(Self::Object { descriptor_hash: descriptor.hash()?, descriptor })
     }
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> { self.validated_inline().map(drop) }
+    /// Validates the value and, for an inline one, returns its decoded bytes and the JSON they parse to.
+    pub fn validated_inline(&self) -> Result<Option<(Vec<u8>, serde_json::Value)>> {
         match self {
             Self::Inline { bytes } => {
                 let decoded = URL_SAFE_NO_PAD.decode(bytes).map_err(|_| WireError("invalid-inline-value"))?;
                 if decoded.len() > MAX_INLINE_UNIT_BYTES { return Err(WireError("inline-unit-too-large")); }
-                if URL_SAFE_NO_PAD.encode(&decoded) != *bytes || payload_value::canonicalize(&decoded)? != decoded { return Err(WireError("noncanonical-inline-value")); }
+                if URL_SAFE_NO_PAD.encode(&decoded) != *bytes { return Err(WireError("noncanonical-inline-value")); }
+                let value = payload_value::parse(&decoded)?;
+                if payload_value::encode(&value)? != decoded { return Err(WireError("noncanonical-inline-value")); }
+                return Ok(Some((decoded, value)));
             }
             Self::Object { descriptor_hash, descriptor } => {
                 validate_hash(descriptor_hash)?; descriptor.validate()?;
@@ -114,7 +119,7 @@ impl UnitValue {
             }
             Self::Deleted => {}
         }
-        Ok(())
+        Ok(None)
     }
     pub fn identity(&self) -> Result<String> { self.validate()?; Ok(hash(&canonical::encode(self)?)) }
 }

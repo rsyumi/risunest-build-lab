@@ -935,6 +935,7 @@ pub(crate) struct PersistentStore {
     // failure is carried until something actually needs per-device state.
     device_store: Result<device_store::DeviceStore, StoreError>,
     message_object_roots: MessageObjectRootsCache,
+    status_library_roots: Arc<StatusLibraryRoots>,
 }
 
 /// Disk-backed roots each sweep target last read, kept while neither
@@ -1147,6 +1148,61 @@ pub(crate) struct AssetGcLibraryRoots {
         Vec<crate::asset_repository::migration_gc::AssetRootSet>,
         std::sync::Arc<crate::asset_repository::migration_gc::AssetGcMarks>,
     )>,
+}
+
+/// The library roots the last residency status read, shared by a store and the job
+/// stores opened from it. A connection that never writes reads the library's
+/// `data_version` before each collection, so any commit since makes the next
+/// status read the roots again.
+#[derive(Default)]
+struct StatusLibraryRoots(std::sync::Mutex<StatusLibraryRootsState>);
+
+#[derive(Default)]
+struct StatusLibraryRootsState {
+    observer: Option<Connection>,
+    roots: Option<AssetGcLibraryRoots>,
+}
+
+impl StatusLibraryRoots {
+    /// The library's `data_version` now and the roots stored last, or `None`
+    /// when the version cannot be read.
+    fn take(&self, database_path: &Path) -> Option<(i64, Option<AssetGcLibraryRoots>)> {
+        let mut state = self.lock();
+        if state.observer.is_none() {
+            state.observer = Self::open_observer(database_path).ok();
+        }
+        let data_version = state.observer.as_ref()?
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .ok()?;
+        Some((data_version, state.roots.take()))
+    }
+
+    fn put(&self, roots: Option<AssetGcLibraryRoots>) {
+        self.lock().roots = roots;
+    }
+
+    /// Opens the library as the revision readers do, never creating it.
+    fn open_observer(database_path: &Path) -> StoreResult<Connection> {
+        let open = |flags| -> StoreResult<Connection> {
+            let connection = Connection::open_with_flags(database_path, flags)?;
+            connection.execute_batch("PRAGMA query_only = ON;")?;
+            Ok(connection)
+        };
+        let preferred = snapshot::revision_reader_open_flags_for_target(cfg!(target_os = "android"));
+        if cfg!(target_os = "android") {
+            return open(preferred);
+        }
+        open(preferred).or_else(|_| open(OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, StatusLibraryRootsState> {
+        self.0.lock().unwrap_or_else(|poisoned| {
+            self.0.clear_poison();
+            let mut state = poisoned.into_inner();
+            state.roots = None;
+            state
+        })
+    }
 }
 
 pub(crate) struct AssetGcPreview {
@@ -1575,6 +1631,7 @@ impl PersistentStore {
             snapshots_dir,
             device_store,
             message_object_roots: MessageObjectRootsCache::default(),
+            status_library_roots: Arc::default(),
         };
         // A pending intent may still need its staging generation, so the sweep waits until
         // every intent recovery still runs has settled.
@@ -1604,6 +1661,7 @@ impl PersistentStore {
             snapshots_dir: self.snapshots_dir.clone(),
             device_store,
             message_object_roots: MessageObjectRootsCache::default(),
+            status_library_roots: Arc::clone(&self.status_library_roots),
         })
     }
 
@@ -1944,29 +2002,6 @@ impl PersistentStore {
         commit: &WorkingSetCommit,
         asset_aliases: &[AssetAlias],
     ) -> StoreResult<RevisionResult> {
-        let resolved;
-        let commit = if let Some(mutations) = &commit.root_mutations {
-            if commit.root.is_some() {
-                return Err(StoreError::Validation {
-                    message: "Root and rootMutations are mutually exclusive".to_owned(),
-                });
-            }
-            let current = self.read_root(None)?;
-            if current.revision != commit.expected_revision {
-                return Err(StoreError::RevisionConflict {
-                    expected: commit.expected_revision,
-                    actual: current.revision,
-                });
-            }
-            resolved = WorkingSetCommit {
-                root: Some(commit::apply_root_mutations(current.value, mutations)?),
-                root_mutations: None,
-                ..commit.clone()
-            };
-            &resolved
-        } else {
-            commit
-        };
         self.lww_commit(commit, asset_aliases)
     }
 
@@ -3315,6 +3350,26 @@ impl PersistentStore {
         _backup_references: Option<&mut std::collections::BTreeSet<String>>,
     ) -> StoreResult<Vec<(&'static str, crate::asset_repository::migration_gc::AssetRootSet)>> {
         self.collect_asset_gc_roots_with_plugin_cache(repository_guard_held, read_only, None)
+    }
+
+    /// The GC roots a residency status reads. The library's own roots are reused from an
+    /// earlier status while no commit has reached the library since that status read them.
+    fn collect_status_asset_gc_roots(
+        &self,
+    ) -> StoreResult<Vec<(&'static str, crate::asset_repository::migration_gc::AssetRootSet)>> {
+        // Writes of an open transaction are seen only by its own connection.
+        let cached = if self.connection.is_autocommit() {
+            self.status_library_roots.take(&self.database_path)
+        } else {
+            None
+        };
+        let Some((data_version, mut library)) = cached else {
+            return self.collect_asset_gc_roots_with_plugin_cache(false, false, None);
+        };
+        // The observer never writes, so its `data_version` alone moves with every commit.
+        let roots = self.collect_asset_gc_roots_reusing_library(false, false, None, Some((&mut library, data_version, 0)));
+        self.status_library_roots.put(library);
+        roots
     }
 
     fn collect_asset_gc_roots_with_plugin_cache(
