@@ -72,19 +72,6 @@ describe('streaming display defaults', () => {
         ).toBe(true)
     })
 
-    it('isolates settled chat history by default and preserves the all-messages choice', () => {
-        expect(
-            normalizeDatabaseDefaults({ characters: [] } as Database)
-                .chatMessageOverflowScope,
-        ).toBe('latest')
-        expect(
-            normalizeDatabaseDefaults({
-                characters: [],
-                chatMessageOverflowScope: 'all',
-            } as Database).chatMessageOverflowScope,
-        ).toBe('all')
-    })
-
     it('edits chat messages in the popup by default and preserves the inline choice', () => {
         expect(
             normalizeDatabaseDefaults({ characters: [] } as Database)

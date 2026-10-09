@@ -1,7 +1,7 @@
 use crate::{ConnectError, Directory, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
-use url::{Host, Url};
+use url::Url;
 
 pub const REGISTRATION_PREFIX: &str = "risunestlocal://sync-server/register#";
 pub const MAX_REGISTRATION_URI_BYTES: usize = 2048;
@@ -28,7 +28,7 @@ fn directory_if_present<'de, D: serde::Deserializer<'de>>(
     Directory::deserialize(deserializer).map(Some)
 }
 
-pub fn validate_endpoint(value: &str, allow_loopback: bool) -> Result<Url> {
+pub fn validate_endpoint(value: &str) -> Result<Url> {
     if value.is_empty()
         || value.len() > MAX_URL_BYTES
         || value.chars().any(|c| c.is_control() || c.is_whitespace())
@@ -55,11 +55,8 @@ pub fn validate_endpoint(value: &str, allow_loopback: bool) -> Result<Url> {
     {
         return Err(ConnectError("invalid-endpoint"));
     }
-    let loopback = matches!(url.host(), Some(Host::Ipv4(ip)) if ip.is_loopback())
-        || matches!(url.host(), Some(Host::Ipv6(ip)) if ip.is_loopback())
-        || url.host_str() == Some("localhost");
-    if url.scheme() != "https" && !(allow_loopback && url.scheme() == "http" && loopback) {
-        return Err(ConnectError("https-required"));
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(ConnectError("invalid-endpoint"));
     }
     url.set_path(&format!("{}/", url.path().trim_end_matches('/')));
     Ok(url)
@@ -75,7 +72,7 @@ impl Registration {
         if let Some(directory) = &self.directory {
             directory.validate()?;
         }
-        validate_endpoint(&self.endpoint, true)
+        validate_endpoint(&self.endpoint)
     }
     pub fn encode_uri(&self) -> Result<String> {
         self.validate()?;

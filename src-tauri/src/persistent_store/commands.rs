@@ -1,4 +1,5 @@
 pub(crate) mod data_health;
+pub(crate) mod image_geometry;
 pub(crate) mod hypa;
 
 use super::archive::ArchivePreview;

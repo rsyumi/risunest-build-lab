@@ -12,6 +12,7 @@
     import RisuNestSettingRows from '../RisuNest/RisuNestSettingRows.svelte'
     import RisuNestPerformanceSettings from './RisuNestPerformanceSettings.svelte'
     import RisuNestInlayInventory from './RisuNestInlayInventory.svelte'
+    import RisuNestImageGeometry from './RisuNestImageGeometry.svelte'
     import RisuNestPluginData from './RisuNestPluginData.svelte'
     import RisuNestLocalData from './RisuNestLocalData.svelte'
     import ServerSyncSettings from './ServerSyncSettings.svelte'
@@ -116,6 +117,7 @@
             {/if}
             <RisuNestInlayInventory />
             {#if isTauri}
+                <RisuNestImageGeometry />
                 <RisuNestDataHealth onOpenUnusedImages={() => jumpTo('risunest-storage')} />
             {/if}
             <RisuNestBackupRestore />

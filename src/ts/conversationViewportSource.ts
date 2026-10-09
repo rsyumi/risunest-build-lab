@@ -13,11 +13,13 @@ import type { Message } from './storage/database.svelte'
 import type {
     ConversationWindow,
     ConversationWindowQuery,
+    ConversationMessageMetadataWindow,
     DataRevision,
     Versioned,
 } from './storage/persistentDataStore'
 import { validateConversationWindowQuery } from './storage/persistentDataStore'
 import { replaceArrayRange } from './arrayRange'
+import { yieldToMainThread } from './ui/yieldToUi'
 
 declare const conversationViewportKeyBrand: unique symbol
 
@@ -64,6 +66,7 @@ export interface ConversationViewportPin {
 export interface ConversationViewportSource {
     snapshot(): ConversationViewportSnapshot
     ensureRange(input: ConversationViewportRangeRequest): Promise<void>
+    findLatestMessagePair?(signal: AbortSignal): Promise<number[]>
     acquireRangePin(
         startIndex: number,
         endIndex: number,
@@ -83,6 +86,9 @@ export interface PersistentConversationWindowReader {
     readConversationWindow(
         input: ConversationWindowQuery,
     ): Promise<Versioned<ConversationWindow> | null>
+    readConversationMessageMetadataWindow?(
+        input: ConversationWindowQuery,
+    ): Promise<Versioned<ConversationMessageMetadataWindow> | null>
 }
 
 export interface PersistentConversationViewportSourceOptions {
@@ -99,6 +105,29 @@ let nextSourceToken = 0
 function createSourceToken(): string {
     nextSourceToken += 1
     return `conversation-viewport-source-${nextSourceToken}`
+}
+
+async function scanLatestMessagePair(
+    totalMessages: number,
+    readPage: (start: number, limit: number, found: ReadonlyMap<Message['role'], number>) => Promise<readonly (Readonly<Message> | undefined)[]>,
+    signal: AbortSignal,
+): Promise<number[]> {
+    const found = new Map<Message['role'], number>()
+    for (let end = totalMessages; end > 0 && found.size < 2; end = Math.max(0, end - 64)) {
+        signal.throwIfAborted()
+        const start = Math.max(0, end - 64)
+        const messages = await readPage(start, end - start, found)
+        signal.throwIfAborted()
+        for (let offset = messages.length - 1; offset >= 0; offset--) {
+            const message = messages[offset]
+            if (message && !message.disabled && !message.isComment &&
+                (message.role === 'user' || message.role === 'char') && !found.has(message.role)) {
+                found.set(message.role, start + offset)
+            }
+        }
+        if (found.size < 2 && start > 0) await yieldToMainThread()
+    }
+    return [...found.values()].sort((left, right) => left - right)
 }
 
 export class SynchronousSessionConversationViewportSource
@@ -118,6 +147,7 @@ implements ConversationViewportSource {
     private lastSessionVersion: number
     private nextInsertedKey = 0
     private disposed = false
+    private latestPair: Promise<number[]> | null = null
 
     constructor(options: SynchronousSessionConversationViewportSourceOptions) {
         this.session = options.session
@@ -144,6 +174,20 @@ implements ConversationViewportSource {
             indexOfKey: (key) => keyIndices.get(key) ?? -1,
             rowAt: (absoluteIndex) => rows.get(absoluteIndex),
         }
+    }
+
+    findLatestMessagePair(signal: AbortSignal): Promise<number[]> {
+        this.assertUsable()
+        if (this.latestPair) return this.latestPair
+        const lookup = scanLatestMessagePair(
+            this.keys.length,
+            async (start, limit) => this.session.readRange(start, limit).messages,
+            signal,
+        ).then((indices) => {
+            if (this.disposed || this.latestPair !== lookup) throw new DOMException('Conversation changed during pair lookup', 'AbortError')
+            return indices
+        }).catch((error) => { if (this.latestPair === lookup) this.latestPair = null; throw error })
+        return this.latestPair = lookup
     }
 
     async ensureRange(input: ConversationViewportRangeRequest): Promise<void> {
@@ -269,6 +313,7 @@ implements ConversationViewportSource {
             this.lastSessionVersion = event.sessionVersion
             return
         }
+        this.latestPair = null
         const previousKeys = this.keys
         this.reconcileKeys(event)
         this.lastSessionVersion = this.session.version
@@ -383,6 +428,7 @@ implements ConversationViewportSource {
     private accessClock = 0
     private nextPinId = 0
     private disposed = false
+    private latestPair: Promise<number[]> | null = null
 
     constructor(options: PersistentConversationViewportSourceOptions) {
         if (typeof options.characterId !== 'string' || options.characterId.length === 0) {
@@ -417,6 +463,87 @@ implements ConversationViewportSource {
             indexOfKey: (key) => this.indexOfKey(epoch, totalMessages, key),
             rowAt: (absoluteIndex) => this.rowAt(epoch, absoluteIndex),
         }
+    }
+
+    findLatestMessagePair(signal: AbortSignal): Promise<number[]> {
+        this.assertUsable()
+        if (this.latestPair) return this.latestPair
+        const resident = new Map<Message['role'], number>()
+        let index = this.totalMessages - 1
+        for (; index >= 0 && resident.size < 2; index--) {
+            const message = this.rows.get(index)?.row.message
+            if (!message) break
+            if (!message.disabled && !message.isComment && (message.role === 'char' || message.role === 'user') && !resident.has(message.role)) {
+                resident.set(message.role, index)
+            }
+        }
+        if (resident.size === 2 || index < 0) return this.latestPair = Promise.resolve([...resident.values()].sort((left, right) => left - right))
+        const revision = this.currentRevision
+        const epoch = this.epoch
+        const sameConversationRevision = (value: number | undefined) => !this.disposed && epoch === this.epoch &&
+            value !== undefined && value >= revision && value <= this.currentRevision
+        const lookup = scanLatestMessagePair(this.totalMessages, async (start, limit, found) => {
+            const query = { characterId: this.characterId, conversationId: this.conversationId, startIndex: start, limit }
+            if (this.reader.readConversationMessageMetadataWindow) {
+                const metadata = await this.reader.readConversationMessageMetadataWindow(query)
+                if (!sameConversationRevision(metadata?.revision) || !metadata) {
+                    throw new DOMException('Conversation changed during pair lookup', 'AbortError')
+                }
+                if (metadata.value.characterId !== this.characterId || metadata.value.conversationId !== this.conversationId ||
+                    metadata.value.startIndex !== Math.min(start, this.persistedTotalMessages) ||
+                    metadata.value.endIndex !== Math.min(start + limit, this.persistedTotalMessages) ||
+                    metadata.value.messages.length !== metadata.value.endIndex - metadata.value.startIndex ||
+                    metadata.value.totalMessages !== this.persistedTotalMessages) {
+                    throw new Error('Conversation pair lookup returned mismatched metadata')
+                }
+                const messages: (Readonly<Message> | undefined)[] = new Array(limit)
+                const roles = new Set(found.keys())
+                for (let offset = limit - 1; offset >= 0 && roles.size < 2; offset--) {
+                    signal.throwIfAborted()
+                    const index = start + offset
+                    const optimistic = this.optimisticRows.has(index) ? this.rows.get(index)?.row.message : undefined
+                    const summary = optimistic ?? metadata.value.messages[offset]
+                    if (!summary || summary.disabled || (summary.role !== 'char' && summary.role !== 'user') || roles.has(summary.role)) continue
+                    let message = optimistic ?? this.rows.get(index)?.row.message
+                    if (!message) {
+                        const body = await this.reader.readConversationWindow({ ...query, startIndex: index, limit: 1 })
+                        if (!sameConversationRevision(body?.revision) || !body || body.value.startIndex !== index ||
+                            body.value.endIndex !== index + 1 || body.value.messages.length !== 1 ||
+                            body.value.characterId !== this.characterId || body.value.conversationId !== this.conversationId ||
+                            body.value.totalMessages !== this.persistedTotalMessages) {
+                            throw new DOMException('Conversation changed during pair lookup', 'AbortError')
+                        }
+                        message = body.value.messages[0]
+                    }
+                    if (message && !message.isComment && !message.disabled && message.role === summary.role) {
+                        messages[offset] = message
+                        roles.add(message.role)
+                    }
+                }
+                return messages
+            }
+            const result = await this.reader.readConversationWindow(query)
+            if (!sameConversationRevision(result?.revision) || !result) {
+                throw new DOMException('Conversation changed during pair lookup', 'AbortError')
+            }
+            if (result.value.characterId !== this.characterId || result.value.conversationId !== this.conversationId ||
+                result.value.startIndex !== Math.min(start, this.persistedTotalMessages) ||
+                result.value.endIndex !== Math.min(start + limit, this.persistedTotalMessages) ||
+                result.value.messages.length !== result.value.endIndex - result.value.startIndex ||
+                result.value.totalMessages !== this.persistedTotalMessages) {
+                throw new Error('Conversation pair lookup returned a mismatched window')
+            }
+            return Array.from({ length: limit }, (_, offset) => {
+                const index = start + offset
+                return this.optimisticRows.has(index)
+                    ? this.rows.get(index)!.row.message
+                    : result.value.messages[offset]
+            })
+        }, signal).then((indices) => {
+            if (this.disposed || this.latestPair !== lookup) throw new DOMException('Conversation changed during pair lookup', 'AbortError')
+            return indices
+        }).catch((error) => { if (this.latestPair === lookup) this.latestPair = null; throw error })
+        return this.latestPair = lookup
     }
 
     async ensureRange(input: ConversationViewportRangeRequest): Promise<void> {
@@ -491,6 +618,7 @@ implements ConversationViewportSource {
             // count only at the end of the conversation.
             || (messages.length !== deleteCount && startIndex + deleteCount !== this.totalMessages)
         ) throw new RangeError('Optimistic conversation range is unsupported')
+        this.latestPair = null
         const previousRows = new Map(this.rows)
         const previousOptimisticRows = new Set(this.optimisticRows)
         const previousTotalMessages = this.totalMessages
@@ -521,6 +649,7 @@ implements ConversationViewportSource {
         return () => {
             if (restored || this.disposed) return
             restored = true
+            this.latestPair = null
             this.rows = previousRows
             this.optimisticRows = previousOptimisticRows
             this.totalMessages = previousTotalMessages
@@ -536,6 +665,7 @@ implements ConversationViewportSource {
             throw new RangeError('Persistent conversation revision must advance')
         }
         this.currentRevision = revision
+        this.latestPair = null
         this.persistedTotalMessages = totalMessages
         this.totalMessages = totalMessages
         this.epoch += 1

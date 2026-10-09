@@ -148,9 +148,37 @@ fn bounded_uri_preserves_long_input_without_truncation() {
 }
 
 #[test]
+fn http_endpoints_roundtrip_through_registration_and_directory() {
+    for endpoint in [
+        "http://127.0.0.1:14319",
+        "http://192.168.0.10:14319/base",
+        "http://10.0.0.10:14319",
+        "http://[fd00::10]:14319",
+        "http://sync.internal:14319",
+        "http://203.0.113.10:14319",
+    ] {
+        let mut value = registration();
+        value.endpoint = endpoint.into();
+        for base_url in ["https://registry.example", "http://registry.internal:14320"] {
+            let config = Directory { base_url: base_url.into(), ..directory() };
+            value.directory = Some(config.clone());
+            let uri = value.encode_uri().unwrap();
+            let decoded = Registration::parse_uri(&uri).unwrap();
+            assert_eq!(decoded.endpoint, endpoint);
+            assert_eq!(decoded.directory.unwrap().base_url, base_url);
+            let envelope = seal_endpoint(&config.uuid, &config.key, endpoint).unwrap();
+            assert_eq!(open_endpoint(&config.uuid, &config.key, &envelope).unwrap(), endpoint);
+        }
+        value.directory = None;
+        assert_eq!(Registration::parse_uri(&value.encode_uri().unwrap()).unwrap().endpoint, endpoint);
+    }
+}
+
+#[test]
 fn rejects_unsafe_endpoints_and_invalid_directory_credentials() {
     for endpoint in [
-        "http://192.168.1.1",
+        "ftp://sync.example",
+        "http://u:p@sync.example",
         "file:///test",
         "https://u:p@sync.example",
         "https://sync.example/?",
@@ -188,7 +216,7 @@ fn randomized_envelopes_detect_nonce_ciphertext_and_tag_corruption() {
         bad[position] ^= 1;
         assert!(open_endpoint(&config.uuid, &config.key, &URL_SAFE_NO_PAD.encode(bad)).is_err());
     }
-    assert!(seal_endpoint(&config.uuid, &config.key, "http://127.0.0.1:4319").is_err());
+    assert!(seal_endpoint(&config.uuid, &config.key, "ftp://sync.example").is_err());
 }
 
 #[test]

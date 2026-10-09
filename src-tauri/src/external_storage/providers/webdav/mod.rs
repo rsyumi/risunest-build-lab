@@ -28,6 +28,7 @@
 //! to the root, which any device can resolve on its own.
 mod multistatus;
 mod paths;
+mod redirect;
 #[cfg(test)]
 mod tests;
 
@@ -152,8 +153,7 @@ fn settings(config: &ConnectionConfig) -> Result<Settings> {
         return Err(unsupported());
     }
     // The user-id half of the Basic credentials cannot carry a colon.
-    if config.account_id.is_empty()
-        || config.account_id.len() > MAX_ACCOUNT_BYTES
+    if config.account_id.len() > MAX_ACCOUNT_BYTES
         || config.account_id.contains(':')
         || config.account_id.chars().any(char::is_control)
     {
@@ -181,12 +181,12 @@ struct RepositoryContext {
     base: Url,
     identity: String,
     account: super::super::quota::AccountKey,
-    authorization: Zeroizing<String>,
+    authorization: Option<Zeroizing<String>>,
 }
 impl RepositoryContext {
     fn new(settings: &Settings, password: &SecretBytes) -> Result<Self> {
         let reauth = || ProviderError::new(ErrorKind::ReauthRequired);
-        if password.0.is_empty() || password.0.len() > MAX_PASSWORD_BYTES {
+        if password.0.len() > MAX_PASSWORD_BYTES {
             return Err(reauth());
         }
         let password = std::str::from_utf8(&password.0).map_err(|_| reauth())?;
@@ -200,12 +200,12 @@ impl RepositoryContext {
             account: super::super::quota::AccountKey::new(
                 PROVIDER_ID,
                 &settings.endpoint,
-                &settings.account_id,
+                &format!("webdav:{}", settings.account_id),
             )?,
-            authorization: Zeroizing::new(format!(
+            authorization: (!(settings.account_id.is_empty() && password.is_empty())).then(|| Zeroizing::new(format!(
                 "Basic {}",
                 STANDARD.encode(credentials.as_bytes())
-            )),
+            ))),
             endpoint: settings.endpoint.clone(),
         })
     }
@@ -425,10 +425,9 @@ impl WebdavProvider {
         operation: ProviderOperation,
     ) -> HttpRequest {
         let mut headers = BTreeMap::new();
-        headers.insert(
-            "authorization".to_owned(),
-            context.authorization.to_string(),
-        );
+        if let Some(authorization) = &context.authorization {
+            headers.insert("authorization".to_owned(), authorization.to_string());
+        }
         if http::control_operation(operation) {
             http::bypass_cache(&mut headers);
         }
@@ -446,11 +445,11 @@ impl WebdavProvider {
         }
     }
     async fn send(&self, request: HttpRequest, cancel: &Cancellation) -> Result<HttpResponse> {
-        self.dependencies.send(request, cancel).await
+        self.send_redirects(request, redirect::Body::Empty, cancel).await.map(|(response, _)| response)
     }
     /// WebDAV gives two statuses a meaning the shared classification does not
     /// carry: 409 is a missing ancestor collection, 423 a write lock another
-    /// client holds. Redirects stay unsupported; this adapter follows none.
+    /// client holds.
     fn classify(&self, response: &HttpResponse) -> ProviderError {
         match response.status {
             409 => common::error(ErrorKind::NotFound, 409),
@@ -474,7 +473,7 @@ impl WebdavProvider {
         url: Url,
         depth: &str,
         cancel: &Cancellation,
-    ) -> Result<Option<Vec<multistatus::Entry>>> {
+    ) -> Result<Option<(Url, Vec<multistatus::Entry>)>> {
         let mut request = self.request(
             context,
             dav_method("PROPFIND"),
@@ -486,16 +485,14 @@ impl WebdavProvider {
             "content-type".to_owned(),
             "application/xml; charset=\"utf-8\"".to_owned(),
         );
-        request.body = Some(Box::pin(std::io::Cursor::new(PROPFIND_BODY)) as _);
-        request.content_length = Some(PROPFIND_BODY.len() as u64);
-        let mut response = self.send(request, cancel).await?;
+        let (mut response, final_url) = self.send_redirects(request, redirect::Body::Bytes(PROPFIND_BODY), cancel).await?;
         if response.status == 404 {
             return Ok(None);
         }
         self.require(&response, &[207])?;
         let body =
             common::read_bounded(&mut response.body, if depth == "1" { 16 * 1024 * 1024 } else { common::MAX_CONTROL_BODY }, cancel).await?;
-        Ok(Some(if depth == "1" { multistatus::parse_complete(&body)? } else { multistatus::parse(&body)? }))
+        Ok(Some((final_url, if depth == "1" { multistatus::parse_complete(&body)? } else { multistatus::parse(&body)? })))
     }
 
     /// The resource itself, through a `Depth: 0` request.
@@ -506,7 +503,7 @@ impl WebdavProvider {
         cancel: &Cancellation,
     ) -> Result<Option<Member>> {
         let url = paths::object_url(&context.base, object);
-        let Some(entries) = self.propfind(context, url.clone(), "0", cancel).await? else {
+        let Some((url, entries)) = self.propfind(context, url, "0", cancel).await? else {
             return Ok(None);
         };
         let target = paths::decoded_segments(&url)?;
@@ -564,7 +561,7 @@ impl WebdavProvider {
                 continue;
             }
             match self.propfind(context, url.clone(), "0", cancel).await? {
-                Some(entries) => require_exact_collection(&url, &entries)?,
+                Some((resolved, entries)) => require_exact_collection(&resolved, &entries)?,
                 None => self.mkcol_new(context, url, cancel).await?,
             }
         }
@@ -610,7 +607,7 @@ impl WebdavProvider {
     ) -> Result<()> {
         for folder in ROLE_FOLDERS {
             let url = paths::collection_url(&context.base, &[folder.to_owned()]);
-            let entries = self
+            let (url, entries) = self
                 .propfind(context, url.clone(), "1", cancel)
                 .await?
                 .ok_or_else(|| ProviderError::new(ErrorKind::PreconditionFailed))?;
@@ -684,9 +681,7 @@ impl WebdavProvider {
         request
             .headers
             .insert("content-type".to_owned(), OCTET_STREAM.to_owned());
-        request.content_length = Some(bytes.len() as u64);
-        request.body = Some(Box::pin(std::io::Cursor::new(bytes)) as _);
-        let response = self.send(request, cancel).await?;
+        let (response, _) = self.send_redirects(request, redirect::Body::Bytes(&bytes), cancel).await?;
         self.require(&response, &[200, 201, 204])?;
         Ok(HeadReceipt {
             version: strong_etag(&response.headers),
@@ -734,6 +729,10 @@ impl Provider for WebdavProvider {
             // is there and what it already holds.
             let root = paths::collection_url(&context.base, &[]);
             let listing = self.propfind(&context, root.clone(), "1", cancel).await?;
+            let (root, listing) = match listing {
+                Some((resolved, entries)) => (resolved, Some(entries)),
+                None => (root, None),
+            };
             match (mode, listing) {
                 (OpenMode::Existing, None) => return Err(ProviderError::new(ErrorKind::NotFound)),
                 (OpenMode::Existing, Some(entries)) => {
@@ -870,9 +869,7 @@ impl Provider for WebdavProvider {
             request
                 .headers
                 .insert("content-type".to_owned(), OCTET_STREAM.to_owned());
-            request.body = Some(source.open(0, intent.byte_length, cancel).await?);
-            request.content_length = Some(intent.byte_length);
-            let response = self.send(request, cancel).await?;
+            let (response, _) = self.send_redirects(request, redirect::Body::Source(source), cancel).await?;
             if response.status == 412 {
                 return self
                     .converged(repository, &object, intent, locator, cancel)
@@ -1011,7 +1008,7 @@ impl Provider for WebdavProvider {
                 listing
             } else {
                 let url = paths::collection_url(&context.base, std::slice::from_ref(&folder));
-                let entries = self.propfind(context, url.clone(), "1", cancel).await?
+                let (url, entries) = self.propfind(context, url.clone(), "1", cancel).await?
                     .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
                 require_exact_collection(&url, &entries)?;
                 let all = strict_members(&url, &entries)?;

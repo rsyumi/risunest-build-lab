@@ -56,8 +56,11 @@ describe('external storage connection request', () => {
         },
     )
 
-    it('retains the WebDAV username required for authentication', () => {
+    it('retains supplied WebDAV credentials and allows either field to be empty', () => {
         expect(buildConnectionConfig('webdav', { accountId: ' dav-user ' }, 'windows').accountId).toBe('dav-user')
+        expect(buildConnectionConfig('webdav', {}, 'windows').accountId).toBe('')
+        expect(buildProviderSecret('webdav', {})).toEqual({ kind: 'webdav', password: '' })
+        expect(buildProviderSecret('webdav', { password: 'secret' })).toEqual({ kind: 'webdav', password: 'secret' })
     })
 
     it('sends a GitLab access token without a token-kind negotiation field', () => {

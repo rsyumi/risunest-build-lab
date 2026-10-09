@@ -58,7 +58,8 @@ describe("server registration", () => {
     for (const endpoint of [
       "https://@sync.example",
       "https://a:b@sync.example",
-      "http://example.com",
+      "ftp://example.com",
+      "http://a:b@sync.example",
       "https://sync.example?",
       "https://sync.example#",
       "https://sync.example/ white",
@@ -74,5 +75,22 @@ describe("server registration", () => {
           directory: { ...vector.registration.directory, key },
         }),
       ).toThrow();
+  });
+  it.each([
+    "http://127.0.0.1:14319",
+    "http://192.168.0.10:14319/base",
+    "http://10.0.0.10:14319",
+    "http://[fd00::10]:14319",
+    "http://sync.internal:14319",
+    "http://203.0.113.10:14319",
+  ])("preserves HTTP endpoint %s with and without a registry", (endpoint) => {
+    for (const directory of [
+      undefined,
+      vector.registration.directory,
+      { ...vector.registration.directory, baseUrl: "http://registry.internal:14320" },
+    ]) {
+      const registration = { ...vector.registration, endpoint, directory };
+      expect(parseServerRegistration(encodeServerRegistration(registration))).toEqual(registration);
+    }
   });
 });

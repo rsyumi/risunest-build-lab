@@ -82,8 +82,9 @@ class TestResizeObserver {
     emit(target: Element, height: number) {
         this.callback([{
             target,
+            borderBoxSize: [{ blockSize: height, inlineSize: 500 }],
             contentRect: { height } as DOMRectReadOnly,
-        } as ResizeObserverEntry], this as unknown as ResizeObserver)
+        } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver)
     }
 }
 
@@ -349,6 +350,7 @@ describe('Chats imperative mount lifecycle', () => {
             await Promise.resolve()
             document.body.replaceChildren()
             vi.unstubAllGlobals()
+            vi.restoreAllMocks()
         }
     })
 
@@ -679,6 +681,51 @@ describe('Chats imperative mount lifecycle', () => {
         expect(scan.reads).toBeGreaterThanOrEqual(initialReads + 10_000)
     })
 
+    test('retries a latest-pair lookup invalidated before a queued source update runs', async () => {
+        const messages = Array.from({ length: 100 }, (_, index) => makeMessage(index))
+        messages[98].role = 'user'
+        const currentCharacter = makeCharacter(messages)
+        const { session, source } = makeViewportSource(currentCharacter)
+        let reject!: (error: unknown) => void
+        let lookup = new Promise<number[]>((_resolve, fail) => { reject = fail })
+        const find = vi.spyOn(source, 'findLatestMessagePair').mockImplementation(() => lookup)
+        mounted = mount(ChatsHarness, { target, props: { initialMessages: messages, initialCharacter: currentCharacter, initialViewportSource: source } })
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(64))
+        const replacement = Promise.resolve([98, 99])
+        lookup = replacement
+        reject(new DOMException('Synthetic conversation changed', 'AbortError'))
+        session.edit(session.locate(99), { ...messages[99], data: 'synthetic changed row' })
+        await vi.waitFor(() => expect(find.mock.results.some(result => result.value === replacement)).toBe(true))
+        expect(target.querySelector('[data-chat-history-load-error]')).toBeNull()
+    })
+
+    test('prepares by viewport height and preserves latest-pair plugin DOM across an old-history jump', async () => {
+        vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+            return this.classList.contains('scroll-parent') ? 600 : 0
+        })
+        const messages = Array.from({ length: 1_000 }, (_, index) => makeMessage(index))
+        const source = makePersistentViewportSource(messages)
+        mounted = mount(ChatsHarness, { target, props: { initialCharacter: makeMetadataOnlyCharacter(), initialViewportSource: source } })
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(5))
+        const tail = target.querySelector<HTMLElement>('[data-chat-index="999"]')!
+        TestResizeObserver.instances[0].emit(tail, 10_000)
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(2))
+        const pair = [998, 999].map(index => target.querySelector<HTMLElement>(`[data-chat-index="${index}"]`)!)
+        const button = document.createElement('button')
+        const clicked = vi.fn()
+        button.addEventListener('click', clicked)
+        pair[0].append(button)
+        await expect((mounted as HarnessInstance).jumpTo(500)).resolves.toBe(true)
+        expect(probeElements(target).length).toBeLessThan(16)
+        expect(target.querySelector('[data-chat-index="998"]')).toBe(pair[0])
+        expect(target.querySelector('[data-chat-index="999"]')).toBe(pair[1])
+        button.click()
+        expect(clicked).toHaveBeenCalledOnce()
+        expect(source.snapshot().rowAt(998)).toBeDefined()
+        expect(source.snapshot().rowAt(999)).toBeDefined()
+        expect(target.querySelector('[data-chat-index="500"]')).not.toBeNull()
+    })
+
     test('keeps 10,000 settled turns within the profile mount budget across direct jumps', async () => {
         const messages = Array.from({ length: 10_000 }, (_, index) => makeMessage(index))
         mounted = mount(ChatsHarness, {
@@ -698,8 +745,8 @@ describe('Chats imperative mount lifecycle', () => {
         expect(chatMountProbe.mounts.length - chatMountProbe.unmounts.length).toBeLessThanOrEqual(65)
     })
 
-    test('mounts at most four new rows before yielding and reserves queued row height', async () => {
-        schedulingMocks.state.controlled = true
+    test('prepares at most two unfinished bodies and reserves queued row height', async () => {
+        chatMountProbe.holdDisplay = true
         const messages = Array.from({ length: 64 }, (_, index) =>
             makeMessage(index),
         )
@@ -711,12 +758,12 @@ describe('Chats imperative mount lifecycle', () => {
             },
         })
 
-        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(4))
-        expect(schedulingMocks.yieldToMainThread).toHaveBeenCalledOnce()
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(2))
+        expect(chatMountProbe.pendingDisplays.size).toBe(2)
         const queuedRows = [
             ...target.querySelectorAll<HTMLElement>('.chat-message-container'),
         ].filter((element) => !element.querySelector('[data-chat-probe]'))
-        expect(queuedRows).toHaveLength(60)
+        expect(queuedRows).toHaveLength(62)
         expect(
             queuedRows.every(
                 (element) =>
@@ -725,22 +772,26 @@ describe('Chats imperative mount lifecycle', () => {
             ),
         ).toBe(true)
 
-        schedulingMocks.state.controlled = false
-        schedulingMocks.releaseAll()
+        chatMountProbe.pendingDisplays.values().next().value!()
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(3))
+        expect(chatMountProbe.pendingDisplays.size).toBe(2)
+        chatMountProbe.holdDisplay = false
+        for (const settle of [...chatMountProbe.pendingDisplays.values()]) settle()
         await vi.waitFor(() => expect(probeElements(target)).toHaveLength(64))
     })
 
-    test('coalesces immediately resolved parser projections before mounting rows', async () => {
-        schedulingMocks.state.controlled = true
-        const messages = Array.from({ length: 8 }, (_, index) =>
+    test('bounds unfinished projections before message bodies mount', async () => {
+        const ready = deferred<void>()
+        const messages = Array.from({ length: 80 }, (_, index) =>
             makeMessage(index),
         )
         const currentCharacter = makeCharacter(messages)
         const { source } = makeViewportSource(currentCharacter)
         const resolver: LiveChatParserProjectionResolver = {
-            resolve: vi.fn(async ({ row }) =>
-                boundedProjection(currentCharacter, row.absoluteIndex),
-            ),
+            resolve: vi.fn(async ({ row }) => {
+                await ready.promise
+                return boundedProjection(currentCharacter, row.absoluteIndex)
+            }),
         }
         mounted = mount(ChatsHarness, {
             target,
@@ -753,14 +804,29 @@ describe('Chats imperative mount lifecycle', () => {
         })
 
         await vi.waitFor(() =>
-            expect(resolver.resolve).toHaveBeenCalledTimes(8),
+            expect(resolver.resolve).toHaveBeenCalledTimes(2),
         )
         await Promise.resolve()
-        expect(schedulingMocks.yieldToMainThread).toHaveBeenCalledOnce()
         expect(probeElements(target)).toHaveLength(0)
 
-        schedulingMocks.releaseNext()
-        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(4))
+        ready.resolve()
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(64))
+    })
+
+    test('includes the greeting in the two unfinished body preparations', async () => {
+        chatMountProbe.holdDisplay = true
+        const messages = Array.from({ length: 8 }, (_, index) => makeMessage(index))
+        const currentCharacter = makeCharacter(messages)
+        const { source } = makeViewportSource(currentCharacter)
+        mounted = mount(ChatsHarness, { target, props: { initialCharacter: currentCharacter, initialViewportSource: source } })
+        await vi.waitFor(() => expect(chatMountProbe.pendingDisplays.size).toBe(2))
+        expect(target.querySelectorAll('[data-chat-probe]')).toHaveLength(2)
+        expect(conversationStartProbe(target)).not.toBeNull()
+        await tick()
+        expect(chatMountProbe.pendingDisplays.size).toBe(2)
+        chatMountProbe.holdDisplay = false
+        for (const settle of [...chatMountProbe.pendingDisplays.values()]) settle()
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(8))
     })
 
     test('waits for a queued jump target to mount before resolving navigation', async () => {
@@ -775,7 +841,7 @@ describe('Chats imperative mount lifecycle', () => {
                 initialCharacter: makeCharacter(messages),
             },
         })
-        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(4))
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(2))
 
         let settled = false
         const jumping = (mounted as HarnessInstance)
@@ -811,7 +877,7 @@ describe('Chats imperative mount lifecycle', () => {
                 initialCharacter: makeCharacter(oldMessages),
             },
         })
-        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(4))
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(2))
         const oldMountCount = chatMountProbe.mounts.length
 
         const nextMessages = Array.from({ length: 20 }, (_, index) =>
@@ -1585,18 +1651,19 @@ describe('Chats imperative mount lifecycle', () => {
                 parserProjectionResolver: resolver,
             },
         })
-        await vi.waitFor(() => expect(projections.has(50)).toBe(true))
+        await vi.waitFor(() => expect(projections.has(98)).toBe(true))
 
         const jumping = (mounted as HarnessInstance).jumpTo(35)
+        projections.get(99)!.resolve(boundedProjection(currentCharacter, 99))
         await vi.waitFor(() => expect(projections.has(35)).toBe(true))
         projections.get(35)!.resolve(boundedProjection(currentCharacter, 35))
         await expect(jumping).resolves.toBe(true)
 
-        projections.get(50)!.resolve(boundedProjection(currentCharacter, 50))
+        projections.get(98)!.resolve(boundedProjection(currentCharacter, 98))
         await vi.waitFor(() =>
             expect(
                 probeElements(target).some(
-                    (element) => element.dataset.message === 'message-50',
+                    (element) => element.dataset.message === 'message-98',
                 ),
             ).toBe(true),
         )
@@ -2439,7 +2506,8 @@ describe('Chats imperative mount lifecycle', () => {
         expect(pendingEditorDrafts('character-id', 'chat-room-id')).toEqual([])
         // The view moved to the draft, not only its pinned row.
         await vi.waitFor(() => expect(probeElements(target).some((node) => node.dataset.message === 'message-6')).toBe(true))
-        expect(probeElements(target).some((node) => node.dataset.message === 'message-199')).toBe(false)
+        expect(probeElements(target).some((node) => node.dataset.message === 'message-199')).toBe(true)
+        expect(probeElements(target).some((node) => node.dataset.message === 'message-197')).toBe(false)
     })
 
     test('keeps an older windowed message with a draft loaded through a new navigation generation', async () => {
@@ -2481,7 +2549,8 @@ describe('Chats imperative mount lifecycle', () => {
         expect(jump.startIndex).toBeLessThanOrEqual(5)
         expect(jump.startIndex + jump.limit).toBeGreaterThan(5)
         await vi.waitFor(() => expect(probeElements(target).some((node) => node.dataset.message === 'message-6')).toBe(true))
-        expect(probeElements(target).some((node) => node.dataset.message === 'message-199')).toBe(false)
+        expect(probeElements(target).some((node) => node.dataset.message === 'message-199')).toBe(true)
+        expect(probeElements(target).some((node) => node.dataset.message === 'message-197')).toBe(false)
     })
 
     test.each(['middle', 'home'] as const)('seeks directly into a distant virtual gap: %s', async (position) => {
@@ -2552,7 +2621,8 @@ describe('Chats imperative mount lifecycle', () => {
         } finally {
             align.mockRestore()
         }
-        expect(probeElements(target).some((node) => node.dataset.message === 'message-199')).toBe(false)
+        expect(probeElements(target).some((node) => node.dataset.message === 'message-199')).toBe(true)
+        expect(probeElements(target).some((node) => node.dataset.message === 'message-197')).toBe(false)
 
         scrollParent.scrollTop = -4_000
         await expect((mounted as HarnessInstance).jumpToBottom()).resolves.toBe(true)
@@ -3070,10 +3140,10 @@ describe('Chats imperative mount lifecycle', () => {
         )
         schedulingMocks.releaseNext()
         await vi.waitFor(() =>
-            expect(chatMountProbe.displayUpdates).toHaveLength(4),
+            expect(chatMountProbe.displayUpdates).toHaveLength(2),
         )
         expect(chatMountProbe.displayUpdates.map((update) => update.index)).toEqual(
-            [11, 10, 9, 8],
+            [11, 10],
         )
         const previousSignals = chatMountProbe.displayUpdates.map(
             (update) => update.signal,
@@ -3085,9 +3155,9 @@ describe('Chats imperative mount lifecycle', () => {
         schedulingMocks.state.controlled = false
         schedulingMocks.releaseAll()
         await vi.waitFor(() =>
-            expect(chatMountProbe.displayUpdates).toHaveLength(16),
+            expect(chatMountProbe.displayUpdates).toHaveLength(14),
         )
-        const next = chatMountProbe.displayUpdates.slice(4)
+        const next = chatMountProbe.displayUpdates.slice(2)
         expect(next.map((update) => update.index)).toEqual([
             11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
         ])
@@ -3249,12 +3319,10 @@ describe('Chats imperative mount lifecycle', () => {
                 }) as DOMRect
         }
         scrollParent.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }))
-        TestResizeObserver.instances[0].emit(anchor, 100)
+        scrollParent.dispatchEvent(new Event('scroll'))
         anchorTop = 150
-        for (const [frame, callback] of [...pendingFrames]) {
-            pendingFrames.delete(frame)
-            callback(0)
-        }
+        ;(mounted as HarnessInstance).replaceParserDependencies()
+        await tick()
         expect(scrollParent.scrollBy).toHaveBeenCalledWith({
             top: 50,
             behavior: 'instant',
@@ -3436,7 +3504,7 @@ describe('Chats imperative mount lifecycle', () => {
         ).toBe(false))
     })
 
-    test('pins the newest streaming row during an old-history jump and releases it when settled', async () => {
+    test('keeps the latest pair after streaming settles during an old-history jump', async () => {
         const messages = Array.from({ length: 200 }, (_, index) => makeMessage(index))
         messages.at(-1)!.role = 'char'
         mounted = mount(ChatsHarness, {
@@ -3453,10 +3521,10 @@ describe('Chats imperative mount lifecycle', () => {
         await tick()
         await vi.waitFor(() => expect(
             probeElements(target).some((element) => element.dataset.message === 'message-199'),
-        ).toBe(false))
+        ).toBe(true))
     })
 
-    test('corrects the stable-key anchor after a measured height change', async () => {
+    test('does not add an app scroll correction for a measured content size change', async () => {
         const messages = Array.from({ length: 200 }, (_, index) =>
             makeMessage(index),
         )
@@ -3505,12 +3573,10 @@ describe('Chats imperative mount lifecycle', () => {
         TestResizeObserver.instances[0].emit(anchor, 100)
         anchorTop = 170
 
-        await vi.waitFor(() =>
-            expect(scrollParent.scrollBy).toHaveBeenCalledWith({
-                top: 50,
-                behavior: 'instant',
-            }),
-        )
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        await tick()
+        expect(scrollParent.scrollBy).not.toHaveBeenCalled()
+        expect(anchor.getBoundingClientRect().top).toBe(170)
     })
 
     test('forgets deleted row heights before the same message ID is reused', async () => {
@@ -3783,11 +3849,8 @@ describe('Chats imperative mount lifecycle', () => {
             pendingFrames.delete(frame),
         )
         anchorTop = 170
-        TestResizeObserver.instances[0].emit(anchor, 100)
-        for (const [frame, callback] of [...pendingFrames]) {
-            pendingFrames.delete(frame)
-            callback(0)
-        }
+        ;(mounted as HarnessInstance).replaceParserDependencies()
+        await tick()
         expect(scrollParent.scrollBy).toHaveBeenCalledWith({
             top: 50,
             behavior: 'instant',
@@ -3937,7 +4000,7 @@ describe('Chats imperative mount lifecycle', () => {
         },
     )
 
-    test('preserves the user-visible keyed row offset when delayed content growth precedes resize delivery', async () => {
+    test('keeps row DOM without a second position adjustment after delayed content growth', async () => {
         const messages = Array.from({ length: 200 }, (_, index) =>
             makeMessage(index),
         )
@@ -3995,6 +4058,29 @@ describe('Chats imperative mount lifecycle', () => {
         expect(target.querySelector(`[data-chat-render-key="${anchorKey}"]`)).toBe(
             anchor,
         )
-        expect(anchor.getBoundingClientRect().top).toBe(readerOffset)
+        expect(anchor.getBoundingClientRect().top).toBe(readerOffset - growth)
+        expect(scrollParent.scrollBy).not.toHaveBeenCalled()
+    })
+
+    test('keeps gaps and plugin children without geometry reads on size-only updates', async () => {
+        const messages = Array.from({ length: 200 }, (_, index) => makeMessage(index))
+        mounted = mount(ChatsHarness, {
+            target,
+            props: { initialMessages: messages, initialCharacter: makeCharacter(messages) },
+        })
+        await vi.waitFor(() => expect(probeElements(target)).toHaveLength(64))
+        const gap = target.querySelector<HTMLElement>('[data-chat-gap]')!
+        const row = target.querySelector<HTMLElement>('[data-chat-index="199"]')!
+        const pluginControl = document.createElement('button')
+        row.append(pluginControl)
+        const read = vi.spyOn(row, 'getBoundingClientRect')
+        const mounts = chatMountProbe.mounts.length
+        TestResizeObserver.instances[0].emit(row, 10_000)
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        await tick()
+        expect(target.querySelector('[data-chat-gap]')).toBe(gap)
+        expect(row.contains(pluginControl)).toBe(true)
+        expect(chatMountProbe.mounts).toHaveLength(mounts)
+        expect(read).not.toHaveBeenCalled()
     })
 })

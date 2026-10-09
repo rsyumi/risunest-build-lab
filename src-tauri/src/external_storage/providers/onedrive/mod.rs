@@ -880,7 +880,7 @@ impl OneDrive {
         path: &str,
         cancel: &Cancellation,
     ) -> Result<ObjectReceipt> {
-        let session = self.open_session(&resume.sealed_state, intent).await?;
+        let session = self.open_session(&resume.data.secret()?, intent).await?;
         let upload_url = url::Url::parse(&session.upload_url).map_err(|_| corrupt())?;
         let mut offset = resume.confirmed_offset;
         for _ in 0..MAX_FRAGMENT_REQUESTS {
@@ -1227,7 +1227,7 @@ impl Provider for OneDrive {
                 byte_length: intent.byte_length,
             })?;
             Ok(Some(ResumeState {
-                sealed_state: self.deps.vault.store(&sealed).await?,
+                data: self.deps.vault.store(&sealed).await?.into(),
                 confirmed_offset: 0,
                 expires_at_ms: graph::expires_at_ms(session.expiration_date_time.as_ref()),
             }))
@@ -1412,7 +1412,7 @@ impl Provider for OneDrive {
             intent.validate(repository)?;
             let path = config::object_path(intent.role, &intent.object_id)?;
             if let Some(resume) = resume {
-                let session = self.open_session(&resume.sealed_state, intent).await?;
+                let session = self.open_session(&resume.data.secret()?, intent).await?;
                 let url = url::Url::parse(&session.upload_url).map_err(|_| corrupt())?;
                 let request = self.request(
                     reqwest::Method::GET,
@@ -1434,7 +1434,7 @@ impl Provider for OneDrive {
                             .filter(|offset| *offset < intent.byte_length)
                         {
                             return Ok(UploadResolution::Resumable(ResumeState {
-                                sealed_state: resume.sealed_state.clone(),
+                                data: resume.data.clone(),
                                 confirmed_offset: offset,
                                 expires_at_ms,
                             }));

@@ -35,6 +35,8 @@ export const chatMountProbe = {
         rowKey: string
     }[],
     throwNextMount: false,
+    holdDisplay: false,
+    pendingDisplays: new Map<number, () => void>(),
     activeEditors: new Set<number>(),
     closeEditors: new Map<number, () => void>(),
     editorDrafts: new Map<number, Omit<ChatEditorDraft, 'index' | 'caret'>>(),
@@ -49,6 +51,8 @@ export function resetChatMountProbe() {
     chatMountProbe.displayUpdates = []
     chatMountProbe.viewportBindings = []
     chatMountProbe.throwNextMount = false
+    chatMountProbe.holdDisplay = false
+    chatMountProbe.pendingDisplays.clear()
     chatMountProbe.activeEditors = new Set()
     chatMountProbe.closeEditors = new Map()
     chatMountProbe.editorDrafts = new Map()

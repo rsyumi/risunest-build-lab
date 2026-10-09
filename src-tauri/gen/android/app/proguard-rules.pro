@@ -20,9 +20,6 @@
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
 
-# Native credential access uses this class by name through JNI.
--keep class io.github.rsyumi.risunest.ServerSyncSecrets { *; }
-
 # Native TLS calls the Android certificate verifier by name through JNI.
 -keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }
 -keep class io.github.rsyumi.risunest.PlatformTls {
@@ -30,7 +27,7 @@
 }
 
 # Rust invokes these static entry points by name; keep their JNI signatures.
--keep class io.github.rsyumi.risunest.ExternalStorageSecrets {
+-keep class io.github.rsyumi.risunest.DeviceSecrets {
     public static native void initialize();
     public static byte[] seal(java.lang.String, byte[]);
     public static byte[] open(java.lang.String, byte[]);

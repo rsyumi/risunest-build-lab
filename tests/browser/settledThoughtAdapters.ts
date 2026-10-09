@@ -24,6 +24,7 @@ export const getUserIcon = () => ''
 export const getChatVar = () => 'null'
 export const getGlobalChatVar = () => 'null'
 const unexpected = () => { throw new Error('Unexpected settled-thought fixture service access') }
+export const getFileImageSource = unexpected
 export const getFileSrc = unexpected
 export const setChatVar = unexpected
 export const processScriptFull = unexpected

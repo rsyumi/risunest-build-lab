@@ -34,7 +34,7 @@ impl Readiness {
                 .chars()
                 .take_while(|c| !c.is_whitespace() && *c != '|')
                 .collect();
-            if let Ok(url) = risunest_sync_connect::validate_endpoint(&candidate, false) {
+            if let Ok(url) = risunest_sync_connect::validate_endpoint(&candidate) {
                 let host = url.host_str().unwrap_or("");
                 let name = host.strip_suffix(".trycloudflare.com").unwrap_or("");
                 if !name.is_empty()

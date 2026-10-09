@@ -64,14 +64,12 @@ class RustWebViewClient {
 
     @Test fun nativeInitializersRemainVerifiedWhenR8OmitsTheirMappingLines() {
         val mapping = """
-io.github.rsyumi.risunest.ExternalStorageSecrets -> io.github.rsyumi.risunest.ExternalStorageSecrets:
+io.github.rsyumi.risunest.DeviceSecrets -> io.github.rsyumi.risunest.DeviceSecrets:
     11:20:byte[] open(java.lang.String,byte[]):83:83 -> open
-io.github.rsyumi.risunest.ServerSyncSecrets -> io.github.rsyumi.risunest.ServerSyncSecrets:
-    6:11:byte[] open(byte[]):61:61 -> open
 """.trimIndent()
         assertFalse(mapping.contains("initialize"))
-        val dump = nativeInitializer("ExternalStorageSecrets") + nativeInitializer("ServerSyncSecrets").replace("#1", "#2")
-        assertEquals(setOf("ExternalStorageSecrets", "ServerSyncSecrets"), retainedJniNativeInitializers(dump))
+        val dump = nativeInitializer("DeviceSecrets")
+        assertEquals(setOf("DeviceSecrets"), retainedJniNativeInitializers(dump))
         assertEquals(retainedJniNativeInitializers(dump), retainedJniNativeInitializers(dump.replace("\n", "\r\n")))
     }
 
@@ -79,17 +77,19 @@ io.github.rsyumi.risunest.ServerSyncSecrets -> io.github.rsyumi.risunest.ServerS
         for (dump in listOf(
             "",
             nativeInitializer("OtherSecrets"),
-            nativeInitializer("ExternalStorageSecrets", method = "renamed"),
-            nativeInitializer("ExternalStorageSecrets", signature = "([B)V"),
-            nativeInitializer("ExternalStorageSecrets", signature = "()I"),
-            nativeInitializer("ExternalStorageSecrets", access = "0111"),
-            nativeInitializer("ExternalStorageSecrets", access = "0019"),
+            nativeInitializer("ExternalStorageSecrets"),
+            nativeInitializer("ServerSyncSecrets"),
+            nativeInitializer("DeviceSecrets", method = "renamed"),
+            nativeInitializer("DeviceSecrets", signature = "([B)V"),
+            nativeInitializer("DeviceSecrets", signature = "()I"),
+            nativeInitializer("DeviceSecrets", access = "0111"),
+            nativeInitializer("DeviceSecrets", access = "0019"),
         )) {
             assertTrue(retainedJniNativeInitializers(dump).isEmpty())
         }
-        val missingServer = retainedJniNativeInitializers(nativeInitializer("ExternalStorageSecrets"))
-        assertEquals(setOf("ExternalStorageSecrets"), missingServer)
-        assertFalse("ServerSyncSecrets" in missingServer)
+        val retained = retainedJniNativeInitializers(nativeInitializer("DeviceSecrets"))
+        assertEquals(setOf("DeviceSecrets"), retained)
+        assertFalse("ServerSyncSecrets" in retained)
     }
 
     @Test fun platformTlsInitializerTakesTheApplicationContext() {
@@ -98,7 +98,7 @@ io.github.rsyumi.risunest.ServerSyncSecrets -> io.github.rsyumi.risunest.ServerS
         for (dump in listOf(
             nativeInitializer("PlatformTls"),
             nativeInitializer("PlatformTls", signature = context, access = "0111"),
-            nativeInitializer("ServerSyncSecrets", signature = context),
+            nativeInitializer("DeviceSecrets", signature = context),
         )) {
             assertTrue(retainedJniNativeInitializers(dump).isEmpty())
         }

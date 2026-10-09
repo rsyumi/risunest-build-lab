@@ -377,7 +377,10 @@ describe('Plugin v3 runtime consent and ownership', () => {
         const next = await start()
         expect(await next.requestPluginPermission('db')).toBe(true)
         expect(alertConfirm).toHaveBeenCalledOnce()
-        now += 3 * 24 * 60 * 60 * 1000
+        now += 7 * 24 * 60 * 60 * 1000 - 1
+        expect(await next.requestPluginPermission('db')).toBe(true)
+        expect(alertConfirm).toHaveBeenCalledOnce()
+        now += 1
         expect(await next.requestPluginPermission('db')).toBe(true)
         expect(alertConfirm).toHaveBeenCalledTimes(2)
         await resetAllPluginPermissions()

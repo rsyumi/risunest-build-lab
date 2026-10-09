@@ -7,18 +7,13 @@ import { promisify } from 'node:util'
 import path from 'node:path'
 import { cutDeviceNetwork } from '../../scripts/phase3AndroidSmoke.mjs'
 import { REALM_BLOCKED_URL_PATTERNS } from '../../scripts/realmBlocklist.mjs'
+import { androidTarget, runnerOptions } from '../support/androidTarget.mjs'
 
-const options = Object.fromEntries(process.argv.slice(2).map(arg => {
-    const split = arg.indexOf('=')
-    assert.ok(arg.startsWith('--') && split > 2, 'Use --name=value')
-    return [arg.slice(2, split), arg.slice(split + 1)]
-}))
-for (const key of Object.keys(options)) assert.ok(['adb', 'apk', 'health', 'output', 'device', 'serial', 'cdp-port'].includes(key), 'Unknown option')
-assert.ok(options.adb && options.apk && options.health, '--adb, --apk and --health are required')
-assert.ok(!options.device || ['api34', 'api35'].includes(options.device), 'Unknown synthetic device')
-assert.ok(!options.serial || options.serial === 'emulator-5640', 'Unexpected alternate synthetic serial')
-const serial = options.serial ?? (options.device === 'api35' ? 'emulator-5556' : 'emulator-5554')
-const avd = options.device === 'api35' ? 'risunest_buffer_api35_synthetic' : 'risunest_vm_retest'
+const options = runnerOptions(process.argv.slice(2))
+for (const key of Object.keys(options)) assert.ok(['adb', 'aapt', 'adb-port', 'avd', 'apk', 'health', 'output', 'serial', 'cdp-port'].includes(key), 'Unknown option')
+assert.ok(options.apk && options.health, '--apk and --health are required')
+const android = androidTarget(options)
+const { adb, serial, avd } = android
 const configuredIdentifier = 'io.github.rsyumi.risunest'
 const packageName = 'io.github.rsyumi.risunest.pluginreview'
 const title = 'RisuNest synthetic plugin review'
@@ -32,7 +27,7 @@ const output = path.resolve(options.output ?? '.tmp/plugin-review/android-result
 const token = randomBytes(16).toString('hex')
 let client, launched = false, forwarded = false
 async function run(args, timeout = 10000, allowFailure = false) {
-    try { return await execute(options.adb, ['-s', serial, ...args], { windowsHide: true, timeout, encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 }) }
+    try { return await execute(adb, android.args(args), { env: android.env, windowsHide: true, timeout, encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 }) }
     catch (error) { if (allowFailure) return { stdout: '' }; throw new Error(`Synthetic ADB ${args[0]} failed`, { cause: error }) }
 }
 async function connect() {
@@ -81,19 +76,17 @@ async function connect() {
     } catch (error) { close(); throw error }
 }
 async function main() {
-    assert.equal(process.env.ADB_SERVER_SOCKET, 'tcp:127.0.0.1:15037', 'Unexpected ADB server')
-    assert.equal((await run(['emu', 'avd', 'name'])).stdout.split('\n')[0].trim(), avd, 'Unsafe AVD')
+    android.assertAvd((await run(['emu', 'avd', 'name'])).stdout)
     assert.equal((await run(['shell', 'getprop', 'sys.boot_completed'])).stdout.trim(), '1')
     const health = JSON.parse(await readFile(options.health, 'utf8'))
     assert.ok(health.Serial === serial && health.Seconds >= 120 && health.Samples >= 8 && health.Failures === 0 && health.Passed === true
         && health.HashMatch === true && health.Push === true && health.Pull === true && health.ConsolePing === true, 'Sustained synthetic ADB health proof required')
     assert.ok(Date.now() - (await stat(options.health)).mtimeMs < 30 * 60000, 'Stale ADB health proof')
-    const aapt = path.resolve(path.dirname(options.adb), '../build-tools/36.0.0/aapt.exe')
-    const metadata = await execute(aapt, ['dump', 'badging', apk], { windowsHide: true, timeout: 10000, encoding: 'utf8' })
+    const metadata = await execute(android.aapt, ['dump', 'badging', apk], { windowsHide: true, timeout: 10000, encoding: 'utf8' })
     assert.equal(/^package: name='([^']+)'/m.exec(metadata.stdout)?.[1], packageName, 'Refusing non-plugin-review APK before installation')
     await cutDeviceNetwork(serial, { run(target, command, { allowFailure = false } = {}) {
         assert.equal(target, serial)
-        const result = spawnSync(options.adb, ['-s', target, ...command], { windowsHide: true, timeout: 5000, encoding: 'utf8' })
+        const result = spawnSync(adb, android.args(command, target), { env: android.env, windowsHide: true, timeout: 5000, encoding: 'utf8' })
         if (!allowFailure) assert.equal(result.status, 0, 'Network cutoff failed')
         return result
     }, sleep: delay })

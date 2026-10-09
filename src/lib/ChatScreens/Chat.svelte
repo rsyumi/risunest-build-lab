@@ -125,6 +125,7 @@
         bookmarked?: boolean
         parserProjection?: BoundedLiveChatParserProjection
         parserAbortSignal?: AbortSignal
+        onDisplaySettled?: () => void
         restoredEditor?: ChatEditorDraft
         onEditorOpen?: () => void
         onEditorClose?: () => void
@@ -167,6 +168,7 @@
         bookmarked,
         parserProjection,
         parserAbortSignal,
+        onDisplaySettled,
         restoredEditor,
         onEditorOpen,
         onEditorClose,
@@ -286,11 +288,12 @@
         captureViewportTarget: () => CapturedChatMessageTarget | null
         parserProjection?: BoundedLiveChatParserProjection
         totalMessages: number
+        preserveDisplay?: boolean
     }) {
         viewportRow = state.viewportRow
         viewportSourceToken = state.viewportSourceToken
         captureViewportTarget = state.captureViewportTarget
-        parserProjection = state.parserProjection
+        if (!state.preserveDisplay) parserProjection = state.parserProjection
         idx = state.viewportRow.absoluteIndex
         totalLength = state.totalMessages
         if (selectedConversationOperations) {
@@ -304,7 +307,7 @@
             if (editIntent) editIntent = selectedConversationOperations.rebindMessageEditIntent(editIntent, input)
             if (partialEditIntent) partialEditIntent = selectedConversationOperations.rebindMessageEditIntent(partialEditIntent, input)
         }
-        updateDisplayedMessage()
+        if (!state.preserveDisplay) updateDisplayedMessage()
     }
 
     export function refreshParserProjection(
@@ -390,6 +393,7 @@
         totalLength = state.totalMessages
         parserProjection = state.parserProjection
         parserAbortSignal = state.parserAbortSignal
+        onDisplaySettled = state.onDisplaySettled
         if (state.viewportBinding) {
             updateViewportBinding({
                 ...state.viewportBinding,
@@ -987,6 +991,13 @@
     let staticCaptureSettled = false
     $effect(() => {
         const customWithoutTextBox = captureTheme === 'customHTML' &&
+            !(captureSettings?.guiHTML ?? DBState.db.guiHTML)?.toLocaleLowerCase().includes('<risutextbox')
+        if (!blankMessage && !inlineEditMode && !customWithoutTextBox) return
+        const settled = onDisplaySettled
+        void tick().then(() => settled?.())
+    })
+    $effect(() => {
+        const customWithoutTextBox = captureTheme === 'customHTML' &&
             !captureSettings?.guiHTML?.toLocaleLowerCase().includes('<risutextbox')
         if (!captureContext || staticCaptureSettled || (!blankMessage && !customWithoutTextBox)) return
         staticCaptureSettled = true
@@ -1165,6 +1176,7 @@
                     {captureContext}
                     {captureParserIndex}
                     {parserAbortSignal}
+                    {onDisplaySettled}
                     {parserProjection} />
         </span>
         {#if !captureContext && idx >= 0 && !editMode && !editTranslationMode && !isOptimizedStreamingMessage && partialEditEnabled && (DBState.db.enableBlockPartialEdit || DBState.db.enableDragPartialEdit)}

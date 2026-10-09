@@ -408,6 +408,18 @@ mod tests {
         Paths { data: root.join("data"), roots: vec![root.join("data"), root.join("webview")], control: root.join("control"), install_conflict: None }
     }
     #[test]
+    fn full_reset_removes_profile_image_geometry() {
+        use crate::persistent_store::{PersistentStore, image_geometry::{self, ImageGeometry}};
+        let root = tempfile::tempdir().unwrap();
+        let paths = paths(root.path());
+        let store = PersistentStore::open(&paths.data).unwrap();
+        image_geometry::write(&paths.data, &[ImageGeometry { content_hash: "a".repeat(64), width: 10, height: 20 }]).unwrap();
+        drop(store);
+        assert!(paths.data.join("persistent/image-geometry.sqlite").exists());
+        erase_with(&paths, &mut request(), |_| Ok(()), files::remove).unwrap();
+        assert!(!paths.data.exists());
+    }
+    #[test]
     fn cleanup_closes_the_lease_owner_before_erasing_and_reopens_the_new_cache() {
         use crate::external_storage::{contract::ErrorKind, job_store::JobCommandState, lease_ledger::LocalLeaseLedger};
         use risunest_external_storage_format::control::{LeaseDocument, LeaseKind};

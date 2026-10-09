@@ -171,8 +171,9 @@ subscribeRuntimePerformanceProfile(() => {
     browserAssetDataUrlCache = createBrowserAssetDataUrlCache()
 })
 const pendingBrowserAssetReads = new Map<string, Promise<string | null>>()
-const pendingTauriAssetUrls = new Map<string, Promise<string | null>>()
-const tauriAssetUrlCache = new ByteBudgetLru<string, string>(
+type NativeAssetSource = { url: string; image?: import('./storage/blobStore').BlobImageSource | null }
+const pendingTauriAssetUrls = new Map<string, Promise<NativeAssetSource | null>>()
+const tauriAssetUrlCache = new ByteBudgetLru<string, NativeAssetSource>(
     Number.POSITIVE_INFINITY,
     () => 0,
     256,
@@ -210,9 +211,13 @@ async function readBrowserAssetDataUrl(loc: string): Promise<string | null> {
     return await pending
 }
 
-function invalidateNativeMediaUrls(): void {
+export function clearNativeAssetSourceCache(): void {
     tauriAssetUrlCache.clear()
     pendingTauriAssetUrls.clear()
+}
+
+function invalidateNativeMediaUrls(): void {
+    clearNativeAssetSourceCache()
     ReloadGUIPointer.update(value => value + 1)
 }
 subscribeNativeMediaEndpointChanges(invalidateNativeMediaUrls)
@@ -226,16 +231,28 @@ export function invalidateAssetSourceCache(key: string): void {
 
 /** Resolves a Tauri asset URL once per key, including concurrent lookups. */
 async function resolveTauriAssetUrl(loc: string): Promise<string | null> {
+    return (await resolveTauriAssetSource(loc))?.url ?? null
+}
+
+export async function getFileImageSource(loc: string): Promise<import('./storage/blobStore').BlobImageSource | null> {
+    if (!isTauri || !loc.startsWith('assets/')) return null
+    return (await resolveTauriAssetSource(loc))?.image ?? null
+}
+
+async function resolveTauriAssetSource(loc: string): Promise<NativeAssetSource | null> {
     const cached = tauriAssetUrlCache.get(loc)
     if (cached !== undefined) return cached
     let pending = pendingTauriAssetUrls.get(loc)
     if (!pending) {
         pending = (async () => {
-            const url = await (await resolveBlobStore()).resolveUrl(loc)
+            const store = await resolveBlobStore()
+            const image = await store.resolveImageSource?.(loc)
+            const url = image?.url ?? await store.resolveUrl(loc)
+            const source = url ? { url, image } : null
             if (url && pendingTauriAssetUrls.get(loc) === pending) {
-                tauriAssetUrlCache.set(loc, url)
+                tauriAssetUrlCache.set(loc, source!)
             }
-            return url
+            return source
         })()
         pendingTauriAssetUrls.set(loc, pending)
         const cleanup = () => {

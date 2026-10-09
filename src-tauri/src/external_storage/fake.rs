@@ -995,6 +995,9 @@ impl MemoryVault {
     pub(crate) fn contents(&self, reference: &str) -> Option<Vec<u8>> {
         self.secrets.lock().unwrap().get(reference).cloned()
     }
+    pub(crate) fn entry_count(&self) -> usize {
+        self.secrets.lock().unwrap().len()
+    }
 }
 impl SecretVault for MemoryVault {
     fn read<'a>(&'a self, reference: &'a SecretRef) -> ProviderFuture<'a, SecretBytes> {

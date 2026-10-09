@@ -493,8 +493,9 @@ impl S3Provider {
     }
 
     async fn session(&self, resume: &ResumeState) -> Result<SessionState> {
-        let bytes = self.dependencies.vault.read(&resume.sealed_state).await?;
-        let state: SessionState = serde_json::from_slice(&bytes.0).map_err(|_| corrupt())?;
+        let ResumeData::S3Multipart(json) = &resume.data else { return Err(corrupt()); };
+        if !resume.data.valid() { return Err(corrupt()); }
+        let state: SessionState = serde_json::from_str(json).map_err(|_| corrupt())?;
         if state.upload_id.is_empty()
             || state.upload_id.len() > 1024
             || state.part_size == 0
@@ -505,25 +506,10 @@ impl S3Provider {
         Ok(state)
     }
 
-    async fn seal(&self, state: &SessionState) -> Result<SecretRef> {
-        let bytes = serde_json::to_vec(state).map_err(|_| corrupt())?;
-        self.dependencies
-            .vault
-            .store(&crate::external_storage::auth::SecretBytes(
-                zeroize::Zeroizing::new(bytes),
-            ))
-            .await
-    }
-
-    async fn reseal(&self, reference: &SecretRef, state: &SessionState) -> Result<()> {
-        let bytes = serde_json::to_vec(state).map_err(|_| corrupt())?;
-        self.dependencies
-            .vault
-            .replace(
-                reference,
-                &crate::external_storage::auth::SecretBytes(zeroize::Zeroizing::new(bytes)),
-            )
-            .await
+    fn save_session(state: &SessionState) -> Result<ResumeData> {
+        let data = ResumeData::S3Multipart(serde_json::to_string(state).map_err(|_| corrupt())?);
+        if !data.valid() { return Err(corrupt()); }
+        Ok(data)
     }
 
     /// An object that is already in place converges only when the remote
@@ -896,16 +882,14 @@ impl Provider for S3Provider {
             self.require(profile, &response, &[200])?;
             let body =
                 common::read_bounded(&mut response.body, common::MAX_CONTROL_BODY, cancel).await?;
-            let sealed_state = self
-                .seal(&SessionState {
-                    upload_id: xml::parse_initiate_multipart(&body)?,
-                    key,
-                    part_size: profile.part_size_bytes,
-                    parts: Vec::new(),
-                })
-                .await?;
+            let data = Self::save_session(&SessionState {
+                upload_id: xml::parse_initiate_multipart(&body)?,
+                key,
+                part_size: profile.part_size_bytes,
+                parts: Vec::new(),
+            })?;
             Ok(Some(ResumeState {
-                sealed_state,
+                data,
                 confirmed_offset: 0,
                 expires_at_ms: profile
                     .multipart_lifetime_ms
@@ -1176,9 +1160,8 @@ impl Provider for S3Provider {
             let (confirmed_offset, parts) =
                 contiguous(&listed, state.part_size, intent.byte_length);
             state.parts = parts;
-            self.reseal(&resume.sealed_state, &state).await?;
             Ok(UploadResolution::Resumable(ResumeState {
-                sealed_state: resume.sealed_state.clone(),
+                data: Self::save_session(&state)?,
                 confirmed_offset,
                 expires_at_ms: resume.expires_at_ms,
             }))

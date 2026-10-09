@@ -1262,7 +1262,7 @@ fn a_resumable_session_continues_from_the_offset_the_service_confirmed() {
         assert_eq!(resume.expires_at_ms, None);
         let sealed = String::from_utf8(
             test.vault
-                .contents(&resume.sealed_state.0)
+                .contents(&resume.data.secret().unwrap().0)
                 .expect("sealed upload state"),
         )
         .unwrap();
@@ -1316,12 +1316,12 @@ fn an_expired_session_retains_its_file_id_and_a_confirmed_one_completes() {
         let resume = provider.begin_upload(&repository, &intent, &cancel).await.unwrap().unwrap();
         let state = SecretBytes(zeroize::Zeroizing::new(json!({ "fileId": "pack-expired",
             "sessionUri": server.url.join("/synthetic/upload/session/expired").unwrap().as_str(), "intent": intent }).to_string().into_bytes()));
-        crate::external_storage::auth::SecretVault::replace(test.vault.as_ref(), &resume.sealed_state, &state).await.unwrap();
+        crate::external_storage::auth::SecretVault::replace(test.vault.as_ref(), &resume.data.secret().unwrap(), &state).await.unwrap();
         let UploadResolution::Resumable(updated) = provider.reconcile_upload(&repository, &intent, Some(&resume), &cancel).await.unwrap()
             else { panic!("must preserve allocated identity"); };
-        assert_eq!(updated.sealed_state.0, resume.sealed_state.0);
+        assert_eq!(updated.data.secret().unwrap().0, resume.data.secret().unwrap().0);
         assert_eq!(updated.confirmed_offset, 0);
-        assert!(String::from_utf8(test.vault.contents(&updated.sealed_state.0).unwrap()).unwrap().contains("pack-expired"));
+        assert!(String::from_utf8(test.vault.contents(&updated.data.secret().unwrap().0).unwrap()).unwrap().contains("pack-expired"));
         let UploadResolution::Complete(receipt) = provider.reconcile_upload(&repository, &intent, Some(&updated), &cancel).await.unwrap()
             else { panic!("expected complete"); };
         assert_eq!(receipt.byte_length, 4096);
@@ -2406,7 +2406,7 @@ fn longest_sync_names_fit_the_longest_accepted_root() {
 
 async fn set_synthetic_session(test: &TestDependencies, resume: &ResumeState, intent: &ObjectIntent, file_id: &str, uri: &str) {
     let bytes = SecretBytes(zeroize::Zeroizing::new(json!({ "fileId": file_id, "sessionUri": uri, "intent": intent }).to_string().into_bytes()));
-    crate::external_storage::auth::SecretVault::replace(test.vault.as_ref(), &resume.sealed_state, &bytes).await.unwrap();
+    crate::external_storage::auth::SecretVault::replace(test.vault.as_ref(), &resume.data.secret().unwrap(), &bytes).await.unwrap();
 }
 
 
@@ -2454,7 +2454,7 @@ fn segment_preallocation_accepts_the_full_hash_name_and_sends_no_body() {
         let state = provider.begin_upload(&repository, &intent, &cancel).await.unwrap().unwrap();
         assert_eq!(request_lines(&server).len(), 4);
         assert!(server.requests.lock().unwrap().iter().all(|request| request.body.is_empty()));
-        let sealed = String::from_utf8(test.vault.contents(&state.sealed_state.0).unwrap()).unwrap();
+        let sealed = String::from_utf8(test.vault.contents(&state.data.secret().unwrap().0).unwrap()).unwrap();
         assert!(sealed.contains("allocated-file"));
         let directory = tempfile::tempdir().unwrap();
         let source = spool(directory.path(), "sealed", bytes);
@@ -2688,7 +2688,7 @@ fn lost_session_initialization_keeps_the_preallocated_id_on_every_retry() {
         assert_eq!(provider.create_object(&repository, &intent, &source, Some(&resume), &cancel).await.unwrap_err().kind, ErrorKind::Transient);
         let UploadResolution::Resumable(updated) = provider.reconcile_upload(&repository, &intent, Some(&resume), &cancel).await.unwrap()
             else { panic!("unresolved identity must be retained"); };
-        assert_eq!(resume.sealed_state.0, updated.sealed_state.0);
+        assert_eq!(resume.data.secret().unwrap().0, updated.data.secret().unwrap().0);
         assert_eq!(provider.create_object(&repository, &intent, &source, Some(&updated), &cancel).await.unwrap_err().kind, ErrorKind::Transient);
         let records = server.requests.lock().unwrap();
         assert_eq!(records[4].body, records[6].body);
@@ -2717,7 +2717,7 @@ fn retained_drive_session_reports_only_confirmed_offsets_and_verifies_completion
         let UploadResolution::Resumable(updated) = provider.reconcile_upload(&repository, &intent, Some(&resume), &cancel).await.unwrap()
             else { panic!("expected confirmed partial offset"); };
         assert_eq!(updated.confirmed_offset, 2048);
-        assert_eq!(updated.sealed_state.0, resume.sealed_state.0);
+        assert_eq!(updated.data.secret().unwrap().0, resume.data.secret().unwrap().0);
         let UploadResolution::Complete(receipt) = provider.reconcile_upload(&repository, &intent, Some(&updated), &cancel).await.unwrap()
             else { panic!("expected verified completion"); };
         assert_eq!(receipt.checksum.unwrap().value, intent.sha256);

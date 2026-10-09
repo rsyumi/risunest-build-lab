@@ -29,9 +29,14 @@ impl Purpose {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Backend { System, PrivateFile }
+
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Entry {
+    backend: Backend,
     purpose: Purpose,
     id: String,
 }
@@ -87,7 +92,7 @@ fn read_entry(root: &Path, path: &Path) -> Result<Entry, String> {
         "server-sync" => Purpose::ServerSync,
         _ => return Err("secret-index-corrupt".into()),
     };
-    let entry = Entry { purpose, id: id.to_owned() };
+    let entry = Entry { purpose, id: id.to_owned(), backend: Backend::System };
     validate(root, &entry)?;
     let metadata = fs::symlink_metadata(path).map_err(|_| "secret-index-unavailable")?;
     if !metadata.is_file()
@@ -102,49 +107,76 @@ fn read_entry(root: &Path, path: &Path) -> Result<Entry, String> {
         .take(1025)
         .read_to_end(&mut bytes)
         .map_err(|_| "secret-index-unavailable")?;
-    if !bytes.is_empty() {
-        let contents: Entry = serde_json::from_slice(&bytes).map_err(|_| "secret-index-corrupt")?;
-        if contents != entry { return Err("secret-index-corrupt".into()); }
-    }
-    Ok(entry)
+    let contents: Entry = serde_json::from_slice(&bytes).map_err(|_| "secret-index-corrupt")?;
+    if contents.purpose != entry.purpose || contents.id != entry.id { return Err("secret-index-corrupt".into()); }
+    Ok(contents)
 }
 
-// Persist ownership before invoking the OS store, including failed creation attempts.
-pub(crate) fn tracked_write<T>(
-    root: &Path,
-    purpose: Purpose,
-    id: &str,
-    write: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
-    let _lock = INDEX_LOCK.lock().map_err(|_| "secret-index-unavailable")?;
-    let entry = Entry {
-        purpose,
-        id: id.to_owned(),
-    };
-    validate(root, &entry)?;
-    let directory = ensure_directory(root)?;
-    let path = directory.join(format!("{}--{}.json", purpose.name(), id));
-    // Unpublished temporary files cannot be mistaken for credential identities.
-    let mut file = tempfile::NamedTempFile::new_in(root).map_err(|_| "secret-index-unavailable")?;
-    let bytes = serde_json::to_vec(&entry).map_err(|_| "secret-index-unavailable")?;
-    file.write_all(&bytes).and_then(|_| file.as_file().sync_all())
-        .map_err(|_| "secret-index-unavailable")?;
-    match file.persist_noclobber(&path) {
-        Ok(_) => {},
-        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-            if read_entry(root, &path)? != entry { return Err("secret-index-corrupt".into()); }
-        },
+fn entry_path(root: &Path, purpose: Purpose, id: &str) -> Result<std::path::PathBuf, String> {
+    validate(root, &Entry { purpose, id: id.to_owned(), backend: Backend::System })?;
+    let directory = root.join(DIRECTORY);
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) if !metadata.is_dir() || crate::trust_boundary::is_link_like(&metadata) => return Err("secret-index-corrupt".into()),
+        Ok(_) => (),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
         Err(_) => return Err("secret-index-unavailable".into()),
     }
+    Ok(directory.join(format!("{}--{}.json", purpose.name(), id)))
+}
+
+fn existing(root: &Path, path: &Path) -> Result<Option<Entry>, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => read_entry(root, path).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("secret-index-unavailable".into()),
+    }
+}
+
+pub(crate) fn backend(root: &Path, purpose: Purpose, id: &str) -> Result<Option<Backend>, String> {
+    let _lock = INDEX_LOCK.lock().map_err(|_| "secret-index-unavailable")?;
+    Ok(existing(root, &entry_path(root, purpose, id)?)?.map(|entry| entry.backend))
+}
+
+pub(crate) fn remove_one(root: &Path, purpose: Purpose, id: &str, remove: impl FnOnce(Backend) -> Result<(), String>) -> Result<(), String> {
+    let _lock = INDEX_LOCK.lock().map_err(|_| "secret-index-unavailable")?;
+    let path = entry_path(root, purpose, id)?;
+    if let Some(entry) = existing(root, &path)? {
+        remove(entry.backend)?;
+        fs::remove_file(path).map_err(|_| "secret-index-unavailable")?;
+    }
+    Ok(())
+}
+
+// Persist the selected backend before creating the secret, including failed attempts.
+pub(crate) fn routed_write<T>(
+    root: &Path, purpose: Purpose, id: &str,
+    select: impl FnOnce() -> Result<Backend, String>,
+    write: impl FnOnce(Backend) -> Result<T, String>,
+) -> Result<T, String> {
+    let _lock = INDEX_LOCK.lock().map_err(|_| "secret-index-unavailable")?;
+    let path = entry_path(root, purpose, id)?;
+    if let Some(entry) = existing(root, &path)? { return write(entry.backend); }
+    let entry = Entry { purpose, id: id.to_owned(), backend: select()? };
+    let directory = ensure_directory(root)?;
+    let mut file = tempfile::NamedTempFile::new_in(root).map_err(|_| "secret-index-unavailable")?;
+    let bytes = serde_json::to_vec(&entry).map_err(|_| "secret-index-unavailable")?;
+    file.write_all(&bytes).and_then(|_| file.as_file().sync_all()).map_err(|_| "secret-index-unavailable")?;
+    file.persist_noclobber(&path).map_err(|_| "secret-index-unavailable")?;
     #[cfg(unix)]
-    fs::File::open(&directory).and_then(|file| file.sync_all())
-        .map_err(|_| "secret-index-unavailable")?;
-    write()
+    fs::File::open(&directory).and_then(|file| file.sync_all()).map_err(|_| "secret-index-unavailable")?;
+    #[cfg(not(unix))]
+    let _ = directory;
+    write(entry.backend)
+}
+
+#[cfg(test)]
+fn tracked_write<T>(root: &Path, purpose: Purpose, id: &str, write: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    routed_write(root, purpose, id, || Ok(Backend::System), |_| write())
 }
 
 fn remove_with(
     root: &Path,
-    mut remove: impl FnMut(Purpose, &str) -> Result<(), String>,
+    mut remove: impl FnMut(Purpose, &str, Backend) -> Result<(), String>,
 ) -> Result<(), String> {
     let _lock = INDEX_LOCK.lock().map_err(|_| "secret-index-unavailable")?;
     let directory = root.join(DIRECTORY);
@@ -164,22 +196,16 @@ fn remove_with(
     }
     // Validate the complete inventory before deleting any credential.
     for (path, entry) in entries {
-        remove(entry.purpose, &entry.id)?;
+        remove(entry.purpose, &entry.id, entry.backend)?;
         fs::remove_file(path).map_err(|_| "secret-index-unavailable")?;
     }
     fs::remove_dir(directory).map_err(|_| "secret-index-unavailable".into())
 }
 
 pub(crate) fn remove_all(root: &Path) -> Result<(), String> {
-    remove_with(root, |purpose, id| match purpose {
-        Purpose::ServerSync => crate::server_sync::credentials::remove_owned(root, id),
-        _ => crate::external_storage::secrets::remove_owned(root, purpose, id),
-    })?;
+    remove_with(root, |purpose, id, backend| crate::device_secrets::remove_owned(root, purpose, id, backend))?;
     #[cfg(target_os = "android")]
-    {
-        crate::external_storage::secrets::remove_android_keys()?;
-        crate::server_sync::credentials::remove_android_keys()?;
-    }
+    crate::device_secrets::remove_android_keys()?;
     Ok(())
 }
 
@@ -188,34 +214,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_entries_recover_only_the_exact_filename_identity() {
+    fn empty_entries_cannot_guess_the_storage_backend() {
         let root = tempfile::tempdir().unwrap();
         let directory = ensure_directory(root.path()).unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         fs::write(directory.join(format!("provider--{id}.json")), b"").unwrap();
-        let mut removed = 0;
-        remove_with(root.path(), |purpose, found| {
-            assert_eq!(purpose, Purpose::Provider);
-            assert_eq!(found, id);
-            removed += 1;
-            Ok(())
-        }).unwrap();
-        assert_eq!(removed, 1);
-        let directory = ensure_directory(root.path()).unwrap();
-        fs::write(directory.join("provider--invalid.json"), b"").unwrap();
-        assert!(remove_with(root.path(), |_, _| panic!("invalid filename cannot own a secret")).is_err());
+        assert!(remove_with(root.path(), |_, _, _| panic!("unknown backend cannot be deleted")).is_err());
+    }
+
+    #[test]
+    fn backend_is_durable_and_never_reselected_after_failed_creation() {
+        for selected in [Backend::System, Backend::PrivateFile] {
+            let root = tempfile::tempdir().unwrap();
+            let id = uuid::Uuid::new_v4().to_string();
+            assert!(routed_write(root.path(), Purpose::Provider, &id, || Ok(selected), |_| Err::<(), _>("failed".into())).is_err());
+            assert_eq!(backend(root.path(), Purpose::Provider, &id).unwrap(), Some(selected));
+            routed_write(root.path(), Purpose::Provider, &id, || panic!("must retain selected storage"), |actual| { assert_eq!(actual, selected); Ok(()) }).unwrap();
+            assert!(remove_one(root.path(), Purpose::Provider, &id, |_| Err("locked".into())).is_err());
+            assert_eq!(backend(root.path(), Purpose::Provider, &id).unwrap(), Some(selected));
+            remove_one(root.path(), Purpose::Provider, &id, |actual| { assert_eq!(actual, selected); Ok(()) }).unwrap();
+            assert_eq!(backend(root.path(), Purpose::Provider, &id).unwrap(), None);
+        }
     }
 
     #[test]
     fn torn_or_mismatching_nonempty_entries_block_the_entire_inventory() {
         for body in [b"{".to_vec(), serde_json::to_vec(&Entry {
-            purpose: Purpose::Provider, id: uuid::Uuid::new_v4().to_string(),
+            purpose: Purpose::Provider, id: uuid::Uuid::new_v4().to_string(), backend: Backend::System,
         }).unwrap()] {
             let root = tempfile::tempdir().unwrap();
             let directory = ensure_directory(root.path()).unwrap();
             let id = uuid::Uuid::new_v4().to_string();
             fs::write(directory.join(format!("provider--{id}.json")), body).unwrap();
-            assert_eq!(remove_with(root.path(), |_, _| panic!("must validate first")).unwrap_err(), "secret-index-corrupt");
+            assert_eq!(remove_with(root.path(), |_, _, _| panic!("must validate first")).unwrap_err(), "secret-index-corrupt");
             assert!(tracked_write(root.path(), Purpose::Provider, &id,
                 || -> Result<(), String> { panic!("must not overwrite a mismatching index") }).is_err());
         }
@@ -230,7 +261,7 @@ mod tests {
             let entries = fs::read_dir(&directory).unwrap().collect::<Vec<_>>();
             assert_eq!(entries.len(), 1);
             let entry = read_entry(root.path(), &entries[0].as_ref().unwrap().path()).unwrap();
-            assert_eq!(entry, Entry { purpose: Purpose::Provider, id: id.clone() });
+            assert_eq!(entry, Entry { purpose: Purpose::Provider, id: id.clone(), backend: Backend::System });
             assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
             Ok(())
         }).unwrap();
@@ -246,20 +277,20 @@ mod tests {
             ))
             .is_err()
         );
-        assert!(remove_with(root.path(), |purpose, found| {
+        assert!(remove_with(root.path(), |purpose, found, _| {
             assert_eq!(purpose, Purpose::Provider);
             assert_eq!(found, id);
             Err("locked".into())
         })
         .is_err());
         let mut removed = 0;
-        remove_with(root.path(), |_, _| {
+        remove_with(root.path(), |_, _, _| {
             removed += 1;
             Ok(())
         })
         .unwrap();
         assert_eq!(removed, 1);
-        remove_with(root.path(), |_, _| panic!("already removed")).unwrap();
+        remove_with(root.path(), |_, _, _| panic!("already removed")).unwrap();
     }
 
     #[test]
@@ -274,7 +305,7 @@ mod tests {
         .unwrap();
         fs::write(root.path().join(DIRECTORY).join("corrupt.json"), b"{}").unwrap();
         assert_eq!(
-            remove_with(root.path(), |_, _| panic!("must validate first")).unwrap_err(),
+            remove_with(root.path(), |_, _, _| panic!("must validate first")).unwrap_err(),
             "secret-index-corrupt"
         );
     }
@@ -322,7 +353,7 @@ mod tests {
             tracked_write(root.path(), purpose, &id, || Ok(())).unwrap();
             expected.push((purpose, id));
         }
-        remove_with(root.path(), |purpose, id| {
+        remove_with(root.path(), |purpose, id, _| {
             let position = expected
                 .iter()
                 .position(|entry| entry.0 == purpose && entry.1 == id)
@@ -343,7 +374,7 @@ mod tests {
         tracked_write(first.path(), Purpose::AccountCredential, &id, || Ok(())).unwrap();
         tracked_write(first.path(), Purpose::AccountCredential, &id, || Ok(())).unwrap();
         let mut count = 0;
-        remove_with(first.path(), |purpose, found| {
+        remove_with(first.path(), |purpose, found, _| {
             assert_eq!(purpose, Purpose::AccountCredential);
             assert_eq!(found, id);
             count += 1;

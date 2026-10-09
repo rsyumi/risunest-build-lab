@@ -63,7 +63,7 @@ describe('getInlayRenderSource', () => {
         vi.unstubAllGlobals()
     })
 
-    test('attaches a native original only while its marker is visible', async () => {
+    test('defers a native image until visible and retains its source until unmount', async () => {
         vi.stubGlobal('IntersectionObserver', TestIntersectionObserver)
         const registry = new DeferredInlayMarkerRegistry()
         const root = document.createElement('div')
@@ -88,7 +88,7 @@ describe('getInlayRenderSource', () => {
         expect(inlayMocks.getInlayAssetBlob).not.toHaveBeenCalled()
 
         observer.setVisible(image, false)
-        expect(image.getAttribute('src')).toBeNull()
+        expect(image.getAttribute('src')).toBe('http://risuasset.localhost/native-image')
         expect(URL.revokeObjectURL).not.toHaveBeenCalled()
 
         observer.setVisible(image, true)
@@ -102,7 +102,7 @@ describe('getInlayRenderSource', () => {
         root.remove()
     })
 
-    test('keeps a shared browser object URL until its last visible marker exits', async () => {
+    test('keeps a shared browser image URL until its mounted consumers are released', async () => {
         vi.stubGlobal('IntersectionObserver', TestIntersectionObserver)
         inlayMocks.getInlayAssetBlob.mockResolvedValue({
             data: new Blob(['shared'], { type: 'image/png' }),
@@ -135,17 +135,17 @@ describe('getInlayRenderSource', () => {
         expect(images[1].getAttribute('src')).toBe('blob:shared-first')
 
         observer.setVisible(images[1], false)
-        expect(revoke).toHaveBeenCalledOnce()
-        expect(revoke).toHaveBeenCalledWith('blob:shared-first')
+        expect(revoke).not.toHaveBeenCalled()
+        expect(images.map((image) => image.getAttribute('src'))).toEqual(['blob:shared-first', 'blob:shared-first'])
 
         observer.setVisible(images[0], true)
         await Promise.resolve(); await Promise.resolve()
-        expect(inlayMocks.getInlayAssetBlob).toHaveBeenCalledTimes(2)
-        expect(images[0].getAttribute('src')).toBe('blob:shared-second')
+        expect(inlayMocks.getInlayAssetBlob).toHaveBeenCalledTimes(1)
+        expect(images[0].getAttribute('src')).toBe('blob:shared-first')
 
         cleanup()
-        expect(revoke).toHaveBeenCalledTimes(2)
-        expect(revoke).toHaveBeenLastCalledWith('blob:shared-second')
+        expect(revoke).toHaveBeenCalledOnce()
+        expect(revoke).toHaveBeenCalledWith('blob:shared-first')
         root.remove()
     })
 
@@ -287,7 +287,7 @@ describe('getInlayRenderSource', () => {
         expect(URL.revokeObjectURL).not.toHaveBeenCalled()
     })
 
-    test('detaches an existing original asset URL offscreen without changing its markup layout', () => {
+    test('retains an existing original asset URL on mount and intersection exit', () => {
         vi.stubGlobal('IntersectionObserver', TestIntersectionObserver)
         const root = document.createElement('div')
         const nativeUrl = `http://127.0.0.1:43127/${'a'.repeat(32)}/${Buffer.from('assets/original.png').toString('hex')}`
@@ -297,14 +297,14 @@ describe('getInlayRenderSource', () => {
 
         const cleanup = mountDeferredInlaySources(root, new DeferredInlayMarkerRegistry())
         const observer = TestIntersectionObserver.instances[0]
-        expect(image.getAttribute('src')).toBeNull()
+        expect(image.getAttribute('src')).toBe(nativeUrl)
         expect(root.querySelector('figure')?.className).toBe('custom-bot-layout')
         expect(root.querySelector('figcaption')?.textContent).toBe('caption')
 
         observer.setVisible(image, true)
         expect(image.getAttribute('src')).toBe(nativeUrl)
         observer.setVisible(image, false)
-        expect(image.getAttribute('src')).toBeNull()
+        expect(image.getAttribute('src')).toBe(nativeUrl)
         expect(URL.revokeObjectURL).not.toHaveBeenCalled()
 
         cleanup()
@@ -346,11 +346,13 @@ describe('getInlayRenderSource', () => {
             observer.setVisible(image, false)
         }
 
-        expect(create).toHaveBeenCalledTimes(1_000)
-        expect(revoke).toHaveBeenCalledTimes(1_000)
+        expect(create).toHaveBeenCalledOnce()
+        expect(revoke).not.toHaveBeenCalled()
         expect(peakLiveUrls).toBe(1)
-        expect(liveUrls).toBe(0)
+        expect(liveUrls).toBe(1)
         cleanup()
+        expect(liveUrls).toBe(0)
+        expect(revoke).toHaveBeenCalledOnce()
         root.remove()
     })
 
@@ -427,6 +429,17 @@ describe('getInlayRenderSource', () => {
             size: 42,
             objectUrl: false,
         })).toBe('<video controls><source src="http://risuasset.localhost/video-id" type="video/webm"></video>')
+    })
+
+    test('reserves known image dimensions in eager markup', () => {
+        const root = document.createElement('div')
+        root.innerHTML = renderInlaySourceMarkup({
+            url: 'http://risuasset.localhost/image', mime: 'image/png', type: 'image',
+            name: 'image.png', size: 42, objectUrl: false, width: 640, height: 480,
+        })
+        const image = root.querySelector('img')!
+        expect(image.getAttribute('width')).toBe('640')
+        expect(image.getAttribute('height')).toBe('480')
     })
 
     test('escapes URL and MIME attribute values', () => {

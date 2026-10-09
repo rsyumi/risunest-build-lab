@@ -39,7 +39,6 @@ pub(super) const ROOT_FIELDS: &[&str] = &[
     "chainOfThought",
     "chatLoadAdditionalPages",
     "chatLoadInitialPages",
-    "chatMessageOverflowScope",
     "checkCorruption",
     "cipherChat",
     "classicMaxWidth",

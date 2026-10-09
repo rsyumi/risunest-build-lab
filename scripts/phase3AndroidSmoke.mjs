@@ -20,11 +20,11 @@ const defaultApk = resolve(
 )
 const fixtureDirectory = resolve(
     repositoryRoot,
-    'docs/native-app-analysis/evidence/phase-3/step6-inputs',
+    '.tmp/phase3-android/fixtures',
 )
 const evidenceRoot = resolve(
     repositoryRoot,
-    'docs/native-app-analysis/evidence/phase-3/step6-run',
+    '.tmp/phase3-android/results',
 )
 const sourceFixturePath = resolve(repositoryRoot, 'src-tauri/fixtures/persistent-fixture.json')
 const packr = new Packr({ useRecords: false })

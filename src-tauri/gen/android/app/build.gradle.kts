@@ -176,7 +176,7 @@ afterEvaluate {
                 logger.warn(
                     "RisuNest: release signing is not configured (${keystorePropertiesFile.path} " +
                         "missing or incomplete), so this release artifact is UNSIGNED and cannot be " +
-                        "installed. See docs/research/android-build-audit-2026-09-06.md.",
+                        "installed.",
                 )
             }
         }
@@ -230,7 +230,7 @@ tasks.matching { it.name.startsWith("minify") && it.name.endsWith("ReleaseWithR8
             }.assertNormalExitValue()
             nativeInitializers += retainedJniNativeInitializers(dump.toString(Charsets.UTF_8.name()))
         }
-        for (owner in listOf("ExternalStorageSecrets", "ServerSyncSecrets")) {
+        for (owner in listOf("DeviceSecrets")) {
             val className = "io.github.rsyumi.risunest.$owner"
             val classIndex = lines.indexOf("$className -> $className:")
             check(classIndex >= 0) { "R8 renamed or removed JNI class: $className" }

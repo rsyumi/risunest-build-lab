@@ -13,10 +13,7 @@ const deviceSettings = vi.hoisted(() => ({
     updateDeviceSettings: vi.fn(),
 }))
 
-const stores = vi.hoisted(() => ({ DBState: { db: {} as { chatMessageOverflowScope?: 'latest' | 'all' } } }))
-
 vi.mock('src/ts/storage/deviceSettings', () => deviceSettings)
-vi.mock('src/ts/stores.svelte', () => stores)
 vi.mock('src/lang', () => ({
     language: {
         risuNest: {
@@ -26,10 +23,6 @@ vi.mock('src/lang', () => ({
                 profileNormal: 'Standard',
                 profileLowSpec: 'Low-spec',
                 profileHelp: 'Help',
-                overflowScope: 'Render isolation',
-                overflowScopeLatest: 'Latest message',
-                overflowScopeAll: 'All',
-                overflowScopeHelp: 'Help',
                 historyLimit: 'Skip older messages',
                 historyLimitHelp: 'Help',
                 historyLimitMultiplier: 'Loading limit',
@@ -48,7 +41,6 @@ describe('RisuNestPerformanceSettings', () => {
         if (mounted) await unmount(mounted)
         mounted = undefined
         document.body.replaceChildren()
-        stores.DBState.db = {}
         vi.clearAllMocks()
     })
 
@@ -73,25 +65,6 @@ describe('RisuNestPerformanceSettings', () => {
         expect(lowSpec?.getAttribute('aria-pressed')).toBe('true')
         expect(deviceSettings.updateDeviceSettings).toHaveBeenCalledOnce()
         expect(deviceSettings.updateDeviceSettings).toHaveBeenCalledWith({ performanceProfile: 'low-spec' })
-    })
-
-    it('stores the render isolation choice in the database', async () => {
-        const target = document.createElement('div')
-        document.body.append(target)
-        mounted = mount(RisuNestPerformanceSettings, { target })
-        await tick()
-
-        const buttons = [...target.querySelectorAll<HTMLButtonElement>('[aria-label="Render isolation"] button')]
-        const latest = buttons.find((button) => button.textContent === 'Latest message')
-        const all = buttons.find((button) => button.textContent === 'All')
-        expect(latest?.getAttribute('aria-pressed')).toBe('true')
-
-        all?.click()
-        await tick()
-
-        expect(stores.DBState.db.chatMessageOverflowScope).toBe('all')
-        expect(all?.getAttribute('aria-pressed')).toBe('true')
-        expect(deviceSettings.updateDeviceSettings).not.toHaveBeenCalled()
     })
 
     it('shows the loading limit only while the history limit is on and stores the toggle', async () => {

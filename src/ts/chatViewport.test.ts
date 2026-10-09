@@ -1,11 +1,62 @@
 import { describe, expect, it } from 'vitest'
-import { buildChatViewport, resolveChatViewportStep } from './chatViewport'
+import { buildChatViewport, locateChatViewportOffset, resolveChatViewportStep } from './chatViewport'
 
 function keys(count: number): string[] {
     return Array.from({ length: count }, (_, index) => `message-${index}`)
 }
 
 describe('buildChatViewport', () => {
+    it('keeps one tall reading row plus required tail rows without filling a count', () => {
+        const viewport = buildChatViewport({
+            keys: keys(200), budget: 64, overscan: 8, estimatedMessageHeight: 256,
+            viewportHeight: 600,
+            anchor: { key: 'message-50', indexHint: 50, relativeOffset: -4_000 },
+            measuredHeightsByIndex: new Map([[50, 10_000]]),
+            pins: [
+                { key: 'message-198', reason: 'latest-pair' },
+                { key: 'message-199', reason: 'latest-pair' },
+            ],
+        })
+        expect(viewport.messageRows.map(row => row.index)).toEqual([50, 198, 199])
+    })
+
+    it('covers short rows despite distant pins and retains only existing nearby DOM', () => {
+        const base = {
+            keys: keys(100), budget: 2, overscan: 0, estimatedMessageHeight: 100,
+            viewportHeight: 500,
+            anchor: { key: 'message-20', indexHint: 20, relativeOffset: 0 },
+            pins: [{ key: 'message-99', reason: 'latest-pair' as const }],
+        }
+        const viewport = buildChatViewport({ ...base, retainedIndices: [4, 15, 30, 70] })
+        const indices = viewport.messageRows.map(row => row.index)
+        expect(indices).toEqual(expect.arrayContaining([20, 21, 22, 23, 24, 99, 15, 30]))
+        expect(indices).not.toContain(4)
+        expect(indices).not.toContain(70)
+        expect(indices).not.toContain(14)
+    })
+
+    it('bounds initial zero-height rows and uses bottom geometry on entry', () => {
+        const viewport = buildChatViewport({
+            keys: keys(200), budget: 64, overscan: 8, estimatedMessageHeight: 256,
+            viewportHeight: 600,
+            measuredHeightsByIndex: new Map([[199, 10_000], [198, 0]]),
+        })
+        expect(viewport.messageRows.map(row => row.index)).toEqual([199])
+        const unknown = buildChatViewport({
+            keys: keys(200), budget: 64, overscan: 8, estimatedMessageHeight: 256,
+            viewportHeight: 600,
+            measuredHeightsByIndex: new Map(Array.from({ length: 200 }, (_, i) => [i, 0])),
+        })
+        expect(unknown.mountedMessageCount).toBe(5)
+        const retained = buildChatViewport({
+            keys: keys(200), budget: 64, overscan: 8, estimatedMessageHeight: 256,
+            viewportHeight: 600,
+            measuredHeightsByIndex: new Map(Array.from({ length: 200 }, (_, i) => [i, 0])),
+            retainedIndices: Array.from({ length: 200 }, (_, i) => i),
+        })
+        expect(retained.mountedMessageCount).toBeLessThan(12)
+    })
+
     it('uses a bounded key source and indexed height corrections without scanning omitted rows', () => {
         let keyReads = 0
         let indexLookups = 0
@@ -170,9 +221,9 @@ describe('buildChatViewport', () => {
             ],
         })
 
-        expect(viewport.messageRows.map((row) => row.index)).toEqual([0, 2, 7, 9])
+        expect(viewport.messageRows.map((row) => row.index)).toEqual([0, 2, 5, 7, 9])
         expect(viewport.messageRows.at(-1)).toMatchObject({ index: 9, pinReasons: ['streaming'] })
-        expect(viewport.mountedMessageCount).toBe(4)
+        expect(viewport.mountedMessageCount).toBe(5)
         expect(viewport.pinOverflow).toEqual({
             count: 1,
             pinnedMessageCount: 4,
@@ -207,6 +258,28 @@ describe('buildChatViewport', () => {
         expect(inserted.anchor).toEqual({ key: 'c', indexHint: 3, relativeOffset: 11 })
         expect(rerolled.anchor).toEqual(inserted.anchor)
         expect(deleted.anchor).toEqual({ key: 'd', indexHint: 3, relativeOffset: 11 })
+    })
+})
+
+describe('locateChatViewportOffset', () => {
+    it.each([false, true])('matches a linear walk including zero-height rows (older=%s)', (older) => {
+        const measured = new Map([[4, 0], [5, 600], [11, 40]])
+        for (let distance = 0; distance < 2_400; distance += 20) {
+            let index = older ? 19 : 0
+            let traversed = 0
+            let height = measured.get(index) ?? 100
+            while (traversed + height < distance && (older ? index > 0 : index < 19)) {
+                traversed += height
+                index += older ? -1 : 1
+                height = measured.get(index) ?? 100
+            }
+            expect(locateChatViewportOffset(0, 20, distance, older, 100, measured))
+                .toEqual({ index, traversed, height })
+        }
+    })
+    it('finds a far offset without walking every omitted message', () => {
+        expect(locateChatViewportOffset(0, 1_000_000, 90_000_050, false, 100, new Map()))
+            .toEqual({ index: 900_000, traversed: 90_000_000, height: 100 })
     })
 })
 

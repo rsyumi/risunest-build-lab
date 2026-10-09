@@ -43,8 +43,8 @@ export const externalProviderDefinitions: ExternalProviderDefinition[] = [
     {
         id: 'webdav', oauth: false, customEndpoint: true,
         defaultEndpoint: '', profiles: [{ value: '', label: '' }, { value: 'koofr', label: 'Koofr' }],
-        fields: [{ key: 'accountId', required: true }, { key: 'root', required: true, location: true, placeholder: 'RisuNest' }],
-        secretFields: [{ key: 'password', required: true, secret: true }],
+        fields: [{ key: 'accountId' }, { key: 'root', required: true, location: true, placeholder: 'RisuNest' }],
+        secretFields: [{ key: 'password', secret: true }],
         supportsSync: true,
     },
     {
@@ -143,7 +143,7 @@ export function buildProviderSecret(
     values: Record<string, string>,
 ): ExternalProviderSecretInput | null {
     switch (providerId) {
-        case 'webdav': return { kind: 'webdav', password: values.password }
+        case 'webdav': return { kind: 'webdav', password: values.password ?? '' }
         case 's3': return { kind: 's3', accessKeyId: values.accessKeyId, secretAccessKey: values.secretAccessKey }
         case 'mybox': return { kind: 'mybox', pat: values.pat, expiresAtMs: String(new Date(values.expiresAtMs).getTime()) as `${number}` }
         case 'github_releases': return { kind: 'github', token: values.token }

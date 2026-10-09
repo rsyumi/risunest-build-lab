@@ -35,7 +35,7 @@ describe("server connection navigation", () => {
     `${base}?endpoint=${encodeURIComponent("https://user:pass@example.test")}`,
     `${base}?endpoint=${encodeURIComponent("https://@example.test")}`,
     `${base}?endpoint=${encodeURIComponent("https://example.test/?")}`,
-    `${base}?endpoint=${encodeURIComponent("http://example.test")}`,
+    `${base}?endpoint=${encodeURIComponent("ftp://example.test")}`,
     "risunestlocal://@sync-server/connect",
     "risunestlocal://user@sync-server/connect",
     "risunestlocal://sync-server:12/connect",
@@ -63,8 +63,16 @@ describe("server connection navigation", () => {
       "http://127.0.0.2:4319",
       "http://[::1]:4319",
       "http://localhost:4319",
+      "http://192.168.0.10:14319",
+      "http://[fd00::10]:14319",
+      "http://sync.internal:14319/base",
+      "http://203.0.113.10:14319",
+      "https://sync.example.test/base",
     ]) {
       expect(validateServerSyncEndpoint(endpoint)).toBe(`${endpoint}/`);
+      expect(parseServerSyncDeepLink(`${base}?endpoint=${encodeURIComponent(endpoint)}`)).toEqual({
+        endpoint: `${endpoint}/`,
+      });
     }
     expect(validateServerSyncId("x".repeat(128))).toHaveLength(128);
     expect(() => validateServerSyncId("x".repeat(129))).toThrow();
