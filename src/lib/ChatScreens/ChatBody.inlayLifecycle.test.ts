@@ -170,6 +170,7 @@ describe('ChatBody deferred inlay lifecycle', () => {
         vi.stubGlobal('IntersectionObserver', undefined)
         chatState.db = {}
         liveRenderMocks.getFileImageSource.mockReset().mockResolvedValue(null)
+        liveRenderMocks.getModuleAssets.mockReturnValue([])
         schedulingMocks.state.controlled = false
         schedulingMocks.releaseAll()
         schedulingMocks.yieldToMainThread.mockClear()
@@ -212,7 +213,10 @@ describe('ChatBody deferred inlay lifecycle', () => {
         const recordDimensions = vi.fn(async () => {})
         chatState.db.newImageHandlingBeta = true
         liveRenderMocks.getModuleAssets.mockReturnValue([['synthetic.png', 'assets/synthetic.png', 'png']] as never)
-        liveRenderMocks.getFileImageSource.mockResolvedValue({ url: 'https://synthetic.invalid/image.png', recordDimensions })
+        liveRenderMocks.getFileImageSource.mockResolvedValue({
+            url: 'https://synthetic.invalid/image.png', recordDimensions, contentHash: 'a'.repeat(64),
+            metadata: { kind: 'asset', key: 'assets/synthetic.png', mime: 'image/png', name: 'synthetic.png', size: 1 },
+        })
         parserMocks.ParseMarkdown.mockResolvedValue('<img src="synthetic.png">')
         const onDisplaySettled = vi.fn()
         mounted = mount(ChatBodyInlayHarness, { target, props: { onDisplaySettled } })
@@ -225,6 +229,69 @@ describe('ChatBody deferred inlay lifecycle', () => {
         image.dispatchEvent(new Event('load'))
         expect(recordDimensions).toHaveBeenCalledExactlyOnceWith(320, 200)
         liveRenderMocks.getModuleAssets.mockReturnValue([])
+    })
+
+    test('prepares beta image dimensions before publishing the first DOM', async () => {
+        const metadata = deferred<any>()
+        chatState.db.newImageHandlingBeta = true
+        liveRenderMocks.getModuleAssets.mockReturnValue([['synthetic.png', 'assets/synthetic.png', 'png']] as never)
+        liveRenderMocks.getFileImageSource.mockReturnValue(metadata.promise)
+        parserMocks.ParseMarkdown.mockResolvedValue('<img src="synthetic.png">')
+        const settled = vi.fn()
+        mounted = mount(ChatBodyInlayHarness, { target, props: { onDisplaySettled: settled } })
+        await vi.waitFor(() => expect(liveRenderMocks.getFileImageSource).toHaveBeenCalled())
+        expect(target.querySelector('img')).toBeNull()
+        metadata.resolve({
+            url: 'https://synthetic.invalid/image.png', contentHash: 'a'.repeat(64), width: 640, height: 480,
+            metadata: { kind: 'asset', key: 'assets/synthetic.png', mime: 'image/png', name: 'synthetic.png', size: 1 },
+        })
+        await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce())
+        expect(target.querySelector('img')?.getAttribute('width')).toBe('640')
+        expect(target.querySelector('img')?.getAttribute('height')).toBe('480')
+    })
+
+    test('does not publish stale beta image preparation after a message changes', async () => {
+        const metadata = deferred<any>()
+        chatState.db.newImageHandlingBeta = true
+        liveRenderMocks.getModuleAssets.mockReturnValue([['synthetic.png', 'assets/synthetic.png', 'png']] as never)
+        liveRenderMocks.getFileImageSource.mockReturnValue(metadata.promise)
+        parserMocks.ParseMarkdown.mockImplementation(async message => message === 'first' ? '<img src="synthetic.png">' : '<p>second</p>')
+        const settled = vi.fn()
+        mounted = mount(ChatBodyInlayHarness, { target, props: { onDisplaySettled: settled } })
+        await vi.waitFor(() => expect(liveRenderMocks.getFileImageSource).toHaveBeenCalled())
+        ;(mounted as { setMessage(value: string): void }).setMessage('second')
+        await vi.waitFor(() => expect(target.textContent).toContain('second'))
+        metadata.resolve({
+            url: 'https://synthetic.invalid/image.png', contentHash: 'a'.repeat(64), width: 640, height: 480,
+            metadata: { kind: 'asset', key: 'assets/synthetic.png', mime: 'image/png', name: 'synthetic.png', size: 1 },
+        })
+        await tick()
+        await tick()
+        expect(target.querySelector('img')).toBeNull()
+        expect(target.textContent).toContain('second')
+        expect(settled).toHaveBeenCalledOnce()
+    })
+
+    test('keeps message text visible if a beta image cannot be resolved', async () => {
+        chatState.db.newImageHandlingBeta = true
+        liveRenderMocks.getModuleAssets.mockReturnValue([['synthetic.png', 'assets/synthetic.png', 'png']] as never)
+        liveRenderMocks.getFileImageSource.mockRejectedValue(new Error('synthetic missing image'))
+        parserMocks.ParseMarkdown.mockResolvedValue('<p>Readable message</p><img src="synthetic.png">')
+        const settled = vi.fn()
+        mounted = mount(ChatBodyInlayHarness, { target, props: { onDisplaySettled: settled } })
+        await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce())
+        expect(target.textContent).toContain('Readable message')
+    })
+
+    test('does not resolve hidden images through the beta asset-name lookup', async () => {
+        chatState.db.newImageHandlingBeta = true
+        chatState.db.hideAllImages = true
+        parserMocks.ParseMarkdown.mockResolvedValue('<img src="/none.webp" alt="?">')
+        const settled = vi.fn()
+        mounted = mount(ChatBodyInlayHarness, { target, props: { onDisplaySettled: settled } })
+        await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce())
+        expect(liveRenderMocks.getFileImageSource).not.toHaveBeenCalled()
+        expect(target.querySelector('img')?.getAttribute('src')).toBe('/none.webp')
     })
 
     test('mounts a deferred collapsed thought body only when opened, retaining its state across updates', async () => {

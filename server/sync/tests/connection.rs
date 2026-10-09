@@ -33,15 +33,21 @@ fn http_fixed_addresses_survive_restart_registration_and_publication() {
             .unwrap();
             assert_eq!(registration.endpoint, endpoint);
             assert_eq!(
-                registration.directory.as_ref().map(|value| value.base_url.as_str()),
+                registration
+                    .directory
+                    .as_ref()
+                    .map(|value| value.base_url.as_str()),
                 registry_url,
             );
             if let Some(publication) = store.plan_publication().unwrap() {
                 let directory = registration.directory.unwrap();
                 assert_eq!(
                     risunest_sync_connect::open_endpoint(
-                        &directory.uuid, &directory.key, &publication.envelope,
-                    ).unwrap(),
+                        &directory.uuid,
+                        &directory.key,
+                        &publication.envelope,
+                    )
+                    .unwrap(),
                     endpoint,
                 );
                 store.confirm_publication(&publication).unwrap();
