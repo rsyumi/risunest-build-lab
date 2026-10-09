@@ -3,6 +3,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use risunest_sync_wire::{
     lww::{
         AckRequest, CancelOperationRequest, NewDeviceClaimRequest, PushRequest, SeqNotification,
+        WriterBindingRequest,
     },
     stamp::DecimalU64,
     unit::UnitKey,
@@ -43,6 +44,15 @@ pub(super) async fn writer_claim(
     Extension(device): Extension<Device>,
 ) -> Result<Response> {
     blocking(move || Ok(Json(app.store.new_device_writer_claim(&device)?).into_response())).await
+}
+pub(super) async fn bind_writer(
+    State(app): State<App>,
+    Extension(device): Extension<Device>,
+    body: Bytes,
+) -> Result<Response> {
+    let request: WriterBindingRequest = canonical::decode(&body, MAX_METADATA_BYTES)?;
+    blocking(move || app.store.bind_device_writer(&device, &request)).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 pub(super) async fn push(
     State(app): State<App>,

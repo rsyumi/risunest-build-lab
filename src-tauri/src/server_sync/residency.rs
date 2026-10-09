@@ -240,6 +240,35 @@ impl Residency {
         }
         Ok(found)
     }
+    /// The size of what `object(digest, None)` finds for each of `digests`, asked in pages.
+    pub(crate) fn active_sizes(&self, digests: &[String]) -> Result<Vec<Option<u64>>> {
+        let mut sizes = Vec::with_capacity(digests.len());
+        let mut parsed = std::collections::HashSet::new();
+        for page in digests.chunks(512) {
+            let marks = (1..=page.len()).map(|index| format!("?{index}")).collect::<Vec<_>>().join(",");
+            let mut query = self.db.prepare(&format!("SELECT o.hash,o.size,c.config FROM objects o JOIN contexts c ON c.id=o.context WHERE o.state='active' AND o.hash IN ({marks}) ORDER BY o.hash,o.confirmation_order DESC"))?;
+            let mut latest = std::collections::HashMap::new();
+            for row in query.query_map(rusqlite::params_from_iter(page), |r| Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)?, r.get::<_, String>(2)?))))? {
+                let (hash, value) = row?;
+                latest.entry(hash).or_insert(value);
+            }
+            for digest in page {
+                validate_hash(digest)?;
+                let Some((size, config)) = latest.get(digest) else {
+                    sizes.push(None);
+                    continue;
+                };
+                let size = u64::try_from(*size).map_err(|_| SyncError::new("invalid-retention-size", 409))?;
+                if !parsed.contains(config) {
+                    serde_json::from_str::<StoredConfig>(config)
+                        .map_err(|_| SyncError::new("invalid-retention-config", 409))?;
+                    parsed.insert(config.clone());
+                }
+                sizes.push(Some(size));
+            }
+        }
+        Ok(sizes)
+    }
     pub(crate) fn target_holds(&self, digest: &str, library_id: &str, target_id: &str) -> Result<bool> {
         validate_hash(digest)?;
         validate_hash(target_id)?;

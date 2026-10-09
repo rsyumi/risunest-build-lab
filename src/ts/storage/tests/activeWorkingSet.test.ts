@@ -726,6 +726,29 @@ describe('ActiveWorkingSet', () => {
         })
     })
 
+    it('does not publish a new selection when persistence remains busy after settling', async () => {
+        const harness = makeWindowedHarness({
+            characters: [makeCharacter('a', [makeChat('chat-a')]), makeCharacter('b', [makeChat('chat-b')])],
+        })
+        await expect(harness.workingSet.activateCharacter('a')).resolves.toBe(true)
+        const previous = harness.database.characters[0]
+        const read = harness.readCharacter.getMockImplementation() as (id: string) => Promise<unknown>
+        harness.readCharacter.mockImplementation(async (id: string) => {
+            harness.coordinator.hasPendingPersistenceWork = true
+            return read(id)
+        })
+        harness.coordinator.runSelectedConversationTransition.mockClear()
+        harness.coordinator.runSelectedConversationTransition.mockImplementation(<T>(transition: () => T) => {
+            if (harness.coordinator.hasPendingPersistenceWork) throw new Error('pending persistence')
+            return transition()
+        })
+
+        await expect(harness.workingSet.activateCharacter('b')).resolves.toBe(false)
+        expect(harness.coordinator.runSelectedConversationTransition).not.toHaveBeenCalled()
+        expect(harness.database.characters[0]).toBe(previous)
+        expect(harness.workingSet.captureSelectedConversationTarget()?.characterId).toBe('a')
+    })
+
     it('reads the character again when background persistence moves the revision', async () => {
         const harness = makeWindowedHarness({
             characters: [makeCharacter('a', [makeChat('chat-a')])],

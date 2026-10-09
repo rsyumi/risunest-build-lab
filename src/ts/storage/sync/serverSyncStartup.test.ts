@@ -28,7 +28,7 @@ vi.mock('src/ts/plugins/apiV3/v3.svelte', () => ({ fencePluginExecutionForAuthor
 vi.mock('../persistentRevisionEvents', () => ({ subscribeLocalPersistentRevision: () => () => {} }))
 vi.mock('../generatingConversationRegistry', () => ({ generatingConversations: { snapshot: () => [] } }))
 vi.mock('src/ts/alert', () => ({ alertConfirm: async () => false, alertActionConfirm: vi.fn(async () => true), alertCheckboxConfirm: vi.fn(async () => ({ confirmed: true, checked: false })) }))
-vi.mock('@lucide/svelte', () => ({ CheckIcon: () => {}, LoaderCircleIcon: () => {}, TriangleAlertIcon: () => {} }))
+vi.mock('@lucide/svelte', () => ({ CheckIcon: () => {}, CloudDownloadIcon: () => {}, HardDriveIcon: () => {}, LoaderCircleIcon: () => {}, TriangleAlertIcon: () => {} }))
 vi.mock('./serverSyncRegistrationInbox', () => ({ serverRegistrationInbox: { changed: { subscribe: () => () => {} }, releaseConsumed() {}, take: () => undefined } }))
 vi.mock('./serverSyncQr', () => ({ canScanServerRegistration: false, createServerQrScanner: () => ({ cancel() {} }) }))
 vi.mock('./serverAssetResidency', () => ({ getAssetResidencyStatus: async () => undefined, setAssetResidencyPolicy: vi.fn(), evictLocalAssets: vi.fn(), cancelAssetResidencyOperation: vi.fn() }))
@@ -283,14 +283,15 @@ describe('initial publication owed by a first binding that stopped after its swi
     })
 })
 
+async function readCode(deviceId: string) {
+    const { encodeServerRegistration } = await import('./serverSyncRegistration')
+    const input = document.querySelector('textarea')!
+    input.value = encodeServerRegistration({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId, token: 'ab'.repeat(32) })
+    input.dispatchEvent(new Event('input', { bubbles: true })); await settle()
+    button('Read')!.click(); await settle()
+}
+
 describe('a duplicate device connecting again with a registration code', () => {
-    async function readCode(deviceId: string) {
-        const { encodeServerRegistration } = await import('./serverSyncRegistration')
-        const input = document.querySelector('textarea')!
-        input.value = encodeServerRegistration({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId, token: 'ab'.repeat(32) })
-        input.dispatchEvent(new Event('input', { bubbles: true })); await settle()
-        button('Read')!.click(); await settle()
-    }
     it('refuses a used code before reading the library and keeps connecting as a new device available', async () => {
         f.offline = false; f.pushError = { code: 'writer-collision', status: 409, retryable: false }
         Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
@@ -314,5 +315,25 @@ describe('a duplicate device connecting again with a registration code', () => {
         expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_inspect', { request: { bindingAuthority: '4', requestId: expect.any(String) }, newDevice: false })
         expect(commands()).not.toContain('server_sync_lww_stage_target')
         expect(document.querySelector('[role="alert"]')?.textContent).toBe('Registration used')
+    })
+})
+
+describe('a new installation connecting with a registration code another installation used', () => {
+    it.each(['settings', 'onboarding'] as const)('is refused before the library is read and asks for a new code in %s', async tone => {
+        f.binding = { target: { kind: 'none' }, targetAuthority: '0', selectionEpoch: 'none', libraryId: null, progress: null }
+        f.configured = false; f.offline = false
+        await production.installServerSyncProduction()
+        const Settings = (await import('src/lib/Setting/Pages/ServerSyncSettings.svelte')).default
+        component = ui.mount(Settings, { target: document.body, props: { tone } }); await settle()
+        await readCode('used')
+        f.invoke.mockClear(); f.inspectError = { code: 'registration-used', status: 409, retryable: false }
+        button('Connect and sync')!.click()
+        await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toBe(tone === 'onboarding' ? 'Registration used in onboarding' : 'Registration used'))
+        expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_inspect', { request: { bindingAuthority: '0', requestId: expect.any(String) }, newDevice: false })
+        for (const command of ['server_sync_lww_stage_target', 'server_sync_lww_fence', 'pds_lww_switch_target', 'server_sync_lww_activate']) expect(commands()).not.toContain(command)
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: false }, error: 'registration-used' })
+        expect(document.querySelector('textarea')).not.toBeNull()
+        expect(button('Connect and sync')).toBeUndefined()
+        expect(button('Connect as new device')).toBeUndefined()
     })
 })

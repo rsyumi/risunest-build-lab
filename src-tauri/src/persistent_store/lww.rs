@@ -3840,3 +3840,7 @@ mod hash_work_tests {
         assert!(!take_hash_work().domains.contains_key("native_receive_intent"));
     }
 }
+
+#[cfg(test)]
+#[path = "lww_small_field_tests.rs"]
+mod small_field_tests;

@@ -84,7 +84,26 @@ pub(super) fn commit_lww(
         if previous != digest { return Err(validation("request-id-integrity")); }
         return Ok(RevisionResult { revision });
     }
-    commit_inner(connection, input, asset_aliases, Some((header, stamp, digest)))
+    let resolved;
+    let write = if let Some(mutations) = &input.root_mutations {
+        if input.root.is_some() {
+            return Err(validation("Root and rootMutations are mutually exclusive"));
+        }
+        let revision = current_revision(connection)?;
+        if revision != input.expected_revision {
+            return Err(StoreError::RevisionConflict { expected: input.expected_revision, actual: revision });
+        }
+        let current = super::query::read_root(connection, &super::ReadTarget {
+            generation: active_generation(connection)?, revision,
+        })?;
+        resolved = WorkingSetCommit {
+            root: Some(apply_root_mutations(current.value, mutations)?),
+            root_mutations: None,
+            ..input.clone()
+        };
+        &resolved
+    } else { input };
+    commit_inner(connection, write, input, asset_aliases, Some((header, stamp, digest)))
 }
 
 /// The units a local edit can change, captured before the edit so that `record` queues exactly
@@ -124,6 +143,7 @@ impl<'a> LocalCapture<'a> {
 fn commit_inner(
     connection: &mut Connection,
     input: &WorkingSetCommit,
+    capture_targets: &WorkingSetCommit,
     asset_aliases: &[AssetAlias],
     lww: Option<(&super::lww::Header,&risunest_sync_wire::stamp::Stamp,&str)>,
 ) -> StoreResult<RevisionResult> {
@@ -191,7 +211,7 @@ fn commit_inner(
                     }
                 }
             }
-            let capture = LocalCapture::begin(transaction, active, input, asset_aliases, conversation_orders)?;
+            let capture = LocalCapture::begin(transaction, active, capture_targets, asset_aliases, conversation_orders)?;
             Ok((retained, capture))
         },
         |transaction, generation, (retained, capture)| {

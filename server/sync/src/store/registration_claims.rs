@@ -1,6 +1,7 @@
 use super::*;
 use risunest_sync_wire::lww::{
     NewDeviceClaimReceipt, NewDeviceClaimRequest, NewDeviceClaimState, NewDeviceClaimStatus,
+    WriterBindingRequest,
 };
 
 /// Whether a writer or operation already belongs to the device, which keeps it from claiming one.
@@ -13,6 +14,49 @@ fn registration_used(tx: &rusqlite::Transaction, device: &Device) -> Result<bool
 }
 
 impl Store {
+    /// Binds the writer of a join that keeps its installation's writer. The device's own writer
+    /// binds again; a device another writer or an operation used, or a writer another device
+    /// holds, is refused.
+    pub fn bind_device_writer(
+        &self,
+        device: &Device,
+        request: &WriterBindingRequest,
+    ) -> Result<()> {
+        request.validate()?;
+        let mut db = self.db()?;
+        let tx = db.transaction()?;
+        Self::require_device(&tx, device)?;
+        let other_writer: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM writers WHERE device=?1 AND writer<>?2)",
+            params![device.id, request.writer_id],
+            |row| row.get(0),
+        )?;
+        if other_writer {
+            return Err(Error::new("registration-used", 409));
+        }
+        let owner: Option<String> = tx
+            .query_row(
+                "SELECT device FROM writers WHERE writer=?1",
+                [&request.writer_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match owner {
+            Some(owner) if owner == device.id => return Ok(()),
+            Some(_) => return Err(Error::new("writer-collision", 409)),
+            None => {}
+        }
+        if registration_used(&tx, device)? {
+            return Err(Error::new("registration-used", 409));
+        }
+        tx.execute(
+            "INSERT INTO writers(writer,device) VALUES(?1,?2)",
+            params![request.writer_id, device.id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn new_device_writer_claim(&self, device: &Device) -> Result<NewDeviceClaimState> {
         let mut db = self.db()?;
         let tx = db.transaction()?;

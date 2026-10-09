@@ -1748,8 +1748,8 @@ export class ActiveWorkingSet {
     // A sync receive or a scheduled flush can queue coordinator work while an
     // activation reads, and the selection transition refuses pending work.
     // Waits for that work, then reports whether the reads are still current.
-    // A newer navigation ends the wait; persistent pending work is left for
-    // the transition to report.
+    // A newer navigation ends the wait; work still pending after it is
+    // reported like a moved revision.
     private async settleBeforeWindowedPublish(
         generation: number,
         revision: DataRevision,
@@ -1771,7 +1771,8 @@ export class ActiveWorkingSet {
             this.dependencies.canActivateWorkingSet?.() === false
         )
             return false
-        return revision === this.dependencies.coordinator.revision &&
+        return this.dependencies.coordinator.hasPendingPersistenceWork !== true &&
+            revision === this.dependencies.coordinator.revision &&
             mutationGeneration ===
                 this.dependencies.coordinator.mutationGeneration
             ? true
@@ -2000,6 +2001,7 @@ export class ActiveWorkingSet {
         activation?: WindowedConversationActivationChange
     }): boolean {
         if (
+            this.dependencies.coordinator.hasPendingPersistenceWork === true ||
             !this.isCurrentWindowedActivation(
                 input.generation,
                 {},
@@ -2196,50 +2198,42 @@ export class ActiveWorkingSet {
         initialTarget: SelectedConversationTarget,
         reason: string,
     ): Promise<CompleteSelectedConversationState> {
-        await this.dependencies.coordinator.flushPendingData(
-            `complete-selected-conversation:${reason}`,
-        )
-        let state = initialState
-        let target = initialTarget
-        if (this.selectedConversationState !== initialState) {
-            const current = this.selectedConversationState
-            // A save completes the conversation itself when its edits have to be written whole.
-            if (
-                current?.kind === 'complete' &&
-                current.characterId === initialState.characterId &&
-                current.conversationId === initialState.conversationId &&
-                current.navigationGeneration === initialTarget.navigationGeneration
-            ) return current
-            if (
-                current?.kind !== 'windowed' ||
-                current.characterId !== initialState.characterId ||
-                current.conversationId !== initialState.conversationId ||
-                current.navigationGeneration !==
-                    initialTarget.navigationGeneration ||
-                current.authority.sessionToken !==
-                    initialState.authority.sessionToken ||
-                current.authority.sessionVersion !==
-                    initialState.authority.sessionVersion ||
-                current.authority.persistedSessionVersion !==
-                    initialState.authority.persistedSessionVersion
+        const flushReason = `complete-selected-conversation:${reason}`
+        await this.dependencies.coordinator.flushPendingData(flushReason)
+        let owner = this.followPromotedConversation(initialState, initialTarget)
+        if ('complete' in owner) return owner.complete
+        let { state, target } = owner
+        let persisted: Awaited<ReturnType<PersistentDataStore['readConversation']>>
+        for (let attempt = 0; ; attempt++) {
+            this.requireCurrentWindowedState(state, target)
+            const readRevision = state.authority.storeRevision
+            persisted = await this.dependencies.store.readConversation(
+                state.characterId,
+                state.conversationId,
             )
-                throw new SelectedConversationPromotionStaleError()
-            const currentTarget = this.captureSelectedConversationTarget()
-            if (!currentTarget)
-                throw new SelectedConversationPromotionStaleError()
-            state = current
-            target = currentTarget
+            // A sync receive or a scheduled save can queue coordinator work while
+            // the conversation reads, and the transition refuses pending work.
+            // Waits for that work, then reads again if it moved the revision.
+            for (
+                let settle = 0;
+                settle < WINDOWED_PUBLISH_SETTLE_ATTEMPTS &&
+                this.dependencies.coordinator.hasPendingPersistenceWork === true;
+                settle++
+            ) {
+                await this.dependencies.coordinator.flushPendingData(flushReason)
+            }
+            owner = this.followPromotedConversation(state, target)
+            if ('complete' in owner) return owner.complete
+            ;({ state, target } = owner)
+            if (
+                state.authority.storeRevision === readRevision ||
+                attempt >= WINDOWED_CHARACTER_ACTIVATION_RETRIES
+            )
+                break
         }
-        this.requireCurrentWindowedState(state, target)
-        if (this.dependencies.coordinator.revision !== state.authority.storeRevision) {
-            throw new SelectedConversationPromotionStaleError()
-        }
-        const persisted = await this.dependencies.store.readConversation(
-            state.characterId,
-            state.conversationId,
-        )
         this.requireCurrentWindowedState(state, target)
         if (
+            this.dependencies.coordinator.revision !== state.authority.storeRevision ||
             !persisted ||
             persisted.revision !== state.authority.storeRevision ||
             persisted.value.id !== state.conversationId
@@ -2491,6 +2485,40 @@ export class ActiveWorkingSet {
             this.demotionScheduled = false
             this.tryDemoteSelectedConversation()
         })
+    }
+
+    // Writes made while a promotion waits replace or advance the selected state
+    // and keep its session. Any other change ends the promotion.
+    private followPromotedConversation(
+        state: WindowedSelectedConversationState,
+        target: SelectedConversationTarget,
+    ):
+        | { complete: CompleteSelectedConversationState }
+        | { state: WindowedSelectedConversationState; target: SelectedConversationTarget } {
+        const current = this.selectedConversationState
+        // A save completes the conversation itself when its edits have to be written whole.
+        if (
+            current?.kind === 'complete' &&
+            current.characterId === state.characterId &&
+            current.conversationId === state.conversationId &&
+            current.navigationGeneration === target.navigationGeneration
+        ) return { complete: current }
+        if (
+            current?.kind !== 'windowed' ||
+            current.characterId !== state.characterId ||
+            current.conversationId !== state.conversationId ||
+            current.navigationGeneration !== target.navigationGeneration ||
+            current.authority.sessionToken !== state.authority.sessionToken ||
+            current.authority.sessionVersion !== state.authority.sessionVersion ||
+            current.authority.persistedSessionVersion !==
+                state.authority.persistedSessionVersion
+        )
+            throw new SelectedConversationPromotionStaleError()
+        if (current === state && this.matchesTarget(state, target))
+            return { state, target }
+        const currentTarget = this.captureSelectedConversationTarget()
+        if (!currentTarget) throw new SelectedConversationPromotionStaleError()
+        return { state: current, target: currentTarget }
     }
 
     private requireCurrentWindowedState(

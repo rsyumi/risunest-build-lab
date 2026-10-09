@@ -31,10 +31,13 @@
     let retry = $state(0)
     let activeController: AbortController | null = null
     let readyOwner: string | null = null
+    let selectionRevision = 0
     let selectionIdentity = $state(untrack(captureLiveDisplayParserSelection))
     onMount(() =>
         subscribeLiveDisplayParserSelection((identity) => {
+            selectionRevision++
             if (identity !== selectionIdentity) activeController?.abort()
+            else if (failed) retry++
             selectionIdentity = identity
         }),
     )
@@ -59,6 +62,7 @@
         void retry
         void refreshRevision
         const requestedOwner = owner
+        const requestedRevision = selectionRevision
         const controller = new AbortController()
         activeController = controller
         let lease: { release(): void } | null = null
@@ -84,7 +88,10 @@
                 readySignal = controller.signal
             })
             .catch(() => {
-                if (!controller.signal.aborted) failed = true
+                if (controller.signal.aborted) return
+                // Preparation may complete elsewhere before this rejection arrives.
+                if (selectionRevision !== requestedRevision) retry++
+                else failed = true
             })
         return () => {
             controller.abort()

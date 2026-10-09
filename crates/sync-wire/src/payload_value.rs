@@ -39,8 +39,12 @@ impl<'de> Deserialize<'de> for Strict {
     }
 }
 pub fn canonicalize(bytes: &[u8]) -> Result<Vec<u8>> {
+    encode(&parse(bytes)?)
+}
+/// The value `canonicalize` encodes, with every number read as a JavaScript number.
+pub fn parse(bytes: &[u8]) -> Result<Value> {
     let Strict(value) = serde_json::from_slice(bytes).map_err(|_| WireError("invalid-payload-json"))?;
-    encode(&value)
+    Ok(value)
 }
 pub fn encode(value: &Value) -> Result<Vec<u8>> {
     let mut out = Vec::new();
