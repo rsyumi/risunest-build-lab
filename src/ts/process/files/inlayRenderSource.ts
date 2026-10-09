@@ -1,6 +1,9 @@
+import { observeImageDimensions } from './imageGeometryRender'
 import { ScreenshotPreparationError } from '../../chatScreenshotErrors'
 import type { InlayBlobType, InlayBlobMetadata } from 'src/ts/storage/blobStore'
 import { getInlayAssetBlob, getInlayAssetMetadata, getInlayAssetRenderUrl } from './inlays'
+import { getBlobStore } from '../../storage/platformBlobStore'
+import { validImageDimensions } from '../../storage/imageGeometry'
 
 export interface InlayRenderSource {
     url: string
@@ -11,6 +14,7 @@ export interface InlayRenderSource {
     width?: number
     height?: number
     objectUrl: boolean
+    recordDimensions?: (width: number, height: number) => Promise<void>
 }
 
 interface DeferredInlayMarker {
@@ -53,8 +57,8 @@ export function renderDeferredInlaySourceMarkup(
     const assetId = escapeHtmlAttribute(id)
     const mime = mediaMimeHint(source.mime)
     const typeHint = mime ? ` type="${mime}"` : ''
-    const dimensions = source.width && source.height
-        ? ` width="${Math.floor(source.width)}" height="${Math.floor(source.height)}"`
+    const dimensions = validImageDimensions(source.width, source.height)
+        ? ` width="${source.width}" height="${source.height}"`
         : ''
     switch (source.type) {
         case 'image': return `<img data-risu-inlay-id="${assetId}"${marker}${dimensions} loading="lazy"/>`
@@ -85,6 +89,12 @@ function startDeferredInlaySources(
     }
     registry?.clear()
     const markerTargets = new Map<Element, HTMLElement[]>()
+    const imageListeners: Array<() => void> = []
+    for (const [element, marker] of markers) {
+        if (!(element instanceof HTMLImageElement)) continue
+        imageListeners.push(observeImageDimensions(element, marker.source,
+            () => !disposed && element.dataset.risuInlayToken === marker.token))
+    }
     for (const element of markers.keys()) {
         const target = element instanceof HTMLSourceElement && element.parentElement instanceof HTMLMediaElement
             ? element.parentElement
@@ -215,6 +225,7 @@ function startDeferredInlaySources(
             else void loadResource(marker.id)
             return
         }
+        if (element instanceof HTMLImageElement && element.hasAttribute('src')) return
         if (isPlaying(element)) return
         detach(element)
         visibleElements?.delete(element)
@@ -237,7 +248,7 @@ function startDeferredInlaySources(
             originalSources.set(target, sources)
             element.dataset.risuManagedMedia = 'true'
             if (element instanceof HTMLImageElement && !element.hasAttribute('loading')) element.loading = 'lazy'
-            detach(element)
+            if (!(element instanceof HTMLImageElement)) detach(element)
         }
     }
 
@@ -270,6 +281,7 @@ function startDeferredInlaySources(
                     setVisible(element, entry.isIntersecting)
                 }
                 for (const source of originalSources.get(entry.target) ?? []) {
+                    if (source.element instanceof HTMLImageElement) continue
                     if (entry.isIntersecting) attach(source.element, source.url)
                     else if (!(entry.target instanceof HTMLMediaElement && !entry.target.paused && !entry.target.ended)) {
                         detach(source.element)
@@ -288,6 +300,7 @@ function startDeferredInlaySources(
     const cleanup = () => {
         if (disposed) return
         disposed = true
+        for (const remove of imageListeners) remove()
         observer?.disconnect()
         observer = null
         for (const { media, release } of playbackListeners) {
@@ -367,9 +380,12 @@ export function renderInlaySourceMarkup(source: InlayRenderSource): string {
     const url = escapeHtmlAttribute(source.url)
     const mime = mediaMimeHint(source.mime)
     const typeHint = mime ? ` type="${mime}"` : ''
+    const dimensions = validImageDimensions(source.width, source.height)
+        ? ` width="${source.width}" height="${source.height}"`
+        : ''
     switch (source.type) {
         case 'image':
-            return `<img src="${url}"/>`
+            return `<img src="${url}"${dimensions}/>`
         case 'video':
             return `<video controls><source src="${url}"${typeHint}></video>`
         case 'audio':
@@ -401,6 +417,17 @@ export async function getInlayRenderSource(
         const metadata = knownMetadata
             ?? await getInlayAssetMetadata(id)
         if (!metadata) return null
+        const store = getBlobStore()
+        if (metadata.inlayType === 'image' && store.resolveImageSource) {
+            const image = await store.resolveImageSource(id)
+            if (!image || image.metadata.kind !== 'inlay') return null
+            return {
+                ...sourceFromMetadata(image.metadata, image.url, false),
+                width: image.width,
+                height: image.height,
+                recordDimensions: image.recordDimensions,
+            }
+        }
         const url = await getInlayAssetRenderUrl(id)
         return url ? sourceFromMetadata(metadata, url, false) : null
     }

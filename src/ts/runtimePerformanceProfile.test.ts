@@ -11,7 +11,7 @@ describe('runtime performance profile', () => {
         setRuntimePerformanceProfile('normal')
     })
 
-    it('preserves the existing normal budgets and makes every low-spec budget lower', () => {
+    it('preserves existing budgets and shares the small initial preparation limits', () => {
         expect(getRuntimePerformanceProfile()).toBe('normal')
         expect(getRuntimePerformanceBudgets()).toMatchObject({
             browserAssetDataUrlCacheBytes: 16 * 1024 * 1024,
@@ -30,8 +30,12 @@ describe('runtime performance profile', () => {
 
         for (const key of Object.keys(normal) as Array<keyof typeof normal>) {
             expect(lowSpec[key]).toBeGreaterThan(0)
-            expect(lowSpec[key]).toBeLessThan(normal[key])
+            if (key === 'chatActiveRowPreparations' || key === 'chatPreparationScreens') {
+                expect(lowSpec[key]).toBe(normal[key])
+            } else expect(lowSpec[key]).toBeLessThan(normal[key])
         }
+        expect(normal.chatActiveRowPreparations).toBe(2)
+        expect(normal.chatPreparationScreens).toBe(1)
     })
 
     it('notifies runtime consumers only when the explicit profile changes', () => {

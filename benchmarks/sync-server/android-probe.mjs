@@ -2,17 +2,17 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { androidTarget, runnerOptions } from "../support/androidTarget.mjs";
 
-const adb = process.env.ANDROID_HOME + "/platform-tools/adb.exe";
+const android = androidTarget(runnerOptions(process.argv.slice(2)));
 const run = (...args) =>
-  execFileSync(adb, ["-P", "15037", "-s", "emulator-5554", ...args], {
+  execFileSync(android.adb, android.args(args), {
+    env: android.env,
     timeout: 5000,
     encoding: "utf8",
     windowsHide: true,
   }).trim();
-if (run("emu", "avd", "name").split(/\s+/)[0] !== "risunest_vm_retest") {
-  throw new Error("Refusing an unverified Android profile");
-}
+android.assertAvd(run("emu", "avd", "name"));
 const root = fileURLToPath(new URL(".local/", import.meta.url));
 mkdirSync(root, { recursive: true });
 const bytes = randomBytes(1024 * 1024);

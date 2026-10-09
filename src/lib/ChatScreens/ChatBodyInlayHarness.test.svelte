@@ -12,6 +12,7 @@
     interface Props {
         initialTranslated?: boolean
         onCaptureSettled?: (generation: number) => void
+        onDisplaySettled?: () => void
         onCaptureError?: (generation: number, error: unknown) => void
         captureContext?: FrozenChatScreenshotRenderContext
         idx?: number
@@ -31,6 +32,7 @@
     let {
         initialTranslated: translated = $bindable(false),
         onCaptureSettled,
+        onDisplaySettled,
         onCaptureError,
         captureContext,
         idx = 0,
@@ -128,6 +130,7 @@
             : null}
         {bodyRoot}
         {onCaptureSettled}
+        {onDisplaySettled}
         {onCaptureError}
         {captureContext}
         {captureParserIndex}

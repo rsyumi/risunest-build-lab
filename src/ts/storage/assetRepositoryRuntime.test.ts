@@ -238,3 +238,21 @@ describe('coordinated staged asset activation', () => {
         expect(test.currentRemove).toHaveBeenCalledOnce()
     })
 })
+
+
+it('records derived dimensions outside the save coordinator and rejects an obsolete source after activation', async () => {
+    let epoch = 1
+    const recordDimensions = vi.fn(async () => {})
+    const save = vi.fn()
+    const raw = repository()
+    raw.resolveImageSource = vi.fn(async () => ({ url: 'risuasset://synthetic', contentHash: 'a'.repeat(64), metadata: { ...metadata, key: 'assets/item.bin', size: 1 }, recordDimensions }))
+    const store = createCoordinatorOwnedAssetBlobStore(createRuntimeAssetRepositoryDispatcher(raw), {} as never,
+        { getStorageAuthorityEpoch: () => epoch, runStorageOnlyMutation: save } as never)
+    const source = await store.resolveImageSource!('assets/item.bin')
+    await source!.recordDimensions(30, 20)
+    expect(recordDimensions).toHaveBeenCalledExactlyOnceWith(30, 20)
+    expect(save).not.toHaveBeenCalled()
+    epoch++
+    await expect(source!.recordDimensions(30, 20)).rejects.toMatchObject({ name: 'AbortError' })
+    expect(recordDimensions).toHaveBeenCalledTimes(1)
+})

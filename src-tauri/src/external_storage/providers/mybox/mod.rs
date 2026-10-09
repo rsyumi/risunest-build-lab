@@ -545,7 +545,7 @@ impl Mybox {
         state: &ResumeState,
         intent: &ObjectIntent,
     ) -> Result<Session> {
-        let stored = self.deps.vault.read(&state.sealed_state).await?;
+        let stored = self.deps.vault.read(&state.data.secret()?).await?;
         let session: Session = serde_json::from_slice(stored.0.as_slice())
             .map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
         let folder = config::role_folder(intent.role);
@@ -949,7 +949,7 @@ impl Provider for Mybox {
                 )
                 .await?;
             Ok(Some(ResumeState {
-                sealed_state,
+                data: sealed_state.into(),
                 confirmed_offset: 0,
                 expires_at_ms: Some(now.saturating_add(api::UPLOAD_URL_LIFETIME_MS)),
             }))
@@ -1275,11 +1275,11 @@ impl Provider for Mybox {
                                 upload_url: upload.upload_url,
                                 ..session
                             },
-                            Some(&resume.sealed_state),
+                            Some(&resume.data.secret()?),
                         )
                         .await?;
                     Ok(UploadResolution::Resumable(ResumeState {
-                        sealed_state,
+                        data: sealed_state.into(),
                         confirmed_offset: upload.offset,
                         expires_at_ms: Some(now.saturating_add(api::UPLOAD_URL_LIFETIME_MS)),
                     }))

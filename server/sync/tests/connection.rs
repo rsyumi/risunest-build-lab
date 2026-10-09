@@ -9,6 +9,53 @@ fn options(endpoint: &str) -> ConnectionOptions {
 }
 
 #[test]
+fn http_fixed_addresses_survive_restart_registration_and_publication() {
+    for endpoint in ["http://192.168.0.10:14319", "http://127.0.0.1:14319"] {
+        for registry_url in [
+            None,
+            Some("https://registry.example"),
+            Some("http://registry.internal:14320"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Store::init(root.path()).unwrap();
+            store
+                .configure_connection(ConnectionOptions {
+                    endpoint: Some(endpoint.into()),
+                    cloudflared: None,
+                    registry_url: registry_url.map(str::to_owned),
+                })
+                .unwrap();
+            drop(store);
+            let store = Store::open(root.path()).unwrap();
+            let registration = risunest_sync_connect::Registration::parse_uri(
+                &store.issue_registration().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(registration.endpoint, endpoint);
+            assert_eq!(
+                registration.directory.as_ref().map(|value| value.base_url.as_str()),
+                registry_url,
+            );
+            if let Some(publication) = store.plan_publication().unwrap() {
+                let directory = registration.directory.unwrap();
+                assert_eq!(
+                    risunest_sync_connect::open_endpoint(
+                        &directory.uuid, &directory.key, &publication.envelope,
+                    ).unwrap(),
+                    endpoint,
+                );
+                store.confirm_publication(&publication).unwrap();
+                drop(store);
+                let store = Store::open(root.path()).unwrap();
+                assert!(store.plan_publication().unwrap().is_none());
+            } else {
+                assert!(registry_url.is_none());
+            }
+        }
+    }
+}
+
+#[test]
 fn publication_survives_restart_and_does_not_repeat_confirmed_address() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::init(root.path()).unwrap();

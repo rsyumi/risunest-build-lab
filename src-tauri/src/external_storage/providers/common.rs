@@ -26,10 +26,10 @@ pub(crate) fn error(kind: ErrorKind, status: u16) -> ProviderError {
         cause: Default::default(),
     }
 }
-fn io_error(cancel: &Cancellation) -> ProviderError {
+fn io_error(error: std::io::Error, cancel: &Cancellation) -> ProviderError {
     match cancel.check() {
         Err(cancelled) => cancelled,
-        Ok(()) => ProviderError::new(ErrorKind::Transient),
+        Ok(()) => ProviderError::new(ErrorKind::Transient).caused(&error),
     }
 }
 
@@ -51,7 +51,7 @@ pub(crate) async fn read_bounded(
     body.take(max as u64 + 1)
         .read_to_end(&mut bytes)
         .await
-        .map_err(|_| io_error(cancel))?;
+        .map_err(|error| io_error(error, cancel))?;
     if bytes.len() > max {
         return Err(ProviderError::new(ErrorKind::Corrupt));
     }
@@ -95,7 +95,7 @@ pub(crate) async fn stream_to_sink(
     let mut buffer = vec![0u8; 64 * 1024];
     let mut received = 0u64;
     loop {
-        let read = body.read(&mut buffer).await.map_err(|_| io_error(cancel))?;
+        let read = body.read(&mut buffer).await.map_err(|error| io_error(error, cancel))?;
         if read == 0 {
             break;
         }

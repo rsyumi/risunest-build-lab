@@ -8,7 +8,6 @@ use super::{
     sigv4,
 };
 use crate::external_storage::{
-    auth::{SecretBytes, SecretVault},
     capabilities::Capabilities,
     contract::*,
     fake::{self, loopback_dependencies, with_transport, MemoryVault, TestDependencies},
@@ -217,21 +216,16 @@ impl Spool {
     }
 }
 
-async fn seal_session(
-    test: &TestDependencies,
+async fn multipart_session(
+    _test: &TestDependencies,
     upload_id: &str,
     key: &str,
     part_size: u64,
 ) -> ResumeState {
     let document =
         format!(r#"{{"uploadId":"{upload_id}","key":"{key}","partSize":{part_size},"parts":[]}}"#);
-    let sealed_state = test
-        .vault
-        .store(&SecretBytes(zeroize::Zeroizing::new(document.into_bytes())))
-        .await
-        .unwrap();
     ResumeState {
-        sealed_state,
+        data: ResumeData::S3Multipart(document),
         confirmed_offset: 0,
         expires_at_ms: None,
     }
@@ -1309,7 +1303,7 @@ fn a_multipart_session_uploads_every_part_and_completes_the_object() {
             ),
         ]);
         let (provider, handle) = opened(&test, "r2", &server).await;
-        let resume = seal_session(&test, "synthetic-upload", "risunest/packs/pack-1", 1024).await;
+        let resume = multipart_session(&test, "synthetic-upload", "risunest/packs/pack-1", 1024).await;
         let intent = spool.intent(&handle, "pack-1", ObjectRole::Pack);
         let receipt = provider
             .create_object(&handle, &intent, &spool.source(), Some(&resume), &cancel)
@@ -1359,7 +1353,7 @@ fn a_multipart_session_uploads_every_part_and_completes_the_object() {
 }
 
 #[test]
-fn a_session_opens_only_above_the_threshold_and_seals_its_own_state() {
+fn a_session_opens_only_above_the_threshold_and_keeps_progress_out_of_the_vault() {
     runtime().block_on(async {
         let cancel = Cancellation::default();
         let test = dependencies();
@@ -1400,8 +1394,9 @@ fn a_session_opens_only_above_the_threshold_and_seals_its_own_state() {
         assert_eq!(resume.confirmed_offset, 0);
         // Hugging Face documents a seven day multipart lifetime.
         assert_eq!(resume.expires_at_ms, Some(NOW_MS + 7 * 24 * 60 * 60 * 1000));
-        let sealed = test.vault.contents(&resume.sealed_state.0).unwrap();
-        let sealed: serde_json::Value = serde_json::from_slice(&sealed).unwrap();
+        assert_eq!(test.vault.entry_count(), 1, "only the authentication credential belongs in the vault");
+        let ResumeData::S3Multipart(json) = resume.data else { panic!("expected ordinary progress"); };
+        let sealed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(sealed["uploadId"], "synthetic-upload-id");
         assert_eq!(sealed["key"], "risunest/packs/pack-big");
         assert_eq!(sealed["partSize"], 64 * 1024 * 1024u64);
@@ -1435,7 +1430,7 @@ fn reconcile_separates_completion_conflict_expiry_and_a_confirmed_offset() {
         let test = dependencies();
         let server = WireServer::start(vec![one_descriptor(), metadata(2560, "\"done\""), reply(200, &[], spool.bytes.clone())]);
         let (provider, handle) = opened(&test, "r2", &server).await;
-        let resume = seal_session(&test, "synthetic-upload", "risunest/packs/pack-1", 1024).await;
+        let resume = multipart_session(&test, "synthetic-upload", "risunest/packs/pack-1", 1024).await;
         let intent = spool.intent(&handle, "pack-1", ObjectRole::Pack);
         match provider
             .reconcile_upload(&handle, &intent, Some(&resume), &cancel)
@@ -1453,7 +1448,7 @@ fn reconcile_separates_completion_conflict_expiry_and_a_confirmed_offset() {
         let test = dependencies();
         let server = WireServer::start(vec![one_descriptor(), metadata(999, "\"other\"")]);
         let (provider, handle) = opened(&test, "r2", &server).await;
-        let resume = seal_session(&test, "synthetic-upload", "risunest/packs/pack-1", 1024).await;
+        let resume = multipart_session(&test, "synthetic-upload", "risunest/packs/pack-1", 1024).await;
         let intent = spool.intent(&handle, "pack-1", ObjectRole::Pack);
         assert!(matches!(
             provider
@@ -1475,7 +1470,7 @@ fn reconcile_separates_completion_conflict_expiry_and_a_confirmed_offset() {
             ),
         ]);
         let (provider, handle) = opened(&test, "r2", &server).await;
-        let resume = seal_session(&test, "synthetic-upload", "risunest/packs/pack-1", 1024).await;
+        let resume = multipart_session(&test, "synthetic-upload", "risunest/packs/pack-1", 1024).await;
         let intent = spool.intent(&handle, "pack-1", ObjectRole::Pack);
         assert!(matches!(
             provider
@@ -1501,7 +1496,7 @@ fn reconcile_separates_completion_conflict_expiry_and_a_confirmed_offset() {
             ),
         ]);
         let (provider, handle) = opened(&test, "r2", &server).await;
-        let resume = seal_session(&test, "synthetic-upload", "risunest/packs/pack-1", 1024).await;
+        let resume = multipart_session(&test, "synthetic-upload", "risunest/packs/pack-1", 1024).await;
         let intent = spool.intent(&handle, "pack-1", ObjectRole::Pack);
         let resumed = match provider
             .reconcile_upload(&handle, &intent, Some(&resume), &cancel)
@@ -1512,8 +1507,9 @@ fn reconcile_separates_completion_conflict_expiry_and_a_confirmed_offset() {
             _ => panic!("expected a resumable session"),
         };
         assert_eq!(resumed.confirmed_offset, 2048);
-        let sealed = test.vault.contents(&resumed.sealed_state.0).unwrap();
-        let sealed: serde_json::Value = serde_json::from_slice(&sealed).unwrap();
+        assert_eq!(test.vault.entry_count(), 1);
+        let ResumeData::S3Multipart(json) = &resumed.data else { panic!("expected ordinary progress"); };
+        let sealed: serde_json::Value = serde_json::from_str(json).unwrap();
         assert_eq!(sealed["parts"].as_array().unwrap().len(), 2);
         assert_eq!(sealed["parts"][1]["etag"], "\"p2\"");
         let receipt = provider
@@ -2106,7 +2102,7 @@ fn lost_multipart_completion_requires_exact_remote_bytes() {
         let name = crate::external_storage::contract::segment_object_id("00000000-0000-4000-8000-000000000001", 1, &spool.sha256).unwrap();
         let intent = spool.intent(&handle, &name, ObjectRole::Segment);
         let key = format!("risunest/segments/{name}");
-        let resume = seal_session(&test, "fixed-upload", &key, 1024).await;
+        let resume = multipart_session(&test, "fixed-upload", &key, 1024).await;
         let cancel = Cancellation::default();
         assert_eq!(provider.create_object(&handle, &intent, &spool.source(), Some(&resume), &cancel).await.unwrap_err().kind, ErrorKind::Transient);
         assert!(matches!(provider.reconcile_upload(&handle, &intent, Some(&resume), &cancel).await.unwrap(), UploadResolution::Complete(_)));

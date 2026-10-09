@@ -434,22 +434,22 @@ pub(crate) struct JobIdentity {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SealedResume {
-    reference: String,
+struct StoredResume {
+    data: super::contract::ResumeData,
     confirmed_offset: u64,
     expires_at_ms: Option<u64>,
 }
-impl SealedResume {
+impl StoredResume {
     fn from_state(state: &ResumeState) -> Self {
         Self {
-            reference: state.sealed_state.0.clone(),
+            data: state.data.clone(),
             confirmed_offset: state.confirmed_offset,
             expires_at_ms: state.expires_at_ms,
         }
     }
     fn into_state(self) -> ResumeState {
         ResumeState {
-            sealed_state: SecretRef(self.reference),
+            data: self.data,
             confirmed_offset: self.confirmed_offset,
             expires_at_ms: self.expires_at_ms,
         }
@@ -968,14 +968,14 @@ impl TransferJournal {
         }
         let resume = resume
             .map(|s| {
-                serde_json::from_str::<SealedResume>(&s)
-                    .map(SealedResume::into_state)
+                serde_json::from_str::<StoredResume>(&s)
+                    .map(StoredResume::into_state)
                     .map_err(|_| corrupt())
             })
             .transpose()?;
         if resume
             .as_ref()
-            .is_some_and(|r| r.confirmed_offset > intent.byte_length || r.sealed_state.0.is_empty())
+            .is_some_and(|r| r.confirmed_offset > intent.byte_length || !r.data.valid())
         {
             return Err(corrupt());
         }
@@ -1000,8 +1000,9 @@ impl TransferJournal {
     }
 
     pub fn attempted(&mut self, object: &str, resume: Option<&ResumeState>) -> Result<()> {
+        if resume.is_some_and(|state| !state.data.valid()) { return Err(corrupt()); }
         let resume = resume
-            .map(|r| serde_json::to_string(&SealedResume::from_state(r)))
+            .map(|r| serde_json::to_string(&StoredResume::from_state(r)))
             .transpose()
             .map_err(storage)?;
         if self
@@ -1159,8 +1160,10 @@ impl TransferJournal {
                 .map_err(storage)?
         };
         for (id, encoded) in entries {
-            let resume: SealedResume = serde_json::from_str(&encoded).map_err(|_| corrupt())?;
-            vault.remove(&SecretRef(resume.reference)).await?;
+            let resume: StoredResume = serde_json::from_str(&encoded).map_err(|_| corrupt())?;
+            if let super::contract::ResumeData::Secret(reference) = resume.data {
+                vault.remove(&SecretRef(reference)).await?;
+            }
             self.db
                 .execute(
                     "UPDATE objects SET resume=NULL WHERE id=?1 AND receipt IS NOT NULL",
@@ -1210,6 +1213,36 @@ mod tests {
         journal.register(&intent).unwrap();
         drop(journal);
         (root, store, identity, directory)
+    }
+
+    #[test]
+    fn upload_progress_survives_reopening_and_only_secret_references_are_removed() {
+        use crate::external_storage::{auth::{SecretBytes, SecretVault}, contract::ResumeData};
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for secret in [false, true] {
+                let (_root, _store, identity, directory) = fixture();
+                let vault = fake::MemoryVault::default();
+                let reference = vault.store(&SecretBytes(zeroize::Zeroizing::new(b"synthetic-upload-capability".to_vec()))).await.unwrap();
+                let data = if secret { ResumeData::from(reference.clone()) } else {
+                    ResumeData::S3Multipart(r#"{"uploadId":"synthetic","key":"packs/pack","partSize":1024,"parts":[]}"#.into())
+                };
+                let expected = serde_json::to_string(&data).unwrap();
+                let mut journal = TransferJournal::open(&directory, identity.clone()).unwrap();
+                journal.attempted("pack", Some(&ResumeState { data, confirmed_offset: 2, expires_at_ms: Some(100) })).unwrap();
+                drop(journal);
+                let mut journal = TransferJournal::open(&directory, identity).unwrap();
+                let record = journal.record("pack").unwrap().unwrap();
+                let resumed = record.resume.unwrap();
+                assert_eq!(serde_json::to_string(&resumed.data).unwrap(), expected);
+                assert_eq!(resumed.confirmed_offset, 2);
+                assert_eq!(resumed.expires_at_ms, Some(100));
+                // Completion metadata is irrelevant to session cleanup; isolate that boundary.
+                journal.db.execute("UPDATE objects SET receipt='{}' WHERE id='pack'", []).unwrap();
+                journal.release_completed_sessions(&vault).await.unwrap();
+                assert_eq!(vault.contents(&reference.0).is_none(), secret);
+                assert!(journal.db.query_row("SELECT resume FROM objects WHERE id='pack'", [], |row| row.get::<_, Option<String>>(0)).unwrap().is_none());
+            }
+        });
     }
 
     /// Every holder counts toward one budget: another job's retained spool,

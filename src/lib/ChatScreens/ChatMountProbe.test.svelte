@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onDestroy, onMount, untrack } from 'svelte'
+    import { onDestroy, onMount, tick, untrack } from 'svelte'
     import type { StreamingDisplayOptimizationMode } from 'src/ts/storage/database.svelte'
     import { chatMountProbe } from './chatMountProbe.testSupport'
     import type { BoundedLiveChatParserProjection } from 'src/ts/selectedConversationLiveParserProjection'
@@ -17,6 +17,7 @@
         totalPages = 1,
         parserProjection,
         parserAbortSignal,
+        onDisplaySettled,
         restoredEditor,
         onEditorClose,
     }: {
@@ -30,6 +31,7 @@
         totalPages?: number
         parserProjection?: BoundedLiveChatParserProjection
         parserAbortSignal?: AbortSignal
+        onDisplaySettled?: () => void
         restoredEditor?: ChatEditorDraft
         onEditorClose?: () => void
     } = $props()
@@ -92,12 +94,22 @@
     }
     const initialEditor = untrack(() => restoredEditor)
     if (initialEditor) restoreEditor(initialEditor)
+    function reportDisplay(settled?: () => void) {
+        if (chatMountProbe.holdDisplay) chatMountProbe.pendingDisplays.set(instanceId, () => {
+            chatMountProbe.pendingDisplays.delete(instanceId)
+            settled?.()
+        })
+        else settled?.()
+    }
     export function refreshMessageDisplay(state: ChatDisplayRefresh) {
         message = state.message
         if (state.index !== undefined) idx = state.index
         if (state.character !== undefined) character = state.character
         parserProjection = state.parserProjection
         parserAbortSignal = state.parserAbortSignal
+        onDisplaySettled = state.onDisplaySettled
+        const settled = onDisplaySettled
+        void tick().then(() => reportDisplay(settled))
         refreshCount = untrack(() => refreshCount) + 1
         chatMountProbe.displayUpdates.push({
             instanceId,
@@ -115,6 +127,8 @@
     }
 
     onMount(() => {
+        const settled = onDisplaySettled
+        void tick().then(() => reportDisplay(settled))
         chatMountProbe.closeEditors.set(instanceId, () => {
             chatMountProbe.activeEditors.delete(instanceId)
             restored = undefined
@@ -135,6 +149,7 @@
     })
 
     onDestroy(() => {
+        chatMountProbe.pendingDisplays.delete(instanceId)
         chatMountProbe.closeEditors.delete(instanceId)
         chatMountProbe.unmounts.push(instanceId)
     })

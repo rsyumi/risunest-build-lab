@@ -1,3 +1,5 @@
+import type { ImageGeometryStore } from './imageGeometry'
+
 export type BlobKind = 'asset' | 'inlay'
 export type InlayBlobType = 'image' | 'video' | 'audio' | 'signature'
 export type InlayEncodeFormat = 'webp' | 'png' | 'original'
@@ -79,7 +81,18 @@ export interface BlobListQuery {
 
 export type ConditionalBlobWrite = (data: Uint8Array, metadata: BlobWriteMetadata, sourceBytes: Uint8Array) => Promise<BlobMetadata | null>
 
+export interface BlobImageSource {
+    url: string
+    metadata: BlobMetadata
+    contentHash: string
+    width?: number
+    height?: number
+    recordDimensions(width: number, height: number): Promise<void>
+}
+
 export interface BlobStore {
+    imageGeometry?: ImageGeometryStore
+    resolveImageSource?(key: string): Promise<BlobImageSource | null>
     captureConditionalWrite?(key: string): Promise<ConditionalBlobWrite | null>
     put(key: string, data: Uint8Array, metadata: BlobWriteMetadata): Promise<BlobMetadata>
     putNewInlayImage?(

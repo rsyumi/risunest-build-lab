@@ -22,6 +22,7 @@ const liveRenderMocks = vi.hoisted(() => ({
     getModuleAssets: vi.fn(() => []),
     getCurrentCharacter: vi.fn(() => ({})),
     getFileSrc: vi.fn(async (source: string) => `asset://${source}`),
+    getFileImageSource: vi.fn(async (): Promise<any> => null),
 }))
 
 const schedulingMocks = vi.hoisted(() => {
@@ -53,7 +54,7 @@ vi.mock('src/ts/translator/translator', () => ({
 }))
 vi.mock('src/ts/process/modules', () => ({ getModuleAssets: liveRenderMocks.getModuleAssets }))
 vi.mock('src/ts/storage/database.svelte', () => ({ getCurrentCharacter: liveRenderMocks.getCurrentCharacter }))
-vi.mock('src/ts/globalApi.svelte', () => ({ getFileSrc: liveRenderMocks.getFileSrc }))
+vi.mock('src/ts/globalApi.svelte', () => ({ getFileSrc: liveRenderMocks.getFileSrc, getFileImageSource: liveRenderMocks.getFileImageSource }))
 vi.mock('src/ts/alert', () => ({ alertError: vi.fn() }))
 vi.mock('src/ts/ui/yieldToUi', () => ({
     yieldToMainThread: schedulingMocks.yieldToMainThread,
@@ -168,6 +169,7 @@ describe('ChatBody deferred inlay lifecycle', () => {
         parserMocks.trimMarkdown.mockImplementation((value: string) => value)
         vi.stubGlobal('IntersectionObserver', undefined)
         chatState.db = {}
+        liveRenderMocks.getFileImageSource.mockReset().mockResolvedValue(null)
         schedulingMocks.state.controlled = false
         schedulingMocks.releaseAll()
         schedulingMocks.yieldToMainThread.mockClear()
@@ -191,6 +193,38 @@ describe('ChatBody deferred inlay lifecycle', () => {
         document.body.replaceChildren()
         vi.unstubAllGlobals()
         vi.useRealTimers()
+    })
+
+    test('reports ordinary body readiness without waiting for image bytes or capture completion', async () => {
+        const bytes = deferred<any>()
+        inlayMocks.getInlayAssetBlob.mockReturnValue(bytes.promise)
+        const settled = vi.fn()
+        mounted = mount(ChatBodyInlayHarness, { target, props: { onDisplaySettled: settled } })
+        await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce())
+        expect(target.querySelector('img')).not.toBeNull()
+        expect(target.querySelector('img')?.hasAttribute('src')).toBe(false)
+        bytes.resolve({ data: new Blob(['first']), type: 'image', name: 'synthetic.png' })
+        await vi.waitFor(() => expect(target.querySelector('img')?.getAttribute('src')).toBe('blob:first'))
+        expect(settled).toHaveBeenCalledOnce()
+    })
+
+    test('learns beta image dimensions after identical markup reuses the displayed DOM', async () => {
+        const recordDimensions = vi.fn(async () => {})
+        chatState.db.newImageHandlingBeta = true
+        liveRenderMocks.getModuleAssets.mockReturnValue([['synthetic.png', 'assets/synthetic.png', 'png']] as never)
+        liveRenderMocks.getFileImageSource.mockResolvedValue({ url: 'https://synthetic.invalid/image.png', recordDimensions })
+        parserMocks.ParseMarkdown.mockResolvedValue('<img src="synthetic.png">')
+        const onDisplaySettled = vi.fn()
+        mounted = mount(ChatBodyInlayHarness, { target, props: { onDisplaySettled } })
+        await vi.waitFor(() => expect(onDisplaySettled).toHaveBeenCalledOnce())
+        const image = target.querySelector('img')!
+        Object.defineProperties(image, { naturalWidth: { value: 320 }, naturalHeight: { value: 200 } })
+        ;(mounted as { reload(): void }).reload()
+        await vi.waitFor(() => expect(onDisplaySettled).toHaveBeenCalledTimes(2))
+        expect(target.querySelector('img')).toBe(image)
+        image.dispatchEvent(new Event('load'))
+        expect(recordDimensions).toHaveBeenCalledExactlyOnceWith(320, 200)
+        liveRenderMocks.getModuleAssets.mockReturnValue([])
     })
 
     test('mounts a deferred collapsed thought body only when opened, retaining its state across updates', async () => {
@@ -1433,7 +1467,7 @@ describe('ChatBody settings navigation round trip', () => {
         const chat = mountBody('synthetic')
         const other = mountBody('synthetic')
         await vi.waitFor(() => expect(document.querySelectorAll('img[data-risu-inlay-token]')).toHaveLength(2))
-        expect(document.querySelectorAll('img[data-synthetic-asset][src]')).toHaveLength(0)
+        expect(document.querySelectorAll('img[data-synthetic-asset][src]')).toHaveLength(2)
         showAll()
         await vi.waitFor(() => expect(displayedSources(document)).toEqual([firstUrl, firstUrl, firstUrl, firstUrl]))
 

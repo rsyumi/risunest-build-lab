@@ -10,16 +10,21 @@ import javax.crypto.spec.GCMParameterSpec
 
 /**
  * Native-only OS protection for external-storage secrets, repository keys and
- * the account token. Each purpose holds its own Keystore key.
+ * the account token and Sync credentials. Each purpose holds its own Keystore key.
  */
-internal object ExternalStorageSecrets {
+internal object DeviceSecrets {
   private const val PROVIDER_PURPOSE = "external-storage-secrets"
   private const val ROOT_KEY_PURPOSE = "external-storage-root-keys"
   private const val ACCOUNT_PURPOSE = "account-credentials"
   private const val PROVIDER_ALIAS = "risunest.external-storage.secrets"
   private const val ROOT_KEY_ALIAS = "risunest.external-storage.root-key"
   private const val ACCOUNT_ALIAS = "risunest.account.credential"
-  private const val MAX_ENVELOPE_BYTES = 65_536
+  private const val SYNC_PURPOSE = "server-sync"
+  private const val SYNC_ALIAS = "risunest.server-sync.device-token"
+  private fun maxEnvelopeBytes(purpose: String): Int {
+    alias(purpose)
+    return if (purpose == SYNC_PURPOSE) 16_384 else 65_536
+  }
 
   @JvmStatic external fun initialize()
 
@@ -27,7 +32,8 @@ internal object ExternalStorageSecrets {
     PROVIDER_PURPOSE -> PROVIDER_ALIAS
     ROOT_KEY_PURPOSE -> ROOT_KEY_ALIAS
     ACCOUNT_PURPOSE -> ACCOUNT_ALIAS
-    else -> throw IllegalArgumentException("unsupported external-storage secret purpose")
+    SYNC_PURPOSE -> SYNC_ALIAS
+    else -> throw IllegalArgumentException("unsupported device secret purpose")
   }
 
   @JvmStatic
@@ -38,7 +44,7 @@ internal object ExternalStorageSecrets {
   }
 
   internal fun removeOwnedKeys(remove: (String) -> Unit) {
-    for (alias in listOf(PROVIDER_ALIAS, ROOT_KEY_ALIAS, ACCOUNT_ALIAS)) remove(alias)
+    for (alias in listOf(PROVIDER_ALIAS, ROOT_KEY_ALIAS, ACCOUNT_ALIAS, SYNC_ALIAS)) remove(alias)
   }
 
   @Synchronized
@@ -60,17 +66,19 @@ internal object ExternalStorageSecrets {
     }.generateKey()
   }
 
-  internal fun validatePlaintextSize(size: Int) {
-    require(size in 1..(MAX_ENVELOPE_BYTES - 28))
+  internal fun validatePlaintextSize(purpose: String, size: Int) {
+    val minimum = if (purpose == PROVIDER_PURPOSE) 0 else 1
+    require(size in minimum..(maxEnvelopeBytes(purpose) - 28))
   }
 
-  internal fun validateEnvelopeSize(size: Int) {
-    require(size in 29..MAX_ENVELOPE_BYTES)
+  internal fun validateEnvelopeSize(purpose: String, size: Int) {
+    val minimum = if (purpose == PROVIDER_PURPOSE) 28 else 29
+    require(size in minimum..maxEnvelopeBytes(purpose))
   }
 
   @JvmStatic
   fun seal(purpose: String, input: ByteArray): ByteArray {
-    validatePlaintextSize(input.size)
+    validatePlaintextSize(purpose, input.size)
     val cipher = Cipher.getInstance("AES/GCM/NoPadding")
     cipher.init(Cipher.ENCRYPT_MODE, key(purpose))
     check(cipher.iv.size == 12)
@@ -80,7 +88,7 @@ internal object ExternalStorageSecrets {
 
   @JvmStatic
   fun open(purpose: String, input: ByteArray): ByteArray {
-    validateEnvelopeSize(input.size)
+    validateEnvelopeSize(purpose, input.size)
     val cipher = Cipher.getInstance("AES/GCM/NoPadding")
     cipher.init(Cipher.DECRYPT_MODE, key(purpose), GCMParameterSpec(128, input.copyOfRange(0, 12)))
     cipher.updateAAD(purpose.toByteArray(Charsets.UTF_8))

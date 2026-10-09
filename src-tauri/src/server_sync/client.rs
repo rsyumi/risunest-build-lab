@@ -333,7 +333,7 @@ impl ServerClient {
             .map_err(|_| SyncError::new("invalid-directory-envelope", 502))?;
         let endpoint =
             risunest_sync_connect::open_endpoint(&directory.uuid, &directory.key, envelope)?;
-        if risunest_sync_connect::validate_endpoint(&endpoint, false)?
+        if risunest_sync_connect::validate_endpoint(&endpoint)?
             == *self.url.read().unwrap_or_else(|error| error.into_inner())
         {
             return Err(original);
@@ -1079,17 +1079,21 @@ mod tests {
     }
 
     #[test]
-    fn fixed_endpoint_requires_https_except_loopback_and_rejects_embedded_credentials() {
+    fn fixed_endpoint_accepts_http_and_https_and_rejects_embedded_credentials() {
         for url in [
             "https://sync.example/base",
             "http://127.0.0.1:4319",
             "http://[::1]:4319",
+            "http://192.168.0.1:14319",
+            "http://[fd00::10]:14319",
+            "http://sync.internal:14319/base",
+            "http://203.0.113.10:14319",
         ] {
             assert!(config(url).validate().is_ok());
         }
         for url in [
-            "http://192.168.0.1",
-            "http://sync.example",
+            "ftp://sync.example",
+            "http://name:secret@sync.example",
             "https://name:secret@sync.example",
             "https://sync.example/?token=x",
             "https://sync.example/#fragment",

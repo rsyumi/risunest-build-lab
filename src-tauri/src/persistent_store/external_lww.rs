@@ -22,7 +22,7 @@ const STAGE_PREFIX: &str = "stage/";
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct UploadState {
-    pub sealed_state: String,
+    pub data: crate::external_storage::contract::ResumeData,
     pub confirmed_offset: DecimalU64,
     pub expires_at_ms: Option<DecimalU64>,
 }

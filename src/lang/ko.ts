@@ -2134,11 +2134,6 @@ export const languageKorean = {
             profileLowSpec: '저사양',
             profileHelp:
                 '저사양은 메모리 사용량을 줄이는 대신 긴 대화에서 스크롤이 조금 느려질 수 있습니다.',
-            overflowScope: '채팅 메시지 렌더링 격리',
-            overflowScopeLatest: '최신 메시지',
-            overflowScopeAll: '전체',
-            overflowScopeHelp:
-                '채팅 메시지 영역을 벗어나는 UI 요소(설정 버튼, 오버레이 등)의 렌더링을 최신 메시지 1개에만 허용할지, 전체 메시지에서 허용할지 선택할 수 있습니다. 사용하는 캐릭터와 호환되지 않는 경우 전체를 선택해주세요. 전체는 긴 대화에서 스크롤이 조금 느려질 수 있습니다.',
             historyLimit: '이전 메시지 로딩 생략',
             historyLimitHelp:
                 '메시지 전송 시 정해진 최대 컨텍스트 크기를 넘는 과거 메시지를 로딩하지 않도록 해 속도와 메모리 사용량을 개선합니다. 과거 메시지에 의존하는 로어북 탐색 기능이나 트리거, 모듈, 정규식, 플러그인 등이 제대로 동작하지 않을 수 있습니다. 전체 메시지를 조작하는 모듈이나 플러그인과는 함께 쓰지 마세요.',
@@ -2158,6 +2153,16 @@ export const languageKorean = {
             open: '팝업창에서 수정',
             close: '닫기',
             save: '저장',
+        },
+        imageGeometry: {
+            title: '이미지 크기',
+            calculate: '이미지 크기 계산',
+            help: '이미지 크기를 계산해 저장합니다. 이 기기에 없는 파일은 건너뜁니다.',
+            counts: '저장 {saved}개, 건너뜀 {skipped}개, 실패 {failed}개',
+            complete: '이미지 크기 계산이 완료되었습니다.',
+            cancelled: '이미지 크기 계산이 취소되었습니다.',
+            catalogChanged: '이미지 목록이 변경되었습니다. 다시 계산해주세요.',
+            failed: '이미지 크기를 계산하지 못했습니다. 다시 시도해주세요.',
         },
         inlay: {
             optimizeFailed: '선택한 에셋을 최적화하지 못했습니다.',

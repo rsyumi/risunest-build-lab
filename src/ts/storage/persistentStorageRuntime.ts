@@ -19,6 +19,7 @@ import {
 } from './nativeAssetRepository'
 import type { BlobStore } from './blobStore'
 import type { PersistentStorageAuthority } from './persistentStorageAuthority'
+import { createNativeImageGeometryStore } from './imageGeometry'
 
 function createConfiguredAssetBlobStore(
     store: RuntimeAssetRepositoryDispatcher,
@@ -39,6 +40,7 @@ async function installPersistentStorage(): Promise<void> {
         return
     }
     const repository = createNativeAssetBlobStore({
+        imageGeometry: createNativeImageGeometryStore(undefined, () => getPersistentDataRuntime().getStorageAuthorityEpoch()),
         store: authority.rawStore,
         cas: createNativeImmutablePayloadCas(),
         objectUrls: createNativeAssetObjectUrlResolver(),

@@ -567,14 +567,14 @@ impl ExternalLwwEngine {
     }
     fn resume(state: &UploadState) -> ResumeState {
         ResumeState {
-            sealed_state: SecretRef(state.sealed_state.clone()),
+            data: state.data.clone(),
             confirmed_offset: state.confirmed_offset.0,
             expires_at_ms: state.expires_at_ms.map(|v| v.0),
         }
     }
     fn saved(state: ResumeState) -> UploadState {
         UploadState {
-            sealed_state: state.sealed_state.0,
+            data: state.data,
             confirmed_offset: DecimalU64(state.confirmed_offset),
             expires_at_ms: state.expires_at_ms.map(DecimalU64),
         }

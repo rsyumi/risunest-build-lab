@@ -1,8 +1,9 @@
 import DOMPurify from 'dompurify';
+import { validImageDimensions } from '../storage/imageGeometry'
 import markdownit from 'markdown-it'
 import { appVer, getCurrentCharacter, getDatabase, type Database, type character, type customscript, type loreBook, type triggerscript } from '../storage/database.svelte';
 import { DBState, selIdState } from '../stores.svelte';
-import { aiWatermarkingLawApplies, getFileSrc } from '../globalApi.svelte';
+import { aiWatermarkingLawApplies, getFileSrc, getFileImageSource } from '../globalApi.svelte';
 import { isTauri } from "src/ts/platform"
 import { getChatVar, setChatVar, getGlobalChatVar } from './chatVar.svelte';
 import { processScriptFull, type ProcessScriptCaptureContext } from '../process/scripts';
@@ -479,6 +480,17 @@ $effect.root(() => {
 const imageCBS = ['img', 'image', 'emotion', 'asset', 'bg', 'raw', 'path']
 const videoExtensions = ['mp4', 'webm', 'avi', 'm4p', 'm4v']
 
+function assetImageAttributes(image: import('../storage/blobStore').BlobImageSource | null, registry?: DeferredInlayMarkerRegistry): string {
+    if (!image) return ''
+    const dimensions = validImageDimensions(image.width, image.height) ? ` width="${image.width}" height="${image.height}"` : ''
+    const slot = registry?.register(`asset:${image.contentHash}`, {
+        url: image.url, mime: image.metadata.mime, type: 'image', name: image.metadata.name,
+        size: image.metadata.size, objectUrl: false, width: image.width, height: image.height,
+        recordDimensions: image.recordDimensions,
+    })
+    return dimensions + (slot === undefined ? '' : ` data-risu-inlay-slot="${slot}"`)
+}
+
 async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|character, mode:'normal'|'back', arg:{ch:number}, renderContext:ParseMarkdownRenderContext = {}){
     const assetWidth = renderContext.assetWidth ?? DBState.db.assetWidth
     const assetWidthString = (assetWidth && assetWidth !== -1 || assetWidth === 0) ? `max-width:${assetWidth}rem;` : ''
@@ -520,11 +532,12 @@ async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|c
 
         if(type === 'emotion'){
             const srcPath = resolveEmotionAsset(assetLookup, name)?.srcPaths[0]
-            const path = srcPath ? await getFileSrcCached(srcPath) : null
+            const image = srcPath && isTauri ? await getFileImageSource(srcPath) : null
+            const path = image?.url ?? (srcPath ? await getFileSrcCached(srcPath) : null)
             if(!path){
                 return ''
             }
-            return `<img src="${path}" alt="${path}" style="${assetWidthString} "/>`
+            return `<img src="${path}" alt="${path}" style="${assetWidthString} "${assetImageAttributes(image, renderContext.deferredInlays)}/>`
         }
 
         if(type === 'source'){
@@ -561,15 +574,16 @@ async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|c
             pSrc = match.srcPaths[selIndex]
         }
 
-        const p = await getFileSrcCached(pSrc)
+        const image = isTauri && (type === 'img' || type === 'image') ? await getFileImageSource(pSrc) : null
+        const p = image?.url ?? await getFileSrcCached(pSrc)
         switch(type){
             case 'raw':
             case 'path':
                 return p
             case 'img':
-                return `<img src="${p}" alt="${p}" style="${assetWidthString} "/>`
+                return `<img src="${p}" alt="${p}" style="${assetWidthString} "${assetImageAttributes(image, renderContext.deferredInlays)}/>`
             case 'image':
-                return `<div class="risu-inlay-image"><img src="${p}" alt="${p}" style="${assetWidthString}"/></div>\n`
+                return `<div class="risu-inlay-image"><img src="${p}" alt="${p}" style="${assetWidthString}"${assetImageAttributes(image, renderContext.deferredInlays)}/></div>\n`
             case 'video':
                 return `<video controls autoplay loop><source src="${p}" type="video/mp4"></video>\n`
             case 'video-img':

@@ -5,20 +5,11 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { cutDeviceNetwork } from "../../scripts/phase3AndroidSmoke.mjs";
 import { REALM_BLOCKED_URL_PATTERNS } from "../../scripts/realmBlocklist.mjs";
+import { androidTarget, runnerOptions } from "../support/androidTarget.mjs";
 
-const options = Object.fromEntries(
-  process.argv.slice(2).map((arg) => arg.replace(/^--/, "").split("=")),
-);
-const adb = options.adb;
-assert.ok(
-  !options.device || options.device === "api35",
-  "Unknown synthetic device",
-);
-const serial = options.device === "api35" ? "emulator-5556" : "emulator-5554";
-const avd =
-  options.device === "api35"
-    ? "risunest_buffer_api35_synthetic"
-    : "risunest_vm_retest";
+const options = runnerOptions(process.argv.slice(2));
+const android = androidTarget(options);
+const { adb, serial, avd } = android;
 const packageName = "io.github.rsyumi.risunest";
 const port = 19367;
 const apk = path.resolve(
@@ -31,7 +22,8 @@ const output = path.resolve(
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function run(target, args, { allowFailure = false } = {}) {
-  const result = spawnSync(adb, ["-s", target, ...args], {
+  const result = spawnSync(adb, android.args(args, target), {
+    env: android.env,
     encoding: "utf8",
     windowsHide: true,
     timeout: args[0] === "install" ? 120000 : 10000,
@@ -148,10 +140,7 @@ async function main() {
     ["smoke", "stress", "persistence-spike", "persistence", "viewport", "hypa-summary", "lease-release"].includes(profile),
     "Unknown profile",
   );
-  assert.equal(
-    run(serial, ["emu", "avd", "name"]).stdout.split("\n")[0].trim(),
-    avd,
-  );
+  android.assertAvd(run(serial, ["emu", "avd", "name"]).stdout);
   assert.equal(
     run(serial, ["shell", "getprop", "sys.boot_completed"]).stdout.trim(),
     "1",

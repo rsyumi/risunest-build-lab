@@ -9,33 +9,22 @@ import { promisify } from "node:util";
 import { pipeline } from "node:stream/promises";
 import { cutDeviceNetwork } from "../../scripts/phase3AndroidSmoke.mjs";
 import { REALM_BLOCKED_URL_PATTERNS } from "../../scripts/realmBlocklist.mjs";
+import { androidTarget, runnerOptions } from "../support/androidTarget.mjs";
 
-// This runner deliberately has its own fixed device guard. It must not relax or reuse
-// the startup benchmark's distinct emulator-5580/risunest_startup_synthetic guard.
-const serial = "emulator-5554";
-const avdName = "risunest_vm_retest";
 const packageName = "io.github.rsyumi.risunest";
 const syntheticTitle = "RisuNest synthetic device backup smoke";
 const port = 19369;
 const execute = promisify(execFile);
 const delay = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
-const args = Object.fromEntries(
-  process.argv.slice(2).map((argument) => {
-    const equal = argument.indexOf("=");
-    assert.ok(
-      argument.startsWith("--") && equal > 2,
-      "Use --name=value arguments",
-    );
-    return [argument.slice(2, equal), argument.slice(equal + 1)];
-  }),
-);
+const args = runnerOptions(process.argv.slice(2));
 for (const name of Object.keys(args))
   assert.ok(
-    ["adb", "apk", "output", "health", "peer", "exchange", "legacy-mb", "legacy-encoding"].includes(name),
+    ["adb", "aapt", "adb-port", "serial", "avd", "apk", "output", "health", "peer", "exchange", "legacy-mb", "legacy-encoding"].includes(name),
     "Unsupported runner option",
   );
-const adb = args.adb;
+const android = androidTarget(args);
+const { adb, serial, avd: avdName } = android;
 const apk = args.apk && path.resolve(args.apk);
 const output = path.resolve(
   args.output ?? ".tmp/device-webview-android/result.json",
@@ -66,7 +55,8 @@ const rendererHeap = {
 
 async function run(command, timeout = 10_000, allowFailure = false) {
   try {
-    return await execute(adb, ["-s", serial, ...command], {
+    return await execute(adb, android.args(command), {
+      env: android.env,
       windowsHide: true,
       timeout,
       encoding: "utf8",
@@ -114,8 +104,9 @@ async function retainArchive() {
   await mkdir(path.dirname(archivePath), { recursive: true });
   const child = spawn(
     adb,
-    ["-s", serial, "exec-out", "run-as", packageName, "cat", state.backupPath],
+    android.args(["exec-out", "run-as", packageName, "cat", state.backupPath]),
     {
+      env: android.env,
       windowsHide: true,
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 60_000,
@@ -340,23 +331,9 @@ function metrics(value) {
 async function main() {
   assert.ok(
     adb && apk,
-    "Explicit --adb and separate agent-built --apk are required",
+    "A separate agent-built --apk is required",
   );
-  assert.equal(
-    process.env.ANDROID_ADB_SERVER_PORT,
-    "15037",
-    "Owned private ADB server is required",
-  );
-  assert.equal(
-    process.env.ADB_SERVER_SOCKET,
-    "tcp:127.0.0.1:15037",
-    "Unexpected ADB server socket",
-  );
-  assert.equal(
-    (await run(["emu", "avd", "name"])).stdout.split("\n")[0].trim(),
-    avdName,
-    "Unsafe Android AVD",
-  );
+  android.assertAvd((await run(["emu", "avd", "name"])).stdout);
   validatedAvd = true;
   assert.equal(
     (await run(["shell", "getprop", "sys.boot_completed"])).stdout.trim(),
@@ -381,7 +358,7 @@ async function main() {
   );
   const sha256 = await fileHash(apk);
   const { stdout: apkMetadata } = await execute(
-    path.resolve(path.dirname(adb), "../build-tools/36.0.0/aapt.exe"),
+    android.aapt,
     ["dump", "badging", apk],
     { windowsHide: true, timeout: 10_000, encoding: "utf8" },
   );
@@ -396,7 +373,8 @@ async function main() {
   await cutDeviceNetwork(serial, {
     run(target, command, { allowFailure = false } = {}) {
       assert.equal(target, serial);
-      const result = spawnSync(adb, ["-s", target, ...command], {
+      const result = spawnSync(adb, android.args(command, target), {
+        env: android.env,
         windowsHide: true,
         timeout: 5000,
         encoding: "utf8",

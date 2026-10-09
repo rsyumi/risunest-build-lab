@@ -1,6 +1,5 @@
 private val nativeInitializerDescriptors = mapOf(
-    "ExternalStorageSecrets" to "()V",
-    "ServerSyncSecrets" to "()V",
+    "DeviceSecrets" to "()V",
     "PlatformTls" to "(Landroid/content/Context;)V",
 )
 

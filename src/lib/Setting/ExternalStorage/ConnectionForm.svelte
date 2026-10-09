@@ -930,6 +930,8 @@
         padding: 0 1rem 1rem;
         font-size: 0.875rem;
         color: var(--risu-theme-danger-400);
+        white-space: pre-line;
+        overflow-wrap: anywhere;
     }
     .note {
         display: grid;
@@ -1012,6 +1014,8 @@
         font-size: 0.8125rem;
         line-height: 1.45;
         font-weight: 400;
+        white-space: pre-line;
+        overflow-wrap: anywhere;
     }
     .field > small.field-error,
     .review .field-error {

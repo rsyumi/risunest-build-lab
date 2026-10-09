@@ -18,6 +18,7 @@ import { RevisionConflictError, type PersistentDataStore, type AssetAlias } from
 import type { PersistentStorageAuthority } from './persistentStorageAuthority'
 
 export function createNativeAssetBlobStore(input: {
+    imageGeometry?: import('./imageGeometry').ImageGeometryStore
     remote?: RemoteAssetReader
     store: PersistentDataStore
     cas: ImmutablePayloadCas
@@ -26,6 +27,7 @@ export function createNativeAssetBlobStore(input: {
     writeSessions: DurableAssetWriteSessionFactory
 }): CompleteAssetRepositoryBlobStore {
     return createCompleteAssetRepositoryBlobStore({
+        imageGeometry: input.imageGeometry,
         remote: input.remote,
         store: input.store,
         cas: input.cas,
@@ -214,6 +216,18 @@ export function createCoordinatorOwnedAssetBlobStore(
         list: (query) => store.list(query),
         remove: (key) => mutateInInvocationOrder(key, () => store.remove(key)),
         resolveUrl: (key) => store.resolveUrl(key),
+        imageGeometry: store.imageGeometry,
+        resolveImageSource: store.resolveImageSource ? async key => {
+            const epoch = runtime.getStorageAuthorityEpoch()
+            const source = await store.resolveImageSource!(key)
+            if (!source || epoch !== runtime.getStorageAuthorityEpoch()) return null
+            const record = source.recordDimensions
+            source.recordDimensions = (width, height) => {
+                if (epoch !== runtime.getStorageAuthorityEpoch()) return Promise.reject(new DOMException('Image storage changed', 'AbortError'))
+                return record(width, height)
+            }
+            return source
+        } : undefined,
     }
     coordinated.putNewInlayImage = (key, data, input) => {
         const ownedData = data.slice()
@@ -256,5 +270,7 @@ export function createRuntimeAssetRepositoryDispatcher(
         list: (query) => store.list(query),
         remove: (key) => store.remove(key),
         resolveUrl: (key) => store.resolveUrl(key),
+        imageGeometry: store.imageGeometry,
+        resolveImageSource: store.resolveImageSource?.bind(store),
     }
 }

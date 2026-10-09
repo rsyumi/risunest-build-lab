@@ -1,16 +1,18 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { writable } from 'svelte/store'
 
-vi.mock('../platform', () => ({ isTauri: false, isNodeServer: false }))
+vi.mock('../platform', () => ({ get isTauri() { return parserMocks.native }, isNodeServer: false }))
 
 const parserMocks = vi.hoisted(() => ({
+    native: false,
     characters: [] as unknown[],
     selIdState: { selId: -1 },
     getModuleAssets: vi.fn((): [string, string, string][] => [['Theme', 'theme.mp3', 'mp3']]),
     getCurrentCharacter: vi.fn(() => ({ image: 'live.png' })),
     getFileSrc: vi.fn((path: string) => Promise.resolve(`resolved:${path}`)),
+    getFileImageSource: vi.fn(async (): Promise<import('../storage/blobStore').BlobImageSource | null> => null),
 }))
 
 vi.mock(import('../storage/database.svelte'), () => ({
@@ -21,6 +23,7 @@ vi.mock(import('../storage/database.svelte'), () => ({
 
 vi.mock(import('../globalApi.svelte'), () => ({
     aiWatermarkingLawApplies: () => false,
+    getFileImageSource: parserMocks.getFileImageSource,
     getFileSrc: parserMocks.getFileSrc,
 }))
 
@@ -65,6 +68,33 @@ const character: simpleCharacterArgument = {
 }
 
 describe('parser asset resolution parity', () => {
+    afterEach(() => {
+        parserMocks.native = false
+        parserMocks.getFileImageSource.mockReset()
+    })
+
+    it.each(['img::portrait', 'image::portrait', 'emotion::smile'])('emits stored intrinsic dimensions for %s before image loading', async (token) => {
+        parserMocks.native = true
+        const recordDimensions = vi.fn(async () => {})
+        parserMocks.getFileImageSource.mockResolvedValue({
+            url: 'https://synthetic.invalid/image.png',
+            contentHash: 'a'.repeat(64),
+            metadata: { kind: 'asset', key: 'assets/image.png', mime: 'image/png', name: 'image.png', ext: 'png', size: 1 },
+            width: 640,
+            height: 480,
+            recordDimensions,
+        })
+        const result = await ParseMarkdown(`{{${token}}}`, character, 'back', 7)
+        const root = document.createElement('div')
+        root.innerHTML = result
+        const image = root.querySelector('img')!
+        expect(image.getAttribute('src')).toBe('https://synthetic.invalid/image.png')
+        expect(image.getAttribute('width')).toBe('640')
+        expect(image.getAttribute('height')).toBe('480')
+        expect(image.getAttribute('loading')).toBe('lazy')
+        expect(recordDimensions).not.toHaveBeenCalled()
+    })
+
     it('does not run live scripts when navigation aborts after assets resolve', async () => {
         const controller = new AbortController()
         let resolveAsset!: (value: string) => void
