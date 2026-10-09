@@ -4,20 +4,21 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
 import { REALM_BLOCKED_URL_PATTERNS } from "../../scripts/realmBlocklist.mjs";
+import { androidTarget, runnerOptions } from "../support/androidTarget.mjs";
 
 // A separately installed package is mandatory. Never inspect the user's app.
 const packageName = "io.github.rsyumi.risunest.syncservervalidation20260911";
-const adb = process.env.ANDROID_HOME + "/platform-tools/adb.exe";
+const android = androidTarget(runnerOptions(process.argv.slice(2), ["--ui", "--unresponsive-startup"]));
 const root = fileURLToPath(new URL(".local/", import.meta.url));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const run = (...args) =>
-  execFileSync(adb, ["-P", "15037", "-s", "emulator-5554", ...args], {
+  execFileSync(android.adb, android.args(args), {
+    env: android.env,
     timeout: 15000,
     encoding: "utf8",
     windowsHide: true,
   }).trim();
-if (run("emu", "avd", "name").split(/\s+/)[0] !== "risunest_vm_retest")
-  throw new Error("Unsafe Android AVD");
+android.assertAvd(run("emu", "avd", "name"));
 if (!run("shell", "pm", "path", packageName).startsWith("package:"))
   throw new Error("Isolated validation package is not installed");
 mkdirSync(root, { recursive: true });
@@ -319,7 +320,7 @@ try {
   const report = {
     serverPlatform: server.platform,
     packageName,
-    avd: "risunest_vm_retest",
+    avd: android.avd,
     registration: true,
     restart: true,
     initialPhase: initial.phase,

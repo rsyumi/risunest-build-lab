@@ -588,7 +588,7 @@ pub(crate) fn validate_config_shape(config: &ConnectionConfig) -> Result<()> {
     let valid = match config.provider.as_str() {
         "webdav" => {
             matches!(config.profile.as_deref(), None | Some("koofr"))
-                && account()
+                && (config.account_id.is_empty() || account())
                 && !config.account_id.contains(':')
                 && required(&["root"])
                 && only(&["root"])
@@ -851,8 +851,7 @@ pub(crate) fn encode_secret(
     let invalid = || ProviderError::new(ErrorKind::ReauthRequired);
     let (bytes, account_id) = match (provider, input) {
         ("webdav", ProviderSecretInput::Webdav { password })
-            if !password.is_empty()
-                && password.len() <= 1024
+            if password.len() <= 1024
                 && !password.chars().any(char::is_control) =>
         {
             (password.into_bytes(), None)
@@ -953,6 +952,17 @@ mod tests {
     use super::*;
     use crate::external_storage::{contract::OAuthProfile, recovery};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn webdav_preparation_and_secret_encoding_accept_blank_credentials() {
+        let mut request = request("webdav", ConnectionPurpose::Sync);
+        request.config.account_id.clear();
+        assert!(validate_preparation(&request).is_ok());
+        let secret = encode_secret("webdav", ProviderSecretInput::Webdav { password: String::new() }).unwrap();
+        assert!(secret.bytes.0.is_empty());
+        request.config.account_id = "username".into();
+        assert!(validate_preparation(&request).is_ok());
+    }
 
     fn request(
         provider: &str,

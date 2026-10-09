@@ -721,8 +721,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     safScope.launch(Dispatchers.IO) {
       cleanupLegacyOpenedFiles(File(cacheDir, "opened_files"))
     }
-    ServerSyncSecrets.initialize()
-    ExternalStorageSecrets.initialize()
+    DeviceSecrets.initialize()
     ExternalStorageAuthorization.onOAuthRedirectIntent(intent)
     if (BuildConfig.ENABLE_EXPERIMENTAL_SAF_FILE_JOBS) {
       recoverSafDestination(savedInstanceState != null)

@@ -118,6 +118,8 @@ export type ExternalProviderSecretInput =
     | { kind: 'gitlab'; token: string }
 
 export interface ExternalConnectionError {
+    detail?: string
+    httpStatus?: number
     code: string
     message: string
     retryable: boolean

@@ -187,7 +187,7 @@ fn fake_snapshot_discovery_and_lost_upload_reconcile_use_complete_immutable_obje
             ErrorKind::Transient
         );
         let resume = ResumeState {
-            sealed_state: SecretRef("synthetic-only".into()),
+            data: SecretRef("synthetic-only".into()).into(),
             confirmed_offset: 0,
             expires_at_ms: None,
         };

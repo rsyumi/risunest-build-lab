@@ -133,6 +133,8 @@ export function createGatedBlobStore(store: BlobStore, gate: StorageMutationGate
         list: (query) => store.list(query),
         remove: (key) => gate.runKeyedWrite(key, () => store.remove(key)),
         resolveUrl: (key) => store.resolveUrl(key),
+        imageGeometry: store.imageGeometry,
+        resolveImageSource: store.resolveImageSource?.bind(store),
     }
     if (store.putNewInlayImage) {
         gated.putNewInlayImage = (key, data, input) => {

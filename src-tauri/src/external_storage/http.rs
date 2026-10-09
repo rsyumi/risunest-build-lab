@@ -24,6 +24,7 @@ const RESPONSE_HEADERS_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) struct NativeHttpTransport {
     client: reqwest::Client,
     user_http_origin: Option<String>,
+    webdav_http: bool,
     #[cfg(test)]
     loopback_http: bool,
 }
@@ -33,18 +34,22 @@ impl NativeHttpTransport {
             .redirect(reqwest::redirect::Policy::none())
             .no_gzip().no_brotli().no_deflate()
             .connect_timeout(Duration::from_secs(30))
-            .build().map_err(|_| ProviderError::new(ErrorKind::Unsupported))?;
+            .build().map_err(network_error)?;
         Ok(Self {
             client,
             user_http_origin: None,
+            webdav_http: false,
             #[cfg(test)]
             loopback_http: false,
         })
     }
     pub fn with_user_endpoint(mut self, config: &ConnectionConfig) -> Result<Self> {
+        self.webdav_http = config.provider == "webdav";
         if accepts_user_http(&config.provider) {
-            let endpoint = url::Url::parse(&config.endpoint).map_err(|_| ProviderError::new(ErrorKind::Unsupported))?;
-            if !user_endpoint_allowed(&endpoint) { return Err(ProviderError::new(ErrorKind::Unsupported)); }
+            let endpoint = url::Url::parse(&config.endpoint).map_err(|error| ProviderError::new(ErrorKind::Unsupported).caused(&error))?;
+            if !user_endpoint_allowed(&endpoint) {
+                return Err(ProviderError::new(ErrorKind::Unsupported).caused("The storage URL must use HTTP or HTTPS without embedded credentials or a fragment"));
+            }
             if endpoint.scheme() == "http" {
                 let target = if config.provider == "s3" {
                     super::providers::s3::configured_origin(config)?
@@ -56,7 +61,7 @@ impl NativeHttpTransport {
     }
     fn permits_url(&self, url: &url::Url) -> bool {
         url.scheme() == "https" || (url.scheme() == "http"
-            && self.user_http_origin.as_deref() == Some(url.origin().ascii_serialization().as_str()))
+            && (self.webdav_http || self.user_http_origin.as_deref() == Some(url.origin().ascii_serialization().as_str())))
     }
     #[cfg(test)]
     pub fn for_loopback_tests() -> Self {
@@ -65,6 +70,7 @@ impl NativeHttpTransport {
                 .no_gzip().no_brotli().no_deflate()
                 .redirect(reqwest::redirect::Policy::none()).build().unwrap(),
             user_http_origin: None,
+            webdav_http: false,
             loopback_http: true,
         }
     }
@@ -80,21 +86,25 @@ pub(crate) fn user_endpoint_allowed(url: &url::Url) -> bool {
 }
 
 fn network_error(error: reqwest::Error) -> ProviderError {
-    // reqwest errors may contain signed URLs. Their text never crosses this boundary.
+    let mut kind = if error.is_builder() { ErrorKind::Unsupported } else { ErrorKind::Transient };
+    let mut details = Vec::new();
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
     while let Some(error) = source {
+        let detail = error.to_string();
+        if !details.contains(&detail) { details.push(detail); }
         #[cfg(not(target_os = "android"))]
         if error.is::<native_tls::Error>() {
-            return ProviderError::new(ErrorKind::EndpointRejected);
+            kind = ErrorKind::EndpointRejected;
         }
         #[cfg(target_os = "android")]
         if error.is::<rustls::Error>() || error.downcast_ref::<std::io::Error>()
             .and_then(std::io::Error::get_ref).is_some_and(|inner| inner.is::<rustls::Error>()) {
-            return ProviderError::new(ErrorKind::EndpointRejected);
+            kind = ErrorKind::EndpointRejected;
         }
         source = error.source();
     }
-    ProviderError::new(ErrorKind::Transient)
+    if kind == ErrorKind::EndpointRejected { details.insert(0, "TLS handshake failed".into()); }
+    ProviderError::new(kind).caused(&details.join(": "))
 }
 
 struct UploadProgress {
@@ -120,13 +130,16 @@ impl AsyncRead for UploadReader {
         result
     }
 }
-async fn upload_watchdog(progress: Arc<Mutex<UploadProgress>>) {
+async fn upload_watchdog(progress: Arc<Mutex<UploadProgress>>) -> String {
     loop {
-        let deadline = {
+        let (deadline, awaiting_headers) = {
             let progress = progress.lock().unwrap_or_else(|error| error.into_inner());
-            progress.last_progress + if progress.remaining == 0 { RESPONSE_HEADERS_TIMEOUT } else { TRANSFER_IDLE_TIMEOUT }
+            (progress.last_progress + if progress.remaining == 0 { RESPONSE_HEADERS_TIMEOUT } else { TRANSFER_IDLE_TIMEOUT }, progress.remaining == 0)
         };
-        if tokio::time::Instant::now() >= deadline { return; }
+        if tokio::time::Instant::now() >= deadline {
+            return if awaiting_headers { format!("The server sent no response headers for {} seconds", RESPONSE_HEADERS_TIMEOUT.as_secs()) }
+                else { format!("Upload made no progress for {} seconds", TRANSFER_IDLE_TIMEOUT.as_secs()) };
+        }
         tokio::time::sleep_until(deadline).await;
     }
 }
@@ -168,7 +181,7 @@ impl HttpTransport for NativeHttpTransport {
             }
             let response = tokio::select! {
                 _ = cancel.cancelled() => return Err(ProviderError::new(ErrorKind::Cancelled)),
-                _ = upload_watchdog(progress) => return Err(ProviderError::new(ErrorKind::Transient)),
+                detail = upload_watchdog(progress) => return Err(ProviderError::new(ErrorKind::Transient).caused(&detail)),
                 result = builder.send() => result.map_err(network_error)?,
             };
             let status = response.status().as_u16();
@@ -187,7 +200,7 @@ impl HttpTransport for NativeHttpTransport {
                 tokio_util::io::StreamReader::new(
                     response
                         .bytes_stream()
-                        .map_err(|_| std::io::Error::other("external-response-io")),
+                        .map_err(|error| std::io::Error::other(network_error(error).cause.0.unwrap_or_else(|| "Response body read failed".into()))),
                 ),
             );
             Ok(HttpResponse {
@@ -226,7 +239,7 @@ impl ResponseBody {
         if self.cancel.check().is_err() {
             Some(std::io::Error::other("cancelled"))
         } else if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            Some(std::io::Error::new(std::io::ErrorKind::TimedOut, "external-control-timeout"))
+            Some(std::io::Error::new(std::io::ErrorKind::TimedOut, "The storage control request exceeded its deadline"))
         } else { None }
     }
 }
@@ -238,7 +251,7 @@ impl AsyncRead for ResponseBody {
             return Poll::Ready(Err(std::io::Error::other("cancelled")));
         }
         if self.idle_wait.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "external-transfer-idle")));
+            return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("Response body made no progress for {} seconds", TRANSFER_IDLE_TIMEOUT.as_secs()))));
         }
         let before = buf.filled().len();
         let result = self.reader.as_mut().poll_read(cx, buf);
@@ -253,7 +266,7 @@ impl AsyncRead for ResponseBody {
             Poll::Pending => {
                 if let Some(wait) = self.deadline_wait.as_mut() {
                     if wait.as_mut().poll(cx).is_ready() {
-                        return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "external-control-timeout")));
+                        return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "The storage control request exceeded its deadline")));
                     }
                 }
                 Poll::Pending
@@ -599,7 +612,8 @@ async fn dispatch_ready(
         .map(|until| Duration::from_millis(until.saturating_sub(after)));
     if (200..300).contains(&response.status) && response.headers.get("content-type")
         .is_some_and(|value| value.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("text/html")) {
-        return Err(super::providers::common::error(ErrorKind::EndpointRejected, response.status));
+        return Err(super::providers::common::error(ErrorKind::EndpointRejected, response.status)
+            .caused("The server returned an HTML page instead of storage data (Content-Type: text/html)"));
     }
     match response.status {
         200..=299 => state.backoff.success(&account)?,
@@ -627,7 +641,7 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     #[test]
-    fn configured_http_is_exact_and_s3_uses_its_validated_bucket_origin() {
+    fn webdav_can_follow_http_redirects_and_other_providers_keep_their_configured_origin() {
         let parse = |value: &str| url::Url::parse(value).unwrap();
         // A connection being committed has no account yet.
         let config = |provider: &str, endpoint: &str, addressing: &str| serde_json::from_value::<ConnectionConfig>(serde_json::json!({
@@ -639,7 +653,9 @@ mod tests {
         for provider in ["webdav","gitlab_packages"] {
             let transport = NativeHttpTransport::new().unwrap().with_user_endpoint(&config(provider,"http://storage.invalid:8080/root","path")).unwrap();
             assert!(transport.permits_url(&parse("http://storage.invalid:8080/root/item")));
-            for other in ["http://storage.invalid/root", "http://other.invalid:8080/root"] { assert!(!transport.permits_url(&parse(other))); }
+            for other in ["http://storage.invalid/root", "http://other.invalid:8080/root"] {
+                assert_eq!(transport.permits_url(&parse(other)), provider == "webdav");
+            }
         }
         for (addressing, expected, rejected) in [
             ("path","http://storage.invalid:8080/chosen/a","http://chosen.storage.invalid:8080/a"),
@@ -651,7 +667,7 @@ mod tests {
             assert!(!transport.permits_url(&parse("http://other.storage.invalid:8080/a")));
         }
         let secure=NativeHttpTransport::new().unwrap().with_user_endpoint(&config("webdav","https://storage.invalid","path")).unwrap();
-        assert!(!secure.permits_url(&parse("http://storage.invalid/a")));
+        assert!(secure.permits_url(&parse("http://storage.invalid/a")));
         let fixed=NativeHttpTransport::new().unwrap().with_user_endpoint(&config("google_drive","http://storage.invalid","path")).unwrap();
         assert!(!fixed.permits_url(&parse("http://storage.invalid/a")));
     }
@@ -957,13 +973,18 @@ mod tests {
             assert_eq!(error.kind, ErrorKind::EndpointRejected);
             assert_eq!(error.http_status, None);
             assert_eq!(error.oauth_error_description, None);
+            let detail = error.cause.0.as_deref().unwrap();
+            assert!(detail.contains("TLS handshake failed"));
+            assert!(!detail.contains("must-not-leak"));
             server.join().unwrap();
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             drop(listener);
             let mut refused = request("webdav", "synthetic");
             refused.url = url::Url::parse(&format!("http://{address}/synthetic")).unwrap();
-            assert_eq!(transport.send(refused, &Cancellation::default()).await.err().unwrap().kind, ErrorKind::Transient);
+            let error = transport.send(refused, &Cancellation::default()).await.err().unwrap();
+            assert_eq!(error.kind, ErrorKind::Transient);
+            assert!(error.cause.0.as_deref().is_some_and(|detail| detail.len() > "network failure".len()));
         });
     }
     #[test]
@@ -982,8 +1003,9 @@ mod tests {
             tokio::time::advance(Duration::from_secs(119)).await;
             assert!(futures::poll!(&mut watchdog).is_pending());
             tokio::time::advance(Duration::from_secs(1)).await;
-            tokio::time::timeout(Duration::from_millis(2), &mut watchdog).await
+            let detail = tokio::time::timeout(Duration::from_millis(2), &mut watchdog).await
                 .expect("headers must time out within one timer tick of the deadline");
+            assert_eq!(detail, "The server sent no response headers for 120 seconds");
 
             let cancel = Cancellation::default();
             let mut body = ResponseBody::new(Box::pin(std::io::Cursor::new(vec![1; 7])), &cancel, None);
@@ -1001,8 +1023,9 @@ mod tests {
             tokio::time::advance(TRANSFER_IDLE_TIMEOUT - Duration::from_secs(1)).await;
             assert!(futures::poll!(&mut watchdog).is_pending());
             tokio::time::advance(Duration::from_secs(1)).await;
-            tokio::time::timeout(Duration::from_millis(2), &mut watchdog).await
+            let detail = tokio::time::timeout(Duration::from_millis(2), &mut watchdog).await
                 .expect("uploads must time out within one timer tick of the idle deadline");
+            assert_eq!(detail, "Upload made no progress for 90 seconds");
         });
     }
 

@@ -1284,7 +1284,7 @@ impl Provider for GoogleDrive {
             }
             let file_id = self.generate_id(context.session(), cancel).await?;
             let sealed_state = self.seal_upload(&SealedUpload { file_id, session_uri: None, intent: intent.clone() }).await?;
-            Ok(Some(ResumeState { sealed_state, confirmed_offset: 0, expires_at_ms: None }))
+            Ok(Some(ResumeState { data: sealed_state.into(), confirmed_offset: 0, expires_at_ms: None }))
         })
     }
 
@@ -1304,7 +1304,7 @@ impl Provider for GoogleDrive {
                     None => Err(ProviderError::new(ErrorKind::Unsupported)),
                 };
             };
-            let mut upload = self.open_sealed(&resume.sealed_state, &context.settings).await?;
+            let mut upload = self.open_sealed(&resume.data.secret()?, &context.settings).await?;
             if upload.intent != *intent { return Err(corrupt()); }
             if upload.session_uri.is_none() && intent.byte_length <= MULTIPART_MAX_BYTES {
                 return match self.multipart_create(session, intent, source, &upload.file_id, cancel).await {
@@ -1321,7 +1321,7 @@ impl Provider for GoogleDrive {
                 let bytes = SecretBytes(zeroize::Zeroizing::new(serde_json::json!({
                     "fileId": upload.file_id, "sessionUri": upload.session_uri.as_ref().map(|uri| uri.as_str()),
                     "intent": upload.intent }).to_string().into_bytes()));
-                self.dependencies.vault.replace(&resume.sealed_state, &bytes).await?;
+                self.dependencies.vault.replace(&resume.data.secret()?, &bytes).await?;
             }
             self.upload_chunks(session, intent, source, &upload, resume.confirmed_offset, cancel).await
         })
@@ -1552,12 +1552,12 @@ impl Provider for GoogleDrive {
                     None => Ok(UploadResolution::RestartRequired),
                 };
             };
-            let mut upload = self.open_sealed(&resume.sealed_state, &context.settings).await?;
+            let mut upload = self.open_sealed(&resume.data.secret()?, &context.settings).await?;
             if upload.intent != *intent { return Err(corrupt()); }
             let found = if let Some(uri) = upload.session_uri.as_ref() {
                 match self.session_status(session, uri, intent.byte_length, cancel).await? {
                     SessionStatus::Incomplete(confirmed_offset) if confirmed_offset <= intent.byte_length => {
-                        return Ok(UploadResolution::Resumable(ResumeState { sealed_state: resume.sealed_state.clone(),
+                        return Ok(UploadResolution::Resumable(ResumeState { data: resume.data.clone(),
                             confirmed_offset, expires_at_ms: resume.expires_at_ms }));
                     }
                     SessionStatus::Incomplete(_) => return Err(corrupt()),
@@ -1569,8 +1569,8 @@ impl Provider for GoogleDrive {
                 upload.session_uri = None;
                 let bytes = SecretBytes(zeroize::Zeroizing::new(serde_json::json!({ "fileId": upload.file_id,
                     "sessionUri": null, "intent": upload.intent }).to_string().into_bytes()));
-                self.dependencies.vault.replace(&resume.sealed_state, &bytes).await?;
-                return Ok(UploadResolution::Resumable(ResumeState { sealed_state: resume.sealed_state.clone(), confirmed_offset: 0, expires_at_ms: None }));
+                self.dependencies.vault.replace(&resume.data.secret()?, &bytes).await?;
+                return Ok(UploadResolution::Resumable(ResumeState { data: resume.data.clone(), confirmed_offset: 0, expires_at_ms: None }));
             };
             match self.verify_file(session, intent, &file, cancel).await {
                 Ok(()) => (),

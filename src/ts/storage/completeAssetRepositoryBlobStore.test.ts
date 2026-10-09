@@ -55,6 +55,7 @@ function createStore(overrides: Partial<CompleteAssetAliasStore> = {}): Complete
 }
 
 function createFacade(input: {
+    imageGeometry?: import('./imageGeometry').ImageGeometryStore
     remote?: RemoteAssetReader
     store?: CompleteAssetAliasStore
     cas?: ImmutablePayloadCas
@@ -83,6 +84,7 @@ function createFacade(input: {
     }))
     const options = {
         remote: input.remote,
+        imageGeometry: input.imageGeometry,
         store,
         cas,
         objectUrls: { resolveObjectUrl },
@@ -735,4 +737,53 @@ it('rechecks conditional source identity after a competing commit instead of ove
     expect(store.commitAssetAlias).toHaveBeenCalledOnce()
     expect(current.objectHash).toBe(inlayHash)
     expect(release).toHaveBeenCalledWith('aborted')
+})
+
+
+describe('content-bound image dimensions', () => {
+    it('keeps a resolved URL, hash and dimensions together across alias replacement', async () => {
+        let current = assetAlias({ mime: 'image/png', ext: 'png' })
+        const imageGeometry = { read: vi.fn(async () => []), write: vi.fn(async () => {}), compute: vi.fn() }
+        const { facade, store, cas } = createFacade({
+            store: createStore({ readAssetAlias: vi.fn(async () => ({ revision: 10, value: current })) }),
+            cas: createCas({ statObject: vi.fn(async () => 4) }),
+            imageGeometry,
+            resolveObjectUrl: async ({ contentHash }) => `risuasset://${contentHash}`,
+        })
+        const first = await facade.resolveImageSource!('assets/photo.bin')
+        current = { ...current, objectHash: inlayHash }
+        await first!.recordDimensions(640, 480)
+        const second = await facade.resolveImageSource!('assets/photo.bin')
+        expect(first).toMatchObject({ contentHash: assetHash, url: `risuasset://${assetHash}`, width: 640, height: 480 })
+        expect(second).toMatchObject({ contentHash: inlayHash, url: `risuasset://${inlayHash}` })
+        expect(second!.width).toBeUndefined()
+        expect(imageGeometry.write).toHaveBeenCalledExactlyOnceWith([{ contentHash: assetHash, width: 640, height: 480 }])
+        expect(store.commitAssetAlias).not.toHaveBeenCalled()
+        expect(cas.readObject).not.toHaveBeenCalled()
+    })
+
+    it('uses committed sizes and keeps rendering available if the index fails', async () => {
+        const imageGeometry = {
+            read: vi.fn().mockResolvedValueOnce([{ contentHash: assetHash, width: 80, height: 60 }]).mockRejectedValueOnce(new Error('corrupt')),
+            write: vi.fn(async () => {}), compute: vi.fn(),
+        }
+        const { facade } = createFacade({
+            store: createStore({ readAssetAlias: vi.fn(async () => ({ revision: 10, value: assetAlias({ mime: 'image/png' }) })) }),
+            cas: createCas({ statObject: vi.fn(async () => 4) }), imageGeometry,
+        })
+        expect(await facade.resolveImageSource!('assets/photo.bin')).toMatchObject({ width: 80, height: 60 })
+        const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        try { expect(await facade.resolveImageSource!('assets/photo.bin')).toMatchObject({ url: 'risuasset://cas-object' }) }
+        finally { warning.mockRestore() }
+    })
+
+    it('seeds final encoded dimensions without making image ingestion depend on the index', async () => {
+        const imageGeometry = { read: vi.fn(), write: vi.fn().mockRejectedValue(new Error('disk full')), compute: vi.fn() }
+        const { facade } = createFacade({ imageGeometry })
+        const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        try {
+            await expect(facade.putNewInlayImage!('inlay-image', new Uint8Array([1]), { name: 'synthetic' } as never)).resolves.toMatchObject({ width: 19, height: 23 })
+            expect(imageGeometry.write).toHaveBeenCalledExactlyOnceWith([{ contentHash: assetHash, width: 19, height: 23 }])
+        } finally { warning.mockRestore() }
+    })
 })

@@ -12,6 +12,7 @@ export interface ChatDisplayRefresh {
     totalMessages: number
     parserProjection?: BoundedLiveChatParserProjection
     parserAbortSignal?: AbortSignal
+    onDisplaySettled?: () => void
     viewportBinding?: {
         viewportRow: ConversationViewportRow
         viewportSourceToken: string

@@ -19,14 +19,14 @@ pub struct Directory {
 }
 impl Directory {
     pub fn validate(&self) -> Result<()> {
-        validate_endpoint(&self.base_url, true)?;
+        validate_endpoint(&self.base_url)?;
         normalized_uuid(&self.uuid)?;
         key_bytes(&self.key)?;
         Ok(())
     }
     pub fn record_url(&self) -> Result<url::Url> {
         self.validate()?;
-        validate_endpoint(&self.base_url, true)?
+        validate_endpoint(&self.base_url)?
             .join(&format!("endpoints/{}", normalized_uuid(&self.uuid)?))
             .map_err(|_| ConnectError("invalid-directory-url"))
     }
@@ -55,7 +55,7 @@ fn aead_key(value: &str) -> Result<aead::LessSafeKey> {
         .map_err(|_| ConnectError("invalid-directory-key"))
 }
 pub fn generate_directory(base_url: String) -> Result<Directory> {
-    validate_endpoint(&base_url, true)?;
+    validate_endpoint(&base_url)?;
     let mut key = [0; 32];
     SystemRandom::new()
         .fill(&mut key)
@@ -67,7 +67,7 @@ pub fn generate_directory(base_url: String) -> Result<Directory> {
     })
 }
 pub fn seal_endpoint(uuid: &str, key: &str, endpoint: &str) -> Result<String> {
-    validate_endpoint(endpoint, false)?;
+    validate_endpoint(endpoint)?;
     let aad = normalized_uuid(uuid)?;
     let mut nonce = [0; 12];
     SystemRandom::new()
@@ -99,6 +99,6 @@ pub fn open_endpoint(uuid: &str, key: &str, envelope: &str) -> Result<String> {
         .map_err(|_| ConnectError("directory-authentication-failed"))?;
     let endpoint =
         std::str::from_utf8(plain).map_err(|_| ConnectError("invalid-directory-endpoint"))?;
-    validate_endpoint(endpoint, false)?;
+    validate_endpoint(endpoint)?;
     Ok(endpoint.to_owned())
 }

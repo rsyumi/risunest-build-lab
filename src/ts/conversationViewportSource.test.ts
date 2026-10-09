@@ -76,6 +76,21 @@ function harness(messages: Message[]) {
 }
 
 describe('SynchronousSessionConversationViewportSource', () => {
+    it('finds the latest ordinary row of each role and invalidates on role edits', async () => {
+        const { session, source } = harness([
+            { role: 'user', data: 'u' },
+            { role: 'char', data: 'c' },
+            { role: 'user', data: 'comment', isComment: true },
+            { role: 'user', data: 'disabled', disabled: true },
+            { role: 'char', data: 'c2' },
+        ])
+        const signal = new AbortController().signal
+        await expect(source.findLatestMessagePair(signal)).resolves.toEqual([0, 4])
+        session.edit(session.locate(4), { role: 'user', data: 'pending reply' })
+        await expect(source.findLatestMessagePair(signal)).resolves.toEqual([1, 4])
+        source.dispose()
+    })
+
     it('keeps rows readable across display variable commits and invalidates the next external edit', async () => {
         const { conversation, session, source } = harness([
             message('first', 'first'),
@@ -376,6 +391,51 @@ describe('SynchronousSessionConversationViewportSource', () => {
 })
 
 describe('PersistentConversationViewportSource', () => {
+    it.each([false, true])('finds a distant latest user without hydrating the history (metadata=%s)', async (metadata) => {
+        const messages: Message[] = Array.from({ length: 300 }, (_, i) => ({ role: 'char', data: `synthetic-${i}` }))
+        messages[5].role = 'user'
+        messages[290] = { role: 'user', data: 'comment', isComment: true }
+        messages[291] = { role: 'user', data: 'disabled', disabled: true }
+        const readConversationWindow = vi.fn(async ({ startIndex, limit }: ConversationWindowQuery) => ({
+            revision: 1,
+            value: persistentWindow(startIndex, messages.slice(startIndex, startIndex + limit), messages.length),
+        }))
+        const readMetadata = vi.fn(async ({ startIndex, limit }: ConversationWindowQuery) => ({
+            revision: 1,
+            value: {
+                ...persistentWindow(startIndex, [], messages.length),
+                endIndex: Math.min(messages.length, startIndex + limit),
+                messages: messages.slice(startIndex, startIndex + limit).map(message => ({ role: message.role, disabled: message.disabled, parserInert: true })),
+            },
+        }))
+        const source = new PersistentConversationViewportSource({
+            reader: { readConversationWindow, ...(metadata ? { readConversationMessageMetadataWindow: readMetadata } : {}) },
+            characterId: 'character-a', conversationId: 'conversation-a', revision: 1, totalMessages: 300, rowBudget: 64,
+        })
+        const signal = new AbortController().signal
+        const lookup = source.findLatestMessagePair(signal)
+        await expect(lookup).resolves.toEqual([5, 299])
+        expect(source.findLatestMessagePair(signal)).toBe(lookup)
+        expect(source.snapshot().rowAt(5)).toBeUndefined()
+        expect(readConversationWindow).toHaveBeenCalledTimes(metadata ? 3 : 5)
+        expect(readConversationWindow.mock.calls.every(([query]) => query.limit <= 64)).toBe(true)
+        if (metadata) expect(readMetadata).toHaveBeenCalledTimes(5)
+        source.dispose()
+    })
+
+    it('does not publish an old pair after an optimistic role change', async () => {
+        const pending = deferred<Versioned<ConversationWindow>>()
+        const source = new PersistentConversationViewportSource({
+            reader: { readConversationWindow: () => pending.promise },
+            characterId: 'character-a', conversationId: 'conversation-a', revision: 1, totalMessages: 2, rowBudget: 64,
+        })
+        const lookup = source.findLatestMessagePair(new AbortController().signal)
+        source.applyOptimisticRange(1, 1, [{ role: 'user', data: 'changed' }])
+        pending.resolve({ revision: 1, value: persistentWindow(0, [{ role: 'user', data: 'old-u' }, { role: 'char', data: 'old-c' }], 2) })
+        await expect(lookup).rejects.toMatchObject({ name: 'AbortError' })
+        source.dispose()
+    })
+
     it('publishes optimistic generated tail rows while persistent reads remain on the pinned base', async () => {
         const readConversationWindow = vi.fn(async () => ({
             revision: 7,
@@ -836,4 +896,19 @@ describe('PersistentConversationViewportSource', () => {
         expect(() => streaming.release()).not.toThrow()
         expect(() => streaming.release()).not.toThrow()
     })
+})
+
+
+it.each([7, 8])('keeps a latest-pair scan valid across an unrelated revision (reader revision %s)', async revision => {
+    const pending = deferred<Versioned<ConversationWindow>>()
+    const source = new PersistentConversationViewportSource({
+        reader: { readConversationWindow: () => pending.promise },
+        characterId: 'character-a', conversationId: 'conversation-a', revision: 7, totalMessages: 2, rowBudget: 2,
+    })
+    const lookup = source.findLatestMessagePair(new AbortController().signal)
+    source.advanceUnchangedRevision(8)
+    pending.resolve({ revision, value: persistentWindow(0, [{ ...message('u', 'synthetic'), role: 'user' }, message('c', 'synthetic')], 2) })
+    await expect(lookup).resolves.toEqual([0, 1])
+    expect(source.findLatestMessagePair(new AbortController().signal)).toBe(lookup)
+    source.dispose()
 })

@@ -9,6 +9,7 @@
         role,
         parserProjection,
         parserAbortSignal,
+        onDisplaySettled,
     }: any = $props()
     let translated = $state(false)
     let translating = $state(false)
@@ -18,6 +19,7 @@
         message = state.message
         parserProjection = state.parserProjection
         parserAbortSignal = state.parserAbortSignal
+        onDisplaySettled = state.onDisplaySettled
         refreshRevision += 1
     }
     export function updateViewportBinding(state: any) {
@@ -35,6 +37,7 @@
         {role}
         {parserProjection}
         {parserAbortSignal}
+        {onDisplaySettled}
         reloadRevision={String(refreshRevision)}
         bind:translated
         bind:translating

@@ -18,6 +18,7 @@
         onRemoveCreatorQuote,
         acquireConversationStartParserLease,
         selectedConversationOperations,
+        onDisplaySettled,
     }: {
         currentCharacter: character
         resolvedImage: string
@@ -30,6 +31,7 @@
             request: LiveChatParserConversationStartRequest,
         ) => Promise<{ release(): void } | null>
         selectedConversationOperations?: SelectedConversationOperations
+        onDisplaySettled?: () => void
     } = $props()
 
     let currentChat = $derived(
@@ -82,7 +84,10 @@
             parserController = controller
             parserReady = true
         } catch {
-            if (isCurrent()) parserLoadFailed = true
+            if (isCurrent()) {
+                parserLoadFailed = true
+                onDisplaySettled?.()
+            }
         }
     }
 
@@ -154,6 +159,7 @@
             currentPage={(currentChat.fmIndex ?? -1) + 2}
             totalPages={alternateGreetings.length + 1}
             {selectedConversationOperations}
+            {onDisplaySettled}
             parserAbortSignal={parserController?.signal}
         />
     {/if}

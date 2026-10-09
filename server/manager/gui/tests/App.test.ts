@@ -141,6 +141,20 @@ it("dismisses the applied notice after four seconds", async () => {
   expect(target.textContent).not.toContain("변경 사항을 적용했습니다.");
 });
 
+it.each([false, true])("saves an HTTP fixed address with registry enabled: %s", async (registryEnabled) => {
+  snapshot.connection.registryEnabled = registryEnabled;
+  await open();
+  await applyConnection("http://192.168.0.10:14319");
+  expect(target.querySelector<HTMLInputElement>("input[type=url]")!.checkValidity()).toBe(true);
+  expect(backend.mutate).toHaveBeenCalledWith(
+    "connection",
+    expect.objectContaining({
+      options: expect.objectContaining({ endpoint: "http://192.168.0.10:14319" }),
+    }),
+  );
+  expect(target.textContent).toContain("변경 사항을 적용했습니다.");
+});
+
 it("gives a repeated applied notice its own four seconds", async () => {
   await open();
   await applyConnection("https://first.example.com");

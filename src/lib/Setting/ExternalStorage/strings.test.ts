@@ -16,17 +16,27 @@ describe('the storage usage copy', () => {
 })
 
 describe('externalErrorMessage', () => {
+    it('keeps native connection diagnostics and HTTP status in both languages', () => {
+        for (const locale of ['ko', 'en']) {
+            const copy = externalStorageStrings(locale)
+            const detail = 'TLS certificate verification failed: certificate has expired'
+            expect(externalErrorMessage(copy, { kind: 'endpointRejected', detail, httpStatus: 502 }))
+                .toBe([copy.endpointRejected, 'HTTP 502', detail].join('\n'))
+            expect(externalErrorMessage(copy, { code: 'endpointRejected', detail, message: detail, httpStatus: 502 }))
+                .toBe([copy.endpointRejected, 'HTTP 502', detail].join('\n'))
+        }
+    })
     it('reads the kind of a rejected command and the code of a job error', () => {
         expect(externalErrorMessage(strings, { kind: 'storageFull', httpStatus: null, retryAtMs: null }))
             .toBe(strings.freeSpace)
         expect(externalErrorMessage(strings, { code: 'corrupt', message: 'x', action: 'none', retryable: false }))
-            .toBe(strings.corrupted)
+            .toBe(`${strings.corrupted}\nx`)
     })
 
     it('tells a wrong recovery key apart from another repository at the location', () => {
         expect(externalErrorMessage(strings, { kind: 'recoveryKeyMismatch' })).toBe(strings.recoveryKeyMismatch)
         expect(externalErrorMessage(strings, { code: 'repositoryMismatch', message: 'x', action: 'none', retryable: false }))
-            .toBe(strings.repositoryMismatch)
+            .toBe(`${strings.repositoryMismatch}\nx`)
     })
 
     it('names a repository this device has already connected', () => {
@@ -47,6 +57,7 @@ describe('externalErrorMessage', () => {
             strings.reauthenticate,
             strings.oauthErrorCode.replace('{0}', 'invalid_grant'),
             strings.oauthErrorDescription.replace('{0}', 'Bad Request: redirect_uri is invalid.'),
+            'HTTP 400',
         ].join('\n'))
         expect(externalErrorMessage(strings, {
             kind: 'reauthRequired', oauthError: '<script>alert(1)</script>',
@@ -57,7 +68,7 @@ describe('externalErrorMessage', () => {
     })
 
     it('falls back for a local failure that carries no native kind', () => {
-        expect(externalErrorMessage(strings, new Error('offline'))).toBe(strings.errorGeneric)
+        expect(externalErrorMessage(strings, new Error('offline'))).toBe(`${strings.errorGeneric}\noffline`)
         expect(externalErrorMessage(strings, undefined)).toBe(strings.errorGeneric)
         expect(externalErrorMessage(strings, { kind: 'invented' })).toBe(strings.errorGeneric)
     })

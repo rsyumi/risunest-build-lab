@@ -32,6 +32,7 @@ vi.mock(
 )
 vi.mock(import('../../globalApi.svelte'), () => ({
     aiWatermarkingLawApplies: () => false,
+    getFileImageSource: vi.fn(async () => null),
     getFileSrc: () => Promise.resolve(''),
 }))
 vi.mock(import('../../stores.svelte'), () => ({

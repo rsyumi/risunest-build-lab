@@ -1471,7 +1471,7 @@ fn there_is_no_upload_session_and_a_foreign_resume_state_is_refused() {
             .unwrap()
             .is_none());
         let resume = ResumeState {
-            sealed_state: SecretRef("foreign".into()),
+            data: SecretRef("foreign".into()).into(),
             confirmed_offset: 0,
             expires_at_ms: None,
         };
@@ -1514,7 +1514,7 @@ fn reconciliation_reports_the_stored_object_or_a_restart() {
             .unwrap();
         let intent = object_intent(&handle, ObjectRole::Pack, "object-1", &bytes);
         let resume = ResumeState {
-            sealed_state: SecretRef("unused".into()),
+            data: SecretRef("unused".into()).into(),
             confirmed_offset: 0,
             expires_at_ms: None,
         };

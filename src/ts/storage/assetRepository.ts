@@ -8,6 +8,7 @@ import {
     type InlayEncodeOptions,
     type InlayBlobMetadata,
 } from './blobStore'
+import { validImageDimensions } from './imageGeometry'
 import {
     hashPayloadBytes,
     type ImmutablePayloadCas,
@@ -260,6 +261,7 @@ export interface DurableAssetWriteSessionFactory {
 }
 
 export interface CompleteAssetRepositoryBlobStoreOptions {
+    imageGeometry?: import('./imageGeometry').ImageGeometryStore
     remote?: RemoteAssetReader
     store: CompleteAssetAliasStore
     cas: ImmutablePayloadCas
@@ -293,6 +295,7 @@ export type CompleteAssetRepositoryBlobStore = BlobStore &
     }
 
 export interface CompleteTypedAssetRepository {
+    resolveImageSource(identity: AssetAliasIdentity): Promise<import('./blobStore').BlobImageSource | null>
     prepareOwnedPut(
         identity: AssetAliasIdentity,
         ownedData: Uint8Array,
@@ -430,6 +433,10 @@ export function createCompleteTypedAssetRepository(
                     if (committed) {
                         state = 'activated'
                         await releaseSession('committed')
+                        if (alias.kind === 'inlay' && alias.inlayType === 'image' && alias.objectHash && validImageDimensions(alias.width, alias.height)) {
+                            void options.imageGeometry?.write([{ contentHash: alias.objectHash, width: alias.width!, height: alias.height! }])
+                                .catch(() => console.warn('Image dimensions could not be saved'))
+                        }
                     }
                     return aliasBlobMetadata(alias)
                 },
@@ -555,6 +562,36 @@ export function createCompleteTypedAssetRepository(
                 }
             }
         },
+        async resolveImageSource(identity) {
+            validateAssetAliasIdentity(identity)
+            const versioned = await readValidatedAlias(options.store, identity)
+            const alias = versioned?.value
+            if (!alias?.objectHash) return null
+            const isImage = alias.kind === 'inlay' ? alias.inlayType === 'image' : inferBlobMime(alias.mime, alias.ext).startsWith('image/')
+            if (!isImage) return null
+            const size = await options.cas.statObject(alias.objectHash) ?? await options.remote?.statObject(alias.objectHash) ?? null
+            if (size === null) return null
+            if (size !== alias.size) throw new Error('Image asset size mismatch')
+            const url = await options.objectUrls.resolveObjectUrl({ contentHash: alias.objectHash, mime: inferBlobMime(alias.mime, alias.ext), size })
+            if (!url) return null
+            let geometry: import('./imageGeometry').ImageGeometry | undefined
+            try { geometry = (await options.imageGeometry?.read([alias.objectHash]))?.[0] }
+            catch { console.warn('Stored image dimensions are unavailable') }
+            const source: import('./blobStore').BlobImageSource = {
+                url,
+                metadata: aliasBlobMetadata(alias),
+                contentHash: alias.objectHash,
+                width: geometry?.width ?? (alias.kind === 'inlay' ? alias.width : undefined),
+                height: geometry?.height ?? (alias.kind === 'inlay' ? alias.height : undefined),
+                async recordDimensions(width, height) {
+                    if (!options.imageGeometry) return
+                    await options.imageGeometry.write([{ contentHash: alias.objectHash!, width, height }])
+                    source.width = width
+                    source.height = height
+                },
+            }
+            return source
+        },
         async resolveUrl(identity) {
             validateAssetAliasIdentity(identity)
             const versioned = await readValidatedAlias(options.store, identity)
@@ -592,6 +629,8 @@ export function createCompleteAssetRepositoryBlobStore(
 ): CompleteAssetRepositoryBlobStore {
     const repository = createCompleteTypedAssetRepository(options)
     return {
+        imageGeometry: options.imageGeometry,
+        resolveImageSource: (key) => repository.resolveImageSource(requireNamespacedBlobIdentity(key)),
         prepareOwnedPut(key, ownedData, metadata) {
             return repository.prepareOwnedPut(
                 requireNamespacedBlobIdentity(key, metadata.kind),

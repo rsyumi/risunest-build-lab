@@ -127,7 +127,7 @@ done
 paths_owned=true
 
 test "$(loginctl show-user "$task_user" --property=Linger --value 2>/dev/null || true)" = yes || \
-  fail 'the build-lab runner must enable linger before this test'
+  fail 'enable user lingering before running this test'
 python3 - <<'PY'
 import socket
 

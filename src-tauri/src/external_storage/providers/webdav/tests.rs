@@ -1,4 +1,5 @@
 use super::*;
+mod redirects;
 use crate::external_storage::{
     fake::{loopback_dependencies, MemoryVault, TestDependencies},
     transfer::{SpoolSink, SpoolSource},
@@ -310,10 +311,6 @@ fn configuration_and_secret_rejections_never_reach_the_wire() {
                 ..base.clone()
             },
             ConnectionConfig {
-                account_id: String::new(),
-                ..base.clone()
-            },
-            ConnectionConfig {
                 location: BTreeMap::new(),
                 ..base.clone()
             },
@@ -368,7 +365,7 @@ fn configuration_and_secret_rejections_never_reach_the_wire() {
             .await;
         assert_eq!(kind_of(absent), ErrorKind::ReauthRequired);
 
-        for password in [b"".to_vec(), b"line\nbreak".to_vec(), vec![0xffu8; 4]] {
+        for password in [b"line\nbreak".to_vec(), vec![0xffu8; 4]] {
             let test = loopback_dependencies(MemoryVault::with(SECRET_REF, &password), NOW_MS);
             let provider = create(test.dependencies.clone()).unwrap();
             let outcome = provider
@@ -713,7 +710,7 @@ fn a_lost_put_reconciles_from_the_stored_resource() {
         let payload = source(&directory, "pack", &bytes);
         let declared = intent(&repository, "pack-2", ObjectRole::Pack, &bytes);
         let resume = ResumeState {
-            sealed_state: harness.secret(),
+            data: harness.secret().into(),
             confirmed_offset: 0,
             expires_at_ms: None,
         };
@@ -1247,7 +1244,7 @@ fn documented_statuses_map_to_provider_errors_with_their_retry_hints() {
             reply(423, &[], b""),
             reply(429, &[("Retry-After", "60")], b""),
             reply(404, &[], b""),
-            reply(302, &[("Location", "https://elsewhere.invalid/dav")], b""),
+            reply(302, &[], b""),
         ]);
         let repository = harness.opened().await;
         let directory = tempfile::tempdir().unwrap();
@@ -1259,7 +1256,7 @@ fn documented_statuses_map_to_provider_errors_with_their_retry_hints() {
             (ErrorKind::Transient, 423, None),
             (ErrorKind::RateLimited, 429, Some(NOW_MS + 60_000)),
             (ErrorKind::NotFound, 404, None),
-            // Redirects are never followed; the configured endpoint rejected the request.
+            // A redirect without a destination cannot be followed.
             (ErrorKind::EndpointRejected, 302, None),
         ];
         for (index, (kind, status, retry_at_ms)) in expected.into_iter().enumerate() {

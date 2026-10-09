@@ -16,6 +16,7 @@ pub(crate) mod upstream_stream;
 pub(crate) mod lww_commands;
 mod content_locators;
 pub(crate) mod device_store;
+pub(crate) mod image_geometry;
 pub(crate) mod export;
 pub(crate) mod external_apply;
 pub(crate) mod external_capture;
