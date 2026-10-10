@@ -7,17 +7,16 @@ on:
         description: Full Sync snapshot commit SHA
         type: string
         required: true
+      architecture:
+        description: Windows architecture
+        type: choice
+        default: arm64
+        options: [arm64, x64]
 permissions:
   contents: read
 jobs:
   updater:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc }
-          - { runner: windows-2022, target: x86_64-pc-windows-msvc }
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ inputs.architecture == 'arm64' && 'windows-11-arm' || 'windows-2022' }}
     timeout-minutes: 60
     defaults:
       run:
@@ -27,6 +26,7 @@ jobs:
       SNAPSHOT_SHA: ${{ inputs.source_sha }}
       CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
       CARGO_INCREMENTAL: "0"
+      TARGET: ${{ inputs.architecture == 'arm64' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }}
     steps:
       - name: Validate dispatch
         working-directory: ${{ github.workspace }}
@@ -56,25 +56,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
         with:
           toolchain: "1.97.1"
-          targets: ${{ matrix.target }}
+          targets: ${{ env.TARGET }}
       - uses: actions/cache/restore@v5
         with:
           path: source/src-tauri/target
-          key: updater-1.97.1-${{ matrix.target }}-${{ hashFiles('source/server/manager/Cargo.lock', 'source/server/sync/Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: updater-1.97.1-${{ matrix.target }}-${{ hashFiles('source/server/manager/Cargo.lock', 'source/server/sync/Cargo.lock') }}-
+          key: updater-1.97.1-${{ env.TARGET }}-${{ hashFiles('source/server/manager/Cargo.lock', 'source/server/sync/Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: updater-1.97.1-${{ env.TARGET }}-${{ hashFiles('source/server/manager/Cargo.lock', 'source/server/sync/Cargo.lock') }}-
       - name: Build process executables
         id: build
         run: |
-          cargo build --manifest-path server/sync/Cargo.toml --release --locked --target ${{ matrix.target }}
+          cargo build --manifest-path server/sync/Cargo.toml --release --locked --target ${{ env.TARGET }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo build --manifest-path server/manager/Cargo.toml --release --locked --target ${{ matrix.target }}
+          cargo build --manifest-path server/manager/Cargo.toml --release --locked --target ${{ env.TARGET }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test manager transactions
+        run: |
+          & cargo test --manifest-path server/manager/Cargo.toml --release --locked --target ${{ env.TARGET }} --lib 2>&1 |
+            Tee-Object -FilePath artifacts/manager-tests.log | Out-Host
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run all scheduled update cases
         env:
-          RISUNEST_TEST_SERVER: ${{ env.CARGO_TARGET_DIR }}/${{ matrix.target }}/release/risunest-sync-server.exe
-          RISUNEST_TEST_MANAGER: ${{ env.CARGO_TARGET_DIR }}/${{ matrix.target }}/release/risunest-sync-manager.exe
+          RISUNEST_TEST_SERVER: ${{ env.CARGO_TARGET_DIR }}/${{ env.TARGET }}/release/risunest-sync-server.exe
+          RISUNEST_TEST_MANAGER: ${{ env.CARGO_TARGET_DIR }}/${{ env.TARGET }}/release/risunest-sync-manager.exe
         run: |
-          & cargo test --manifest-path server/manager/Cargo.toml --release --locked --target ${{ matrix.target }} --test update_helper -- --ignored --test-threads=1 --nocapture 2>&1 |
+          & cargo test --manifest-path server/manager/Cargo.toml --release --locked --target ${{ env.TARGET }} --test update_helper -- --ignored --test-threads=1 --nocapture 2>&1 |
             Tee-Object -FilePath artifacts/update-helper.log -OutVariable output | Out-Host
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (($output | Out-String) -notmatch 'test result: ok\. 8 passed; 0 failed; 0 ignored;') { throw 'incomplete update test inventory' }
@@ -82,10 +87,10 @@ jobs:
         if: always() && !cancelled() && steps.build.outcome == 'success'
         with:
           path: source/src-tauri/target
-          key: updater-1.97.1-${{ matrix.target }}-${{ hashFiles('source/server/manager/Cargo.lock', 'source/server/sync/Cargo.lock') }}-${{ github.run_id }}
+          key: updater-1.97.1-${{ env.TARGET }}-${{ hashFiles('source/server/manager/Cargo.lock', 'source/server/sync/Cargo.lock') }}-${{ github.run_id }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-updater-${{ matrix.target }}-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          name: windows-updater-${{ env.TARGET }}-${{ inputs.source_sha }}-${{ github.run_attempt }}
           path: source/artifacts/
           retention-days: 3
