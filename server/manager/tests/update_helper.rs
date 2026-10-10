@@ -1093,7 +1093,7 @@ async fn live_installer_guard_restart_failure(
         .map_err(|_| "installer-guard-corrupt-target-write-failed")?;
     fs::write(&cancel, br#"{"cancel":true}"#).map_err(|_| "installer-guard-cancel-write-failed")?;
     let health_wait_started = std::time::Instant::now();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(125);
+    let deadline = tokio::time::Instant::now() + SCHEDULED_HELPER_COMPLETION_BUDGET;
     let error_value = loop {
         if let Ok(bytes) = fs::read(&error_path) {
             break serde_json::from_slice::<serde_json::Value>(&bytes)

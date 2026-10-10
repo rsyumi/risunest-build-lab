@@ -3717,8 +3717,8 @@
     {
       "path": "server/manager/gui/src-tauri/src/lib.rs",
       "mode": "100644",
-      "bytes": 30227,
-      "sha256": "f7ee678177ea7fee74fe4b85878cc6b6007b9819de7b7b115161605335c465b1"
+      "bytes": 31613,
+      "sha256": "9a9f53389d797dd06ca166520b759b861719856d4e85dd99b437352425a3b14e"
     },
     {
       "path": "server/manager/gui/src-tauri/src/main.rs",
@@ -3759,8 +3759,8 @@
     {
       "path": "server/manager/gui/src/App.svelte",
       "mode": "100644",
-      "bytes": 26433,
-      "sha256": "e25b08de0ba7d41119d99e48000f5e72e02cc0c1ddc44d57a551341fd96aaab1"
+      "bytes": 26482,
+      "sha256": "6c6241f1f57813498f9b080744f2d676e569d2f8120d4b9446e452ee84cf9ab2"
     },
     {
       "path": "server/manager/gui/src/Connections.svelte",
@@ -3813,8 +3813,8 @@
     {
       "path": "server/manager/gui/src/styles.css",
       "mode": "100644",
-      "bytes": 16156,
-      "sha256": "f2d73467b137a714e47ed245ba140133d85855835905a69b1c8d64b4ed4d207b"
+      "bytes": 16228,
+      "sha256": "73258840b78a21a012fc73a6d9620ceee290e28c75fcdb11a42644a1aeb411d1"
     },
     {
       "path": "server/manager/gui/tests/App.test.ts",
@@ -4011,8 +4011,8 @@
     {
       "path": "server/manager/src/update/transaction.rs",
       "mode": "100644",
-      "bytes": 46814,
-      "sha256": "b3c638b7e424992ec354eae5eb8f43bb5b5c7bc1b94211a39377d3aa81923542"
+      "bytes": 50432,
+      "sha256": "e4aa7adfb63db045a849ceff8bd6cd2bd7e3beb84696a5a29c6ed7ec1f1f9607"
     },
     {
       "path": "server/manager/tests/background_entry.rs",
@@ -4071,8 +4071,8 @@
     {
       "path": "server/manager/tests/update_helper.rs",
       "mode": "100644",
-      "bytes": 69941,
-      "sha256": "c8775d056cf4bf33bd4eab7daafde1912e08e07888d368d7d184ff2a87725603"
+      "bytes": 69951,
+      "sha256": "374b93fc09c19d26337178eb55f574379500074f0c512ab1c030aa54458a5dfd"
     },
     {
       "path": "server/manager/tests/windows-startup.ps1",
@@ -9129,14 +9129,14 @@
     {
       "path": "src/lib/Setting/ExternalStorage/ExternalStorageSettings.svelte",
       "mode": "100644",
-      "bytes": 72978,
-      "sha256": "e61954a055c3d3d25fadaf8d852886b7fc812138b3a5e3b033938e3ab99a2157"
+      "bytes": 73533,
+      "sha256": "4121b2105b97f12443668e94708a81647689dce8033daaa69c749fa383ba95f2"
     },
     {
       "path": "src/lib/Setting/ExternalStorage/ExternalStorageSettings.test.ts",
       "mode": "100644",
-      "bytes": 82491,
-      "sha256": "9bcdfc0fb3a3df084dd97ebced810ccbb26b6ea468859b23e81f9bbdc2f8dac4"
+      "bytes": 83752,
+      "sha256": "dc05fa2a657f5f074402e4ed50e1233b7bc3066b2cbf4ec90d1831c3cea8c2ab"
     },
     {
       "path": "src/lib/Setting/ExternalStorage/strings.test.ts",

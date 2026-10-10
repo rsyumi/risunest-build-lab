@@ -598,6 +598,7 @@
 </div>
 <dialog
   bind:this={dialogElement}
+  class:qr-dialog={dialog === "issued" && !!svg}
   oncancel={(e) => {
     e.preventDefault();
     close();
