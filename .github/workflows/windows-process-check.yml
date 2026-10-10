@@ -1,0 +1,60 @@
+name: Windows process check
+run-name: Windows process ${{ inputs.source_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full Sync snapshot commit SHA
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-11-arm, windows-2022]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: source
+    env:
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Validate dispatch
+        working-directory: ${{ github.workspace }}
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/main' -or $env:SNAPSHOT_SHA -notmatch '^[0-9a-f]{40}$') { throw 'invalid dispatch' }
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Verify snapshot
+        run: |
+          if ((git rev-parse HEAD) -ne $env:SNAPSHOT_SHA) { throw 'snapshot mismatch' }
+          node ../control/scripts/verify-snapshot.mjs . sync
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Copy-Item .build-lab/source.json artifacts/source.json
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+      - name: Probe scheduled processes
+        run: |
+          & tests/windows-process/scheduled-probe.ps1 -OutputDirectory artifacts/process-probe 2>&1 | Tee-Object -FilePath artifacts/probe.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-process-${{ matrix.runner }}-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
