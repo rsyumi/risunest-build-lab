@@ -76,6 +76,7 @@ jobs:
       - name: Run native Rust inventory
         env:
           CHECK: ${{ inputs.check }}
+          RUST_TEST_THREADS: "1"
         run: |
           arguments=()
           if [[ "$CHECK" == preflight ]]; then arguments+=(--preflight-only); fi
