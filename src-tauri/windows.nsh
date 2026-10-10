@@ -2,7 +2,7 @@
   ${If} $DeleteAppDataCheckboxState = 1
   ${AndIf} $UpdateMode <> 1
     ; The template's process check runs after this hook.
-    !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+    !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
     SetDetailsPrint both
     DetailPrint "Removing RisuNest application data..."
     SetDetailsPrint none

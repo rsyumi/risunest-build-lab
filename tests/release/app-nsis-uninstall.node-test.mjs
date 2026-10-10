@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -9,6 +9,7 @@ const compiler = process.env.NSIS_MAKENSIS ?? join(process.env.LOCALAPPDATA ?? "
 const skip = process.platform !== "win32" ? "NSIS execution requires Windows" : !existsSync(compiler) ? "NSIS compiler is unavailable" : false;
 if (process.env.RISUNEST_REQUIRE_NSIS === "1" && skip) throw new Error(skip);
 const quote = (value) => value.replaceAll("$", "$$").replaceAll('"', '$\\"');
+const installedExecutable = "$INSTDIR\\${MAINBINARYNAME}.exe";
 
 test("NSIS executes app cleanup only on explicit removal and retains retry capability on failure", { skip }, () => {
   const root = mkdtempSync(join(tmpdir(), "risunest-nsis-contract-"));
@@ -19,27 +20,19 @@ test("NSIS executes app cleanup only on explicit removal and retains retry capab
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   };
   try {
-    compile("cleanup", String.raw`
-Unicode true
-RequestExecutionLevel user
-SilentInstall silent
-OutFile "${quote(join(root, "cleanup.exe"))}"
-!include FileFunc.nsh
-Section
-  ${"$"}{GetParameters} $0
-  StrCmp $0 "--remove-local-data --yes" 0 invalid
-  IfFileExists "$EXEDIR\process-checked" 0 invalid
-  FileOpen $0 "$EXEDIR\cleanup-called" w
-  FileWrite $0 "called"
-  FileClose $0
-  IfFileExists "$EXEDIR\fail-cleanup" invalid 0
-  Delete "$EXEDIR\synthetic-data"
-  SetErrorLevel 0
-  Quit
-  invalid:
-  SetErrorLevel 7
-SectionEnd
-`);
+    const native = {
+      x64: { target: "x86_64-pc-windows-msvc", machine: 0x8664 },
+      arm64: { target: "aarch64-pc-windows-msvc", machine: 0xaa64 },
+    }[process.arch];
+    assert.ok(native, `Unsupported Windows architecture: ${process.arch}`);
+    const cleanup = join(root, "cleanup.exe");
+    const compiled = spawnSync("rustc", [
+      "--edition=2021", "--target", native.target,
+      resolve("tests/release/fixtures/nsis-cleanup.rs"), "-o", cleanup,
+    ], { encoding: "utf8", timeout: 60_000, windowsHide: true });
+    assert.equal(compiled.status, 0, `${compiled.error ?? ""}\n${compiled.stdout}\n${compiled.stderr}`);
+    const executable = readFileSync(cleanup);
+    assert.equal(executable.readUInt16LE(executable.readUInt32LE(0x3c) + 4), native.machine);
     compile("installer", String.raw`
 Unicode true
 RequestExecutionLevel user
@@ -52,7 +45,10 @@ OutFile "${quote(join(root, "installer.exe"))}"
 !define PRODUCTNAME "Synthetic RisuNest"
 Var DeleteAppDataCheckboxState
 Var UpdateMode
-!macro CheckIfAppIsRunning executableName productName
+!macro CheckIfAppIsRunning executablePath productName
+  StrCmp "${"$"}{executablePath}" "${installedExecutable}" +3
+  SetErrorLevel 9
+  Abort "Process check must use the installed executable path"
   FileOpen $0 "$INSTDIR\process-checked" w
   FileWrite $0 "checked"
   FileClose $0
@@ -81,7 +77,7 @@ Function un.onInit
 FunctionEnd
 Section Uninstall
   !insertmacro NSIS_HOOK_PREUNINSTALL
-  !insertmacro CheckIfAppIsRunning "${"$"}{MAINBINARYNAME}.exe" "${"$"}{PRODUCTNAME}"
+  !insertmacro CheckIfAppIsRunning "${installedExecutable}" "${"$"}{PRODUCTNAME}"
   Delete "$INSTDIR\SyntheticRisuNest.exe"
   Delete "$INSTDIR\registered"
 SectionEnd

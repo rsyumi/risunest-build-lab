@@ -7989,8 +7989,8 @@
     {
       "path": "src-tauri/windows.nsh",
       "mode": "100644",
-      "bytes": 754,
-      "sha256": "5ffdbd5a2271f5a5f65e6f7b5cb2c4125dfc88b3d9c4ca580be144acae1b2c5e"
+      "bytes": 763,
+      "sha256": "446e704d2f9e1b7f4908eda365bc0a0574086acca5c893dd31d601f7c001c8a5"
     },
     {
       "path": "src/App.svelte",
@@ -17469,8 +17469,8 @@
     {
       "path": "tests/release/app-nsis-uninstall.node-test.mjs",
       "mode": "100644",
-      "bytes": 5490,
-      "sha256": "097b48873325c115f9b46d243a329fffa6572a96619ed47d9a7fdd19844686cb"
+      "bytes": 5951,
+      "sha256": "aea1df8791ee698c5104e4b389ca2a842c53a5ede8c07714e68f16afeacf6eee"
     },
     {
       "path": "tests/release/build-collect.node-test.mjs",
@@ -17481,8 +17481,8 @@
     {
       "path": "tests/release/build-native-package.node-test.mjs",
       "mode": "100644",
-      "bytes": 21106,
-      "sha256": "2e519d1d7712aeb0d559f45482fc385c9f97a706f1b084a87958230dc12a6698"
+      "bytes": 21117,
+      "sha256": "c4ea75080e49bb69c6315a3bbd54adddbd9a52b1f8b4f8a3da75d2215f63b045"
     },
     {
       "path": "tests/release/build-runtime-parity.node-test.mjs",
@@ -17531,6 +17531,12 @@
       "mode": "100644",
       "bytes": 2949,
       "sha256": "0e6bec6dda7a7109415ef32ac24501753dc53de645748dbe1f7fc3937bb4d198"
+    },
+    {
+      "path": "tests/release/fixtures/nsis-cleanup.rs",
+      "mode": "100644",
+      "bytes": 890,
+      "sha256": "76b75180a28b2b20492fc8ca26f3ea042392a99443fec9a79ff6c292ed272ee9"
     },
     {
       "path": "tests/release/github.node-test.mjs",

@@ -334,7 +334,7 @@ test("RisuNest NSIS completes requested cleanup before removing its retry entry 
   assert.match(hook, /!macro NSIS_HOOK_PREUNINSTALL/);
   assert.match(hook, /\$DeleteAppDataCheckboxState = 1/);
   assert.match(hook, /\$UpdateMode <> 1/);
-  assert.match(hook, /!insertmacro CheckIfAppIsRunning "\$\{MAINBINARYNAME\}\.exe" "\$\{PRODUCTNAME\}"/);
+  assert.match(hook, /!insertmacro CheckIfAppIsRunning "\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe" "\$\{PRODUCTNAME\}"/);
   assert.match(hook, /ExecWait '"\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe" --remove-local-data --yes' \$R6/);
   assert.ok(hook.indexOf("!insertmacro CheckIfAppIsRunning") < hook.indexOf("ExecWait"));
   assert.match(hook, /\$\{If\} \$\{Errors\}\s+\$\{OrIf\} \$R6 != 0/);
