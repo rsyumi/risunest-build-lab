@@ -22,9 +22,9 @@ Var SyncFailureMessage
   Pop $0
   Pop $1
   StrCmp $0 "0" 0 sync_prepare_failed
-  StrCpy $R7 $1 64
+  StrCpy $R7 $1 36
   StrLen $2 $R7
-  StrCmp $2 "64" sync_prepare_done sync_prepare_failed
+  StrCmp $2 "36" sync_prepare_done sync_prepare_failed
   sync_prepare_failed:
   StrCpy $SyncFailureMessage "RisuNest Sync could not be prepared for installation. Check the server status in RisuNest Sync and try again."
   DetailPrint "$SyncFailureMessage"
@@ -143,9 +143,9 @@ Var SyncFailureMessage
   Pop $0
   Pop $1
   StrCmp $0 "0" 0 sync_uninstall_failed
-  StrCpy $R7 $1 64
+  StrCpy $R7 $1 36
   StrLen $2 $R7
-  StrCmp $2 "64" 0 sync_uninstall_failed
+  StrCmp $2 "36" 0 sync_uninstall_failed
   sync_uninstall_cleanup:
   StrCpy $SyncFailureMessage "RisuNest Sync could not stop the server or remove automatic startup and scheduled updates. Program files were preserved."
   DetailPrint "Stopping the server and removing startup and update tasks..."

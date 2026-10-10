@@ -10,6 +10,8 @@ cleanup() {
 trap cleanup EXIT
 export IPHONEOS_DEPLOYMENT_TARGET
 IPHONEOS_DEPLOYMENT_TARGET=$(node -p "require('./src-tauri/tauri.ios.conf.json').bundle.iOS.minimumSystemVersion")
+# Each fixture can open several stores; keep the simulator's file budget per test.
+export SIMCTL_CHILD_RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
 device_id=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(device["udid"] for runtime,devices in data["devices"].items() if "iOS" in runtime for device in devices if device.get("isAvailable") and device.get("state") in ("Shutdown", "Booted")))')
 xcrun simctl boot "$device_id" 2>/dev/null || true
 xcrun simctl bootstatus "$device_id" -b

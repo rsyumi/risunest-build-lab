@@ -1,6 +1,7 @@
 pub mod config;
 pub mod connection;
 pub mod http;
+pub mod identity;
 pub mod management;
 #[cfg(test)]
 mod management_tests;

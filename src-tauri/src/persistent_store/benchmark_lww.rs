@@ -2003,7 +2003,7 @@ fn actual_source_process_bootstrap_retains_complete_source_and_native_receipts()
     let (_destination_directory,mut destination)=server_sync::lww_tests::local();
     assert_ne!(producer.lww_clock_state().unwrap().writer_id,destination.lww_clock_state().unwrap().writer_id);
     let sender=native_bootstrap::source_client(&mut source,&producer,"synthetic-producer",
-        &"82".repeat(32),false).unwrap();
+        "82000000-0000-4000-8000-000000000000",false).unwrap();
     let config=sender.client.config();
     bind(&mut producer,SyncTarget::Server(config.endpoint.clone()),&config.endpoint,&config.library_id);
     producer.commit(&WorkingSetCommit {expected_revision:producer.revision().unwrap(),
@@ -2018,7 +2018,7 @@ fn actual_source_process_bootstrap_retains_complete_source_and_native_receipts()
         .collect::<std::collections::BTreeMap<String,std::collections::BTreeSet<String>>>();
     assert!(roles[&hash].contains("Asset"));
     let candidate=native_bootstrap::source_client(&mut source,&destination,"synthetic-destination",
-        &"83".repeat(32),true).unwrap();
+        "83000000-0000-4000-8000-000000000000",true).unwrap();
     let record=native_bootstrap::server_bootstrap_source_raw(source,&mut destination,
         candidate.client.test_io.unwrap(),&roles,None,final_runner::Direction::AtoB,0).unwrap();
     eprintln!("M-SOURCE-NATIVE-BOOTSTRAP-CORRECTNESS {}",serde_json::to_string(&record).unwrap());
@@ -2041,7 +2041,7 @@ fn actual_source_read_barrier_allows_real_foreground_publication_during_hydratio
     let (_source_directory,mut producer)=server_sync::lww_tests::local();
     let (_destination_directory,mut destination)=server_sync::lww_tests::local();
     let sender=native_bootstrap::source_client(&mut source,&producer,"synthetic-overlap-producer",
-        &"84".repeat(32),false).unwrap();
+        "84000000-0000-4000-8000-000000000000",false).unwrap();
     let config=sender.client.config();
     bind(&mut producer,SyncTarget::Server(config.endpoint.clone()),&config.endpoint,&config.library_id);
     producer.commit(&WorkingSetCommit {expected_revision:producer.revision().unwrap(),
@@ -2055,7 +2055,7 @@ fn actual_source_read_barrier_allows_real_foreground_publication_during_hydratio
     let roles=published.body_objects.iter().map(|(hash,object)|(hash.clone(),object.purposes.iter().cloned().collect()))
         .collect::<std::collections::BTreeMap<String,std::collections::BTreeSet<String>>>();
     let candidate=native_bootstrap::source_client(&mut source,&destination,"synthetic-overlap-destination",
-        &"85".repeat(32),true).unwrap();
+        "85000000-0000-4000-8000-000000000000",true).unwrap();
     let bound=server_sync::first_binding_cycle(&mut destination,candidate.client.test_io.as_ref().unwrap().clone(),|_|{}).unwrap();
     assert!(bound.activation.revision>=0);
     server_sync::lww_tests::receive_available(&sender,&mut producer,&[]).unwrap();

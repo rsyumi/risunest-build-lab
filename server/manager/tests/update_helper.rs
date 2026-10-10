@@ -568,7 +568,7 @@ fn transient_helper_task_count(root: &Path) -> Result<usize, String> {
 
 #[cfg(windows)]
 fn owned_transient_helper_task_count(root: &Path) -> Result<usize, String> {
-    const COUNT: &str = r#"$ErrorActionPreference='Stop';$service=New-Object -ComObject 'Schedule.Service';$service.Connect();$folder=$service.GetFolder('\');$count=0;foreach($task in $folder.GetTasks(1)){$name=$task.Name;if(!$name.StartsWith($env:RISUNEST_TEST_TASK_PREFIX,[StringComparison]::Ordinal)){continue};$suffix=$name.Substring($env:RISUNEST_TEST_TASK_PREFIX.Length);if($suffix.Length -eq 64 -and $suffix -cmatch '^[0-9a-f]{64}$' -and $task.Definition.RegistrationInfo.Description -eq 'RisuNest update helper'){$count++}};[Console]::Out.Write($count)"#;
+    const COUNT: &str = r#"$ErrorActionPreference='Stop';$service=New-Object -ComObject 'Schedule.Service';$service.Connect();$folder=$service.GetFolder('\');$count=0;foreach($task in $folder.GetTasks(1)){$name=$task.Name;if(!$name.StartsWith($env:RISUNEST_TEST_TASK_PREFIX,[StringComparison]::Ordinal)){continue};$suffix=$name.Substring($env:RISUNEST_TEST_TASK_PREFIX.Length);if($suffix.Length -eq 36 -and $suffix -cmatch '\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z' -and $task.Definition.RegistrationInfo.Description -eq 'RisuNest update helper'){$count++}};[Console]::Out.Write($count)"#;
     let output = platform::process("powershell.exe")
         .args([
             "-NoLogo",
@@ -1053,11 +1053,7 @@ async fn live_installer_guard_restart_failure(
         .map_err(|_| "installer-guard-nonce-invalid")?
         .trim()
         .to_owned();
-    if nonce.len() != 64
-        || !nonce
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if !risunest_sync_server::identity::is_uuid_v4(&nonce) {
         return Err("installer-guard-nonce-invalid".into());
     }
     let guard_dir = root.join("manager-update");
@@ -1427,7 +1423,7 @@ fn no_claim_helper_task_is_removed_without_consuming_recovery_state() {
     let foreign_task = format!(
         "{}-update-helper-{}",
         platform::instance_name(&fixture.root),
-        "f".repeat(64)
+        "ffffffff-ffff-4fff-8fff-ffffffffffff".to_owned()
     );
     let invalid_suffix_task = format!(
         "{}-update-helper-invalid",
@@ -1436,7 +1432,7 @@ fn no_claim_helper_task_is_removed_without_consuming_recovery_state() {
     let other_instance_task = format!(
         "{}-update-helper-{}",
         platform::instance_name(other_instance.path()),
-        "e".repeat(64)
+        "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee".to_owned()
     );
     register_synthetic_task(&foreign_task, "RisuNest foreign helper").unwrap();
     register_synthetic_task(&invalid_suffix_task, "RisuNest update helper").unwrap();

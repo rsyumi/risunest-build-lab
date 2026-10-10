@@ -68,6 +68,10 @@ cleanup() {
     wait "$active_installer_pid"
   fi
   if test "$paths_owned" = true; then
+    if test -f "$test_root/update-service.backup"; then
+      if test -d "$update_service_path"; then rmdir "$update_service_path" || cleanup_failed=true; fi
+      mv "$test_root/update-service.backup" "$update_service_path" || cleanup_failed=true
+    fi
     if test -x "$install_dir/risunest-sync-manager"; then
       "$install_dir/risunest-sync-manager" uninstall >/dev/null 2>&1
     fi
@@ -287,12 +291,17 @@ PY
 )
 test "$failure_license_hash" != "$stable_license_hash"
 
-# Make the first post-swap schedule rewrite fail through the real manager and systemd path.
-chmod 400 "$update_service_path"
-if sh "$failure_dir/install.sh" --non-interactive --policy=notify; then
+# A directory blocks atomic replacement; a read-only file can still be replaced by its owner.
+mv "$update_service_path" "$test_root/update-service.backup"
+mkdir "$update_service_path"
+configuration_log="$test_root/post-swap-configuration-failure.log"
+if sh "$failure_dir/install.sh" --non-interactive --policy=notify >"$configuration_log" 2>&1; then
   fail 'post-swap configuration failure unexpectedly succeeded'
 fi
-chmod 600 "$update_service_path"
+grep -Fq 'user-service-write-failed' "$configuration_log" || fail 'configuration fixture failed for a reason other than schedule write rejection'
+rmdir "$update_service_path"
+mv "$test_root/update-service.backup" "$update_service_path"
+systemctl --user daemon-reload
 test "$(stat -c '%i' "$install_dir")" = "$stable_install_inode" || fail 'same-version rollback did not restore the original install directory'
 test "$(stat -c '%i' "$data_dir/metadata.sqlite")" = "$stable_store_inode" || fail 'same-version rollback replaced the daemon data store'
 rolled_back_license_hash=$(python3 - "$install_dir/CLOUDFLARED-LICENSE" <<'PY'

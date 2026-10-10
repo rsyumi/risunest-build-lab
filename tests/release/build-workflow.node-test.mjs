@@ -65,6 +65,57 @@ test("failed or cancelled mandatory checks cannot prepare either release", () =>
   }
 });
 
+test("packaging runs after successful preparation despite skipped other-product checks", () => {
+  const products = { "app-desktop": "app", "app-android": "app", "app-ios": "app", "sync-suite": "sync" };
+  for (const [job, owner] of Object.entries(products)) {
+    const block = workflow.slice(workflow.indexOf(`\n  ${job}:\n`));
+    const condition = /\n    if: ([\s\S]*?)\n    needs:/.exec(block)?.[1].replace(/^>-\n/, "");
+    assert(condition, `${job} has a build condition`);
+    const permits = ({ product = owner, source = "success", preparation = "success", published = "false", cancelled = false } = {}) => {
+      const expression = /\b(always|cancelled|failure|success)\s*\(/.test(condition)
+        ? condition : `success() && (${condition})`;
+      return runInNewContext(expression
+        .replace(/always\(\)/g, "true")
+        .replace(/success\(\)/g, "false")
+        .replace(/cancelled\(\)/g, JSON.stringify(cancelled))
+        .replace(/inputs\.product/g, JSON.stringify(product))
+        .replace(/needs\.source\.result/g, JSON.stringify(source))
+        .replace(/needs\.prepare-draft\.result/g, JSON.stringify(preparation))
+        .replace(/needs\.prepare-draft\.outputs\.already_published/g, JSON.stringify(published)),
+      Object.create(null), { timeout: 100, contextCodeGeneration: { strings: false, wasm: false } });
+    };
+    assert.equal(permits(), true, `${job} must build when other-product ancestors are skipped`);
+    assert.equal(permits({ product: owner === "app" ? "sync" : "app" }), false, `${job} product selection`);
+    assert.equal(permits({ published: "true" }), false, `${job} immutable published release`);
+    assert.equal(permits({ cancelled: true }), false, `${job} cancelled workflow`);
+    for (const result of ["failure", "cancelled", "skipped"]) {
+      assert.equal(permits({ source: result }), false, `${job} source ${result}`);
+      assert.equal(permits({ preparation: result }), false, `${job} preparation ${result}`);
+    }
+  }
+});
+
+test("a green release requires completed artifact collection or published-release recovery", () => {
+  const result = workflow.slice(workflow.indexOf("\n  release-result:\n"));
+  assert.match(result, /if: \$\{\{ !cancelled\(\) \}\}/);
+  assert.match(result, /needs: \[collect-publish, recover-published\]/);
+  assert.match(result, /COLLECT_RESULT: \$\{\{ needs\.collect-publish\.result \}\}/);
+  assert.match(result, /RECOVERY_RESULT: \$\{\{ needs\.recover-published\.result \}\}/);
+  const program = /node -e '([^'\n]+)'/.exec(result)?.[1];
+  assert(program, "Missing release completion check");
+  for (const collect of ["success", "failure", "cancelled", "skipped"]) {
+    for (const recovery of ["success", "failure", "cancelled", "skipped"]) {
+      let exitCode = 0;
+      runInNewContext(program, {
+        process: { env: { COLLECT_RESULT: collect, RECOVERY_RESULT: recovery }, exit: code => { exitCode = code; } },
+        console: { error() {} },
+      }, { timeout: 100, contextCodeGeneration: { strings: false, wasm: false } });
+      assert.equal(exitCode, collect === "success" || recovery === "success" ? 0 : 1,
+        `collection=${collect} recovery=${recovery}`);
+    }
+  }
+});
+
 test("WASM jobs verify native artifacts afterward and Android includes barcode tests", () => {
   assert.match(workflow, /pnpm test:wasm[\s\S]*dbus-run-session -- bash scripts\/linux-native-tests\.sh --lib external_storage/);
   assert.match(workflow, /:app:testLowMemorySafCopy :tauri-plugin-barcode-scanner:testDebugUnitTest/);

@@ -63,7 +63,7 @@ impl Management {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let locator = discovery::Discovery {
             address: listener.local_addr()?,
-            token: discovery::request_id()?,
+            token: crate::identity::secret_token()?,
         };
         let (stop, _) = watch::channel(false);
         let reading = store.clone();

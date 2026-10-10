@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,7 +16,7 @@ import {
   validateIosArchiveEntries,
 } from "../../scripts/release/package-app.mjs";
 import { APP_IDENTIFIER, SYNC_IDENTIFIER, assertAppIdentifier, assertNoIdentifierOverride, assertSyncIdentifier, mergeTauriConfig, releaseTauriConfig } from "../../scripts/release/tauri-config.mjs";
-import { validateOwnedInventory } from "../../server/manager/install/package.mjs";
+import { validateOwnedInventory, writeWindowsArchive } from "../../server/manager/install/package.mjs";
 import { identifierDirectories, overlaps, windowsLayout } from "../pathManifest.mjs";
 
 function pe(machine) {
@@ -97,6 +97,32 @@ test("raw packaging accepts native Windows ARM64 targets", () => {
   const report = JSON.parse(result.stdout.trim());
   assert.equal(report.target, "aarch64-pc-windows-msvc");
   assert.ok(readFileSync(join(output, "risunest-sync-server-1.2.3-aarch64-pc-windows-msvc.zip")).length > 0);
+});
+
+test("Windows managed ZIP preserves top-level names and bytes with absolute output paths", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "risunest managed zip "));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const source = join(root, "source files");
+  mkdirSync(source);
+  const files = {
+    "risunest-sync-gui.exe": pe(0xaa64),
+    "CLOUDFLARED-LICENSE": Buffer.from("synthetic license\n"),
+    "risunest-sync-bundle.json": Buffer.from('{"schema":"risunest-sync-bundle/v1"}\n'),
+  };
+  for (const [name, bytes] of Object.entries(files)) writeFileSync(join(source, name), bytes);
+  const archive = join(root, "managed.zip");
+  writeWindowsArchive(source, archive);
+  assert.equal(assertPackageFormat(archive, "zip").format, "zip");
+  const inspected = spawnSync("python", ["-c", [
+    "import json, sys, zipfile",
+    "with zipfile.ZipFile(sys.argv[1]) as archive:",
+    "    assert archive.testzip() is None",
+    "    print(json.dumps({name: archive.read(name).hex() for name in archive.namelist()}))",
+  ].join("\n"), archive], { encoding: "utf8", windowsHide: true });
+  assert.equal(inspected.status, 0, inspected.stderr);
+  assert.deepEqual(JSON.parse(inspected.stdout), Object.fromEntries(
+    Object.entries(files).map(([name, bytes]) => [name, bytes.toString("hex")]),
+  ));
 });
 
 test("NSIS inspection excludes only generated installer metadata from the owned inventory", () => {

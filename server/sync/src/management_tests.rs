@@ -16,7 +16,7 @@ fn configured_store() -> (tempfile::TempDir, Store) {
 #[test]
 fn named_issuance_is_not_replayed_and_status_has_no_credentials() {
     let (_root, store) = configured_store();
-    let request = "a".repeat(64);
+    let request = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned();
     let uri = store
         .issue_named_registration("테스트 기기", &request, None)
         .unwrap();
@@ -77,14 +77,30 @@ fn disabling_registry_preserves_identity_without_publication_or_uri_key() {
 fn bad_registration_input_allocates_no_device() {
     let (_root, store) = configured_store();
     assert!(store
-        .issue_named_registration("\u{1b}[31m", &"a".repeat(64), None)
+        .issue_named_registration("\u{1b}[31m", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", None)
         .is_err());
     assert!(store
-        .issue_named_registration("", &"b".repeat(64), None)
+        .issue_named_registration("", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", None)
         .is_err());
     assert!(store
         .issue_named_registration("기기", "bad request", None)
         .is_err());
+    for invalid in [
+        "a".repeat(64),
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_uppercase(),
+        "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa".into(),
+        "aaaaaaaa-aaaa-4aaa-0aaa-aaaaaaaaaaaa".into(),
+        "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa".into(),
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n".into(),
+    ] {
+        assert_eq!(
+            store
+                .issue_named_registration("기기", &invalid, None)
+                .unwrap_err()
+                .code,
+            "invalid-registration-request"
+        );
+    }
     assert!(store.managed_devices().unwrap().is_empty());
 }
 
@@ -214,7 +230,21 @@ async fn management_http_auth_revision_and_live_issuance() {
         .json()
         .await
         .unwrap();
-    let request_id = "c".repeat(64);
+    risunest_sync_wire::validate_hash(&discovery.token).unwrap();
+    let (session, _) = before["revision"]
+        .as_str()
+        .unwrap()
+        .split_once(':')
+        .unwrap();
+    assert_eq!(
+        uuid::Uuid::parse_str(session).unwrap().get_version(),
+        Some(uuid::Version::Random)
+    );
+    let request_id = crate::management::discovery::request_id().unwrap();
+    assert_eq!(
+        uuid::Uuid::parse_str(&request_id).unwrap().get_version(),
+        Some(uuid::Version::Random)
+    );
     let response = client.post(format!("{url}/devices")).bearer_auth(&discovery.token).json(&serde_json::json!({"revision":before["revision"],"requestId":request_id,"name":"HTTP 테스트"})).send().await.unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(response.headers()["cache-control"], "no-store");
@@ -451,7 +481,11 @@ fn local_issuance_replaces_the_endpoint_and_omits_directory() {
     let (_root, store) = configured_store();
     let local = risunest_sync_connect::Registration::parse_uri(
         &store
-            .issue_named_registration("이 컴퓨터", &"a".repeat(64), Some("http://127.0.0.1:14319"))
+            .issue_named_registration(
+                "이 컴퓨터",
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                Some("http://127.0.0.1:14319"),
+            )
             .unwrap(),
     )
     .unwrap();
@@ -459,7 +493,7 @@ fn local_issuance_replaces_the_endpoint_and_omits_directory() {
     assert!(local.directory.is_none());
     let configured = risunest_sync_connect::Registration::parse_uri(
         &store
-            .issue_named_registration("다른 기기", &"b".repeat(64), None)
+            .issue_named_registration("다른 기기", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", None)
             .unwrap(),
     )
     .unwrap();
@@ -517,7 +551,7 @@ async fn local_target_issues_a_loopback_registration_without_a_ready_public_endp
     let blocked = client
         .post(format!("{url}/devices"))
         .bearer_auth(&token)
-        .json(&serde_json::json!({"revision":before["revision"],"requestId":"a".repeat(64),"name":"공개 기기"}))
+        .json(&serde_json::json!({"revision":before["revision"],"requestId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),"name":"공개 기기"}))
         .send()
         .await
         .unwrap();
@@ -530,7 +564,7 @@ async fn local_target_issues_a_loopback_registration_without_a_ready_public_endp
     let issued: serde_json::Value = client
         .post(format!("{url}/devices"))
         .bearer_auth(&token)
-        .json(&serde_json::json!({"revision":current["revision"],"requestId":"b".repeat(64),"name":"이 컴퓨터","target":"local"}))
+        .json(&serde_json::json!({"revision":current["revision"],"requestId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_owned(),"name":"이 컴퓨터","target":"local"}))
         .send()
         .await
         .unwrap()
@@ -566,7 +600,7 @@ async fn a_specific_listener_rejects_local_registration_before_allocating_a_devi
     let rejected = client
         .post(format!("{url}/devices"))
         .bearer_auth(&token)
-        .json(&serde_json::json!({"revision":before["revision"],"requestId":"a".repeat(64),"name":"이 컴퓨터","target":"local"}))
+        .json(&serde_json::json!({"revision":before["revision"],"requestId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),"name":"이 컴퓨터","target":"local"}))
         .send()
         .await
         .unwrap();

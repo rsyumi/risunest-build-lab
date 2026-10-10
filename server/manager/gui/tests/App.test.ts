@@ -84,7 +84,7 @@ beforeEach(() => {
     updatePolicy: vi.fn(async () => {}),
     updateCheck: vi.fn(async () => ({ result: "current" })),
     uninstall: vi.fn(async () => {}),
-    requestId: vi.fn(async () => "a".repeat(64)),
+    requestId: vi.fn(async () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
     qr: vi.fn(async () => '<svg aria-label="synthetic-qr"></svg>'),
   };
   HTMLDialogElement.prototype.showModal = function () {
@@ -571,7 +571,7 @@ it("issues a local registration only when the listener offers a loopback endpoin
   expect(backend.mutate).toHaveBeenCalledWith("devices", {
     revision: "synthetic:0",
     name: "이 컴퓨터",
-    requestId: "a".repeat(64),
+    requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     target: "local",
   });
   await vi.waitFor(() =>
@@ -604,7 +604,7 @@ it("hides the local option and keeps configured issuance for a specific listener
   expect(backend.mutate).toHaveBeenCalledWith("devices", {
     revision: "synthetic:0",
     name: "다른 기기",
-    requestId: "a".repeat(64),
+    requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     target: "configured",
   });
   await vi.waitFor(() =>

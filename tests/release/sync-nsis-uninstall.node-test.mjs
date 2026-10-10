@@ -57,7 +57,7 @@ fn main() {
   assert_eq!(values.len(),3);
   let owner=values[2].parse::<u32>().unwrap();
   assert!(owner>0 && owner!=std::process::id());
-  println!("{}","a".repeat(64));
+  println!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
  }
  if args=="installer delete-data" {
   if root.join("fail").exists() {std::process::exit(9);}
@@ -135,7 +135,7 @@ SectionEnd
         assert.ok(calls.indexOf('installer prepare ') < calls.indexOf('uninstall lock-held'), `${scenario.name}: acquire guard before cleanup`);
       }
       if (scenario.name === 'delete') {
-        assert.match(calls, new RegExp(`^installer finish ${'a'.repeat(64)}:`, 'm'));
+        assert.match(calls, /^installer finish aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:/m);
         assert.ok(calls.indexOf('installer finish') < calls.indexOf('installer delete-data'));
       }
     }
