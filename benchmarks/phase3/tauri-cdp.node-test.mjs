@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import path from 'node:path'
 import test from 'node:test'
 
 import {
@@ -161,30 +162,33 @@ test('aggregateProcessMemory sums unique app and WebView process IDs', () => {
 })
 
 test('tauriBuildInvocation bypasses Windows command shims', () => {
-    const invocation = tauriBuildInvocation('E:\\repo', 'C:\\temp\\benchmark.json')
+    const repository = path.resolve('synthetic-repo')
+    const config = path.resolve('synthetic-temp', 'benchmark.json')
+    const invocation = tauriBuildInvocation(repository, config)
 
     assert.equal(invocation.command, process.execPath)
     assert.deepEqual(invocation.args, [
-        'E:\\repo\\node_modules\\@tauri-apps\\cli\\tauri.js',
+        path.join(repository, 'node_modules', '@tauri-apps', 'cli', 'tauri.js'),
         'build',
         '--no-bundle',
         '--ci',
         '--config',
-        'C:\\temp\\benchmark.json',
+        config,
     ])
 })
 
 test('benchmarkAppDataDirectory accepts only the exact isolated identifier layout', () => {
     const identifier = 'RisuNest.phase3benchmark.run123'
-    const snapshot = `C:\\Users\\test\\AppData\\Roaming\\${identifier}\\persistent\\snapshots\\one.db`
+    const roaming = path.resolve('synthetic-roaming')
+    const snapshot = path.join(roaming, identifier, 'persistent', 'snapshots', 'one.db')
 
     assert.equal(
         benchmarkAppDataDirectory(snapshot, identifier),
-        `C:\\Users\\test\\AppData\\Roaming\\${identifier}`,
+        path.join(roaming, identifier),
     )
     assert.throws(
         () => benchmarkAppDataDirectory(
-            'C:\\Users\\test\\AppData\\Roaming\\RisuNest\\persistent\\snapshots\\one.db',
+            path.join(roaming, 'RisuNest', 'persistent', 'snapshots', 'one.db'),
             identifier,
         ),
         /isolated benchmark identifier/,

@@ -28,7 +28,7 @@ manager_run autostart install
 daemon_plist=$(find "$test_home/Library/LaunchAgents" -maxdepth 1 -name 'io.github.rsyumi.risunest-sync-*.plist' ! -name '*-update.plist' -print)
 test "$(printf '%s\n' "$daemon_plist" | sed '/^$/d' | wc -l | tr -d ' ')" = 1
 daemon_label=$(/usr/libexec/PlistBuddy -c 'Print :Label' "$daemon_plist")
-launchctl print "$domain/$daemon_label" >/dev/null
+if launchctl print "$domain/$daemon_label" >/dev/null 2>&1; then exit 1; fi
 
 update_plist=$(find "$test_home/Library/LaunchAgents" -maxdepth 1 -name 'io.github.rsyumi.risunest-sync-*-update.plist' -print)
 test -z "$update_plist"
@@ -54,6 +54,7 @@ while test "$attempt" -lt 50; do
   sleep 0.1
 done
 test "$ready" = true
+launchctl print "$domain/$daemon_label" >/dev/null
 
 manager_run autostart remove
 status=$(manager_run autostart status)

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import path from 'node:path'
 import test from 'node:test'
 
 import {
@@ -50,11 +51,13 @@ test('benchmark config isolates the Windows profile and disables bundling', () =
 })
 
 test('release executable follows the shared absolute Cargo target directory', () => {
+    const repository = path.resolve('synthetic-repo')
+    const target = path.resolve('synthetic-shared-target')
     assert.equal(
-        resolveCargoTargetDirectory('E:\\repo', 'E:\\shared-target'),
-        'E:\\shared-target',
+        resolveCargoTargetDirectory(repository, target),
+        target,
     )
-    assert.equal(resolveCargoTargetDirectory('E:\\repo', undefined), 'E:\\repo\\src-tauri\\target')
+    assert.equal(resolveCargoTargetDirectory(repository, undefined), path.join(repository, 'src-tauri', 'target'))
 })
 
 test('SIGINT and SIGTERM clean owned resources once before exiting', async () => {

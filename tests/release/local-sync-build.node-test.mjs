@@ -16,8 +16,9 @@ import {
 const repository = fileURLToPath(new URL("../..", import.meta.url));
 
 test("local Sync builds default to the main checkout Cargo cache without overriding an explicit target", () => {
-  const root = join("C:/", "workspace", "RisuNest");
-  const worktree = join("C:/", "workspace", "worktree");
+  const workspace = resolve(tmpdir(), "risunest-local-sync-paths");
+  const root = join(workspace, "RisuNest");
+  const worktree = join(workspace, "worktree");
   const common = join(root, ".git");
   assert.equal(
     localCargoTargetDirectory({ commonGitDirectory: common, root: worktree }),

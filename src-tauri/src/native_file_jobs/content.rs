@@ -184,6 +184,11 @@ pub(super) fn prepare_content(
             NativeJobError::new("store-error", error)
         }
     })?;
+    #[cfg(test)]
+    if let Some(gate) = &job.content_preparation_gate {
+        gate.entered.send(()).unwrap();
+        gate.resume.lock().unwrap().recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    }
     job.set_progress(JobProgress {
         completed_bytes: 0,
         total_bytes: Some(source.total_bytes),

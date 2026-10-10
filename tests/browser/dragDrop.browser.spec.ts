@@ -141,13 +141,14 @@ async function position(page: Page, name: string) {
 
 /** Hovers the top edge of a row at a pace Sortable's move animation keeps up with. */
 async function settleOn(page: Page, target: string, via?: string) {
-    await page.waitForTimeout(250)
-    // Rows shift once the dragged row leaves its pinned edge, so measure the target after that.
+    // Leave the repeat zone before waiting for the drop target to settle.
     if (via) {
         const pass = await center(itemButton(page, via).locator('..'))
         await page.mouse.move(pass.x, pass.y, { steps: 6 })
-        await page.waitForTimeout(250)
+        // A delayed drop must stay on this page past the 700 ms repeat interval.
+        await page.waitForTimeout(750)
     }
+    // Rows shift once the dragged row leaves its pinned edge, so measure the target after that.
     const drop = await center(itemButton(page, target).locator('..'))
     await page.mouse.move(drop.x, drop.top, { steps: 6 })
     await page.waitForTimeout(250)
@@ -171,6 +172,7 @@ test.describe('lore pages', () => {
         }
         await expect(pagerText(page)).toContainText(expected)
         await settleOn(page, target, via)
+        await expect(pagerText(page)).toContainText(expected)
         await mouse.up()
     }
 

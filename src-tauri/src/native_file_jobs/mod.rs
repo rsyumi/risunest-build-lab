@@ -4019,6 +4019,8 @@ pub(crate) enum FinalizeOutcome {
 }
 
 pub(crate) struct JobRegistry {
+    #[cfg(test)]
+    content_preparation_gate: Mutex<Option<Arc<ContentPreparationGate>>>,
     jobs: Mutex<HashMap<String, Arc<JobControl>>>,
     max_terminal_jobs: usize,
     max_terminal_age: Duration,
@@ -4053,6 +4055,8 @@ impl Default for JobRegistry {
 impl JobRegistry {
     fn with_retention(max_terminal_jobs: usize, max_terminal_age: Duration) -> Self {
         Self {
+            #[cfg(test)]
+            content_preparation_gate: Mutex::new(None),
             jobs: Mutex::new(HashMap::new()),
             max_terminal_jobs,
             max_terminal_age,
@@ -4097,6 +4101,8 @@ impl JobRegistry {
         validate_warning_codes(&warning_codes)?;
         let id = Uuid::new_v4().to_string();
         let job = Arc::new(JobControl {
+            #[cfg(test)]
+            content_preparation_gate: self.content_preparation_gate.lock().unwrap().clone(),
             #[cfg(test)] source_io_scope: crate::portable_backup::source_io::capture_scope(),
             cancel_requested: Arc::new(AtomicBool::new(false)),
             requires_restore_finalization,
@@ -4251,7 +4257,15 @@ impl JobRegistry {
     }
 }
 
+#[cfg(test)]
+struct ContentPreparationGate {
+    entered: std::sync::mpsc::SyncSender<()>,
+    resume: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
 pub(crate) struct JobControl {
+    #[cfg(test)]
+    content_preparation_gate: Option<Arc<ContentPreparationGate>>,
     #[cfg(test)] pub(super) source_io_scope: crate::portable_backup::source_io::Scope,
     cancel_requested: Arc<AtomicBool>,
     requires_restore_finalization: bool,
@@ -7608,7 +7622,7 @@ mod tests {
         let active_database = persistent.join("active.sqlite3");
         fs::write(&active_database, b"unchanged-active-database").unwrap();
         let source = directory.path().join("large-card.json");
-        let description = "x".repeat(7 * 1024 * 1024);
+        let description = "synthetic description";
         fs::write(
             &source,
             serde_json::to_vec(&serde_json::json!({
@@ -7623,6 +7637,12 @@ mod tests {
         )
         .unwrap();
         let state = NativeFileJobState::initialize(directory.path().join("native-file-jobs"));
+        let (entered, preparation_started) = std::sync::mpsc::sync_channel(1);
+        let (resume_preparation, resume) = std::sync::mpsc::channel();
+        *state.registry.content_preparation_gate.lock().unwrap() = Some(Arc::new(ContentPreparationGate {
+            entered,
+            resume: Mutex::new(resume),
+        }));
         let started = state
             .start_content_for_test(NativeFileJobStartRequest::PrepareContentImport {
                 source: JobSource::DesktopPath {
@@ -7633,17 +7653,12 @@ mod tests {
             .expect("start content preparation");
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        while state.status(&started.job_id).unwrap().state == JobState::Queued {
-            assert!(
-                Instant::now() < deadline,
-                "content preparation did not start"
-            );
-            thread::yield_now();
-        }
+        preparation_started.recv_timeout(Duration::from_secs(5)).expect("content preparation did not start");
         assert_eq!(
             state.cancel(&started.job_id).unwrap(),
             CancelOutcome::Requested
         );
+        resume_preparation.send(()).unwrap();
         loop {
             let status = state.status(&started.job_id).unwrap();
             if status.state.is_terminal() {

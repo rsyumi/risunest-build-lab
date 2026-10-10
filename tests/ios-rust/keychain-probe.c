@@ -1,0 +1,29 @@
+#include <CoreFoundation/CoreFoundation.h>
+#include <Security/Security.h>
+#include <stdio.h>
+
+int main(void) {
+    CFUUIDRef uuid = CFUUIDCreate(NULL);
+    CFStringRef account = CFUUIDCreateString(NULL, uuid);
+    const UInt8 bytes[] = "synthetic-keychain-probe";
+    CFDataRef data = CFDataCreate(NULL, bytes, sizeof(bytes) - 1);
+    const void *keys[] = { kSecClass, kSecAttrService, kSecAttrAccount, kSecValueData };
+    const void *values[] = {
+        kSecClassGenericPassword, CFSTR("io.github.rsyumi.risunest.rust-tests.probe"), account, data
+    };
+    CFDictionaryRef query = CFDictionaryCreate(NULL, keys, values, 4,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    OSStatus added = SecItemAdd(query, NULL);
+    CFDictionaryRef identity = CFDictionaryCreate(NULL, keys, values, 3,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    OSStatus found = SecItemCopyMatching(identity, NULL);
+    OSStatus removed = SecItemDelete(identity);
+    printf("Synthetic keychain preflight: add=%d find=%d remove=%d\n",
+        (int)added, (int)found, (int)removed);
+    CFRelease(identity);
+    CFRelease(query);
+    CFRelease(data);
+    CFRelease(account);
+    CFRelease(uuid);
+    return added == errSecSuccess && found == errSecSuccess && removed == errSecSuccess ? 0 : 1;
+}

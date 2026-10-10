@@ -620,7 +620,7 @@ fn helper_lock_active(root: &Path) -> Result<bool, String> {
 #[cfg(windows)]
 fn helper_failure_diagnostic(root: &Path) -> serde_json::Value {
     const TASKS: &str = r#"$ErrorActionPreference='Stop';$service=New-Object -ComObject 'Schedule.Service';$service.Connect();$folder=$service.GetFolder('\');$items=@();foreach($task in $folder.GetTasks(1)){if($task.Name.StartsWith($env:RISUNEST_TEST_TASK_PREFIX,[StringComparison]::Ordinal)){try{$action=$task.Definition.Actions.Item(1);$instances=@();foreach($instance in $task.GetInstances(0)){$instances+=@{enginePid=[int64]$instance.EnginePID;state=[int]$instance.State}};$items+=@{name=$task.Name;description=$task.Definition.RegistrationInfo.Description;program=$action.Path;arguments=$action.Arguments;state=[int]$task.State;lastResult=[int64]$task.LastTaskResult;lastRunTime=$task.LastRunTime.ToString('o');nextRunTime=$task.NextRunTime.ToString('o');instances=$instances}}catch{$items+=@{name=$task.Name;snapshotError='task-disappeared-during-snapshot'}}}};ConvertTo-Json -Compress -InputObject @($items)"#;
-    const PROCESSES: &str = r#"$ErrorActionPreference='Stop';$items=@(Get-CimInstance Win32_Process | Where-Object {$null -ne $_.CommandLine -and $_.CommandLine.Contains($env:RISUNEST_TEST_ROOT,[StringComparison]::OrdinalIgnoreCase)} | ForEach-Object {@{pid=[int64]$_.ProcessId;name=$_.Name;commandLine=$_.CommandLine}});ConvertTo-Json -Compress -InputObject $items"#;
+    const PROCESSES: &str = r#"$ErrorActionPreference='Stop';$items=@(Get-CimInstance Win32_Process | Where-Object {$null -ne $_.CommandLine -and $_.CommandLine.IndexOf($env:RISUNEST_TEST_ROOT,[StringComparison]::OrdinalIgnoreCase) -ge 0} | ForEach-Object {@{pid=[int64]$_.ProcessId;name=$_.Name;commandLine=$_.CommandLine}});ConvertTo-Json -Compress -InputObject $items"#;
     fn powershell_json(
         script: &str,
         name: &str,
@@ -668,7 +668,7 @@ fn helper_failure_diagnostic(root: &Path) -> serde_json::Value {
             }),
         }
     }
-    let prefix = format!("{}-update-helper-", platform::instance_name(root));
+    let prefix = format!("{}-", platform::instance_name(root));
     let harness_log = fs::read_to_string(root.join("spawn-helper-log"))
         .map(|value| value.chars().take(2_000).collect::<String>())
         .unwrap_or_else(|_| "unavailable".into());
@@ -797,7 +797,10 @@ try {
                 };
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err("scheduled-helper-subprocess-timeout".into());
+                return Err(format!(
+                    "scheduled-helper-subprocess-timeout:diagnostic={}",
+                    helper_failure_diagnostic(root)
+                ));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

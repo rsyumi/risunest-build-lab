@@ -780,6 +780,44 @@ describe('Chats imperative mount lifecycle', () => {
         await vi.waitFor(() => expect(probeElements(target)).toHaveLength(64))
     })
 
+    test.each([false, true])('preserves the reader anchor (ready: %s) when a pending row becomes very tall', async ready => {
+        chatMountProbe.holdDisplay = true
+        const messages = Array.from({ length: 3 }, (_, index) => makeMessage(index))
+        mounted = mount(ChatsHarness, { target, props: { initialMessages: messages, initialCharacter: makeCharacter(messages) } })
+        await vi.waitFor(() => expect(chatMountProbe.pendingDisplays.size).toBe(2))
+        const readyMount = chatMountProbe.mounts.find(row => row.index === 1)!
+        const anchor = target.querySelector<HTMLElement>('[data-chat-index="1"]')!
+        if (ready) {
+            chatMountProbe.pendingDisplays.get(readyMount.instanceId)!()
+            await vi.waitFor(() => expect(anchor.dataset.chatMountPending).toBeUndefined())
+        }
+        const growing = target.querySelector<HTMLElement>('[data-chat-index="2"]')!
+        const scrollParent = target.querySelector<HTMLElement>('.scroll-parent')!
+        scrollParent.getBoundingClientRect = () => ({ top: 0, bottom: 500, height: 500 }) as DOMRect
+        scrollParent.scrollBy = vi.fn().mockImplementation(({ top = 0 }: ScrollToOptions) => { scrollParent.scrollTop += top })
+        for (const row of target.querySelectorAll<HTMLElement>('[data-chat-index]')) {
+            row.getBoundingClientRect = () => {
+                const growth = growing.dataset.chatHeightPending ? 0 : 24_000
+                const top = row === anchor ? 100 - growth - scrollParent.scrollTop : -1_000 - growth
+                return { top, bottom: top + 400, height: 400 } as DOMRect
+            }
+        }
+        scrollParent.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }))
+        scrollParent.scrollTop = -100
+        scrollParent.dispatchEvent(new Event('scroll'))
+        const offset = anchor.getBoundingClientRect().top
+        const pendingMount = chatMountProbe.mounts.find(row => row.index === 2)!
+        chatMountProbe.pendingDisplays.get(pendingMount.instanceId)!()
+        await vi.waitFor(() => expect(growing.dataset.chatHeightPending).toBeUndefined())
+        expect(anchor.getBoundingClientRect().top).toBe(offset)
+        expect(scrollParent.scrollBy).toHaveBeenCalledWith({ top: -24_000, behavior: 'instant' })
+        // The resulting native scroll notification must not be treated as another history step.
+        scrollParent.dispatchEvent(new Event('scroll'))
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+        expect(anchor.isConnected).toBe(true)
+        expect(anchor.getBoundingClientRect().top).toBe(offset)
+    })
+
     test('bounds unfinished projections before message bodies mount', async () => {
         const ready = deferred<void>()
         const messages = Array.from({ length: 80 }, (_, index) =>

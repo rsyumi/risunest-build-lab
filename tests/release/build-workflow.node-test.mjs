@@ -71,6 +71,19 @@ test("WASM jobs verify native artifacts afterward and Android includes barcode t
   assert.match(workflow, /pnpm test --project app --project app-extended/);
 });
 
+test("iOS Rust tests preflight their own keychain identity before running the full inventory", () => {
+  const ios = workflow.slice(workflow.indexOf("\n  app-ios-tests:"), workflow.indexOf("\n  sync-tests:"));
+  const runner = readFileSync(new URL("../../scripts/ios-native-tests.sh", import.meta.url), "utf8");
+  assert.match(ios, /run: bash scripts\/ios-native-tests\.sh/);
+  assert.match(runner, /tauri\.ios\.conf\.json.*minimumSystemVersion/);
+  assert.match(runner, /__TEXT,__entitlements/);
+  assert.match(runner, /__TEXT,__ents_der/);
+  assert.match(runner, /keychain-access-groups/);
+  assert(runner.indexOf('"$profile/keychain-probe"\n') < runner.indexOf('cargo test '));
+  assert.match(runner, /cargo test .*--release --locked --target aarch64-apple-ios-sim --lib "\$@"/);
+  assert.doesNotMatch(runner, /--skip|--ignored|danger_accept_invalid/);
+});
+
 test("release source input uses one run timestamp instead of the commit timestamp", () => {
   assert.match(workflow, /published_at=\$\(date -u/);
   assert.doesNotMatch(workflow, /git show[^\n]*--format=%cI/);
@@ -258,6 +271,19 @@ test("pnpm preserves the Cargo argument separator for every Tauri build", () => 
   const bundles = workflow.match(/pnpm exec -- tauri bundle[^\n]*/g) ?? [];
   assert.equal(bundles.length, 1);
   assert.doesNotMatch(bundles[0], / -- --locked/);
+});
+
+test("Android SDK setup explicitly excludes the retired tools package", () => {
+  const directory = new URL("../../.github/workflows/", import.meta.url);
+  let setups = 0;
+  for (const name of readdirSync(directory).filter(name => /\.ya?ml$/.test(name))) {
+    const contents = readFileSync(new URL(name, directory), "utf8").replace(/\r\n/g, "\n");
+    for (const step of contents.split(/^      - /m).filter(step => step.startsWith("uses: android-actions/setup-android@"))) {
+      setups++;
+      assert.match(step, /^        with:\n          packages: platform-tools$/m, name);
+    }
+  }
+  assert(setups > 0, "Missing Android SDK setup steps");
 });
 
 test("Android jobs preserve the committed shell and let Tauri generate ignored build files", () => {
