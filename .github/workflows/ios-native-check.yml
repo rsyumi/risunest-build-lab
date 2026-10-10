@@ -76,10 +76,9 @@ jobs:
       - name: Run native Rust inventory
         env:
           CHECK: ${{ inputs.check }}
-          RUST_TEST_THREADS: "1"
         run: |
           arguments=()
-          if [[ "$CHECK" == preflight ]]; then arguments+=(--preflight-only); fi
+          if [[ "$CHECK" == preflight ]]; then arguments+=(--preflight-only); else arguments+=(-- --test-threads=1); fi
           bash scripts/ios-native-tests.sh "${arguments[@]}" 2>&1 | tee artifacts/native-tests.log
       - uses: actions/cache/save@v5
         if: always() && !cancelled() && inputs.check == 'inventory'
