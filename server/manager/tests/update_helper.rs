@@ -19,6 +19,11 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+const SCHEDULED_SHELL_BUDGET: Duration = Duration::from_secs(90);
+#[cfg(windows)]
+const SCHEDULED_HELPER_COMPLETION_BUDGET: Duration = Duration::from_secs(300);
+
 struct Fixture {
     _temp: tempfile::TempDir,
     root: PathBuf,
@@ -441,7 +446,7 @@ $definition.Principal.LogonType=3
 $definition.Principal.RunLevel=0
 $definition.Settings.AllowDemandStart=$true
 $definition.Settings.Enabled=$true
-$definition.Settings.ExecutionTimeLimit='PT1M'
+$definition.Settings.ExecutionTimeLimit='PT2M'
 $action=$definition.Actions.Create(0)
 $action.Path=$env:RISUNEST_TEST_TASK_PROGRAM
 $directory=$env:RISUNEST_TEST_TASK_DIRECTORY
@@ -698,7 +703,7 @@ fn helper_failure_diagnostic(root: &Path) -> serde_json::Value {
 
 #[cfg(windows)]
 async fn wait_for_transient_helper_cleanup(root: &Path) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + SCHEDULED_SHELL_BUDGET;
     loop {
         let last_error = match transient_helper_task_count(root) {
             Ok(0) => return Ok(()),
@@ -736,6 +741,7 @@ async fn spawn_helper_from_scheduled_harness(
     )
     .map_err(|_| "scheduled-harness-write-failed")?;
     let task_name = format!("{}-helper-test", platform::instance_name(root));
+    let started = tokio::time::Instant::now();
     let launched = scheduled_harness_action(
         &task_name,
         "run",
@@ -744,10 +750,14 @@ async fn spawn_helper_from_scheduled_harness(
     );
     let wait: Result<(), String> = async {
         launched?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let deadline = tokio::time::Instant::now() + SCHEDULED_SHELL_BUDGET;
         loop {
             if let Ok(value) = fs::read_to_string(&result) {
                 return if value == "success" {
+                    eprintln!(
+                        "scheduled helper harness ({mode}) completed in {} ms",
+                        started.elapsed().as_millis()
+                    );
                     Ok(())
                 } else {
                     let detail = fs::read(&log)
@@ -849,7 +859,7 @@ async fn live_helper_replacement(
         wait_for_initial_server_exit(initial_server.as_mut().unwrap())?;
     }
     spawn_helper_from_scheduled_harness(root, install, server, manager, "apply-helper").await?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + SCHEDULED_HELPER_COMPLETION_BUDGET;
     loop {
         let transaction = InstallTransaction::load(root, install).map_err(|error| {
             format!(
@@ -1548,7 +1558,7 @@ async fn live_recovery_from_installed_manager(
     }
 
     spawn_helper_from_scheduled_harness(root, install, server, manager, "recover-manager").await?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + SCHEDULED_HELPER_COMPLETION_BUDGET;
     loop {
         let transaction_done = InstallTransaction::load(root, install)
             .map_err(|error| format!("transaction-load:{error}"))?

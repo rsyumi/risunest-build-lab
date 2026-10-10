@@ -4071,8 +4071,8 @@
     {
       "path": "server/manager/tests/update_helper.rs",
       "mode": "100644",
-      "bytes": 69507,
-      "sha256": "cf862c60d28919bdc1ca911e49d8e961e34f6e03ebf73f24b2b0172f460bc2cf"
+      "bytes": 69941,
+      "sha256": "c8775d056cf4bf33bd4eab7daafde1912e08e07888d368d7d184ff2a87725603"
     },
     {
       "path": "server/manager/tests/windows-startup.ps1",
