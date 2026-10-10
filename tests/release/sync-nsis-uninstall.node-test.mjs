@@ -143,7 +143,10 @@ SectionEnd
         assert.ok(calls.indexOf('installer finish') < calls.indexOf('installer delete-data'));
       }
     }
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally {
+    assert.equal(dirname(directory), resolve(tmpdir()));
+    rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 });
 
 test('Sync preinstall checks the resolved installation directory', { skip: process.platform !== 'win32' || !existsSync(compiler) }, () => {

@@ -17595,8 +17595,8 @@
     {
       "path": "tests/release/sync-nsis-uninstall.node-test.mjs",
       "mode": "100644",
-      "bytes": 9325,
-      "sha256": "ce629ccc2090fafb5e85921bf93abac555fa0e60af77a3b55eeec5264dd06570"
+      "bytes": 9421,
+      "sha256": "a8cb88a7e8f6537c6bdd3fc054959e91f46336ea9c6cad1b770df5ceea23260f"
     },
     {
       "path": "tests/release/verify-cloudflared.node-test.mjs",
