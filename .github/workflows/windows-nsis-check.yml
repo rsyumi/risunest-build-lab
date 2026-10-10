@@ -62,6 +62,7 @@ jobs:
         env:
           RISUNEST_REQUIRE_NSIS: '1'
         run: |
+          if ((node -p process.arch) -ne 'arm64') { throw 'NSIS check requires ARM64 Node' }
           & node --test tests/release/app-nsis-uninstall.node-test.mjs 2>&1 | Tee-Object -FilePath artifacts/nsis.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
@@ -70,4 +71,3 @@ jobs:
           name: nsis-arm64-${{ inputs.source_sha }}-${{ github.run_attempt }}
           path: source/artifacts/
           retention-days: 3
-
