@@ -1,0 +1,113 @@
+name: Native storage profile
+run-name: Native storage ${{ inputs.source_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full Sync snapshot commit SHA
+        type: string
+        required: true
+      native:
+        description: Run the exact bounded-spool correctness test
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  io:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, windows-11-arm, ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - name: Verify snapshot
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . sync
+          mkdir -p artifacts
+          cp .build-lab/source.json artifacts/source.json
+      - name: Measure synthetic filesystem and SQLite operations
+        run: python benchmarks/native-storage/io-profile.py --count 200 --root workspace=. --root runner-temp="$RUNNER_TEMP" | tee artifacts/io.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: storage-io-${{ matrix.runner }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
+  native:
+    if: inputs.native
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2022, target: x86_64-pc-windows-msvc }
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - name: Verify snapshot
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . sync
+          mkdir -p artifacts
+          cp .build-lab/source.json artifacts/source.json
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libwebkit2gtk-4.1-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev gnome-keyring dbus-x11 xvfb
+      - name: Compile the instrumented test binary
+        run: cargo test --manifest-path src-tauri/Cargo.toml --release --locked --target ${{ matrix.target }} --lib --no-run --message-format=json > artifacts/build.jsonl
+      - name: Compare exact test with isolated temporary roots
+        env:
+          PROFILE_TARGET: ${{ matrix.target }}
+        run: |
+          binary=$(python -c 'import json; from pathlib import Path; rows=[json.loads(x) for x in Path("artifacts/build.jsonl").read_text().splitlines()]; matches=[x["executable"] for x in rows if x.get("reason")=="compiler-artifact" and x.get("profile",{}).get("test") and x.get("target",{}).get("name")=="risunest_lib" and x.get("executable")]; assert len(matches)==1,matches; print(matches[0])')
+          python benchmarks/native-storage/run-test-profile.py --binary "$binary" --test external_storage::packaging::tests::c_a_spool_with_room_for_two_objects_still_finishes_the_publication --root workspace=. 2>&1 | tee artifacts/native.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: storage-native-${{ matrix.runner }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
