@@ -577,9 +577,9 @@ async fn wait_rolled_back(scenario: &Scenario, target: &str) -> Result<(), Strin
     loop {
         let transaction = InstallTransaction::load(&scenario.root, &scenario.install)?;
         let status = load_status(&scenario.root)?;
-        if transaction
-            .as_ref()
-            .is_some_and(|value| value.phase == TransactionPhase::RolledBack)
+        if transaction.is_none()
+            && !scenario.staged.exists()
+            && !scenario.backup.exists()
             && status.phase == UpdatePhase::Failed
             && status.last_failed_version.as_deref() == Some(target)
         {
@@ -723,11 +723,15 @@ async fn failing_update_rolls_back(fixture: &VerifiedFixture) -> Result<(), Stri
     }
     wait_helper_job_gone(&scenario.root, &helper_label).await?;
     tokio::time::sleep(Duration::from_secs(16)).await;
+    let status = load_status(&scenario.root)?;
     if launchd_job_loaded(&helper_label)?
         || helper_lock_active(&scenario.root)?
-        || InstallTransaction::load(&scenario.root, &scenario.install)?
-            .is_none_or(|value| value.phase != TransactionPhase::RolledBack)
-        || load_status(&scenario.root)?.phase != UpdatePhase::Failed
+        || InstallTransaction::load(&scenario.root, &scenario.install)?.is_some()
+        || scenario.staged.exists()
+        || scenario.backup.exists()
+        || status.phase != UpdatePhase::Failed
+        || status.last_failed_version.as_deref() != Some(injected_target.as_str())
+        || status.reason.as_deref() != Some("updated-server-health-failed")
     {
         return Err("failed one-shot helper restarted after launchd throttle".into());
     }

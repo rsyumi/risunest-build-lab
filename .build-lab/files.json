@@ -4053,8 +4053,8 @@
     {
       "path": "server/manager/tests/macos_update.rs",
       "mode": "100644",
-      "bytes": 29663,
-      "sha256": "93e7e6e637c9ccc0ede7e06dc0ac0b01e9a9738d5e5fc45987bfb30554bbe65f"
+      "bytes": 29844,
+      "sha256": "8146f0f872b36e7fe05bf8609b2102c45a71f2ef7b37e426b947498ebacfe295"
     },
     {
       "path": "server/manager/tests/manual_start.rs",
@@ -17469,8 +17469,8 @@
     {
       "path": "tests/release/app-nsis-uninstall.node-test.mjs",
       "mode": "100644",
-      "bytes": 5457,
-      "sha256": "fd580eaf3f9ef6b9500809682e68f2839bc86d8a6b74883dbe94ca3583d10a1b"
+      "bytes": 5490,
+      "sha256": "097b48873325c115f9b46d243a329fffa6572a96619ed47d9a7fdd19844686cb"
     },
     {
       "path": "tests/release/build-collect.node-test.mjs",
