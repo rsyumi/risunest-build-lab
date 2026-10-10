@@ -9,11 +9,11 @@ Var SyncFailureMessage
 
 !macro NSIS_HOOK_PREINSTALL
   SetDetailsPrint both
+  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   StrCmp $INSTDIR "${RISUNEST_SYNC_DEFAULT_INSTALL_DIR}" 0 sync_install_dir_ready
   StrCpy $INSTDIR "${RISUNEST_SYNC_INSTALL_DIR}"
   SetOutPath $INSTDIR
   sync_install_dir_ready:
-  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   StrCpy $R7 ""
   IfFileExists "$INSTDIR\risunest-sync-manager.exe" 0 sync_prepare_done
   System::Call 'kernel32::GetCurrentProcessId()i.r0'
@@ -107,7 +107,7 @@ Var SyncFailureMessage
     Pop $1
     StrCmp $0 "0" sync_uninstall_done sync_uninstall_failed
   ${EndIf}
-  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   InitPluginsDir
   StrCpy $SyncFailureMessage "RisuNest Sync removal could not be prepared. Program files were preserved."
   ClearErrors

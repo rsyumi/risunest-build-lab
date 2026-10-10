@@ -7741,10 +7741,13 @@ mod tests {
     fn c_a_spool_with_room_for_two_objects_still_finishes_the_publication() {
         for limit in [12 * 1024, 9 * 1024] {
             runtime().block_on(async {
+                let profile_started = std::time::Instant::now();
+                eprintln!("PROFILE limit={limit} phase=start elapsed_ms=0");
                 let root = tempfile::tempdir().unwrap();
                 let provider = FakeProvider::new(false);
                 let repository = fake::repository();
                 let capture = captured_record_window(root.path(), "tight", 1, 2000, 0, 0, 0);
+                eprintln!("PROFILE limit={limit} phase=capture elapsed_ms={}", profile_started.elapsed().as_millis());
                 let meta = metadata("tight", &capture);
                 let directory = root.path().join("tight-job");
                 let job = format!("tight-{}", uuid::Uuid::new_v4());
@@ -7757,12 +7760,14 @@ mod tests {
                     .with_limit(limit),
                 );
                 let (peak, stop, sampler) = peak_sampler(directory.clone(), held_spool);
+                eprintln!("PROFILE limit={limit} phase=package_start elapsed_ms={}", profile_started.elapsed().as_millis());
                 let completed = package_and_upload(
                     capture, vec![], root.path(), &root.path().join("cache"), meta, &[5; 32],
                     limits(4096), None, &mut transfer, &provider, &repository,
                     &PhaseProgress::silent(), &Cancellation::default(),
                 )
                 .await;
+                eprintln!("PROFILE limit={limit} phase=package_end elapsed_ms={}", profile_started.elapsed().as_millis());
                 stop.store(true, std::sync::atomic::Ordering::Relaxed);
                 sampler.join().unwrap();
                 let completed = completed.unwrap_or_else(|error| {
@@ -7778,6 +7783,11 @@ mod tests {
                 );
                 let peak = peak.load(std::sync::atomic::Ordering::Relaxed);
                 assert!(peak <= limit, "{peak} bytes held against a {limit}-byte spool");
+                drop(completed);
+                drop(transfer);
+                eprintln!("PROFILE limit={limit} phase=cleanup_start elapsed_ms={}", profile_started.elapsed().as_millis());
+                drop(root);
+                eprintln!("PROFILE limit={limit} phase=cleanup_end elapsed_ms={}", profile_started.elapsed().as_millis());
             });
         }
     }

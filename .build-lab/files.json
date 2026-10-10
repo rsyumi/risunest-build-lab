@@ -607,6 +607,18 @@
       "sha256": "f0b93f13a7826f02c57ce6be168056bab3911b204b0920712ebc30af9b05eb5a"
     },
     {
+      "path": "benchmarks/native-storage/io-profile.py",
+      "mode": "100644",
+      "bytes": 3893,
+      "sha256": "915c03d76022fbb862afd054dde95d91cd2aa7cabf37832aa89b4a0e74a76315"
+    },
+    {
+      "path": "benchmarks/native-storage/run-test-profile.py",
+      "mode": "100644",
+      "bytes": 2897,
+      "sha256": "7cdaf2b39eab0505b5edcf3c6ee8340131ea9b2a597c687f6ae89f716cb98db5"
+    },
+    {
       "path": "benchmarks/phase3/tauri-cdp.mjs",
       "mode": "100644",
       "bytes": 31442,
@@ -3897,8 +3909,8 @@
     {
       "path": "server/manager/install/windows.nsh",
       "mode": "100644",
-      "bytes": 9174,
-      "sha256": "cac9d3804ece988ffac039ea3eaf40b2ebb537c182f76590a0df7f3ca42924df"
+      "bytes": 9156,
+      "sha256": "33525b75d9ddfbbcf85ce7540eaaddd85b8c69a821a56dc4c8d38ff09c45a162"
     },
     {
       "path": "server/manager/install/windows.test.ps1",
@@ -6033,8 +6045,8 @@
     {
       "path": "src-tauri/src/external_storage/packaging.rs",
       "mode": "100644",
-      "bytes": 492255,
-      "sha256": "afe1ce15bf1f3b9e46d7d07fa0d3d6aa7b2b95275b43340c2792632353d8123e"
+      "bytes": 493105,
+      "sha256": "698f460f58ad9480e1ee4c97fdea0da83389b82736eb0ff5323929f06232d33e"
     },
     {
       "path": "src-tauri/src/external_storage/phase_progress.rs",
@@ -17595,8 +17607,8 @@
     {
       "path": "tests/release/sync-nsis-uninstall.node-test.mjs",
       "mode": "100644",
-      "bytes": 9421,
-      "sha256": "a8cb88a7e8f6537c6bdd3fc054959e91f46336ea9c6cad1b770df5ceea23260f"
+      "bytes": 7230,
+      "sha256": "f290a8033dd0869d1a52330d6b234dd54f1cca6a52b36bff96ce12edcd8eed74"
     },
     {
       "path": "tests/release/verify-cloudflared.node-test.mjs",
