@@ -7,6 +7,11 @@ on:
         description: Full iOS snapshot commit SHA
         type: string
         required: true
+      check:
+        description: Native inventory or simulator preflight
+        type: choice
+        default: inventory
+        options: [inventory, preflight]
 permissions:
   contents: read
 concurrency:
@@ -58,10 +63,28 @@ jobs:
           package_json_file: source/package.json
       - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
         with:
+          toolchain: "1.97.1"
           targets: aarch64-apple-ios-sim
+      - uses: actions/cache/restore@v5
+        if: inputs.check == 'inventory'
+        with:
+          path: source/src-tauri/target
+          key: ios-native-26.3-1.97.1-${{ hashFiles('source/src-tauri/Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: ios-native-26.3-1.97.1-${{ hashFiles('source/src-tauri/Cargo.lock') }}-
       - run: pnpm install --frozen-lockfile
+        if: inputs.check == 'inventory'
       - name: Run native Rust inventory
-        run: bash scripts/ios-native-tests.sh 2>&1 | tee artifacts/native-tests.log
+        env:
+          CHECK: ${{ inputs.check }}
+        run: |
+          arguments=()
+          if [[ "$CHECK" == preflight ]]; then arguments+=(--preflight-only); fi
+          bash scripts/ios-native-tests.sh "${arguments[@]}" 2>&1 | tee artifacts/native-tests.log
+      - uses: actions/cache/save@v5
+        if: always() && !cancelled() && inputs.check == 'inventory'
+        with:
+          path: source/src-tauri/target
+          key: ios-native-26.3-1.97.1-${{ hashFiles('source/src-tauri/Cargo.lock') }}-${{ github.run_id }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
