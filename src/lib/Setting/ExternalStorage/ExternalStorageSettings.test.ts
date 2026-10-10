@@ -23,6 +23,7 @@ const state = vi.hoisted(() => ({
     recheckConflict: vi.fn(),
     deleteConflict: vi.fn(),
     beginConnectionSettingsExport: vi.fn(),
+    qrDataUrl: vi.fn<() => Promise<string>>(),
     saveConnectionSettingsFile: vi.fn(),
     removeConnection: vi.fn(),
     connectionOnly: vi.fn(),
@@ -33,7 +34,10 @@ const state = vi.hoisted(() => ({
 vi.mock('src/ts/platform', () => ({ isTauri: true, isTauriAndroid: false, isTauriIOS: false }))
 vi.mock('@tauri-apps/plugin-os', () => ({ type: () => 'windows' }))
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }))
-vi.mock('qrcode', () => ({ default: { toDataURL: vi.fn() } }))
+vi.mock('qrcode', async importOriginal => {
+    const actual = await importOriginal<{ default: typeof import('qrcode') }>()
+    return { default: { ...actual.default, toDataURL: state.qrDataUrl } }
+})
 vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertNormal: vi.fn(), alertCheckboxConfirm: vi.fn() }))
 vi.mock('src/ts/storage/sync/external/lwwProduction', () => ({ requestExternalLwwNow: state.syncNow, supportsExternalLwwNewDevice: () => state.remedy, subscribeExternalLwwFailures(callback: (value: ReadonlyMap<string, unknown>) => void) { callback(new Map(state.failures)); return () => {} } }))
 vi.mock('src/ts/storage/sync/bindingRegistry', () => ({ bindSyncTarget: state.bind, unbindSyncTarget: state.unbind }))
@@ -664,6 +668,31 @@ describe('the storage usage tab', () => {
         await openStorageUsage()
         expect(labelled(strings.retentionCount).value).toBe('10')
         expect(labelled(strings.retentionDays).value).toBe('30')
+    })
+
+    it.each([
+        [100, 5, 245],
+        [300, 4, 308],
+        [1000, 2, 258],
+        [2300, 2, 370],
+    ])('renders %i-character connection settings with whole-pixel QR modules', async (length, scale, size) => {
+        const qrPayload = 'synthetic-lowercase-payload-'.repeat(100).slice(0, length)
+        const image = 'data:image/png;base64,c3ludGhldGlj'
+        state.qrDataUrl.mockResolvedValue(image)
+        state.beginConnectionSettingsExport.mockResolvedValue({
+            transferId: 'settings-transfer', expiresAtMs: '1000', qrPayload,
+        })
+        const button = [...target.querySelectorAll('button')].find(
+            item => item.textContent?.trim() === strings.connectionSettings,
+        )!
+        button.click()
+        await settle()
+
+        expect(state.qrDataUrl).toHaveBeenCalledWith(qrPayload, { margin: 4, scale })
+        const qr = target.querySelector<HTMLImageElement>(`img[alt="${strings.connectionSettingsQr}"]`)!
+        expect(qr.src).toBe(image)
+        expect(qr.width).toBe(size)
+        expect(qr.height).toBe(size)
     })
 
     it('exports connection settings without offering recovery-key replacement', async () => {

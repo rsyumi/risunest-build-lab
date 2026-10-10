@@ -350,6 +350,8 @@ fn manager_qr(uri: String) -> Result<String> {
     let qr = qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::M)
         .map_err(|_| "qr-unavailable")?;
     let width = qr.width();
+    let modules = width + 8;
+    let size = modules * 240_usize.div_ceil(modules);
     let mut path = String::new();
     for y in 0..width {
         for x in 0..width {
@@ -358,7 +360,7 @@ fn manager_qr(uri: String) -> Result<String> {
             }
         }
     }
-    Ok(format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {} {}\" shape-rendering=\"crispEdges\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/><path d=\"{path}\" fill=\"black\"/></svg>",width+8,width+8))
+    Ok(format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{size}\" height=\"{size}\" viewBox=\"0 0 {modules} {modules}\" shape-rendering=\"crispEdges\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/><path d=\"{path}\" fill=\"black\"/></svg>"))
 }
 
 #[tauri::command]
@@ -542,6 +544,40 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::{cell::Cell, ffi::OsString};
+
+    #[test]
+    fn registration_qr_uses_integer_module_sizes_at_least_240_pixels_wide() {
+        for length in [0, 300, 900] {
+            let uri = risunest_sync_connect::Registration {
+                endpoint: format!("https://sync.example/{}", "a".repeat(length)),
+                library_id: "library".into(),
+                device_id: "device".into(),
+                token: "a".repeat(64),
+                directory: None,
+            }
+            .encode_uri()
+            .unwrap();
+            let qr =
+                qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::M)
+                    .unwrap();
+            let modules = qr.width() + 8;
+            let svg = manager_qr(uri).unwrap();
+            let size: usize = svg
+                .split(" width=\"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(size >= 240);
+            assert_eq!(size % modules, 0);
+            assert!(size - modules < 240);
+            assert!(svg.contains(&format!("height=\"{size}\"")));
+            assert!(svg.contains(&format!("viewBox=\"0 0 {modules} {modules}\"")));
+        }
+    }
 
     struct TestRoot(PathBuf);
 

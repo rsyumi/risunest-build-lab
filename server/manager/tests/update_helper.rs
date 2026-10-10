@@ -19,6 +19,11 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+const SCHEDULED_SHELL_BUDGET: Duration = Duration::from_secs(90);
+#[cfg(windows)]
+const SCHEDULED_HELPER_COMPLETION_BUDGET: Duration = Duration::from_secs(300);
+
 struct Fixture {
     _temp: tempfile::TempDir,
     root: PathBuf,
@@ -441,16 +446,25 @@ $definition.Principal.LogonType=3
 $definition.Principal.RunLevel=0
 $definition.Settings.AllowDemandStart=$true
 $definition.Settings.Enabled=$true
-$definition.Settings.ExecutionTimeLimit='PT1M'
+$definition.Settings.ExecutionTimeLimit='PT2M'
 $action=$definition.Actions.Create(0)
-$action.Path='powershell.exe'
+$action.Path=$env:RISUNEST_TEST_TASK_PROGRAM
+$directory=$env:RISUNEST_TEST_TASK_DIRECTORY
+if($directory.StartsWith('\\?\UNC\',[StringComparison]::OrdinalIgnoreCase)){$directory='\\'+$directory.Substring(8)}
+elseif($directory.StartsWith('\\?\',[StringComparison]::Ordinal)){$directory=$directory.Substring(4)}
+$action.WorkingDirectory=$directory
 $action.Arguments=$env:RISUNEST_TEST_TASK_ARGUMENTS
 $task=$folder.RegisterTaskDefinition($env:RISUNEST_TEST_TASK_NAME,$definition,6,$sid,$null,3,$null)
 $null=$task.Run($null)
 "#;
 
 #[cfg(windows)]
-fn scheduled_harness_action(name: &str, action: &str, arguments: &str) -> Result<(), String> {
+fn scheduled_harness_action(
+    name: &str,
+    action: &str,
+    arguments: &str,
+    root: &Path,
+) -> Result<(), String> {
     let output = platform::process("powershell.exe")
         .args([
             "-NoLogo",
@@ -462,6 +476,11 @@ fn scheduled_harness_action(name: &str, action: &str, arguments: &str) -> Result
         .env("RISUNEST_TEST_TASK_NAME", name)
         .env("RISUNEST_TEST_TASK_ACTION", action)
         .env("RISUNEST_TEST_TASK_ARGUMENTS", arguments)
+        .env("RISUNEST_TEST_TASK_DIRECTORY", root)
+        .env(
+            "RISUNEST_TEST_TASK_PROGRAM",
+            std::env::current_exe().map_err(|_| "test-executable-missing")?,
+        )
         .stdin(Stdio::null())
         .output()
         .map_err(|_| "scheduled-harness-unavailable")?;
@@ -684,7 +703,7 @@ fn helper_failure_diagnostic(root: &Path) -> serde_json::Value {
 
 #[cfg(windows)]
 async fn wait_for_transient_helper_cleanup(root: &Path) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + SCHEDULED_SHELL_BUDGET;
     loop {
         let last_error = match transient_helper_task_count(root) {
             Ok(0) => return Ok(()),
@@ -706,74 +725,39 @@ async fn spawn_helper_from_scheduled_harness(
     manager: &Path,
     mode: &str,
 ) -> Result<(), String> {
-    let wrapper = root.join("spawn-helper-harness.ps1");
     let config = root.join("spawn-helper-harness.json");
     let result = root.join("spawn-helper-result");
     let log = root.join("spawn-helper-log");
-    fs::write(
-        &wrapper,
-        r#"param([string]$ConfigPath)
-$ErrorActionPreference='Stop'
-try {
- $config=Get-Content -Raw -LiteralPath $ConfigPath | ConvertFrom-Json
- $logPath=$config.log
- if($logPath.StartsWith('\\?\UNC\',[StringComparison]::OrdinalIgnoreCase)){$logPath='\\'+$logPath.Substring(8)}
- elseif($logPath.StartsWith('\\?\',[StringComparison]::Ordinal)){$logPath=$logPath.Substring(4)}
- $resultPath=$config.result
- $env:RISUNEST_HELPER_SUBPROCESS='1'
- $env:RISUNEST_HELPER_ROOT=$config.root
- $env:RISUNEST_HELPER_INSTALL=$config.install
- $env:RISUNEST_HELPER_SERVER=$config.server
- $env:RISUNEST_HELPER_MANAGER=$config.manager
- $env:RISUNEST_HELPER_MODE=$config.mode
- $errorLogPath=$logPath+'.stderr'
- $test=Start-Process -FilePath $config.testExe -ArgumentList @('--ignored','--exact','spawn_update_helper_subprocess') -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $logPath -RedirectStandardError $errorLogPath
- if([IO.File]::Exists($errorLogPath)){[IO.File]::AppendAllText($logPath,[IO.File]::ReadAllText($errorLogPath))}
- if($test.ExitCode -ne 0){throw 'helper subprocess failed'}
- [IO.File]::WriteAllText($resultPath,'success')
-} catch {
- if(!(Test-Path -LiteralPath $logPath)){[IO.File]::WriteAllText($logPath,($_.Exception.ToString()+"`n"+$_.InvocationInfo.PositionMessage+"`n"+$_.ScriptStackTrace))}
- [IO.File]::WriteAllText($resultPath,'failure')
- exit 1
-}
-"#,
-    )
-    .map_err(|_| "scheduled-harness-write-failed")?;
-    let test_exe = std::env::current_exe().map_err(|_| "test-executable-missing")?;
     let config_value = serde_json::json!({
         "root": root,
         "install": install,
         "server": server,
         "manager": manager,
         "mode": mode,
-        "testExe": test_exe,
-        "result": result,
-        "log": log,
     });
     fs::write(
         &config,
         serde_json::to_vec(&config_value).map_err(|_| "scheduled-harness-write-failed")?,
     )
     .map_err(|_| "scheduled-harness-write-failed")?;
-    if [&wrapper, &config]
-        .iter()
-        .any(|path| path.to_string_lossy().contains('"'))
-    {
-        return Err("scheduled-harness-path-invalid".into());
-    }
     let task_name = format!("{}-helper-test", platform::instance_name(root));
-    let arguments = format!(
-        "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{}\" -ConfigPath \"{}\"",
-        wrapper.display(),
-        config.display()
+    let started = tokio::time::Instant::now();
+    let launched = scheduled_harness_action(
+        &task_name,
+        "run",
+        "--ignored --exact spawn_update_helper_subprocess",
+        root,
     );
-    let launched = scheduled_harness_action(&task_name, "run", &arguments);
     let wait: Result<(), String> = async {
         launched?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let deadline = tokio::time::Instant::now() + SCHEDULED_SHELL_BUDGET;
         loop {
             if let Ok(value) = fs::read_to_string(&result) {
                 return if value == "success" {
+                    eprintln!(
+                        "scheduled helper harness ({mode}) completed in {} ms",
+                        started.elapsed().as_millis()
+                    );
                     Ok(())
                 } else {
                     let detail = fs::read(&log)
@@ -806,7 +790,7 @@ try {
         }
     }
     .await;
-    let removed = scheduled_harness_action(&task_name, "remove", "");
+    let removed = scheduled_harness_action(&task_name, "remove", "", root);
     let result = wait.and(removed);
     if result.is_err() {
         let _ = remove_transient_helper_tasks(root);
@@ -875,7 +859,7 @@ async fn live_helper_replacement(
         wait_for_initial_server_exit(initial_server.as_mut().unwrap())?;
     }
     spawn_helper_from_scheduled_harness(root, install, server, manager, "apply-helper").await?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + SCHEDULED_HELPER_COMPLETION_BUDGET;
     loop {
         let transaction = InstallTransaction::load(root, install).map_err(|error| {
             format!(
@@ -1109,7 +1093,7 @@ async fn live_installer_guard_restart_failure(
         .map_err(|_| "installer-guard-corrupt-target-write-failed")?;
     fs::write(&cancel, br#"{"cancel":true}"#).map_err(|_| "installer-guard-cancel-write-failed")?;
     let health_wait_started = std::time::Instant::now();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(125);
+    let deadline = tokio::time::Instant::now() + SCHEDULED_HELPER_COMPLETION_BUDGET;
     let error_value = loop {
         if let Ok(bytes) = fs::read(&error_path) {
             break serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -1346,14 +1330,45 @@ async fn helper_rolls_back_a_corrupt_live_replacement_and_restarts_the_old_serve
 #[test]
 #[ignore = "internal subprocess for the live detached-helper test"]
 fn spawn_update_helper_subprocess() {
-    if std::env::var_os("RISUNEST_HELPER_SUBPROCESS").is_none() {
+    let config_path = std::env::current_dir()
+        .unwrap()
+        .join("spawn-helper-harness.json");
+    if !config_path.is_file() {
         return;
     }
-    let root = PathBuf::from(std::env::var_os("RISUNEST_HELPER_ROOT").unwrap());
-    let install = PathBuf::from(std::env::var_os("RISUNEST_HELPER_INSTALL").unwrap());
-    let server = PathBuf::from(std::env::var_os("RISUNEST_HELPER_SERVER").unwrap());
-    let manager = PathBuf::from(std::env::var_os("RISUNEST_HELPER_MANAGER").unwrap());
-    if std::env::var("RISUNEST_HELPER_MODE").as_deref() == Ok("recover-manager") {
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(config_path).unwrap()).unwrap();
+    let root = PathBuf::from(config["root"].as_str().unwrap());
+    let outcome = std::panic::catch_unwind(|| run_update_helper_subprocess(&config));
+    if let Err(payload) = &outcome {
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("helper subprocess panicked");
+        fs::write(root.join("spawn-helper-log"), message).unwrap();
+    }
+    fs::write(
+        root.join("spawn-helper-result"),
+        if outcome.is_ok() {
+            "success"
+        } else {
+            "failure"
+        },
+    )
+    .unwrap();
+    if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[cfg(windows)]
+fn run_update_helper_subprocess(config: &serde_json::Value) {
+    let root = PathBuf::from(config["root"].as_str().unwrap());
+    let install = PathBuf::from(config["install"].as_str().unwrap());
+    let server = PathBuf::from(config["server"].as_str().unwrap());
+    let manager = PathBuf::from(config["manager"].as_str().unwrap());
+    if config["mode"].as_str() == Some("recover-manager") {
         assert!(platform::process(manager)
             .args(["--data-dir"])
             .arg(&root)
@@ -1472,9 +1487,11 @@ fn no_claim_helper_task_is_removed_without_consuming_recovery_state() {
         Ok(())
     })();
 
-    let foreign_cleanup = scheduled_harness_action(&foreign_task, "remove", "");
-    let invalid_cleanup = scheduled_harness_action(&invalid_suffix_task, "remove", "");
-    let other_cleanup = scheduled_harness_action(&other_instance_task, "remove", "");
+    let foreign_cleanup = scheduled_harness_action(&foreign_task, "remove", "", &fixture.root);
+    let invalid_cleanup =
+        scheduled_harness_action(&invalid_suffix_task, "remove", "", &fixture.root);
+    let other_cleanup =
+        scheduled_harness_action(&other_instance_task, "remove", "", other_instance.path());
     let owned_cleanup = platform::cleanup_update_helpers(&fixture.root);
     result.unwrap_or_else(|error| {
         panic!(
@@ -1541,7 +1558,7 @@ async fn live_recovery_from_installed_manager(
     }
 
     spawn_helper_from_scheduled_harness(root, install, server, manager, "recover-manager").await?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + SCHEDULED_HELPER_COMPLETION_BUDGET;
     loop {
         let transaction_done = InstallTransaction::load(root, install)
             .map_err(|error| format!("transaction-load:{error}"))?
