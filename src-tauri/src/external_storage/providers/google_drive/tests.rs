@@ -172,6 +172,18 @@ fn error_reply(status: u16, reason: &str) -> Reply {
 fn about_reply() -> Reply {
     json_reply(200, json!({ "user": { "permissionId": ACCOUNT } }))
 }
+const GRANT_VERIFICATION_REQUESTS: usize = cfg!(any(target_os = "android", target_os = "ios")) as usize;
+
+fn grant_verification_replies() -> Vec<Reply> {
+    if GRANT_VERIFICATION_REQUESTS == 0 {
+        return Vec::new();
+    }
+    vec![json_reply(200, json!({
+        "issued_to": client_id(config::platform_key()),
+        "scope": "https://www.googleapis.com/auth/drive.file"
+    }))]
+}
+
 fn folder_reply() -> Reply {
     json_reply(
         200,
@@ -884,6 +896,7 @@ fn an_expired_access_token_is_refreshed_once_and_rotation_is_persisted() {
                 "refresh_token": "rotated-refresh"
             }),
         )];
+        replies.extend(grant_verification_replies());
         replies.extend(open_existing_replies());
         let server = WireServer::start(replies);
         let test = deps_with(Some(stored_secret_with_client_secret(NOW_MS - 1)));
@@ -899,7 +912,7 @@ fn an_expired_access_token_is_refreshed_once_and_rotation_is_persisted() {
             .await
             .unwrap();
         let lines = request_lines(&server);
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 4 + GRANT_VERIFICATION_REQUESTS);
         assert!(lines[0].starts_with("POST /synthetic/token"));
         let records = server.requests.lock().unwrap();
         let body = String::from_utf8(records[0].body.clone()).unwrap();
@@ -907,7 +920,10 @@ fn an_expired_access_token_is_refreshed_once_and_rotation_is_persisted() {
         assert!(body.contains("refresh_token=synthetic-refresh"));
         assert!(body.contains("client_id="));
         assert!(body.contains("client_secret=synthetic-client-secret"));
-        assert!(records[1]
+        if GRANT_VERIFICATION_REQUESTS != 0 {
+            assert!(lines[1].starts_with("GET /synthetic/tokeninfo?access_token=refreshed-access"));
+        }
+        assert!(records[1 + GRANT_VERIFICATION_REQUESTS]
             .headers
             .to_lowercase()
             .contains("authorization: bearer refreshed-access"));
@@ -957,6 +973,7 @@ fn a_rejected_token_is_retried_once_after_a_successful_refresh() {
                 json!({ "access_token": "second-access", "expires_in": 3599 }),
             ),
         ];
+        replies.extend(grant_verification_replies());
         replies.extend(open_existing_replies());
         let server = WireServer::start(replies);
         let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
@@ -972,10 +989,13 @@ fn a_rejected_token_is_retried_once_after_a_successful_refresh() {
             .await
             .unwrap();
         let lines = request_lines(&server);
-        assert_eq!(lines.len(), 5);
+        assert_eq!(lines.len(), 5 + GRANT_VERIFICATION_REQUESTS);
         assert!(lines[0].starts_with("GET /synthetic/drive/v3/about"));
         assert!(lines[1].starts_with("POST /synthetic/token"));
-        assert!(lines[2].starts_with("GET /synthetic/drive/v3/about"));
+        if GRANT_VERIFICATION_REQUESTS != 0 {
+            assert!(lines[2].starts_with("GET /synthetic/tokeninfo?access_token=second-access"));
+        }
+        assert!(lines[2 + GRANT_VERIFICATION_REQUESTS].starts_with("GET /synthetic/drive/v3/about"));
     });
 }
 
@@ -2100,7 +2120,7 @@ fn android_grant_binding_fails_before_account_lookup() {
 fn a_code_exchange_returns_a_storable_refresh_payload() {
     runtime().block_on(async {
         let platform_client_id = client_id(config::platform_key());
-        let server = WireServer::start(vec![
+        let mut replies = vec![
             json_reply(
                 200,
                 json!({
@@ -2109,9 +2129,13 @@ fn a_code_exchange_returns_a_storable_refresh_payload() {
                     "expires_in": 3599
                 }),
             ),
+        ];
+        replies.extend(grant_verification_replies());
+        replies.extend([
             about_reply(),
             json_reply(200, json!({ "access_token": "granted-access" })),
         ]);
+        let server = WireServer::start(replies);
         let test = deps_with(Some(stored_secret(NOW_MS)));
         let cancel = Cancellation::default();
         let grant = || AuthorizationCode {
@@ -2146,10 +2170,13 @@ fn a_code_exchange_returns_a_storable_refresh_payload() {
         assert!(body.contains("code_verifier=synthetic-verifier"));
         assert!(body.contains("client_secret=synthetic-client-secret"));
         assert!(body.contains(&format!("client_id={platform_client_id}")));
-        assert!(records[1]
+        if GRANT_VERIFICATION_REQUESTS != 0 {
+            assert!(records[1].headers.starts_with("GET /synthetic/tokeninfo?access_token=granted-access"));
+        }
+        assert!(records[1 + GRANT_VERIFICATION_REQUESTS]
             .headers
             .starts_with("GET /synthetic/drive/v3/about?fields=user"));
-        assert!(records[1]
+        assert!(records[1 + GRANT_VERIFICATION_REQUESTS]
             .headers
             .contains("authorization: Bearer granted-access"));
         drop(records);
@@ -2314,6 +2341,7 @@ fn transfer_401_refreshes_once_and_replays_only_confirmed_bytes() {
             replies.push(ids_reply("session-file"));
             replies.push(error_reply(401, "authError"));
             replies.push(json_reply(200, json!({"access_token":"fresh-access","expires_in":3600,"token_type":"Bearer"})));
+            replies.extend(grant_verification_replies());
             replies.push(json_reply_with(308, &[("Range", "bytes=0-511")], json!({})));
             replies.push(if repeated { error_reply(401, "authError") } else {
                 json_reply(200, json!({"id":"session-file","size":"1024","version":"1","sha256Checksum":hash(&payload)}))
@@ -2331,10 +2359,13 @@ fn transfer_401_refreshes_once_and_replays_only_confirmed_bytes() {
             if repeated { assert_eq!(result.err().unwrap().kind, ErrorKind::Unauthorized); }
             else { assert_eq!(result.unwrap().byte_length, 1024); }
             let requests = server.requests.lock().unwrap();
-            assert_eq!(requests.len(), 8);
-            assert!(requests[6].headers.to_lowercase().contains("content-range: bytes */1024"));
-            assert!(requests[7].headers.to_lowercase().contains("content-range: bytes 512-1023/1024"));
-            assert_eq!(requests[7].body, payload[512..]);
+            assert_eq!(requests.len(), 8 + GRANT_VERIFICATION_REQUESTS);
+            if GRANT_VERIFICATION_REQUESTS != 0 {
+                assert!(requests[6].headers.starts_with("GET /synthetic/tokeninfo?access_token=fresh-access"));
+            }
+            assert!(requests[6 + GRANT_VERIFICATION_REQUESTS].headers.to_lowercase().contains("content-range: bytes */1024"));
+            assert!(requests[7 + GRANT_VERIFICATION_REQUESTS].headers.to_lowercase().contains("content-range: bytes 512-1023/1024"));
+            assert_eq!(requests[7 + GRANT_VERIFICATION_REQUESTS].body, payload[512..]);
         }
     });
 }
@@ -2348,8 +2379,14 @@ fn multipart_and_media_retry_once_after_token_rejection() {
         replies.extend([
             ids_reply("generated-file"), error_reply(401, "authError"),
             json_reply(200, json!({"access_token":"fresh-access","expires_in":3600,"token_type":"Bearer"})),
+        ]);
+        replies.extend(grant_verification_replies());
+        replies.extend([
             json_reply(200, file.clone()), json_reply(200, file), error_reply(401, "authError"),
             json_reply(200, json!({"access_token":"fresh-access-2","expires_in":3600,"token_type":"Bearer"})),
+        ]);
+        replies.extend(grant_verification_replies());
+        replies.extend([
             Reply::Http { status: 200, headers: vec![], body: payload.to_vec() },
         ]);
         let server = WireServer::start(replies);
@@ -2364,9 +2401,13 @@ fn multipart_and_media_retry_once_after_token_rejection() {
         let mut sink = SpoolSink::create(&directory.path().join("read"), payload.len() as u64).unwrap();
         provider.read_object(&repository, &receipt.locator, None, &mut sink, &cancel).await.unwrap();
         let requests = server.requests.lock().unwrap();
-        assert_eq!(requests.len(), 11);
+        assert_eq!(requests.len(), 11 + 2 * GRANT_VERIFICATION_REQUESTS);
         assert!(requests[4].body.windows(payload.len()).any(|bytes| bytes == payload));
-        assert!(requests[6].body.windows(payload.len()).any(|bytes| bytes == payload));
+        if GRANT_VERIFICATION_REQUESTS != 0 {
+            assert!(requests[6].headers.starts_with("GET /synthetic/tokeninfo?access_token=fresh-access"));
+            assert!(requests[11].headers.starts_with("GET /synthetic/tokeninfo?access_token=fresh-access-2"));
+        }
+        assert!(requests[6 + GRANT_VERIFICATION_REQUESTS].body.windows(payload.len()).any(|bytes| bytes == payload));
     });
 }
 

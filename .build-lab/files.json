@@ -6117,8 +6117,8 @@
     {
       "path": "src-tauri/src/external_storage/providers/google_drive/tests.rs",
       "mode": "100644",
-      "bytes": 111817,
-      "sha256": "fd599c2ddae67e01bb46b2360501d1d6eb97a7b3e12ef0806dfa55773991f4a8"
+      "bytes": 113974,
+      "sha256": "fe6e54bb844a0718c32d0e34386799155ab4a9eb20ba023b806427e6a3568e92"
     },
     {
       "path": "src-tauri/src/external_storage/providers/google_drive/wire.rs",
