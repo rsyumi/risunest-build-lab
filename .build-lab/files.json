@@ -3885,8 +3885,8 @@
     {
       "path": "server/manager/install/managed-install.integration.test.sh",
       "mode": "100644",
-      "bytes": 22697,
-      "sha256": "06afbbfd7d7858df644e64a9077e8828bf58c58597d9e44d6e13e1d55e328957"
+      "bytes": 22810,
+      "sha256": "47dcf65375a44269a1215b2928534475b2b8b047000d2208176e59b5d7f2f978"
     },
     {
       "path": "server/manager/install/package.mjs",

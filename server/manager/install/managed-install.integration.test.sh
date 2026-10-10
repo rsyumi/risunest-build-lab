@@ -10,7 +10,7 @@ fail() {
 test "$#" -eq 1 || fail 'usage: managed-install.integration.test.sh MANAGED_TAR_GZ'
 test "$(uname -s)" = Linux || fail 'run this integration test on Linux'
 test "$(id -u)" -ne 0 || fail 'run this integration test as the service user, not root'
-for command in cmp flock grep loginctl python3 realpath sed stat systemctl tar; do
+for command in cmp flock grep loginctl python3 realpath sed stat systemctl tar tee; do
   command -v "$command" >/dev/null 2>&1 || fail "required command is unavailable: $command"
 done
 
@@ -298,7 +298,8 @@ configuration_log="$test_root/post-swap-configuration-failure.log"
 if sh "$failure_dir/install.sh" --non-interactive --policy=notify 2>&1 | tee "$configuration_log"; then
   fail 'post-swap configuration failure unexpectedly succeeded'
 fi
-grep -Fq 'user-service-write-failed' "$configuration_log" || fail 'configuration fixture failed for a reason other than schedule write rejection'
+# The obstruction also rejects schedule restoration, so the CLI reports the policy rollback error.
+grep -Fq '(update-policy-rollback-failed)' "$configuration_log" || fail 'configuration fixture failed for a reason other than blocked schedule restoration'
 rmdir "$update_service_path"
 mv "$test_root/update-service.backup" "$update_service_path"
 systemctl --user daemon-reload
