@@ -101,6 +101,34 @@ async fn upload_inner(
     cancel: &Cancellation,
     recreate_missing: bool,
 ) -> Result<ObjectReceipt> {
+    match prepare_upload(journal, object, provider, repository, cancel, recreate_missing).await? {
+        PreparedUpload::Complete(receipt) => Ok(receipt),
+        PreparedUpload::Pending(prepared) => {
+            let outcome = provider.create_object(repository, &prepared.intent, &prepared.source,
+                prepared.resume.as_ref(), cancel).await;
+            settle_upload(journal, prepared, outcome, provider, repository, cancel).await
+        }
+    }
+}
+
+enum PreparedUpload {
+    Complete(ObjectReceipt),
+    Pending(PreparedBody),
+}
+struct PreparedBody {
+    intent: ObjectIntent,
+    source: SpoolSource,
+    resume: Option<ResumeState>,
+}
+
+async fn prepare_upload(
+    journal: &mut TransferJournal,
+    object: &str,
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    cancel: &Cancellation,
+    recreate_missing: bool,
+) -> Result<PreparedUpload> {
     cancel.check()?;
     let mut record = journal
         .record(object)?
@@ -119,7 +147,7 @@ async fn upload_inner(
                     journal.directory(), &record.intent, provider, repository, receipt, cancel,
                 ).await? {
                     journal.complete(&record.intent, repository, &receipt)?;
-                    return Ok(receipt);
+                    return Ok(PreparedUpload::Complete(receipt));
                 }
                 if !recreate_missing {
                     return Err(ProviderError::new(ErrorKind::PreconditionFailed));
@@ -170,18 +198,20 @@ async fn upload_inner(
             .await?;
     }
     journal.attempted(object, record.resume.as_ref())?;
-    let outcome = provider
-        .create_object(
-            repository,
-            &record.intent,
-            &source,
-            record.resume.as_ref(),
-            cancel,
-        )
-        .await;
+    Ok(PreparedUpload::Pending(PreparedBody { intent: record.intent, source, resume: record.resume }))
+}
+
+async fn settle_upload(
+    journal: &mut TransferJournal,
+    prepared: PreparedBody,
+    outcome: Result<ObjectReceipt>,
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    cancel: &Cancellation,
+) -> Result<ObjectReceipt> {
     match outcome {
         Ok(receipt) => {
-            journal.complete(&record.intent, repository, &receipt)?;
+            journal.complete(&prepared.intent, repository, &receipt)?;
             Ok(receipt)
         }
         Err(original) => {
@@ -194,21 +224,21 @@ async fn upload_inner(
                 )
             {
                 match provider
-                    .reconcile_upload(repository, &record.intent, record.resume.as_ref(), cancel)
+                    .reconcile_upload(repository, &prepared.intent, prepared.resume.as_ref(), cancel)
                     .await
                 {
                     Ok(UploadResolution::Complete(receipt)) => {
                         if let Some(receipt) = verify_remote_receipt(
-                            journal.directory(), &record.intent, provider, repository, receipt, cancel,
+                            journal.directory(), &prepared.intent, provider, repository, receipt, cancel,
                         ).await? {
-                            journal.complete(&record.intent, repository, &receipt)?;
+                            journal.complete(&prepared.intent, repository, &receipt)?;
                             return Ok(receipt);
                         }
                     }
                     Ok(UploadResolution::Resumable(resume)) => {
-                        journal.attempted(object, Some(&resume))?
+                        journal.attempted(&prepared.intent.object_id, Some(&resume))?
                     }
-                    Ok(UploadResolution::RestartRequired) => journal.attempted(object, None)?,
+                    Ok(UploadResolution::RestartRequired) => journal.attempted(&prepared.intent.object_id, None)?,
                     Ok(UploadResolution::Conflict) => {
                         return Err(ProviderError::new(ErrorKind::PreconditionFailed))
                     }
@@ -318,11 +348,57 @@ pub(crate) async fn upload_wave(
         ))
         .await?;
     }
-    let mut receipts = Vec::with_capacity(members.len());
-    for member in members {
-        receipts.push(upload(journal, &member.object_id, provider, repository, cancel).await?);
+    use futures::{stream::FuturesUnordered, StreamExt};
+    let limit = provider.transfer_concurrency().max(1);
+    let mut receipts = vec![None; members.len()];
+    for (batch_index, batch) in members.chunks(REGISTRATION_WAVE).enumerate() {
+        let mut ready = std::collections::VecDeque::new();
+        for (index, member) in batch.iter().enumerate() {
+            let ordinal = batch_index * REGISTRATION_WAVE + index;
+            match prepare_upload(journal, &member.object_id, provider, repository, cancel, true).await? {
+                PreparedUpload::Complete(receipt) => receipts[ordinal] = Some(receipt),
+                PreparedUpload::Pending(body) => ready.push_back((ordinal, body)),
+            }
+        }
+        let mut active = FuturesUnordered::new();
+        let mut failure = None;
+        let mut failed = Vec::new();
+        loop {
+            if failure.is_none() {
+                if let Err(error) = cancel.check() { failure = Some(error); }
+            }
+            while failure.is_none() && failed.is_empty() && active.len() < limit {
+                let Some((ordinal, body)) = ready.pop_front() else { break; };
+                active.push(async move {
+                    let outcome = provider.create_object(repository, &body.intent, &body.source,
+                        body.resume.as_ref(), cancel).await;
+                    (ordinal, body, outcome)
+                });
+            }
+            let Some((ordinal, body, outcome)) = active.next().await else { break; };
+            match outcome {
+                Ok(receipt) => {
+                    match settle_upload(journal, body, Ok(receipt), provider, repository, cancel).await {
+                        Ok(receipt) => receipts[ordinal] = Some(receipt),
+                        Err(error) => { if failure.is_none() { failure = Some(error); } }
+                    }
+                }
+                Err(error) => failed.push((ordinal, body, error)),
+            }
+            // Recovery may read a body through the shared limiter. Drain all
+            // active uploads first so unpolled siblings cannot retain its slots.
+            if active.is_empty() {
+                for (ordinal, body, error) in failed.drain(..) {
+                    match settle_upload(journal, body, Err(error), provider, repository, cancel).await {
+                        Ok(receipt) => receipts[ordinal] = Some(receipt),
+                        Err(error) => { if failure.is_none() { failure = Some(error); } }
+                    }
+                }
+            }
+        }
+        if let Some(error) = failure { return Err(error); }
     }
-    Ok(receipts)
+    receipts.into_iter().map(|receipt| receipt.ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))).collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -377,7 +453,7 @@ mod tests {
     use crate::persistent_store::sync_selection::CaptureIdentity;
     use std::io::Write;
 
-    fn identity() -> JobIdentity {
+    pub(super) fn identity() -> JobIdentity {
         JobIdentity {
             job_id: "synthetic-job".into(),
             connection_id: "synthetic-connection".into(),
@@ -414,7 +490,7 @@ mod tests {
         (journal, intent)
     }
     /// A wave of sealed objects, registered together.
-    fn prepare_wave(root: &std::path::Path, count: usize) -> (TransferJournal, Vec<WaveMember>) {
+    pub(super) fn prepare_wave(root: &std::path::Path, count: usize) -> (TransferJournal, Vec<WaveMember>) {
         let mut journal = TransferJournal::open(root, identity()).unwrap();
         let mut members = Vec::new();
         for index in 0..count {
@@ -456,7 +532,7 @@ mod tests {
         page
     }
 
-    fn runtime() -> tokio::runtime::Runtime {
+    pub(super) fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1061,3 +1137,7 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "transfer_upload_tests.rs"]
+pub(crate) mod concurrency_tests;

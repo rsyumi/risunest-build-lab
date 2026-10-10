@@ -1179,7 +1179,7 @@ pub(super) mod tests {
                     endpoint:"https://synthetic.invalid".into(),account_id:"fixture".into(),location:BTreeMap::new(),oauth_profile:None},
                 descriptor:f.sender.descriptor.clone(),descriptor_locator:RemoteLocator{connection_identity:f.sender.repository.connection_identity.clone(),collection:None,object:"descriptor".into()},
                 provider_repository_id:f.sender.repository.repository_id.clone(),credential_ref:"credential".into(),root_key_ref:"key".into(),recovery_key_ref:"recovery".into(),
-                retention_policy:None,capabilities:f.sender.capabilities.clone(),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
+                retention_policy:None,transfer_concurrency:None,capabilities:f.sender.capabilities.clone(),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
             },provider:f.provider.clone(),handle:fake::repository(),
             dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new([7;32]),
         };
@@ -1455,7 +1455,7 @@ pub(super) mod tests {
                     endpoint:"https://synthetic.invalid".into(),account_id:"fixture".into(),location:BTreeMap::new(),oauth_profile:None},
                 descriptor:f.sender.descriptor.clone(),descriptor_locator:RemoteLocator{connection_identity:f.sender.repository.connection_identity.clone(),collection:None,object:"descriptor".into()},
                 provider_repository_id:f.sender.repository.repository_id.clone(),credential_ref:"credential".into(),root_key_ref:"key".into(),recovery_key_ref:"recovery".into(),
-                retention_policy:None,capabilities:f.sender.capabilities.clone(),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
+                retention_policy:None,transfer_concurrency:None,capabilities:f.sender.capabilities.clone(),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
             },provider:f.provider.clone(),handle:fake::repository(),
             dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new([7;32]),
         }
@@ -1885,7 +1885,7 @@ pub(super) mod tests {
                     credential_ref: "credential".into(),
                     root_key_ref: "key".into(),
                     recovery_key_ref: "recovery-key".into(),
-                    retention_policy: None,
+                    retention_policy: None, transfer_concurrency: None,
                     capabilities: fake::capabilities(true),
                     created_at_ms: 1_000,
                     verified_at_ms: 1,

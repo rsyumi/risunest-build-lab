@@ -92,7 +92,7 @@ fn restore_original_backup(populate: impl FnOnce(&mut PersistentStore)) -> (temp
                 Some(risunest_external_storage_format::format::Strategy::Cas)).unwrap(),
             descriptor_locator: RemoteLocator { connection_identity: repository.connection_identity.clone(), collection: None, object: "descriptor".into() },
             provider_repository_id: repository.repository_id.clone(), credential_ref: "credential".into(), root_key_ref: "key".into(),
-            recovery_key_ref: "recovery".into(), retention_policy: None, capabilities: fake::capabilities(true),
+            recovery_key_ref: "recovery".into(), retention_policy: None, transfer_concurrency: None, capabilities: fake::capabilities(true),
             created_at_ms: 1, verified_at_ms: 1, last_sync_at_ms: None, last_backup_at_ms: None,
         },
         provider: provider.clone(), handle: repository,

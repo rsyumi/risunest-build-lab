@@ -12,13 +12,13 @@
     import SettingNotice from '../RisuNest/SettingNotice.svelte'
     import StatusBadge from '../RisuNest/StatusBadge.svelte'
     import { CloudIcon, DatabaseIcon, MonitorSmartphoneIcon, PackageIcon, PinIcon, ServerIcon } from '@lucide/svelte'
-    import { alertConfirm, alertNormal, alertCheckboxConfirm } from 'src/ts/alert'
+    import { alertActionConfirm, alertConfirm, alertNormal, alertCheckboxConfirm } from 'src/ts/alert'
     import { DBState } from 'src/ts/stores.svelte'
     import { getExternalStorageBridge } from 'src/ts/storage/sync/external/bridge'
-    import { bindSyncTarget, unbindSyncTarget } from 'src/ts/storage/sync/bindingRegistry'
+    import { bindSyncTarget, resumeCurrentSyncBinding, unbindSyncTarget } from 'src/ts/storage/sync/bindingRegistry'
     import { createNativeSyncBindingBridge } from 'src/ts/storage/sync/bindingNative'
     import { subscribeSyncBindingChanges } from 'src/ts/storage/sync/bindingChanges'
-    import { requestExternalLwwNow, subscribeExternalLwwFailures, supportsExternalLwwNewDevice } from 'src/ts/storage/sync/external/lwwProduction'
+    import { isExternalLwwRunning, requestExternalLwwNow, subscribeExternalLwwFailures, supportsExternalLwwNewDevice } from 'src/ts/storage/sync/external/lwwProduction'
     import BindingTargetSwitch from 'src/ts/storage/sync/BindingTargetSwitch.svelte'
     import { PREVIOUS_FILES_DOWNLOAD_FAILED } from 'src/ts/storage/sync/bindingFlow'
     import { language } from 'src/lang'
@@ -99,6 +99,10 @@
     let pollTimer: ReturnType<typeof setTimeout> | undefined
     /** The state a sync switch was set to while its change runs. Otherwise it shows the device's sync target. */
     let syncRequest = $state<Record<string, boolean>>({})
+    /** Whether sync with each connection was started in this session, read on every refresh. */
+    let syncRunning = $state<Record<string, boolean>>({})
+    /** A connection made for sync while its recovery key is on screen starts syncing once the key is closed. */
+    let pendingSyncStart: ExternalConnectionSummary | undefined
     /** The state an automatic backup switch was set to while its change runs. Otherwise it shows the stored setting. */
     let automaticRequest = $state<Record<string, boolean>>({})
     let stopBindingChanges: (() => void) | undefined
@@ -110,12 +114,12 @@
         busy = true
         syncRequest[connection.id] = enabled
         try {
-            if (enabled) await bindSyncTarget({ kind: 'external', connectionId: connection.id })
-            else {
-                // A switch left over from an older state must not stop another sync target.
-                const current = (await createNativeSyncBindingBridge().state()).target
-                if (current.kind === 'external' && current.connectionId === connection.id) await unbindSyncTarget()
-            }
+            const current = (await createNativeSyncBindingBridge().state()).target
+            const selected = current.kind === 'external' && current.connectionId === connection.id
+            // A start that left sync off keeps this target, so turning the switch on resumes it.
+            if (enabled) await (selected ? resumeCurrentSyncBinding(current) : bindSyncTarget({ kind: 'external', connectionId: connection.id }))
+            // A switch left over from an older state must not stop another sync target.
+            else if (selected) await unbindSyncTarget()
             await refreshExternalStorageProductionState()
             error = ''
         } catch (reason) {
@@ -131,7 +135,25 @@
         busy = true
         try { await requestExternalLwwNow(connection.id) }
         catch (reason) { error = externalErrorMessage(strings, reason) }
-        finally { busy = false }
+        finally {
+            await refresh(true)
+            busy = false
+        }
+    }
+    /** Makes a connection made for sync this device's sync target, asking first when another target is set. */
+    async function startSync(connection: ExternalConnectionSummary): Promise<void> {
+        const current = await createNativeSyncBindingBridge().state().then(binding => binding.target, reason => {
+            error = externalErrorMessage(strings, reason)
+            return undefined
+        })
+        if (!current) return
+        if (current.kind !== 'none' && !await alertActionConfirm({
+            title: strings.switchSyncTitle,
+            description: current.kind === 'server' ? strings.switchSyncFromServer : strings.switchSyncFromExternal,
+            actionLabel: strings.startSync,
+            cancelLabel: strings.cancel,
+        })) return
+        await setSyncBinding(connection, true)
     }
     function beginRestore(connection: ExternalConnectionSummary, item: ExternalHistoryItem): void {
         try {
@@ -161,6 +183,7 @@
         }
         try {
             storageState = await bridge.getState()
+            syncRunning = Object.fromEntries(storageState.connections.map(connection => [connection.id, isExternalLwwRunning(connection.id)]))
             estimateRemaining(storageState)
             for (const connection of storageState.connections) {
                 if (historyRequested.has(connection.id)) continue
@@ -237,6 +260,9 @@
         if (renewed) {
             const job = activeJob(result.connection)
             if (job && externalJobIsPaused(job)) await resumeJob(result.connection, job)
+        } else if (result.connection.purpose === 'sync') {
+            if (recoveryKey) pendingSyncStart = result.connection
+            else await startSync(result.connection)
         }
     }
 
@@ -521,6 +547,27 @@
         if (value !== policy[limit]) void changeRetentionPolicy(connection, { ...policy, [limit]: value })
     }
 
+    async function commitTransferConcurrency(connection: ExternalConnectionSummary, input: HTMLInputElement): Promise<void> {
+        const saved = connection.transferConcurrency
+        const value = Number(input.value)
+        if (!input.value.trim() || !Number.isInteger(value) || value < 1 || value > 16) {
+            input.value = String(saved)
+            return
+        }
+        if (value === saved) return
+        busy = true
+        try {
+            await bridge.setTransferConcurrency(connection.id, value)
+            connection.transferConcurrency = value
+            await refresh(true)
+        } catch (failure) {
+            input.value = String(connection.transferConcurrency)
+            error = externalErrorMessage(strings, failure)
+        } finally {
+            busy = false
+        }
+    }
+
     async function removeConnection(connection: ExternalConnectionSummary): Promise<void> {
         busy = true
         activeAction = `remove:${connection.id}`
@@ -620,7 +667,11 @@
     }
 
     function closeRecoveryKey(): void {
+        if (!recoveryKey) return
         recoveryKey = ''
+        const connection = pendingSyncStart
+        pendingSyncStart = undefined
+        if (connection) void startSync(connection)
     }
 
     function closeConnectionSettings(): void {
@@ -709,13 +760,20 @@
             && connection.lastError?.reason === job?.error?.reason
     }
 
-    function connectionTone(connection: ExternalConnectionSummary): 'connected' | 'working' | 'attention' | 'idle' {
+    /** A sync target that this start left off, or that stopped, until its switch or sync button starts it again. */
+    function syncStopped(connection: ExternalConnectionSummary): boolean {
+        const selection = storageState?.selection
+        return connection.purpose === 'sync' && selection?.kind === 'external' && selection.connectionId === connection.id && !syncRunning[connection.id]
+    }
+
+    function connectionTone(connection: ExternalConnectionSummary): 'connected' | 'working' | 'attention' | 'idle' | 'paused' {
         const job = activeJob(connection)
         if (!connectionUsable(connection)) return 'attention'
         if (job && (externalJobIsPaused(job) || job.state === 'uncertain')) return 'attention'
         const operation = externalProgressFor(progress, connection.id)
         if (operation?.state === 'running') return operation.stage === 'waiting' ? 'idle' : 'working'
         if (job && externalJobIsActive(job)) return 'working'
+        if (syncStopped(connection)) return 'paused'
         if (connectionUsable(connection)) return 'connected'
         return 'attention'
     }
@@ -729,6 +787,7 @@
         const operation = externalProgressFor(progress, connection.id)
         if (operation?.state === 'running') return operation.stage === 'waiting' ? strings.transfer.waiting : operation.kind === 'binding' ? strings.transfer.connecting : strings.transfer.syncing
         if (job && externalJobIsActive(job)) return strings.jobActive[job.kind]
+        if (syncStopped(connection)) return strings.statusPaused
         return connectionStatusLabel(connection.status)
     }
 
@@ -850,6 +909,7 @@
             {@const retryable = !!job && externalJobIsPaused(job) && ['retry', 'wait', 'free-space'].includes(job.error?.action ?? '') && ['backup', 'cleanup', 'restore', 'check-repository', 'pin-history', 'delete-history'].includes(job.kind)}
             {@const remedy = renewable || lockable || recheckable || retryable}
             {@const syncTarget = storageState.selection.kind === 'external' && storageState.selection.connectionId === connection.id}
+            {@const syncing = syncTarget && !!syncRunning[connection.id]}
             {@const backedUp = connection.purpose === 'backup' || !!connection.lastBackupAtMs}
             {@const synced = connection.purpose === 'sync' && !!connection.lastSyncAtMs}
             <article class="card">
@@ -912,7 +972,7 @@
                     {#if connection.purpose === 'backup'}
                         <SettingToggle showLabel label={strings.automaticBackup} disabled={busy} checked={automaticRequest[connection.id] ?? !connection.automaticBackupPaused} onchange={enabled => setAutomaticWork(connection, enabled)} />
                     {:else}
-                        <SettingToggle showLabel label={strings.makeSyncTarget} disabled={busy} checked={syncRequest[connection.id] ?? syncTarget} onchange={enabled => setSyncBinding(connection, enabled)} />
+                        <SettingToggle showLabel label={strings.makeSyncTarget} disabled={busy} checked={syncRequest[connection.id] ?? syncing} onchange={enabled => setSyncBinding(connection, enabled)} />
                     {/if}
                     <div class="actions">
                         {#if renewable}<SettingButton disabled={busy} onclick={() => renewalConnection = connection}>{strings.renew}</SettingButton>{/if}
@@ -924,6 +984,16 @@
                         {#if job && externalJobIsActive(job)}<SettingButton variant="secondary" onclick={() => cancelJob(job)}>{strings.cancel}</SettingButton>{/if}
                         {#if job && unfinishedRestore(job)}<SettingButton variant="secondary" disabled={busy} onclick={() => stopRestore(job)}>{strings.stopRestore}</SettingButton>{/if}
                     </div>
+                </div>
+
+                <div class="setting">
+                    <label class="field">
+                        <span>{strings.transferConcurrency}</span>
+                        <span class="amount">
+                            <NumberInput size="sm" className="w-20 text-right tabular-nums" disabled={busy} min={1} max={16} value={connection.transferConcurrency} onChange={event => commitTransferConcurrency(connection, event.currentTarget)} />
+                        </span>
+                    </label>
+                    <p class="help">{strings.transferConcurrencyHelp}</p>
                 </div>
 
                 <div class="details">
@@ -938,7 +1008,7 @@
                         <div class="panel" role="tabpanel" id="{connection.id}-history-panel" aria-labelledby="{connection.id}-history-tab">
                             {#if historyLoading[connection.id]}<p class="empty">{strings.loading}</p>
                             {:else if historyError[connection.id]}<SettingNotice role="status" text={historyError[connection.id]} />
-                            {:else if items.length === 0}<p class="empty">{strings.noHistory}</p>{/if}
+                            {:else if items.length === 0}<p class="empty">{connection.purpose === 'sync' ? strings.noSyncHistory : strings.noHistory}</p>{/if}
                             {#if items.length > 0}
                                 <ul class="rows">
                                     {#each items as item (item.id)}
@@ -1246,6 +1316,14 @@
         border-radius: 0.5rem;
         background: var(--risu-theme-bgcolor);
     }
+    .setting {
+        display: grid;
+        gap: 0.375rem;
+        min-width: 0;
+    }
+    .setting .help {
+        max-width: none;
+    }
     .tabs {
         display: flex;
         gap: 0.25rem;
@@ -1484,12 +1562,17 @@
     }
     .fields {
         display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
         gap: 0.5rem;
+    }
+    /* The rows share one value column, so inputs line up whether or not a unit follows them. */
+    .fields .field {
+        grid-column: 1 / -1;
+        grid-template-columns: subgrid;
     }
     .field {
         display: grid;
-        grid-template-columns: minmax(8rem, max-content) auto;
-        justify-content: start;
+        grid-template-columns: minmax(0, 1fr) auto;
         align-items: center;
         gap: 0.75rem;
         font-size: 14px;

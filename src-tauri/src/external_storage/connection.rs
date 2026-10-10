@@ -295,6 +295,7 @@ pub(crate) struct ConnectionSummary {
     pub endpoint: EndpointConfirmation,
     /// The policy in force, which is the default until the user changes it.
     pub retention_policy: RetentionPolicy,
+    pub transfer_concurrency: usize,
     pub capabilities: Capabilities,
     pub automatic_backup_paused: bool,
     pub status: ConnectionStatus,
@@ -810,6 +811,7 @@ pub(crate) fn summary(connection: &StoredConnection) -> ConnectionSummary {
         retention_policy: connection
             .retention_policy
             .unwrap_or(RetentionPolicy::DEFAULT),
+        transfer_concurrency: connection.transfer_concurrency.unwrap_or(super::transfer_limit::DEFAULT),
         capabilities: connection.capabilities.clone(),
         automatic_backup_paused: false,
         status: ConnectionStatus::Ready,
@@ -1413,7 +1415,7 @@ mod tests {
             verified_at_ms: 1,
             last_sync_at_ms: None,
             last_backup_at_ms: None,
-            retention_policy: None,
+            retention_policy: None, transfer_concurrency: None,
         };
         let summary = summary(&connection);
         assert_eq!(summary.display_name, "mybox");

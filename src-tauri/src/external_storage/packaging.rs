@@ -825,7 +825,7 @@ impl ParentGraph {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct AttemptVerification {
     receipts: BTreeMap<String, ObjectReceipt>,
     catalogs: BTreeMap<String, Vec<RemoteObject>>,
@@ -1541,6 +1541,11 @@ fn source_totals(sources: &[SourceEntry]) -> (u64, u64) {
     )
 }
 
+fn remember_pack_failure(first: &std::sync::Mutex<Option<ProviderError>>, error: &ProviderError) {
+    let mut first = first.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if first.is_none() { *first = Some(error.clone()); }
+}
+
 /// Counts each source in `prepared` once it is done. The caller planned them.
 async fn build_entries(
     kind: wire::CatalogKind,
@@ -1781,216 +1786,123 @@ async fn build_entries(
         .parent()
         .ok_or_else(|| corrupt("external storage root has no repository"))?
         .to_path_buf();
-    let cancel_owned = cancel.clone();
+    let stop = Cancellation::default();
+    let first_failure = Arc::new(std::sync::Mutex::new(None));
+    let producer_failure = first_failure.clone();
+    let pending_uploads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut sealing_journal = journal.preparation_handle(pending_uploads.clone())?;
+    let mut uploading_cache = PackageCache::open(build_root.parent().ok_or_else(|| corrupt("build root"))?)?;
+    let data_key = derive_key(root_key, format_repository_id, "data").map_err(corrupt)?;
+    let cancel_owned = stop.clone();
     let producer_prepared = Arc::clone(prepared);
     let placed = placements;
-    // Each pack is a family from the moment its plaintext file is allocated
-    // until its wave is sent: one being built and one being sealed or waiting
-    // for its wave, against the families the whole application allows.
+    // Plaintext preparation retains the global family and CPU bounds. Sealed
+    // files release the family and remain charged to the shared spool budget.
     let (built, mut arriving) = tokio::sync::mpsc::channel(1);
+    let (sealed_tx, mut sealed_rx) = tokio::sync::mpsc::channel(16);
     let handle = tokio::runtime::Handle::current();
     let families = journal.families();
-    let producer_families = families.clone();
     let producer = spawn_blocking(move || {
-        prepare_packs(
-            uncached,
-            &repository_root_owned,
-            &external_root_owned,
-            &build_root_owned,
-            target,
-            max_pack,
-            chunk_bytes,
-            &placed,
-            &built,
-            &handle,
-            &producer_families,
-            &producer_prepared,
-            &cancel_owned,
-        )
+        let result = prepare_packs(
+            uncached, &repository_root_owned, &external_root_owned, &build_root_owned,
+            target, max_pack, chunk_bytes, &placed, &built, &handle, &families,
+            &producer_prepared, &cancel_owned,
+        );
+        if let Err(error) = &result {
+            remember_pack_failure(&producer_failure, error);
+            cancel_owned.cancel();
+        }
+        result
     });
-    let data_key = derive_key(root_key, format_repository_id, "data").map_err(corrupt)?;
-    let mut uploaded_packs = Vec::new();
-    let mut family = Vec::new();
-    // The families of the packs in `family` that still wait for their wave.
-    let mut held: Vec<FamilyPermit> = Vec::new();
-    let mut failure = None;
-    loop {
-        let next = if held.is_empty() {
-            arriving.recv().await
-        } else {
-            tokio::select! {
-                biased;
-                next = arriving.recv() => next,
-                // A pack of this job or another waits for a family these
-                // sealed packs hold, and sending them ends those families.
-                _ = families.contended() => {
-                    match upload_sealed_wave(
-                        std::mem::take(&mut family),
-                        format_repository_id,
-                        root_key,
-                        cache,
-                        journal,
-                        provider,
-                        repository,
-                        cancel,
-                    )
-                    .await
-                    {
-                        Ok(objects) => {
-                            uploaded_packs.extend(objects);
-                            held.clear();
-                            continue;
-                        }
-                        Err(error) => {
-                            failure = Some(error);
-                            break;
-                        }
+    let sealing = async {
+        let outcome: Result<()> = async {
+            while let Some(mut pack) = arriving.recv().await {
+                stop.check()?;
+                pack.file.as_file_mut().seek(SeekFrom::Start(0)).map_err(transient)?;
+                let plain_hash = hash_reader(pack.file.as_file_mut(), pack.length).map_err(corrupt)?;
+                let id = wire::keyed_object_id(&data_key, sealing_journal.job_id(),
+                    wire::ObjectRole::Pack, &plain_hash).map_err(corrupt)?;
+                let object = seal_plain_object(
+                    pack.file.path(), pack.length, plain_hash, id, ObjectRole::Pack,
+                    format_repository_id, root_key, &data_key, limits, 0, cache, evidence,
+                    &mut sealing_journal, provider, repository, &stop,
+                ).await?.ok_or_else(|| ProviderError::new(ErrorKind::Transient))?;
+                let PendingPack { file, family, .. } = pack;
+                drop(file);
+                drop(family);
+                if matches!(object, SealedObject::Pending { .. }) {
+                    pending_uploads.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                }
+                tokio::select! {
+                    result = sealed_tx.send(object) => result.map_err(transient)?,
+                    _ = stop.cancelled() => return Err(ProviderError::new(ErrorKind::Cancelled)),
+                }
+            }
+            Ok(())
+        }.await;
+        if let Err(error) = &outcome {
+            remember_pack_failure(&first_failure, error);
+            stop.cancel();
+        }
+        drop(arriving);
+        drop(sealed_tx);
+        // Closing the plaintext channel releases a blocked producer; always
+        // join it, including cancellation, spool pressure and upload failures.
+        let produced = producer.await.map_err(transient).and_then(|result| result);
+        if let Err(error) = &produced {
+            remember_pack_failure(&first_failure, error);
+            stop.cancel();
+        }
+        outcome?;
+        produced
+    };
+    let uploading = async {
+        let outcome: Result<Vec<RemoteObject>> = async {
+            let mut uploaded = Vec::new();
+            loop {
+                let Some(first) = sealed_rx.recv().await else { break; };
+                stop.check()?;
+                let limit = provider.transfer_concurrency().max(1);
+                let mut wave = vec![first];
+                // Never await a second pack: another job may need the spool
+                // held by this wave before it can produce anything else.
+                while wave.len() < limit {
+                    match sealed_rx.try_recv() {
+                        Ok(object) => wave.push(object),
+                        Err(_) => break,
                     }
                 }
+                let pending = waiting(&wave);
+                let result = upload_sealed_wave(wave, format_repository_id, root_key,
+                    &mut uploading_cache, journal, provider, repository, cancel).await;
+                journal.settle_pipeline_wave(&pending_uploads, pending);
+                uploaded.extend(result?);
             }
-        };
-        let Some(mut pack) = next else {
-            break;
-        };
-        let sealed: Result<SealedObject> = async {
-            pack.file
-                .as_file_mut()
-                .seek(SeekFrom::Start(0))
-                .map_err(transient)?;
-            let plain_hash = hash_reader(pack.file.as_file_mut(), pack.length).map_err(corrupt)?;
-            let id = wire::keyed_object_id(
-                &data_key,
-                journal.job_id(),
-                wire::ObjectRole::Pack,
-                &plain_hash,
-            )
-            .map_err(corrupt)?;
-            loop {
-                let waiting_now = waiting(&family);
-                if let Some(sealed) = seal_plain_object(
-                    pack.file.path(),
-                    pack.length,
-                    plain_hash,
-                    id.clone(),
-                    ObjectRole::Pack,
-                    format_repository_id,
-                    root_key,
-                    &data_key,
-                    limits,
-                    waiting_now,
-                    cache,
-                    evidence,
-                    journal,
-                    provider,
-                    repository,
-                    cancel,
-                )
-                .await?
-                {
-                    return Ok(sealed);
-                }
-                // The packs already sealed hold the room this one needs, and
-                // sending them gives it back.
-                if waiting_now == 0 {
-                    return Err(ProviderError::new(ErrorKind::Transient));
-                }
-                uploaded_packs.extend(
-                    upload_sealed_wave(
-                        std::mem::take(&mut family),
-                        format_repository_id,
-                        root_key,
-                        cache,
-                        journal,
-                        provider,
-                        repository,
-                        cancel,
-                    )
-                    .await?,
-                );
-                held.clear();
-            }
+            Ok(uploaded)
+        }.await;
+        if let Err(error) = &outcome {
+            remember_pack_failure(&first_failure, error);
+            stop.cancel();
         }
-        .await;
-        let PendingPack { file, family: permit, .. } = pack;
-        // The plaintext has been sealed, so the ciphertext is the only copy
-        // this pack still needs while its wave fills.
-        drop(file);
-        match sealed {
-            Ok(object) => {
-                // A pack the repository already holds under these bytes has
-                // nothing left to send, so its family ends before any wave
-                // is sent.
-                if matches!(object, SealedObject::Pending { .. }) {
-                    held.push(permit);
-                } else {
-                    drop(permit);
-                }
-                family.push(object);
-            }
-            Err(error) => {
-                failure = Some(error);
-                break;
-            }
-        }
-        // A pack that is sealed but not yet sent owns its ciphertext, so only
-        // as many as the active family bound allows wait for a registration.
-        if family.len() >= ACTIVE_PACK_FAMILIES {
-            match upload_sealed_wave(
-                std::mem::take(&mut family),
-                format_repository_id,
-                root_key,
-                cache,
-                journal,
-                provider,
-                repository,
-                cancel,
-            )
-            .await
-            {
-                Ok(objects) => {
-                    uploaded_packs.extend(objects);
-                    held.clear();
-                }
-                Err(error) => {
-                    failure = Some(error);
-                    break;
-                }
-            }
-        }
-    }
-    // The producer is waiting to hand over its next pack or for a family, so
-    // it has to be let go before its own outcome can be read.
-    drop(arriving);
-    // A job that stops keeps what it sealed for its next attempt, but not the
-    // families, which other jobs may be waiting for.
-    if failure.is_some() {
-        held.clear();
-    }
-    let produced = producer.await;
-    if let Some(error) = failure {
+        drop(sealed_rx);
+        outcome
+    };
+    let mut pipeline = Box::pin(async { tokio::join!(sealing, uploading) });
+    let (produced, uploaded) = tokio::select! {
+        result = &mut pipeline => result,
+        _ = cancel.cancelled() => { stop.cancel(); pipeline.as_mut().await }
+    };
+    // Release the future's mutable borrows before returning the verification
+    // evidence collected by the sequential sealing stage to its owner.
+    drop(pipeline);
+    if let Some(error) = first_failure.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
         return Err(error);
     }
-    let (pending, fetched) = produced.map_err(transient)??;
+    let uploaded_packs = uploaded?;
+    let (pending, fetched) = produced?;
+    journal.verification = sealing_journal.verification;
     hydration.objects += fetched.objects;
     hydration.bytes += fetched.bytes;
-    // The last family is only worth sending once production has answered for
-    // every source, because a publication that cannot finish has no use for it.
-    if !family.is_empty() {
-        uploaded_packs.extend(
-            upload_sealed_wave(
-                family,
-                format_repository_id,
-                root_key,
-                cache,
-                journal,
-                provider,
-                repository,
-                cancel,
-            )
-            .await?,
-        );
-    }
-    drop(held);
     let mut new_entries = Vec::with_capacity(pending.len());
     for entry in pending {
         let mut used: BTreeMap<String, RemoteObject> = BTreeMap::new();
@@ -2090,7 +2002,13 @@ fn prepare_packs(
                     None => payloads
                         .insert(PayloadCas::new(repository_root).map_err(transient)?),
                 };
-                open_library_source(payloads, digest, &mut hydration, cancel)?
+                // Hydration decrypts under the same CPU budget. No producer
+                // permit may be retained while opening a remote source.
+                cpu.take();
+                let source = open_library_source(payloads, digest, &mut hydration, cancel)?;
+                cancel.check()?;
+                cpu = Some(handle.block_on(cpu_permit())?);
+                source
             }
             ObjectSource::File(path) if source.file_offset.is_some() => {
                 let offset = source.file_offset.unwrap();
@@ -2523,7 +2441,7 @@ async fn seal_plain_object(
     // Held until the journal answers for the file, so another job always sees
     // either the reservation or the bytes. The room includes the page that
     // registers this object with the `wave` already waiting beside it.
-    let bytes = ciphertext_length.saturating_add(super::control::inventory_page_headroom(wave + 1));
+    let bytes = ciphertext_length.saturating_add(super::control::inventory_page_headroom(journal.registration_headroom_members(wave)));
     let admission = if wave == 0 {
         journal.reserve_spool_after_release(bytes, cancel).await?
     } else { journal.reserve_spool(bytes)? };
@@ -5437,7 +5355,7 @@ mod tests {
                 stored:super::super::connection_store::StoredConnection {
                     id:"synthetic-connection".into(),config:super::super::contract::ConnectionConfig {provider:"synthetic".into(),profile:None,endpoint:"https://synthetic.invalid".into(),account_id:"account".into(),location:BTreeMap::new(),oauth_profile:None},
                     descriptor:risunest_external_storage_format::format::Descriptor::new("format-repository".into(),Some(risunest_external_storage_format::format::Strategy::Cas)).unwrap(),
-                    descriptor_locator:RemoteLocator{connection_identity:repository.connection_identity.clone(),collection:None,object:"descriptor".into()},provider_repository_id:repository.repository_id.clone(),credential_ref:"credential".into(),root_key_ref:"key".into(),recovery_key_ref:"recovery".into(),retention_policy:None,capabilities:fake::capabilities(true),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
+                    descriptor_locator:RemoteLocator{connection_identity:repository.connection_identity.clone(),collection:None,object:"descriptor".into()},provider_repository_id:repository.repository_id.clone(),credential_ref:"credential".into(),root_key_ref:"key".into(),recovery_key_ref:"recovery".into(),retention_policy:None,transfer_concurrency:None,capabilities:fake::capabilities(true),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
                 },provider:provider.clone(),handle:repository,dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new(key),
             };
             let connected=Arc::new(connected);
@@ -7263,11 +7181,10 @@ mod tests {
                 meta, &key, limits(64 * 1024), None, &mut journal, &provider, &repository, &PhaseProgress::silent(), &cancel)
                 .await.unwrap_err();
             assert_eq!(error.kind, ErrorKind::Corrupt);
-            // One record pack and two full asset waves. The asset pack the
-            // consumer had already sealed when production failed is not sent,
-            // because a publication that cannot finish has no use for it.
+            // Record and asset work already settled before the source failure
+            // remains durable regardless of how the ready packs formed waves.
             let placed = stored_packs(&provider);
-            assert_eq!(placed.len(), 5);
+            assert!(placed.len() >= 2, "no settled asset prefix before the source failure");
             for object in &placed {
                 assert!(journal.record(object).unwrap().unwrap().released);
                 assert!(!journal.spool_path(object).exists());
@@ -7741,13 +7658,10 @@ mod tests {
     fn c_a_spool_with_room_for_two_objects_still_finishes_the_publication() {
         for limit in [12 * 1024, 9 * 1024] {
             runtime().block_on(async {
-                let profile_started = std::time::Instant::now();
-                eprintln!("PROFILE limit={limit} phase=start elapsed_ms=0");
                 let root = tempfile::tempdir().unwrap();
                 let provider = FakeProvider::new(false);
                 let repository = fake::repository();
                 let capture = captured_record_window(root.path(), "tight", 1, 2000, 0, 0, 0);
-                eprintln!("PROFILE limit={limit} phase=capture elapsed_ms={}", profile_started.elapsed().as_millis());
                 let meta = metadata("tight", &capture);
                 let directory = root.path().join("tight-job");
                 let job = format!("tight-{}", uuid::Uuid::new_v4());
@@ -7760,14 +7674,12 @@ mod tests {
                     .with_limit(limit),
                 );
                 let (peak, stop, sampler) = peak_sampler(directory.clone(), held_spool);
-                eprintln!("PROFILE limit={limit} phase=package_start elapsed_ms={}", profile_started.elapsed().as_millis());
                 let completed = package_and_upload(
                     capture, vec![], root.path(), &root.path().join("cache"), meta, &[5; 32],
                     limits(4096), None, &mut transfer, &provider, &repository,
                     &PhaseProgress::silent(), &Cancellation::default(),
                 )
                 .await;
-                eprintln!("PROFILE limit={limit} phase=package_end elapsed_ms={}", profile_started.elapsed().as_millis());
                 stop.store(true, std::sync::atomic::Ordering::Relaxed);
                 sampler.join().unwrap();
                 let completed = completed.unwrap_or_else(|error| {
@@ -7783,11 +7695,6 @@ mod tests {
                 );
                 let peak = peak.load(std::sync::atomic::Ordering::Relaxed);
                 assert!(peak <= limit, "{peak} bytes held against a {limit}-byte spool");
-                drop(completed);
-                drop(transfer);
-                eprintln!("PROFILE limit={limit} phase=cleanup_start elapsed_ms={}", profile_started.elapsed().as_millis());
-                drop(root);
-                eprintln!("PROFILE limit={limit} phase=cleanup_end elapsed_ms={}", profile_started.elapsed().as_millis());
             });
         }
     }
@@ -7985,12 +7892,10 @@ mod tests {
         });
     }
 
-    /// With every family but one active elsewhere, a job still finishes. Its
-    /// producer waits for the family its own sealed pack holds, and that wait
-    /// is what sends the pack, so only one pack plaintext is ever built at a
-    /// time and the family held elsewhere is left alone.
+    /// One globally available family still permits progress because sealed
+    /// ciphertext releases its family before waiting for remote completion.
     #[test]
-    fn c_a_job_left_one_family_sends_each_pack_before_building_the_next() {
+    fn c_a_job_left_one_family_completes_with_one_preparation_at_a_time() {
         runtime().block_on(async {
             const RECORDS: usize = 8;
             let root = tempfile::tempdir().unwrap();
@@ -8014,8 +7919,10 @@ mod tests {
                 let families = families.clone();
                 let builds = builds.clone();
                 move |uploaded| {
-                    assert_eq!(families.counts(), (2, usize::from(uploaded < RECORDS)));
-                    assert_eq!(build_files(&builds), 0, "next plaintext built before pack upload");
+                    let (active, _) = families.counts();
+                    assert!((1..=ACTIVE_PACK_FAMILIES).contains(&active));
+                    assert!(build_files(&builds) <= 1, "more than one available preparation family");
+                    assert!(uploaded <= RECORDS);
                 }
             }));
             // A tiny target forces one distinct record per pack without thousands
@@ -8098,7 +8005,7 @@ mod tests {
     fn c_a_stopped_job_keeps_its_spool_but_not_its_families() {
         runtime().block_on(async {
             let root = tempfile::tempdir().unwrap();
-            let provider = FakeProvider::new(false);
+            let provider = gated::GatedProvider::new(Some(3));
             let repository = fake::repository();
             let families = PackFamilies::new(ACTIVE_PACK_FAMILIES);
             let stopped_job = format!("stopped-{}", uuid::Uuid::new_v4());
@@ -8120,9 +8027,8 @@ mod tests {
             let meta = metadata("stopped", &capture);
             let mut transfer = journal(&stopped_directory, &stopped_job, &capture);
             transfer.set_spool_budget(budget(&stopped_job, 4 * 1024 * 1024));
-            // The second wave's first pack: its page is uploaded, the pack's
-            // outcome is left for a later session to observe.
-            provider.fail_upload_number(5, ErrorKind::RateLimited);
+            // The third pack's page is uploaded, while the pack's outcome
+            // is left for a later session to observe.
             let error = package_and_upload(
                 capture, vec![], root.path(), &root.path().join("stopped-cache"), meta, &[5; 32],
                 limits(4096), None, &mut transfer, &provider, &repository,
@@ -8132,6 +8038,11 @@ mod tests {
             .err()
             .expect("the refused upload stops the job");
             assert_eq!(error.kind, ErrorKind::RateLimited);
+            let refused = provider.packs.lock().unwrap()[2].clone();
+            let record = transfer.record(&refused).unwrap().unwrap();
+            assert!(record.attempted && record.receipt.is_none());
+            let page = transfer.covered_by(&refused).unwrap().unwrap();
+            assert!(transfer.record(&page).unwrap().unwrap().receipt.is_some());
             drop(transfer);
             assert_eq!(families.counts(), (0, 0));
             let kept: BTreeMap<String, [u8; 32]> = fs::read_dir(&stopped_directory)
@@ -8196,7 +8107,7 @@ mod tests {
             .unwrap();
             assert_eq!(held_spool(&stopped_directory), 0);
             assert_eq!(families.counts(), (0, 0));
-            let stored = provider.state.lock().unwrap().objects.clone();
+            let stored = provider.inner.state.lock().unwrap().objects.clone();
             for (name, digest) in &kept {
                 let (object, (bytes, _)) = stored
                     .iter()
@@ -8215,7 +8126,7 @@ mod tests {
         /// A fake repository that refuses one pack upload by its position and
         /// holds the reconciliation of one named object until it is let go.
         pub(super) struct GatedProvider {
-            inner: FakeProvider,
+            pub(super) inner: FakeProvider,
             refuse_pack: Option<usize>,
             pub(super) packs: std::sync::Mutex<Vec<String>>,
             pub(super) on_pack: Option<Box<dyn Fn(usize) + Send + Sync>>,
@@ -8423,11 +8334,11 @@ mod tests {
                     ),
                     async {
                         provider.arrived.acquire().await.unwrap().forget();
-                        // Either the producer starts the next pack, or it
-                        // waits while both families stay taken.
+                        // Preparation may already have sealed every remaining
+                        // pack and released all families before this observation.
                         let seen = loop {
                             let (files, counts) = (build_files(&build), families.counts());
-                            if files > 0 || counts == (2, 1) {
+                            if files > 0 || counts.0 == 0 {
                                 break (files, counts);
                             }
                             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -8439,7 +8350,7 @@ mod tests {
             })
             .await
             .expect("the held wave stopped making progress");
-            assert!(files > 0, "no next pack while a wave was held, families {counts:?}");
+            assert!(files > 0 || counts.0 == 0, "preparation held while a wave was held, families {counts:?}");
             assert!(counts.0 <= ACTIVE_PACK_FAMILIES);
             assert_eq!(packs_of(&completed.unwrap()), RECORDS);
             assert_eq!(families.counts(), (0, 0));
@@ -10336,4 +10247,5 @@ mod tests {
         });
     }
 
+    include!("packaging_upload_tests.rs");
 }

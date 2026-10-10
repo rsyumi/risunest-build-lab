@@ -26,6 +26,8 @@ pub(crate) struct StoredConnection {
     /// default for a connection that never set one.
     #[serde(default)]
     pub retention_policy: Option<super::connection::RetentionPolicy>,
+    #[serde(default)]
+    pub transfer_concurrency: Option<usize>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -214,9 +216,24 @@ impl ConnectionStore {
         policy: super::connection::RetentionPolicy,
     ) -> Result<StoredConnection> {
         policy.validate()?;
-        let mut connection = self.read(id)?;
-        connection.retention_policy = Some(policy);
-        self.write(id, connection)
+        self.update_preference(id, |connection| connection.retention_policy = Some(policy))
+    }
+    pub fn set_transfer_concurrency(&mut self, id: &str, value: usize) -> Result<StoredConnection> {
+        super::transfer_limit::validate(value)?;
+        self.update_preference(id, |connection| connection.transfer_concurrency = Some(value))
+    }
+    fn update_preference(&mut self, id: &str, update: impl FnOnce(&mut StoredConnection)) -> Result<StoredConnection> {
+        let tx = self.0.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+        let encoded: String = tx.query_row("SELECT value FROM connections WHERE id=?1", [id], |row| row.get(0))
+            .optional().map_err(storage)?.ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+        let mut connection = decode(&encoded)?;
+        if connection.id != id { return Err(corrupt()); }
+        update(&mut connection);
+        let encoded = serde_json::to_string(&connection).map_err(storage)?;
+        decode(&encoded)?;
+        tx.execute("UPDATE connections SET value=?2 WHERE id=?1", params![id, encoded]).map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        Ok(connection)
     }
     pub fn replace_credential(
         &mut self,
@@ -262,17 +279,6 @@ impl ConnectionStore {
         Ok(connection)
     }
 
-    fn write(&mut self, id: &str, connection: StoredConnection) -> Result<StoredConnection> {
-        let encoded = serde_json::to_string(&connection).map_err(storage)?;
-        decode(&encoded)?;
-        self.0
-            .execute(
-                "UPDATE connections SET value=?2 WHERE id=?1",
-                params![id, encoded],
-            )
-            .map_err(storage)?;
-        Ok(connection)
-    }
     pub fn put_pending(&mut self, connection: &PendingStoredConnection) -> Result<()> {
         validate_pending(connection)?;
         let encoded = serde_json::to_string(connection).map_err(storage)?;
@@ -372,7 +378,7 @@ impl ConnectionStore {
             descriptor_locator,
             provider_repository_id,
             credential_ref: pending.credential_ref,
-            retention_policy: None,
+            retention_policy: None, transfer_concurrency: None,
             root_key_ref: pending.root_key_ref,
             recovery_key_ref: pending.recovery_key_ref,
             capabilities,
@@ -601,6 +607,8 @@ fn decode(encoded: &str) -> Result<StoredConnection> {
     }
     let value: StoredConnection = serde_json::from_str(encoded).map_err(|_| corrupt())?;
     value.descriptor.validate().map_err(|_| corrupt())?;
+    super::transfer_limit::validate(value.transfer_concurrency.unwrap_or(super::transfer_limit::DEFAULT))
+        .map_err(|_| corrupt())?;
     if [
         &value.id,
         &value.provider_repository_id,
@@ -1074,6 +1082,39 @@ mod tests {
         let unlocked = store.replace_repository_key(&original.id, &original.root_key_ref, "new-root").unwrap();
         assert_eq!(unlocked.credential_ref, "new-secret");
         assert_eq!(unlocked.recovery_key_ref, original.recovery_key_ref);
+    }
+
+    #[test]
+    fn transfer_preferences_are_local_validated_and_preserved_by_renewal() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = ConnectionStore::open(root.path()).unwrap();
+        let pending = pending();
+        store.put_pending(&pending).unwrap();
+        let stored = store.promote_pending(&pending.id, locator("synthetic"), Capabilities::default()).unwrap();
+        assert_eq!(stored.transfer_concurrency, None);
+        assert_eq!(super::super::connection::summary(&stored).transfer_concurrency, 4);
+        assert_eq!(super::super::transfer_limit::effective_limit(root.path(), &stored.id).unwrap(), 4);
+        super::super::transfer_limit::set_limit(root.path(), &stored.id, 16).unwrap();
+        assert_eq!(super::super::transfer_limit::effective_limit(root.path(), &stored.id).unwrap(), 16);
+        for invalid in [0, 17, usize::MAX] {
+            assert!(super::super::transfer_limit::set_limit(root.path(), &stored.id, invalid).is_err());
+        }
+        assert_eq!(store.read(&stored.id).unwrap().transfer_concurrency, Some(16));
+        assert_eq!(super::super::transfer_limit::effective_limit(root.path(), &stored.id).unwrap(), 16);
+        let blocked = Connection::open(root.path().join("external-connections.sqlite")).unwrap();
+        blocked.execute_batch("CREATE TRIGGER reject_transfer_save BEFORE UPDATE ON connections BEGIN SELECT RAISE(FAIL, 'synthetic write failure'); END;").unwrap();
+        assert!(super::super::transfer_limit::set_limit(root.path(), &stored.id, 2).is_err());
+        assert_eq!(store.read(&stored.id).unwrap().transfer_concurrency, Some(16));
+        assert_eq!(super::super::transfer_limit::effective_limit(root.path(), &stored.id).unwrap(), 16);
+        blocked.execute_batch("DROP TRIGGER reject_transfer_save;").unwrap();
+        store.replace_credential(&stored.id, &stored.credential_ref, "renewed").unwrap();
+        store.set_retention_policy(&stored.id, super::super::connection::RetentionPolicy::DEFAULT).unwrap();
+        assert_eq!(store.read(&stored.id).unwrap().transfer_concurrency, Some(16));
+        let mut invalid = serde_json::to_value(&stored).unwrap();
+        for value in [serde_json::json!(0), serde_json::json!(17), serde_json::json!(1.5)] {
+            invalid["transferConcurrency"] = value;
+            assert!(decode(&invalid.to_string()).is_err());
+        }
     }
 
 }

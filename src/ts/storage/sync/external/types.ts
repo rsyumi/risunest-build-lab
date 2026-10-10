@@ -151,6 +151,7 @@ export interface ExternalConnectionSummary {
     endpoint: ExternalEndpointConfirmation
     /** The policy in force, which is the default until the user changes it. */
     retentionPolicy: ExternalRetentionPolicy
+    transferConcurrency: number
     capabilities: ExternalCapabilities
     status: 'ready' | 'paused' | 'reauth-required' | 'key-locked' | 'error'
     automaticBackupPaused: boolean

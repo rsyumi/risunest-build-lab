@@ -6,6 +6,7 @@ use super::{
 use risunest_external_storage_format::snapshot::StoredObject;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use futures::StreamExt;
 use std::{
     borrow::Borrow,
     collections::{BTreeMap, BTreeSet},
@@ -679,26 +680,55 @@ fn hydrate_standalone(connection:&OpenedSource,sources:Vec<Source>,scratch:&Path
         let protection=connection.protection(&writer);
         let owner=admit(&protection,cancel).await?;
         owner.run(&protection,cancel,async {
-            let mut spools=Vec::new();let mut bytes=0u64;
             let mut sources=sources.into_iter().peekable();
-            while let Some(source)=sources.next() {
-                let size=source.body.plaintext_byte_length.0;
-                match publisher.cas.stat_object(&source.hash).map_err(local)? {
-                    Some(actual) if actual!=size=>return Err(segment::corrupt()),
-                    Some(_)=>opened(&source.hash,HydrationOutcome::AlreadyLocal),
-                    None=>{
+            while sources.peek().is_some() {
+                let mut batch=Vec::new();let mut bytes=0u64;let mut hashes=BTreeSet::new();
+                while let Some(source)=sources.next() {
+                    cancel.check()?;
+                    let size=source.body.plaintext_byte_length.0;
+                    if !hashes.insert(source.hash.clone()) {continue;}
+                    match publisher.cas.stat_object(&source.hash).map_err(local)? {
+                        Some(actual) if actual!=size=>return Err(segment::corrupt()),
+                        Some(_)=>opened(&source.hash,HydrationOutcome::AlreadyLocal),
+                        None=>{
+                            bytes=bytes.saturating_add(size);
+                            batch.push(source);
+                        }
+                    }
+                    if batch.len()>=PUBLISH_BATCH_BODIES || bytes>=PUBLISH_BATCH_BYTES {break;}
+                }
+                let width=provider.transfer_concurrency();
+                let stopped=std::sync::atomic::AtomicBool::new(false);
+                let mut downloads=futures::stream::iter(batch.iter()).map(|source| {
+                    let stopped=&stopped;
+                    async move {
+                        if stopped.load(std::sync::atomic::Ordering::Acquire) {return (source,Err(ProviderError::new(ErrorKind::Cancelled)));}
+                        let result=download_standalone(source,scratch,provider.as_ref(),repository,cancel).await;
+                        if result.is_err() {stopped.store(true,std::sync::atomic::Ordering::Release);}
+                        (source,result)
+                    }
+                }).buffered(width);
+                let mut spools=Vec::new();let mut failure=None;
+                while let Some((source,result))=downloads.next().await {
+                    let staged=match result {Ok(staged)=>staged,Err(error)=>{if failure.is_none() {failure=Some(error);}continue;}};
+                    let opened=async {
+                        cancel.check()?;
                         let mut output=tempfile::NamedTempFile::new_in(scratch).map_err(local)?;
-                        spool_standalone(&source,&mut output,scratch,key,provider.as_ref(),repository,cancel).await?;
-                        bytes=bytes.saturating_add(size);
-                        spools.push((source.hash,size,output));
+                        let _cpu=super::packaging::cpu_permit().await?;
+                        open_standalone(source,&mut output,&staged.path().join("ciphertext"),key)?;
+                        Ok(output)
+                    }.await;
+                    match opened {
+                        Ok(output)=>spools.push((source.hash.clone(),source.body.plaintext_byte_length.0,output)),
+                        Err(error)=>{stopped.store(true,std::sync::atomic::Ordering::Release);if failure.is_none() {failure=Some(error);}},
                     }
                 }
-                if !spools.is_empty() && (spools.len()>=PUBLISH_BATCH_BODIES || bytes>=PUBLISH_BATCH_BYTES || sources.peek().is_none()) {
+                if !spools.is_empty() {
                     if let Some(reason)=owner.recheck(&protection,cancel).await? {return Err(super::leases::yield_error(reason));}
                     let bodies=spools.iter().map(|(hash,size,file)|StagedBody{hash:hash.clone(),size:*size,path:file.path().to_owned()}).collect();
                     publisher.publish(bodies,opened).map_err(|error| {installer_error.replace(Some(error));segment::corrupt()})?;
-                    spools.clear();bytes=0;
                 }
+                if let Some(error)=failure {return Err(error);}
             }
             Ok(())
         }).await
@@ -884,6 +914,12 @@ pub(crate) async fn spool_frozen_remote_body(source:&FrozenBodySource,destinatio
 /// `output`, which then holds exactly the verified plaintext.
 async fn spool_standalone(source:&Source,output:&mut tempfile::NamedTempFile,destination:&Path,key:&[u8;32],provider:&dyn Provider,
     repository:&RepositoryHandle,cancel:&Cancellation)->Result<()> {
+    let scratch=download_standalone(source,destination,provider,repository,cancel).await?;
+    open_standalone(source,output,&scratch.path().join("ciphertext"),key)
+}
+async fn download_standalone(source:&Source,destination:&Path,provider:&dyn Provider,
+    repository:&RepositoryHandle,cancel:&Cancellation)->Result<tempfile::TempDir> {
+    cancel.check()?;
     let scratch=tempfile::tempdir_in(destination).map_err(local)?;
     let locator=source.body.locator.as_ref().ok_or_else(segment::corrupt)?;
     locator.validate_for(repository)?;
@@ -893,9 +929,12 @@ async fn spool_standalone(source:&Source,output:&mut tempfile::NamedTempFile,des
         ReadReceipt::Body(receipt)=>receipt,
         ReadReceipt::NotModified(_)=>return Err(segment::corrupt()),
     };
-    if receipt.locator!=*locator || receipt.byte_length!=source.body.byte_length.0 || !sink.is_verified() {return Err(segment::corrupt());}
+    if receipt.locator!=*locator || !receipt.complete || receipt.byte_length!=source.body.byte_length.0 || !sink.is_verified() {return Err(segment::corrupt());}
     let _verified=super::transfer::SpoolSource::verified(&cipher,source.body.byte_length.0,&source.body.sha256)?;
-    let mut input=crate::trust_boundary::open_regular_source(&cipher).map_err(local)?;
+    Ok(scratch)
+}
+fn open_standalone(source:&Source,output:&mut tempfile::NamedTempFile,cipher:&Path,key:&[u8;32])->Result<()> {
+    let mut input=crate::trust_boundary::open_regular_source(cipher).map_err(local)?;
     segment::open_body_stream(&mut input,output,&source.library_id,&source.body.object_id,key,source.body.plaintext_byte_length.0)?;
     if !super::snapshot_restore::verify_body_file(output.path(),source.body.plaintext_byte_length.0,&source.hash)? {return Err(segment::corrupt());}
     Ok(())
@@ -932,6 +971,9 @@ mod registration_tests {
 #[path="lww_residency_hydration_tests.rs"]
 mod hydration_tests;
 #[cfg(test)]
+#[path="lww_download_tests.rs"]
+mod download_tests;
+#[cfg(test)]
 pub(crate) use hydration_tests::{forget_registry_opens, register_synthetic_source, registry_opens, synthetic_packed};
 #[cfg(test)]
 fn test_source_connections()->&'static std::sync::Mutex<std::collections::BTreeMap<(std::path::PathBuf,String),std::sync::Arc<super::connection_commands::ConnectedRepository>>> {
@@ -953,7 +995,7 @@ pub(crate) fn install_test_source_connection(root:&Path,connection:std::sync::Ar
     Ok(TestSourceConnection{key})
 }
 /// Opens a body source's connection, with the stored record it was opened from.
-async fn open_source_connection(connection_root:&Path,connection_id:&str,library_id:&str,cancel:&Cancellation)->Result<(std::sync::Arc<dyn Provider>,RepositoryHandle,zeroize::Zeroizing<[u8;32]>,StoredConnection)> {
+pub(crate) async fn open_source_connection(connection_root:&Path,connection_id:&str,library_id:&str,cancel:&Cancellation)->Result<(std::sync::Arc<dyn Provider>,RepositoryHandle,zeroize::Zeroizing<[u8;32]>,StoredConnection)> {
     #[cfg(test)]
     hydration_tests::observe("source-connection",connection_root,connection_root);
     #[cfg(test)]
@@ -971,9 +1013,17 @@ async fn open_source_connection(connection_root:&Path,connection_id:&str,library
     if stored.descriptor.repository_id != library_id {
         return Err(segment::corrupt());
     }
-    let dependencies =
-        super::connection::dependencies_for_config(&connection_root, &stored.config)?;
-    let provider = super::connection::provider_for(&stored.config, dependencies)?;
+    let load = || {
+        let dependencies = super::connection::dependencies_for_config(connection_root, &stored.config)?;
+        super::connection::provider_for(&stored.config, dependencies)
+    };
+    #[cfg(test)]
+    let injected = super::transfer_factory_tests::inputs(connection_root, connection_id);
+    #[cfg(test)]
+    let provider = match &injected { Some(inputs) => inputs.provider.clone(), None => load()? };
+    #[cfg(not(test))]
+    let provider = load()?;
+    let provider = super::transfer_limit::wrap(connection_root,connection_id,provider)?;
     let (repository, _) = provider
         .open_repository(
             &stored.config,
@@ -982,10 +1032,14 @@ async fn open_source_connection(connection_root:&Path,connection_id:&str,library
             cancel,
         )
         .await?;
-    let key = super::connection_commands::read_root_key(
-        super::secrets::repository_key_vault(&connection_root).as_ref(),
+    let vault = super::secrets::repository_key_vault(connection_root);
+    let load_key = super::connection_commands::read_root_key(
+        vault.as_ref(),
         &stored.root_key_ref,
-    )
-    .await?;
+    );
+    #[cfg(test)]
+    let key = match injected { Some(inputs) => { drop(load_key); inputs.root_key }, None => load_key.await? };
+    #[cfg(not(test))]
+    let key = load_key.await?;
     Ok((provider, repository, key, stored))
 }

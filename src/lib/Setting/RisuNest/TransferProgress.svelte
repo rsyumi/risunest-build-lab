@@ -2,6 +2,8 @@
     import type { Snippet } from 'svelte'
     import { CheckIcon, ChevronRightIcon, LoaderCircleIcon } from '@lucide/svelte'
     import SettingProgress from './SettingProgress.svelte'
+    import TransferSpeed from './TransferSpeed.svelte'
+    import type { TransferRateSample } from 'src/ts/storage/sync/transferRate'
 
     let { label, detail = '', fraction = null, done = false, stopped = false, activity = '',
         stages = [], counters = [], detailsLabel, collapsible = false, open = $bindable(false), actions, speed }: {
@@ -17,9 +19,17 @@
         collapsible?: boolean
         open?: boolean
         actions?: Snippet
-        speed?: Snippet
+        /**
+         * The network samples of a transfer. Its line stays in place until the transfer is done,
+         * and shows the rates only while `active`.
+         */
+        speed?: { sample: TransferRateSample; active: boolean; uploadLabel: string; downloadLabel: string }
     } = $props()
 </script>
+
+{#snippet rate()}
+    {#if speed}<TransferSpeed sample={speed.sample} active={speed.active && !stopped} uploadLabel={speed.uploadLabel} downloadLabel={speed.downloadLabel} />{/if}
+{/snippet}
 
 {#snippet information()}
     {#if activity}<p class="activity">{activity}</p>{/if}
@@ -42,8 +52,7 @@
 {/snippet}
 
 <div class="transfer-progress">
-    <SettingProgress {label} {detail} {fraction} {done} {stopped} {actions} />
-    {#if speed}{@render speed()}{/if}
+    <SettingProgress {label} {detail} {fraction} {done} {stopped} {actions} footer={speed && !done ? rate : undefined} />
     {#if activity || stages.length > 1 || counters.length}
         {#if collapsible}
             <details class="group" bind:open>

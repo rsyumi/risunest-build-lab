@@ -339,7 +339,7 @@ fn backup_only_cleanup_reads_points_without_requesting_an_unsupported_head() {
                 recovery_key_ref: "synthetic-recovery-key".into(),
                 capabilities: super::capabilities(), created_at_ms: NOW_MS,
                 verified_at_ms: 1,
-                last_sync_at_ms: None, last_backup_at_ms: None, retention_policy: None,
+                last_sync_at_ms: None, last_backup_at_ms: None, retention_policy: None, transfer_concurrency: None,
             },
             provider, handle, dependencies: test.dependencies,
             root_key: zeroize::Zeroizing::new([7; 32]),
@@ -957,6 +957,8 @@ fn a_lost_upload_response_converges_on_the_stored_asset_without_deleting() {
             .await
             .unwrap();
         assert_eq!(receipt.locator.object, "20/88");
+        let context = handle.context.downcast_ref::<api::Context>().unwrap();
+        assert_eq!(context.batches()[&api::batch_key(ObjectRole::Pack, "job-1")].assets, 2);
         assert!(receipt.complete);
         assert!(receipt.checksum.unwrap().provider_verified);
         let records = server.requests.lock().unwrap();
@@ -1956,5 +1958,98 @@ fn empty_job_release_cleanup_requires_complete_empty_inventory_and_no_active_own
             assert_eq!(deletes.len(), usize::from(case == 0 || case == 7), "case {case}");
             if let Some(request) = deletes.first() { assert!(head_line(request).contains("/releases/20 ")); }
         }
+    });
+}
+
+#[test]
+fn concurrent_first_use_and_rollover_reserve_each_attempt_before_upload() {
+    use crate::external_storage::http::{HttpRequest, HttpResponse, HttpTransport, NativeHttpTransport};
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    struct PausedFirstRequest {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        requests: AtomicUsize,
+        inner: NativeHttpTransport,
+    }
+    impl HttpTransport for PausedFirstRequest {
+        fn send<'a>(&'a self, request: HttpRequest, cancel: &'a Cancellation) -> ProviderFuture<'a, HttpResponse> {
+            Box::pin(async move {
+                if self.requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                self.inner.send(request, cancel).await
+            })
+        }
+    }
+    runtime().block_on(async {
+        let server = github_server(vec![
+            reply(201, release(40, &job_tag("job-1", 0))),
+            reply(201, release(41, &job_tag("job-1", 1))),
+        ]);
+        let transport = Arc::new(PausedFirstRequest {
+            entered: Default::default(), release: Default::default(), requests: AtomicUsize::new(0),
+            inner: NativeHttpTransport::for_loopback_tests(),
+        });
+        let test = crate::external_storage::fake::with_transport(transport.clone(), MemoryVault::with(SECRET, TOKEN), NOW_MS);
+        let provider = super::GithubReleases { dependencies: test.dependencies };
+        let context = api::Context::new(&config(&server), zeroize::Zeroizing::new("synthetic-token".into())).unwrap();
+        let batch = api::batch_key(ObjectRole::Pack, "job-1");
+        let cancel = Cancellation::default();
+        let reservations = futures::future::join_all((0..101).map(|_| provider.batch_release(&context, &batch, &cancel)));
+        let controller = async {
+            transport.entered.notified().await;
+            tokio::task::yield_now().await;
+            let before_release = transport.requests.load(Ordering::SeqCst);
+            transport.release.notify_one();
+            assert_eq!(before_release, 1);
+        };
+        let (reservations, ()) = tokio::join!(reservations, controller);
+        let reservations: Vec<_> = reservations.into_iter().map(Result::unwrap).collect();
+        assert_eq!(reservations.iter().filter(|(id, _)| *id == 40).count(), 100);
+        assert_eq!(reservations.iter().filter(|(id, _)| *id == 41).count(), 1);
+        assert!(reservations.iter().all(|(id, tag)| tag == &job_tag("job-1", if *id == 40 { 0 } else { 1 })));
+        // No upload response succeeded. Reservations remain consumed anyway.
+        assert_eq!(provider.batch_release(&context, &batch, &cancel).await.unwrap().0, 41);
+        assert_eq!(context.batches()[&batch].assets, 2);
+        assert_eq!(transport.requests.load(Ordering::SeqCst), 2);
+    });
+}
+
+#[test]
+fn uncertain_upload_keeps_the_last_slot_through_reconciliation_and_rollover() {
+    runtime().block_on(async {
+        let bytes = vec![4u8; 16];
+        let server = github_server(vec![
+            repository_reply(true), reply(200, json!([])), Reply::Lost,
+            reply(200, json!([release(20, &job_tag("job-1", 0))])),
+            reply(200, json!([asset(88, "pack-object-1", 16, Some(digest_of(&bytes)))])),
+            reply(201, release(21, &job_tag("job-1", 1))),
+            reply(201, asset(89, "pack-object-2", 16, Some(digest_of(&bytes)))),
+        ]);
+        let test = dependencies();
+        let provider = adapter(test.dependencies.clone());
+        let handle = open(provider.as_ref(), &server, OpenMode::Create).await.unwrap();
+        let context = handle.context.downcast_ref::<api::Context>().unwrap();
+        let batch = api::batch_key(ObjectRole::Pack, "job-1");
+        context.batches().insert(batch.clone(), api::Batch { seq: 0, release: 20, assets: 99 });
+        let directory = tempfile::tempdir().unwrap();
+        let source = source(directory.path(), "pack", &bytes);
+        let intent = object_intent(&handle, ObjectRole::Pack, "object-1", &bytes);
+        let cancel = Cancellation::default();
+        let lost = provider.create_object(&handle, &intent, &source, None, &cancel).await.err().unwrap();
+        assert_eq!(lost.kind, ErrorKind::Transient);
+        assert_eq!(context.batches()[&batch].assets, 100);
+        let resolution = provider.reconcile_upload(&handle, &intent, None, &cancel).await.unwrap();
+        let UploadResolution::Complete(receipt) = resolution else { panic!("uncertain asset must reconcile"); };
+        assert_eq!(receipt.locator.object, "20/88");
+        assert_eq!(context.batches()[&batch].assets, 100);
+        let next = object_intent(&handle, ObjectRole::Pack, "object-2", &bytes);
+        let receipt = provider.create_object(&handle, &next, &source, None, &cancel).await.unwrap();
+        assert_eq!(receipt.locator.object, "21/89");
+        assert_eq!(context.batches()[&batch].assets, 1);
+        let requests = server.requests.lock().unwrap();
+        assert!(head_line(&requests[2]).contains("/releases/20/assets?name=pack-object-1"));
+        assert!(head_line(&requests[6]).contains("/releases/21/assets?name=pack-object-2"));
     });
 }

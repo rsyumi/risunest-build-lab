@@ -1066,6 +1066,35 @@ pub(crate) fn job_directory(root: &std::path::Path, connection: &str, job: &str)
             &risunest_external_storage_format::content_identity::hash(job.as_bytes())[..8],
         ))
 }
+fn retaining_spool_directories(root: &std::path::Path, store: &JobStore) -> Result<Vec<(String, PathBuf)>> {
+    let mut directories = store.list_retaining()?.into_iter().map(|job| {
+        let directory = job_directory(root, &job.request.connection_id, &job.id);
+        (job.id, directory)
+    }).collect::<Vec<_>>();
+    let publications = root.join("external-storage").join("lww-publications");
+    match std::fs::symlink_metadata(&publications) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(directories),
+        Err(error) => return Err(local_error(error)),
+        Ok(metadata) if crate::trust_boundary::is_link_like(&metadata) || !metadata.is_dir() => {
+            return Err(ProviderError::new(ErrorKind::Corrupt));
+        }
+        Ok(_) => {},
+    }
+    for entry in std::fs::read_dir(publications).map_err(local_error)? {
+        let entry = entry.map_err(local_error)?;
+        let metadata = match std::fs::symlink_metadata(entry.path()) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            result => result.map_err(local_error)?,
+        };
+        if crate::trust_boundary::is_link_like(&metadata) || !metadata.is_dir() {
+            return Err(ProviderError::new(ErrorKind::Corrupt));
+        }
+        let id = entry.file_name().into_string().map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
+        directories.push((id, entry.path()));
+    }
+    Ok(directories)
+}
+
 /// The transfer spool as `job_id` sees it when it seals another object: every
 /// job that has not been swept, with the directory its spool lives in.
 pub(crate) fn spool_budget(root: &std::path::Path, job_id: &str) -> super::journal::SpoolBudget {
@@ -1074,14 +1103,7 @@ pub(crate) fn spool_budget(root: &std::path::Path, job_id: &str) -> super::journ
     super::journal::SpoolBudget::new(job_id.to_owned(), move || {
         let mut held = store.lock().map_err(local_error)?;
         if held.is_none() { *held = Some(JobStore::open(&root)?); }
-        Ok(held.as_ref().ok_or_else(|| ProviderError::new(ErrorKind::Transient))?
-            .list_retaining()?
-            .into_iter()
-            .map(|job| {
-                let directory = job_directory(&root, &job.request.connection_id, &job.id);
-                (job.id, directory)
-            })
-            .collect())
+        retaining_spool_directories(&root, held.as_ref().ok_or_else(|| ProviderError::new(ErrorKind::Transient))?)
     })
 }
 
@@ -1095,18 +1117,12 @@ fn spool_budget_owner(
 ) -> Result<Option<(String, u64)>> {
     let mut total = 0u64;
     let mut owner: Option<(String, u64)> = None;
-    for other in store.list_retaining()? {
-        if other.id == job.id {
-            continue;
-        }
-        let held = super::journal::held_spool_bytes(&job_directory(
-            root,
-            &other.request.connection_id,
-            &other.id,
-        ))?;
+    for (id, directory) in retaining_spool_directories(root, store)? {
+        if id == job.id { continue; }
+        let held = super::journal::held_spool_bytes(&directory)?;
         total = total.saturating_add(held);
         if owner.as_ref().is_none_or(|(_, previous)| held > *previous) {
-            owner = Some((other.id.clone(), held));
+            owner = Some((id, held));
         }
     }
     let headroom = super::packaging::producing_job_spool_headroom()?;
@@ -2059,6 +2075,38 @@ mod tests {
         store.put(&holder).unwrap();
         assert!(spool_budget_owner(root.path(), &store, &waiting).unwrap().is_none());
     }
+    #[test]
+    fn retained_lww_and_job_spools_share_admission_and_start_headroom() {
+        let root = tempfile::tempdir().unwrap();
+        let store = JobStore::open(root.path()).unwrap();
+        let job = automatic_job();
+        store.put(&job).unwrap();
+        let lww = root.path().join("external-storage/lww-publications/synthetic-lww");
+        std::fs::create_dir_all(&lww).unwrap();
+        let retained = std::fs::File::create(lww.join("pack.spool")).unwrap();
+        let limit = super::super::journal::TRANSFER_SPOOL_BUDGET;
+        let data = lww.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let retained_control = std::fs::File::create(data.join("control.spool")).unwrap();
+        retained.set_len(100).unwrap();
+        retained_control.set_len(limit - 101).unwrap();
+        assert!(spool_budget(root.path(), &job.id).try_reserve(2).unwrap().is_none());
+        assert_eq!(spool_budget_owner(root.path(), &store, &job).unwrap(), Some(("synthetic-lww".into(), limit - 1)));
+        retained.set_len(0).unwrap();
+        retained_control.set_len(0).unwrap();
+        let lww_budget = spool_budget(root.path(), "synthetic-lww");
+        let in_flight = lww_budget.try_reserve(100).unwrap().unwrap();
+        assert!(spool_budget(root.path(), &job.id).try_reserve(limit - 100).unwrap().is_some());
+        drop(in_flight);
+        let directory = job_directory(root.path(), &job.request.connection_id, &job.id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let retained_job = std::fs::File::create(directory.join("pack.spool")).unwrap();
+        retained_job.set_len(limit - 1).unwrap();
+        assert!(spool_budget(root.path(), "synthetic-lww").try_reserve(2).unwrap().is_none());
+        retained_job.set_len(0).unwrap();
+        assert!(spool_budget(root.path(), "synthetic-lww").try_reserve(limit).unwrap().is_some());
+    }
+
     /// A producing job starts only when the spool the other jobs hold leaves
     /// room for every pack its first wave seals, so a full spool makes it wait
     /// before it starts instead of refusing it partway through.

@@ -3,7 +3,7 @@
     import { createRateMeter, type TransferRateSample } from 'src/ts/storage/sync/transferRate'
     import { formatRisuNestStorageBytes as bytes } from 'src/ts/storage/risuNestStorageDashboard'
 
-    let { sample, uploadLabel, downloadLabel }: { sample: TransferRateSample; uploadLabel: string; downloadLabel: string } = $props()
+    let { sample, active = true, uploadLabel, downloadLabel }: { sample: TransferRateSample; active?: boolean; uploadLabel: string; downloadLabel: string } = $props()
     const upload = createRateMeter(), download = createRateMeter()
     let id: string | undefined, at = -1, receivedAt = 0
     let rates = $state<{ upload?: number; download?: number }>({})
@@ -22,7 +22,7 @@
     onMount(() => { const timer = setInterval(refresh, 500); return () => clearInterval(timer) })
 </script>
 
-{#if (sample.sending && rates.upload !== undefined) || (sample.receiving && rates.download !== undefined)}
+{#if active && ((sample.sending && rates.upload !== undefined) || (sample.receiving && rates.download !== undefined))}
     <p class="speed" data-transfer-speed>
         {#if sample.sending && rates.upload !== undefined}<span aria-label={uploadLabel}>↑ {bytes(rates.upload)}/s</span>{/if}
         {#if sample.receiving && rates.download !== undefined}<span aria-label={downloadLabel}>↓ {bytes(rates.download)}/s</span>{/if}
@@ -30,5 +30,5 @@
 {/if}
 
 <style>
-    .speed { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin: 0; color: var(--risu-theme-textcolor2); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .speed { display: flex; flex-wrap: wrap; gap: 0 1rem; margin: 0; color: var(--risu-theme-textcolor2); font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; }
 </style>

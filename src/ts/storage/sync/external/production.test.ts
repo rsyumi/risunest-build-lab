@@ -140,6 +140,7 @@ const initialState: ExternalStorageState = {
             warnings: [], remoteVerified: true,
         },
         retentionPolicy: { keepCount: 10, keepDays: 30 },
+        transferConcurrency: 4,
         capabilities: {
             immutableCreate: true,
             directCompleteRead: true,
@@ -598,6 +599,40 @@ describe('external storage production integration', () => {
             expect(mocks.bridge.startJob).toHaveBeenCalledWith(expect.objectContaining({
                 connectionId: 'new-sync', targetRevision: '21', reason: 'automatic',
             }))
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('resumes automatic backup after a newly verified connection repair', async () => {
+        vi.useFakeTimers()
+        try {
+            const { installExternalStorageProduction, refreshExternalStorageProductionState } = await import('./production')
+            await installExternalStorageProduction()
+            mocks.bridge.startJob.mockRejectedValueOnce({ kind: 'reauthRequired' })
+            mocks.listener?.(8)
+            await vi.advanceTimersByTimeAsync(60_000)
+            expect(mocks.bridge.startJob).toHaveBeenCalledTimes(1)
+            mocks.revision = 9
+            mocks.listener?.(9)
+            await refreshExternalStorageProductionState()
+            await vi.advanceTimersByTimeAsync(300_000)
+            expect(mocks.bridge.startJob).toHaveBeenCalledTimes(1)
+            mocks.bridge.getState.mockResolvedValue({
+                ...initialState,
+                connections: [{ ...initialState.connections[0], status: 'paused', automaticBackupPaused: true, lastVerifiedAtMs: '400000' }],
+            })
+            await refreshExternalStorageProductionState()
+            await vi.advanceTimersByTimeAsync(60_000)
+            expect(mocks.bridge.startJob).toHaveBeenCalledTimes(1)
+            mocks.bridge.getState.mockResolvedValue({
+                ...initialState,
+                connections: [{ ...initialState.connections[0], lastVerifiedAtMs: '400000' }],
+            })
+            await refreshExternalStorageProductionState()
+            await vi.advanceTimersByTimeAsync(60_000)
+            expect(mocks.bridge.startJob).toHaveBeenCalledTimes(2)
+            expect(mocks.bridge.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ targetRevision: '9' }))
         } finally {
             vi.useRealTimers()
         }

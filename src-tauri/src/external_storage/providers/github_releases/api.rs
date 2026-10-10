@@ -6,7 +6,7 @@ use crate::external_storage::{contract::*, providers::common, quota::AccountKey}
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
 use zeroize::Zeroizing;
 
@@ -62,6 +62,7 @@ pub(super) struct Context {
     pub(super) identity: String,
     token: Zeroizing<String>,
     batches: Mutex<BTreeMap<String, Batch>>,
+    batch_locks: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// Release currently receiving a batch's assets and its observed asset count.
@@ -103,7 +104,13 @@ impl Context {
             identity,
             token,
             batches: Mutex::new(BTreeMap::new()),
+            batch_locks: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    pub(super) fn batch_lock(&self, batch: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.batch_locks.lock().unwrap().entry(batch.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
     }
 
     pub(super) fn authorization(&self) -> Zeroizing<String> {

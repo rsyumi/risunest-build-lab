@@ -167,6 +167,10 @@ export class ExternalStorageBridge {
 
 
 
+    setTransferConcurrency(connectionId: string, value: number): Promise<void> {
+        return this.native('external_storage_set_transfer_concurrency', { connectionId, value })
+    }
+
     setRetentionPolicy(connectionId: string, policy: ExternalRetentionPolicy): Promise<void> {
         return this.native('external_storage_set_retention_policy', { connectionId, policy })
     }

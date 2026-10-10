@@ -868,7 +868,7 @@ fn google_project_number(client_id: &str) -> Option<&str> {
     .then_some(project)
 }
 
-pub(crate) fn connection_root(app: &AppHandle) -> Result<PathBuf> {
+pub(crate) fn connection_root<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
     runtime::root(app)
 }
 
@@ -2153,21 +2153,28 @@ pub(crate) async fn open_connected(
     open_connected_with_cancel(app, connection_id, &Cancellation::default()).await
 }
 
-pub(crate) async fn open_connected_with_cancel(
-    app: &AppHandle,
+pub(crate) async fn open_connected_with_cancel<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     connection_id: &str,
     cancel: &Cancellation,
 ) -> Result<ConnectedRepository> {
     cancel.check()?;
     let root = connection_root(app)?;
     let mut stored = ConnectionStore::open(&root)?.read(connection_id)?;
-    let dependencies = connection::dependencies_for_config(&root, &stored.config)?;
-    let root_key = read_root_key(
-        secrets::repository_key_vault(&root).as_ref(),
-        &stored.root_key_ref,
-    )
-    .await?;
-    let provider = connection::provider_for(&stored.config, dependencies.clone())?;
+    let load = async {
+        let dependencies = connection::dependencies_for_config(&root, &stored.config)?;
+        let root_key = read_root_key(secrets::repository_key_vault(&root).as_ref(), &stored.root_key_ref).await?;
+        let provider = connection::provider_for(&stored.config, dependencies.clone())?;
+        Ok::<_, ProviderError>((dependencies, root_key, provider))
+    };
+    #[cfg(test)]
+    let (dependencies, root_key, provider): (Dependencies, Zeroizing<[u8; 32]>, Arc<dyn Provider>) = match super::transfer_factory_tests::inputs(&root, connection_id) {
+        Some(inputs) => { drop(load); (inputs.dependencies, inputs.root_key, inputs.provider) },
+        None => load.await?,
+    };
+    #[cfg(not(test))]
+    let (dependencies, root_key, provider) = load.await?;
+    let provider = super::transfer_limit::wrap(&root, connection_id, provider)?;
     let (handle, capabilities) = provider
         .open_repository(
             &stored.config,
@@ -2202,6 +2209,15 @@ pub(crate) async fn open_connected_with_cancel(
         dependencies,
         root_key,
     })
+}
+
+#[tauri::command]
+pub(crate) fn external_storage_set_transfer_concurrency(app: AppHandle, connection_id: String, value: usize) -> Result<()> {
+    logged("external_storage_set_transfer_concurrency", (|| {
+        let cleanup_state = app.state::<ConnectionCommandState>();
+        let _cleanup_guard = cleanup_state.admit()?;
+        super::transfer_limit::set_limit(&connection_root(&app)?, &connection_id, value)
+    })())
 }
 
 #[tauri::command]
@@ -2241,8 +2257,9 @@ pub(crate) async fn external_storage_remove_connection(
         pds.external_prepare_connection_removal(&connection_id)
             .map_err(runtime::local_error)?;
         drop(pds);
+        super::lww_commands::invalidate_connection_cache(&connection_id).await?;
         runtime::end_removed_connection_jobs(&root, &connection_id)?;
-        let mut store = ConnectionStore::open(&root)?;
+        let store = ConnectionStore::open(&root)?;
         let stored = store.read(&connection_id)?;
         runtime::native_store(&app)?
             .external_lww_forget_target(&format!(
@@ -2259,7 +2276,7 @@ pub(crate) async fn external_storage_remove_connection(
         secrets::repository_key_vault(&root)
             .remove(&SecretRef(stored.recovery_key_ref.clone()))
             .await?;
-        store.remove(&connection_id)?;
+        super::transfer_limit::remove_connection(&root, &connection_id)?;
         // Sources left behind count as unavailable, because their connection is gone.
         let forgotten = runtime::native_store(&app).and_then(|pds| {
             pds.forget_external_connection_bodies(&connection_id).map_err(|error| runtime::local_error(error.code))
@@ -2700,7 +2717,7 @@ mod tests {
             credential_ref: "credential".into(),
             root_key_ref: "root-key".into(),
             recovery_key_ref: "recovery-key".into(),
-            retention_policy: None,
+            retention_policy: None, transfer_concurrency: None,
             capabilities: super::super::fake::capabilities(false),
             created_at_ms: 1,
             verified_at_ms: 1,
@@ -2794,7 +2811,7 @@ mod tests {
             credential_ref: "not-exported".into(),
             root_key_ref: "not-exported".into(),
             recovery_key_ref: "not-exported-recovery".into(),
-            retention_policy: None,
+            retention_policy: None, transfer_concurrency: None,
             capabilities: super::super::fake::capabilities(false),
             created_at_ms: 1,
             verified_at_ms: 1,
@@ -2949,7 +2966,7 @@ mod tests {
             credential_ref: "old".into(), root_key_ref: "root".into(), recovery_key_ref: "recovery".into(),
             capabilities: super::super::fake::capabilities(false), created_at_ms: 1,
             verified_at_ms: 1,
-            last_sync_at_ms: None, last_backup_at_ms: None, retention_policy: None,
+            last_sync_at_ms: None, last_backup_at_ms: None, retention_policy: None, transfer_concurrency: None,
         }
     }
 

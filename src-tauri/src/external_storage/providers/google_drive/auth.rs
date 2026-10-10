@@ -13,7 +13,10 @@ use crate::external_storage::{
     quota::AccountKey,
 };
 use serde::Deserialize;
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, OnceLock, Weak},
+};
 use zeroize::Zeroizing;
 
 /// A token is refreshed this far before its stated expiry.
@@ -282,20 +285,40 @@ async fn account_id(
     Ok(permission_id)
 }
 
-/// Returns a usable access token, refreshing and persisting rotation when the
-/// cached and stored tokens are expired or `force_refresh` is set.
+// Vault instances can differ across handles; the opaque reference identifies
+// the credential. The registry shares only exclusion, never token material.
+fn refresh_lock(secret: &SecretRef) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS.get_or_init(|| Mutex::new(BTreeMap::new())).lock().unwrap();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&secret.0).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(secret.0.clone(), Arc::downgrade(&lock));
+    lock
+}
+
+/// Returns a usable token, persisting rotation before publishing the cache.
+/// A rejected token is refreshed only if another request has not replaced it.
 pub(super) async fn access_token(
     dependencies: &Dependencies,
     settings: &Settings,
     secret: &SecretRef,
     account: &AccountKey,
     cache: &Mutex<Option<CachedToken>>,
-    force_refresh: bool,
+    rejected: Option<&str>,
     cancel: &Cancellation,
 ) -> Result<Zeroizing<String>> {
+    let lock = refresh_lock(secret);
+    let _guard = tokio::select! {
+        _ = cancel.cancelled() => return Err(ProviderError::new(ErrorKind::Cancelled)),
+        guard = lock.lock() => guard,
+    };
+    cancel.check()?;
     let now_ms = dependencies.clock.now_ms();
     let fresh = |expires_at_ms: u64| expires_at_ms > now_ms.saturating_add(EXPIRY_SKEW_MS);
-    if !force_refresh {
+    if rejected.is_none() {
         let cached = cache
             .lock()
             .unwrap()
@@ -307,17 +330,14 @@ pub(super) async fn access_token(
         }
     }
     let payload = decode(&dependencies.vault.read(secret).await?)?;
-    if !force_refresh {
-        if let (Some(access), Some(expires_at_ms)) = (&payload.access_token, payload.expires_at_ms)
-        {
-            if fresh(expires_at_ms) {
-                let token = CachedToken {
-                    access: Zeroizing::new(access.to_string()),
-                    expires_at_ms,
-                };
-                *cache.lock().unwrap() = Some(token.duplicate());
-                return Ok(token.access);
-            }
+    if let (Some(access), Some(expires_at_ms)) = (&payload.access_token, payload.expires_at_ms) {
+        if fresh(expires_at_ms) && rejected != Some(access.as_str()) {
+            let token = CachedToken {
+                access: Zeroizing::new(access.to_string()),
+                expires_at_ms,
+            };
+            *cache.lock().unwrap() = Some(token.duplicate());
+            return Ok(token.access);
         }
     }
     let mut refresh_form = vec![

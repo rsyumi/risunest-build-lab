@@ -71,6 +71,16 @@ function destinations(state: ExternalStorageState): ExternalScheduledDestination
     return result
 }
 
+function recoverVerifiedConnections(current: ProductionRuntime, state: ExternalStorageState): void {
+    for (const connection of state.connections) {
+        const previous = current.state.connections.find(item => item.id === connection.id)
+        if (connection.lastVerifiedAtMs !== undefined
+            && connection.lastVerifiedAtMs !== previous?.lastVerifiedAtMs) {
+            current.scheduler.recovered(connection.id)
+        }
+    }
+}
+
 async function refreshForeground(current: ProductionRuntime): Promise<void> {
     const bridge = getExternalStorageBridge()
     if (!hasMobileBackgroundTasks()) {
@@ -78,6 +88,7 @@ async function refreshForeground(current: ProductionRuntime): Promise<void> {
         await bridge.setExecutionSession(current.session)
     }
     const state = await bridge.getState()
+    recoverVerifiedConnections(current, state)
     current.state = state
     current.controller.replaceState(state)
     await refreshExternalLwwAdapters(state)
@@ -225,6 +236,7 @@ export async function refreshExternalStorageProductionState(): Promise<void> {
         return
     }
     const state = await getExternalStorageBridge().getState()
+    recoverVerifiedConnections(current, state)
     current.state = state
     current.controller.replaceState(state)
     await refreshExternalLwwAdapters(state)

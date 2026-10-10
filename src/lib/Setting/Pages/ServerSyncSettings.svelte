@@ -20,7 +20,6 @@
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingButton from '../RisuNest/SettingButton.svelte'
     import TransferProgress from '../RisuNest/TransferProgress.svelte'
-    import TransferSpeed from '../RisuNest/TransferSpeed.svelte'
     import SettingNotice from '../RisuNest/SettingNotice.svelte'
     import StatusBadge from '../RisuNest/StatusBadge.svelte'
 
@@ -321,13 +320,12 @@
                 done={summary?.complete}
                 activity={summary && !summary.complete ? (progress.detail ? `${progress.label} · ${progress.detail}` : progress.label) : ''}
                 stages={progress.stages} counters={progress.counters} detailsLabel={copy.details}
-                collapsible={!!summary} bind:open={detailsOpen}>
-                {#snippet speed()}
-                    {#if view.progress?.network && view.progress.pausedAt === undefined && !view.paused && view.progress.active.some(stage => stage !== 'applying' && stage !== 'refreshing')}
-                        <TransferSpeed sample={view.progress.network} uploadLabel={copy.uploadSpeed} downloadLabel={copy.downloadSpeed} />
-                    {/if}
-                {/snippet}
-            </TransferProgress>
+                collapsible={!!summary} bind:open={detailsOpen}
+                speed={view.progress?.network ? {
+                    sample: view.progress.network,
+                    active: view.progress.pausedAt === undefined && !view.paused && view.progress.active.some(stage => stage !== 'applying' && stage !== 'refreshing'),
+                    uploadLabel: copy.uploadSpeed, downloadLabel: copy.downloadSpeed,
+                } : undefined} />
         </div>
     {/if}
 {/snippet}

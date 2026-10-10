@@ -190,6 +190,7 @@ impl Drop for Guard {
 }
 struct ObservedProvider { provider: Arc<dyn Provider>, observer: Observer }
 impl Provider for ObservedProvider {
+    fn transfer_concurrency(&self) -> usize { self.provider.transfer_concurrency() }
     fn progress_stage(&self, stage: &'static str) {
         if let Some(run) = self.observer.current() { run.update(stage, |_| {}, true); }
     }
@@ -387,3 +388,7 @@ mod tests {
         assert_eq!(observer.current().unwrap().reading.lock().unwrap().network_received, 4);
     }
 }
+
+#[cfg(test)]
+#[path = "transfer_progress_tests.rs"]
+mod transfer_progress_tests;

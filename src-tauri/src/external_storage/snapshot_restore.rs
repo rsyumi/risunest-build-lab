@@ -23,6 +23,7 @@ use risunest_external_storage_format::{
 };
 use sha2::{Digest, Sha256};
 use rusqlite::OptionalExtension;
+use futures::{FutureExt, StreamExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
@@ -419,6 +420,62 @@ async fn download_ciphertext(
     Ok(destination)
 }
 
+/// A bounded batch shares each ciphertext destination, including duplicate references.
+/// Only the owner opens plaintext or advances durable placement state.
+fn stage_ciphertexts<'a>(
+    objects: &[&'a RemoteObject], staging_root: &'a Path, provider: &'a dyn Provider,
+    repository: &'a RepositoryHandle, durability: Durability, cancel: &'a Cancellation,
+) -> Result<impl futures::Stream<Item = (&'a RemoteObject, Result<Option<PathBuf>>)> + 'a> {
+    let downloads = staging_root.join("downloads");
+    ensure_directory(&downloads)?;
+    let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut destinations = BTreeMap::new();
+    let mut pending = Vec::with_capacity(objects.len());
+    for &object in objects {
+        let transfer = if let Some((previous, transfer)) = destinations.get(&object.ciphertext_sha256) {
+            if *previous != object { return Err(corrupt("conflicting ciphertext destination")); }
+            futures::future::Shared::clone(transfer)
+        } else {
+            let downloads = downloads.clone();
+            let stopped = stopped.clone();
+            let transfer = async move {
+                cancel.check()?;
+                if stopped.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(ProviderError::new(ErrorKind::Cancelled));
+                }
+                let result = async {
+                    let plaintext = staging_root.join("plaintext").join(&object.plaintext_sha256);
+                    if verify(&plaintext, object.plaintext_length, &object.plaintext_sha256)? {
+                        return Ok(None);
+                    }
+                    download_ciphertext(object, &downloads, provider, repository, durability, cancel).await.map(Some)
+                }.await;
+                if result.is_err() { stopped.store(true, std::sync::atomic::Ordering::Release); }
+                result
+            }.boxed().shared();
+            destinations.insert(object.ciphertext_sha256.clone(), (object, transfer.clone()));
+            transfer
+        };
+        pending.push(async move { (object, transfer.await) });
+    }
+    Ok(futures::stream::iter(pending).buffered(objects.len().max(1)))
+}
+
+async fn open_staged_object(
+    object: &RemoteObject, root_key: &[u8; 32], staging_root: &Path,
+    ciphertext: Option<PathBuf>, durability: Durability, progress: Option<&PhaseProgress>,
+) -> Result<PathBuf> {
+    let plaintext = staging_root.join("plaintext");
+    ensure_directory(&plaintext)?;
+    let destination = plaintext.join(&object.plaintext_sha256);
+    if verify(&destination, object.plaintext_length, &object.plaintext_sha256)? {
+        return Ok(destination);
+    }
+    if destination.exists() { fs::remove_file(&destination).map_err(transient)?; }
+    let ciphertext = ciphertext.ok_or_else(|| corrupt("staged ciphertext is missing"))?;
+    decrypt_object(object, root_key, &plaintext, &destination, &ciphertext, durability, progress).await
+}
+
 pub(super) async fn open_object(
     object: &RemoteObject,
     root_key: &[u8; 32],
@@ -470,6 +527,13 @@ async fn open_object_with(
         fs::remove_file(&destination).map_err(transient)?;
     }
     let ciphertext = download_ciphertext(object, &downloads, provider, repository, durability, cancel).await?;
+    decrypt_object(object, root_key, &plaintext, &destination, &ciphertext, durability, progress).await
+}
+
+async fn decrypt_object(
+    object: &RemoteObject, root_key: &[u8; 32], plaintext: &Path, destination: &Path,
+    ciphertext: &Path, durability: Durability, progress: Option<&PhaseProgress>,
+) -> Result<PathBuf> {
     let partial = plaintext.join(format!("{}.partial", object.plaintext_sha256));
     if partial.exists() {
         fs::remove_file(&partial).map_err(transient)?;
@@ -477,7 +541,7 @@ async fn open_object_with(
     let object_copy = object.clone();
     let repository_id = object.repository_id.clone();
     let root = *root_key;
-    let cipher_path = ciphertext.clone();
+    let cipher_path = ciphertext.to_owned();
     let partial_path = partial.clone();
     let cpu = cpu_permit().await?;
     spawn_blocking(move || {
@@ -544,7 +608,7 @@ async fn open_object_with(
     if let Some(progress) = progress {
         progress.found_completed(object.receipt.byte_length);
     }
-    Ok(destination)
+    Ok(destination.to_owned())
 }
 
 /// Removes what one opened object left behind. A check proves a body and has
@@ -784,13 +848,23 @@ async fn open_packs(
     cancel: &Cancellation,
 ) -> Result<BTreeMap<String, PathBuf>> {
     let mut paths = BTreeMap::new();
-    for (id, pack) in packs {
-        cancel.check()?;
-        paths.insert(
-            id.clone(),
-            open_object(pack, root_key, staging_root, provider, repository, cancel).await?,
-        );
-        progress.completed(pack.receipt.byte_length);
+    let mut pending = packs.iter().peekable();
+    while pending.peek().is_some() {
+        let batch: Vec<_> = pending.by_ref().take(provider.transfer_concurrency()).collect();
+        let objects: Vec<_> = batch.iter().map(|(_, object)| *object).collect();
+        let mut downloads = stage_ciphertexts(&objects, staging_root, provider, repository, Durability::Durable, cancel)?;
+        let mut identities = batch.iter();
+        while let Some((pack, ciphertext)) = downloads.next().await {
+            let id = identities.next().ok_or_else(|| corrupt("download identity missing"))?.0;
+            let path = open_staged_object(pack, root_key, staging_root, ciphertext?, Durability::Durable, None).await?;
+            let cipher = staging_root.join("downloads").join(format!("{}.cipher", pack.ciphertext_sha256));
+            match fs::remove_file(cipher) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(transient(error)),
+                _ => {}
+            }
+            paths.insert(id.clone(), path);
+            progress.completed(pack.receipt.byte_length);
+        }
     }
     Ok(paths)
 }
@@ -1435,65 +1509,75 @@ async fn run_turnover(
         touched: BTreeSet::new(),
     });
     let turned = async {
-        for (id, pack) in order.iter().zip(&required) {
-            cancel.check()?;
-            if marker_path(staging_root, id)?.is_file() {
-                progress.completed(pack.receipt.byte_length);
-                continue;
-            }
-            let plaintext =
-                open_object_with(pack, root_key, staging_root, provider, repository, durability, None, cancel).await?;
-            #[cfg(test)]
-            record_turnover(staging_root, &required);
-            // Decrypting was all the ciphertext was for.
-            match fs::remove_file(
-                staging_root
-                    .join("downloads")
-                    .join(format!("{}.cipher", pack.ciphertext_sha256)),
-            ) {
-                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(transient(error));
+        let mut remaining = order.iter().zip(&required).peekable();
+        while remaining.peek().is_some() {
+            let mut batch = Vec::new();
+            for (id, pack) in remaining.by_ref().take(provider.transfer_concurrency()) {
+                cancel.check()?;
+                if marker_path(staging_root, id)?.is_file() {
+                    progress.completed(pack.receipt.byte_length);
+                } else {
+                    batch.push((id, pack));
                 }
-                _ => {}
             }
-            let place_root = staging_root.to_path_buf();
-            let place_id = id.clone();
-            let place_pending = pending.clone();
-            let place_users = users.remove(id).unwrap_or_default();
-            let mut place_content = content.take().ok_or_else(|| transient("content store"))?;
-            let mut place_group = group.take().ok_or_else(|| transient("placed group"))?;
-            let plaintext_length = pack.plaintext_length;
-            let cpu = cpu_permit().await?;
-            let (returned_content, returned_group, placed) = spawn_blocking(move || {
-                let placed = place_pack(
-                    &place_root,
-                    &place_id,
-                    &plaintext,
-                    &place_pending,
-                    &place_users,
-                    &mut place_content,
-                    &mut place_group.touched,
-                )
-                .and_then(|()| {
-                    place_group.packs.push(place_id);
-                    place_group.bytes = place_group.bytes.saturating_add(plaintext_length);
-                    if place_group.full() {
-                        place_group.flush(&place_root, &mut place_content)?;
+            let objects: Vec<_> = batch.iter().map(|(_, pack)| *pack).collect();
+            let mut downloads = stage_ciphertexts(&objects, staging_root, provider, repository, durability, cancel)?;
+            let mut identities = batch.iter();
+            while let Some((pack, ciphertext)) = downloads.next().await {
+                let id = identities.next().ok_or_else(|| corrupt("download identity missing"))?.0;
+                let plaintext = open_staged_object(pack, root_key, staging_root, ciphertext?, durability, None).await?;
+                #[cfg(test)]
+                record_turnover(staging_root, &required);
+                // Decrypting was all the ciphertext was for.
+                match fs::remove_file(
+                    staging_root
+                        .join("downloads")
+                        .join(format!("{}.cipher", pack.ciphertext_sha256)),
+                ) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(transient(error));
                     }
-                    Ok(())
-                });
-                (place_content, place_group, placed)
-            })
-            .await
-            .map_err(transient)?;
-            drop(cpu);
-            content = Some(returned_content);
-            group = Some(returned_group);
-            placed?;
-            discard_object(staging_root, pack);
-            #[cfg(test)]
-            record_turnover(staging_root, &required);
-            progress.completed(pack.receipt.byte_length);
+                    _ => {}
+                }
+                let place_root = staging_root.to_path_buf();
+                let place_id = id.clone();
+                let place_pending = pending.clone();
+                let place_users = users.remove(id).unwrap_or_default();
+                let mut place_content = content.take().ok_or_else(|| transient("content store"))?;
+                let mut place_group = group.take().ok_or_else(|| transient("placed group"))?;
+                let plaintext_length = pack.plaintext_length;
+                let cpu = cpu_permit().await?;
+                let (returned_content, returned_group, placed) = spawn_blocking(move || {
+                    let placed = place_pack(
+                        &place_root,
+                        &place_id,
+                        &plaintext,
+                        &place_pending,
+                        &place_users,
+                        &mut place_content,
+                        &mut place_group.touched,
+                    )
+                    .and_then(|()| {
+                        place_group.packs.push(place_id);
+                        place_group.bytes = place_group.bytes.saturating_add(plaintext_length);
+                        if place_group.full() {
+                            place_group.flush(&place_root, &mut place_content)?;
+                        }
+                        Ok(())
+                    });
+                    (place_content, place_group, placed)
+                })
+                .await
+                .map_err(transient)?;
+                drop(cpu);
+                content = Some(returned_content);
+                group = Some(returned_group);
+                placed?;
+                discard_object(staging_root, pack);
+                #[cfg(test)]
+                record_turnover(staging_root, &required);
+                progress.completed(pack.receipt.byte_length);
+            }
         }
         Ok(())
     }
@@ -2032,7 +2116,13 @@ async fn download_packed_body_files_with<O:std::borrow::Borrow<wire::StoredObjec
     }
     let content=(durability==Durability::Durable).then(||content_store(staging_root)).transpose()?;
     let mut plan=resolve_entries_in(entries,staging_root,content.as_ref(),None,cancel)?;
-    for resolved in &mut plan {resolved.destination=Some(staging_root.join(format!("{}.payload",resolved.digest)));}
+    for resolved in &mut plan {
+        let destination=staging_root.join(format!("{}.payload",resolved.digest));
+        if resolved.source.is_none() && verify(&destination,resolved.entry.byte_length,&resolved.digest)? {
+            resolved.source=Some(ObjectSource::File(destination.clone()));
+        }
+        resolved.destination=Some(destination);
+    }
     let (_,objects)=turn_over_packs_with(plan,&packs,root_key,staging_root,provider,repository,&PhaseProgress::silent(),durability,cancel).await?;
     objects.into_iter().map(|(hash,object)|match object.source {ObjectSource::File(path)=>Ok((hash,path)),_=>Err(corrupt("body source"))}).collect()
 }
@@ -2055,6 +2145,7 @@ pub(crate) async fn download_packed_body_file(
 pub(crate) struct RestoreBodyPlan {
     db: rusqlite::Connection,
     directory: PathBuf,
+    staged: std::collections::VecDeque<(RemoteObject, Result<Option<PathBuf>>)>,
 }
 impl RestoreBodyPlan {
     pub(crate) fn new(directory: &Path) -> Result<Self> {
@@ -2077,7 +2168,7 @@ impl RestoreBodyPlan {
             CREATE INDEX IF NOT EXISTS pack_chunks ON chunks(pack,done,hash,ordinal);
             CREATE TABLE IF NOT EXISTS seen(hash TEXT PRIMARY KEY); BEGIN IMMEDIATE;
             DELETE FROM seen").map_err(transient)?;
-        Ok(Self {db,directory})
+        Ok(Self {db,directory,staged:Default::default()})
     }
     pub(crate) fn push<O:std::borrow::Borrow<wire::StoredObject>>(&self,source:&super::lww_residency::PackedSource<O>,priority:bool,repository:&RepositoryHandle)->Result<()> {
         super::lww_residency::validate_packed_source(source,repository)?;
@@ -2186,15 +2277,29 @@ impl RestoreBodyPlan {
         Ok((count,bytes))
     }
     pub(crate) async fn next_pack(&mut self,key:&[u8;32],provider:&dyn Provider,repository:&RepositoryHandle,progress:&PhaseProgress,cancel:&Cancellation)->Result<bool> {
-        let encoded:Option<String>=self.db.query_row("SELECT body FROM packs WHERE done=0 ORDER BY priority,id LIMIT 1",[],|row|row.get(0)).optional().map_err(transient)?;
-        let Some(encoded)=encoded else {
+        cancel.check()?;
+        if self.staged.is_empty() {
+            let packs = {
+                let mut query=self.db.prepare("SELECT body FROM packs WHERE done=0 ORDER BY priority,id LIMIT ?1").map_err(transient)?;
+                let rows=query.query_map([provider.transfer_concurrency() as i64],|row|row.get::<_,String>(0)).map_err(transient)?;
+                rows.map(|row|serde_json::from_str::<RemoteObject>(&row.map_err(transient)?).map_err(corrupt)).collect::<Result<Vec<_>>>()?
+            };
+            let objects:Vec<_>=packs.iter().collect();
+            let mut downloads=stage_ciphertexts(&objects,&self.directory,provider,repository,Durability::Durable,cancel)?;
+            while let Some((remote,result))=downloads.next().await {
+                self.staged.push_back((remote.clone(),result));
+            }
+        }
+        let Some((remote,ciphertext))=self.staged.pop_front() else {
             let remaining:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM bodies WHERE settled=0)",[],|row|row.get(0)).map_err(transient)?;
             if remaining {return Err(corrupt("restore bodies are incomplete"));}
             return Ok(false);
         };
-        let remote:RemoteObject=serde_json::from_str(&encoded).map_err(corrupt)?;
         cancel.check()?;
-        let path=open_object_with(&remote,key,&self.directory,provider,repository,Durability::Durable,None,cancel).await?;
+        let ciphertext=match ciphertext {Ok(path)=>path,Err(error)=>{self.staged.clear();return Err(error);}};
+        let path=match open_staged_object(&remote,key,&self.directory,ciphertext,Durability::Durable,None).await {
+            Ok(path)=>path,Err(error)=>{self.staged.clear();return Err(error);}
+        };
         let mut input=crate::trust_boundary::open_regular_source(&path).map_err(transient)?;
         let tx=self.db.transaction().map_err(transient)?;
         {
@@ -2806,6 +2911,10 @@ pub(crate) async fn download_snapshot(
         captured_by_device: document.captured_by_device,
     })
 }
+
+#[cfg(test)]
+#[path = "snapshot_download_tests.rs"]
+pub(super) mod download_tests;
 
 #[cfg(test)]
 mod tests {

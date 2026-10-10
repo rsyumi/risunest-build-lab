@@ -902,7 +902,7 @@ async fn connected_repository(fixture:&CycleFixture)->Result<Arc<crate::external
         stored:StoredConnection {id:fixture.sender.connection_id.clone(),config,descriptor:fixture.sender.descriptor.clone(),
             descriptor_locator:RemoteLocator {connection_identity:handle.connection_identity.clone(),collection:None,object:"descriptor".into()},
             provider_repository_id:handle.repository_id.clone(),credential_ref:"fixture".into(),root_key_ref:"fixture-key".into(),
-            recovery_key_ref:"fixture-recovery".into(),retention_policy:None,capabilities,
+            recovery_key_ref:"fixture-recovery".into(),retention_policy:None,transfer_concurrency:None,capabilities,
             created_at_ms:crate::external_storage::runtime::now_ms(),verified_at_ms:crate::external_storage::runtime::now_ms(),
             last_sync_at_ms:None,last_backup_at_ms:None},provider:fixture.provider.clone(),handle,dependencies,
         root_key:zeroize::Zeroizing::new(*fixture.sender.root_key)}))

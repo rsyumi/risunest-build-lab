@@ -254,6 +254,32 @@ impl Store {
         #[cfg(test)]
         let _observed = crate::source_observer::ingress(&self.root);
         Self::require_device(&*self.db()?, device)?;
+        for (digest, bytes) in objects {
+            #[cfg(test)]
+            let measured = std::time::Instant::now();
+            validate_hash(digest)?;
+            if bytes.len() > MAX_TARGET_BYTES || {
+                let actual = hash(bytes);
+                #[cfg(test)]
+                crate::source_observer::hashed(digest, "object-ingress-sha256", bytes.len());
+                actual != *digest
+            } {
+                return Err(Error::new("hash-mismatch", 400));
+            }
+            #[cfg(test)]
+            frame_metrics::record(1, measured);
+        }
+        self.put_hashed_objects(device, objects)
+    }
+
+    // Only immediate callers that computed identities from these unchanged bodies
+    // may enter here. Authorization and durable publication remain shared.
+    pub(super) fn put_hashed_objects(
+        &self,
+        device: &super::Device,
+        objects: &[(String, Vec<u8>)],
+    ) -> Result<()> {
+        Self::require_device(&*self.db()?, device)?;
         let staging = self.root.join("staging");
         check_path(&staging)?;
         let mut prepared = Vec::new();
@@ -274,19 +300,10 @@ impl Store {
             found
         };
         for (digest, bytes) in objects {
-            #[cfg(test)]
-            let measured = std::time::Instant::now();
             validate_hash(digest)?;
-            if bytes.len() > MAX_TARGET_BYTES || {
-                let actual = hash(bytes);
-                #[cfg(test)]
-                crate::source_observer::hashed(digest, "object-ingress-sha256", bytes.len());
-                actual != *digest
-            } {
+            if bytes.len() > MAX_TARGET_BYTES {
                 return Err(Error::new("hash-mismatch", 400));
             }
-            #[cfg(test)]
-            frame_metrics::record(1, measured);
             if bytes.len() <= SMALL_OBJECT_BYTES
                 && !(small_files.contains(digest.as_str())
                     && self.filed_body_differs(digest, bytes)?)
@@ -466,6 +483,98 @@ mod tests {
     use super::*;
 
     #[test]
+    fn validated_batch_rejects_mismatch_and_oversize_before_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::init(directory.path()).unwrap();
+        let registration = store.add_device().unwrap();
+        let device = super::super::Device {
+            id: registration.device_id,
+        };
+        let good = b"synthetic good".to_vec();
+        let digest = hash(&good);
+        for (bad_hash, bad_body) in [
+            (hash(b"other"), b"wrong bytes".to_vec()),
+            ("invalid".into(), vec![]),
+            (hash(b"oversized"), vec![0; MAX_TARGET_BYTES + 1]),
+        ] {
+            assert!(store
+                .put_objects(
+                    &device,
+                    &[(digest.clone(), good.clone()), (bad_hash, bad_body)]
+                )
+                .is_err());
+            assert!(store.object_size(&digest).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn frame_handoff_preserves_validation_retry_and_durable_mixed_storage() {
+        use risunest_sync_wire::{
+            delta,
+            transfer::{self, Frame},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::init(directory.path()).unwrap();
+        let registration = store.add_device().unwrap();
+        let device = super::super::Device {
+            id: registration.device_id,
+        };
+        let small = b"synthetic base".to_vec();
+        let large = vec![b'z'; SMALL_OBJECT_BYTES + 1];
+        let target = b"synthetic base changed".to_vec();
+        let recipe = delta::create(&[&small], &target).unwrap();
+        let mut bad_recipe = recipe.clone();
+        bad_recipe.target_hash = hash(b"wrong target");
+        let bad =
+            transfer::encode(&[Frame::Full(small.clone()), Frame::Delta(bad_recipe)]).unwrap();
+        assert!(store.receive_frames(&device, &bad).is_err());
+        assert!(store.object_size(&hash(&small)).unwrap().is_none());
+        let frames = [
+            Frame::Full(small.clone()),
+            Frame::Delta(recipe),
+            Frame::Full(large.clone()),
+        ];
+        let encoded = transfer::encode(&frames).unwrap();
+        let mut corrupt = encoded.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        assert!(store.receive_frames(&device, &corrupt).is_err());
+        assert!(store.object_size(&hash(&small)).unwrap().is_none());
+        let unknown = super::super::Device {
+            id: "missing-device".into(),
+        };
+        assert!(store.receive_frames(&unknown, &encoded).is_err());
+        assert!(store.object_size(&hash(&small)).unwrap().is_none());
+        store.db().unwrap().execute_batch("CREATE TRIGGER synthetic_frame_failure BEFORE INSERT ON small_objects BEGIN SELECT RAISE(ABORT,'synthetic body failure'); END").unwrap();
+        assert!(store.receive_frames(&device, &encoded).is_err());
+        for body in [&small, &target, &large] {
+            assert!(store.object_size(&hash(body)).unwrap().is_none());
+        }
+        assert_eq!(
+            store
+                .db()
+                .unwrap()
+                .query_row("SELECT count(*) FROM object_leases", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        store
+            .db()
+            .unwrap()
+            .execute_batch("DROP TRIGGER synthetic_frame_failure")
+            .unwrap();
+        let hashes = [&small, &target, &large].map(|body| hash(body));
+        for _ in 0..2 {
+            assert_eq!(store.receive_frames(&device, &encoded).unwrap(), hashes);
+        }
+        drop(store);
+        let store = Store::open(directory.path()).unwrap();
+        for (body, digest) in [&small, &target, &large].into_iter().zip(hashes) {
+            assert_eq!(&store.get_object(&digest).unwrap(), body);
+        }
+    }
+
+    #[test]
     fn frame_body_write_failure_leaves_no_metadata_or_lease() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::init(directory.path()).unwrap();
@@ -480,6 +589,12 @@ mod tests {
         // directory has to carry.
         let bytes = vec![b's'; SMALL_OBJECT_BYTES + 1];
         let digest = hash(&bytes);
+        let encoded =
+            risunest_sync_wire::transfer::encode(&[risunest_sync_wire::transfer::Frame::Full(
+                bytes.clone(),
+            )])
+            .unwrap();
+        assert!(store.receive_frames(&device, &encoded).is_err());
         assert!(store
             .put_objects(&device, &[(digest.clone(), bytes)])
             .is_err());

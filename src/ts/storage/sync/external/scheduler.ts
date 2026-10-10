@@ -20,6 +20,7 @@ export interface ExternalSchedulerDependencies {
     session(): ExternalExecutionSession
     maintenance?(): Array<{ connectionId: string; lastAttemptAt?: number }>
     now?(): number
+    wallNow?(): number
     setTimer?(callback: () => void, delay: number): unknown
     clearTimer?(timer: unknown): void
 }
@@ -47,7 +48,10 @@ export function createExternalStorageScheduler(
     let stopped = false
     let suspended = false
     const refusals = new Map<string, number>()
-    const now = dependencies.now ?? Date.now
+    const retryNotBefore = new Map<string, number>()
+    const blocked = new Set<string>()
+    const now = dependencies.now ?? (() => performance.now())
+    const wallNow = dependencies.wallNow ?? Date.now
     const setTimer = dependencies.setTimer
         ?? ((callback: () => void, delay: number): unknown => globalThis.setTimeout(callback, delay))
     const clearTimer = dependencies.clearTimer
@@ -74,7 +78,9 @@ export function createExternalStorageScheduler(
     const scheduleNext = (): void => {
         clear()
         if (stopped || suspended || !dependencies.available()) return
-        const next = Math.min(...[...pending.values()].map(item => item.dueAt),
+        const next = Math.min(...[...pending.entries()]
+            .filter(([key]) => !blocked.has(key) && !inFlight.has(key.slice(key.indexOf(':') + 1)))
+            .map(([key, item]) => Math.max(item.dueAt, retryNotBefore.get(key) ?? 0)),
             dependencies.maintenance ? maintenanceAt : Number.POSITIVE_INFINITY)
         if (!Number.isFinite(next)) return
         timer = setTimer(runDue, Math.max(0, next - now()))
@@ -102,10 +108,12 @@ export function createExternalStorageScheduler(
         const currentTime = now()
         const key = destinationKey(destination)
         const current = pending.get(key)
+        const deadline = currentTime + Math.max(5_000, Number(parsed) - wallNow())
+        retryNotBefore.set(key, Math.max(retryNotBefore.get(key) ?? 0, deadline))
         pending.set(key, {
             revision: current && current.revision > target ? current.revision : target,
             firstAt: current?.firstAt ?? currentTime,
-            dueAt: Math.max(currentTime + 5_000, Number(parsed)),
+            dueAt: deadline,
         })
         return true
     }
@@ -117,12 +125,14 @@ export function createExternalStorageScheduler(
             dependencies.destinations().map(destination => [destinationKey(destination), destination]),
         )
         for (const [key, item] of pending) {
-            if (item.dueAt > currentTime) continue
+            if (blocked.has(key) || item.dueAt > currentTime
+                || (retryNotBefore.get(key) ?? 0) > currentTime) continue
             const destination = destinations.get(key)
             if (!destination) {
                 pending.delete(key)
                 continue
             }
+            if (inFlight.has(destination.connectionId)) continue
             pending.delete(key)
             const request: ExternalControllerRequest = {
                 connectionId: destination.connectionId,
@@ -133,16 +143,27 @@ export function createExternalStorageScheduler(
             }
             started(destination.connectionId)
             void controller.request(request).then((result) => {
+                if (stopped) return
+                if (result.kind === 'complete') {
+                    const latest = pending.get(key)
+                    if (latest && latest.revision <= parseRevision(result.revision)) pending.delete(key)
+                }
                 if (result.kind !== 'blocked') {
                     refusals.delete(key)
                     return
                 }
-                if (result.error?.retryable === false) return
-                const causeKind = externalErrorKind('cause' in result ? result.cause : undefined) ?? result.reason
+                const stopRetry = () => { blocked.add(key) }
+                if (result.reason === 'publication-unknown' || result.error?.reason === 'publication-unknown') { stopRetry(); return }
+                const causeKind = result.error?.code ?? externalErrorKind('cause' in result ? result.cause : undefined) ?? result.reason
+                if (result.error?.retryable === false) {
+                    if (!['clockSkew', 'preconditionFailed'].includes(causeKind)) stopRetry()
+                    return
+                }
+                if (!result.error && causeKind === 'clockSkew') return
                 if (!result.error && ['endpointRejected', 'unauthorized', 'reauthRequired',
-                    'repositoryKeyUnavailable', 'deviceVaultUnavailable', 'clockSkew', 'storageFull',
+                    'repositoryKeyUnavailable', 'deviceVaultUnavailable', 'storageFull',
                     'localStorageFull', 'localPermissionDenied', 'unsupported', 'corrupt', 'notFound',
-                    'repositoryMismatch'].includes(causeKind)) return
+                    'repositoryMismatch'].includes(causeKind)) { stopRetry(); return }
                 if (!result.error && result.reason === 'preconditionFailed') {
                     const count = (refusals.get(key) ?? 0) + 1
                     refusals.set(key, count)
@@ -157,26 +178,32 @@ export function createExternalStorageScheduler(
                     scheduleNext()
                     return
                 }
-                if (result.error?.action === 'wait' || result.error?.action === 'reauthenticate'
+                if (result.error?.action === 'reauthenticate'
                     || result.error?.action === 'unlock-key'
-                    || result.error?.action === 'free-space'
-                    || result.reason === 'publication-unknown') return
+                    || result.error?.action === 'free-space') { stopRetry(); return }
+                if (result.error?.action === 'wait') return
                 merge(destination, item.revision)
                 scheduleNext()
-            }).finally(() => finished(destination.connectionId))
+            }).finally(() => {
+                finished(destination.connectionId)
+                runDue()
+            })
         }
         if (dependencies.maintenance && currentTime >= maintenanceAt) {
             maintenanceAt = currentTime + 60_000
             for (const candidate of dependencies.maintenance?.() ?? []) {
-                const last = Math.max(lastCleanup.get(candidate.connectionId) ?? -Infinity,
-                    candidate.lastAttemptAt ?? -Infinity)
-                if (currentTime - last < cleanupInterval || inFlight.has(candidate.connectionId)
+                if (currentTime - (lastCleanup.get(candidate.connectionId) ?? -Infinity) < cleanupInterval
+                    || wallNow() - (candidate.lastAttemptAt ?? -Infinity) < cleanupInterval
+                    || inFlight.has(candidate.connectionId)
                     || [...pending.keys()].some(key => key.endsWith(`:${candidate.connectionId}`))) continue
                 lastCleanup.set(candidate.connectionId, currentTime)
                 started(candidate.connectionId)
                 void controller.request({ connectionId: candidate.connectionId, kind: 'cleanup',
                     targetRevision: '0', reason: 'automatic', session: dependencies.session(),
-                }).finally(() => finished(candidate.connectionId))
+                }).finally(() => {
+                    finished(candidate.connectionId)
+                    runDue()
+                })
             }
         }
         scheduleNext()
@@ -197,6 +224,7 @@ export function createExternalStorageScheduler(
         ) {
             const target = parseRevision(value)
             const key = `${kind}:${connectionId}`
+            blocked.delete(key)
             const newer = pending.get(key)
             if (!newer || newer.revision <= target) pending.delete(key)
             scheduleNext()
@@ -209,10 +237,24 @@ export function createExternalStorageScheduler(
                 reason: 'manual',
                 session: dependencies.session(),
                 ...(backgroundTask ? { backgroundTask } : {}),
-            }).finally(() => finished(connectionId))
+            }).then(result => {
+                if (result.kind === 'complete') {
+                    const latest = pending.get(key)
+                    if (latest && latest.revision <= parseRevision(result.revision)) pending.delete(key)
+                }
+                return result
+            }).finally(() => {
+                finished(connectionId)
+                runDue()
+            })
         },
         resume(): void {
             suspended = false
+            scheduleNext()
+        },
+        recovered(connectionId: string): void {
+            blocked.delete(`backup:${connectionId}`)
+            refusals.delete(`backup:${connectionId}`)
             scheduleNext()
         },
         async suspend(

@@ -3,6 +3,9 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use risunest_external_storage_format::{crypto::derive_key, snapshot as wire};
 use crate::persistent_store::{content_capture::ContentCaptureSink, external_capture::CapturedSnapshot, sync_selection::CaptureIdentity};
 use std::{collections::{BTreeMap,BTreeSet}, io::Cursor, path::Path};
+#[cfg(test)]
+#[path = "lww_checkpoint_cache_tests.rs"]
+mod scheduling_cache_tests;
 
 #[cfg(test)]
 pub(crate) struct CompactionBarrier { pub reached:tokio::sync::Notify, pub resume:tokio::sync::Notify }
@@ -175,6 +178,14 @@ fn live_published_objects(state:&PublishedState,capture:&mut super::capture::Cap
 pub(crate) struct CheckpointSummaries {
     scope:String,
     classified:BTreeMap<ReceiptKey,Option<lww_checkpoint::CheckpointSummary>>,
+    revision:u64,
+}
+impl CheckpointSummaries {
+    pub(crate) fn invalidate(&mut self) {
+        self.revision=self.revision.wrapping_add(1);
+        self.scope.clear();
+        self.classified.clear();
+    }
 }
 type ReceiptKey=(String,Option<String>,String,u64,Option<String>);
 fn receipt_key(receipt:&ObjectReceipt)->ReceiptKey {
@@ -196,23 +207,30 @@ impl ExternalLwwEngine {
     /// Every published checkpoint's summary. Only a snapshot whose receipt
     /// `cache` has not classified is read.
     pub(crate) async fn checkpoint_summaries(&self,cache:&tokio::sync::Mutex<CheckpointSummaries>,cancel:&Cancellation)->Result<Vec<lww_checkpoint::CheckpointSummary>> {
-        let mut cache=cache.lock().await;
         let scope=format!("{}\n{}\n{}",self.target_scope(),self.repository.repository_id,self.descriptor.repository_id);
-        if cache.scope!=scope {*cache=CheckpointSummaries{scope,classified:BTreeMap::new()};}
+        let (revision,known)={
+            let mut cache=cache.lock().await;
+            cancel.check()?;
+            if cache.scope!=scope {cache.invalidate();cache.scope=scope.clone();}
+            cache.revision=cache.revision.wrapping_add(1);
+            (cache.revision,cache.classified.clone())
+        };
         let mut classified=BTreeMap::new();let mut output=Vec::new();
         for receipt in self.snapshot_receipts(cancel).await? {
             receipt.locator.validate_for(&self.repository)?;
             let key=receipt_key(&receipt);
             // An incomplete receipt is never answered from the cache, so it is refused.
-            let known=if receipt.complete {cache.classified.get(&key).cloned()} else {None};
-            let summary=match known {
+            let cached=if receipt.complete {known.get(&key).cloned()} else {None};
+            let summary=match cached {
                 Some(summary)=>summary,
                 None=>self.classified_checkpoint(&receipt,cancel).await?.map(|(_,checkpoint)|lww_checkpoint::CheckpointSummary::of(&checkpoint)),
             };
             output.extend(summary.clone());
             classified.insert(key,summary);
         }
-        cache.classified=classified;
+        cancel.check()?;
+        let mut cache=cache.lock().await;
+        if cache.scope==scope && cache.revision==revision {cache.classified=classified;}
         Ok(output)
     }
     pub(super) async fn refresh_packed_sources(&self,sources:&[super::lww_residency::PackedSource],directory:&Path,cancel:&Cancellation)->Result<Vec<super::lww_residency::PackedSource>> {

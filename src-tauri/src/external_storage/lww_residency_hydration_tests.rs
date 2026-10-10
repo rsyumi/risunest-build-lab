@@ -183,6 +183,7 @@ fn received(publications: &[usize]) -> Received {
         root_key_ref: "key".into(),
         recovery_key_ref: "recovery".into(),
         retention_policy: None,
+        transfer_concurrency: None,
         capabilities: f.receiver.capabilities.clone(),
         created_at_ms: 1,
         verified_at_ms: 1,

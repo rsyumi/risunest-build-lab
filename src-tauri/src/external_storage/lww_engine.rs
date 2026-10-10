@@ -32,6 +32,10 @@ use tokio::task::spawn_blocking;
 
 /// The largest listing page every provider accepts.
 pub(crate) const LISTING_PAGE: u16 = 1000;
+const RECEIVE_SEGMENT_LIMIT: usize = 4;
+#[cfg(test)]
+#[path = "lww_scheduling_tests.rs"]
+mod scheduling_tests;
 /// Providers name a locator's collection after a role folder or a release tag.
 pub(crate) const MAX_LOCATOR_COLLECTION_BYTES: usize = 128;
 /// JSON bytes of changes in one receive page. One change is far smaller, and
@@ -442,6 +446,12 @@ impl Admission {
             .checked_add(elapsed)
             .ok_or_else(segment::corrupt)
     }
+    #[cfg(test)]
+    pub(crate) fn age_for_test(&mut self, elapsed: Duration) {
+        self.at -= elapsed;
+        self.wall_ms -= elapsed.as_millis() as u64;
+        self.upper_ms -= elapsed.as_millis() as u64;
+    }
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -449,6 +459,7 @@ pub(crate) struct PublicationResult {
     pub segments: DecimalU64,
     pub units: DecimalU64,
     pub bytes: DecimalU64,
+    pub more: bool,
 }
 impl Default for PublicationResult {
     fn default() -> Self {
@@ -456,6 +467,7 @@ impl Default for PublicationResult {
             segments: DecimalU64(0),
             units: DecimalU64(0),
             bytes: DecimalU64(0),
+            more: false,
         }
     }
 }
@@ -579,6 +591,7 @@ impl ExternalLwwEngine {
             expires_at_ms: state.expires_at_ms.map(DecimalU64),
         }
     }
+    #[cfg(test)]
     pub(crate) async fn publish(
         &mut self,
         store: &mut PersistentStore,
@@ -586,6 +599,19 @@ impl ExternalLwwEngine {
         generating: &[MessageLocator],
         cancel: &Cancellation,
     ) -> Result<PublicationResult> {
+        self.publish_limited(store, authority, generating, None, cancel).await
+    }
+    pub(crate) async fn publish_limited(
+        &mut self,
+        store: &mut PersistentStore,
+        authority: DecimalU64,
+        generating: &[MessageLocator],
+        turn_limit: Option<u32>,
+        cancel: &Cancellation,
+    ) -> Result<PublicationResult> {
+        if turn_limit == Some(0) {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
         #[cfg(test)]
         let key_operation = cycle_keys::Operation::start();
         let mut result = PublicationResult::default();
@@ -866,7 +892,11 @@ impl ExternalLwwEngine {
             result.segments.0 += completed.segments.0;
             result.units.0 += completed.units.0;
             result.bytes.0 += completed.bytes.0;
+            if turn_limit.is_some_and(|limit| result.segments.0 >= u64::from(limit)) {
+                break;
+            }
         }
+        result.more = !store.lww_read_outbox(authority, 1).map_err(store_error)?.entries.is_empty();
         #[cfg(test)]
         key_operation.finish();
         Ok(result)
@@ -983,6 +1013,8 @@ impl ExternalLwwEngine {
                 let mut journal=super::journal::TransferJournal::open(
                     &root.join("external-storage").join("lww-publications").join(&job.job_id).join("data"),job.clone(),
                 ).map_err(transient)?;
+                journal.set_spool_budget(super::runtime::spool_budget(&root, &job.job_id));
+                let _execution = journal.begin_spool_execution();
                 let sources=publication.controls.iter().map(|control|super::packaging::AssetCatalogSource {
                     content_hash:control.content_hash.clone(),byte_length:control.byte_length,
                     source:super::content_store::ObjectSource::File(control.source.clone()),
@@ -1005,6 +1037,8 @@ impl ExternalLwwEngine {
                     &root.join("external-storage").join("lww-publications").join(&job.job_id),
                     job.clone(),
                 ).map_err(transient)?;
+                journal.set_spool_budget(super::runtime::spool_budget(&root, &job.job_id));
+                let _execution = journal.begin_spool_execution();
                 let mut spools = Vec::new();
                 let mut sources = Vec::new();
                 for asset in publication.assets.iter().filter(|asset| asset.byte_length <= segment::SMALL_BODY_BYTES as u64) {
@@ -1052,77 +1086,90 @@ impl ExternalLwwEngine {
             || !publication.reused_assets.is_empty() || !publication.reused_control_catalogs.is_empty() {
             return Err(segment::corrupt());
         }
-        for index in 0..publication.bodies.len() {
-            if publication.bodies[index].complete {
-                continue;
-            }
-            let job = publication.asset_job.clone().ok_or_else(segment::corrupt)?;
-            let path = sealed_body_path(store.repository_root(), &job.job_id, &publication.bodies[index].object_id);
-            if publication.bodies[index].sha256.is_empty() {
-                let body = &publication.bodies[index];
-                let asset = publication.assets.iter().find(|asset| asset.content_hash == body.content_hash)
-                    .ok_or_else(segment::corrupt)?;
-                let (byte_length, sha256) = self.seal_frozen_standalone(store, asset, &job, &body.object_id, publication.authority, &path, cancel).await?;
-                publication.bodies[index].sha256 = sha256;
-                publication.bodies[index].byte_length = byte_length;
-                store.external_lww_persist(&publication, &sealed).map_err(store_error)?;
-            }
-            let body = publication.bodies[index].clone();
-            let source = super::transfer::SpoolSource::verified(&path, body.byte_length, &body.sha256)?;
-            let intent = ObjectIntent {
-                job_id: self.library.clone(),
-                repository_id: self.repository.repository_id.clone(),
-                object_id: body.object_id.clone(),
-                role: ObjectRole::Pack,
-                byte_length: body.byte_length,
-                sha256: body.sha256.clone(),
-            };
-            let mut finished = None;
-            if let Some(saved) = publication.bodies[index].resume.as_ref() {
-                // An earlier attempt may have finished without its answer, or
-                // its session may have moved on or expired.
-                let saved = Self::resume(saved);
-                match self.provider.reconcile_upload(&self.repository, &intent, Some(&saved), cancel).await? {
-                    UploadResolution::Complete(receipt) => finished = Some(receipt),
-                    UploadResolution::Resumable(state) => publication.bodies[index].resume = Some(Self::saved(state)),
-                    UploadResolution::RestartRequired => publication.bodies[index].resume = None,
-                    UploadResolution::Conflict => return Err(segment::corrupt()),
+        use futures::{stream::FuturesUnordered, StreamExt};
+        let mut next_body = 0;
+        while next_body < publication.bodies.len() {
+            let limit = self.provider.transfer_concurrency().max(1);
+            let end = (next_body + limit).min(publication.bodies.len());
+            let mut ready = Vec::new();
+            for index in next_body..end {
+                cancel.check()?;
+                if publication.bodies[index].complete { continue; }
+                let job = publication.asset_job.clone().ok_or_else(segment::corrupt)?;
+                let path = sealed_body_path(store.repository_root(), &job.job_id, &publication.bodies[index].object_id);
+                if publication.bodies[index].sha256.is_empty() {
+                    let body = &publication.bodies[index];
+                    let asset = publication.assets.iter().find(|asset| asset.content_hash == body.content_hash)
+                        .ok_or_else(segment::corrupt)?;
+                    let (byte_length, sha256) = self.seal_frozen_standalone(store, asset, &job, &body.object_id, publication.authority, &path, cancel).await?;
+                    publication.bodies[index].sha256 = sha256;
+                    publication.bodies[index].byte_length = byte_length;
+                    store.external_lww_persist(&publication, &sealed).map_err(store_error)?;
                 }
-                store
-                    .external_lww_persist(&publication, &sealed)
-                    .map_err(store_error)?;
-            }
-            let receipt = match finished {
-                Some(receipt) => receipt,
-                None => {
-                    if publication.bodies[index].resume.is_none() {
-                        publication.bodies[index].resume = self
-                            .provider
-                            .begin_upload(&self.repository, &intent, cancel)
-                            .await?
-                            .map(Self::saved);
-                        store
-                            .external_lww_persist(&publication, &sealed)
-                            .map_err(store_error)?;
+                let body = publication.bodies[index].clone();
+                let source = super::transfer::SpoolSource::verified(&path, body.byte_length, &body.sha256)?;
+                let intent = ObjectIntent {
+                    job_id: self.library.clone(),
+                    repository_id: self.repository.repository_id.clone(),
+                    object_id: body.object_id.clone(),
+                    role: ObjectRole::Pack,
+                    byte_length: body.byte_length,
+                    sha256: body.sha256.clone(),
+                };
+                let mut finished = None;
+                {
+                    let saved = publication.bodies[index].resume.as_ref().map(Self::resume);
+                    match self.provider.reconcile_upload(&self.repository, &intent, saved.as_ref(), cancel).await? {
+                        UploadResolution::Complete(receipt) => finished = Some(receipt),
+                        UploadResolution::Resumable(state) => publication.bodies[index].resume = Some(Self::saved(state)),
+                        UploadResolution::RestartRequired => publication.bodies[index].resume = None,
+                        UploadResolution::Conflict => return Err(segment::corrupt()),
                     }
-                    let resume = publication.bodies[index].resume.as_ref().map(Self::resume);
-                    self.provider
-                        .create_object(
-                            &self.repository,
-                            &intent,
-                            &source,
-                            resume.as_ref(),
-                            cancel,
-                        )
-                        .await?
+                    store
+                        .external_lww_persist(&publication, &sealed)
+                        .map_err(store_error)?;
                 }
-            };
-            Self::validate_receipt(&intent, &receipt)?;
-            publication.bodies[index].locator = Some(receipt.locator);
-            publication.bodies[index].complete = true;
-            store
-                .external_lww_persist(&publication, &sealed)
-                .map_err(store_error)?;
+                if let Some(receipt) = finished {
+                    Self::validate_receipt(&intent, &receipt)?;
+                    publication.bodies[index].locator = Some(receipt.locator);
+                    publication.bodies[index].complete = true;
+                    store.external_lww_persist(&publication, &sealed).map_err(store_error)?;
+                    continue;
+                }
+                if publication.bodies[index].resume.is_none() {
+                    publication.bodies[index].resume = self.provider
+                        .begin_upload(&self.repository, &intent, cancel).await?.map(Self::saved);
+                }
+                // The sealed identity and session are durable before dispatch,
+                // including providers whose uploads have no session state.
+                store.external_lww_persist(&publication, &sealed).map_err(store_error)?;
+                let resume = publication.bodies[index].resume.as_ref().map(Self::resume);
+                ready.push((index, intent, source, resume));
+            }
+            let mut active = FuturesUnordered::new();
+            for (index, intent, source, resume) in ready {
+                active.push(async move {
+                    let outcome = self.provider.create_object(&self.repository, &intent, &source,
+                        resume.as_ref(), cancel).await;
+                    (index, intent, outcome)
+                });
+            }
+            let mut failure = None;
+            while let Some((index, intent, outcome)) = active.next().await {
+                let settled = (|| -> Result<()> {
+                    let receipt = outcome?;
+                    Self::validate_receipt(&intent, &receipt)?;
+                    publication.bodies[index].locator = Some(receipt.locator);
+                    publication.bodies[index].complete = true;
+                    store.external_lww_persist(&publication, &sealed).map_err(store_error)?;
+                    Ok(())
+                })();
+                if let Err(error) = settled {
+                    if failure.is_none() { failure = Some(error); }
+                }
+            }
+            if let Some(error) = failure { return Err(error); }
+            next_body = end;
         }
         if !publication.sealed {
             let plain = URL_SAFE_NO_PAD
@@ -1936,6 +1983,16 @@ impl ExternalLwwEngine {
         checkpoints: &tokio::sync::Mutex<super::lww_compaction::CheckpointSummaries>,
         cancel: &Cancellation,
     ) -> Result<Vec<String>> {
+        self.receive_requests_limited(store, authority, checkpoints, RECEIVE_SEGMENT_LIMIT, cancel).await
+    }
+    async fn receive_requests_limited(
+        &self,
+        store: &mut PersistentStore,
+        authority: DecimalU64,
+        checkpoints: &tokio::sync::Mutex<super::lww_compaction::CheckpointSummaries>,
+        segment_limit: usize,
+        cancel: &Cancellation,
+    ) -> Result<Vec<String>> {
         let target = self.target_scope();
         store.external_lww_seed_activation(&target, authority).map_err(store_error)?;
         let progress=store.lww_receive_progress(authority).map_err(store_error)?;
@@ -1954,7 +2011,10 @@ impl ExternalLwwEngine {
         let upper=DecimalU64(self.admitted_upper()?.checked_add(300_000).ok_or_else(segment::corrupt)?);
         let mut offered = Vec::new();
         if !behind(&covered, &reachable(&current, &groups)) {
-            let reached = self.receive_segments(store, authority, &current, groups, upper, &mut offered, cancel).await?;
+            let (reached, stopped) = self.receive_segments(store, authority, &current, groups, upper, &mut offered, segment_limit, cancel).await?;
+            if stopped {
+                return Ok(offered);
+            }
             if !behind(&covered, &reached) {
                 store.external_lww_retain_receives(&target, &offered.iter().cloned().collect()).map_err(store_error)?;
                 return Ok(offered);
@@ -1978,12 +2038,14 @@ impl ExternalLwwEngine {
         groups: BTreeMap<(String, u64), (String, ObjectReceipt)>,
         upper: DecimalU64,
         offered: &mut Vec<String>,
+        segment_limit: usize,
         cancel: &Cancellation,
-    ) -> Result<BTreeMap<String, u64>> {
+    ) -> Result<(BTreeMap<String, u64>, bool)> {
         let target = self.target_scope();
         let mut prefixes = current.iter().map(|(writer, cursor)| (writer.clone(), cursor.0)).collect::<BTreeMap<_, _>>();
         let mut held = BTreeSet::new();
-        let mut received = false;
+        let mut received = 0;
+        let mut staged = 0;
         for ((writer, seq), (hash, receipt)) in groups {
             if held.contains(&writer) {
                 continue;
@@ -2015,6 +2077,7 @@ impl ExternalLwwEngine {
             store
                 .external_lww_record_seen(&target, &writer, seq, &hash, Some(&references))
                 .map_err(store_error)?;
+            let before = offered.len();
             let mut pages = PageWriter::new(
                 &target,
                 format!("external-receive-{}-{}-{}-{}", self.library, authority.0, writer, seq),
@@ -2028,12 +2091,16 @@ impl ExternalLwwEngine {
             }
             pages.finish(store, offered)?;
             prefixes.insert(writer, seq);
-            received = true;
+            received += 1;
+            staged += usize::from(offered.len() > before);
+            if staged >= segment_limit && !offered.is_empty() {
+                return Ok((prefixes, true));
+            }
         }
-        if !received && !held.is_empty() {
+        if received == 0 && !held.is_empty() {
             return Err(ProviderError::new(ErrorKind::ClockSkew));
         }
-        Ok(prefixes)
+        Ok((prefixes, false))
     }
     /// Receives the published state as one catalog when the segments cannot
     /// reach what the checkpoints cover. The first writer's pages carry the
@@ -2152,3 +2219,7 @@ impl ExternalLwwEngine {
         Ok(count)
     }
 }
+
+#[cfg(test)]
+#[path = "lww_upload_concurrency_tests.rs"]
+mod upload_concurrency_tests;

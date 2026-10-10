@@ -86,6 +86,19 @@ struct Context {
     turn:Mutex<super::lww_compaction::CompactionTurn>,
 }
 static CONTEXTS: OnceLock<Mutex<BTreeMap<String, Arc<Context>>>> = OnceLock::new();
+#[cfg(test)]
+#[path = "lww_scheduling_command_tests.rs"]
+mod scheduling_command_tests;
+pub(crate) async fn invalidate_connection_cache(id: &str) -> Result<()> {
+    let existing = CONTEXTS.get().map(|contexts| {
+        contexts.lock().map_err(runtime::local_error).map(|contexts| contexts.get(id).cloned())
+    }).transpose()?.flatten();
+    if let Some(context) = existing {
+        context.cancel.lock().map_err(runtime::local_error)?.cancel();
+        context.checkpoints.lock().await.invalidate();
+    }
+    Ok(())
+}
 fn context(id: &str) -> Result<Arc<Context>> {
     if id.is_empty() {
         return Err(lww_segment::corrupt());
@@ -167,7 +180,8 @@ async fn admit_clock(session: &mut Session) -> Result<()> {
             .ok_or_else(lww_segment::corrupt)?
             .requests;
         let mut sample =
-            requests.clock_sample_after(&engine.repository.account, session.fresh_after)?;
+            requests.clock_sample_after(&engine.repository.account, session.fresh_after)?
+                .filter(|sample| sample.observed_at.elapsed() <= std::time::Duration::from_secs(15 * 60));
         if sample.is_none() {
             session.fresh_after = Instant::now();
             engine
@@ -204,6 +218,16 @@ pub(crate) struct Request {
     pub generating: Vec<MessageLocator>,
     #[serde(default)]
     exit_target: Option<ExitTarget>,
+    #[serde(default)]
+    turn_limit: Option<u32>,
+}
+impl Request {
+    fn check_publish_limit(&self) -> Result<()> {
+        if self.turn_limit == Some(0) || (self.exit_target.is_some() && self.turn_limit.is_some()) {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        Ok(())
+    }
 }
 fn check(
     app: &AppHandle,
@@ -325,6 +349,7 @@ impl<'de> Deserialize<'de> for StageRequest {
                 },
                 generating: input.generating,
                 exit_target: None,
+                turn_limit: None,
             },
             inspection_id: input.inspection_id,
             target_id: input.target_id,
@@ -381,6 +406,7 @@ pub(crate) async fn external_lww_publish(
     webview: tauri::Webview, progress: Option<tauri::ipc::JavaScriptChannelId>,
 ) -> Result<PublicationResult> {
     logged("external_lww_publish", Box::pin(async move {
+        request.check_publish_limit()?;
         let state = app.state::<crate::persistent_store::PersistentStoreState>();
         let _operation = state.admit_renderer_operation().map_err(runtime::local_error)?;
         let context = context(&request.connection_id)?;
@@ -409,6 +435,7 @@ pub(crate) async fn external_lww_publish(
             &mut store,
             request.header.binding_authority,
             &request.generating,
+            request.turn_limit,
             cancel,
         )
         .await?;
@@ -477,9 +504,10 @@ async fn publish_round(
     store: &mut crate::persistent_store::PersistentStore,
     authority: risunest_sync_wire::stamp::DecimalU64,
     generating: &[MessageLocator],
+    turn_limit: Option<u32>,
     cancel: &Cancellation,
 ) -> Result<PublicationResult> {
-    let result = engine.publish(store, authority, generating, cancel).await?;
+    let result = engine.publish_limited(store, authority, generating, turn_limit, cancel).await?;
     if result.segments.0 > 0 {
         record_sync_round(engine);
     }
@@ -597,6 +625,7 @@ pub(crate) async fn external_lww_fence(
             .lock()
             .map_err(runtime::local_error)?
             .cancel();
+        context.checkpoints.lock().await.invalidate();
         let mut session = context.session.lock().await;
         session.cancel = Cancellation::default();
         let fenced = fence(&app, &connection_id, &mut session, new_device).await;
@@ -634,6 +663,7 @@ async fn fence(app: &AppHandle, id: &str, session: &mut Session, new_device: boo
 pub(crate) async fn external_lww_resume(connection_id: String) -> Result<()> {
     logged("external_lww_resume", async move {
         let context = context(&connection_id)?;
+        context.checkpoints.lock().await.invalidate();
         let mut session = context.session.lock().await;
         let cancel = Cancellation::default();
         *context.cancel.lock().map_err(runtime::local_error)? = cancel.clone();
@@ -674,6 +704,7 @@ impl<'de> Deserialize<'de> for NewDeviceRequest {
                 },
                 generating: input.generating,
                 exit_target: None,
+                turn_limit: None,
             },
             staging_id: input.staging_id,
         })
@@ -724,7 +755,7 @@ mod tests {
             recovery_key_ref: "synthetic-recovery".into(),
             capabilities: super::super::fake::capabilities(false),
             created_at_ms: 1, verified_at_ms: 1, last_sync_at_ms: None,
-            last_backup_at_ms: None, retention_policy: None,
+            last_backup_at_ms: None, retention_policy: None, transfer_concurrency: None,
         }
     }
 
@@ -959,7 +990,7 @@ mod tests {
             let last_sync = |root: &std::path::Path, id: &str| ConnectionStore::open(root).unwrap().read(id).unwrap().last_sync_at_ms;
             let cancel = Cancellation::default();
 
-            assert_eq!(publish_round(&mut f.sender, &mut f.a, DecimalU64(0), &[], &cancel).await.unwrap().segments.0, 0);
+            assert_eq!(publish_round(&mut f.sender, &mut f.a, DecimalU64(0), &[], None, &cancel).await.unwrap().segments.0, 0);
             assert_eq!(last_sync(f.directory_a.path(), "sender"), None);
             f.a.commit(&WorkingSetCommit {
                 expected_revision: f.a.revision().unwrap(),
@@ -968,7 +999,7 @@ mod tests {
                 }]),
                 ..Default::default()
             }).unwrap();
-            assert_eq!(publish_round(&mut f.sender, &mut f.a, DecimalU64(0), &[], &cancel).await.unwrap().segments.0, 1);
+            assert_eq!(publish_round(&mut f.sender, &mut f.a, DecimalU64(0), &[], None, &cancel).await.unwrap().segments.0, 1);
             assert!(last_sync(f.directory_a.path(), "sender").is_some());
 
             let mut queue = VecDeque::new();

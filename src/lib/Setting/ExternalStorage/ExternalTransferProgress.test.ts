@@ -57,6 +57,26 @@ describe('external storage shared panel', () => {
         run.finish('complete'); await tick()
         expect(target.querySelector('[data-transfer-speed]')).toBeNull()
     })
+    it('keeps the speed line inside the progress box, outside its live region, until the transfer finishes', async () => {
+        vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'performance'] })
+        await show()
+        const run = beginExternalProgress('synthetic', 'binding')
+        let report!: (reading: unknown) => void
+        native.invoke.mockImplementation(async (_name, { progress }) => { report = progress.onmessage })
+        await run.invoke('synthetic', {})
+        const reading = { sequence: 1, stage: 'downloading', preparedBytes: '0', uploadedBytes: '0', downloadedBytes: '0', uploadedObjects: '0', downloadedObjects: '0', network: { id: 'native', atMs: 0, sentBytes: '0', receivedBytes: '0', sending: false, receiving: true } }
+        report(reading); await tick()
+        const line = target.querySelector('[data-setting-progress] > :last-child')!
+        expect(line.closest('[role="status"]')).toBeNull()
+        expect(line.querySelector('[data-transfer-speed]')).toBeNull()
+        report({ ...reading, sequence: 2, network: { ...reading.network, atMs: 1000, receivedBytes: '1048576' } }); await tick()
+        expect(line.querySelector('[data-transfer-speed]')?.textContent).toContain('↓ 1.0 MiB/s')
+        run.stage('applying'); await tick()
+        expect(target.querySelector('[data-transfer-speed]')).toBeNull()
+        expect(line.isConnected).toBe(true)
+        run.finish('complete'); await tick()
+        expect(line.isConnected).toBe(false)
+    })
     it('observes an automatic operation started after mounting and keeps details collapsed', async () => {
         vi.useFakeTimers(); await show()
         const run = beginExternalProgress('synthetic', 'sync')

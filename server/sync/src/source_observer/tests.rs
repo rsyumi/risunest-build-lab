@@ -484,11 +484,11 @@ fn actual_fitting_full_and_delta_transfer_sha_domains_are_observed() {
     );
     assert_eq!(
         full.hash_domains["transfer-full-encode-sha256"].hash_bytes,
-        2 * file.len() as u64
+        file.len() as u64
     );
     assert_eq!(
         full.hash_domains["transfer-full-encode-sha256"].hash_calls,
-        2
+        1
     );
     conserved(&full);
     begin(
@@ -511,6 +511,8 @@ fn actual_fitting_full_and_delta_transfer_sha_domains_are_observed() {
         ingress.hash_domains["transfer-full-decode-sha256"].hash_bytes,
         inline.len() as u64
     );
+    assert_eq!(ingress.hash_domains["frame-ingress-sha256"].hash_calls, 1);
+    assert!(!ingress.hash_domains.contains_key("object-ingress-sha256"));
     conserved(&ingress);
 }
 
@@ -1173,4 +1175,79 @@ fn a_panicking_observer_test_does_not_poison_the_next_one() {
     assert!(failed.is_err());
     let _reset = Reset::new();
     assert!(active().is_none());
+}
+
+#[test]
+#[ignore = "runs in the isolated observer child"]
+fn sizing_does_not_hash_and_send_still_validates() {
+    let _reset = Reset::new();
+    let (root, _store, _device, inline, _) = seeded();
+    let digest = risunest_sync_wire::hash(&inline);
+    begin(
+        root.path(),
+        "sizing".into(),
+        "source".into(),
+        vec![role(&digest, &["Asset"])],
+    )
+    .unwrap();
+    let observed = operation(root.path());
+    let frames = [shared_wire::transfer::Frame::Full(inline.clone())];
+    for _ in 0..3 {
+        assert_eq!(
+            shared_wire::transfer::encoded_len(&frames).unwrap(),
+            inline.len() + 53
+        );
+    }
+    let sized = snapshot(false).unwrap();
+    assert!(sized.complete);
+    assert!(sized.hash_domains.is_empty());
+    let encoded = shared_wire::transfer::encode(&frames).unwrap();
+    assert_eq!(encoded.len(), inline.len() + 53);
+    drop(observed);
+    let sent = snapshot(true).unwrap();
+    assert!(sent.complete);
+    assert_eq!(
+        sent.hash_domains["transfer-full-encode-sha256"].hash_calls,
+        1
+    );
+    assert_eq!(
+        sent.hash_domains["transfer-full-encode-sha256"].hash_bytes,
+        inline.len() as u64
+    );
+    conserved(&sent);
+}
+
+#[test]
+#[ignore = "runs in the isolated observer child"]
+fn delta_ingress_reuses_only_the_immediate_materialized_identity() {
+    let _reset = Reset::new();
+    let (root, store, device, inline, _) = seeded();
+    let target = [inline.as_slice(), b" changed"].concat();
+    let digest = risunest_sync_wire::hash(&target);
+    let base_hash = risunest_sync_wire::hash(&inline);
+    let recipe = risunest_sync_wire::delta::create(&[&inline], &target).unwrap();
+    let encoded =
+        risunest_sync_wire::transfer::encode(&[risunest_sync_wire::transfer::Frame::Delta(recipe)])
+            .unwrap();
+    begin(
+        root.path(),
+        "delta-ingress".into(),
+        "ingress".into(),
+        vec![role(&digest, &["Control"]), role(&base_hash, &["Control"])],
+    )
+    .unwrap();
+    assert_eq!(
+        store.receive_frames(&device, &encoded).unwrap(),
+        std::slice::from_ref(&digest)
+    );
+    let received = snapshot(true).unwrap();
+    assert!(received.complete);
+    assert_eq!(received.hash_domains["frame-ingress-sha256"].hash_calls, 1);
+    assert_eq!(
+        received.hash_domains["frame-ingress-sha256"].hash_bytes,
+        target.len() as u64
+    );
+    assert!(!received.hash_domains.contains_key("object-ingress-sha256"));
+    conserved(&received);
+    assert_eq!(store.get_object(&digest).unwrap(), target);
 }

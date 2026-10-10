@@ -6,7 +6,9 @@ import { beginExternalProgress, clearExternalProgress } from 'src/ts/storage/syn
 const state = vi.hoisted(() => ({
     getState: vi.fn(),
     prepareHistoryDelete: vi.fn(),
-    syncNow: vi.fn(), bind: vi.fn(), unbind: vi.fn(),
+    syncNow: vi.fn(), bind: vi.fn(), unbind: vi.fn(), resume: vi.fn(), actionConfirm: vi.fn(),
+    stopped: new Set<string>(),
+    form: undefined as undefined | { onconnected: (result: unknown) => Promise<void> },
     failures: new Map<string, unknown>(), remedy: true,
     jobStarted: undefined as (() => void) | undefined,
     stopJobEvents: vi.fn(),
@@ -19,6 +21,7 @@ const state = vi.hoisted(() => ({
     removeRetainedPublication: vi.fn(),
     getQuota: vi.fn(),
     setRetentionPolicy: vi.fn(),
+    setTransferConcurrency: vi.fn(),
     listHistory: vi.fn(),
     listConflicts: vi.fn(),
     recheckConflict: vi.fn(),
@@ -40,9 +43,11 @@ vi.mock('qrcode', async importOriginal => {
     const actual = await importOriginal<{ default: typeof import('qrcode') }>()
     return { default: { ...actual.default, toDataURL: state.qrDataUrl } }
 })
-vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertNormal: vi.fn(), alertCheckboxConfirm: vi.fn() }))
-vi.mock('src/ts/storage/sync/external/lwwProduction', () => ({ requestExternalLwwNow: state.syncNow, supportsExternalLwwNewDevice: () => state.remedy, subscribeExternalLwwFailures(callback: (value: ReadonlyMap<string, unknown>) => void) { callback(new Map(state.failures)); return () => {} } }))
-vi.mock('src/ts/storage/sync/bindingRegistry', () => ({ bindSyncTarget: state.bind, unbindSyncTarget: state.unbind }))
+vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertNormal: vi.fn(), alertCheckboxConfirm: vi.fn(), alertActionConfirm: state.actionConfirm }))
+vi.mock('src/ts/storage/sync/external/lwwProduction', () => ({ requestExternalLwwNow: state.syncNow, isExternalLwwRunning: (id: string) => !state.stopped.has(id), supportsExternalLwwNewDevice: () => state.remedy, subscribeExternalLwwFailures(callback: (value: ReadonlyMap<string, unknown>) => void) { callback(new Map(state.failures)); return () => {} } }))
+vi.mock('src/ts/storage/sync/bindingRegistry', () => ({ bindSyncTarget: state.bind, unbindSyncTarget: state.unbind, resumeCurrentSyncBinding: state.resume }))
+// The form's own steps are covered by its tests; here it only reports a finished connection.
+vi.mock('./ConnectionForm.svelte', () => ({ default: (_anchor: unknown, props: { onconnected: (result: unknown) => Promise<void> }) => { state.form = props } }))
 vi.mock('src/ts/storage/sync/bindingNative', () => ({ createNativeSyncBindingBridge: () => ({ state: async () => state.binding }) }))
 vi.mock('src/lang', () => ({ language: { risuNest: { serverSync: { lastSuccess: 'Last sync' } }, lwwSync: { newDeviceAction: 'Connect as new device', clockBlocked: 'Correct the device clock and retry.', previousStorageUnavailable: 'The previous storage could not be reached.', downloadFailedNotConnected: 'The files could not be downloaded, so the connection was not made.' } } }))
 vi.mock('src/ts/storage/sync/serverAssetResidency', () => ({ countConnectionOnlyAssets: state.connectionOnly, downloadRemoteAssets: state.downloadRemote }))
@@ -72,6 +77,7 @@ vi.mock('src/ts/storage/sync/external/bridge', () => ({
         removeRetainedPublication: state.removeRetainedPublication,
         getQuota: state.getQuota,
         setRetentionPolicy: state.setRetentionPolicy,
+        setTransferConcurrency: state.setTransferConcurrency,
         listHistory: state.listHistory,
         listConflicts: state.listConflicts,
         recheckConflict: state.recheckConflict,
@@ -88,7 +94,7 @@ import { requestExternalStorageNow, resumeExternalStorageJob, requestExternalSto
 import { externalErrorMessage, externalStorageStrings } from './strings'
 import { notifySyncBindingChanged } from 'src/ts/storage/sync/bindingChanges'
 
-beforeEach(() => { clearExternalProgress('connection-1'); state.failures.clear(); state.remedy = true; state.binding = { target: { kind: 'none' } } })
+beforeEach(() => { clearExternalProgress('connection-1'); state.failures.clear(); state.stopped.clear(); state.form = undefined; state.remedy = true; state.binding = { target: { kind: 'none' } } })
 const strings = externalStorageStrings('en')
 let target: HTMLDivElement
 let component: ReturnType<typeof mount> | undefined
@@ -109,6 +115,7 @@ function connection(keepCount: number, keepDays: number) {
             remoteVerified: true,
         },
         retentionPolicy: { keepCount, keepDays },
+        transferConcurrency: 4,
         capabilities: {
             immutableCreate: true, directCompleteRead: true, atomicCreateHead: false,
             conditionalHeadUpdate: false, stableHeadReplace: false, headReadAfterWrite: false,
@@ -155,6 +162,7 @@ describe('the storage usage tab', () => {
         // The rows have to stand on their own: usage is a separate request.
         state.getQuota.mockRejectedValue({ kind: 'transient', httpStatus: null, retryAtMs: null })
         state.setRetentionPolicy.mockResolvedValue(undefined)
+        state.setTransferConcurrency.mockResolvedValue(undefined)
         state.listHistory.mockResolvedValue({ items: [] })
         state.beginConnectionSettingsExport.mockResolvedValue({
             transferId: 'settings-transfer',
@@ -610,6 +618,13 @@ describe('the storage usage tab', () => {
         expect(state.bind).toHaveBeenCalledWith({ kind: 'external', connectionId: 'connection-1' }, { mode: 'new-device' })
         expect(alertConfirm).not.toHaveBeenCalled(); expect(alertCheckboxConfirm).not.toHaveBeenCalled()
     })
+    it('names the empty history of a sync connection apart from a backup connection', async () => {
+        if (component) await unmount(component)
+        state.listHistory.mockResolvedValue({ items: [] })
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0', paused: false }, connections: [{ ...connection(10, 30), purpose: 'sync', strategy: 'sequential' }], jobs: [] })
+        component = mount(ExternalStorageSettings, { target }); await settle()
+        expect(target.querySelector('[role="tabpanel"]')?.textContent?.trim()).toBe(strings.noSyncHistory)
+    })
     it('labels the sync target switch apart from the button that syncs now', async () => {
         if (component) await unmount(component)
         state.getState.mockResolvedValue({ supported: true, selection: { kind: 'external', connectionId: 'connection-1', selectionEpoch: '0', paused: false }, connections: [{ ...connection(10, 30), purpose: 'sync', strategy: 'sequential' }], jobs: [] })
@@ -755,6 +770,48 @@ describe('the storage usage tab', () => {
         await settle()
         const flags = [...target.querySelectorAll('.item')].map(item => [...item.querySelectorAll('.item-head .flag')].map(flag => flag.textContent?.trim()))
         expect(flags).toEqual([[strings.thisDevice], [], [], [strings.pinned, strings.thisDevice]])
+    })
+
+    it('keeps the concurrent transfer setting outside the details box, visible with both tabs', async () => {
+        expect(labelled(strings.transferConcurrency).value).toBe('4')
+        expect(target.textContent).toContain(strings.transferConcurrencyHelp)
+        expect(labelled(strings.transferConcurrency).closest('.details')).toBeNull()
+        await openStorageUsage()
+        expect(labelled(strings.transferConcurrency).value).toBe('4')
+        expect(labelled(strings.transferConcurrency).closest('[role="tabpanel"]')).toBeNull()
+    })
+
+    it.each(['', '0', '17', '1.5', 'Infinity'])('restores invalid concurrent transfer input %s without saving', async value => {
+        const input = labelled(strings.transferConcurrency)
+        input.value = value
+        input.dispatchEvent(new Event('change', { bubbles: true }))
+        await settle()
+        expect(input.value).toBe('4')
+        expect(state.setTransferConcurrency).not.toHaveBeenCalled()
+    })
+
+    it('disables a pending transfer preference and restores its value after a failed save', async () => {
+        let fail!: (error: unknown) => void
+        state.setTransferConcurrency.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject }))
+        const input = labelled(strings.transferConcurrency)
+        input.value = '8'
+        input.dispatchEvent(new Event('change', { bubbles: true }))
+        await tick()
+        expect(state.setTransferConcurrency).toHaveBeenCalledWith('connection-1', 8)
+        expect(input.disabled).toBe(true)
+        fail({ kind: 'transient' })
+        await settle()
+        expect(input.value).toBe('4')
+        expect(input.disabled).toBe(false)
+    })
+
+    it('saves a valid concurrent transfer value and updates the saved control', async () => {
+        const input = labelled(strings.transferConcurrency)
+        input.value = '16'
+        input.dispatchEvent(new Event('change', { bubbles: true }))
+        await settle()
+        expect(state.setTransferConcurrency).toHaveBeenCalledWith('connection-1', 16)
+        expect(state.setRetentionPolicy).not.toHaveBeenCalled()
     })
 
     it('sends a changed limit and leaves the other one alone', async () => {
@@ -1277,6 +1334,104 @@ describe('the sync switch', () => {
         expect(toggle().checked).toBe(false)
         expect(drawnChecked()).toBe(false)
         expect([...target.querySelectorAll('button')].some(button => button.textContent?.trim() === strings.runSync)).toBe(false)
+    })
+
+    it('shows a sync target this start left off as paused and resumes it from the switch', async () => {
+        state.binding = { target: { kind: 'external', connectionId: 'connection-1' } }
+        state.stopped.add('connection-1')
+        await show(selection('external', 'connection-1'))
+        expect(toggle().checked).toBe(false)
+        expect(target.querySelector('.card-status')?.textContent).toBe(strings.statusPaused)
+        expect(target.querySelector('.card-status [data-tone]')?.getAttribute('data-tone')).toBe('paused')
+        expect([...target.querySelectorAll('button')].some(button => button.textContent?.trim() === strings.runSync)).toBe(true)
+        state.resume.mockImplementation(async () => { state.stopped.delete('connection-1') })
+        toggle().click(); await settle()
+        expect(state.resume).toHaveBeenCalledExactlyOnceWith({ kind: 'external', connectionId: 'connection-1' })
+        expect(state.bind).not.toHaveBeenCalled()
+        expect(toggle().checked).toBe(true)
+        expect(target.querySelector('.card-status')?.textContent).toBe(strings.statusReady)
+    })
+
+    it('reads whether sync runs again after syncing now', async () => {
+        state.stopped.add('connection-1')
+        await show(selection('external', 'connection-1'))
+        state.syncNow.mockImplementation(async () => { state.stopped.delete('connection-1') })
+        const run = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.runSync)!
+        run.click(); await settle()
+        expect(state.syncNow).toHaveBeenCalledWith('connection-1')
+        expect(toggle().checked).toBe(true)
+        expect(target.querySelector('.card-status')?.textContent).toBe(strings.statusReady)
+    })
+})
+
+describe('a new connection', () => {
+    const syncConnection = (overrides: Record<string, unknown> = {}) => ({ ...connection(10, 30), purpose: 'sync' as const, strategy: 'sequential' as const, ...overrides })
+    const view = (connections: unknown[]) => ({ supported: true, selection: { kind: 'none', selectionEpoch: '0', paused: false }, connections, jobs: [] })
+    const button = (label: string) => [...target.querySelectorAll('button')].find(item => item.textContent?.trim() === label)
+    const toggle = () => [...target.querySelectorAll('label')].find(item => item.textContent?.trim() === strings.makeSyncTarget)?.querySelector('input')
+    async function mountWith(connections: unknown[]): Promise<void> {
+        state.getState.mockResolvedValue(view(connections))
+        state.listHistory.mockResolvedValue({ items: [] })
+        target = document.createElement('div')
+        document.body.append(target)
+        component = mount(ExternalStorageSettings, { target })
+        await settle()
+    }
+    async function connect(result: { connection: unknown; recovery?: { key: string } }): Promise<void> {
+        await mountWith([])
+        button(strings.add)!.click(); await settle()
+        state.getState.mockResolvedValue(view([result.connection]))
+        await state.form!.onconnected(result)
+        await settle()
+    }
+    beforeEach(() => { vi.clearAllMocks(); state.bind.mockReset(); state.bind.mockResolvedValue({ kind: 'bound' }); state.actionConfirm.mockReset() })
+    afterEach(() => {
+        if (component) unmount(component)
+        component = undefined
+        target.remove()
+    })
+
+    it('starts syncing with a connection made for sync when no sync target is set', async () => {
+        await connect({ connection: syncConnection() })
+        expect(state.actionConfirm).not.toHaveBeenCalled()
+        expect(state.bind).toHaveBeenCalledExactlyOnceWith({ kind: 'external', connectionId: 'connection-1' })
+    })
+
+    it('asks before moving sync from the sync server and starts only once accepted', async () => {
+        state.binding = { target: { kind: 'server', connectionId: 'server' } }
+        state.actionConfirm.mockResolvedValue(false)
+        await connect({ connection: syncConnection() })
+        expect(state.actionConfirm).toHaveBeenCalledExactlyOnceWith({ title: strings.switchSyncTitle, description: strings.switchSyncFromServer, actionLabel: strings.startSync, cancelLabel: strings.cancel })
+        expect(state.bind).not.toHaveBeenCalled()
+        expect(toggle()?.checked).toBe(false)
+    })
+
+    it('names another external storage when it is the sync target', async () => {
+        state.binding = { target: { kind: 'external', connectionId: 'connection-0' } }
+        state.actionConfirm.mockResolvedValue(true)
+        await connect({ connection: syncConnection() })
+        expect(state.actionConfirm).toHaveBeenCalledWith(expect.objectContaining({ description: strings.switchSyncFromExternal }))
+        expect(state.bind).toHaveBeenCalledExactlyOnceWith({ kind: 'external', connectionId: 'connection-1' })
+    })
+
+    it('waits for the recovery key to be closed before syncing', async () => {
+        await connect({ connection: syncConnection(), recovery: { key: 'synthetic-recovery-key' } })
+        expect(state.bind).not.toHaveBeenCalled()
+        button(strings.closeRecovery)!.click(); await settle()
+        expect(state.bind).toHaveBeenCalledExactlyOnceWith({ kind: 'external', connectionId: 'connection-1' })
+    })
+
+    it('leaves a backup connection without sync', async () => {
+        await connect({ connection: connection(10, 30) })
+        expect(state.bind).not.toHaveBeenCalled()
+    })
+
+    it('leaves a renewed sign-in without starting sync', async () => {
+        await mountWith([syncConnection({ status: 'reauth-required' })])
+        button(strings.renew)!.click(); await settle()
+        state.getState.mockResolvedValue(view([syncConnection()]))
+        await state.form!.onconnected({ connection: syncConnection() }); await settle()
+        expect(state.bind).not.toHaveBeenCalled()
     })
 })
 

@@ -383,7 +383,7 @@ mod tests {
             credential_ref: "credential".into(),
             root_key_ref: "root".into(),
             recovery_key_ref: "recovery".into(),
-            retention_policy: None,
+            retention_policy: None, transfer_concurrency: None,
             capabilities: Capabilities::default(),
             created_at_ms: 1,
             verified_at_ms: 1,
@@ -394,7 +394,8 @@ mod tests {
 
     #[test]
     fn connection_settings_roundtrip_keeps_credentials_encrypted_and_omits_keys() {
-        let connection = stored();
+        let mut connection = stored();
+        connection.transfer_concurrency = Some(16);
         let key = generate_key().unwrap();
         let bytes = export_connection_settings(&connection, &key, Some(b"secret")).unwrap();
         let visible = String::from_utf8_lossy(&bytes);
@@ -402,6 +403,11 @@ mod tests {
         assert!(!visible.contains(&connection.root_key_ref));
         assert!(!visible.contains(&*key));
         let imported = import_connection_settings(&bytes, &key).unwrap();
+        let envelope = ConnectionSettingsEnvelope::decode(&bytes).unwrap();
+        let plaintext = envelope.open(&envelope.repository_id, &parse_key(&key).unwrap()).unwrap();
+        let exported: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
+        assert!(exported.get("transferConcurrency").is_none());
+        assert!(exported["config"].get("transferConcurrency").is_none());
         assert!(imported.config == connection.config);
         assert_eq!(imported.repository_id, "repository");
         assert_eq!(imported.credential.unwrap().as_slice(), b"secret");

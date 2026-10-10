@@ -744,6 +744,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         external_storage::lww_commands::external_lww_resume,
         external_storage::lww_commands::external_lww_prepare_new_device,
         external_storage::connection_commands::external_storage_set_retention_policy,
+        external_storage::connection_commands::external_storage_set_transfer_concurrency,
         external_storage::connection_commands::external_storage_remove_connection,
         external_storage::connection_commands::external_storage_begin_connection_settings_export,
         external_storage::connection_commands::external_storage_save_connection_settings_file,
