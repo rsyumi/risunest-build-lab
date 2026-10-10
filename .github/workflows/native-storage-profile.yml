@@ -7,6 +7,10 @@ on:
         description: Full Sync snapshot commit SHA
         type: string
         required: true
+      windows_only:
+        description: Skip the Linux baseline already in progress
+        type: boolean
+        default: false
       native:
         description: Run the exact bounded-spool correctness test
         type: boolean
@@ -18,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [windows-2022, windows-11-arm, ubuntu-24.04]
+        runner: ${{ inputs.windows_only && fromJSON('["windows-2022","windows-11-arm"]') || fromJSON('["windows-2022","windows-11-arm","ubuntu-24.04"]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     defaults:
@@ -28,6 +32,9 @@ jobs:
     env:
       SNAPSHOT_SHA: ${{ inputs.source_sha }}
     steps:
+      - name: Preserve snapshot bytes
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
@@ -59,9 +66,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { runner: windows-2022, target: x86_64-pc-windows-msvc }
-          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+        include: ${{ inputs.windows_only && fromJSON('[{"runner":"windows-2022","target":"x86_64-pc-windows-msvc"}]') || fromJSON('[{"runner":"windows-2022","target":"x86_64-pc-windows-msvc"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu"}]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     defaults:
@@ -73,6 +78,9 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
       CARGO_INCREMENTAL: '0'
     steps:
+      - name: Preserve snapshot bytes
+        working-directory: ${{ github.workspace }}
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
