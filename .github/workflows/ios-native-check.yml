@@ -54,6 +54,8 @@ jobs:
           mkdir -p artifacts
           cp .build-lab/source.json artifacts/source.json
       - uses: pnpm/action-setup@v5
+        with:
+          package_json_file: source/package.json
       - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
         with:
           targets: aarch64-apple-ios-sim
