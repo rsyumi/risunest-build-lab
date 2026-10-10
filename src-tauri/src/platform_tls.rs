@@ -147,7 +147,7 @@ mod tests {
         );
         let signing_key = rcgen::KeyPair::generate().unwrap();
         let cert = params.self_signed(&signing_key).unwrap();
-        let certificate = reqwest::Certificate::from_pem(cert.pem().as_bytes()).unwrap();
+        let certificate = reqwest::Certificate::from_der(cert.der()).unwrap();
         let config = Arc::new(
             rustls::ServerConfig::builder_with_provider(Arc::new(
                 rustls::crypto::ring::default_provider(),

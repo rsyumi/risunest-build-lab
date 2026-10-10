@@ -1,5 +1,18 @@
+@layer risu-image-size;
 @import "tailwindcss" source(".");
 @source "../index.html";
+
+@layer risu-image-size {
+  :where(img[data-risu-image-size]) {
+    contain: size;
+    contain-intrinsic-size: var(--risu-image-width) var(--risu-image-height);
+  }
+}
+
+.chat-message-container[data-chat-height-pending="true"] {
+  visibility: hidden;
+  overflow-anchor: none;
+}
 
 @plugin '@tailwindcss/typography';
 
@@ -369,10 +382,6 @@ select optgroup {
 
 .bgc {
   border-top: 1px solid rgba(98, 114, 164, 0.7);
-}
-
-.text-bordered {
-  -webkit-text-stroke: 1px #000;
 }
 
 .x-risu-risu-file {

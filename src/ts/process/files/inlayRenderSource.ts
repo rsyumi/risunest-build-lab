@@ -1,4 +1,4 @@
-import { applyImageDimensionHints, observeImageDimensions } from './imageGeometryRender'
+import { applyImageDimensionHints, bindImageReservations, imageReservationAttributes, observeImageDimensions } from './imageGeometryRender'
 import { ScreenshotPreparationError } from '../../chatScreenshotErrors'
 import type { BlobImageSource, InlayBlobType, InlayBlobMetadata } from 'src/ts/storage/blobStore'
 import { getInlayAssetBlob, getInlayAssetMetadata, getInlayAssetRenderUrl } from './inlays'
@@ -86,7 +86,7 @@ export function renderDeferredInlaySourceMarkup(
         ? ` width="${source.width}" height="${source.height}"`
         : ''
     switch (source.type) {
-        case 'image': return `<img data-risu-inlay-id="${assetId}"${marker}${dimensions} loading="lazy"/>`
+        case 'image': return `<img data-risu-inlay-id="${assetId}"${marker}${dimensions}${slot === undefined ? '' : imageReservationAttributes(source.width, source.height)} loading="lazy"/>`
         case 'video': return `<video controls><source data-risu-inlay-id="${assetId}"${marker}${typeHint}></video>`
         case 'audio': return `<audio controls><source data-risu-inlay-id="${assetId}"${marker}${typeHint}></audio>`
         default: return ''
@@ -142,6 +142,10 @@ function startDeferredInlaySources(
     const visibleById = new Map<string, Set<HTMLElement>>()
     const resources = new Map<string, { url: string, objectUrl: boolean }>()
     const pending = new Map<string, Promise<void>>()
+    imageListeners.push(bindImageReservations(markers, (element, source) => {
+        const marker = markers.get(element)
+        return (marker && resources.get(marker.id)?.url) ?? source.url
+    }))
 
     const isValid = (element: HTMLElement, marker: DeferredInlayMarker & { token: string }) => {
         const validKind = marker.type === 'image' && element instanceof HTMLImageElement

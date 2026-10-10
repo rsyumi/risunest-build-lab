@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import path from 'node:path'
 import test from 'node:test'
 
 import {
@@ -44,8 +45,11 @@ test('gate summary requires every 100 to 500 rule production cell to pass', () =
 })
 
 test('release executable follows the configured shared Cargo target', () => {
+    const repository = path.resolve('synthetic-repo')
+    const target = path.resolve('synthetic-shared-target')
     assert.equal(
-        resolveCargoTargetDirectory('E:\\repo', 'E:\\shared-target'),
-        'E:\\shared-target',
+        resolveCargoTargetDirectory(repository, target),
+        target,
     )
+    assert.equal(resolveCargoTargetDirectory(repository, undefined), path.join(repository, 'src-tauri', 'target'))
 })

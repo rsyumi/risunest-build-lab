@@ -3,6 +3,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { resolve } from 'node:path'
 import { lazyAppBoundaries } from './lazyAppPlugin'
 import { settledThoughtBoundaries } from './settledThoughtPlugin'
+import tailwindcss from '@tailwindcss/vite'
 
 const adapters = new Set(["../plugins.svelte", "src/ts/storage/database.svelte", "src/ts/storage/workingSetCatalog", "../pluginSafeClass", "../pluginClaimSession", "src/ts/stores.svelte", "src/ts/util", "src/ts/alert", "src/lang", "src/ts/globalApi.svelte", "src/ts/gui/colorscheme", "src/ts/platform", "src/ts/process/mcp/pluginmcp", "src/ts/process/files/inlays", "src/ts/translator/translator", "src/ts/parser/parser.svelte", "src/ts/storage/nativePluginPermissions", "src/ts/process/index.svelte", "src/ts/process/generationState", "src/ts/model/modellist", "src/ts/process/request/request", "src/ts/process/modules", "src/ts/process/ttsHooks", "src/ts/storage/persistentDataRuntime.svelte", "src/ts/conversationMutations", "../pluginDatabaseAccess"])
 export default defineConfig(({ mode }) => {
@@ -10,7 +11,7 @@ export default defineConfig(({ mode }) => {
     return {
         root: resolve(import.meta.dirname),
         define: { 'import.meta.env.VITE_RISU_LEGAL_CONFIGURED': 'true' },
-        plugins: [lazyAppBoundaries(), settledThoughtBoundaries(), {
+        plugins: [tailwindcss(), lazyAppBoundaries(), settledThoughtBoundaries(), {
             name: 'fixture-host-boundaries', enforce: 'pre',
             async resolveId(source, importer, options) {
                 source = source.replaceAll('\\', '/').replace(resolve(import.meta.dirname, '../../src').replaceAll('\\', '/') + '/', 'src/')
@@ -47,7 +48,7 @@ export default defineConfig(({ mode }) => {
             outDir: resolve(import.meta.dirname, '../../.tmp/test-results/browser/dist'), emptyOutDir: true,
             rollupOptions: {
                 preserveEntrySignatures: 'strict',
-                input: [resolve(import.meta.dirname, 'index.html'), resolve(import.meta.dirname, 'dragDrop.html'), resolve(import.meta.dirname, 'modalNavigation.html'), resolve(import.meta.dirname, 'lazyApp.html'), resolve(import.meta.dirname, 'monaco.html'), resolve(import.meta.dirname, 'settledThought.html'), resolve(import.meta.dirname, 'switchContainment.html')],
+                input: [resolve(import.meta.dirname, 'index.html'), resolve(import.meta.dirname, 'dragDrop.html'), resolve(import.meta.dirname, 'modalNavigation.html'), resolve(import.meta.dirname, 'lazyApp.html'), resolve(import.meta.dirname, 'monaco.html'), resolve(import.meta.dirname, 'settledThought.html'), resolve(import.meta.dirname, 'switchContainment.html'), resolve(import.meta.dirname, 'chatRendering.html')],
             },
         },
     }

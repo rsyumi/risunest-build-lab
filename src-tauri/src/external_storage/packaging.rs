@@ -7902,6 +7902,7 @@ mod tests {
     #[test]
     fn c_two_jobs_share_the_pack_families_and_both_finish() {
         runtime().block_on(async {
+            const RECORDS: usize = 8;
             let root = tempfile::tempdir().unwrap();
             let provider = FakeProvider::new(false);
             let repository = fake::repository();
@@ -7921,8 +7922,8 @@ mod tests {
                     .with_limit(limit)
                     .with_families(families.clone())
             };
-            let left_capture = captured_record_window(root.path(), "left", 1, 2000, 0, 0, 0);
-            let right_capture = captured_record_window(root.path(), "right", 1, 2000, 0, 0, 0);
+            let left_capture = captured_record_window(root.path(), "left", 1, RECORDS, 0, 0, 0);
+            let right_capture = captured_record_window(root.path(), "right", 1, RECORDS, 0, 0, 0);
             let left_meta = metadata("left", &left_capture);
             let right_meta = metadata("right", &right_capture);
             let mut left = journal(&left_directory, &left_job, &left_capture);
@@ -7937,27 +7938,31 @@ mod tests {
                 peak_of(move || held_spool(&left_spool) + held_spool(&right_spool));
             let (left_cache, right_cache) = (root.path().join("left-cache"), root.path().join("right-cache"));
             let (key, progress, cancel) = ([5; 32], PhaseProgress::silent(), Cancellation::default());
-            let (left_done, right_done) = tokio::time::timeout(FAMILY_TEST_BOUND, async {
+            let mut package_limits = limits(4096);
+            package_limits.target_plaintext_bytes = 1;
+            let completed = tokio::time::timeout(FAMILY_TEST_BOUND, async {
                 tokio::join!(
                     package_and_upload(
                         left_capture, vec![], root.path(), &left_cache, left_meta, &key,
-                        limits(4096), None, &mut left, &provider, &repository, &progress, &cancel,
+                        package_limits, None, &mut left, &provider, &repository, &progress, &cancel,
                     ),
                     package_and_upload(
                         right_capture, vec![], root.path(), &right_cache, right_meta, &key,
-                        limits(4096), None, &mut right, &provider, &repository, &progress, &cancel,
+                        package_limits, None, &mut right, &provider, &repository, &progress, &cancel,
                     ),
                 )
             })
-            .await
-            .expect("two jobs sharing the pack families stopped making progress");
+            .await;
             for stopped in [&stop, &spool_stop] {
                 stopped.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             sampler.join().unwrap();
             spool_sampler.join().unwrap();
+            let (left_done, right_done) = completed
+                .expect("two jobs sharing the pack families stopped making progress");
             let (left_done, right_done) = (left_done.unwrap(), right_done.unwrap());
-            assert!(packs_of(&left_done) > 2 && packs_of(&right_done) > 2);
+            assert_eq!(packs_of(&left_done), RECORDS);
+            assert_eq!(packs_of(&right_done), RECORDS);
             assert_eq!(families.counts(), (0, 0));
             let plaintexts = plaintexts.load(std::sync::atomic::Ordering::Relaxed);
             assert!(
@@ -8350,6 +8355,7 @@ mod tests {
     #[test]
     fn c_a_pack_already_held_ends_its_family_before_its_wave_is_sent() {
         runtime().block_on(async {
+            const RECORDS: usize = 8;
             let root = tempfile::tempdir().unwrap();
             let repository = fake::repository();
             let families = PackFamilies::new(ACTIVE_PACK_FAMILIES);
@@ -8362,7 +8368,9 @@ mod tests {
                     .with_limit(4 * 1024 * 1024)
                     .with_families(families.clone())
             };
-            let capture = captured_record_window(root.path(), "held", 1, 2000, 0, 0, 0);
+            let capture = captured_record_window(root.path(), "held", 1, RECORDS, 0, 0, 0);
+            let mut package_limits = limits(4096);
+            package_limits.target_plaintext_bytes = 1;
             let reference = capture.durable_reference(root.path()).unwrap();
             let meta = metadata("held", &capture);
             // The first two waves are sent and their packs cached; the fifth
@@ -8371,7 +8379,7 @@ mod tests {
             let mut transfer = journal(&directory, &job, &capture);
             transfer.set_spool_budget(budget());
             let error = package_and_upload(
-                capture, vec![], root.path(), &cache, meta, &[5; 32], limits(4096), None,
+                capture, vec![], root.path(), &cache, meta, &[5; 32], package_limits, None,
                 &mut transfer, &provider, &repository, &PhaseProgress::silent(),
                 &Cancellation::default(),
             )
@@ -8400,7 +8408,7 @@ mod tests {
             let (completed, (files, counts)) = tokio::time::timeout(FAMILY_TEST_BOUND, async {
                 tokio::join!(
                     package_and_upload(
-                        capture, vec![], root.path(), &cache, meta, &[5; 32], limits(4096), None,
+                        capture, vec![], root.path(), &cache, meta, &[5; 32], package_limits, None,
                         &mut transfer, &provider, &repository, &progress, &cancel,
                     ),
                     async {
@@ -8423,7 +8431,7 @@ mod tests {
             .expect("the held wave stopped making progress");
             assert!(files > 0, "no next pack while a wave was held, families {counts:?}");
             assert!(counts.0 <= ACTIVE_PACK_FAMILIES);
-            assert!(packs_of(&completed.unwrap()) > 5);
+            assert_eq!(packs_of(&completed.unwrap()), RECORDS);
             assert_eq!(families.counts(), (0, 0));
             assert_eq!(held_spool(&directory), 0);
         });
@@ -8436,6 +8444,7 @@ mod tests {
     #[test]
     fn c_two_jobs_on_a_tight_spool_finish_or_stop_without_holding_anything() {
         runtime().block_on(async {
+            const RECORDS: usize = 8;
             let root = tempfile::tempdir().unwrap();
             let provider = FakeProvider::new(false);
             let repository = fake::repository();
@@ -8455,8 +8464,8 @@ mod tests {
                     .with_families(families.clone())
             };
             let tight = 24 * 1024;
-            let left_capture = captured_record_window(root.path(), "left", 1, 2000, 0, 0, 0);
-            let right_capture = captured_record_window(root.path(), "right", 1, 2000, 0, 0, 0);
+            let left_capture = captured_record_window(root.path(), "left", 1, RECORDS, 0, 0, 0);
+            let right_capture = captured_record_window(root.path(), "right", 1, RECORDS, 0, 0, 0);
             let references = [
                 left_capture.durable_reference(root.path()).unwrap(),
                 right_capture.durable_reference(root.path()).unwrap(),
@@ -8469,15 +8478,17 @@ mod tests {
             right.set_spool_budget(budget(&right_job, tight));
             let (left_cache, right_cache) = (root.path().join("left-cache"), root.path().join("right-cache"));
             let (key, progress, cancel) = ([5; 32], PhaseProgress::silent(), Cancellation::default());
+            let mut package_limits = limits(4096);
+            package_limits.target_plaintext_bytes = 1;
             let (left_done, right_done) = tokio::time::timeout(FAMILY_TEST_BOUND, async {
                 tokio::join!(
                     package_and_upload(
                         left_capture, vec![], root.path(), &left_cache, left_meta, &key,
-                        limits(4096), None, &mut left, &provider, &repository, &progress, &cancel,
+                        package_limits, None, &mut left, &provider, &repository, &progress, &cancel,
                     ),
                     package_and_upload(
                         right_capture, vec![], root.path(), &right_cache, right_meta, &key,
-                        limits(4096), None, &mut right, &provider, &repository, &progress, &cancel,
+                        package_limits, None, &mut right, &provider, &repository, &progress, &cancel,
                     ),
                 )
             })
@@ -8500,14 +8511,14 @@ mod tests {
                         let mut again = journal(directory, job, &capture);
                         again.set_spool_budget(budget(job, 4 * 1024 * 1024));
                         package_and_upload(
-                            capture, vec![], root.path(), cache, meta, &key, limits(4096), None,
+                            capture, vec![], root.path(), cache, meta, &key, package_limits, None,
                             &mut again, &provider, &repository, &progress, &cancel,
                         )
                         .await
                         .unwrap()
                     }
                 };
-                assert!(packs_of(&done) > 2);
+                assert_eq!(packs_of(&done), RECORDS);
                 assert_eq!(super::super::journal::admitted_spool_writes(job), 0);
                 assert_eq!(held_spool(directory), 0);
             }

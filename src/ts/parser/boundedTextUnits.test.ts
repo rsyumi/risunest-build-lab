@@ -150,7 +150,7 @@ describe('incremental text units', () => {
         expectBoundedUnits(text, published.map((unit) => unit.end))
     })
 
-    test('slow frames shrink the batch and fast frames grow it', () => {
+    test('slow frames keep a small batch instead of serializing every unit into a separate paint', () => {
         const frames = new ManualFrames()
         let clock = 0
         let published: readonly TextUnit[] = []
@@ -165,12 +165,15 @@ describe('incremental text units', () => {
             frames.runOne()
             return published.length - before
         }
-        let frameInterval = 200
+        let frameInterval = 16
+        for (let frame = 0; frame < 4; frame++) added()
+        expect(units.budget).toBeGreaterThan(8192)
+        frameInterval = 200
         for (let frame = 0; frame < 5; frame++) added()
-        expect(units.budget).toBeLessThanOrEqual(maxTextUnitLength)
-        expect(added()).toBe(1)
+        expect(units.budget).toBe(8192)
+        expect(added()).toBeGreaterThanOrEqual(4)
         frameInterval = 16
-        for (let frame = 0; frame < 10; frame++) added()
+        for (let frame = 0; frame < 3; frame++) added()
         expect(units.budget).toBeGreaterThan(8192)
         expect(added()).toBeGreaterThan(4)
         frames.runAll()
