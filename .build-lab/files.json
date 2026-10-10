@@ -3897,8 +3897,8 @@
     {
       "path": "server/manager/install/windows.nsh",
       "mode": "100644",
-      "bytes": 9156,
-      "sha256": "33525b75d9ddfbbcf85ce7540eaaddd85b8c69a821a56dc4c8d38ff09c45a162"
+      "bytes": 9174,
+      "sha256": "cac9d3804ece988ffac039ea3eaf40b2ebb537c182f76590a0df7f3ca42924df"
     },
     {
       "path": "server/manager/install/windows.test.ps1",
@@ -17595,8 +17595,8 @@
     {
       "path": "tests/release/sync-nsis-uninstall.node-test.mjs",
       "mode": "100644",
-      "bytes": 7230,
-      "sha256": "f290a8033dd0869d1a52330d6b234dd54f1cca6a52b36bff96ce12edcd8eed74"
+      "bytes": 9325,
+      "sha256": "ce629ccc2090fafb5e85921bf93abac555fa0e60af77a3b55eeec5264dd06570"
     },
     {
       "path": "tests/release/verify-cloudflared.node-test.mjs",
