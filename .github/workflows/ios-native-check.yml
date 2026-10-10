@@ -1,0 +1,68 @@
+name: iOS native Rust check
+run-name: iOS native Rust ${{ inputs.source_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full iOS snapshot commit SHA
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: ios-native-${{ inputs.source_sha }}
+  cancel-in-progress: true
+jobs:
+  native:
+    runs-on: macos-15
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      CARGO_INCREMENTAL: "0"
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Validate dispatch
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          sudo xcode-select --switch "$DEVELOPER_DIR"
+          printf '%s\n' "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Verify snapshot
+        run: |
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . ios
+          mkdir -p artifacts
+          cp .build-lab/source.json artifacts/source.json
+      - uses: pnpm/action-setup@v5
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+        with:
+          targets: aarch64-apple-ios-sim
+      - run: pnpm install --frozen-lockfile
+      - name: Run native Rust inventory
+        run: bash scripts/ios-native-tests.sh 2>&1 | tee artifacts/native-tests.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-native-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
