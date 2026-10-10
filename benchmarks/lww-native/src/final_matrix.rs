@@ -153,6 +153,24 @@ fn source(run:&str)->Result<source_process::SourceProcess,String> {
         &environment("LWW_SOURCE_FINGERPRINT")?,&environment("LWW_SOURCE_BINARY_SHA")?,run)
 }
 
+const RENDERER_DEVICE_REQUESTS:[(&str,&str,&str);2]=[
+    ("windows-registration.uri","synthetic-renderer-windows","72000000-0000-4000-8000-000000000000"),
+    ("android-registration.uri","synthetic-renderer-android","73000000-0000-4000-8000-000000000000"),
+];
+
+#[test]
+fn renderer_peer_registration_requests_are_accepted_by_sync() {
+    let root=tempfile::tempdir().unwrap();
+    let store=risunest_sync_server::store::Store::init(root.path()).unwrap();
+    let mut devices=BTreeSet::new();
+    for (_,name,request) in RENDERER_DEVICE_REQUESTS {
+        let uri=store.issue_named_registration(name,request,Some("http://127.0.0.1:8080")).unwrap();
+        let registration=risunest_sync_connect::Registration::parse_uri(&uri).unwrap();
+        assert!(devices.insert(registration.device_id));
+    }
+    assert_eq!(store.managed_devices().unwrap().len(),RENDERER_DEVICE_REQUESTS.len());
+}
+
 pub(super) fn renderer_setup()->Result<(),String> {
     if environment("RISUNEST_LWW_FINAL_STAGE")?!="authorized-synthetic" {return Err("renderer setup gate is closed".into());}
     let checkpoint=environment("RISUNEST_LWW_FINAL_CHECKPOINT")?;
@@ -183,7 +201,7 @@ pub(super) fn renderer_setup()->Result<(),String> {
     if shutdown_file.exists() {return Err("renderer setup shutdown sentinel already exists".into());}
     let mut child=source(&format!("renderer-{}",uuid::Uuid::new_v4()))?;
     let setup=(||->Result<(),String> {
-        let producer=native_bootstrap::source_client(&mut child,&store,"synthetic-renderer-producer",&"71".repeat(32),false)?;
+        let producer=native_bootstrap::source_client(&mut child,&store,"synthetic-renderer-producer","71000000-0000-4000-8000-000000000000",false)?;
         let config=producer.client.config();
         bind(&mut store,SyncTarget::Server(config.endpoint.clone()),&config.endpoint,&config.library_id);
         let initial=queue_initial_producer(&mut store,&certificate,certificate.assets.len())?;
@@ -196,9 +214,10 @@ pub(super) fn renderer_setup()->Result<(),String> {
         if acknowledged==0 || submitted<initial["units"].as_u64().ok_or("actual initial unit count missing")? {
             return Err("renderer source lacks acknowledged complete producer publication".into());
         }
-        let registrations=[("producer-registration.uri",config.encode_uri().map_err(|_|"producer URI encoding failed")?),
-            ("windows-registration.uri",child.register("synthetic-renderer-windows",&"72".repeat(32))?.uri),
-            ("android-registration.uri",child.register("synthetic-renderer-android",&"73".repeat(32))?.uri)];
+        let mut registrations=vec![("producer-registration.uri",config.encode_uri().map_err(|_|"producer URI encoding failed")?)];
+        for (file,name,request) in RENDERER_DEVICE_REQUESTS {
+            registrations.push((file,child.register(name,request)?.uri));
+        }
         for (name,uri) in registrations {
             use std::io::Write;
             let mut file=std::fs::OpenOptions::new().create_new(true).write(true).open(output.join(name)).map_err(|e|e.to_string())?;
@@ -475,7 +494,7 @@ fn costly_server(output:&Path,producer:&mut PersistentStore,server:LocalServerFi
                 },
                 "server-sync-first-binding"=>{
                     let mut child=source(&format!("final-{label}"))?;
-                    let sender=native_bootstrap::source_client(&mut child,producer,"synthetic-final-producer",&hex::encode(sha2::Sha256::digest(label.as_bytes())),false)?;
+                    let sender=native_bootstrap::source_client(&mut child,producer,"synthetic-final-producer",&uuid::Uuid::new_v4().to_string(),false)?;
                     let config=sender.client.config();
                     bind(producer,SyncTarget::Server(config.endpoint.clone()),&config.endpoint,&config.library_id);
                     let initial=queue_initial_producer(producer,certificate,hashes.len())?;
@@ -486,7 +505,7 @@ fn costly_server(output:&Path,producer:&mut PersistentStore,server:LocalServerFi
                     let roles=observed.body_objects.iter().map(|(hash,object)|(hash.clone(),object.purposes.iter().cloned().collect()))
                         .collect::<BTreeMap<String,BTreeSet<String>>>();
                     let candidate=native_bootstrap::source_client(&mut child,&destination,"synthetic-final-destination",
-                        &hex::encode(sha2::Sha256::digest(format!("destination-{label}").as_bytes())),true)?;
+                        &uuid::Uuid::new_v4().to_string(),true)?;
                     if scenario==Scenario::DuringAssetTransfer {
                         let hash=delta.as_ref().ok_or("excluded large Asset delta absent")?["payloadHash"].as_str().ok_or("large Asset delta hash absent")?;
                         let mut roles=roles;roles.entry(hash.into()).or_default().insert("Asset".into());

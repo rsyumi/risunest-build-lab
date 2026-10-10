@@ -36,6 +36,7 @@ pub(crate) mod oauth;
 pub(crate) mod package_cache;
 pub(crate) mod packaging;
 pub(crate) mod phase_progress;
+pub(crate) mod progress;
 pub(crate) mod providers;
 pub(crate) mod publication;
 pub(crate) mod quota;

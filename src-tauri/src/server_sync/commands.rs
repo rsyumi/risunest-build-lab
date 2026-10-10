@@ -247,6 +247,8 @@ pub(crate) async fn asset_residency_download_remote(
     selected_character_id: Option<String>,
     operation_id: String,
     target: Option<crate::persistent_store::asset_residency::PreviousStorageTarget>,
+    webview: tauri::Webview, progress: Option<tauri::ipc::JavaScriptChannelId>,
+    transfer_progress: Option<tauri::ipc::JavaScriptChannelId>,
 ) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
     let operation = recorded("asset-download", app.state::<ServerSyncCommandState>().claim_asset_operation(operation_id))?;
     logged_blocking("asset-download", move || within(&LANES.assets, || {
@@ -264,11 +266,13 @@ pub(crate) async fn asset_residency_download_remote(
             }
         };
         let store = job_store(&app)?;
-        match target {
+        let observer = crate::external_storage::progress::Observer::default();
+        let _observation = observer.begin(transfer_progress.map(|channel| channel.channel_on(webview.clone())));
+        observer.within(|| super::asset_download_progress::within(progress.map(|channel| channel.channel_on(webview)), || match target {
             Some(target) if connection_id.is_none() => store.asset_residency_download_previous(&target, Some(cancelled.clone()), selected_character_id.as_deref(), check),
             Some(_) => Err(SyncError::new("invalid-asset-download-scope", 400)),
             None => store.asset_residency_download_remote(connection_id.as_deref(), Some(cancelled.clone()), selected_character_id.as_deref(), check),
-        }
+        }))
     })).await
 }
 #[tauri::command]

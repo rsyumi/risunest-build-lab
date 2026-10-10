@@ -10,6 +10,8 @@ cleanup() {
 trap cleanup EXIT
 export IPHONEOS_DEPLOYMENT_TARGET
 IPHONEOS_DEPLOYMENT_TARGET=$(node -p "require('./src-tauri/tauri.ios.conf.json').bundle.iOS.minimumSystemVersion")
+# Each fixture can open several stores; keep the simulator's file budget per test.
+export SIMCTL_CHILD_RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
 device_id=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(device["udid"] for runtime,devices in data["devices"].items() if "iOS" in runtime for device in devices if device.get("isAvailable") and device.get("state") in ("Shutdown", "Booted")))')
 xcrun simctl boot "$device_id" 2>/dev/null || true
 xcrun simctl bootstatus "$device_id" -b
@@ -22,14 +24,24 @@ cat > "$profile/entitlements.plist" <<'EOF'
 </dict></plist>
 EOF
 xcrun derq query -f xml -i "$profile/entitlements.plist" -o "$profile/entitlements.der" --raw
+support="$CARGO_TARGET_DIR/ios-test-support"
+mkdir -p "$support"
+support=$(cd "$support" && pwd -P)
+identity=$(shasum -a 256 "$profile/entitlements.plist" | awk '{print $1}')
+for extension in plist der; do
+    if [[ ! -f "$support/entitlements-$identity.$extension" ]]; then
+        mv "$profile/entitlements.$extension" "$support/entitlements-$identity.$extension"
+    fi
+done
 link_args=(
-    "-Wl,-sectcreate,__TEXT,__entitlements,$profile/entitlements.plist"
-    "-Wl,-sectcreate,__TEXT,__ents_der,$profile/entitlements.der"
+    "-Wl,-sectcreate,__TEXT,__entitlements,$support/entitlements-$identity.plist"
+    "-Wl,-sectcreate,__TEXT,__ents_der,$support/entitlements-$identity.der"
 )
 xcrun --sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min="$IPHONEOS_DEPLOYMENT_TARGET" \
     -framework CoreFoundation -framework Security "${link_args[@]}" \
     tests/ios-rust/keychain-probe.c -o "$profile/keychain-probe"
 xcrun simctl spawn "$device_id" "$profile/keychain-probe"
+if [[ "${1:-}" == --preflight-only ]]; then exit 0; fi
 cat > "$profile/runner.sh" <<'EOF'
 #!/bin/sh
 exec xcrun simctl spawn "$IOS_SIMULATOR_UDID" "$@"

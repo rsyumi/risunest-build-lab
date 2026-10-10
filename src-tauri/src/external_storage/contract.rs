@@ -591,6 +591,10 @@ pub(crate) enum ProviderOperation {
 /// One call represents one provider operation. Each SDK subrequest, session
 /// control call and explicit owner retry passes the one-dispatch HTTP boundary.
 pub(crate) trait Provider: Send + Sync {
+    fn progress_stage(&self, _stage: &'static str) {}
+    fn preparation_progress(&self) -> std::sync::Arc<super::phase_progress::PhaseProgress> {
+        super::phase_progress::PhaseProgress::silent()
+    }
     fn open_repository<'a>(
         &'a self,
         config: &'a ConnectionConfig,

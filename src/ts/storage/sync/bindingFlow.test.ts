@@ -37,6 +37,33 @@ function setup(options: Partial<InspectedSyncTarget> & { nonDefault?: boolean; c
 }
 const target = { kind: 'server', connectionId: 'connection' } as const
 
+it.each(['replacement', 'previous-files', 'late-replacement'] as const)('reports confirmation waiting for %s until the answer arrives', async route => {
+    const s = setup({ empty: route === 'previous-files' })
+    const waiting = vi.fn()
+    s.transport.setConfirmationPending = waiting
+    let answer!: () => void
+    const pending = new Promise<void>(resolve => answer = resolve)
+    const question = async () => { await pending; return false }
+    if (route === 'previous-files') s.deps.confirmPreviousStorageFiles = async () => { await pending; return 'cancel' }
+    else s.deps.confirmReplacement = question
+    if (route === 'late-replacement') s.deps.hasNonDefaultData = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true)
+    const result = s.flow.bind(target, s.transport)
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalledExactlyOnceWith(true))
+    answer()
+    expect(await result).toEqual({ kind: 'cancelled' })
+    expect(waiting.mock.calls).toEqual([[true], [false]])
+    expect(s.events).not.toContain('switch')
+})
+
+it('clears the waiting indication if the confirmation dialog fails', async () => {
+    const s = setup()
+    const waiting = vi.fn()
+    s.transport.setConfirmationPending = waiting
+    s.deps.confirmReplacement = async () => { throw new Error('synthetic dialog failure') }
+    await expect(s.flow.bind(target, s.transport)).rejects.toThrow('synthetic dialog failure')
+    expect(waiting.mock.calls).toEqual([[true], [false]])
+})
+
 function newDeviceTransport(s: ReturnType<typeof setup>) {
     s.transport.prepareNewDeviceBinding = async (_staged, context) => {
         expect(context.state.targetAuthority).toBe('0')

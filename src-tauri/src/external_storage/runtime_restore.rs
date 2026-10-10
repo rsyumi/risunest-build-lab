@@ -492,6 +492,8 @@ pub(crate) async fn run_restore<R: Runtime>(
         return Ok(result);
     }
     let root = runtime::root(app)?;
+    let observation = super::progress::JobProgress::begin(runtime::job_directory(&root, &job.request.connection_id, &job.id));
+    observation.scope(async {
     let store=runtime::native_store(app)?;
     if let Some(result)=completed_restore_in_store(&store,job)? {
         return finish_restore_bodies(app,connected,job,result,None,store,cancel).await;
@@ -544,6 +546,7 @@ pub(crate) async fn run_restore<R: Runtime>(
         }
     };
     finish_restore_bodies(app,connected,job,result.0,Some(result.1),result.2,cancel).await
+    }).await
 }
 
 fn restore_pins(root:&Path,id:&str)->Result<crate::asset_repository::job_pins::DurableCasJob> {

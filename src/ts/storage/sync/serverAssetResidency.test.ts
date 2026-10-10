@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const mock = vi.hoisted(() => ({ invoke: vi.fn(), begin: vi.fn(), selectedIndex: 0 }))
-vi.mock('@tauri-apps/api/core', () => ({ invoke: mock.invoke }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: mock.invoke, Channel: class { onmessage = (_value: unknown) => {} } }))
 vi.mock('../../mobileBackgroundTask', () => ({ beginMobileBackgroundTask: mock.begin }))
 vi.mock('src/ts/stores.svelte', () => ({ selectedCharID: { subscribe: (run: (value: number) => void) => { run(mock.selectedIndex); return () => {} } } }))
 vi.mock('../database.svelte', () => ({ getDatabase: () => ({ characters: [{ chaId: 'selected-policy-character' }] }) }))
@@ -34,7 +34,7 @@ describe('asset residency mobile lifetime', () => {
         mock.begin.mockResolvedValue({ dispose, progress: vi.fn() })
         mock.invoke.mockResolvedValue(status)
         await downloadRemoteAssets('receiver')
-        expect(mock.invoke).toHaveBeenCalledWith('asset_residency_download_remote', { connectionId: 'receiver', selectedCharacterId: 'selected-policy-character', operationId: expect.any(String) })
+        expect(mock.invoke).toHaveBeenCalledWith('asset_residency_download_remote', { connectionId: 'receiver', selectedCharacterId: 'selected-policy-character', operationId: expect.any(String), progress: expect.objectContaining({ onmessage: expect.any(Function) }), transferProgress: expect.objectContaining({ onmessage: expect.any(Function) }) })
         await downloadRemoteAssets()
         expect(mock.invoke).toHaveBeenCalledWith('asset_residency_download_remote', { connectionId: null, selectedCharacterId: 'selected-policy-character', operationId: expect.any(String) })
         expect(mock.begin).toHaveBeenCalledTimes(2)

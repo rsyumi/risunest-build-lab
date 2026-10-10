@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 
 const text = languageKorean.risuNest.serverSync
 const lane = (name: ServerSyncLane['lane'], counts: Partial<ServerSyncLane> = {}): ServerSyncLane => ({
-    lane: name, active: false, step: 'idle', listed: 0, listedTotal: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...counts,
+    lane: name, active: false, sending: false, receiving: false, step: 'idle', listed: 0, listedTotal: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...counts,
 })
 const attempt = (fields: Partial<ServerSyncAttempt>): ServerSyncAttempt => ({ mode: 'full', startedAt: 0, stages: ['publishing'], active: ['publishing'], current: 'publishing', ...fields })
 
@@ -43,13 +43,12 @@ describe('server sync rate meter', () => {
 
 describe('server sync progress view', () => {
     it('names the native step and measures an upload against the changes planned when publishing began', () => {
-        const view = serverSyncProgressView(attempt({ plannedSend: 8, lanes: [lane('send', { active: true, step: 'uploading', itemsDone: 2, itemsTotal: 6, filesDone: 1, filesTotal: 4, bytesDone: 1024 * 1024, bytesTotal: 4 * 1024 * 1024, sentBytes: 1024 * 1024 })], rate: 512 * 1024 }), text, 65_000)
+        const view = serverSyncProgressView(attempt({ plannedSend: 8, lanes: [lane('send', { active: true, step: 'uploading', itemsDone: 2, itemsTotal: 6, filesDone: 1, filesTotal: 4, bytesDone: 1024 * 1024, bytesTotal: 4 * 1024 * 1024, sentBytes: 1024 * 1024 })] }), text, 65_000)
         expect(view.label).toBe(text.activity.uploading)
         expect(view.detail).toBe('2 / 8')
         expect(view.fraction).toBe(0.25)
         expect(view.counters.map(counter => [counter.key, counter.value])).toEqual([
             ['bytes', '↑ 1.0 MiB · ↓ 0 B'],
-            ['rate', '512 KiB/s'],
             ['items', '2 / 8'],
             ['files', '1'],
             ['elapsed', '01:05'],

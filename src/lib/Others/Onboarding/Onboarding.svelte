@@ -53,7 +53,6 @@
     import { getExternalStorageBridge } from 'src/ts/storage/sync/external/bridge'
     import {
         externalJobIsActive,
-        externalJobProgress,
         mergeExternalHistoryItems,
     } from 'src/ts/storage/sync/external/connection'
     import {
@@ -74,6 +73,7 @@
     import { canScanServerRegistration } from 'src/ts/storage/sync/serverSyncQr'
     import { createNativeSyncBindingBridge } from 'src/ts/storage/sync/bindingNative'
     import ConnectionForm from 'src/lib/Setting/ExternalStorage/ConnectionForm.svelte'
+    import ExternalTransferProgress from 'src/lib/Setting/ExternalStorage/ExternalTransferProgress.svelte'
     import {
         externalConnectionTitle,
         externalErrorMessage,
@@ -174,15 +174,14 @@
     let externalJob = $state<ExternalJobSummary | undefined>()
     let externalKey = $state(0)
     const externalRestorable = $derived(externalOnboardingRestorable(externalHistory))
-    const externalPercent = $derived.by(() => {
-        const progress = externalJob ? externalJobProgress(externalJob) : null
-        return progress === null ? null : Math.round(progress * 100)
-    })
     // The native side owns the job; this reads its progress while it runs.
     $effect(() => {
-        if (externalStage !== 'working' || !externalBridge) return
+        if (externalStage !== 'working' || !externalBridge || externalConnection?.purpose === 'sync') return
         let stopped = false
+        let reading = false
         const read = async () => {
+            if (reading) return
+            reading = true
             try {
                 const state = await externalBridge.getState()
                 if (stopped) return
@@ -191,7 +190,7 @@
                 )
             } catch {
                 // The screen keeps its own error; a progress read may fail.
-            }
+            } finally { reading = false }
         }
         void read()
         const timer = setInterval(() => void read(), 1200)
@@ -390,17 +389,23 @@
             return
         }
         if (result.connection.purpose === 'sync') {
-            externalWorking = true
-            externalStage = 'working'
-            try {
-                const outcome = await bindExternalOnboardingTarget(result.connection.id)
-                if (outcome.kind === 'bound') flow = goToOnboardingState(flow, 'done', 'external')
-                else externalStage = 'connect'
-            } catch (cause) { externalFailure(cause) }
-            finally { externalWorking = false }
+            await connectExternalSync()
             return
         }
         await loadExternalHistory(false)
+    }
+
+    async function connectExternalSync(): Promise<void> {
+        if (!externalConnection || externalWorking) return
+        externalWorking = true
+        externalStage = 'working'
+        externalError = ''
+        try {
+            const outcome = await bindExternalOnboardingTarget(externalConnection.id)
+            if (outcome.kind === 'bound') flow = goToOnboardingState(flow, 'done', 'external')
+            else externalStage = 'connect'
+        } catch (cause) { externalFailure(cause) }
+        finally { externalWorking = false }
     }
 
     async function loadExternalHistory(append: boolean): Promise<void> {
@@ -925,26 +930,11 @@
                                 <h1>{ex.title}</h1>
                                 <p class="lead">{ex.unsupported}</p>
                             {:else if externalStage === 'working'}
-                                <h1>
-                                    {ex.restoring}
-                                </h1>
+                                <h1>{externalConnection?.purpose === 'sync' ? externalStrings.transfer.syncing : ex.restoring}</h1>
                                 <p class="lead">{ex.syncingLead}</p>
                                 {@render externalRepositoryChip()}
-                                {@render bar(
-                                    externalPercent,
-                                    ex.restoring,
-                                )}
-                                {#if externalJob}
-                                    <p class="meta">
-                                        <span
-                                            >{externalPercent === null
-                                                ? strings.risuNest.importDialog.preparing
-                                                : `${externalPercent}%`}</span
-                                        >
-                                        <span class="dim"
-                                            >{externalStrings.jobActive[externalJob.kind]}</span
-                                        >
-                                    </p>
+                                {#if externalConnection}
+                                    <ExternalTransferProgress connectionId={externalConnection.id} strings={externalStrings} job={externalJob} onboarding syncing={externalConnection.purpose === 'sync'} />
                                 {/if}
                             {:else if externalStage === 'error'}
                                 <h1>{ex.title}</h1>
@@ -957,6 +947,7 @@
                                         type="button"
                                         disabled={externalWorking}
                                         onclick={() => {
+                                            if (externalConnection?.purpose === 'sync') { void connectExternalSync(); return }
                                             externalError = ''
                                             externalStage = externalConnection ? 'choose' : 'connect'
                                             if (

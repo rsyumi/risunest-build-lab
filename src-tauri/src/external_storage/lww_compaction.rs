@@ -332,7 +332,7 @@ impl ExternalLwwEngine {
             }).collect();
             let completed=super::packaging::package_and_upload_asset_catalog(sources,&self.connection_root,
                 &directory.join("asset-repack"),&self.root_key,limits,journal,self.provider.as_ref(),&self.repository,
-                &super::phase_progress::PhaseProgress::silent(),cancel,protection).await?;
+                &self.provider.preparation_progress(),cancel,protection).await?;
             catalogs.push(completed.catalog);
         }
         if !plans.is_empty() {
@@ -549,7 +549,7 @@ impl ExternalLwwEngine {
         let metadata=super::packaging::SnapshotMetadata { snapshot_id:job_id.into(),repository_id:self.repository.repository_id.clone(),library_id:self.library.clone(),author_device_id:writer.into(),created_at_ms:self.admitted_upper()?,logical_revision:0,parent_snapshot_id:None,content_fingerprint:fingerprint,
             purpose:super::packaging::SnapshotPurpose::LwwCheckpoint { covered_prefixes:state.catalog.coverage.clone(),state_identity:state.catalog.identity()?,asset_catalogs,standalone_bodies } };
         let captured=CapturedSnapshot{id:job_id.into(),identity:identity.clone(),catalog:capture,projected_records:count,shared:true};
-        let completed=super::packaging::package_and_upload_protected(captured,Vec::new(),directory,&directory.join("cache"),metadata,&self.root_key,limits,None,&mut journal,self.provider.as_ref(),&self.repository,&super::phase_progress::PhaseProgress::silent(),cancel,protection).await?;
+        let completed=super::packaging::package_and_upload_protected(captured,Vec::new(),directory,&directory.join("cache"),metadata,&self.root_key,limits,None,&mut journal,self.provider.as_ref(),&self.repository,&self.provider.preparation_progress(),cancel,protection).await?;
         #[cfg(test)]
         let completed={
             let mut completed=completed;

@@ -176,6 +176,11 @@ fn source_identity() -> (String, Vec<Value>) {
             include_bytes!("../../../../server/sync/src/http/mod.rs"),
         ),
         (
+            "server/sync/src/identity.rs",
+            "server",
+            include_bytes!("../../../../server/sync/src/identity.rs"),
+        ),
+        (
             "server/sync/src/lib.rs",
             "server",
             include_bytes!("../../../../server/sync/src/lib.rs"),

@@ -1,6 +1,7 @@
 pub(crate) mod cache;
 pub(crate) mod client;
 pub(crate) mod commands;
+pub(crate) mod asset_download_progress;
 pub(crate) mod credentials;
 pub(crate) mod events;
 pub(crate) mod management;

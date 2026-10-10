@@ -241,6 +241,8 @@ export interface ExternalJobSummary {
     phase: string
     /** Which work the four counters below measure. */
     counters?: 'prepared' | 'transferred'
+    /** Confirmed objects in this running backup attempt, independent of preparation. */
+    transfer?: import('./progress').ExternalTransferSnapshot
     completedBytes: DecimalString
     totalBytes?: DecimalString
     completedItems: DecimalString

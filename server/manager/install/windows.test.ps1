@@ -13,12 +13,14 @@ fn main() {
         let mut file = OpenOptions::new().create(true).append(true).open(log).unwrap();
         writeln!(file, "{}", args.join("|")).unwrap();
     }
-    if args.as_slice() == ["installer", "prepare"] {
-        println!("{}", "a".repeat(64));
+    if args.len() == 3 && args[0] == "installer" && args[1] == "prepare" {
+        let owner = args[2].parse::<u32>().unwrap();
+        assert!(owner > 0 && owner != std::process::id());
+        println!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
         return;
     }
     if args.len() == 3 && args[0] == "installer" && args[1] == "finish" {
-        std::process::exit(if args[2] == "a".repeat(64) { 0 } else { 41 });
+        std::process::exit(if args[2] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" { 0 } else { 41 });
     }
     if args.first().map(String::as_str) == Some("autostart")
         && env::var("RISUNEST_NSIS_FAIL_AUTOSTART").as_deref() == Ok("1")
@@ -99,9 +101,9 @@ SectionEnd
     if ($shortcut.TargetPath -ne (Join-Path $installDir "hook-output.txt") -or !(Test-Path -LiteralPath $shortcut.TargetPath)) {
         throw "NSIS created a shortcut whose target does not match the installed file location."
     }
-    $expected = "installer|finish|" + ("a" * 64)
+    $expected = "installer|finish|aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     if ((Get-Content $log) -notcontains $expected) {
-        throw "NSIS did not pass the exact 64-character nonce to installer finish."
+        throw "NSIS did not pass the exact UUID nonce to installer finish."
     }
 
     $env:RISUNEST_NSIS_FAIL_AUTOSTART = "1"

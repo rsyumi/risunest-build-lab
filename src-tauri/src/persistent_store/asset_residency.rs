@@ -660,18 +660,22 @@ impl PersistentStore {
         selected_character_id: Option<&str>, check: impl Fn() -> Result<()>,
     ) -> Result<ResidencyStatus> {
         let mut hydration = crate::server_sync::residency::HydrationSession::new(&self.repository_root, cancellation)?;
+        let progress = crate::server_sync::asset_download_progress::plan(targets.len());
+        let mut completed = BTreeSet::new();
+        let mut opened = |hash: &str, _| { if completed.insert(hash.to_owned()) { progress.completed(0); } };
         if let Some(character_id) = selected_character_id {
             let selected = self.selected_character_asset_hashes(character_id)?.into_iter()
                 .filter(|hash| targets.contains(hash)).collect::<Vec<_>>();
-            if !hydration.hydrate_many(&selected, &check)?.is_empty() {
+            if !hydration.hydrate_many_outcomes(&selected, &check, &mut opened)?.is_empty() {
                 return Err(SyncError::new("required-asset-unavailable", 409));
             }
         }
-        if !hydration.hydrate_many(&targets.into_iter().collect::<Vec<_>>(), &check)?.is_empty() {
+        if !hydration.hydrate_many_outcomes(&targets.into_iter().collect::<Vec<_>>(), &check, &mut opened)?.is_empty() {
             return Err(SyncError::new("required-asset-unavailable", 409));
         }
         let status = self.asset_residency_status()?;
         check()?;
+        progress.flush();
         Ok(status)
     }
     pub(crate) fn asset_residency_set_policy(

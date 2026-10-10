@@ -296,6 +296,11 @@ fn apply_job_connection_status(connection: &mut Value, jobs: &[Value]) {
 }
 
 fn job_summary(root: &std::path::Path, mut job: DurableJob) -> Value {
+    if !job.terminal() {
+        if let Some(progress) = super::progress::job_snapshot(&job_directory(root, &job.request.connection_id, &job.id)) {
+            job.summary["transfer"] = json!(progress);
+        }
+    }
     job.summary["reason"] = json!(job.request.reason);
     job.summary["targetRevision"] = json!(job.request.target_revision);
     if job.request.kind == JobKind::PinHistory {
@@ -1620,6 +1625,8 @@ async fn run_backup(
     };
     let cache = package_cache_root(&directory)?;
     let prepared = preparation_progress(&root, &job.id);
+    let observation = super::progress::JobProgress::begin(directory.clone());
+    let observed_provider = observation.wrap(connected.provider.clone());
     let completed = super::packaging::package_and_upload(
         capture,
         sections,
@@ -1631,7 +1638,7 @@ async fn run_backup(
             .with_maintenance(maintenance_allowed(app, connected)),
         None,
         &mut journal,
-        connected.provider.as_ref(),
+        observed_provider.as_ref(),
         &connected.handle,
         &prepared,
         cancel,

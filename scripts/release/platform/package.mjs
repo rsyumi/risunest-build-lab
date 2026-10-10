@@ -1,4 +1,18 @@
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+
+export function writeZipArchive(source, archive) {
+  const entries = readdirSync(source).sort();
+  if (!entries.length) throw new Error("Package staging directory is empty.");
+  const child = spawnSync("python", ["-m", "zipfile", "-c", resolve(archive), ...entries], {
+    cwd: source,
+    stdio: "inherit",
+    windowsHide: true,
+  });
+  if (child.error) throw child.error;
+  if (child.status !== 0) throw new Error(`ZIP creation failed (${child.status}).`);
+}
 
 export function assertPackageFormat(path, format) {
   const stats = statSync(path);

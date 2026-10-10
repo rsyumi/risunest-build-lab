@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
+import { beginExternalProgress, clearExternalProgress } from 'src/ts/storage/sync/external/progress'
 
 const state = vi.hoisted(() => ({
     getState: vi.fn(),
@@ -32,6 +33,7 @@ const state = vi.hoisted(() => ({
 }))
 
 vi.mock('src/ts/platform', () => ({ isTauri: true, isTauriAndroid: false, isTauriIOS: false }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(), Channel: class { onmessage = (_value: unknown) => {} } }))
 vi.mock('@tauri-apps/plugin-os', () => ({ type: () => 'windows' }))
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }))
 vi.mock('qrcode', async importOriginal => {
@@ -86,7 +88,7 @@ import { requestExternalStorageNow, resumeExternalStorageJob, requestExternalSto
 import { externalErrorMessage, externalStorageStrings } from './strings'
 import { notifySyncBindingChanged } from 'src/ts/storage/sync/bindingChanges'
 
-beforeEach(() => { state.failures.clear(); state.remedy = true; state.binding = { target: { kind: 'none' } } })
+beforeEach(() => { clearExternalProgress('connection-1'); state.failures.clear(); state.remedy = true; state.binding = { target: { kind: 'none' } } })
 const strings = externalStorageStrings('en')
 let target: HTMLDivElement
 let component: ReturnType<typeof mount> | undefined
@@ -485,8 +487,15 @@ describe('the storage usage tab', () => {
         expect(download.disabled).toBe(true)
         expect(state.exportSnapshot).toHaveBeenCalledOnce()
         expect(state.exportSnapshot.mock.calls[0].slice(0, 2)).toEqual(['connection-1', 'snapshot'])
+        const transferProgress = state.exportSnapshot.mock.calls[0][4]
+        transferProgress.onmessage({ sequence: 1, network: { id: 'export', atMs: 0, sentBytes: '0', receivedBytes: '0', sending: false, receiving: true } })
+        await settle()
+        transferProgress.onmessage({ sequence: 2, network: { id: 'export', atMs: 1000, sentBytes: '0', receivedBytes: '2097152', sending: false, receiving: true } })
+        await settle()
+        expect(target.querySelector('[data-external-progress="export"] [data-transfer-speed]')?.textContent).toContain('↓ 2.0 MiB/s')
         expect(target.textContent).toContain('10 B / 20 B')
         const cancel = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.cancel)!
+        expect(cancel.closest('[data-external-progress="export"]')?.querySelector('[role="progressbar"]')).toBeTruthy()
         cancel.click()
         await settle()
         expect(state.cancelExport).toHaveBeenCalledWith(state.exportSnapshot.mock.calls[0][2])
@@ -1174,6 +1183,34 @@ describe('the sync switch', () => {
         if (component) unmount(component)
         component = undefined
         target.remove()
+    })
+
+    it('labels binding accurately and keeps authentication warnings above activity', async () => {
+        await show(selection('none'))
+        const run = beginExternalProgress('connection-1', 'binding')
+        await settle()
+        expect(target.querySelector('.card-status')?.textContent).toBe(strings.transfer.connecting)
+        run.stage('waiting'); await settle()
+        expect(target.querySelector('.card-status')?.textContent).toBe(strings.transfer.waiting)
+        expect(target.querySelector('.card-status [data-tone]')?.getAttribute('data-tone')).toBe('idle')
+        state.getState.mockResolvedValue({ ...view(selection('none')), connections: [{ ...syncConnection(), status: 'reauth-required' }] })
+        state.jobStarted?.(); await settle()
+        expect(target.querySelector('.card-status')?.textContent).toBe(strings.statusReauth)
+        expect(target.querySelector('.card-status [data-tone]')?.getAttribute('data-tone')).toBe('attention')
+        run.finish('cancelled')
+    })
+
+    it('leaves the badge and panel idle during a slow check without changes', async () => {
+        vi.useFakeTimers()
+        try {
+            await show(selection('external', 'connection-1'))
+            const run = beginExternalProgress('connection-1', 'sync')
+            run.stage('preparing')
+            await vi.advanceTimersByTimeAsync(60_000); await settle()
+            expect(target.querySelector('.card-status')?.textContent).toBe(strings.statusReady)
+            expect(target.querySelector('[data-external-progress]')).toBeNull()
+            run.finish('complete', false)
+        } finally { vi.useRealTimers() }
     })
 
     it('shows the device sync target again after turning it on failed', async () => {

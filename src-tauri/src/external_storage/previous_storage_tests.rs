@@ -295,7 +295,13 @@ fn a_connection_counts_and_downloads_only_the_bodies_no_other_live_connection_ho
     let _resolver = lww_residency::install_test_source_connection(f.directory_b.path(), Arc::new(connection)).unwrap();
     f.b.asset_residency_download_remote(Some("second"), None, None, || Ok(())).unwrap();
     assert!(!f.b.external_lww_object_is_local(&shared).unwrap());
-    f.b.asset_residency_download_remote(Some("receiver"), None, None, || Ok(())).unwrap();
+    let readings = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = readings.clone();
+    let progress = tauri::ipc::Channel::new(move |body| { sink.lock().unwrap().push(body.deserialize::<serde_json::Value>().unwrap()); Ok(()) });
+    crate::server_sync::asset_download_progress::within(Some(progress), || {
+        f.b.asset_residency_download_remote(Some("receiver"), None, None, || Ok(())).unwrap();
+    });
+    assert_eq!(readings.lock().unwrap().last(), Some(&serde_json::json!({"completedItems":1,"totalItems":1})));
     assert!(f.b.external_lww_object_is_local(&exclusive).unwrap());
     assert!(!f.b.external_lww_object_is_local(&shared).unwrap(), "another connection still holds it");
     assert_eq!(status(&f.b)["externalObjects"], serde_json::json!([]));

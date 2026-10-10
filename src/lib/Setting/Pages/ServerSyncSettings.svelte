@@ -1,6 +1,6 @@
 <script lang="ts">
     import { onMount, onDestroy } from 'svelte'
-    import { CheckIcon, ChevronRightIcon, CloudDownloadIcon, HardDriveIcon, LoaderCircleIcon } from '@lucide/svelte'
+    import { CloudDownloadIcon, HardDriveIcon, LoaderCircleIcon } from '@lucide/svelte'
     import { language } from 'src/lang'
     import { alertActionConfirm, alertCheckboxConfirm, alertConfirm } from 'src/ts/alert'
     import { isTauri } from 'src/ts/platform'
@@ -15,11 +15,12 @@
     import type { ServerConfig } from 'src/ts/storage/sync/serverSync'
     import { PREVIOUS_FILES_DOWNLOAD_FAILED } from 'src/ts/storage/sync/bindingFlow'
     import { formatRisuNestStorageBytes as bytes } from 'src/ts/storage/risuNestStorageDashboard'
-    import { serverSyncProgressView, serverSyncRoutineView, type ServerSyncProgressView } from 'src/ts/storage/sync/serverSyncProgress'
+    import { serverSyncProgressView, serverSyncRoutineView } from 'src/ts/storage/sync/serverSyncProgress'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingButton from '../RisuNest/SettingButton.svelte'
-    import SettingProgress from '../RisuNest/SettingProgress.svelte'
+    import TransferProgress from '../RisuNest/TransferProgress.svelte'
+    import TransferSpeed from '../RisuNest/TransferSpeed.svelte'
     import SettingNotice from '../RisuNest/SettingNotice.svelte'
     import StatusBadge from '../RisuNest/StatusBadge.svelte'
 
@@ -310,45 +311,26 @@
     </div>
 {/snippet}
 
-{#snippet progressSteps(steps: ServerSyncProgressView)}
-    {#if steps.stages.length > 1}
-        <ol class="stages">
-            {#each steps.stages as stage (stage.stage)}
-                <li data-state={stage.state} aria-current={stage.state === 'active' ? 'step' : undefined}>
-                    {#if stage.state === 'done'}<CheckIcon size={14} aria-hidden="true" />{:else}<LoaderCircleIcon size={14} class="motion-safe:animate-spin" aria-hidden="true" />{/if}
-                    <span>{stage.label}</span>
-                </li>
-            {/each}
-        </ol>
-    {/if}
-    <dl class="kv">
-        {#each steps.counters as counter (counter.key)}<dt>{counter.label}</dt><dd>{counter.value}</dd>{/each}
-    </dl>
-{/snippet}
-
 {#snippet progressPanel()}
-    {#if summary && progress}
-        <div class="progress" data-sync-progress data-mode="routine">
-            <SettingProgress label={summary.label} fraction={summary.fraction} done={summary.complete} />
-            <details class="group" bind:open={detailsOpen}>
-                <summary class="flex cursor-pointer list-none items-center gap-2 text-sm text-textcolor2 select-none [&::-webkit-details-marker]:hidden">
-                    <ChevronRightIcon size={16} class="shrink-0 transition-transform duration-200 group-open:rotate-90" aria-hidden="true" />
-                    <span>{copy.details}</span>
-                </summary>
-                <div class="details">
-                    {#if !summary.complete}<p class="activity">{progress.detail ? `${progress.label} · ${progress.detail}` : progress.label}</p>{/if}
-                    {@render progressSteps(progress)}
-                </div>
-            </details>
-        </div>
-    {:else if progress}
-        <div class="progress" data-sync-progress>
-            <SettingProgress label={progress.label} detail={progress.detail} fraction={progress.fraction} />
-            {@render progressSteps(progress)}
+    {#if progress}
+        <div class="progress" data-sync-progress data-mode={summary ? 'routine' : undefined}>
+            <TransferProgress
+                label={summary?.label ?? progress.label}
+                detail={summary ? '' : progress.detail}
+                fraction={summary ? summary.fraction : progress.fraction}
+                done={summary?.complete}
+                activity={summary && !summary.complete ? (progress.detail ? `${progress.label} · ${progress.detail}` : progress.label) : ''}
+                stages={progress.stages} counters={progress.counters} detailsLabel={copy.details}
+                collapsible={!!summary} bind:open={detailsOpen}>
+                {#snippet speed()}
+                    {#if view.progress?.network && view.progress.pausedAt === undefined && !view.paused && view.progress.active.some(stage => stage !== 'applying' && stage !== 'refreshing')}
+                        <TransferSpeed sample={view.progress.network} uploadLabel={copy.uploadSpeed} downloadLabel={copy.downloadSpeed} />
+                    {/if}
+                {/snippet}
+            </TransferProgress>
         </div>
     {/if}
 {/snippet}
-
 {#snippet place(part: 'local' | 'server' | 'external' | 'missing', label: string, value?: string)}
     <div class="place" data-part={part}>
         <span class="place-label"><i class="place-dot" aria-hidden="true"></i><span>{label}</span></span>
@@ -523,37 +505,6 @@
         from {
             width: 0;
         }
-    }
-    .details {
-        display: grid;
-        gap: 0.625rem;
-        min-width: 0;
-        margin-top: 0.5rem;
-        padding-left: 1.5rem;
-    }
-    .activity {
-        font-size: 13px;
-    }
-    .stages {
-        display: grid;
-        gap: 0.375rem;
-        margin: 0;
-        padding: 0;
-        list-style: none;
-        font-size: 13px;
-    }
-    .stages li {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        min-width: 0;
-        color: var(--risu-theme-textcolor2);
-    }
-    .stages li[data-state='active'] {
-        color: var(--risu-theme-textcolor);
-    }
-    .stages li[data-state='done'] :global(svg) {
-        color: var(--risu-theme-success-500);
     }
     .value {
         font-size: 14px;

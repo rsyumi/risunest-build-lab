@@ -215,8 +215,12 @@ pub(crate) async fn external_storage_export_snapshot(
     app: AppHandle,
     request: ExportSnapshotRequest,
     progress: tauri::ipc::Channel<serde_json::Value>,
+    webview: tauri::Webview, transfer_progress: Option<tauri::ipc::JavaScriptChannelId>,
 ) -> Result<ExportSnapshotResponse> {
     logged("external_storage_export_snapshot", Box::pin(async move {
+        let observer = super::progress::Observer::default();
+        let _observation = observer.begin(transfer_progress.map(|channel| channel.channel_on(webview)));
+        observer.scope(async {
         if !valid_id(&request.connection_id) || !valid_id(&request.snapshot_id) {
             return Err(ProviderError::new(ErrorKind::Corrupt));
         }
@@ -320,6 +324,7 @@ pub(crate) async fn external_storage_export_snapshot(
         counters.flush();
         cancel.check()?;
         publish_prepared_snapshot(&app, selected, prepared, &sections, staging.path(), &cancel)
+        }).await
     }).await)
 }
 

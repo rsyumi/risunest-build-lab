@@ -375,7 +375,7 @@ fn launchd_user_domain() -> Result<String> {
     Ok(format!("gui/{}", uid.trim()))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn macos_helper_prefix(root: &Path) -> String {
     format!("io.github.rsyumi.{}-update-helper-", instance_name(root))
 }
@@ -386,14 +386,35 @@ fn macos_helper_plist(root: &Path, task_name: &str) -> PathBuf {
         .join(format!("{task_name}.plist"))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn valid_macos_helper_task(root: &Path, task_name: &str) -> bool {
     let prefix = macos_helper_prefix(root);
     task_name.starts_with(&prefix)
-        && task_name.len() == prefix.len() + 64
-        && task_name[prefix.len()..]
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && risunest_sync_server::identity::is_uuid_v4(&task_name[prefix.len()..])
+}
+
+#[test]
+fn macos_helper_names_require_own_root_and_canonical_uuid() {
+    let root = Path::new("synthetic-instance");
+    let prefix = macos_helper_prefix(root);
+    let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    assert!(valid_macos_helper_task(root, &format!("{prefix}{id}")));
+    assert!(!valid_macos_helper_task(
+        Path::new("other-instance"),
+        &format!("{prefix}{id}")
+    ));
+    for invalid in [
+        id.to_uppercase(),
+        id.replace("-4aaa-", "-7aaa-"),
+        id.replace("-8aaa-", "-0aaa-"),
+        format!("{id}\n"),
+        "a".repeat(64),
+    ] {
+        assert!(!valid_macos_helper_task(
+            root,
+            &format!("{prefix}{invalid}")
+        ));
+    }
 }
 
 #[cfg(target_os = "macos")]

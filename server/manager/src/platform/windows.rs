@@ -10,10 +10,7 @@ fn helper_task_prefix(root: &Path) -> String {
 fn valid_helper_task(root: &Path, task_name: &str) -> bool {
     let prefix = helper_task_prefix(root);
     task_name.starts_with(&prefix)
-        && task_name.len() == prefix.len() + 64
-        && task_name[prefix.len()..]
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && risunest_sync_server::identity::is_uuid_v4(&task_name[prefix.len()..])
 }
 
 fn quote_argument(value: &str) -> String {
@@ -126,7 +123,7 @@ pub(super) fn finish_update_helper(root: &Path, task_name: &str) -> Result<()> {
 }
 
 pub(super) fn sweep_stale_update_helpers(root: &Path) -> Result<()> {
-    const SWEEP: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');foreach($t in @($f.GetTasks(1))){$n=$t.Name;if(!$n.StartsWith($env:RISUNEST_HELPER_PREFIX,[StringComparison]::Ordinal)){continue};$x=$n.Substring($env:RISUNEST_HELPER_PREFIX.Length);if($x -cnotmatch '^[0-9a-f]{64}$'){continue};if($t.Definition.RegistrationInfo.Description -ne $env:RISUNEST_HELPER_DESCRIPTION){continue};if($t.State -eq 4 -or $t.GetInstances(0).Count -ne 0){continue};$date=[DateTime]::MinValue;if(![DateTime]::TryParse($t.Definition.RegistrationInfo.Date,[ref]$date)){continue};if($date.ToUniversalTime() -gt [DateTime]::UtcNow.AddMinutes(-15)){continue};$f.DeleteTask($n,0)}"#;
+    const SWEEP: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');foreach($t in @($f.GetTasks(1))){$n=$t.Name;if(!$n.StartsWith($env:RISUNEST_HELPER_PREFIX,[StringComparison]::Ordinal)){continue};$x=$n.Substring($env:RISUNEST_HELPER_PREFIX.Length);if($x -cnotmatch '\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z'){continue};if($t.Definition.RegistrationInfo.Description -ne $env:RISUNEST_HELPER_DESCRIPTION){continue};if($t.State -eq 4 -or $t.GetInstances(0).Count -ne 0){continue};$date=[DateTime]::MinValue;if(![DateTime]::TryParse($t.Definition.RegistrationInfo.Date,[ref]$date)){continue};if($date.ToUniversalTime() -gt [DateTime]::UtcNow.AddMinutes(-15)){continue};$f.DeleteTask($n,0)}"#;
     let status = process("powershell.exe")
         .args([
             "-NoLogo",
@@ -150,7 +147,7 @@ pub(super) fn sweep_stale_update_helpers(root: &Path) -> Result<()> {
 }
 
 pub(super) fn cleanup_update_helpers(root: &Path) -> Result<()> {
-    const CLEAN: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');foreach($t in @($f.GetTasks(1))){$n=$t.Name;if(!$n.StartsWith($env:RISUNEST_HELPER_PREFIX,[StringComparison]::Ordinal)){continue};$x=$n.Substring($env:RISUNEST_HELPER_PREFIX.Length);if($x.Length -ne 64 -or $x -cnotmatch '^[0-9a-f]{64}$'){continue};if($t.Definition.RegistrationInfo.Description -ne $env:RISUNEST_HELPER_DESCRIPTION){continue};foreach($i in @($t.GetInstances(0))){$i.Stop()};$f.DeleteTask($n,0)}"#;
+    const CLEAN: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');foreach($t in @($f.GetTasks(1))){$n=$t.Name;if(!$n.StartsWith($env:RISUNEST_HELPER_PREFIX,[StringComparison]::Ordinal)){continue};$x=$n.Substring($env:RISUNEST_HELPER_PREFIX.Length);if($x.Length -ne 36 -or $x -cnotmatch '\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z'){continue};if($t.Definition.RegistrationInfo.Description -ne $env:RISUNEST_HELPER_DESCRIPTION){continue};foreach($i in @($t.GetInstances(0))){$i.Stop()};$f.DeleteTask($n,0)}"#;
     let status = process("powershell.exe")
         .args([
             "-NoLogo",
@@ -402,6 +399,27 @@ pub(super) fn update_schedule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn helper_names_require_own_root_and_canonical_uuid() {
+        let root = Path::new("synthetic-instance");
+        let prefix = helper_task_prefix(root);
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        assert!(valid_helper_task(root, &format!("{prefix}{id}")));
+        assert!(!valid_helper_task(
+            Path::new("other-instance"),
+            &format!("{prefix}{id}")
+        ));
+        for invalid in [
+            id.to_uppercase(),
+            id.replace("-4aaa-", "-7aaa-"),
+            id.replace("-8aaa-", "-0aaa-"),
+            format!("{id}\n"),
+            "a".repeat(64),
+        ] {
+            assert!(!valid_helper_task(root, &format!("{prefix}{invalid}")));
+        }
+    }
     #[test]
     fn helper_arguments_preserve_spaces_quotes_and_trailing_slashes() {
         assert_eq!(quote_argument("plain"), "plain");

@@ -13,6 +13,7 @@ import { registerSyncBindingTransport, resumeCurrentSyncBinding } from '../bindi
 import { SERVER_SYNC_DEVICE_CHANGED_EVENT } from '../serverSyncNativeSignals'
 import { createLwwScheduler } from './lwwScheduler'
 import type { ExternalStorageState } from './types'
+import { beginExternalProgress, clearExternalProgress, clearExternalSyncProgress, externalProgressFailure, type ExternalProgressRun } from './progress'
 
 interface Adapter { transport: SyncBindingTransport; scheduler: ReturnType<typeof createLwwScheduler>; dispose(): void; state?: SyncBindingState }
 const adapters = new Map<string, Adapter>()
@@ -39,6 +40,7 @@ let resumeBoundTarget = true
 
 function createAdapter(connectionId: string): Adapter {
     let active: BindingContext | undefined
+    let bindingProgress: ExternalProgressRun | undefined
     const context = async (): Promise<BindingContext> => {
         const state = await native.state()
         if (state.target.kind !== 'external' || state.target.connectionId !== connectionId) throw new Error('Sync binding changed')
@@ -46,31 +48,44 @@ function createAdapter(connectionId: string): Adapter {
     }
     // Native code returns one bounded page per call until none remain.
     const receive = async (binding: BindingContext): Promise<number> => {
+        const progress = beginExternalProgress(connectionId, 'sync')
         let received = 0
-        for (;;) {
-            binding.signal.throwIfAborted()
-            const request = await invoke<LwwStageReceive | null>('external_lww_receive', { request: header(connectionId, binding) })
-            if (!request) return received
-            binding.signal.throwIfAborted()
-            await getPersistentDataRuntime().applyLwwReceive(request)
-            received++
-        }
+        try {
+            for (;;) {
+                binding.signal.throwIfAborted()
+                const request = await progress.invoke<LwwStageReceive | null>('external_lww_receive', { request: header(connectionId, binding) }, binding.state.targetAuthority)
+                if (!request) { progress.finish('complete', received > 0); return received }
+                binding.signal.throwIfAborted()
+                progress.stage('applying')
+                await getPersistentDataRuntime().applyLwwReceive(request)
+                received++
+            }
+        } catch (error) { progress.finish(externalProgressFailure(error)); throw error }
     }
     const publish = async (binding?: BindingContext, flush = true): Promise<void> => {
         const current = binding ?? await context()
         current.signal.throwIfAborted()
+        const progress = (binding && bindingProgress) || beginExternalProgress(connectionId, 'sync')
+        const owned = progress !== bindingProgress
+        let meaningful = false
         try {
-            if (flush) await flushPendingDataLocally('external-lww-publish')
-            await invoke('external_lww_publish', { request: header(connectionId, current) })
-        } finally {
-            current.signal.throwIfAborted()
-            const runtime = getPersistentDataRuntime()
-            await runtime.runStorageOnlyMutation(async () => {
+            progress.stage('preparing', current.state.targetAuthority)
+            try {
+                if (flush) await flushPendingDataLocally('external-lww-publish')
+                const result = await progress.invoke<{ segments: string }>('external_lww_publish', { request: header(connectionId, current) }, current.state.targetAuthority)
+                meaningful = Number(result?.segments) > 0
+            } finally {
+                progress.stage('finalizing')
                 current.signal.throwIfAborted()
-                const page = await runtime.store.lwwReadOutbox({ bindingAuthority: current.state.targetAuthority, requestId: crypto.randomUUID(), limit: '1' })
-                return page.revision
-            })
-        }
+                const runtime = getPersistentDataRuntime()
+                await runtime.runStorageOnlyMutation(async () => {
+                    current.signal.throwIfAborted()
+                    const page = await runtime.store.lwwReadOutbox({ bindingAuthority: current.state.targetAuthority, requestId: crypto.randomUUID(), limit: '1' })
+                    return page.revision
+                })
+            }
+            if (owned) progress.finish('complete', meaningful)
+        } catch (error) { if (owned) progress.finish(externalProgressFailure(error)); throw error }
         reportFailure(connectionId)
     }
     const scheduler = createLwwScheduler({
@@ -85,11 +100,24 @@ function createAdapter(connectionId: string): Adapter {
         },
     })
     const transport: SyncBindingTransport & { receiveAvailableChanges(context: BindingContext): Promise<void> } = {
-        inspectTarget: binding => invoke<InspectedSyncTarget>('external_lww_inspect', { request: header(connectionId, binding) }),
-        pullAvailableState: (target, binding) => invoke<StagedSyncTarget>('external_lww_stage_binding', { request: {
-            ...header(connectionId, binding), inspectionId: target.inspectionId, targetId: target.targetId, libraryId: target.libraryId,
-        } }),
-        replaceFromTarget: replaceNativeSyncBinding,
+        async observeBinding(operation) {
+            if (bindingProgress) return operation()
+            const progress = beginExternalProgress(connectionId, 'binding')
+            bindingProgress = progress
+            try {
+                const result = await operation()
+                progress.finish(result.kind === 'cancelled' ? 'cancelled' : 'complete')
+                return result
+            } catch (error) { progress.finish(externalProgressFailure(error)); throw error }
+            finally { if (bindingProgress === progress) bindingProgress = undefined }
+        },
+        setConfirmationPending(waiting) { bindingProgress?.stage(waiting ? 'waiting' : 'checking') },
+        inspectTarget: binding => bindingProgress ? bindingProgress.invoke<InspectedSyncTarget>('external_lww_inspect', { request: header(connectionId, binding) }, binding.state.targetAuthority) : invoke<InspectedSyncTarget>('external_lww_inspect', { request: header(connectionId, binding) }),
+        pullAvailableState: (target, binding) => {
+            const args = { request: { ...header(connectionId, binding), inspectionId: target.inspectionId, targetId: target.targetId, libraryId: target.libraryId } }
+            return bindingProgress ? bindingProgress.invoke<StagedSyncTarget>('external_lww_stage_binding', args, binding.state.targetAuthority) : invoke<StagedSyncTarget>('external_lww_stage_binding', args)
+        },
+        async replaceFromTarget(staged, binding) { bindingProgress?.stage('applying', binding.state.targetAuthority); await replaceNativeSyncBinding(staged, binding) },
         reportStopped(error) {
             const cause = error instanceof AggregateError ? error.errors[0] : error
             if ((cause as { name?: unknown } | null)?.name !== 'AbortError') reportFailure(connectionId, cause)
@@ -110,6 +138,7 @@ function createAdapter(connectionId: string): Adapter {
             adapter.state = undefined
             const old = binding.state.target
             if (old.kind === 'external') {
+                clearExternalSyncProgress(old.connectionId)
                 const adapter = adapters.get(old.connectionId)
                 adapter?.scheduler.stop()
                 if (adapter) adapter.state = undefined
@@ -121,12 +150,12 @@ function createAdapter(connectionId: string): Adapter {
         prepareNewDeviceBinding: (staged, binding) => invoke<NewDeviceBindingPreparation>('external_lww_prepare_new_device', {
             request: { ...header(connectionId, binding, staged.receiveId), stagingId: staged.stagingId },
         }),
-        replaceAsNewDevice: replaceNativeSyncBindingAsNewDevice,
+        async replaceAsNewDevice(staged, preparation, binding) { bindingProgress?.stage('applying', binding.state.targetAuthority); return replaceNativeSyncBindingAsNewDevice(staged, preparation, binding) },
         async resumeNewDeviceBinding(_preparation, _result, binding) { await transport.resumeBinding(binding) },
         async receiveAvailableChanges(binding) { await receive(binding) },
     }
     const unregister = registerSyncBindingTransport({ kind: 'external', connectionId }, transport)
-    const adapter: Adapter = { transport, scheduler, dispose() { scheduler.stop(); unregister(); if (adapters.get(connectionId) === adapter) adapters.delete(connectionId) } }
+    const adapter: Adapter = { transport, scheduler, dispose() { scheduler.stop(); unregister(); clearExternalProgress(connectionId); if (adapters.get(connectionId) === adapter) adapters.delete(connectionId) } }
     return adapter
 }
 

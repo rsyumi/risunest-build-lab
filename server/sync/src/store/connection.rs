@@ -250,7 +250,7 @@ impl Store {
         {
             return Err(Error::new("invalid-device-name", 400));
         }
-        if request.len() != 64 || !request.bytes().all(|v| v.is_ascii_hexdigit()) {
+        if !crate::identity::is_uuid_v4(request) {
             return Err(Error::new("invalid-registration-request", 400));
         }
         self.issue_registration_inner(name.trim(), Some(request), local)
@@ -278,7 +278,7 @@ impl Store {
         let mut registration = Registration {
             endpoint,
             library_id: self.head()?.library_id,
-            device_id: "0".repeat(64),
+            device_id: "00000000-0000-4000-8000-000000000000".into(),
             token: "0".repeat(64),
             // A loopback device stays on this computer instead of failing over to
             // the published internet endpoint.
@@ -377,7 +377,11 @@ mod renewal_tests {
             }
             assert_eq!(
                 store
-                    .issue_named_registration("device", &"a".repeat(64), None)
+                    .issue_named_registration(
+                        "device",
+                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        None
+                    )
                     .unwrap_err()
                     .code,
                 "managed-registration-needs-directory"
@@ -385,7 +389,11 @@ mod renewal_tests {
             assert!(store.managed_devices().unwrap().is_empty());
         }
         let uri = store
-            .issue_named_registration("local", &"b".repeat(64), Some("http://127.0.0.1:8080"))
+            .issue_named_registration(
+                "local",
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                Some("http://127.0.0.1:8080"),
+            )
             .unwrap();
         assert!(Registration::parse_uri(&uri).unwrap().directory.is_none());
         assert_eq!(store.managed_devices().unwrap().len(), 1);

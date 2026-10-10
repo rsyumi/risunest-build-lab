@@ -231,12 +231,12 @@ impl Scenario {
         })
     }
 
-    fn install_startup(&self) -> Result<(), String> {
+    fn install_and_start(&self) -> Result<(), String> {
         let status = platform::startup(&self.root, &self.server, "install")?;
         if !status.registered || !status.enabled || !status.action_matches {
             return Err("synthetic LaunchAgent did not reach the expected state".into());
         }
-        Ok(())
+        platform::start(&self.root, &self.server)
     }
 
     async fn stop(&self) -> Result<(), String> {
@@ -644,7 +644,7 @@ async fn successful_update(
     let scenario = Scenario::new(fixture, suffix)?;
     let data_hash = file_hash(&scenario.data_probe)?;
     let source_inode = inode(&scenario.install)?;
-    scenario.install_startup()?;
+    scenario.install_and_start()?;
     wait_healthy(&scenario.root, &fixture.version).await?;
     scenario.stop().await?;
     prepare_transaction(&scenario, &fixture.version, &fixture.version, was_running)?;
@@ -687,7 +687,7 @@ async fn failing_update_rolls_back(fixture: &VerifiedFixture) -> Result<(), Stri
     let scenario = Scenario::new(fixture, "rollback")?;
     let data_hash = file_hash(&scenario.data_probe)?;
     let source_inode = inode(&scenario.install)?;
-    scenario.install_startup()?;
+    scenario.install_and_start()?;
     wait_healthy(&scenario.root, &fixture.version).await?;
     scenario.stop().await?;
     let injected_target = format!("{}-synthetic-health-mismatch", fixture.version);
@@ -739,7 +739,7 @@ async fn failing_update_rolls_back(fixture: &VerifiedFixture) -> Result<(), Stri
 async fn failed_helper_exec_is_cleaned_up(fixture: &VerifiedFixture) -> Result<(), String> {
     let scenario = Scenario::new(fixture, "no-helper-claim")?;
     let data_hash = file_hash(&scenario.data_probe)?;
-    scenario.install_startup()?;
+    scenario.install_and_start()?;
     wait_healthy(&scenario.root, &fixture.version).await?;
     scenario.stop().await?;
     prepare_transaction(&scenario, &fixture.version, &fixture.version, true)?;

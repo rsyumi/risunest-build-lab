@@ -9,7 +9,7 @@ const compiler = process.env.NSIS_MAKENSIS ?? join(process.env.LOCALAPPDATA ?? '
 const skip = process.platform !== 'win32' || !existsSync(compiler);
 if (process.env.RISUNEST_REQUIRE_NSIS === '1' && skip) throw new Error('NSIS compiler is required');
 const quote = value => value.replaceAll('$', '$$').replaceAll('"', '$\\"');
-const nonce = 'a'.repeat(64);
+const nonce = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const stages = {
   prepare: 'Stopping RisuNest Sync and preparing the installation...',
   schedule: 'Applying scheduled update settings...',
@@ -49,10 +49,11 @@ test('NSIS displays the active operation and does not complete failed Sync setup
     return join(root, `${name}.exe`);
   };
   try {
-    // Only the manager process boundary is simulated. NSIS executes the hooks,
-    // renders its real progress control, and handles Abort itself.
+    // NSIS executes the hooks, renders its real progress control, and handles Abort.
+    // Manager processes and modal error dialogs are simulated to keep failures unattended.
     const syncHook = readFileSync(resolve('server/manager/install/windows.nsh'), 'utf8')
       .replaceAll('$LOCALAPPDATA', '$INSTDIR\\local')
+      .replace(/MessageBox MB_OK\|MB_ICON(?:STOP|EXCLAMATION) "\$SyncFailureMessage"/g, 'DetailPrint "$SyncFailureMessage"')
       .replace(/nsExec::ExecToStack '([^\r\n]+)'/g, (_, command) => `!insertmacro Manager "${commandStage(command)}"`)
       .replace('StrCpy $R6 300', '!insertmacro Capture "finish-removal"\n  StrCpy $R6 1');
     writeFileSync(join(root, 'sync.nsh'), syncHook);
@@ -138,9 +139,13 @@ FunctionEnd
 !macroend
 Function .onInstFailed
   !insertmacro Failed
+  SetErrorLevel 1
+  Quit
 FunctionEnd
 Function un.onUninstFailed
   !insertmacro Failed
+  SetErrorLevel 1
+  Quit
 FunctionEnd
 Section
   SetOutPath "$INSTDIR"

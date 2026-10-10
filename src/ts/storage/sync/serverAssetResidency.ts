@@ -1,4 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
+import { beginExternalProgress, externalProgressFailure } from './external/progress';
 import { beginMobileBackgroundTask } from "../../mobileBackgroundTask";
 import { get } from "svelte/store";
 import { selectedCharID } from "src/ts/stores.svelte";
@@ -102,14 +103,25 @@ export const setAssetResidencyPolicy = (policy: AssetResidencyPolicy) =>
     ? protectedCommand("server_sync_asset_policy", { policy, selectedCharacterId: selectedCharacterId() })
     : command("server_sync_asset_policy", { policy });
 /** Downloads the bodies one external connection holds, or every holder's, keeping the policy. */
-export const downloadRemoteAssets = (connectionId?: string, options?: { signal?: AbortSignal; target?: AssetResidencyTarget }) => {
+export const downloadRemoteAssets = async (connectionId?: string, options?: { signal?: AbortSignal; target?: AssetResidencyTarget }) => {
   const operationId = crypto.randomUUID();
-  return protectedCommand("asset_residency_download_remote", {
-    connectionId: connectionId ?? null,
-    selectedCharacterId: selectedCharacterId(),
-    operationId,
-    ...(options?.target ? { target: options.target } : {}),
-  }, options?.signal, operationId);
+  const externalId = connectionId ?? (options?.target?.kind === 'external' ? options.target.connectionId : undefined);
+  const run = externalId ? beginExternalProgress(externalId, 'download') : undefined;
+  const progress = run ? new Channel<{ completedItems: number; totalItems: number }>() : undefined;
+  if (progress) progress.onmessage = value => {
+    if (count(value.completedItems) && count(value.totalItems) && value.completedItems <= value.totalItems) run?.items(value.completedItems, value.totalItems);
+  };
+  try {
+    const result = await protectedCommand("asset_residency_download_remote", {
+      connectionId: connectionId ?? null,
+      selectedCharacterId: selectedCharacterId(),
+      operationId,
+      ...(options?.target ? { target: options.target } : {}),
+      ...(progress ? { progress, transferProgress: run!.networkChannel() } : {}),
+    }, options?.signal, operationId);
+    run?.finish('complete');
+    return result;
+  } catch (error) { run?.finish(externalProgressFailure(error)); throw error; }
 };
 export const evictLocalAssets = () => protectedCommand("server_sync_asset_evict");
 export const cancelAssetResidencyOperation = (operationId?: string) =>

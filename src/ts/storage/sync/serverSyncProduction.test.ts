@@ -696,10 +696,10 @@ describe('production server LWW composition', () => {
 })
 describe('server sync progress', () => {
     const lanes = (sent: number) => ['send', 'receive', 'hydrate', 'binding', 'assets'].map(lane => ({
-        lane, active: lane === 'send', step: lane === 'send' ? 'uploading' : 'idle', listed: 0, listedTotal: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: lane === 'send' ? sent : 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0,
+        lane, active: lane === 'send', sending: lane === 'send', receiving: false, step: lane === 'send' ? 'uploading' : 'idle', listed: 0, listedTotal: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: lane === 'send' ? sent : 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0,
     }))
     const sendLanes = (send: Record<string, unknown>) => ['send', 'receive', 'hydrate', 'binding', 'assets'].map(lane => ({
-        lane, active: false, step: 'idle', listed: 0, listedTotal: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...(lane === 'send' ? send : {}),
+        lane, active: false, sending: false, receiving: false, step: 'idle', listed: 0, listedTotal: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...(lane === 'send' ? send : {}),
     }))
     const pendingReads = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_pending_count').length
     /** A push that waits; each lanes read takes the next of `reads` and repeats the last. */
@@ -712,6 +712,27 @@ describe('server sync progress', () => {
         return (failure?: unknown) => finish(failure)
     }
     const progressReads = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_progress').length
+    it('samples partial body traffic independently in both directions without advancing verified work', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const finish = countedPush([
+            { active: true, sending: true, receiving: true, sentBytes: 100, receivedBytes: 200 },
+            { active: true, sending: true, receiving: true, sentBytes: 2100, receivedBytes: 1200 },
+            { active: true, sending: false, receiving: false, sentBytes: 2100, receivedBytes: 1200 },
+        ])
+        const controller = production.getServerSyncController()
+        const stop = controller.watchProgress()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        const initial = controller.snapshot().progress!.network!
+        expect(initial).toMatchObject({ sentBytes: '0', receivedBytes: '0', sending: true, receiving: true })
+        await vi.advanceTimersByTimeAsync(500); await settle()
+        const current = controller.snapshot().progress!
+        expect(current.network).toMatchObject({ id: initial.id, sentBytes: '2000', receivedBytes: '1000', sending: true, receiving: true })
+        expect(current.network!.atMs).toBeGreaterThan(initial.atMs)
+        expect(current.lanes!.find(lane => lane.lane === 'send')).toMatchObject({ bytesDone: 0, itemsDone: 0 })
+        await vi.advanceTimersByTimeAsync(500); await settle()
+        expect(controller.snapshot().progress?.network).toMatchObject({ sending: false, receiving: false, sentBytes: '2000', receivedBytes: '1000' })
+        finish(); await settle(); stop()
+    })
     const hangingPush = (sent: number[]) => {
         let finish!: (failure?: unknown) => void
         f.invoke.mockImplementation(async command => command === 'server_sync_lww_push' ? new Promise((resolve, reject) => { finish = failure => failure ? reject(failure) : resolve(null) })

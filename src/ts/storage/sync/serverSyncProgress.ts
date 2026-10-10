@@ -3,6 +3,8 @@ import type { languageEnglish } from 'src/lang/en'
 import { formatElapsed } from '../../gui/nativeFileJobDialogModel'
 import { formatRisuNestStorageBytes } from '../risuNestStorageDashboard'
 import { formatRemaining } from './remainingTime'
+import type { TransferRateSample } from './transferRate'
+export { createRateMeter } from './transferRate'
 
 export type ServerSyncLaneName = 'send' | 'receive' | 'hydrate' | 'binding' | 'assets'
 export type ServerSyncNativeStep = 'idle' | 'preparing' | 'checking' | 'uploading' | 'confirming' | 'listing' | 'downloading' | 'staging'
@@ -23,6 +25,8 @@ export interface ServerSyncLane {
     bytesTotal: number
     sentBytes: number
     receivedBytes: number
+    sending: boolean
+    receiving: boolean
     /** Server changes after the receive cursor. */
     backlogDone: number
     /** What remains of that work now. It falls as well as grows, so a view reads it as it is. */
@@ -46,22 +50,6 @@ export function laneDeltas(current: ServerSyncLane[], baseline: ServerSyncLane[]
     })
 }
 
-/** Bytes per second over the last few seconds of samples. */
-export function createRateMeter(windowMs = 3000) {
-    const samples: { at: number; bytes: number }[] = []
-    return {
-        add(at: number, bytes: number) {
-            samples.push({ at, bytes })
-            while (samples.length > 2 && at - samples[1].at >= windowMs) samples.shift()
-        },
-        rate(): number | undefined {
-            if (samples.length < 2) return undefined
-            const first = samples[0], last = samples[samples.length - 1]
-            return last.at > first.at ? Math.max(0, last.bytes - first.bytes) * 1000 / (last.at - first.at) : undefined
-        },
-        reset() { samples.length = 0 },
-    }
-}
 
 export type ServerSyncStage = 'preparing' | 'downloading' | 'applying' | 'refreshing' | 'publishing' | 'assets'
 /** A routine sync shows one bar: for its changes, or for the assets it downloads after them. */
@@ -84,7 +72,7 @@ export interface ServerSyncAttempt {
     current: ServerSyncStage
     /** Lane counts since the attempt was first watched, once a sample arrived. */
     lanes?: ServerSyncLane[]
-    rate?: number
+    network?: TransferRateSample
     /** Changes a watched attempt had to upload when it began publishing. */
     plannedSend?: number
     /** Server changes after the receive cursor, as a watched attempt first read them. */
@@ -102,7 +90,7 @@ export interface ServerSyncProgressView {
     /** Share done, or null while the running step reports no total. */
     fraction: number | null
     stages: { stage: ServerSyncStage; label: string; state: 'done' | 'active' }[]
-    counters: { key: 'bytes' | 'rate' | 'items' | 'files' | 'elapsed' | 'remaining'; label: string; value: string }[]
+    counters: { key: 'bytes' | 'items' | 'files' | 'elapsed' | 'remaining'; label: string; value: string }[]
 }
 
 const STAGE_LANES: Record<ServerSyncStage, ServerSyncLaneName[]> = {
@@ -192,7 +180,6 @@ export function serverSyncProgressView(attempt: ServerSyncAttempt, text: Text, n
     const counters: ServerSyncProgressView['counters'] = []
     if (attempt.lanes) {
         counters.push({ key: 'bytes', label: text.verifiedBytes, value: `↑ ${bytes(sent)} · ↓ ${bytes(received)}` })
-        counters.push({ key: 'rate', label: text.transferRate, value: attempt.rate === undefined ? '-' : `${bytes(attempt.rate)}/s` })
         if (unplanned > 0) counters.push({ key: 'items', label: text.progressItems, value: count(itemsDone) })
         else if (itemsTotal > 0) counters.push({ key: 'items', label: text.progressItems, value: ratio(itemsDone, itemsTotal) })
         // Files are planned per transfer group, so they have no total for the whole attempt.

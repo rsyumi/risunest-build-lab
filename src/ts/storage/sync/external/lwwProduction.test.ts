@@ -8,7 +8,7 @@ const fixture = vi.hoisted(() => ({
     registrations: new Map<string, SyncBindingTransport>(), viewport: undefined as undefined | ((source: unknown) => void),
     revision: undefined as undefined | ((revision: number, cause: string) => void),
 }))
-vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke, Channel: class { onmessage = (_value: unknown) => {} } }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: fixture.listen }))
 vi.mock('../../../platform', () => ({ get isTauri() { return fixture.native } }))
 vi.mock('../../../mobileBackgroundTask', () => ({ runWithMobileBackgroundTask: fixture.mobile }))
@@ -21,6 +21,7 @@ vi.mock('../../persistentRevisionEvents', () => ({ subscribeLocalPersistentRevis
 vi.mock('../bindingNative', () => ({ createNativeSyncBindingBridge: () => ({ state: fixture.state }), replaceNativeSyncBinding: vi.fn(), replaceNativeSyncBindingAsNewDevice: vi.fn() }))
 vi.mock('../bindingRegistry', () => ({ resumeCurrentSyncBinding: fixture.resumeCurrent, registerSyncBindingTransport(target: { connectionId: string }, transport: SyncBindingTransport) { fixture.registrations.set(target.connectionId, transport); return () => fixture.registrations.delete(target.connectionId) } }))
 import { installExternalLwwAdapters, refreshExternalLwwAdapters, externalLwwExitDrain, requestExternalLwwNow, subscribeExternalLwwFailures } from './lwwProduction'
+import { externalProgressFor, subscribeExternalProgress, type ExternalOperationProgress } from './progress'
 const binding = { target: { kind: 'external' as const, connectionId: 'sync' }, targetAuthority: '4', selectionEpoch: 'selection', libraryId: 'library', progress: [] }
 const context = (): BindingContext => ({ state: binding, signal: new AbortController().signal })
 const state = (providers = ['webdav']): ExternalStorageState => ({ connections: providers.map((providerId, i) => ({ id: i ? providerId : 'sync', providerId, purpose: 'sync' })) } as ExternalStorageState)
@@ -39,6 +40,21 @@ beforeEach(() => {
 afterEach(() => { dispose?.(); dispose = undefined; vi.useRealTimers() })
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
 describe('native external LWW adapter', () => {
+    it('observes confirmation waiting within the binding attempt', async () => {
+        dispose = await installExternalLwwAdapters(state(), false)
+        let progress: ReadonlyMap<string, ExternalOperationProgress> = new Map()
+        const stop = subscribeExternalProgress(value => progress = value)
+        const transport = fixture.registrations.get('sync')!
+        await transport.observeBinding!(async () => {
+            transport.setConfirmationPending!(true)
+            expect(externalProgressFor(progress, 'sync')).toMatchObject({ kind: 'binding', stage: 'waiting', state: 'running' })
+            transport.setConfirmationPending!(false)
+            expect(externalProgressFor(progress, 'sync')?.stage).toBe('checking')
+            return { kind: 'cancelled' }
+        })
+        expect(externalProgressFor(progress, 'sync')?.state).toBe('cancelled')
+        stop()
+    })
     it('resumes a persisted external target through shared flow ownership exactly once for the current authority', async () => {
         dispose = await installExternalLwwAdapters(state()); await settle()
         expect(fixture.resumeCurrent).toHaveBeenCalledExactlyOnceWith(binding.target)

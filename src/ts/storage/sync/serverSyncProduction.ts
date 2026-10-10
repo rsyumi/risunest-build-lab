@@ -21,7 +21,7 @@ import type { ServerConfig } from './serverSync'
 import { get } from 'svelte/store'
 import { selectedCharID } from 'src/ts/stores.svelte'
 import { getDatabase } from '../database.svelte'
-import { bytePhase, createRateMeter, laneDeltas, readServerSyncLanes, routineMoved, routinePeak, type ServerSyncAttempt, type ServerSyncLane, type ServerSyncStage } from './serverSyncProgress'
+import { bytePhase, laneDeltas, readServerSyncLanes, routineMoved, routinePeak, type ServerSyncAttempt, type ServerSyncLane, type ServerSyncStage } from './serverSyncProgress'
 import { createRemainingTimeEstimator } from './remainingTime'
 import { setAssetResidencyPolicy, type AssetResidencyPolicy } from './serverAssetResidency'
 
@@ -92,7 +92,6 @@ let finished: ServerSyncAttempt | undefined
 let finishedTimer: ReturnType<typeof setTimeout> | undefined
 let watchers = 0
 let sampling: ReturnType<typeof setInterval> | undefined
-const meter = createRateMeter()
 const remaining = createRemainingTimeEstimator()
 const readLanes = () => readServerSyncLanes().catch(() => undefined)
 async function sample(): Promise<void> {
@@ -113,8 +112,13 @@ async function sample(): Promise<void> {
     if (captured.plannedReceive === undefined && receive && receive.backlogDone > 0) captured.plannedReceive = receive.backlogDone + receive.backlogLeft
     captured.peak = routinePeak(captured)
     const at = Date.now()
-    meter.add(at, captured.lanes.reduce((total, lane) => total + lane.sentBytes + lane.receivedBytes, 0))
-    captured.rate = meter.rate()
+    captured.network = {
+        id: captured.network?.id ?? crypto.randomUUID(), atMs: performance.now(),
+        sentBytes: String(captured.lanes.reduce((total, lane) => total + lane.sentBytes, 0)),
+        receivedBytes: String(captured.lanes.reduce((total, lane) => total + lane.receivedBytes, 0)),
+        sending: lanes.some(lane => lane.active && lane.sending),
+        receiving: lanes.some(lane => lane.active && lane.receiving),
+    }
     const phase = bytePhase(captured)
     captured.remainingMs = remaining.update(phase?.key, phase?.done ?? 0, phase?.total ?? 0, at, phase?.items)
     changed()
@@ -142,7 +146,7 @@ const watchSamples = () => {
 async function during<T>(stage: ServerSyncStage, operation: () => Promise<T>): Promise<T> {
     // Connecting and downloading every asset show their steps; a routine attempt they join becomes one of them.
     const mode = binding || operations ? 'full' : 'routine'
-    if (!attempt) { attempt = { mode, startedAt: Date.now(), stages: [], active: [], current: stage }; attemptFailed = false; baseline = undefined; meter.reset(); remaining.reset(); clearFinished(); watchSamples() }
+    if (!attempt) { attempt = { mode, startedAt: Date.now(), stages: [], active: [], current: stage }; attemptFailed = false; baseline = undefined; remaining.reset(); clearFinished(); watchSamples() }
     else if (mode === 'full') attempt.mode = mode
     const entered = attempt
     if (!entered.stages.includes(stage)) entered.stages.push(stage)

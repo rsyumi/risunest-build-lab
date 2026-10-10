@@ -991,7 +991,7 @@ impl ExternalLwwEngine {
                     sources,&root,&self.connection_root.join("external-storage").join("package-cache").join(&self.connection_id),
                     &self.root_key,super::packaging::PackageLimits::from_capabilities(&self.capabilities)?,
                     &mut journal,self.provider.as_ref(),&self.repository,
-                    &super::phase_progress::PhaseProgress::silent(),cancel,protection,
+                    &self.provider.preparation_progress(),cancel,protection,
                 ).await?;
                 publication.data_catalogs.push(completed.catalog);
                 store.external_lww_persist(&publication,&sealed).map_err(store_error)?;
@@ -1042,7 +1042,7 @@ impl ExternalLwwEngine {
                     &self.connection_root.join("external-storage").join("package-cache").join(&self.connection_id),
                     &self.root_key, super::packaging::PackageLimits::from_capabilities(&self.capabilities)?,
                     &mut journal, self.provider.as_ref(), &self.repository,
-                    &super::phase_progress::PhaseProgress::silent(), cancel, protection,
+                    &self.provider.preparation_progress(), cancel, protection,
                 ).await?;
                 publication.asset_catalogs.push(completed.catalog);
                 store.external_lww_persist(&publication, &sealed).map_err(store_error)?;
@@ -1871,6 +1871,7 @@ impl ExternalLwwEngine {
         let mut published=self.published_state(store,directory.path(),cancel).await?;
         published.require_complete()?;
         self.stage_published_objects(store,&mut published,directory.path(),cancel).await?;
+        self.provider.progress_stage("applying");
         let mut source_failure = None;
         let stage = store
             .lww_stage_binding_units_stream(

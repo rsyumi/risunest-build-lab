@@ -4,6 +4,7 @@
 //! attempt started. `backlog_left` is the exception: it is what remains of
 //! known work now. Lanes that can run at the same time never share counters.
 use std::cell::RefCell;
+use std::io::{self, Read};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -65,6 +66,8 @@ pub(crate) struct ProgressLane {
     bytes_total: AtomicU64,
     sent: AtomicU64,
     received: AtomicU64,
+    sending: AtomicU32,
+    receiving: AtomicU32,
     /// The server's changes after the receive cursor.
     backlog_done: AtomicU64,
     backlog_left: AtomicU64,
@@ -138,6 +141,8 @@ impl ProgressLane {
             bytes_total: self.bytes_total.load(Relaxed),
             sent_bytes: self.sent.load(Relaxed),
             received_bytes: self.received.load(Relaxed),
+            sending: self.sending.load(Relaxed) > 0,
+            receiving: self.receiving.load(Relaxed) > 0,
             backlog_done: self.backlog_done.load(Relaxed),
             backlog_left: self.backlog_left.load(Relaxed),
             asset_scope: *self.asset_scope.lock().unwrap_or_else(|error| error.into_inner()),
@@ -161,6 +166,8 @@ pub(crate) struct LaneSnapshot {
     pub bytes_total: u64,
     pub sent_bytes: u64,
     pub received_bytes: u64,
+    pub sending: bool,
+    pub receiving: bool,
     pub backlog_done: u64,
     pub backlog_left: u64,
     pub asset_scope: Option<AssetScope>,
@@ -188,6 +195,42 @@ impl Lanes {
     }
 }
 pub(crate) static LANES: LazyLock<Lanes> = LazyLock::new(Lanes::default);
+
+/// Observe encoded HTTP bodies as the transport consumes them, including partial failures.
+pub(crate) struct WireReader<R> {
+    reader: R,
+    lane: Arc<ProgressLane>,
+    upload: bool,
+    remaining: Option<u64>,
+    active: bool,
+}
+impl<R> WireReader<R> {
+    pub(crate) fn new(reader: R, lane: Arc<ProgressLane>, upload: bool, length: Option<u64>) -> Self {
+        let active = length != Some(0);
+        if active { if upload { &lane.sending } else { &lane.receiving }.fetch_add(1, Relaxed); }
+        Self { reader, lane, upload, remaining: length, active }
+    }
+    fn finish(&mut self) {
+        if self.active {
+            self.active = false;
+            if self.upload { &self.lane.sending } else { &self.lane.receiving }.fetch_sub(1, Relaxed);
+        }
+    }
+}
+impl<R> Drop for WireReader<R> { fn drop(&mut self) { self.finish(); } }
+impl<R: Read> Read for WireReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.reader.read(buf) {
+            Ok(count) => {
+                if self.upload { self.lane.wire(count as u64, 0); } else { self.lane.wire(0, count as u64); }
+                if let Some(remaining) = &mut self.remaining { *remaining = remaining.saturating_sub(count as u64); }
+                if (count == 0 && !buf.is_empty()) || self.remaining == Some(0) { self.finish(); }
+                Ok(count)
+            }
+            Err(error) => { if error.kind() != io::ErrorKind::Interrupted { self.finish(); } Err(error) }
+        }
+    }
+}
 
 thread_local! {
     static CURRENT: RefCell<Option<Arc<ProgressLane>>> = const { RefCell::new(None) };
@@ -300,5 +343,41 @@ mod tests {
             assert_eq!(lane.snapshot("send").step, "confirming");
         });
         assert!(!lane.snapshot("send").active);
+    }
+
+    #[test]
+    fn wire_readers_count_partial_attempts_and_keep_overlapping_directions_active() {
+        let lane = Arc::new(ProgressLane::default());
+        let mut upload = WireReader::new(io::Cursor::new(vec![1; 10]), lane.clone(), true, Some(10));
+        let mut download = WireReader::new(io::Cursor::new(vec![2; 20]), lane.clone(), false, None);
+        upload.read_exact(&mut [0; 4]).unwrap();
+        download.read_exact(&mut [0; 5]).unwrap();
+        let partial = lane.snapshot("send");
+        assert_eq!((partial.sent_bytes, partial.received_bytes, partial.bytes_done), (4, 5, 0));
+        assert!(partial.sending && partial.receiving);
+        assert_eq!(upload.read(&mut []).unwrap(), 0);
+        assert!(lane.snapshot("send").sending);
+        let mut retry = WireReader::new(io::Cursor::new(vec![1; 10]), lane.clone(), true, Some(10));
+        drop(upload);
+        assert!(lane.snapshot("send").sending);
+        retry.read_exact(&mut [0; 10]).unwrap();
+        assert!(!lane.snapshot("send").sending);
+        assert!(lane.snapshot("send").receiving);
+        drop(download);
+        let done = lane.snapshot("send");
+        assert_eq!((done.sent_bytes, done.received_bytes), (14, 5));
+        assert!(!done.sending && !done.receiving);
+    }
+
+    #[test]
+    fn failed_body_reads_release_activity_without_inventing_completion() {
+        struct Failing;
+        impl Read for Failing { fn read(&mut self, _: &mut [u8]) -> io::Result<usize> { Err(io::ErrorKind::ConnectionReset.into()) } }
+        let lane = Arc::new(ProgressLane::default());
+        let mut reader = WireReader::new(Failing, lane.clone(), false, None);
+        assert!(reader.read(&mut [0; 1]).is_err());
+        let failed = lane.snapshot("receive");
+        assert!(!failed.receiving);
+        assert_eq!((failed.received_bytes, failed.bytes_done), (0, 0));
     }
 }

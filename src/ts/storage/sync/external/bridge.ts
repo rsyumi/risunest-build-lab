@@ -248,11 +248,12 @@ export class ExternalStorageBridge {
     }
 
     exportSnapshot(connectionId: string, snapshotId: string, exportId: string,
-        onProgress: (progress: ExternalSnapshotExportProgress) => void): Promise<ExternalSnapshotExportResult> {
+        onProgress: (progress: ExternalSnapshotExportProgress) => void,
+        transferProgress?: Channel<import('./progress').ExternalTransferSnapshot>): Promise<ExternalSnapshotExportResult> {
         if (!this.supported) return Promise.reject(new ExternalStorageUnsupportedError())
         const progress = new Channel<ExternalSnapshotExportProgress>()
         progress.onmessage = onProgress
-        return this.native('external_storage_export_snapshot', { request: { connectionId, snapshotId, exportId }, progress })
+        return this.native('external_storage_export_snapshot', { request: { connectionId, snapshotId, exportId }, progress, ...(transferProgress ? { transferProgress } : {}) })
     }
 
     cancelExport(exportId: string): Promise<void> {

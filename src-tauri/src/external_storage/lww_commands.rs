@@ -20,6 +20,7 @@ use std::{
 use tauri::{AppHandle,Manager};
 
 struct Session {
+    progress: super::progress::Observer,
     engine: Option<ExternalLwwEngine>,
     identity: Option<Vec<u8>>,
     dependencies: Option<Dependencies>,
@@ -31,6 +32,7 @@ struct Session {
 impl Session {
     fn new() -> Self {
         Self {
+            progress: Default::default(),
             engine: None,
             identity: None,
             dependencies: None,
@@ -139,7 +141,7 @@ async fn connect_with(
     session.cancel.check()?;
     session.dependencies = Some(connected.dependencies);
     session.engine = Some(ExternalLwwEngine {
-        provider: connected.provider,
+        provider: session.progress.wrap(connected.provider),
         repository: connected.handle,
         library: connected.stored.descriptor.repository_id.clone(),
         root_key: connected.root_key,
@@ -257,10 +259,11 @@ pub(crate) struct Inspection {
     server_restored: bool,
 }
 #[tauri::command]
-pub(crate) async fn external_lww_inspect(app: AppHandle, request: Request) -> Result<Inspection> {
+pub(crate) async fn external_lww_inspect(app: AppHandle, request: Request, webview: tauri::Webview, progress: Option<tauri::ipc::JavaScriptChannelId>) -> Result<Inspection> {
     logged("external_lww_inspect", Box::pin(async move {
         let context = context(&request.connection_id)?;
         let mut session = context.session.lock().await;
+        let _progress = session.progress.begin(progress.map(|channel| channel.channel_on(webview)));
         session.cancel = binding_cancellation(&context)?;
         open(&app, &request.connection_id, &mut session).await?;
         let store = check(&app, &request, false)?;
@@ -341,10 +344,12 @@ pub(crate) struct Staged {
 pub(crate) async fn external_lww_stage_binding(
     app: AppHandle,
     request: StageRequest,
+    webview: tauri::Webview, progress: Option<tauri::ipc::JavaScriptChannelId>,
 ) -> Result<Staged> {
     logged("external_lww_stage_binding", Box::pin(async move {
         let context = context(&request.request.connection_id)?;
         let mut session = context.session.lock().await;
+        let _progress = session.progress.begin(progress.map(|channel| channel.channel_on(webview)));
         open(&app, &request.request.connection_id, &mut session).await?;
         let mut store = check(&app, &request.request, false)?;
         let engine = session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
@@ -373,12 +378,14 @@ pub(crate) async fn external_lww_stage_binding(
 pub(crate) async fn external_lww_publish(
     app: AppHandle,
     request: Request,
+    webview: tauri::Webview, progress: Option<tauri::ipc::JavaScriptChannelId>,
 ) -> Result<PublicationResult> {
     logged("external_lww_publish", Box::pin(async move {
         let state = app.state::<crate::persistent_store::PersistentStoreState>();
         let _operation = state.admit_renderer_operation().map_err(runtime::local_error)?;
         let context = context(&request.connection_id)?;
         let mut session = context.session.lock().await;
+        let _progress = session.progress.begin(progress.map(|channel| channel.channel_on(webview)));
         open(&app, &request.connection_id, &mut session).await?;
         let mut store = state.open_admitted_native_job_store(&_operation).map_err(runtime::local_error)?;
         check_store(&store, &request, true)?;
@@ -429,10 +436,12 @@ pub(crate) async fn external_lww_publish(
 pub(crate) async fn external_lww_receive(
     app: AppHandle,
     request: Request,
+    webview: tauri::Webview, progress: Option<tauri::ipc::JavaScriptChannelId>,
 ) -> Result<Option<StageReceive>> {
     logged("external_lww_receive", Box::pin(async move {
         let context = context(&request.connection_id)?;
         let mut session = context.session.lock().await;
+        let _progress = session.progress.begin(progress.map(|channel| channel.channel_on(webview)));
         open(&app, &request.connection_id, &mut session).await?;
         let mut store = check(&app, &request, true)?;
         let Session { engine, receive_pages, cancel, .. } = &mut *session;
