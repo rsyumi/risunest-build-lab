@@ -1,0 +1,62 @@
+name: Native Linux diagnostics
+run-name: Native Linux ${{ inputs.source_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full Sync snapshot commit SHA
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - name: Verify snapshot
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . sync
+          mkdir -p artifacts
+          cp .build-lab/source.json artifacts/source.json
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+      - name: Install Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libwebkit2gtk-4.1-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev gnome-keyring dbus-x11
+      - name: Run native suite with service diagnostics
+        run: |
+          started=$(date --iso-8601=seconds)
+          gnome-keyring-daemon --version
+          ulimit -l
+          set +e
+          dbus-run-session -- bash scripts/linux-native-tests.sh --release 2>&1 | tee artifacts/native.log
+          result=${PIPESTATUS[0]}
+          sudo journalctl --since "$started" --no-pager --grep='gnome-keyring|Out of memory|Killed process|segfault' > artifacts/services.log
+          cat artifacts/services.log
+          printf 'native_exit=%s\n' "$result"
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-linux-diagnostics-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
