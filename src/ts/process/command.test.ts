@@ -120,16 +120,18 @@ describe('processMultiCommand conversation mutations', () => {
         })
         mocks.session = session
         const operation = createConversationOperationContext(session, chat)
+        const generation = { signal: new AbortController().signal, reservation: { isCurrent: () => true, release: vi.fn() } }
         vi.mocked(setCurrentChat).mockClear()
         vi.mocked(runTrigger).mockResolvedValueOnce({
             chat: operation.chat,
         } as never)
         try {
-            await processMultiCommand('/trigger inner', operation)
+            await processMultiCommand('/trigger inner', operation, generation)
             expect(runTrigger).toHaveBeenLastCalledWith(character, 'manual', {
                 chat: operation.chat,
                 manualName: 'inner',
                 conversationOperation: operation,
+                generation,
             })
             expect(setCurrentChat).not.toHaveBeenCalled()
         } finally {
@@ -201,6 +203,20 @@ describe('processMultiCommand conversation mutations', () => {
             'second"',
         ])
         expect(mocks.sendChat).toHaveBeenCalledTimes(2)
+    })
+
+    it('inherits the chat-screen reservation and stops multisend before the next input', async () => {
+        const controller = new AbortController()
+        const reservation = { isCurrent: () => true, release: vi.fn() }
+        mocks.sendChat.mockImplementationOnce(async () => { controller.abort() })
+
+        await processMultiCommand('/multisend "first|||second"', undefined, {
+            signal: controller.signal, reservation,
+        })
+
+        expect(mocks.sendChat).toHaveBeenCalledExactlyOnceWith({ signal: controller.signal }, reservation)
+        expect(mocks.database!.characters[0].chats[0].message.map(message => message.data)).toEqual(['before', '"first'])
+        expect(reservation.release).not.toHaveBeenCalled()
     })
 
     it.each([

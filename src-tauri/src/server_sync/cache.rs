@@ -126,11 +126,17 @@ enum Emission {
 #[cfg(test)]
 thread_local! {
     static PUT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static BATCH_COMMITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 pub(crate) fn take_put_calls() -> u64 {
     PUT_CALLS.with(|calls| calls.replace(0))
+}
+
+#[cfg(test)]
+pub(crate) fn take_batch_commits() -> u64 {
+    BATCH_COMMITS.with(|commits| commits.replace(0))
 }
 
 pub(crate) struct Cache {
@@ -295,6 +301,8 @@ impl Cache {
             }
             inserted.map_err(cache_object_error)?;
             tx.commit()?;
+            #[cfg(test)]
+            BATCH_COMMITS.with(|commits| commits.set(commits.get() + 1));
             // Between groups, never inside one. A reader on another connection
             // can leave the log where it is; this group is already durable, so
             // a refused checkpoint is not a reason to fail it. What it leaves

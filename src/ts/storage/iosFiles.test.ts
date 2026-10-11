@@ -93,6 +93,20 @@ describe('iOS file publication', () => {
             }),
         ).rejects.toMatchObject({ name: 'AbortError' })
     })
+    it('keeps selection reserved through native return and cleanup', async () => {
+        const { isLibraryFileOperationReserved } = await import('./libraryFileOperation')
+        let finish!: (value: { cancelled: boolean }) => void
+        invoke.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+        const selected = pickIOSFile()
+        expect(isLibraryFileOperationReserved()).toBe(true)
+        window.dispatchEvent(new Event('focus'))
+        document.dispatchEvent(new Event('visibilitychange'))
+        await Promise.resolve()
+        expect(isLibraryFileOperationReserved()).toBe(true)
+        finish({ cancelled: true })
+        expect(await selected).toBeNull()
+        expect(isLibraryFileOperationReserved()).toBe(false)
+    })
     it('cleans the app-owned import copy when cancellation arrives during the picker', async () => {
         const controller = new AbortController()
         invoke.mockImplementation(async (command) => {

@@ -180,6 +180,7 @@ describe('common backup file production route', () => {
         m.legacy.mockRejectedValue(new NativeFileJobError('compatibility-import-required', 'Recognized upstream form'))
         m.fallback.mockImplementation(async (context, lifecycle) => {
             expect(context.signal.aborted).toBe(false)
+            expect(lifecycle.firstRun).toBe(firstRun)
             expect(m.beginReplacement).not.toHaveBeenCalled()
             await lifecycle.beforeActivation()
             expect(m.confirmReplacement).not.toHaveBeenCalled()
@@ -233,7 +234,7 @@ describe('common backup file production route', () => {
         expect(m.beginReplacement).not.toHaveBeenCalled()
         expect(m.releaseReplacement).not.toHaveBeenCalled()
     })
-    it('a first run skips the replacement confirmation and asks for sections as an import', async () => {
+    it('forwards first-run consent to the native restore and section selection', async () => {
         m.invoke.mockResolvedValue('local-backup')
         expect(
             await restoreBackupFromNativeSource(
@@ -243,6 +244,7 @@ describe('common backup file production route', () => {
         ).toEqual(result)
         expect(m.confirm).not.toHaveBeenCalled()
         expect(m.legacy).toHaveBeenCalledOnce()
+        expect(m.legacy.mock.calls[0][2]).toMatchObject({firstRun:true})
 
         m.invoke.mockResolvedValue('portable')
         await restoreBackupFromNativeSource(

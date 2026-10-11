@@ -1,6 +1,6 @@
 export type SpecialDay = 'christmas' | 'newYear' | 'aprilFool' | 'anniversary' | 'harvestMoon' | 'halloween' | null
 
-export const RISUNEST_RELEASE_DATE = { year: 2026, month: 10, day: 10 } as const
+export const RISUNEST_RELEASE_DATE = { year: 2026, month: 10, day: 11 } as const
 
 const HARVEST_MOON_LANGUAGES = new Set(['ko', 'zh', 'zh-Hant'])
 

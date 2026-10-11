@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 
 const text = languageKorean.risuNest.serverSync
 const lane = (name: ServerSyncLane['lane'], counts: Partial<ServerSyncLane> = {}): ServerSyncLane => ({
-    lane: name, active: false, step: 'idle', listed: 0, listedTotal: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...counts,
+    lane: name, active: false, sending: false, receiving: false, step: 'idle', listed: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...counts,
 })
 const attempt = (fields: Partial<ServerSyncAttempt>): ServerSyncAttempt => ({ mode: 'full', startedAt: 0, stages: ['publishing'], active: ['publishing'], current: 'publishing', ...fields })
 
@@ -43,13 +43,12 @@ describe('server sync rate meter', () => {
 
 describe('server sync progress view', () => {
     it('names the native step and measures an upload against the changes planned when publishing began', () => {
-        const view = serverSyncProgressView(attempt({ plannedSend: 8, lanes: [lane('send', { active: true, step: 'uploading', itemsDone: 2, itemsTotal: 6, filesDone: 1, filesTotal: 4, bytesDone: 1024 * 1024, bytesTotal: 4 * 1024 * 1024, sentBytes: 1024 * 1024 })], rate: 512 * 1024 }), text, 65_000)
+        const view = serverSyncProgressView(attempt({ plannedSend: 8, lanes: [lane('send', { active: true, step: 'uploading', itemsDone: 2, itemsTotal: 6, filesDone: 1, filesTotal: 4, bytesDone: 1024 * 1024, bytesTotal: 4 * 1024 * 1024, sentBytes: 1024 * 1024 })] }), text, 65_000)
         expect(view.label).toBe(text.activity.uploading)
         expect(view.detail).toBe('2 / 8')
         expect(view.fraction).toBe(0.25)
         expect(view.counters.map(counter => [counter.key, counter.value])).toEqual([
             ['bytes', '↑ 1.0 MiB · ↓ 0 B'],
-            ['rate', '512 KiB/s'],
             ['items', '2 / 8'],
             ['files', '1'],
             ['elapsed', '01:05'],
@@ -86,7 +85,7 @@ describe('server sync progress view', () => {
         expect([view.detail, view.fraction]).toEqual(['10 / 40', 0.25])
     })
     it('shows a binding that downloads bodies after its last change, or stages them, without a share', () => {
-        const binding = (counts: Partial<ServerSyncLane>) => serverSyncProgressView(attempt({ stages: ['downloading'], active: ['downloading'], current: 'downloading', lanes: [lane('binding', { active: true, listed: 4477, listedTotal: 4477, itemsDone: 4477, itemsTotal: 4477, ...counts })] }), text, 0)
+        const binding = (counts: Partial<ServerSyncLane>) => serverSyncProgressView(attempt({ stages: ['downloading'], active: ['downloading'], current: 'downloading', lanes: [lane('binding', { active: true, listed: 4477, listing: { done: 4477, total: 4477 }, itemsDone: 4477, itemsTotal: 4477, ...counts })] }), text, 0)
         const bodies = binding({ step: 'downloading', filesDone: 120, filesTotal: 639 })
         expect([bodies.label, bodies.detail, bodies.fraction]).toEqual([text.activity.downloading, '', null])
         expect(bodies.counters.find(counter => counter.key === 'items')?.value).toBe('4,477 / 4,477')
@@ -96,11 +95,30 @@ describe('server sync progress view', () => {
     })
     it('measures a binding listing against the units its state pin holds', () => {
         const listing = (counts: Partial<ServerSyncLane>) => serverSyncProgressView(attempt({ stages: ['preparing'], active: ['preparing'], current: 'preparing', lanes: [lane('binding', { active: true, step: 'listing', ...counts })] }), text, 0)
-        const first = listing({ listed: 256, listedTotal: 1000 })
+        const starting = listing({ listing: { done: 0, total: 1000 } })
+        expect([starting.detail, starting.fraction]).toEqual(['0 / 1,000', 0])
+        const first = listing({ listed: 256, listing: { done: 256, total: 1000 } })
         expect([first.label, first.detail, first.fraction]).toEqual([text.activity.enumerating, '256 / 1,000', 0.256])
         // Changes made after the pin are read too; what is shown never passes the total.
-        expect(listing({ listed: 1003, listedTotal: 1000 }).detail).toBe('1,000 / 1,000')
+        expect(listing({ listed: 1003, listing: { done: 1000, total: 1000 } }).detail).toBe('1,000 / 1,000')
         expect(listing({ listed: 40 }).detail).toBe(text.itemsCount.replace('{0}', '40'))
+    })
+    it.each(['preparing', 'downloading'] as const)('shows an empty binding listing without a count or share during %s', stage => {
+        const view = serverSyncProgressView(attempt({ stages: [stage], active: [stage], current: stage, lanes: [lane('binding', { active: true, step: 'listing', listing: { done: 0, total: 0 } })] }), text, 0)
+        expect([view.label, view.detail, view.fraction]).toEqual([text.activity.enumerating, '', null])
+        expect(view.counters.find(counter => counter.key === 'items')).toBeUndefined()
+    })
+    it('shows only the current pin after a restart while retaining all transferred bytes', () => {
+        const baseline = [lane('binding', { listed: 80, receivedBytes: 1024, listing: { done: 80, total: 80 } })]
+        const current = [lane('binding', { active: true, step: 'listing', listed: 80 + 66_304 + 256, receivedBytes: 4096, listing: { done: 256, total: 140_421 } })]
+        const view = serverSyncProgressView(attempt({ stages: ['downloading'], active: ['downloading'], current: 'downloading', lanes: laneDeltas(current, baseline) }), text, 0)
+        expect(view.detail).toBe('256 / 140,421')
+        expect(view.fraction).toBe(256 / 140_421)
+        expect(view.counters.find(counter => counter.key === 'bytes')?.value).toBe('↑ 0 B · ↓ 3.0 KiB')
+        current[0].listing = { done: 0, total: 0 }
+        const restarted = serverSyncProgressView(attempt({ stages: ['downloading'], active: ['downloading'], current: 'downloading', lanes: laneDeltas(current, baseline) }), text, 0)
+        expect([restarted.detail, restarted.fraction]).toEqual(['', null])
+        expect(restarted.counters.find(counter => counter.key === 'bytes')?.value).toBe('↑ 0 B · ↓ 3.0 KiB')
     })
     it('reports no share while listing, and counts what was read', () => {
         const view = serverSyncProgressView(attempt({ stages: ['downloading'], active: ['downloading'], current: 'downloading', lanes: [lane('receive', { active: true, step: 'listing', listed: 300 })] }), text, 0)

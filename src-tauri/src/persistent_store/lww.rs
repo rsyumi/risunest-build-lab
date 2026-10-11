@@ -481,10 +481,39 @@ fn clock_state(db: &Connection) -> StoreResult<ClockState> {
         binding_authority: wire(binding.try_into())?,
     })
 }
+#[cfg(test)]
+pub(crate) mod test_clock {
+    use super::*;
+    use crate::external_storage::leases::LeaseClock;
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+    type Clocks = std::collections::BTreeMap<String, Weak<dyn LeaseClock>>;
+    static CLOCKS: OnceLock<Mutex<Clocks>> = OnceLock::new();
+
+    pub(crate) fn register(store: &PersistentStore, clock: Arc<dyn LeaseClock>) {
+        let device = store.device_store().unwrap();
+        let path = device.connection().path().unwrap().to_owned();
+        let mut clocks = CLOCKS.get_or_init(Default::default).lock().unwrap();
+        clocks.retain(|_, clock| clock.strong_count() > 0);
+        clocks.insert(path, Arc::downgrade(&clock));
+    }
+
+    pub(super) fn now_ms(db: &Connection) -> Option<u64> {
+        let clock = CLOCKS.get()?.lock().unwrap().get(db.path()?)?.upgrade()?;
+        Some(clock.reading().wall_ms)
+    }
+}
+
+fn stamp_wall_ms(_db: &Connection) -> StoreResult<u64> {
+    #[cfg(test)]
+    if let Some(now) = test_clock::now_ms(_db) { return Ok(now); }
+    device_store::now_ms()?.try_into().map_err(error)
+}
+
 pub(super) fn reserve_stamp(db: &Connection) -> StoreResult<Stamp> {
     let state = clock_state(db)?;
     let stamp = wire(issue_stamp(
-        device_store::now_ms()?.try_into().map_err(error)?,
+        stamp_wall_ms(db)?,
         &state.writer_id,
         state.issued.as_ref(),
         state.accepted.as_ref(),

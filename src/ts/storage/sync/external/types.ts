@@ -151,6 +151,7 @@ export interface ExternalConnectionSummary {
     endpoint: ExternalEndpointConfirmation
     /** The policy in force, which is the default until the user changes it. */
     retentionPolicy: ExternalRetentionPolicy
+    transferConcurrency: number
     capabilities: ExternalCapabilities
     status: 'ready' | 'paused' | 'reauth-required' | 'key-locked' | 'error'
     automaticBackupPaused: boolean
@@ -241,6 +242,8 @@ export interface ExternalJobSummary {
     phase: string
     /** Which work the four counters below measure. */
     counters?: 'prepared' | 'transferred'
+    /** Confirmed objects in this running backup attempt, independent of preparation. */
+    transfer?: import('./progress').ExternalTransferSnapshot
     completedBytes: DecimalString
     totalBytes?: DecimalString
     completedItems: DecimalString
@@ -323,7 +326,8 @@ export interface ExternalQuotaSummary {
         providerPhysicalKnown: boolean
         locallyUploadedBytesLowerBound: DecimalString
         locallyUploadedObjectCountLowerBound: DecimalString
-        locallyUploadedCoverage: 'cached-upload-receipts'
+        locallyUploadedCoverage: 'observed-remote-files'
+        observedAtMs: DecimalString | null
         latestReachable?: {
             snapshotId: string
             knownDirectBytes: DecimalString
@@ -348,7 +352,7 @@ export interface ExternalRecoveryKeyMaterial {
 export interface ExternalConnectionSettingsMaterial {
     transferId: string
     expiresAtMs: DecimalString
-    qrPayload?: string
+    payload: string
 }
 
 export interface ExternalSnapshotExportResult {

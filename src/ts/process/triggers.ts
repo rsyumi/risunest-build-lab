@@ -7,7 +7,7 @@ import { tokenize } from "../tokenizer";
 import { getModuleTriggers } from "./modules";
 import { get } from "svelte/store";
 import { ReloadChatPointer, ReloadGUIPointer, CurrentTriggerIdStore, DBState } from "../stores.svelte";
-import { processMultiCommand } from "./command";
+import { processMultiCommand, type CommandGeneration } from "./command";
 import { parseKeyValue, sleep } from "../util";
 import { alertError, alertInput, alertNormal, alertSelect } from "../alert";
 import type { OpenAIChat } from "./index.svelte";
@@ -1112,6 +1112,7 @@ interface RunTriggerArguments {
     tempVars?: Record<string, string>
     conversationOperation?: ConversationOperationContext
     onConversationCommit?: ConversationCommitObserver
+    generation?: CommandGeneration
 }
 
 export async function runTrigger(
@@ -1338,6 +1339,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
     
     
     for(const trigger of triggers){
+        if (arg.generation?.signal.aborted) break
         let tempVars:Record<string, number> = {}
 
         if(trigger.effect[0]?.type === 'triggercode' || trigger.effect[0]?.type === 'triggerlua'){
@@ -1434,6 +1436,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
         }
 
         for(let index = 0; index < trigger.effect.length; index++){
+            if (arg.generation?.signal.aborted) break
             const effect = trigger.effect[index]
             if(mode === 'display' && !displayAllowList.includes(effect.type)){
                 continue
@@ -1499,7 +1502,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                 }
                 case 'command':{
                     const effectValue = risuChatParser(effect.value,{chara:char})
-                    await processMultiCommand(effectValue, conversationOperation ?? undefined)
+                    await processMultiCommand(effectValue, conversationOperation ?? undefined, arg.generation)
                     break
                 }
                 case 'stop':
@@ -1517,6 +1520,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                             stopSending,
                             manualName: effect.value,
                             conversationOperation,
+                            generation: arg.generation,
                         })
                         if(r){
                             additonalSysPrompt = r.additonalSysPrompt
@@ -1918,6 +1922,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                             stopSending,
                             manualName: effect.target,
                             conversationOperation,
+                            generation: arg.generation,
                         })
                         if(r){
                             additonalSysPrompt = r.additonalSysPrompt
@@ -1975,7 +1980,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                 }
                 case 'v2Command':{
                     let value = effect.valueType === 'value' ? risuChatParser(effect.value,{chara:char}) : getVar(risuChatParser(effect.value,{chara:char}))
-                    await processMultiCommand(value, conversationOperation ?? undefined)
+                    await processMultiCommand(value, conversationOperation ?? undefined, arg.generation)
                     break
                 }
                 case 'v2SendAIprompt':{

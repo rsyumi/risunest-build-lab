@@ -1,5 +1,6 @@
 import { mount, tick, unmount } from "svelte";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
+import { version as syncVersion } from "../../../version.json";
 import App from "../src/App.svelte";
 import type { Backend, Environment, PlatformStatus, Status } from "../src/api";
 
@@ -436,7 +437,7 @@ it("reports a deferred manual update without claiming the app is current", async
     expect(target.textContent).toContain("관리 작업이 끝난 뒤 다시 확인"),
   );
   expect(backend.updateCheck).toHaveBeenCalledWith(false);
-  expect(target.textContent).not.toContain("현재 최신 버전입니다.");
+  expect(target.textContent).not.toContain("이미 최신 버전입니다.");
 });
 
 it("coordinates an automatic update after the scheduled checker found the open GUI", async () => {
@@ -677,12 +678,43 @@ it("requires confirmation before releasing revoked device custody", async () => 
   expect(backend.mutate).toHaveBeenCalledWith("devices/synthetic-device/forget", expect.objectContaining({ revision: "synthetic:0" }));
 });
 
+it.each([false, true])("shows an already-current result without a warning after a manual check: %s", async (manual) => {
+  const current = { ...environmentSnapshot.updateStatus, phase: "completed", reason: "already-current" };
+  if (manual) {
+    environmentSnapshot.updateStatus.phase = "failed";
+    environmentSnapshot.updateStatus.reason = "synthetic-previous-failure";
+    vi.mocked(backend.updateCheck).mockImplementation(async () => {
+      environmentSnapshot.updateStatus = current;
+      return { result: "current" };
+    });
+  } else {
+    environmentSnapshot.updateStatus = current;
+  }
+  await open();
+  button("실행 설정").click();
+  await settle();
+  if (manual) {
+    button("업데이트 확인 및 적용").click();
+    await vi.waitFor(() => expect(target.textContent).not.toContain("synthetic-previous-failure"));
+    expect(button("업데이트 확인 및 적용").disabled).toBe(false);
+    expect(backend.updateCheck).toHaveBeenCalledExactlyOnceWith(false);
+  }
+  const result = [...target.querySelectorAll("p")].find(p => p.textContent?.includes("마지막 결과:"))!;
+  expect(result.textContent?.trim()).toBe("마지막 결과: 이미 최신 버전입니다.");
+  expect(result.classList.contains("warning")).toBe(false);
+  expect(result.querySelector("code")).toBeNull();
+  expect(target.textContent).not.toContain("업데이트를 완료하지 못했습니다.");
+  expect(target.textContent).not.toContain("already-current");
+});
+
 it("renders unknown update reasons as a localized outcome with a separate diagnostic code", async () => {
+  environmentSnapshot.updateStatus.phase = "failed";
   environmentSnapshot.updateStatus.reason = "synthetic-unknown-reason";
   await open();
   button("실행 설정").click();
   await settle();
   expect(target.textContent).toContain("업데이트를 완료하지 못했습니다.");
   expect(target.querySelector("code")?.textContent).toBe("synthetic-unknown-reason");
-  expect(target.textContent).toContain("RisuNest Sync · 1.0.0");
+  expect(target.querySelector("code")?.closest("p")?.classList.contains("warning")).toBe(true);
+  expect(target.textContent).toContain(`RisuNest Sync · ${syncVersion}`);
 });

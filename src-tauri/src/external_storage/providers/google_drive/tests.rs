@@ -179,7 +179,8 @@ fn grant_verification_replies() -> Vec<Reply> {
         return Vec::new();
     }
     vec![json_reply(200, json!({
-        "issued_to": client_id(config::platform_key()),
+        "aud": client_id(config::platform_key()),
+        "azp": client_id(config::platform_key()),
         "scope": "https://www.googleapis.com/auth/drive.file"
     }))]
 }
@@ -2088,7 +2089,8 @@ fn android_grant_binding_fails_before_account_lookup() {
         let (wrong_client, request) = rejected_android_token_info(json_reply(
             200,
             json!({
-                "issued_to": "999999999999-foreign.apps.googleusercontent.com",
+                "aud": "999999999999-foreign.apps.googleusercontent.com",
+                "azp": "999999999999-foreign.apps.googleusercontent.com",
                 "scope": required_scope
             }),
         ))
@@ -2099,7 +2101,8 @@ fn android_grant_binding_fails_before_account_lookup() {
         let (missing_scope, _) = rejected_android_token_info(json_reply(
             200,
             json!({
-                "issued_to": client_id("android"),
+                "aud": client_id("android"),
+                "azp": client_id("android"),
                 "scope": "openid"
             }),
         ))
@@ -2113,6 +2116,46 @@ fn android_grant_binding_fails_before_account_lookup() {
         ))
         .await;
         assert_eq!(throttled.kind, ErrorKind::RateLimited);
+    });
+}
+
+#[test]
+fn token_info_accepts_the_documented_audience_and_authorized_party() {
+    runtime().block_on(async {
+        let client = client_id("android");
+        let server = WireServer::start(vec![json_reply(200, json!({
+            "aud": client,
+            "azp": client,
+            "scope": "https://www.googleapis.com/auth/drive.file",
+            "expires_in": "3599"
+        }))]);
+        let test = deps_with(None);
+        let config = connection(server.url.as_str());
+        let settings = AuthorizationSettings::parse(&config, "android").unwrap();
+        let account = AccountKey::pending(super::config::PROVIDER_ID, &settings.api("/").unwrap()).unwrap();
+        verify_google_grant(
+            &test.dependencies, settings.token_info_endpoint().unwrap(), &client,
+            &settings.scopes, "synthetic-token", &account, &Cancellation::default(),
+        ).await.unwrap();
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+    });
+}
+
+#[test]
+fn token_info_rejects_missing_or_foreign_client_bindings() {
+    runtime().block_on(async {
+        let client = client_id("android");
+        for mut fields in [
+            json!({ "aud": "foreign", "azp": client }),
+            json!({ "aud": client, "azp": "foreign" }),
+            json!({ "azp": client }),
+            json!({ "aud": client }),
+            json!({ "issued_to": client }),
+        ] {
+            fields["scope"] = json!("https://www.googleapis.com/auth/drive.file");
+            let (error, _) = rejected_android_token_info(json_reply(200, fields)).await;
+            assert_eq!(error.kind, ErrorKind::ReauthRequired);
+        }
     });
 }
 
@@ -2785,5 +2828,113 @@ fn segment_listing_yields_a_usable_clock_sample() {
         provider.list_objects(&repository, Collection::Segments, None, 1, &cancel).await.unwrap();
         assert!(test.dependencies.requests.clock_sample_after(&repository.account, started).unwrap().is_some());
         assert!(request_lines(&server).iter().all(|line| line.starts_with("GET ")));
+    });
+}
+
+#[test]
+fn concurrent_expiration_and_rejected_tokens_share_refresh_across_vault_handles() {
+    use crate::external_storage::auth::SecretVault;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct VaultHandle(Arc<MemoryVault>);
+    impl SecretVault for VaultHandle {
+        fn read<'a>(&'a self, reference: &'a SecretRef) -> ProviderFuture<'a, SecretBytes> { self.0.read(reference) }
+        fn store<'a>(&'a self, bytes: &'a SecretBytes) -> ProviderFuture<'a, SecretRef> { self.0.store(bytes) }
+        fn replace<'a>(&'a self, reference: &'a SecretRef, bytes: &'a SecretBytes) -> ProviderFuture<'a, ()> { self.0.replace(reference, bytes) }
+        fn remove<'a>(&'a self, reference: &'a SecretRef) -> ProviderFuture<'a, ()> { self.0.remove(reference) }
+    }
+    struct PausedRefresh {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        calls: AtomicUsize,
+        inner: NativeHttpTransport,
+    }
+    impl HttpTransport for PausedRefresh {
+        fn send<'a>(&'a self, request: HttpRequest, cancel: &'a Cancellation) -> ProviderFuture<'a, HttpResponse> {
+            Box::pin(async move {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                self.inner.send(request, cancel).await
+            })
+        }
+    }
+    runtime().block_on(async {
+        for rejected in [None, Some("synthetic-access")] {
+            let mut replies = vec![json_reply(200, json!({
+                "access_token": "refreshed-access", "expires_in": 3600, "refresh_token": "rotated-refresh"
+            }))];
+            replies.extend(grant_verification_replies());
+            let server = WireServer::start(replies);
+            let transport = Arc::new(PausedRefresh {
+                entered: Default::default(), release: Default::default(), calls: AtomicUsize::new(0),
+                inner: NativeHttpTransport::for_loopback_tests(),
+            });
+            let expiry = if rejected.is_some() { NOW_MS + 3_600_000 } else { NOW_MS };
+            let test = with_transport(transport.clone(), MemoryVault::with(SECRET, &stored_secret(expiry)), NOW_MS);
+            let mut left = test.dependencies.clone();
+            left.vault = Arc::new(VaultHandle(test.vault.clone()));
+            let mut right = test.dependencies.clone();
+            right.vault = Arc::new(VaultHandle(test.vault.clone()));
+            assert!(!Arc::ptr_eq(&left.vault, &right.vault));
+            let settings = config::Settings::parse(&connection(server.url.as_str())).unwrap();
+            let account = AccountKey::new("google_drive", &server.url, ACCOUNT).unwrap();
+            let first_cache = Mutex::new(None);
+            let second_cache = Mutex::new(None);
+            let secret = secret_ref();
+            let cancel = Cancellation::default();
+            let first = super::auth::access_token(&left, &settings, &secret, &account, &first_cache, rejected, &cancel);
+            let second = super::auth::access_token(&right, &settings, &secret, &account, &second_cache, rejected, &cancel);
+            let controller = async {
+                transport.entered.notified().await;
+                tokio::task::yield_now().await;
+                let before_release = transport.calls.load(Ordering::SeqCst);
+                assert!(first_cache.lock().unwrap().is_none());
+                assert!(second_cache.lock().unwrap().is_none());
+                transport.release.notify_one();
+                assert_eq!(before_release, 1);
+            };
+            let (first, second, ()) = tokio::join!(first, second, controller);
+            assert_eq!(first.unwrap().as_str(), "refreshed-access");
+            assert_eq!(second.unwrap().as_str(), "refreshed-access");
+            assert_eq!(first_cache.lock().unwrap().as_ref().unwrap().access.as_str(), "refreshed-access");
+            assert_eq!(second_cache.lock().unwrap().as_ref().unwrap().access.as_str(), "refreshed-access");
+            let stored: Value = serde_json::from_slice(&test.vault.contents(SECRET).unwrap()).unwrap();
+            assert_eq!(stored["refreshToken"], "rotated-refresh");
+            assert_eq!(stored["accessToken"], "refreshed-access");
+            assert_eq!(transport.calls.load(Ordering::SeqCst), 1 + GRANT_VERIFICATION_REQUESTS);
+        }
+    });
+}
+
+#[test]
+fn failed_rotation_persistence_never_publishes_a_new_cached_token() {
+    use crate::external_storage::auth::SecretVault;
+    struct FailedReplace(Arc<MemoryVault>);
+    impl SecretVault for FailedReplace {
+        fn read<'a>(&'a self, reference: &'a SecretRef) -> ProviderFuture<'a, SecretBytes> { self.0.read(reference) }
+        fn store<'a>(&'a self, bytes: &'a SecretBytes) -> ProviderFuture<'a, SecretRef> { self.0.store(bytes) }
+        fn replace<'a>(&'a self, _: &'a SecretRef, _: &'a SecretBytes) -> ProviderFuture<'a, ()> {
+            Box::pin(async { Err(ProviderError::new(ErrorKind::Transient)) })
+        }
+        fn remove<'a>(&'a self, reference: &'a SecretRef) -> ProviderFuture<'a, ()> { self.0.remove(reference) }
+    }
+    runtime().block_on(async {
+        let mut replies = vec![json_reply(200, json!({
+            "access_token": "refreshed-access", "expires_in": 3600, "refresh_token": "rotated-refresh"
+        }))];
+        replies.extend(grant_verification_replies());
+        let server = WireServer::start(replies);
+        let test = deps_with(Some(stored_secret(NOW_MS)));
+        let mut dependencies = test.dependencies.clone();
+        dependencies.vault = Arc::new(FailedReplace(test.vault.clone()));
+        let settings = config::Settings::parse(&connection(server.url.as_str())).unwrap();
+        let account = AccountKey::new("google_drive", &server.url, ACCOUNT).unwrap();
+        let cache = Mutex::new(None);
+        let error = super::auth::access_token(&dependencies, &settings, &secret_ref(), &account,
+            &cache, None, &Cancellation::default()).await.err().unwrap();
+        assert_eq!(error.kind, ErrorKind::Transient);
+        assert!(cache.lock().unwrap().is_none());
+        assert_eq!(test.vault.contents(SECRET).unwrap(), stored_secret(NOW_MS));
     });
 }

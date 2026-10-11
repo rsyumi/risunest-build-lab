@@ -5,6 +5,7 @@
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingToggle from '../RisuNest/SettingToggle.svelte'
     import SettingButton from '../RisuNest/SettingButton.svelte'
+    import WebViewRefreshButton from '../RisuNest/WebViewRefreshButton.svelte'
     import { getDetailedOSLabel } from 'src/ts/platform'
     import { getDeviceSettings, subscribeDeviceSettings, updateDeviceSettings } from 'src/ts/storage/deviceSettings'
     import { androidGenerationNotificationsEnabled, requestAndroidGenerationNotifications } from 'src/ts/androidGenerationKeepAlive'
@@ -107,4 +108,5 @@
             {/if}
         </dl>
     {/if}
+    <WebViewRefreshButton />
 </SettingGroup>

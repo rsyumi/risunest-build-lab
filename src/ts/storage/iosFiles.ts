@@ -1,3 +1,4 @@
+import { withLibraryFileSelection } from './libraryFileOperation'
 import { invoke } from '@tauri-apps/api/core'
 import { join } from '@tauri-apps/api/path'
 import { iosStagingPath } from './nativePaths'
@@ -48,16 +49,18 @@ export async function reportInterruptedIOSBackupSourcesAtStart(): Promise<void> 
     }
 }
 export async function pickIOSBackupSource(signal?: AbortSignal): Promise<IOSPickedBackupSource | null> {
-    if (signal?.aborted) throw cancelled()
-    await reportInterruptedIOSBackupSources()
-    if (signal?.aborted) throw cancelled()
-    const selected = await invoke<IOSPickedBackupSource & { cancelled: boolean }>('plugin:ios-native|pick_backup_source')
-    if (selected.cancelled) return null
-    if (signal?.aborted) {
-        if (!await discardIOSBackupSource(selected.token)) throw new Error('Backup source cleanup failed')
-        throw cancelled()
-    }
-    return { token: selected.token, name: selected.name, bytes: selected.bytes }
+    return withLibraryFileSelection(async () => {
+        if (signal?.aborted) throw cancelled()
+        await reportInterruptedIOSBackupSources()
+        if (signal?.aborted) throw cancelled()
+        const selected = await invoke<IOSPickedBackupSource & { cancelled: boolean }>('plugin:ios-native|pick_backup_source')
+        if (selected.cancelled) return null
+        if (signal?.aborted) {
+            if (!await discardIOSBackupSource(selected.token)) throw new Error('Backup source cleanup failed')
+            throw cancelled()
+        }
+        return { token: selected.token, name: selected.name, bytes: selected.bytes }
+    })
 }
 export const discardIOSBackupSource = (token: string) => invoke<boolean>('native_portable_source_discard', { source: { type: 'iosScoped', token } })
 export async function materializeIOSBackupSource(token: string): Promise<IOSPickedFile> {
@@ -69,16 +72,18 @@ const cancelled = () =>
 export async function pickIOSFile(
     signal?: AbortSignal,
 ): Promise<IOSPickedFile | null> {
-    if (signal?.aborted) throw cancelled()
-    const result = await invoke<IOSPickedFile & { cancelled: boolean }>(
-        'plugin:ios-native|pick_file',
-    )
-    if (result.cancelled) return null
-    if (signal?.aborted) {
-        await discardIOSFile(result.path)
-        throw cancelled()
-    }
-    return result
+    return withLibraryFileSelection(async () => {
+        if (signal?.aborted) throw cancelled()
+        const result = await invoke<IOSPickedFile & { cancelled: boolean }>(
+            'plugin:ios-native|pick_file',
+        )
+        if (result.cancelled) return null
+        if (signal?.aborted) {
+            await discardIOSFile(result.path)
+            throw cancelled()
+        }
+        return result
+    })
 }
 
 export const discardIOSFile = (path: string) =>
@@ -90,23 +95,25 @@ export async function exportIOSFile(request: {
     signal?: AbortSignal
     requestId?: string
 }): Promise<{ bytes: number; warningCodes?: string[] }> {
-    if (request.signal?.aborted) throw cancelled()
-    const requestId = request.requestId ?? crypto.randomUUID()
-    const result = await invoke<{ cancelled: boolean; bytes: number }>(
-        'plugin:ios-native|export_file',
-        {
-            sourcePath: request.sourcePath,
-            suggestedName: request.suggestedName,
-            requestId,
-        },
-    )
-    let cleanupFailed = false
-    if (result.cancelled || !request.requestId) {
-        await acknowledgeIOSPublication(requestId).catch(() => { cleanupFailed = true })
-    }
-    if (result.cancelled) throw cancelled()
-    // Publication has completed. A late abort must not turn a published file into a reported failure.
-    return { bytes: result.bytes, ...(cleanupFailed ? { warningCodes: ['cleanup-failed'] } : {}) }
+    return withLibraryFileSelection(async () => {
+        if (request.signal?.aborted) throw cancelled()
+        const requestId = request.requestId ?? crypto.randomUUID()
+        const result = await invoke<{ cancelled: boolean; bytes: number }>(
+            'plugin:ios-native|export_file',
+            {
+                sourcePath: request.sourcePath,
+                suggestedName: request.suggestedName,
+                requestId,
+            },
+        )
+        let cleanupFailed = false
+        if (result.cancelled || !request.requestId) {
+            await acknowledgeIOSPublication(requestId).catch(() => { cleanupFailed = true })
+        }
+        if (result.cancelled) throw cancelled()
+        // Publication has completed. A late abort must not turn a published file into a reported failure.
+        return { bytes: result.bytes, ...(cleanupFailed ? { warningCodes: ['cleanup-failed'] } : {}) }
+    })
 }
 
 export const acknowledgeIOSPublication = (id: string) =>

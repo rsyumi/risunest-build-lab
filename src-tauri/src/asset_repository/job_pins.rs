@@ -379,6 +379,65 @@ impl DurableCasJob {
         Ok(prepared)
     }
 
+    pub(crate) fn publish_import_batch(
+        &mut self,
+        cas: &PayloadCas,
+        mut staged: Vec<super::StagedPayload>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<Vec<PreparedPayload>> {
+        self.ensure_preparable()?;
+        self.ensure_cas(cas)?;
+        if !matches!(self.state.kind, CasJobKind::LocalBackupRestore | CasJobKind::CardOrModuleContentImport) {
+            return invalid_data("CAS job is not an import");
+        }
+        if staged.iter().any(|payload| payload.repository_root != self.repository_root) {
+            return invalid_data("staged CAS object belongs to another repository");
+        }
+        let _guard = self.lock_import_publication(cas, &mut staged, cancelled)?;
+        let existing = cas.stat_objects(staged.iter().map(|payload| payload.content_hash.as_str()))?;
+        let mut journal = OpenOptions::new().append(true).open(&self.journal_path)?;
+        // Record the whole batch before publication, including a possible partial failure.
+        for (payload, existing_size) in staged.iter().zip(existing) {
+            self.record_pin_in(&mut journal, &payload.content_hash, payload.byte_size,
+                CasObjectRole::DirectObject, existing_size.is_none())?;
+        }
+        journal.sync_data()?;
+        cas.publish_verified_import_batch(staged)
+    }
+
+    pub(crate) fn publish_unmapped_content_batch(
+        &mut self,
+        cas: &PayloadCas,
+        mut staged: Vec<super::StagedPayload>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<Vec<PreparedPayload>> {
+        self.ensure_preparable()?;
+        self.ensure_cas(cas)?;
+        if self.state.kind != CasJobKind::CardOrModuleContentImport || !self.state.pins.is_empty() {
+            return invalid_data("CAS content job is not awaiting asset mapping");
+        }
+        // The unsealed job blocks collection until mapping supplies the final roots.
+        let _guard = self.lock_import_publication(cas, &mut staged, cancelled)?;
+        cas.publish_verified_import_batch(staged)
+    }
+
+    fn lock_import_publication(
+        &self,
+        cas: &PayloadCas,
+        staged: &mut [super::StagedPayload],
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<std::sync::MutexGuard<'static, ()>> {
+        loop {
+            if cancelled() { return Err(io::Error::other("import cancelled")); }
+            let guard = super::coordinator::lock_repository_mutation()?;
+            if cas.import_destinations_unchanged(staged)? { return Ok(guard); }
+            drop(guard);
+            // A previous batch or another writer may have supplied the object.
+            // Rehash outside the lock, then check the held file identity again.
+            cas.refresh_import_destinations(staged, cancelled)?;
+        }
+    }
+
     pub(crate) fn pin_existing(
         &mut self,
         cas: &PayloadCas,
@@ -716,6 +775,18 @@ impl DurableCasJob {
         role: CasObjectRole,
         published_by_job: bool,
     ) -> io::Result<()> {
+        let mut file = OpenOptions::new().append(true).open(&self.journal_path)?;
+        self.record_pin_in(&mut file, object_hash, byte_size, role, published_by_job)
+    }
+
+    fn record_pin_in(
+        &mut self,
+        file: &mut File,
+        object_hash: &str,
+        byte_size: u64,
+        role: CasObjectRole,
+        published_by_job: bool,
+    ) -> io::Result<()> {
         validate_hash(object_hash)?;
         let descriptor = PinDescriptor {
             byte_size,
@@ -736,8 +807,7 @@ impl DurableCasJob {
             object_role: role,
             published_by_job,
         };
-        let mut file = OpenOptions::new().append(true).open(&self.journal_path)?;
-        write_record(&mut file, &record, false)?;
+        write_record(file, &record, false)?;
         self.state.pins.insert(object_hash.to_owned(), descriptor);
         self.state.next_sequence += 1;
         Ok(())

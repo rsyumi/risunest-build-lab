@@ -41,7 +41,7 @@ const english = {
     connectionSettings: 'Connection settings',
     connectionSettingsImportHelp: 'Import encrypted connection settings, or enter the provider details below. The recovery key and provider access are still required.',
     openConnectionSettingsFile: 'Open settings file', scanConnectionSettings: 'Scan settings QR',
-    connectionSettingsPayload: 'Settings file or QR contents', connectionSettingsPayloadPlaceholder: 'Open the settings file or scan its QR code', importConnectionSettings: 'Import settings',
+    connectionSettingsPayload: 'Connection settings', connectionSettingsPayloadPlaceholder: 'Paste connection settings, open a settings file or scan its QR code', importConnectionSettings: 'Import settings',
     manualConnectionHelp: 'To connect without a settings file, enter the provider details and recovery key.',
     noConnections: 'No external storage is connected. Press Connect storage to connect WebDAV, an S3-compatible bucket, Google Drive, OneDrive, NAVER MYBOX, GitHub or GitLab.',
     makeSyncTarget: 'Sync with this repository',
@@ -49,6 +49,7 @@ const english = {
     restore: 'Restore', download: 'Save as file', pin: 'Keep from cleanup', pinned: 'Kept', deleteHistory: 'Delete', local: 'Keep this device', remote: 'Keep repository',
     thisDevice: 'This device',
     noHistory: 'This repository holds no backup points yet.',
+    noSyncHistory: 'This repository holds no history yet.',
     deleteHistoryConfirm: 'Delete this backup point from the repository?',
     deleteHistoryAcknowledge: 'Permanently delete this backup point from the repository',
     deleteOtherDeviceConfirm: 'This backup was made on another device.',
@@ -57,7 +58,9 @@ const english = {
     saveConnectionSettings: 'Save settings file', connectionSettingsQr: 'Connection settings QR code', closeRecovery: 'Close',
     recoveryCodeHelp: 'Save this key in a secure place. It cannot be replaced or recovered by RisuNest.',
     connectionSettingsNotice: 'These encrypted settings help another device reach this repository. The recovery key and provider access are still required.',
-    connectionSettingsFileOnly: 'These settings do not fit in a QR code. Save and import the settings file instead.',
+    connectionSettingsFileOnly: 'The QR code cannot be displayed. Copy the connection settings or save the settings file.',
+    copyConnectionSettings: 'Copy', connectionSettingsCopied: 'Connection settings copied.',
+    connectionSettingsCopyFailed: 'Could not copy. Select and copy the text.',
     platformClientId: 'OAuth client ID for this device', oauthProjectHint: 'OAuth project',
     authorizationUnavailable: 'Signing in needs a native iOS callback, which is not available in this build.',
     oneDriveAndroidSetup: 'On Android, add risunestlocal://oauth/onedrive under Mobile and desktop applications and enable public client flows in the Entra app.',
@@ -81,8 +84,14 @@ const english = {
     publicationDecision: 'The result of this publication could not be confirmed. Automatic publication has stopped. Check again, pause automatic sync, or select another sync target.',
     cancelled: 'Cancelled', retryAt: 'Try again after {0}.', automaticBackup: 'Automatic backup', renew: 'Sign in again', unlock: 'Unlock',
     completed: 'Completed', failed: 'Failed', queued: 'Queued', running: 'Working…', waiting: 'Waiting', uncertain: 'Could not confirm that the repository was updated. Run the same action again to check.',
+    switchSyncTitle: 'Sync with this repository?',
+    switchSyncFromServer: 'This device stops syncing with the sync server and syncs with this repository.',
+    switchSyncFromExternal: 'This device stops syncing with the other external storage and syncs with this repository.',
+    startSync: 'Sync', statusPaused: 'Paused',
     loadMore: 'Show older history', statusReady: 'Connected', statusReauth: 'Sign-in required', statusLocked: 'Recovery key required', statusError: 'Needs attention',
-    usedByService: 'Used on the service', unknownUsage: 'Unknown', uploadedLowerBound: 'Repository data known to this device', latestReachable: 'Size of the latest backup', atLeast: '{0} or more', files: '{0} files', remoteOnlyFiles: 'Files only in this external storage',
+    usedByService: 'Used on the service', unknownUsage: 'Unknown', uploadedLowerBound: 'Repository data known to this device', lastUsageUpdate: 'Last checked', latestReachable: 'Size of the latest known backup', atLeast: '{0} or more', files: '{0} files', remoteOnlyFiles: 'Files only in this external storage',
+    transferConcurrency: 'Concurrent transfers',
+    transferConcurrencyHelp: 'Set the maximum number of simultaneous uploads and downloads. Lower the value if errors recur.',
     cleanup: 'Clean up now', retentionCount: 'Backups to keep', retentionDays: 'Keep for', retentionDaysUnit: 'days',
     retentionHelp: 'Cleanup removes automatic backups made on this device once they are past both the number of backups to keep and the days to keep them.',
     providerCapacityHelp: 'File versions, trash and unfinished uploads may continue to use space on the service. Remove them through the service when needed.',
@@ -132,13 +141,19 @@ const english = {
     jobActive: { cleanup: 'Cleaning up', backup: 'Backing up', restore: 'Restoring', 'pin-history': 'Keeping', 'delete-history': 'Deleting backup', 'check-repository': 'Checking' },
     restorePhases: { downloading: 'Downloading backup data', 'preparing-local': 'Preparing the restore', 'applying-local': 'Applying the restore', 'awaiting-adoption': 'Applying the restore', 'receiving-assets': 'Downloading assets' } as Record<string, string>,
     jobCounters: { prepared: 'Prepared', transferred: 'Transferred' },
+    transfer: {
+        uploadSpeed: 'Upload speed', downloadSpeed: 'Download speed',
+        details: 'Details', syncing: 'Syncing', connecting: 'Connecting', downloading: 'Downloading sync data', filesDownloading: 'Downloading files', waiting: 'Waiting for your response', syncComplete: 'Sync completed', downloadComplete: 'Download completed', connectionComplete: 'Connected',
+        prepared: 'Prepared', uploaded: 'Uploaded', downloaded: 'Downloaded', objects: '{0} items', files: 'Files ready',
+        checking: 'Checking repository', preparing: 'Preparing data', uploading: 'Uploading', applying: 'Applying data', finalizing: 'Finishing',
+    },
     historyKinds: { snapshot: 'Sync', 'backup-point': 'Backup', conflict: 'Conflict backup', 'recovery-candidate': 'Recovery candidate' },
     endpointWarnings: {
         'github-dedicated-repository': 'Use a separate private repository. This connection is backup only.',
         'gitlab-cleanup-policy': 'GitLab package cleanup policies can delete backups. Keep cleanup policies off for this project. This connection is backup only.',
     },
     providers: {
-        webdav: { name: 'WebDAV / Koofr', description: 'Connects to a WebDAV folder. Leave the account and password empty if authentication is not required.' },
+        webdav: { name: 'WebDAV', description: 'Connects to a WebDAV folder. Leave the account and password empty if authentication is not required.' },
         s3: { name: 'S3-compatible storage', description: 'Uses an S3-compatible bucket such as Amazon S3, Cloudflare R2, Backblaze B2 or Hugging Face.' },
         google_drive: { name: 'Google Drive', description: 'Signs in with a Google account and uses a Drive folder or the hidden app data space.', warningTitle: 'Take care with the hidden app data space', warning: 'If you choose the hidden app data space, deleting the app data in Drive also deletes the backups.' },
         onedrive: { name: 'OneDrive', description: 'Signs in with a Microsoft account and uses a personal, work or app-only folder.' },
@@ -222,7 +237,7 @@ const korean: typeof english = {
     connectionSettings: '연결 설정',
     connectionSettingsImportHelp: '암호화된 연결 설정을 가져오거나 아래에 서비스 연결 정보를 입력하세요. 복구 키와 서비스 접근 권한은 계속 필요합니다.',
     openConnectionSettingsFile: '설정 파일 열기', scanConnectionSettings: '설정 QR 스캔',
-    connectionSettingsPayload: '설정 파일 또는 QR 내용', connectionSettingsPayloadPlaceholder: '설정 파일을 열거나 QR 코드를 스캔하세요', importConnectionSettings: '설정 가져오기',
+    connectionSettingsPayload: '연결 설정', connectionSettingsPayloadPlaceholder: '연결 설정을 붙여넣거나 설정 파일을 열거나 QR 코드를 스캔하세요', importConnectionSettings: '설정 가져오기',
     manualConnectionHelp: '설정 파일 없이 연결하려면 서비스 연결 정보와 복구 키를 입력하세요.',
     noConnections: '연결된 외부 저장소가 없습니다. 저장소 연결을 눌러 WebDAV, S3 호환 저장소, Google Drive, OneDrive, 네이버 MYBOX, GitHub, GitLab 중 하나를 연결하세요.',
     makeSyncTarget: '이 저장소로 동기화',
@@ -230,6 +245,7 @@ const korean: typeof english = {
     restore: '복원', download: '파일로 저장', pin: '지우지 않고 보관', pinned: '보관 중', deleteHistory: '삭제', local: '이 기기 내용 유지', remote: '저장소 내용 유지',
     thisDevice: '이 기기',
     noHistory: '이 저장소에 백업 지점이 아직 없습니다.',
+    noSyncHistory: '이 저장소에 이력이 아직 없습니다.',
     deleteHistoryConfirm: '이 백업 지점을 저장소에서 삭제하시겠습니까?',
     deleteHistoryAcknowledge: '저장소에서 이 백업 지점 영구 삭제',
     deleteOtherDeviceConfirm: '다른 기기에서 만든 백업입니다.',
@@ -238,7 +254,9 @@ const korean: typeof english = {
     saveConnectionSettings: '설정 파일 저장', connectionSettingsQr: '연결 설정 QR 코드', closeRecovery: '닫기',
     recoveryCodeHelp: '이 키를 안전한 곳에 보관하세요. RisuNest에서 교체하거나 복구할 수 없습니다.',
     connectionSettingsNotice: '다른 기기에서 이 저장소에 접근할 때 쓰는 암호화된 설정입니다. 복구 키와 서비스 접근 권한은 계속 필요합니다.',
-    connectionSettingsFileOnly: '이 설정은 QR 코드에 담을 수 없습니다. 설정 파일을 저장한 뒤 가져오세요.',
+    connectionSettingsFileOnly: 'QR 코드를 표시할 수 없습니다. 연결 설정을 복사하거나 설정 파일을 저장하세요.',
+    copyConnectionSettings: '복사', connectionSettingsCopied: '연결 설정을 복사했습니다.',
+    connectionSettingsCopyFailed: '복사하지 못했습니다. 내용을 선택해 복사하세요.',
     platformClientId: '이 기기용 OAuth 클라이언트 ID', oauthProjectHint: 'OAuth 프로젝트',
     authorizationUnavailable: '로그인에는 네이티브 iOS 콜백이 필요하지만 이 빌드에서는 사용할 수 없습니다.',
     oneDriveAndroidSetup: 'Android에서는 Entra 앱의 모바일 및 데스크톱 애플리케이션에 risunestlocal://oauth/onedrive를 추가하고 공용 클라이언트 흐름을 사용 설정하세요.',
@@ -262,8 +280,14 @@ const korean: typeof english = {
     publicationDecision: '저장소 반영 결과를 확인하지 못했으며, 자동 반영이 중지되었습니다. 다시 확인하거나 자동 동기화를 중지하고 동기화 대상을 변경할 수 있습니다.',
     cancelled: '취소됨', retryAt: '{0} 이후 다시 시도하세요.', automaticBackup: '자동 백업', renew: '다시 로그인', unlock: '잠금 해제',
     completed: '완료', failed: '실패', queued: '대기열에 추가됨', running: '처리 중…', waiting: '대기 중', uncertain: '저장소에 반영됐는지 확인하지 못했습니다. 다시 확인하려면 같은 작업을 다시 실행하세요.',
+    switchSyncTitle: '이 저장소로 동기화하시겠습니까?',
+    switchSyncFromServer: '동기화 서버와의 동기화를 중지하고 이 저장소와 동기화합니다.',
+    switchSyncFromExternal: '다른 외부 저장소와의 동기화를 중지하고 이 저장소와 동기화합니다.',
+    startSync: '동기화', statusPaused: '일시 중지됨',
     loadMore: '이전 이력 더 보기', statusReady: '연결됨', statusReauth: '다시 로그인 필요', statusLocked: '복구 키 필요', statusError: '확인 필요',
-    usedByService: '서비스에서 쓰는 용량', unknownUsage: '알 수 없음', uploadedLowerBound: '이 기기에서 확인한 저장소 데이터', latestReachable: '최신 백업 하나의 크기', atLeast: '{0} 이상', files: '파일 {0}개', remoteOnlyFiles: '이 외부 저장소에만 있는 파일',
+    usedByService: '서비스에서 쓰는 용량', unknownUsage: '알 수 없음', uploadedLowerBound: '이 기기에서 확인한 저장소 데이터', lastUsageUpdate: '마지막 확인', latestReachable: '확인한 최신 백업 크기', atLeast: '{0} 이상', files: '파일 {0}개', remoteOnlyFiles: '이 외부 저장소에만 있는 파일',
+    transferConcurrency: '동시 전송 수',
+    transferConcurrencyHelp: '동시에 진행할 업로드와 다운로드 수를 설정합니다. 오류가 반복될 경우 값을 낮춰주세요.',
     cleanup: '지금 정리', retentionCount: '보관 개수', retentionDays: '보관 기간', retentionDaysUnit: '일',
     retentionHelp: '정리할 때 이 기기에서 만든 자동 백업 중 보관 개수와 보관 기간을 모두 넘긴 백업을 지웁니다.',
     providerCapacityHelp: '서비스의 파일 버전, 휴지통, 완료되지 않은 업로드가 용량을 계속 차지할 수 있습니다. 필요한 경우 서비스에서 정리하세요.',
@@ -313,13 +337,19 @@ const korean: typeof english = {
     jobActive: { cleanup: '정리 중', backup: '백업 중', restore: '복원 중', 'pin-history': '보관 중', 'delete-history': '백업 삭제 중', 'check-repository': '검증 중' },
     restorePhases: { downloading: '백업 데이터 받는 중', 'preparing-local': '복원 준비 중', 'applying-local': '복원 적용 중', 'awaiting-adoption': '복원 적용 중', 'receiving-assets': '에셋 받는 중' },
     jobCounters: { prepared: '준비', transferred: '전송' },
+    transfer: {
+        uploadSpeed: '업로드 속도', downloadSpeed: '다운로드 속도',
+        details: '자세히', syncing: '동기화 중', connecting: '연결 중', downloading: '동기화 데이터 다운로드 중', filesDownloading: '파일 다운로드 중', waiting: '사용자 응답 대기 중', syncComplete: '동기화 완료', downloadComplete: '다운로드 완료', connectionComplete: '연결 완료',
+        prepared: '준비', uploaded: '업로드 완료', downloaded: '다운로드 완료', objects: '{0}개 항목', files: '준비된 파일',
+        checking: '저장소 확인 중', preparing: '데이터 준비 중', uploading: '업로드 중', applying: '데이터 반영 중', finalizing: '마무리 중',
+    },
     historyKinds: { snapshot: '동기화', 'backup-point': '백업', conflict: '충돌 백업', 'recovery-candidate': '복구 후보' },
     endpointWarnings: {
         'github-dedicated-repository': '백업 전용 비공개 저장소를 따로 쓰세요. 이 연결은 백업만 합니다.',
         'gitlab-cleanup-policy': 'GitLab의 패키지 정리 정책이 백업을 지울 수 있습니다. 이 프로젝트에서는 정리 정책을 꺼 두세요. 이 연결은 백업만 합니다.',
     },
     providers: {
-        webdav: { name: 'WebDAV / Koofr', description: 'WebDAV 폴더에 연결합니다. 인증이 필요하지 않은 경우 계정과 비밀번호를 비워두세요.' },
+        webdav: { name: 'WebDAV', description: 'WebDAV 폴더에 연결합니다. 인증이 필요하지 않은 경우 계정과 비밀번호를 비워두세요.' },
         s3: { name: 'S3 호환 저장소', description: 'Amazon S3, Cloudflare R2, Backblaze B2, Hugging Face 같은 S3 호환 버킷을 씁니다.' },
         google_drive: { name: 'Google Drive', description: 'Google 계정으로 로그인해 Drive 폴더나 숨겨진 앱 데이터 공간을 씁니다.', warningTitle: '숨겨진 앱 데이터 공간에 주의하세요', warning: '숨겨진 앱 데이터 공간을 고른 경우, Drive에서 앱 데이터를 삭제하면 백업도 함께 지워집니다.' },
         onedrive: { name: 'OneDrive', description: 'Microsoft 계정으로 로그인해 개인·회사·앱 전용 폴더를 씁니다.' },
@@ -499,4 +529,24 @@ export function externalConnectionTitle(
 ): string {
     const name = externalProviderName(strings, connection.providerId)
     return connection.endpoint.accountHint ? `${name} · ${connection.endpoint.accountHint}` : name
+}
+
+/** The folder a connection keeps its repository in, with the fixed app folders named as in the form. */
+export function externalConnectionFolder(
+    strings: ExternalStorageStrings,
+    connection: Pick<ExternalConnectionSummary, 'providerId' | 'endpoint'>,
+): string {
+    const hint = connection.endpoint.repositoryHint
+    if (connection.providerId === 'google_drive' && hint === 'appDataFolder') return strings.options['google_drive.space.appDataFolder']
+    if (connection.providerId === 'onedrive' && hint === 'special/approot') return strings.options['onedrive.accountType.appFolder']
+    return hint
+}
+
+/** Server and folder of a connection. Google Drive and OneDrive always use one API host, so it is left out. */
+export function externalConnectionPlace(
+    strings: ExternalStorageStrings,
+    connection: Pick<ExternalConnectionSummary, 'providerId' | 'endpoint'>,
+): string {
+    const signedIn = connection.providerId === 'google_drive' || connection.providerId === 'onedrive'
+    return [signedIn ? '' : connection.endpoint.authority, externalConnectionFolder(strings, connection)].filter(Boolean).join(' · ')
 }

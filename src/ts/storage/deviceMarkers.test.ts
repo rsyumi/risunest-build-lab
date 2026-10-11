@@ -92,6 +92,20 @@ describe('device markers', () => {
         expect(() => getDeviceMarkers()).toThrow('not loaded yet')
     })
 
+    it('keeps per-plugin attempts across reopening and restored marker reloads', async () => {
+        const { stored, settings } = settingsBackend()
+        const markers = await initializeDeviceMarkers(settings)
+        const attempted = JSON.stringify(['provider-manager', 'yumi-translator'])
+        markers.setItem('risuNestDefaultPluginsAttempted', attempted)
+        await markers.flush()
+        installDeviceMarkers(null)
+        const reopened = await initializeDeviceMarkers(settings)
+        expect(reopened.getItem('risuNestDefaultPluginsAttempted')).toBe(attempted)
+        stored.delete('risuNestDeviceSettings')
+        await reopened.reload!()
+        expect(reopened.getItem('risuNestDefaultPluginsAttempted')).toBe(attempted)
+    })
+
     it('falls back to local storage on the web build', () => {
         delete nativeWindow.__TAURI_INTERNALS__
         localStorage.setItem('hub', 'nightly')

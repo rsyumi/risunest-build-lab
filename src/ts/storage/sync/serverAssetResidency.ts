@@ -1,8 +1,17 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
+import { beginExternalProgress, externalProgressFailure } from './external/progress';
 import { beginMobileBackgroundTask } from "../../mobileBackgroundTask";
 import { get } from "svelte/store";
 import { selectedCharID } from "src/ts/stores.svelte";
 import { getDatabase } from "../database.svelte";
+import { registerLibraryFileOperationGate } from '../libraryFileOperation';
+import { assetCleanupProgress, validAssetCleanupSnapshot, type AssetCleanupSnapshot } from './serverAssetCleanupProgress';
+
+const operations = new Set<Promise<unknown>>();
+registerLibraryFileOperationGate(async () => {
+  while (operations.size) await Promise.allSettled([...operations]);
+  assetCleanupProgress.set(undefined);
+});
 
 export type AssetResidencyTarget = { kind: 'external'; connectionId: string } | { kind: 'server'; libraryId: string; targetId: string };
 
@@ -61,7 +70,12 @@ export async function countConnectionOnlyAssets(connectionId: string): Promise<n
   if (!count(objects)) throw new Error("invalid-asset-residency-status");
   return objects;
 }
-async function protectedCommand(name: string, args?: Record<string, unknown>, signal?: AbortSignal, operationId?: string) {
+function protectedCommand(name: string, args?: Record<string, unknown>, signal?: AbortSignal, operationId?: string) {
+  const operation = runProtectedCommand(name, args, signal, operationId);
+  operations.add(operation);
+  return operation.finally(() => { operations.delete(operation); });
+}
+async function runProtectedCommand(name: string, args?: Record<string, unknown>, signal?: AbortSignal, operationId?: string) {
   const task = await beginMobileBackgroundTask("sync");
   let cancellation: Promise<void> | undefined;
   let admitted = operationId === undefined;
@@ -101,16 +115,64 @@ export const setAssetResidencyPolicy = (policy: AssetResidencyPolicy) =>
   policy === "full"
     ? protectedCommand("server_sync_asset_policy", { policy, selectedCharacterId: selectedCharacterId() })
     : command("server_sync_asset_policy", { policy });
-/** Downloads the bodies one external connection holds, or every holder's, keeping the policy. */
-export const downloadRemoteAssets = (connectionId?: string, options?: { signal?: AbortSignal; target?: AssetResidencyTarget }) => {
+/** Downloads connection-exclusive bodies, every holder's bodies, or files absent from a target. */
+export const downloadRemoteAssets = async (connectionId?: string, options?: { signal?: AbortSignal; target?: AssetResidencyTarget; showEmpty?: boolean; progressConnectionId?: string }) => {
   const operationId = crypto.randomUUID();
-  return protectedCommand("asset_residency_download_remote", {
-    connectionId: connectionId ?? null,
-    selectedCharacterId: selectedCharacterId(),
-    operationId,
-    ...(options?.target ? { target: options.target } : {}),
-  }, options?.signal, operationId);
+  const externalId = connectionId ?? (options?.target?.kind === 'external' ? options.target.connectionId : options?.progressConnectionId);
+  const run = externalId ? beginExternalProgress(externalId, 'download', options?.showEmpty ?? true) : undefined;
+  let hasItems = false;
+  const progress = run ? new Channel<{ completedItems: number; totalItems: number }>() : undefined;
+  if (progress) progress.onmessage = value => {
+    if (count(value.completedItems) && count(value.totalItems) && value.completedItems <= value.totalItems) {
+      hasItems ||= value.totalItems > 0;
+      if (value.totalItems > 0 || options?.showEmpty !== false) run?.items(value.completedItems, value.totalItems);
+    }
+  };
+  try {
+    const result = await protectedCommand("asset_residency_download_remote", {
+      connectionId: connectionId ?? null,
+      selectedCharacterId: selectedCharacterId(),
+      operationId,
+      ...(options?.target ? { target: options.target } : {}),
+      ...(progress ? { progress, transferProgress: run!.networkChannel() } : {}),
+    }, options?.signal, operationId);
+    run?.finish('complete', hasItems || options?.showEmpty !== false);
+    return result;
+  } catch (error) { run?.finish(externalProgressFailure(error)); throw error; }
 };
-export const evictLocalAssets = () => protectedCommand("server_sync_asset_evict");
+let cleanup: { operationId: string; controller: AbortController } | undefined;
+export async function evictLocalAssets(): Promise<AssetResidencyStatus> {
+  if (cleanup) throw new Error('asset-cleanup-busy');
+  const operationId = crypto.randomUUID();
+  const controller = new AbortController();
+  cleanup = { operationId, controller };
+  assetCleanupProgress.set({ operationId, state: 'running', sequence: 0, stage: 'preparing', completedItems: 0, totalItems: null, evictedItems: 0, evictedBytes: 0 });
+  const progress = new Channel<AssetCleanupSnapshot>();
+  progress.onmessage = value => {
+    if (!validAssetCleanupSnapshot(value)) return;
+    // The final channel message can arrive after invoke rejects. Preserve the
+    // terminal state while accepting this operation's last partial counters.
+    assetCleanupProgress.update(current => current?.operationId === operationId
+      && current.state !== 'complete' && value.sequence > current.sequence
+      ? { ...current, ...value } : current);
+  };
+  try {
+    const result = await protectedCommand('server_sync_asset_evict', { operationId, progress }, controller.signal, operationId);
+    assetCleanupProgress.update(current => current?.operationId === operationId ? { ...current, state: 'complete', evictedBytes: result.evictedBytes } : current);
+    return result;
+  } catch (error) {
+    const cancelled = controller.signal.aborted || (typeof error === 'object' && error !== null
+      && (('code' in error && error.code === 'cancelled') || ('name' in error && error.name === 'AbortError')));
+    assetCleanupProgress.update(current => current?.operationId === operationId ? { ...current, state: cancelled ? 'cancelled' : 'failed' } : current);
+    throw error;
+  } finally {
+    if (cleanup?.operationId === operationId) cleanup = undefined;
+  }
+}
+export function cancelLocalAssetCleanup(): void {
+  if (!cleanup) return;
+  assetCleanupProgress.update(current => current?.operationId === cleanup?.operationId ? { ...current, state: 'cancelling' } : current);
+  cleanup.controller.abort();
+}
 export const cancelAssetResidencyOperation = (operationId?: string) =>
   invoke<void>("server_sync_cancel", operationId ? { operationId } : undefined);

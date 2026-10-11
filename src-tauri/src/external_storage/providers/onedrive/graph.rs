@@ -62,8 +62,13 @@ pub(super) struct ChildrenPage {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct SignedInUser {
     pub id: String,
+    #[serde(default)]
+    pub mail: Option<String>,
+    #[serde(default)]
+    pub user_principal_name: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -158,7 +163,7 @@ fn with_query(mut url: url::Url, query: Option<&str>) -> url::Url {
 
 pub(super) fn signed_in_user_url(settings: &Settings) -> Result<url::Url> {
     let url = parse(format!("{}/me", config::base(&settings.endpoint)))?;
-    Ok(with_query(url, Some("$select=id")))
+    Ok(with_query(url, Some("$select=id,mail,userPrincipalName")))
 }
 
 pub(super) fn signed_in_drive_url(settings: &Settings) -> Result<url::Url> {

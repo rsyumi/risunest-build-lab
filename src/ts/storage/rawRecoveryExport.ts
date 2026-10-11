@@ -1,4 +1,4 @@
-import { save } from '@tauri-apps/plugin-dialog'
+import { save } from './fileSelection'
 import { language } from 'src/lang'
 import { alertConfirm } from '../alert'
 

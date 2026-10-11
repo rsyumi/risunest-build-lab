@@ -11,10 +11,13 @@ const rootBack = () => {
     return event.defaultPrevented
 }
 
-afterEach(() => {
+afterEach(async () => {
     alertStore.set({ type: "none", msg: "" })
-    vi.restoreAllMocks()
+    await Promise.resolve()
     history.replaceState(null, '')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await Promise.resolve()
+    vi.restoreAllMocks()
     document.body.replaceChildren()
 })
 it('dismisses on Escape and restores focus to the opener', async () => {

@@ -8,6 +8,8 @@ vi.mock('./platform', () => ({ isTauri: false, isTauriMobile: false, isIOS: () =
 vi.mock('src/lib/UI/PopupList.svelte', () => ({ default: {} }))
 
 import { selectFileByDom, selectSingleFile } from './util'
+import { isLibraryFileOperationReserved } from './storage/libraryFileOperation'
+import { selectDomFiles } from './storage/fileSelection'
 
 function input(): HTMLInputElement {
     const element = document.querySelector<HTMLInputElement>('input[type="file"]')
@@ -26,6 +28,29 @@ afterEach(() => {
 })
 
 describe('DOM file picker', () => {
+    it('keeps admission through focus and visibility events until the actual picker result', async () => {
+        const pending = selectFileByDom(['png'])
+        expect(isLibraryFileOperationReserved()).toBe(true)
+        window.dispatchEvent(new Event('blur'))
+        document.dispatchEvent(new Event('visibilitychange'))
+        window.dispatchEvent(new Event('focus'))
+        await Promise.resolve()
+        expect(isLibraryFileOperationReserved()).toBe(true)
+        input().dispatchEvent(new Event('cancel'))
+        await pending
+        expect(isLibraryFileOperationReserved()).toBe(false)
+    })
+
+    it('settles abort without leaving admission or a late picker callback behind', async () => {
+        const controller = new AbortController()
+        const pending = selectDomFiles({ signal: controller.signal })
+        const element = input()
+        controller.abort()
+        expect(await pending).toEqual([])
+        expect(isLibraryFileOperationReserved()).toBe(false)
+        element.dispatchEvent(new Event('change'))
+        expect(document.querySelector('input')).toBeNull()
+    })
     it('settles cancellation and removes the input and its event listeners', async () => {
         const pending = selectFileByDom(['png'])
         const element = input()

@@ -16,6 +16,7 @@ import { PersistentMutationFencedError } from '../../saveCoordinator'
 import type { PersistentDestructiveReplacementFence } from '../../persistentDataRuntime'
 import type { RetainableReplacementFence } from '../../retainableReplacementFence'
 import { subscribeLocalPersistentRevision } from '../../persistentRevisionEvents'
+import { isLibraryFileOperationReserved, registerLibraryFileOperationGate, subscribeLibraryFileOperationReleased } from '../../libraryFileOperation'
 import type { SyncExitDrainAdapter } from '../../syncExitCoordinator'
 import { hasPendingExternalApplication, runExternalApplication } from './applicationRecovery'
 import { getExternalStorageBridge } from './bridge'
@@ -71,13 +72,25 @@ function destinations(state: ExternalStorageState): ExternalScheduledDestination
     return result
 }
 
+function recoverVerifiedConnections(current: ProductionRuntime, state: ExternalStorageState): void {
+    for (const connection of state.connections) {
+        const previous = current.state.connections.find(item => item.id === connection.id)
+        if (connection.lastVerifiedAtMs !== undefined
+            && connection.lastVerifiedAtMs !== previous?.lastVerifiedAtMs) {
+            current.scheduler.recovered(connection.id)
+        }
+    }
+}
+
 async function refreshForeground(current: ProductionRuntime): Promise<void> {
+    if (isLibraryFileOperationReserved()) return
     const bridge = getExternalStorageBridge()
     if (!hasMobileBackgroundTasks()) {
         current.session = newSession('foreground')
         await bridge.setExecutionSession(current.session)
     }
     const state = await bridge.getState()
+    recoverVerifiedConnections(current, state)
     current.state = state
     current.controller.replaceState(state)
     await refreshExternalLwwAdapters(state)
@@ -110,7 +123,7 @@ export function installExternalStorageProduction(): Promise<() => void> {
         const holder: { current?: ProductionRuntime } = {}
         const controller = createExternalStorageController(bridge, state)
         const scheduler = createExternalStorageScheduler(controller, {
-            available: () => !hasPendingExternalApplication()
+            available: () => !hasPendingExternalApplication() && !isLibraryFileOperationReserved()
                 && document.visibilityState !== 'hidden' && navigator.onLine,
             destinations: () => destinations(holder.current?.state ?? state),
             session: () => holder.current?.session ?? session,
@@ -142,6 +155,7 @@ export function installExternalStorageProduction(): Promise<() => void> {
         }
         holder.current = current
         runtime = current
+        disposers.push(registerLibraryFileOperationGate(() => controller.settled()))
         disposers.push(await installExternalLwwAdapters(state))
         disposers.push(controller.subscribe(snapshot => {
             for (const [connectionId, job] of snapshot.activeJobs) {
@@ -165,12 +179,14 @@ export function installExternalStorageProduction(): Promise<() => void> {
             void scheduler.suspend(() => false)
         }
         const onVisibility = (): void => {
+            if (isLibraryFileOperationReserved()) return
             if (isTauriDesktop) {
                 if (document.visibilityState !== 'hidden') current.scheduler.resume()
                 return
             }
             const hidden = document.visibilityState === 'hidden'
             current.lifecycle = current.lifecycle.then(async () => {
+                if (runtime !== current || isLibraryFileOperationReserved()) return
                 if (hidden) {
                     if (hasMobileBackgroundTasks()) return
                     current.session = { kind: 'foreground', id: crypto.randomUUID() }
@@ -188,6 +204,7 @@ export function installExternalStorageProduction(): Promise<() => void> {
         disposers.push(() => window.removeEventListener('online', onOnline))
         disposers.push(() => window.removeEventListener('offline', onOffline))
         disposers.push(() => document.removeEventListener('visibilitychange', onVisibility))
+        disposers.push(subscribeLibraryFileOperationReleased(onVisibility))
 
         const token = await capturePersistentMutationToken('external-storage-startup')
         scheduler.durableRevision(String(token.revision) as DecimalString)
@@ -225,6 +242,7 @@ export async function refreshExternalStorageProductionState(): Promise<void> {
         return
     }
     const state = await getExternalStorageBridge().getState()
+    recoverVerifiedConnections(current, state)
     current.state = state
     current.controller.replaceState(state)
     await refreshExternalLwwAdapters(state)

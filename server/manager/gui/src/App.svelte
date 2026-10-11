@@ -371,7 +371,7 @@
       } else if (outcome.result === "completed") {
         notice = `Sync ${outcome.value ?? "새 버전"} 업데이트를 완료했습니다.`;
       } else {
-        notice = "현재 최신 버전입니다.";
+        notice = updateReason("already-current");
       }
       await loadEnvironment();
     } catch (error) {
@@ -513,8 +513,9 @@
           {#if environment?.updateStatus.targetVersion}<p>
               대상 버전: {environment.updateStatus.targetVersion}
             </p>{/if}
-          {#if environment?.updateStatus.reason}<p class="warning">
-              마지막 결과: {updateReason(environment.updateStatus.reason)} <code>{environment.updateStatus.reason}</code>
+          {#if environment?.updateStatus.reason}<p class:warning={environment.updateStatus.reason !== "already-current"}>
+              마지막 결과: {updateReason(environment.updateStatus.reason)}
+              {#if environment.updateStatus.reason !== "already-current"}<code>{environment.updateStatus.reason}</code>{/if}
             </p>{/if}
           {#if environment?.updateScheduleError}<p class="warning">
               예약 업데이트 상태를 확인하지 못했습니다.

@@ -77,7 +77,7 @@ impl Store {
             objects.push((digest.clone(), bytes));
             verified.push(digest);
         }
-        self.put_objects(device, &objects)?;
+        self.put_hashed_objects(device, &objects)?;
         Ok(verified)
     }
     pub fn transfer_objects(
@@ -170,10 +170,8 @@ impl Store {
                     )
                     .ok();
                     if let Some(recipe) = recipe {
-                        if let Ok(bytes) = recipe.encode() {
-                            if bytes.len() + 64 < target.len()
-                                && used + bytes.len() + 5 <= 8 * 1024 * 1024
-                            {
+                        if let Ok(length) = recipe.encoded_len() {
+                            if length + 64 < target.len() && used + length + 5 <= 8 * 1024 * 1024 {
                                 frame = Frame::Delta(recipe);
                             }
                         }
@@ -183,11 +181,11 @@ impl Store {
                     frame = Frame::Full(target);
                 }
             }
-            let encoded = transfer::encode(std::slice::from_ref(&frame))?;
-            if used + encoded.len() - 8 > 8 * 1024 * 1024 {
+            let encoded = transfer::encoded_len(std::slice::from_ref(&frame))?;
+            if used + encoded - 8 > 8 * 1024 * 1024 {
                 return Err(Error::new("batch-too-large", 413));
             }
-            used += encoded.len() - 8;
+            used += encoded - 8;
             if !matches!(frame, Frame::FullRequired { .. }) {
                 materialized += size;
             }

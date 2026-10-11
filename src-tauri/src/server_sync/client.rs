@@ -423,6 +423,8 @@ impl ServerClient {
         retry_budget: Arc<RetryBudget>,
     ) -> Result<Self> {
         let url = config.validate()?;
+        // New clients must pick up system proxy changes. Keep the connection
+        // pool scoped to this client and its transfer workers.
         // Other crates enable reqwest's decoders, which would strip a
         // Content-Encoding this client has to see and refuse.
         let http = crate::platform_tls::blocking_client_builder()
@@ -735,12 +737,13 @@ impl ServerClient {
         for (name, value) in headers {
             request = request.header(*name, value);
         }
-        let sent = body.map_or(0, |body| body.wire.len() as u64);
         if let Some(body) = body {
             if body.encoded {
                 request = request.header(body_codec::ENCODING_HEADER, body_codec::ZSTD);
             }
-            request = request.body(body.wire.clone());
+            let length = body.wire.len() as u64;
+            let reader = super::progress::WireReader::new(std::io::Cursor::new(body.wire.clone()), self.lane.clone(), true, Some(length));
+            request = request.body(reqwest::blocking::Body::sized(reader, length));
         }
         let response = request.send().map_err(|e| {
             SyncError::new(
@@ -752,7 +755,6 @@ impl ServerClient {
                 503,
             )
         })?;
-        self.lane.wire(sent, 0);
         let status = response.status().as_u16();
         let object_range = response
             .headers()
@@ -785,11 +787,9 @@ impl ServerClient {
             return Err(SyncError::new("response-too-large", 502));
         }
         let mut bytes = Vec::new();
-        response
-            .take(limit as u64 + 1)
+        super::progress::WireReader::new(response.take(limit as u64 + 1), self.lane.clone(), false, None)
             .read_to_end(&mut bytes)
             .map_err(|_| SyncError::new("incomplete-response", 503))?;
-        self.lane.wire(0, bytes.len() as u64);
         if bytes.len() > limit {
             return Err(SyncError::new("response-too-large", 502));
         }
@@ -968,6 +968,61 @@ mod progress_tests {
     use super::sanitize_retryable_failure;
 
     #[test]
+    fn http_body_progress_is_visible_before_the_request_and_response_complete() {
+        use super::*;
+        use std::{io::Write, net::TcpListener, sync::mpsc};
+        const UPLOAD: usize = 512 * 1024;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (notice, noticed) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") { let mut byte = [0]; socket.read_exact(&mut byte).unwrap(); header.push(byte[0]); }
+            assert!(String::from_utf8(header).unwrap().to_ascii_lowercase().contains(&format!("content-length: {UPLOAD}\r\n")));
+            let mut body = vec![0; UPLOAD];
+            socket.read_exact(&mut body[..32768]).unwrap();
+            notice.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(5)).unwrap();
+            socket.read_exact(&mut body[32768..]).unwrap();
+            assert!(body.iter().all(|byte| *byte == 7));
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8192\r\nConnection: close\r\n\r\n").unwrap();
+            socket.write_all(&[3; 4096]).unwrap();
+            notice.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(5)).unwrap();
+            socket.write_all(&[3; 4096]).unwrap();
+        });
+        let lane = Arc::new(super::super::progress::ProgressLane::default());
+        let worker_lane = lane.clone();
+        let worker = std::thread::spawn(move || super::super::progress::within(&worker_lane, || {
+            let client = ServerClient::new(super::tests::config(&endpoint)).unwrap();
+            let body = PreparedBody { wire: vec![7; UPLOAD], encoded: false, raw_len: UPLOAD };
+            client.request_once(Method::PUT, "synthetic", &[], Some(&body), &[], 8192).unwrap().body
+        }));
+        noticed.recv_timeout(Duration::from_secs(5)).unwrap();
+        let uploading = lane.snapshot("send");
+        assert!(uploading.sent_bytes > 0 && uploading.sent_bytes <= UPLOAD as u64);
+        assert_eq!((uploading.received_bytes, uploading.bytes_done), (0, 0));
+        release.send(()).unwrap();
+        noticed.recv_timeout(Duration::from_secs(5)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while lane.snapshot("send").received_bytes < 4096 && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(1)); }
+        let downloading = lane.snapshot("send");
+        assert_eq!(downloading.received_bytes, 4096);
+        assert!(downloading.receiving);
+        assert!(!downloading.sending);
+        assert_eq!(downloading.bytes_done, 0);
+        release.send(()).unwrap();
+        assert_eq!(worker.join().unwrap(), vec![3; 8192]);
+        server.join().unwrap();
+        let done = lane.snapshot("send");
+        assert_eq!((done.sent_bytes, done.received_bytes), (UPLOAD as u64, 8192));
+        assert!(!done.sending && !done.receiving);
+    }
+
+    #[test]
     fn retryable_failure_progress_exposes_only_a_bounded_error_code() {
         assert_eq!(
             sanitize_retryable_failure(Some("storage-io")).as_deref(),
@@ -1043,6 +1098,48 @@ mod tests {
             device_id: "device".into(),
             token: "a".repeat(64),
         }
+    }
+
+    #[test]
+    fn successive_clients_refresh_transport_without_sharing_credentials_or_cancellation() {
+        use axum::{extract::ConnectInfo, http::{HeaderMap, StatusCode}, Router};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
+                let router = Router::new().fallback(move |ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>, headers: HeaderMap| {
+                    let captured = captured.clone();
+                    async move {
+                        captured.lock().unwrap().push((peer, headers["authorization"].to_str().unwrap().to_owned()));
+                        StatusCode::NO_CONTENT
+                    }
+                });
+                axum::serve(tokio::net::TcpListener::from_std(listener).unwrap(), router.into_make_service_with_connect_info::<std::net::SocketAddr>())
+                    .with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap();
+            });
+        });
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let first = ServerClient::with_cancellation(config(&endpoint), Some(cancelled.clone())).unwrap();
+        assert_eq!(first.request(Method::GET, "head", &[], None, &[], 1024).unwrap().status, 204);
+        cancelled.store(true, Ordering::Release);
+        assert_eq!(first.request(Method::GET, "head", &[], None, &[], 1024).err().unwrap().code, "cancelled");
+        drop(first);
+        let mut next = config(&endpoint);
+        next.token = "b".repeat(64);
+        let second = ServerClient::new(next).unwrap();
+        assert_eq!(second.request(Method::GET, "head", &[], None, &[], 1024).unwrap().status, 204);
+        stop.send(()).unwrap();
+        server.join().unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_ne!(seen[0].0, seen[1].0, "a new client must refresh transport configuration");
+        assert_eq!(seen[0].1, format!("Bearer {}", "a".repeat(64)));
+        assert_eq!(seen[1].1, format!("Bearer {}", "b".repeat(64)));
     }
     #[test]
     fn verified_progress_renews_more_than_five_minutes_of_transient_failures() {

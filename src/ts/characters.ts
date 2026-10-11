@@ -38,7 +38,7 @@ import { removeCharacterIdFromOrder } from './storage/characterOrderMutation'
 import { safeStructuredClone } from './polyfill'
 import { isConversationSummaryStub } from './storage/conversationResidency'
 import { isMetadataOnlySelectedConversation } from './storage/selectedConversationLifecycle'
-import { open } from '@tauri-apps/plugin-dialog'
+import { open } from './storage/fileSelection'
 import { readFile } from '@tauri-apps/plugin-fs'
 import { isTauriDesktop } from './platform'
 import {
@@ -46,6 +46,7 @@ import {
     selectCharacterImageFile,
 } from './storage/characterImageFileRoute'
 import { importNativeJpegAsset } from './storage/nativeJpegAssetImport'
+import { runContentImport } from './storage/contentImportOperation'
 import { SelectedConversationPromotionStaleError } from './storage/activeWorkingSet.svelte'
 import { PersistentMutationFencedError } from './storage/saveCoordinator'
 import { beginNavigationActivity } from './ui/navigationActivity'
@@ -126,7 +127,7 @@ export async function selectCharImg(charIndex:number) {
         },
         readDesktopPath: readFile,
         chooseLegacyFile: async () => selectSingleFile(['png', 'webp', 'gif', 'jpg', 'jpeg']),
-        nativeImport: importNativeJpegAsset,
+        nativeImport: input => runContentImport(input.displayName, {}, options => importNativeJpegAsset(input, options)),
         legacyImport: async (img) => {
             const type = getImageType(img)
             const pngExif: Record<string, string> = {}

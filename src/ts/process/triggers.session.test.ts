@@ -220,6 +220,36 @@ test('CAS-applies Trigger chat variables and note metadata', async () => {
     expect(session.version).toBe(1)
 })
 
+test.each(['runtrigger', 'v2RunTrigger'] as const)('carries preparation cancellation through %s and nested commands', async (type) => {
+    const { chat, char, session } = fixture()
+    const controller = new AbortController()
+    const generation = { signal: controller.signal, reservation: { isCurrent: () => true, release: vi.fn() } }
+    char.triggerscript[0].effect = [
+        { type, value: 'inner', target: 'inner', indent: 0 },
+        { type: 'impersonate', role: 'char', value: 'after outer cancellation' },
+    ] as never
+    char.triggerscript.push({
+        comment: 'inner', type: 'manual', conditions: [], effect: [
+            { type: 'command', value: '/multisend first|||second' },
+            { type: 'impersonate', role: 'char', value: 'after inner cancellation' },
+        ],
+    })
+    runtime.session = session
+    DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+    vi.mocked(processMultiCommand).mockImplementationOnce(async (_command, operation, inherited) => {
+        expect(operation).toBeDefined()
+        expect(inherited).toBe(generation)
+        controller.abort()
+        return ''
+    })
+
+    await runTrigger(char, 'manual', { chat, manualName: 'ordered', generation })
+
+    expect(controller.signal.aborted).toBe(true)
+    expect(chat.message.map(message => message.data)).toEqual(['zero', 'one'])
+    expect(session.activePinReasons).toEqual([])
+})
+
 test('keeps eager Trigger metadata on its original owner after a later error', async () => {
     const { chat, char, session } = fixture()
     char.triggerscript[0].effect = [

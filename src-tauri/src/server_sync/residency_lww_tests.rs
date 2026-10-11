@@ -25,9 +25,37 @@ fn present_bulk_hydration_completes_without_any_body_open_or_hash() {
     assert!(session.hydrate_many_outcomes(&hashes, &|| Ok(()), |hash,outcome| completed.push((hash.to_owned(),outcome))).unwrap().is_empty());
     let work = take_body_io(); let hashes_work = crate::persistent_store::hash_work::take_hash_work();
     assert!(work.complete()); assert!(work.domains.is_empty());
+    assert_eq!((work.stat_requests, work.batch_stat_requests), (0, 1));
     assert_eq!(completed.len(), hashes.len());
     assert!(completed.iter().all(|(_,outcome)| *outcome == super::residency::HydrationOutcome::AlreadyLocal));
     assert!(hashes_work.domains.is_empty()); assert!(hashes_work.incomplete.is_empty());
+}
+
+#[test]
+fn server_hydration_prepares_downloaded_bodies_with_four_joined_workers() {
+    use crate::asset_repository::body_io;
+    let server = LocalServerFixture::new();
+    let (_root, mut store) = local();
+    let core = server.client(&store);
+    let bodies = (0_u8..8).map(|index| vec![index; 80 * 1024]).collect::<Vec<_>>();
+    let hashes = bodies.iter().enumerate().map(|(index, body)| {
+        put_asset(&mut store, &format!("assets/parallel-{index}.png"), body).object_hash.unwrap()
+    }).collect::<Vec<_>>();
+    super::lww_tests::drain_publications(&core, &mut store, &[]).unwrap();
+    store.asset_residency_set_policy(super::residency::AssetPolicy::Remote, || Ok(())).unwrap();
+    store.asset_residency_evict(|| Ok(())).unwrap();
+    body_io::reset_body_io();
+    for hash in &hashes { body_io::register_object_purpose(hash, body_io::BodyPurpose::Asset); }
+    let mut session = super::residency::HydrationSession::new(store.repository_root(), None).unwrap();
+    assert!(session.hydrate_many(&hashes, &|| Ok(())).unwrap().is_empty());
+    let observed = body_io::take_body_io();
+    assert_eq!(observed.worker_scopes_started, 4);
+    assert_eq!(observed.worker_scopes_settled, 4);
+    let cas = PayloadCas::new(store.repository_root()).unwrap();
+    for (hash, body) in hashes.iter().zip(bodies) {
+        assert_eq!(cas.read_object(hash).unwrap(), Some(body));
+        assert_eq!(store.asset_object_byte_size(hash).unwrap(), Some(80 * 1024));
+    }
 }
 
 /// A body fetched from server custody, or already here when asked for, has its
@@ -568,6 +596,49 @@ fn residency_classification_preserves_live_plugin_snapshot_and_durable_job_roots
 }
 
 #[test]
+fn active_durable_job_waits_for_sealing_before_asset_download() {
+    let (_directory, mut store) = local();
+    let mut job = DurableCasJob::begin(
+        store.repository_root(),
+        "synthetic-active-job",
+        CasJobKind::OfficialPublicationOrExportPreparation,
+        crate::asset_repository::job_pins::CasJobOwner::for_test(),
+        1,
+    )
+    .unwrap();
+    for guarded in [false, true] {
+        let _guard = guarded
+            .then(|| crate::asset_repository::coordinator::lock_repository_mutation().unwrap());
+        let error = store.residency_inventory_classification_test(guarded).unwrap_err();
+        assert_eq!(
+            (error.code.as_str(), error.status, error.retryable),
+            ("asset-jobs-busy", 409, true)
+        );
+    }
+    let error = store.asset_residency_download_remote(None, None, None, || Ok(())).err().unwrap();
+    assert_eq!((error.code.as_str(), error.retryable), ("asset-jobs-busy", true));
+    job.seal(&mut store, 2).unwrap();
+    store.asset_residency_download_remote(None, None, None, || Ok(())).unwrap();
+}
+
+#[test]
+fn abandoned_durable_job_keeps_asset_download_blocked() {
+    let (_directory, store) = local();
+    drop(DurableCasJob::begin(
+        store.repository_root(),
+        "synthetic-abandoned-job",
+        CasJobKind::OfficialPublicationOrExportPreparation,
+        crate::asset_repository::job_pins::CasJobOwner::for_test(),
+        1,
+    ).unwrap());
+    let error = store.asset_residency_download_remote(None, None, None, || Ok(())).err().unwrap();
+    assert_eq!(
+        (error.code.as_str(), error.status, error.retryable),
+        ("asset-jobs-unresolved", 409, false)
+    );
+}
+
+#[test]
 fn corrupt_durable_job_proof_blocks_residency_cleanup_before_any_release() {
     let (_directory, store) = local();
     let root = store.repository_root();
@@ -580,6 +651,13 @@ fn corrupt_durable_job_proof_blocks_residency_cleanup_before_any_release() {
     )
     .unwrap();
     drop(job);
+    let _active = DurableCasJob::begin(
+        root,
+        "synthetic-active-job",
+        CasJobKind::OfficialPublicationOrExportPreparation,
+        crate::asset_repository::job_pins::CasJobOwner::for_test(),
+        1,
+    ).unwrap();
     std::fs::write(
         root.join("assets/job-pins/job-synthetic-broken-job.journal"),
         b"synthetic corruption",

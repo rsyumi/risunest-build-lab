@@ -680,6 +680,41 @@ describe('LWW renderer save path', () => {
         completeB()
     })
 
+    it.each(['staging', 'applying'] as const)('queues generation completion during receive %s without losing the response', async phase => {
+        const registry = createGeneratingConversationRegistry()
+        const complete = registry.register({ characterId: 'char-a', conversationId: 'conv-long' })
+        const { database, store, runtime, commit } = await runtimeHarness(registry)
+        const chat = database.characters.find(value => value.chaId === 'char-a')!.chats.find(value => value.id === 'conv-long')!
+        const count = chat.message.length
+        let entered!: () => void, release!: () => void
+        const started = new Promise<void>(resolve => { entered = resolve })
+        const waiting = new Promise<void>(resolve => { release = resolve })
+        store.lwwStageReceive = async () => { if (phase === 'staging') { entered(); await waiting } }
+        store.lwwFinishReceive = async () => {}
+        store.lwwApplyReceive = vi.fn(async request => {
+            expect(request.generating).toEqual(phase === 'applying' ? [{ characterId: 'char-a', conversationId: 'conv-long' }] : [])
+            if (phase === 'applying') { entered(); await waiting }
+            const result = await store.commit({ expectedRevision: runtime.revision,
+                unitMutations: [{ key: '["character","char-b","desc"]', type: 'set', value: 'remote description' }],
+                ...(phase === 'staging' ? { conversations: [{ type: 'replace-range' as const, characterId: 'char-a', conversationId: 'conv-long', start: 0, deleteCount: count, messages: [{ role: 'char', data: 'competing remote response', chatId: 'remote-response' }] }] } : {}),
+            })
+            return { ...result, affectedKeys: ['["character","char-b","desc"]', ...(phase === 'staging' ? ['["messages","char-a","conv-long"]'] : [])], heldKeys: [], deferredKeys: phase === 'applying' ? ['["messages","char-a","conv-long"]'] : [] }
+        })
+        const receive = runtime.applyLwwReceive({ bindingAuthority: 'a', requestId: 'foreground', changes: [], progress: { kind: 'server', cursor: '1' }, admittedTimeUpperMs: '100' })
+        await started
+        chat.message.push({ role: 'char', data: 'completed while receiving', chatId: 'local-completion' })
+        const calls = commit.mock.calls.length
+        complete()
+        const save = runtime.acknowledgeGenerationCompletion()
+        await Promise.resolve()
+        expect(commit.mock.calls).toHaveLength(calls)
+        release(); await receive; await save
+        const stored = (await store.readConversation('char-a', 'conv-long'))!.value
+        expect(stored.message).toHaveLength(count + 1)
+        expect(stored.message.at(-1)).toMatchObject({ data: 'completed while receiving', chatId: 'local-completion' })
+        expect((database.characters.find(value => value.chaId === 'char-b') as character).desc).toBe('remote description')
+    })
+
     it('drains a completed durable receive on runtime restart without another remote receive', async () => {
         const registry = createGeneratingConversationRegistry()
         registry.register({characterId:'char-a',conversationId:'conv-long'})

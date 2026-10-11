@@ -232,8 +232,9 @@ export async function loadData() {
         const markers = getDeviceMarkers()
         applyHubSelection(markers)
         const deviceSettings = loadDeviceSettings(markers)
+        const pluginsExcludedAtStart = excluded('plugins')
         // A restore or a received change later in this run must not start the plugins either.
-        if (excluded('plugins')) keepPluginsOffForThisStart()
+        if (pluginsExcludedAtStart) keepPluginsOffForThisStart()
         if (isTauri) {
             stage = 'native-log'
             try {
@@ -901,6 +902,11 @@ export async function loadData() {
             if (accepted === false) {
                 location.reload()
                 return
+            }
+            if (isTauri && !pluginsExcludedAtStart) {
+                void import('./plugins/defaultPluginBootstrap.svelte')
+                    .then(({ startDefaultPluginBootstrap }) => startDefaultPluginBootstrap())
+                    .catch(error => console.error('Default plugin bootstrap failed', error))
             }
             if (isTauri && !isTauriAndroid && await takeRendererRecovery()) {
                 // A dialog replaces the toast, so it waits for queued dialogs.

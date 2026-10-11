@@ -4776,6 +4776,35 @@ describe('native file jobs', () => {
     })
 })
 
+it.each([
+    ['pocket', runNativeLegacyLocalBackupRestore],
+    ['risusave', runNativeBlockRisuSaveRestore],
+] as const)('retains first-run consent through a fifty-minute %s restore', async (_format, restore) => {
+    const start = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(start)
+    const result = {revision:18,sourceBytes:128,sourceFingerprintKind:'whole-file-sha256' as const,sourceSha256:'a'.repeat(64),characterCount:1,presetCount:0,warningCodes:[]}
+    const states = [status('running'), {...status('waitingForInput'),phase:'awaiting-activation'}, status('succeeded',result)]
+    const commands: string[] = []
+    const acquire = vi.fn()
+    try {
+        await expect(restore(restoreRuntime(17,{acquire}), {type:'desktopPath',path:'synthetic.bin'}, {firstRun:true}, {
+            isTauri:()=>true,
+            wait:async()=>{clock.mockReturnValue(start + 50 * 60 * 1000)},
+            invoke:async command=>{
+                commands.push(command)
+                if(command==='native_file_job_start') return {jobId:'job-1'}
+                if(command==='native_file_job_status') return states.shift()
+                return true
+            },
+        })).resolves.toEqual(result)
+        expect(Date.now()).toBe(start + 50 * 60 * 1000)
+        expect(restoreAlerts.checkbox).not.toHaveBeenCalled()
+        expect(acquire).toHaveBeenCalledOnce()
+        expect(commands).toContain('native_file_job_finalize')
+        expect(commands).not.toContain('native_file_job_cancel')
+    } finally { clock.mockRestore() }
+})
+
 it('cancels staged restore and waits for terminal settlement when the fresh precondition fails', async () => {
     const calls: string[] = []
     const statuses = [

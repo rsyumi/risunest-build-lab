@@ -9,9 +9,9 @@ use super::{
     contract::{Cancellation, ErrorKind, ProviderError, Result},
 };
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 pub(crate) const ANDROID_ONEDRIVE_REDIRECT_URI: &str = "risunestlocal://oauth/onedrive";
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 pub(crate) const ANDROID_GOOGLE_DRIVE_REDIRECT_URI: &str = "risunestlocal://oauth/google-drive";
 
 #[cfg(any(target_os = "ios", test))]
@@ -269,13 +269,13 @@ async fn write_browser_response(stream: &mut tokio::net::TcpStream, status: &str
     }).await;
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 pub(crate) struct AndroidRedirectAuthorization {
     state: String,
     receiver: Option<tokio::sync::oneshot::Receiver<Result<AuthorizationCode>>>,
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 impl AndroidRedirectAuthorization {
     /// Supplies the original registered HTTPS callback for a manual fallback.
     /// The pending authorization remains usable when the URL belongs to a
@@ -342,7 +342,7 @@ impl AndroidRedirectAuthorization {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 impl Drop for AndroidRedirectAuthorization {
     fn drop(&mut self) {
         if self.receiver.is_some() {
@@ -413,9 +413,10 @@ fn validate_android_callback(
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 mod android {
     use super::*;
+    #[cfg(target_os = "android")]
     use jni::{
         objects::{JClass, JString},
         JNIEnv,
@@ -431,6 +432,7 @@ mod android {
         registered_redirect: url::Url,
         app_redirect: url::Url,
         sender: oneshot::Sender<Result<AuthorizationCode>>,
+        on_ready: Box<dyn FnOnce() + Send>,
     }
 
     static REDIRECTS: OnceLock<Mutex<HashMap<String, RedirectPending>>> = OnceLock::new();
@@ -445,6 +447,7 @@ mod android {
         registered_redirect: url::Url,
         app_redirect: url::Url,
         sender: oneshot::Sender<Result<AuthorizationCode>>,
+        on_ready: Box<dyn FnOnce() + Send>,
     ) -> Result<()> {
         let mut pending = redirects()
             .lock()
@@ -459,6 +462,7 @@ mod android {
                 registered_redirect,
                 app_redirect,
                 sender,
+                on_ready,
             },
         );
         Ok(())
@@ -512,6 +516,7 @@ mod android {
         let RedirectPending {
             authorization,
             sender,
+            on_ready,
             ..
         } = pending;
         let result = match outcome {
@@ -522,9 +527,12 @@ mod android {
         // even if validation or delivery fails.
         sender
             .send(result)
-            .map_err(|_| ProviderError::new(ErrorKind::NotFound))
+            .map_err(|_| ProviderError::new(ErrorKind::NotFound))?;
+        on_ready();
+        Ok(())
     }
 
+    #[cfg(target_os = "android")]
     #[no_mangle]
     pub extern "system" fn Java_io_github_rsyumi_risunest_ExternalStorageAuthorization_completeOAuthRedirectNative(
         mut env: JNIEnv,
@@ -541,31 +549,34 @@ mod android {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 pub(crate) fn android_redirect_authorization(
     policy: AuthorizationPolicy,
+    on_ready: Box<dyn FnOnce() + Send>,
 ) -> Result<(AndroidRedirectAuthorization, url::Url)> {
     if policy.redirect_url.as_str() != ANDROID_ONEDRIVE_REDIRECT_URI {
         return Err(ProviderError::new(ErrorKind::Unsupported));
     }
-    start_android_redirect(policy, ANDROID_ONEDRIVE_REDIRECT_URI, false)
+    start_android_redirect(policy, ANDROID_ONEDRIVE_REDIRECT_URI, false, on_ready)
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 pub(crate) fn android_google_web_authorization(
     policy: AuthorizationPolicy,
+    on_ready: Box<dyn FnOnce() + Send>,
 ) -> Result<(AndroidRedirectAuthorization, url::Url)> {
     if policy.redirect_url.scheme() != "https" {
         return Err(ProviderError::new(ErrorKind::Unsupported));
     }
-    start_android_redirect(policy, ANDROID_GOOGLE_DRIVE_REDIRECT_URI, true)
+    start_android_redirect(policy, ANDROID_GOOGLE_DRIVE_REDIRECT_URI, true, on_ready)
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 fn start_android_redirect(
     policy: AuthorizationPolicy,
     app_redirect: &str,
     offline_access: bool,
+    on_ready: Box<dyn FnOnce() + Send>,
 ) -> Result<(AndroidRedirectAuthorization, url::Url)> {
     let registered_redirect = policy.redirect_url.clone();
     let app_redirect =
@@ -596,6 +607,7 @@ fn start_android_redirect(
         registered_redirect,
         app_redirect,
         sender,
+        on_ready,
     )?;
     Ok((
         AndroidRedirectAuthorization {
@@ -767,6 +779,86 @@ mod tests {
             AndroidCallback::OAuthError(kind) => assert_eq!(kind, ErrorKind::Cancelled),
             AndroidCallback::Grant(_) => panic!("expected denial"),
         }
+    }
+
+    #[test]
+    fn android_callback_notifies_once_with_the_result_already_available() {
+        use std::sync::{Arc, Mutex};
+
+        for google in [true, false] {
+            let flow = Arc::new(Mutex::new(None::<AndroidRedirectAuthorization>));
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let on_ready: Box<dyn FnOnce() + Send> = Box::new({
+                let flow = flow.clone();
+                let received = received.clone();
+                move || {
+                    let grant = flow.lock().unwrap().as_mut().unwrap()
+                        .try_complete(None).unwrap().expect("result must be ready before notification");
+                    received.lock().unwrap().push(grant.code.0.to_vec());
+                }
+            });
+            let (pending, _) = if google {
+                android_google_web_authorization(
+                    policy(url::Url::parse("https://oauth.example.test/callback").unwrap()).unwrap(),
+                    on_ready,
+                )
+            } else {
+                android_redirect_authorization(
+                    policy(url::Url::parse(ANDROID_ONEDRIVE_REDIRECT_URI).unwrap()).unwrap(),
+                    on_ready,
+                )
+            }.unwrap();
+            let redirect = if google { ANDROID_GOOGLE_DRIVE_REDIRECT_URI } else { ANDROID_ONEDRIVE_REDIRECT_URI };
+            let callback = format!("{redirect}?code=synthetic-code&state={}", pending.state);
+            *flow.lock().unwrap() = Some(pending);
+            android::complete_redirect(&callback, None).unwrap();
+            assert_eq!(*received.lock().unwrap(), vec![b"synthetic-code".to_vec()]);
+            assert!(flow.lock().unwrap().as_ref().unwrap().is_consumed());
+            assert_eq!(android::complete_redirect(&callback, None).unwrap_err().kind, ErrorKind::NotFound);
+        }
+    }
+
+    #[test]
+    fn android_callback_only_notifies_for_a_live_bound_attempt() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let (mut pending, _) = android_google_web_authorization(
+            policy(url::Url::parse("https://oauth.example.test/callback").unwrap()).unwrap(),
+            Box::new({
+                let notifications = notifications.clone();
+                move || { notifications.fetch_add(1, Ordering::SeqCst); }
+            }),
+        ).unwrap();
+        let wrong_host = format!("https://other.example.test/callback?code=x&state={}", pending.state);
+        assert_eq!(android::complete_redirect(&wrong_host, None).unwrap_err().kind, ErrorKind::Unsupported);
+        assert!(pending.try_complete(None).unwrap().is_none());
+        assert_eq!(notifications.load(Ordering::SeqCst), 0);
+
+        let callback = format!("{ANDROID_GOOGLE_DRIVE_REDIRECT_URI}?code=x&state={}", pending.state);
+        drop(pending);
+        assert_eq!(android::complete_redirect(&callback, None).unwrap_err().kind, ErrorKind::NotFound);
+        assert_eq!(notifications.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn android_provider_denial_notifies_and_finishes_as_cancelled() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let (mut pending, _) = android_google_web_authorization(
+            policy(url::Url::parse("https://oauth.example.test/callback").unwrap()).unwrap(),
+            Box::new({
+                let notifications = notifications.clone();
+                move || { notifications.fetch_add(1, Ordering::SeqCst); }
+            }),
+        ).unwrap();
+        let callback = format!("{ANDROID_GOOGLE_DRIVE_REDIRECT_URI}?error=access_denied&state={}", pending.state);
+        android::complete_redirect(&callback, None).unwrap();
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        assert_eq!(pending.try_complete(None).err().unwrap().kind, ErrorKind::Cancelled);
+        assert!(pending.is_consumed());
+        assert_eq!(android::complete_redirect(&callback, None).unwrap_err().kind, ErrorKind::NotFound);
     }
 
     #[test]

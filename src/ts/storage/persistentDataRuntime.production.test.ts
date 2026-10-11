@@ -39,7 +39,7 @@ import {
     projectCompleteScalableWorkingSet,
 } from './workingSetCatalog'
 import { workingSetResidency } from './workingSetResidency'
-import { canonicalJson, SaveCoordinator } from './saveCoordinator'
+import { canonicalJson, SaveCoordinator, type PersistentCharacterAssetOwnerHead } from './saveCoordinator'
 import { capturePersistentRoot, createPersistentDataRuntime } from './persistentDataRuntime'
 import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
 import { observePersistentSaveChanges } from './persistentSaveObserver.svelte'
@@ -53,6 +53,35 @@ afterEach(() => {
 })
 
 describe('production persistent working-set publication', () => {
+    it.each(['absent', 'empty', 'populated'] as const)('persists a prepared owner head when an existing character has unchanged %s assets', async (shape) => {
+        const initial = {
+            username: 'Before', botPresets: [], botPresetsId: 0, plugins: [],
+            characters: [{ type: 'character', chaId: 'prepared-owner', name: 'Owner', chatPage: 0, chatFolders: [], chats: [],
+                ...(shape === 'absent' ? {} : { additionalAssets: shape === 'empty' ? [] : [['synthetic', 'assets/imported', 'bin']] }),
+            }],
+        } as unknown as Database
+        const indexedDB = new IDBFactory()
+        const name = `prepared-existing-owner-${shape}`
+        const store = new IndexedDbPersistentDataStore(name, indexedDB, IDBKeyRange)
+        await store.open()
+        await store.replaceFromDatabase(initial)
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(-1)
+        const runtime = createPersistentDataRuntime({ store, state: createProductionStateAdapter(), prepareDatabase: async value => value })
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        const owner: PersistentCharacterAssetOwnerHead['owner'] = { kind: 'character-additional-assets', characterId: 'prepared-owner' }
+        const head: PersistentCharacterAssetOwnerHead = shape === 'absent'
+            ? { owner, present: false, manifestHash: null, entryCount: 0 }
+            : { owner, present: true, manifestHash: 'ab'.repeat(32), entryCount: shape === 'populated' ? 1 : 0 }
+        await runtime.upsertPersistentCompleteCharacter('prepared-owner', 'prepared-existing-import', current => current!, { assetOwnerHeads: [head] })
+        expect((await store.readAssetOwnerHead(owner))?.value).toEqual(head)
+        await runtime.mutatePersistentCharacterDetail('prepared-owner', 'edit-after-import', ({ character }) => { character.name = 'Edited after import' })
+        const reopened = new IndexedDbPersistentDataStore(name, indexedDB, IDBKeyRange)
+        await reopened.open()
+        expect((await reopened.readCharacter('prepared-owner'))?.value.name).toBe('Edited after import')
+        expect((await reopened.readAssetOwnerHead(owner))?.value).toEqual(head)
+    })
+
     it('invalidates the actual shared device keyspace after a remote plugin-local change', async () => {
         const owner = `received-device-plugin-${crypto.randomUUID()}`
         const keyspace = getPluginDeviceKeyspace(owner)

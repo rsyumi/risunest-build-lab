@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const startupMocks = vi.hoisted(() => ({ checkNativeStartupStatus: vi.fn() }))
+const defaultPlugins = vi.hoisted(() => ({ startDefaultPluginBootstrap: vi.fn() }))
+vi.mock('./plugins/defaultPluginBootstrap.svelte', () => defaultPlugins)
 const startup = vi.hoisted(() => ({
     native: true, exclusions: [] as string[], database: {} as any, reachUi: false,
     takeRendererRecovery: vi.fn(async () => false),
@@ -372,8 +374,10 @@ describe('renderer recovery notice', () => {
         await loadData()
         expect(bootFailure.set).toHaveBeenLastCalledWith(null)
         expect(startup.takeRendererRecovery).not.toHaveBeenCalled()
+        expect(defaultPlugins.startDefaultPluginBootstrap).not.toHaveBeenCalled()
         answerTerms(true)
         await vi.waitFor(() => expect(alertToast).toHaveBeenCalledExactlyOnceWith('Synthetic recovery notice'))
+        await vi.waitFor(() => expect(defaultPlugins.startDefaultPluginBootstrap).toHaveBeenCalledOnce())
         expect(alertNormal).not.toHaveBeenCalled()
         expect(vi.mocked(waitAlert).mock.invocationCallOrder.at(-1))
             .toBeLessThan(vi.mocked(alertToast).mock.invocationCallOrder[0])
@@ -393,5 +397,17 @@ describe('renderer recovery notice', () => {
         await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce())
         expect(startup.takeRendererRecovery).not.toHaveBeenCalled()
         expect(alertToast).not.toHaveBeenCalled()
+        expect(defaultPlugins.startDefaultPluginBootstrap).not.toHaveBeenCalled()
+    })
+
+    it('does not arm automatic plugin installation when startup excludes plugins', async () => {
+        startup.exclusions = ['plugins']
+        let answerTerms!: (accepted: boolean) => void
+        vi.mocked(alertTOS).mockReturnValueOnce(new Promise(resolve => { answerTerms = resolve }))
+        await loadData()
+        startup.exclusions = []
+        answerTerms(true)
+        await vi.waitFor(() => expect(startup.takeRendererRecovery).toHaveBeenCalled())
+        expect(defaultPlugins.startDefaultPluginBootstrap).not.toHaveBeenCalled()
     })
 })

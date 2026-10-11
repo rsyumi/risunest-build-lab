@@ -40,6 +40,31 @@ describe('upstream import acknowledgement', () => {
         expect(dialog).not.toHaveBeenCalled()
         expect(actionDialog).not.toHaveBeenCalled()
     })
+    it.each(['holds content', 'cannot be read'])('keeps first-run consent when the final library check %s', async condition => {
+        host.store.set('dialog')
+        if (condition === 'holds content') libraryContent.mockResolvedValue(true)
+        else libraryContent.mockRejectedValue(new Error('unreadable'))
+        await expect(confirmUpstreamLibraryReplacement(false, [], {firstRun:true})).resolves.toBe(true)
+        expect(libraryContent).not.toHaveBeenCalled()
+        expect(dialog).not.toHaveBeenCalled()
+        expect(actionDialog).not.toHaveBeenCalled()
+    })
+    it.each([true, false])('keeps first-run backup warnings without the overwrite checkbox, answer=%s', async answer => {
+        actionDialog.mockResolvedValueOnce(answer)
+        await expect(confirmUpstreamLibraryReplacement(false, ['inlay warning'], {firstRun:true})).resolves.toBe(answer)
+        expect(actionDialog).toHaveBeenCalledExactlyOnceWith({
+            title:language.lwwSync.restoreTitle, description:'inlay warning',
+            actionLabel:language.lwwSync.restoreAction, cancelLabel:language.lwwSync.cancelAction,
+        })
+        expect(dialog).not.toHaveBeenCalled()
+        expect(libraryContent).not.toHaveBeenCalled()
+    })
+    it('still asks before a first-run import replaces a bound library', async () => {
+        dialog.mockResolvedValueOnce({confirmed:false,checked:false})
+        await expect(confirmUpstreamLibraryReplacement(true, [], {firstRun:true})).resolves.toBe(false)
+        expect(dialog).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({requireChecked:true}))
+        expect(libraryContent).not.toHaveBeenCalled()
+    })
     it.each([true,false])('shows only the backup warnings in the onboarding, answer=%s', async answer => {
         host.store.set('onboarding')
         actionDialog.mockResolvedValueOnce(answer)

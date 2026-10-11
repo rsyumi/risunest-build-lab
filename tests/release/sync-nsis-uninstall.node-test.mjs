@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 const compiler = process.env.NSIS_MAKENSIS ?? join(process.env.LOCALAPPDATA ?? '', 'tauri', 'NSIS', 'makensis.exe');
+const installedExecutable = '$INSTDIR\\${MAINBINARYNAME}.exe';
 test('Sync removal hooks compile in the uninstaller context', { skip: process.platform !== 'win32' || !existsSync(compiler) }, () => {
   const directory = mkdtempSync(join(tmpdir(), 'risunest-sync-nsis-'));
   try {
@@ -84,6 +85,9 @@ OutFile "${q(join(directory, 'installer.exe'))}"
 Var UpdateMode
 Var DeleteAppDataCheckboxState
 !macro CheckIfAppIsRunning executable product
+  StrCmp "${'$'}{executable}" "${installedExecutable}" +3
+  SetErrorLevel 9
+  Abort "Process check must use the installed executable path"
 !macroend
 !include "${q(hook)}"
 Section
@@ -139,5 +143,50 @@ SectionEnd
         assert.ok(calls.indexOf('installer finish') < calls.indexOf('installer delete-data'));
       }
     }
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally {
+    assert.equal(dirname(directory), resolve(tmpdir()));
+    rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test('Sync preinstall checks the resolved installation directory', { skip: process.platform !== 'win32' || !existsSync(compiler) }, () => {
+  const directory = mkdtempSync(join(tmpdir(), 'risunest-sync-nsis-path-'));
+  const q = value => value.replaceAll('$', '$$').replaceAll('"', '$\\"');
+  const original = join(directory, 'original');
+  const normalized = join(directory, 'normalized');
+  const custom = join(directory, 'custom');
+  try {
+    const script = join(directory, 'installer.nsi');
+    writeFileSync(script, String.raw`
+Unicode true
+RequestExecutionLevel user
+SilentInstall silent
+OutFile "${q(join(directory, 'installer.exe'))}"
+!include LogicLib.nsh
+!include FileFunc.nsh
+!define MAINBINARYNAME "SyntheticSync"
+!define PRODUCTNAME "Synthetic Sync"
+!define RISUNEST_SYNC_DEFAULT_INSTALL_DIR "${q(original)}"
+!define RISUNEST_SYNC_INSTALL_DIR "${q(normalized)}"
+!macro CheckIfAppIsRunning executable product
+  FileOpen $0 "$EXEDIR\checked-path" w
+  FileWrite $0 "${'$'}{executable}"
+  FileClose $0
+!macroend
+!include "${q(resolve('server/manager/install/windows.nsh'))}"
+Section
+  !insertmacro NSIS_HOOK_PREINSTALL
+SectionEnd
+`);
+    const compiled = spawnSync(compiler, ['/V2', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+    assert.equal(compiled.status, 0, `${compiled.stdout}\n${compiled.stderr}`);
+    for (const [requested, expected] of [[original, normalized], [custom, custom]]) {
+      const result = spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${requested}`], { timeout: 30000, windowsHide: true });
+      assert.equal(result.status, 0);
+      assert.equal(readFileSync(join(directory, 'checked-path'), 'utf8'), join(expected, 'SyntheticSync.exe'));
+    }
+  } finally {
+    assert.equal(dirname(directory), resolve(tmpdir()));
+    rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 });

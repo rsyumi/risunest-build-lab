@@ -2219,6 +2219,18 @@ export const languageEnglish = {
                 cleanupNote:
                     'Cleanup removes this device’s copies of files that are on the server, except the current character icons of characters not in the trash.',
                 clean: 'Clear copies on this device',
+                cleanup: {
+                    preparing: 'Checking files to clear',
+                    checking: 'Checking server files',
+                    uploading: 'Uploading files to the server',
+                    deleting: 'Clearing copies on this device',
+                    finalizing: 'Checking cleanup results',
+                    cancelling: 'Cancelling',
+                    complete: 'Copies on this device cleared',
+                    cancelled: 'Cleanup cancelled',
+                    failed: 'Cleanup failed',
+                    freed: 'Space freed',
+                },
                 cancel: 'Cancel',
                 working:
                     'Processing files… Cancellation takes effect after the current request.',
@@ -2269,7 +2281,8 @@ export const languageEnglish = {
             complete: 'Sync complete',
             details: 'Details',
             verifiedBytes: 'Data transferred',
-            transferRate: 'Transfer speed',
+            uploadSpeed: 'Upload speed',
+            downloadSpeed: 'Download speed',
             progressItems: 'Items processed',
             progressFiles: 'Files processed',
             pendingChanges: 'Changes to upload',
@@ -2816,6 +2829,9 @@ export const languageEnglish = {
                 "This feature doesn't work while notifications are off.",
             operatingSystem: 'Operating system',
             webView: 'WebView',
+            refreshScreen: 'Refresh screen',
+            refreshBusy: 'Finish any ongoing tasks and try again.',
+            refreshFailed: 'Could not refresh the screen. Please try again.',
             "iosBackgroundLabel": 'Background tasks',
         },
         boot: {

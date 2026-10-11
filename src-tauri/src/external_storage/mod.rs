@@ -36,6 +36,8 @@ pub(crate) mod oauth;
 pub(crate) mod package_cache;
 pub(crate) mod packaging;
 pub(crate) mod phase_progress;
+pub(crate) mod progress;
+pub(crate) mod transfer_limit;
 pub(crate) mod providers;
 pub(crate) mod publication;
 pub(crate) mod quota;
@@ -75,3 +77,6 @@ pub(crate) mod lww_tests;
 mod lww_large_unit_tests;
 #[cfg(test)]
 pub(crate) mod previous_storage_tests;
+
+#[cfg(test)]
+mod transfer_factory_tests;

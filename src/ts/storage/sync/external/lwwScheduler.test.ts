@@ -4,8 +4,8 @@ import { createLwwScheduler } from './lwwScheduler'
 afterEach(() => vi.useRealTimers())
 function fixture(withMaintenance = false) {
     vi.useFakeTimers()
-    const publish = vi.fn(async () => {})
-    const receive = vi.fn(async () => 0)
+    const publish = vi.fn(async () => ({ count: 0, more: false }))
+    const receive = vi.fn(async () => ({ count: 0, more: false }))
     const failed = vi.fn()
     const maintain = vi.fn(async () => {})
     let available = true
@@ -21,7 +21,7 @@ async function started(f: ReturnType<typeof fixture>) {
 describe('LWW foreground scheduling', () => {
     it('keeps the maintenance deadline during sustained nonempty receives', async () => {
         const f = fixture(true)
-        f.receive.mockImplementation(async () => 1)
+        f.receive.mockImplementation(async () => ({ count: 1, more: false }))
         await started(f)
         await vi.advanceTimersByTimeAsync(59_999)
         expect(f.receive).toHaveBeenCalledTimes(3)
@@ -144,7 +144,7 @@ describe('LWW foreground scheduling', () => {
         await vi.advanceTimersByTimeAsync(20_000 + 20_000 + 60_000)
         expect(f.receive).toHaveBeenCalledTimes(4)
         let finish!: () => void
-        f.publish.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+        f.publish.mockImplementationOnce(() => new Promise<{ count: number; more: boolean }>(resolve => { finish = () => resolve({ count: 0, more: false }) }))
         const request = f.scheduler.publishNow()
         await Promise.resolve(); await Promise.resolve()
         let complete = false
@@ -157,4 +157,287 @@ describe('LWW foreground scheduling', () => {
         expect(f.receive).toHaveBeenCalledTimes(4)
         f.scheduler.stop()
     })
+})
+
+const turn = (count = 0, more = false) => ({ count, more })
+const tick = async () => { for (let i = 0; i < 25; i++) await Promise.resolve() }
+function held<T>() {
+    let resolve!: (value: T) => void
+    let reject!: (error: unknown) => void
+    const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+    return { promise, resolve, reject }
+}
+
+describe('bounded LWW ownership under latency', () => {
+    it('does not queue forty conversation checks ahead of publication', async () => {
+        const f = fixture(); await started(f)
+        f.receive.mockImplementation(async () => { await new Promise(resolve => setTimeout(resolve, 1_000)); return turn() })
+        for (let i = 0; i < 40; i++) {
+            void f.scheduler.conversationOpened()
+            await vi.advanceTimersByTimeAsync(500)
+        }
+        f.scheduler.dirty(true)
+        await vi.advanceTimersByTimeAsync(1_000)
+        expect(f.publish).toHaveBeenCalledTimes(1)
+        expect(f.receive.mock.calls.length).toBeLessThanOrEqual(23)
+        f.scheduler.stop(); await vi.advanceTimersByTimeAsync(1_000); await f.scheduler.settled()
+    })
+    it('keeps one follow-up across 120 seconds of held publication and dirty pressure', async () => {
+        const f = fixture(); await started(f)
+        const pending = held<ReturnType<typeof turn>>()
+        f.publish.mockImplementationOnce(() => pending.promise)
+        f.scheduler.dirty(true); await tick()
+        for (let i = 0; i < 90; i++) { f.scheduler.dirty(); await vi.advanceTimersByTimeAsync(1_000) }
+        await vi.advanceTimersByTimeAsync(30_000)
+        expect(f.publish).toHaveBeenCalledTimes(1)
+        pending.resolve(turn()); await f.scheduler.settled()
+        expect(f.publish).toHaveBeenCalledTimes(2)
+        f.scheduler.stop()
+    })
+    it('retains a newer edit after an older send succeeds and its follow-up fails', async () => {
+        const f = fixture(); await started(f)
+        const pending = held<ReturnType<typeof turn>>()
+        f.publish.mockImplementationOnce(() => pending.promise).mockRejectedValueOnce({ kind: 'transient' })
+        f.scheduler.dirty(true); await tick(); f.scheduler.dirty(true)
+        pending.resolve(turn()); await f.scheduler.settled()
+        expect(f.publish).toHaveBeenCalledTimes(2)
+        await vi.advanceTimersByTimeAsync(15_000)
+        expect(f.publish).toHaveBeenCalledTimes(3)
+        f.scheduler.stop()
+    })
+    it('drops queued demand on stop and ignores a late old failure', async () => {
+        const f = fixture(); await started(f)
+        const pending = held<ReturnType<typeof turn>>()
+        f.receive.mockImplementationOnce(() => pending.promise)
+        void f.scheduler.conversationOpened(); await tick()
+        for (let i = 0; i < 40; i++) { void f.scheduler.conversationOpened(); f.scheduler.dirty(true) }
+        f.scheduler.stop(); pending.reject({ kind: 'corrupt' }); await f.scheduler.settled()
+        await vi.advanceTimersByTimeAsync(600_000)
+        expect(f.receive).toHaveBeenCalledTimes(2)
+        expect(f.publish).not.toHaveBeenCalled()
+        expect(f.failed).not.toHaveBeenCalled()
+    })
+    it('retains monotonic service deadlines across dirty, generation, manual and resume triggers', async () => {
+        const f = fixture(); await started(f)
+        f.publish.mockRejectedValueOnce({ kind: 'rateLimited', retryAtMs: String(Date.now() + 120_000) })
+        f.scheduler.dirty(true); await f.scheduler.settled()
+        await vi.advanceTimersByTimeAsync(1_000); f.scheduler.dirty(); f.scheduler.dirty(true)
+        f.scheduler.stop(); void f.scheduler.resumeForeground()
+        const manual = f.scheduler.manualNow()
+        await vi.advanceTimersByTimeAsync(118_999)
+        expect(f.publish).toHaveBeenCalledTimes(1)
+        await vi.advanceTimersByTimeAsync(1); await manual
+        expect(f.publish).toHaveBeenCalledTimes(2)
+        f.scheduler.stop()
+    })
+    it('does not shorten receive retry through conversation bursts, and send remains eligible', async () => {
+        const f = fixture(); await started(f)
+        f.receive.mockRejectedValueOnce({ kind: 'rateLimited', retryAtMs: String(Date.now() + 120_000) })
+        await f.scheduler.conversationOpened()
+        for (let i = 0; i < 50; i++) void f.scheduler.conversationOpened()
+        f.scheduler.dirty(true); await tick()
+        expect(f.publish).toHaveBeenCalledTimes(1)
+        await vi.advanceTimersByTimeAsync(119_999)
+        expect(f.receive).toHaveBeenCalledTimes(2)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(f.receive).toHaveBeenCalledTimes(3)
+        f.scheduler.stop()
+    })
+    it.each([undefined, 5_000])('runs a waiting manual request after only its native retry deadline (%s)', async retryMillis => {
+        const f = fixture(); await started(f)
+        const pending = held<ReturnType<typeof turn>>()
+        f.publish.mockImplementationOnce(() => pending.promise)
+        f.scheduler.dirty(true); await tick()
+        const manual = f.scheduler.manualNow()
+        pending.reject({ kind: 'transient', ...(retryMillis === undefined ? {} : { retryAtMs: Date.now() + retryMillis }) })
+        await tick()
+        if (retryMillis !== undefined) {
+            await vi.advanceTimersByTimeAsync(retryMillis - 1)
+            expect(f.publish).toHaveBeenCalledTimes(1)
+            await vi.advanceTimersByTimeAsync(1)
+        }
+        expect(f.publish).toHaveBeenCalledTimes(2)
+        await manual
+        f.scheduler.stop()
+    })
+    it.each(['publish', 'receive'] as const)('runs stopped forced %s without the automatic retry cooldown', async operation => {
+        const f = fixture(); await started(f)
+        const callsBefore = f[operation].mock.calls.length
+        f[operation].mockRejectedValueOnce({ kind: 'transient' })
+        if (operation === 'publish') f.scheduler.dirty(true)
+        else void f.scheduler.conversationOpened()
+        await f.scheduler.settled(); f.scheduler.stop()
+        const forced = operation === 'publish' ? f.scheduler.publishNow(true) : f.scheduler.receiveNow(true)
+        await tick()
+        expect(f[operation]).toHaveBeenCalledTimes(callsBefore + 2)
+        await forced
+    })
+    it.each(['publish', 'receive'] as const)('retains automatic %s demand after native cancellation', async operation => {
+        const f = fixture(); await started(f)
+        const callsBefore = f[operation].mock.calls.length
+        f[operation].mockRejectedValueOnce({ kind: 'cancelled' })
+        if (operation === 'publish') f.scheduler.dirty(true)
+        else void f.scheduler.conversationOpened()
+        await f.scheduler.settled()
+        const cooldown = operation === 'publish' ? 15_000 : 20_000
+        await vi.advanceTimersByTimeAsync(cooldown - 1)
+        expect(f[operation]).toHaveBeenCalledTimes(callsBefore + 1)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(f[operation]).toHaveBeenCalledTimes(callsBefore + 2)
+        f.scheduler.stop()
+    })
+    it('alternates bounded turns before either backlog is empty', async () => {
+        const f = fixture(); await started(f)
+        const order: string[] = []
+        let sends = 0; let receives = 0
+        f.publish.mockImplementation(async () => { order.push('send'); return turn(1, ++sends < 3) })
+        f.receive.mockImplementation(async () => { order.push('receive'); return turn(1, ++receives < 3) })
+        f.scheduler.stop(); f.scheduler.start(); await f.scheduler.settled()
+        expect(order).toEqual(['send', 'receive', 'send', 'receive', 'send', 'receive'])
+        expect(f.publish.mock.calls.every(call => (call as unknown as [{turnLimit: number}])[0].turnLimit === 4)).toBe(true)
+        f.scheduler.stop()
+    })
+    it('does not spin on a generating-only outbox or a zero-progress receive', async () => {
+        const f = fixture(); await started(f)
+        f.publish.mockResolvedValue(turn(0, true)); f.receive.mockResolvedValue(turn(0, true))
+        f.scheduler.dirty(true); void f.scheduler.conversationOpened(); await tick()
+        expect(f.publish).toHaveBeenCalledTimes(1)
+        expect(f.receive).toHaveBeenCalledTimes(2)
+        await vi.advanceTimersByTimeAsync(1_000)
+        expect(f.publish).toHaveBeenCalledTimes(1)
+        expect(f.receive).toHaveBeenCalledTimes(2)
+        f.scheduler.stop()
+    })
+    it('blocks unchanged remediation failures until recovery, including across ordinary resume', async () => {
+        const f = fixture(); await started(f)
+        f.publish.mockRejectedValueOnce({ kind: 'reauthRequired' })
+        f.scheduler.dirty(true); await f.scheduler.settled()
+        for (let i = 0; i < 20; i++) { f.scheduler.dirty(true); await vi.advanceTimersByTimeAsync(20_000) }
+        f.scheduler.stop(); await f.scheduler.resumeForeground()
+        expect(f.publish).toHaveBeenCalledTimes(1)
+        f.scheduler.recovered(); await f.scheduler.settled()
+        expect(f.publish).toHaveBeenCalledTimes(2)
+        f.scheduler.stop()
+    })
+    it('coalesces waiting manual requests and one follow-up while a manual round runs', async () => {
+        const f = fixture(); await started(f)
+        const routine = held<ReturnType<typeof turn>>(); const manual = held<ReturnType<typeof turn>>()
+        f.publish.mockImplementationOnce(() => routine.promise).mockImplementationOnce(() => manual.promise)
+        f.scheduler.dirty(true); await tick()
+        const first = f.scheduler.manualNow()
+        for (let i = 0; i < 50; i++) expect(f.scheduler.manualNow()).toBe(first)
+        routine.resolve(turn()); await tick()
+        const followup = f.scheduler.manualNow()
+        for (let i = 0; i < 50; i++) expect(f.scheduler.manualNow()).toBe(followup)
+        expect(followup).not.toBe(first)
+        manual.resolve(turn()); await Promise.all([first, followup]); await f.scheduler.settled()
+        expect(f.publish).toHaveBeenCalledTimes(3)
+        expect((f.publish.mock.calls as unknown as Array<[{ turnLimit?: number }]>).map(([call]) => call.turnLimit)).toEqual([4, undefined, undefined])
+        f.scheduler.stop()
+    })
+    it('rejects cancelled waiting manual work without waiting for an old native call', async () => {
+        const f = fixture(); await started(f)
+        const routine = held<ReturnType<typeof turn>>()
+        f.publish.mockImplementationOnce(() => routine.promise)
+        f.scheduler.dirty(true); await tick()
+        const controller = new AbortController()
+        const manual = f.scheduler.manualNow(controller.signal)
+        const rejected = expect(manual).rejects.toMatchObject({ name: 'AbortError' })
+        controller.abort(); await rejected
+        routine.resolve(turn()); await f.scheduler.settled()
+        expect(f.publish).toHaveBeenCalledTimes(1)
+        f.scheduler.stop()
+    })
+    it('runs forced work while stopped and settles stopped waiting callers', async () => {
+        const f = fixture(); await started(f); f.scheduler.stop()
+        await f.scheduler.publishNow(true); await f.scheduler.receiveNow(true)
+        expect(f.publish).toHaveBeenCalledTimes(1)
+        const pending = held<ReturnType<typeof turn>>()
+        f.publish.mockImplementationOnce(() => pending.promise)
+        const first = f.scheduler.manualNow(); await tick()
+        const second = f.scheduler.manualNow()
+        const rejected = Promise.all([expect(first).rejects.toMatchObject({ name: 'AbortError' }), expect(second).rejects.toMatchObject({ name: 'AbortError' })])
+        f.scheduler.stop(); await rejected; pending.resolve(turn()); await f.scheduler.settled()
+    })
+})
+
+it('cancels each manual caller independently while preserving the shared round for remaining lifetimes', async () => {
+    const f = fixture(); await started(f)
+    const routine = held<ReturnType<typeof turn>>()
+    f.publish.mockImplementationOnce(() => routine.promise)
+    f.scheduler.dirty(true); await tick()
+    const firstSignal = new AbortController(); const secondSignal = new AbortController()
+    const first = f.scheduler.manualNow(firstSignal.signal)
+    const second = f.scheduler.manualNow(secondSignal.signal)
+    const firstRejected = expect(first).rejects.toMatchObject({ name: 'AbortError' })
+    firstSignal.abort(); await firstRejected
+    routine.resolve(turn()); await second
+    expect(f.publish).toHaveBeenCalledTimes(2)
+    f.scheduler.stop()
+})
+
+it('cancels a joined manual caller even when the first caller remains valid', async () => {
+    const f = fixture(); await started(f)
+    const routine = held<ReturnType<typeof turn>>()
+    f.publish.mockImplementationOnce(() => routine.promise)
+    f.scheduler.dirty(true); await tick()
+    const first = f.scheduler.manualNow()
+    const signal = new AbortController()
+    const second = f.scheduler.manualNow(signal.signal)
+    const rejected = expect(second).rejects.toMatchObject({ name: 'AbortError' })
+    signal.abort(); await rejected
+    routine.resolve(turn()); await first
+    expect(f.publish).toHaveBeenCalledTimes(2)
+    f.scheduler.stop()
+})
+
+it('keeps service waits monotonic when the wall clock jumps forward', async () => {
+    vi.useFakeTimers()
+    let monotonic = 0; let wall = 1_000_000
+    const publish = vi.fn(async () => turn())
+    publish.mockRejectedValueOnce({ kind: 'rateLimited', retryAtMs: wall + 120_000 })
+    const scheduler = createLwwScheduler({ available: () => true, now: () => monotonic, wallNow: () => wall, publish, receive: async () => turn(), failed: () => {} })
+    scheduler.start(); await scheduler.settled()
+    wall += 3_600_000
+    scheduler.dirty(true)
+    monotonic = 119_999; await vi.advanceTimersByTimeAsync(119_999)
+    expect(publish).toHaveBeenCalledTimes(1)
+    monotonic++; await vi.advanceTimersByTimeAsync(1)
+    expect(publish).toHaveBeenCalledTimes(2)
+    scheduler.stop()
+})
+
+it('does not retry a remediation failure through a forced hide flush', async () => {
+    const f = fixture(); await started(f)
+    const failure = { kind: 'repositoryKeyUnavailable' }
+    f.publish.mockRejectedValueOnce(failure)
+    f.scheduler.dirty(true); await f.scheduler.settled(); f.scheduler.stop()
+    await expect(f.scheduler.publishNow(true)).rejects.toEqual(failure)
+    expect(f.publish).toHaveBeenCalledTimes(1)
+})
+
+it('keeps maintenance service pauses independent of dirty events and unrelated success', async () => {
+    const f = fixture(true); await started(f)
+    f.maintain.mockRejectedValueOnce({ kind: 'rateLimited', retryAtMs: String(Date.now() + 180_000) })
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(f.maintain).toHaveBeenCalledTimes(1)
+    f.scheduler.dirty(true); await f.scheduler.settled()
+    await vi.advanceTimersByTimeAsync(119_999)
+    expect(f.maintain).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(f.maintain).toHaveBeenCalledTimes(2)
+    f.scheduler.stop()
+})
+
+it('keeps a waiting manual service deadline armed while automatic admission is paused', async () => {
+    const f = fixture(); await started(f)
+    f.publish.mockRejectedValueOnce({ kind: 'rateLimited', retryAtMs: String(Date.now() + 120_000) })
+    f.scheduler.dirty(true); await f.scheduler.settled()
+    const manual = f.scheduler.manualNow()
+    f.scheduler.pauseAutomatic()
+    await vi.advanceTimersByTimeAsync(119_999)
+    expect(f.publish).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1); await manual
+    expect(f.publish).toHaveBeenCalledTimes(2)
+    f.scheduler.stop()
 })

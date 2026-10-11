@@ -1,6 +1,7 @@
 import { alertError } from "src/ts/alert"
 import { importPlugin } from "../plugins.svelte"
 import { sleep } from "src/ts/util"
+import { withLibraryFileSelection } from 'src/ts/storage/libraryFileOperation'
 
 export async function hotReloadPluginFiles(){
 
@@ -14,7 +15,7 @@ export async function hotReloadPluginFiles(){
 
     let fileHandle: FileSystemFileHandle
     try {
-        [fileHandle] = await window.showOpenFilePicker({
+        [fileHandle] = await withLibraryFileSelection(() => window.showOpenFilePicker({
             types: [
                 {
                     description: "JavaScript or TypeScript Plugin File",
@@ -24,7 +25,7 @@ export async function hotReloadPluginFiles(){
                     }
                 }
             ]
-        })   
+        }))
     } catch (error) {
         return
     }

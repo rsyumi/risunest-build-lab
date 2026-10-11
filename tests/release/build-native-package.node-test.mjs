@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { assertBinaryArchitecture } from "../../scripts/release/platform/native.mjs";
-import { assertPackageFormat } from "../../scripts/release/platform/package.mjs";
+import { assertPackageFormat, writeZipArchive } from "../../scripts/release/platform/package.mjs";
 import {
   assertIosBundleMetadata,
   assertMacBundleMetadata,
@@ -16,7 +16,7 @@ import {
   validateIosArchiveEntries,
 } from "../../scripts/release/package-app.mjs";
 import { APP_IDENTIFIER, SYNC_IDENTIFIER, assertAppIdentifier, assertNoIdentifierOverride, assertSyncIdentifier, mergeTauriConfig, releaseTauriConfig } from "../../scripts/release/tauri-config.mjs";
-import { validateOwnedInventory, writeWindowsArchive } from "../../server/manager/install/package.mjs";
+import { validateOwnedInventory } from "../../server/manager/install/package.mjs";
 import { identifierDirectories, overlaps, windowsLayout } from "../pathManifest.mjs";
 
 function pe(machine) {
@@ -99,7 +99,7 @@ test("raw packaging accepts native Windows ARM64 targets", () => {
   assert.ok(readFileSync(join(output, "risunest-sync-server-1.2.3-aarch64-pc-windows-msvc.zip")).length > 0);
 });
 
-test("Windows managed ZIP preserves top-level names and bytes with absolute output paths", (t) => {
+test("Windows ZIP preserves top-level names and bytes with absolute output paths", (t) => {
   const root = mkdtempSync(join(tmpdir(), "risunest managed zip "));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const source = join(root, "source files");
@@ -111,7 +111,7 @@ test("Windows managed ZIP preserves top-level names and bytes with absolute outp
   };
   for (const [name, bytes] of Object.entries(files)) writeFileSync(join(source, name), bytes);
   const archive = join(root, "managed.zip");
-  writeWindowsArchive(source, archive);
+  writeZipArchive(source, archive);
   assert.equal(assertPackageFormat(archive, "zip").format, "zip");
   const inspected = spawnSync("python", ["-c", [
     "import json, sys, zipfile",
@@ -334,7 +334,7 @@ test("RisuNest NSIS completes requested cleanup before removing its retry entry 
   assert.match(hook, /!macro NSIS_HOOK_PREUNINSTALL/);
   assert.match(hook, /\$DeleteAppDataCheckboxState = 1/);
   assert.match(hook, /\$UpdateMode <> 1/);
-  assert.match(hook, /!insertmacro CheckIfAppIsRunning "\$\{MAINBINARYNAME\}\.exe" "\$\{PRODUCTNAME\}"/);
+  assert.match(hook, /!insertmacro CheckIfAppIsRunning "\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe" "\$\{PRODUCTNAME\}"/);
   assert.match(hook, /ExecWait '"\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe" --remove-local-data --yes' \$R6/);
   assert.ok(hook.indexOf("!insertmacro CheckIfAppIsRunning") < hook.indexOf("ExecWait"));
   assert.match(hook, /\$\{If\} \$\{Errors\}\s+\$\{OrIf\} \$R6 != 0/);

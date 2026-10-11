@@ -789,6 +789,8 @@ mod tests {
                 space: "string".into(), key: "k".repeat(513), value: "small".into(),
             }]).is_err());
             device.write_setting("risuNestDeviceSettings", &large_setting).expect("write large setting");
+            device.write_setting("risuNestDefaultPluginsAttempted", &serde_json::json!(r#"["source-plugin"]"#))
+                .expect("write source attempt");
         }
         let stored_setting: String = source.device_store().unwrap().connection().query_row(
             "SELECT value FROM device_settings WHERE key='risuNestDeviceSettings'", [], |row| row.get(0),
@@ -833,6 +835,23 @@ mod tests {
             "SELECT value FROM device_settings WHERE key='risuNestDeviceSettings'", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(restored_setting, stored_setting);
+        assert_eq!(device.read_setting("risuNestDefaultPluginsAttempted").unwrap(), None);
+        device.write_setting("risuNestDefaultPluginsAttempted", &serde_json::json!(r#"["provider-manager","yumi-translator"]"#))
+            .expect("write target attempt");
+        let stage = target.replace_begin().expect("begin second replacement");
+        target.replace_put_root(&stage.staging_id, &serde_json::json!({"language": "synthetic restored"}))
+            .expect("stage root again");
+        let header = crate::persistent_store::lww::Header {
+            binding_authority: target.lww_binding_authority().unwrap(),
+            request_id: "synthetic-preserve-plugin-attempt".into(),
+        };
+        target.lww_commit_replacement_with_device_sections(
+            &header, &stage.staging_id, Some(&Default::default()), &prepared.iter().collect::<Vec<_>>(),
+        ).expect("restore without resetting the target attempt");
+        assert_eq!(
+            target.device_store().unwrap().read_setting("risuNestDefaultPluginsAttempted").unwrap(),
+            Some(serde_json::json!(r#"["provider-manager","yumi-translator"]"#))
+        );
     }
 
     /// A section body lands about 200 characters below the data root, past

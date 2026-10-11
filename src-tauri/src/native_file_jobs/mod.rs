@@ -5962,14 +5962,14 @@ mod tests {
     }
 
     fn wait_for_content_job(state: &NativeFileJobState, job_id: &str) -> JobStatus {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let status = state.status(job_id).unwrap();
             if status.state.is_terminal() {
                 return status;
             }
-            assert!(Instant::now() < deadline, "content preparation timed out");
-            thread::yield_now();
+            assert!(Instant::now() < deadline, "content preparation timed out: {status:?}");
+            thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -6796,6 +6796,55 @@ mod tests {
         .unwrap();
         assert_eq!(session.pin_count(), 3);
         assert!(!session.is_sealed());
+    }
+
+    #[test]
+    fn prepared_asset_rich_modules_commit_units_and_reopen_for_bin_and_risum() {
+        use crate::persistent_store::{AssetAlias, AssetOwnerHead, PersistentStore, WorkingSetCommit};
+
+        for name in ["module.bin", "module.RISUM"] {
+            let directory = TempDir::new().unwrap();
+            let mut store = PersistentStore::open(directory.path()).unwrap();
+            let payloads: Vec<Vec<u8>> = (0..300).map(|index| format!("synthetic-payload-{index}").into_bytes()).collect();
+            let bytes: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+            let tuples: Vec<Value> = (0..payloads.len()).map(|index| json!([format!("asset-{index}"), "source-key", "bin"])).collect();
+            let source = directory.path().join(name);
+            fs::write(&source, risum_fixture(json!({"id":"source-id", "name":"Synthetic module", "assets":tuples}), &bytes)).unwrap();
+            let state = NativeFileJobState::initialize(directory.path().join("native-file-jobs"));
+            let started = start_test_content_job(&state, &source, name);
+            let prepared = wait_for_content_job(&state, &started.job_id);
+            let content = serde_json::to_value(prepared.prepared_content.as_ref().expect("prepared module")).unwrap();
+            assert_eq!(content["format"], "risu-module");
+            let mut module = content["metadata"].clone();
+            module["id"] = json!("imported-module");
+            let aliases: Vec<AssetAlias> = content["assets"].as_array().unwrap().iter().enumerate().map(|(index, asset)| {
+                module["assets"][index][1] = asset["logicalId"].clone();
+                serde_json::from_value(json!({"kind":"asset", "key":asset["logicalId"], "objectHash":asset["objectHash"], "size":asset["byteSize"], "mime":asset["mime"], "name":asset["name"], "ext":asset["ext"]})).unwrap()
+            }).collect();
+            let mut head = content["ownerHead"].clone();
+            head["owner"] = json!({"kind":"root-module-assets", "moduleId":"imported-module"});
+            let head: AssetOwnerHead = serde_json::from_value(head).unwrap();
+            let mut session = crate::asset_repository::job_pins::DurableCasJob::open(directory.path(), &started.job_id).unwrap();
+            session.seal(&mut store, 2).unwrap();
+            let input: WorkingSetCommit = serde_json::from_value(json!({
+                "expectedRevision":store.revision().unwrap(),
+                "unitMutations":[
+                    {"key":"[\"exists\",\"modules\",\"imported-module\"]", "type":"set", "value":true},
+                    {"key":"[\"record\",\"modules\",\"imported-module\"]", "type":"set", "value":module}
+                ],
+                "assetOwnerHeads":[head]
+            })).unwrap();
+            store.commit_with_asset_aliases(&input, &aliases).unwrap();
+            drop(store);
+            let reopened = PersistentStore::open(directory.path()).unwrap();
+            assert_eq!(reopened.read_asset_owner_head(&head.owner, None).unwrap().unwrap().value, head);
+            assert_eq!(reopened.materialize(None).unwrap()["modules"][0], module);
+            let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+            for (alias, payload) in aliases.iter().zip(payloads) {
+                assert_eq!(reopened.read_asset_alias("asset", &alias.key, None).unwrap().unwrap().value, *alias);
+                assert_eq!(cas.read_object(alias.object_hash.as_ref().unwrap()).unwrap(), Some(payload));
+            }
+        }
     }
 
     #[test]

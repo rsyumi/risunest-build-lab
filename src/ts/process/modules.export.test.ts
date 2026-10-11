@@ -173,6 +173,18 @@ describe('legacy module export', () => {
         if (platform === 'android') expect(mocks.importAndroid).toHaveBeenCalledWith('module')
     })
 
+    it('preserves the desktop native import error instead of reporting missing data', async () => {
+        mocks.platform = 'desktop'
+        mocks.open.mockResolvedValue('C:/synthetic/module.risum')
+        const failure = Object.assign(new Error('Another library operation is running'), { code: 'library-operation-busy' })
+        mocks.importDesktop.mockImplementationOnce(async (_path, _import, _options, report) => {
+            report(failure)
+            return { kind: 'failed' }
+        })
+        await importModule()
+        expect(alertError).toHaveBeenCalledExactlyOnceWith(failure)
+    })
+
     it('roundtrips ordinary asset bytes and preserves asset metadata exactly', async () => {
         const firstBytes = new Uint8Array([0x00, 0xff, 0x13, 0x7a, 0x80, 0x42])
         const secondBytes = new Uint8Array([0x91, 0x04, 0xcc, 0x2d, 0x7f])

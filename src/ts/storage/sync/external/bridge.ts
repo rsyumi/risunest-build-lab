@@ -82,6 +82,11 @@ export class ExternalStorageBridge {
         return listen('external-storage-job-started', listener)
     }
 
+    onAuthorizationReady(listener: (authorizationId: string) => void): Promise<() => void> {
+        if (!this.supported) return Promise.resolve(() => {})
+        return listen<string>('external-storage-authorization-ready', event => listener(event.payload))
+    }
+
     prepareRenewal(connectionId: string): Promise<PreparedExternalConnection> {
         return this.native('external_storage_prepare_renewal', { connectionId })
     }
@@ -167,6 +172,10 @@ export class ExternalStorageBridge {
 
 
 
+    setTransferConcurrency(connectionId: string, value: number): Promise<void> {
+        return this.native('external_storage_set_transfer_concurrency', { connectionId, value })
+    }
+
     setRetentionPolicy(connectionId: string, policy: ExternalRetentionPolicy): Promise<void> {
         return this.native('external_storage_set_retention_policy', { connectionId, policy })
     }
@@ -248,11 +257,12 @@ export class ExternalStorageBridge {
     }
 
     exportSnapshot(connectionId: string, snapshotId: string, exportId: string,
-        onProgress: (progress: ExternalSnapshotExportProgress) => void): Promise<ExternalSnapshotExportResult> {
+        onProgress: (progress: ExternalSnapshotExportProgress) => void,
+        transferProgress?: Channel<import('./progress').ExternalTransferSnapshot>): Promise<ExternalSnapshotExportResult> {
         if (!this.supported) return Promise.reject(new ExternalStorageUnsupportedError())
         const progress = new Channel<ExternalSnapshotExportProgress>()
         progress.onmessage = onProgress
-        return this.native('external_storage_export_snapshot', { request: { connectionId, snapshotId, exportId }, progress })
+        return this.native('external_storage_export_snapshot', { request: { connectionId, snapshotId, exportId }, progress, ...(transferProgress ? { transferProgress } : {}) })
     }
 
     cancelExport(exportId: string): Promise<void> {

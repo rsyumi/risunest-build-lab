@@ -21,9 +21,10 @@ import type { ServerConfig } from './serverSync'
 import { get } from 'svelte/store'
 import { selectedCharID } from 'src/ts/stores.svelte'
 import { getDatabase } from '../database.svelte'
-import { bytePhase, createRateMeter, laneDeltas, readServerSyncLanes, routineMoved, routinePeak, type ServerSyncAttempt, type ServerSyncLane, type ServerSyncStage } from './serverSyncProgress'
+import { bytePhase, laneDeltas, readServerSyncLanes, routineMoved, routinePeak, type ServerSyncAttempt, type ServerSyncLane, type ServerSyncStage } from './serverSyncProgress'
 import { createRemainingTimeEstimator } from './remainingTime'
 import { setAssetResidencyPolicy, type AssetResidencyPolicy } from './serverAssetResidency'
+import { isLibraryFileOperationReserved, registerLibraryFileOperationGate, subscribeLibraryFileOperationReleased } from '../libraryFileOperation'
 
 const selectedCharacterId = () => getDatabase().characters[get(selectedCharID)]?.chaId ?? null
 
@@ -92,7 +93,6 @@ let finished: ServerSyncAttempt | undefined
 let finishedTimer: ReturnType<typeof setTimeout> | undefined
 let watchers = 0
 let sampling: ReturnType<typeof setInterval> | undefined
-const meter = createRateMeter()
 const remaining = createRemainingTimeEstimator()
 const readLanes = () => readServerSyncLanes().catch(() => undefined)
 async function sample(): Promise<void> {
@@ -113,8 +113,13 @@ async function sample(): Promise<void> {
     if (captured.plannedReceive === undefined && receive && receive.backlogDone > 0) captured.plannedReceive = receive.backlogDone + receive.backlogLeft
     captured.peak = routinePeak(captured)
     const at = Date.now()
-    meter.add(at, captured.lanes.reduce((total, lane) => total + lane.sentBytes + lane.receivedBytes, 0))
-    captured.rate = meter.rate()
+    captured.network = {
+        id: captured.network?.id ?? crypto.randomUUID(), atMs: performance.now(),
+        sentBytes: String(captured.lanes.reduce((total, lane) => total + lane.sentBytes, 0)),
+        receivedBytes: String(captured.lanes.reduce((total, lane) => total + lane.receivedBytes, 0)),
+        sending: lanes.some(lane => lane.active && lane.sending),
+        receiving: lanes.some(lane => lane.active && lane.receiving),
+    }
     const phase = bytePhase(captured)
     captured.remainingMs = remaining.update(phase?.key, phase?.done ?? 0, phase?.total ?? 0, at, phase?.items)
     changed()
@@ -142,7 +147,7 @@ const watchSamples = () => {
 async function during<T>(stage: ServerSyncStage, operation: () => Promise<T>): Promise<T> {
     // Connecting and downloading every asset show their steps; a routine attempt they join becomes one of them.
     const mode = binding || operations ? 'full' : 'routine'
-    if (!attempt) { attempt = { mode, startedAt: Date.now(), stages: [], active: [], current: stage }; attemptFailed = false; baseline = undefined; meter.reset(); remaining.reset(); clearFinished(); watchSamples() }
+    if (!attempt) { attempt = { mode, startedAt: Date.now(), stages: [], active: [], current: stage }; attemptFailed = false; baseline = undefined; remaining.reset(); clearFinished(); watchSamples() }
     else if (mode === 'full') attempt.mode = mode
     const entered = attempt
     if (!entered.stages.includes(stage)) entered.stages.push(stage)
@@ -195,7 +200,7 @@ const receivedRepresentativeReferences = (changes: LwwRemoteChange[]) => changes
         || key[0] === 'archive'
 })
 function continueHydration(): void {
-    if ((!hydrationPending && !representativesPending) || !foreground || !context || context.signal.aborted || scheduler.isBlocked()) return
+    if ((!hydrationPending && !representativesPending) || !foreground || !context || context.signal.aborted || scheduler.isBlocked() || isLibraryFileOperationReserved()) return
     if (hydrating) { hydrationAgain = true; return }
     const captured = context
     const representativesOnly = !hydrationPending
@@ -264,16 +269,17 @@ async function pushAvailable(captured: BindingContext, drain = false): Promise<v
     for (;;) {
         captured.signal.throwIfAborted()
         if (captured !== context) throw new Error('Sync binding changed')
-        if (!foreground && !drain) return
+        if ((!foreground || isLibraryFileOperationReserved()) && !drain) return
         const receipt = await during('publishing', () => invoke('server_sync_lww_push', { request: header(), generating: generatingConversations.snapshot() }))
         captured.signal.throwIfAborted()
         if (captured !== context) throw new Error('Sync binding changed')
-        if (!foreground && !drain) return
+        if ((!foreground || isLibraryFileOperationReserved()) && !drain) return
         if (!receipt) break
     }
     changed()
 }
 const scheduler = createServerSyncScheduler({
+    automaticSyncAvailable: () => !isLibraryFileOperationReserved(),
     push: () => attempted(async () => { if (context) await pushAvailable(context) }),
     pull: (completeAvailable = false) => attempted(async () => {
         const captured = context
@@ -290,7 +296,7 @@ const scheduler = createServerSyncScheduler({
             checkContext(captured)
             if (receivedBodyReferences(request.changes)) { receivedBodies = true; hydrationPending = true }
             if (status.assetPolicy === 'remote' && receivedRepresentativeReferences(request.changes)) { receivedBodies = true; representativesPending = true }
-            if (!foreground && !completeAvailable) break
+            if ((!foreground || isLibraryFileOperationReserved()) && !completeAvailable) break
             await invoke('server_sync_lww_ack', { request: { bindingAuthority: request.bindingAuthority, requestId: request.requestId } })
             checkContext(captured)
             if (request.changes.length === 0) break
@@ -405,6 +411,15 @@ export async function retryServerSync(): Promise<void> {
 export async function installServerSyncProduction({ resumeBound = true }: { resumeBound?: boolean } = {}): Promise<void> {
     if (!isTauri || disposeServer) return
     const disposers = [registerSyncBindingTransport({ kind: 'server', connectionId: 'server' }, transport)]
+    disposers.push(registerLibraryFileOperationGate(async () => {
+        controller.assertFileOperationAvailable()
+        await scheduler.waitForIdle()
+        await hydrating
+        controller.assertFileOperationAvailable()
+    }))
+    disposers.push(subscribeLibraryFileOperationReleased(() => {
+        void scheduler.resumeAutomaticSync().then(continueHydration)
+    }))
     disposers.push(subscribeLocalPersistentRevision((_revision,cause) => {
         // Saves come in bursts while chatting, so character icons are checked once they settle.
         if (status.assetPolicy === 'remote') { clearTimeout(representativesTimer); representativesTimer = setTimeout(() => { representativesTimer = undefined; representativesPending = true; continueHydration() }, 2000) }
@@ -471,7 +486,11 @@ const controller = {
     },
     /** The changes waiting to be uploaded, or undefined while no server binding is active. */
     pendingChanges: async () => context && !context.signal.aborted ? invoke<number>('server_sync_lww_pending_count', { request: header() }) : undefined,
-    assertFileOperationAvailable: () => { if (replacing) throw new Error('server-sync-busy') },
+    assertFileOperationAvailable: () => {
+        if (replacing || binding || operations) {
+            throw Object.assign(new Error('server-sync-busy'), { code: 'server-sync-busy' })
+        }
+    },
     beginReplacement: async () => {
         replacing = true; foreground = false; if (hydrating) hydrationPending = true
         const release = async () => { replacing = false; await updateForeground(document.visibilityState !== 'hidden'); changed() }

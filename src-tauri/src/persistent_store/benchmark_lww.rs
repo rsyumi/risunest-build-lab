@@ -1131,7 +1131,7 @@ pub(crate) async fn final_external_resume_endpoint(source:&mut PersistentStore,
     let root=destination.repository_root().to_owned();
     let writer=destination.lww_clock_state().map_err(|e|e.to_string())?.writer_id;
     let authority=destination.lww_binding_authority().map_err(|e|e.to_string())?;
-    let ExternalLwwEngine {provider:engine_provider,repository,library,root_key,admission,connection_id,connection_root,capabilities,descriptor}=receiver;
+    let ExternalLwwEngine {provider:engine_provider,repository,library,root_key,admission,test_lease_clock,connection_id,connection_root,capabilities,descriptor}=receiver;
     drop(destination);
     let (commit,expected)=prepare_edit(source,SmallChange::Setting,final_direction(direction),iteration.into());
     source.commit(&commit).map_err(|e|e.to_string())?;
@@ -1149,7 +1149,7 @@ pub(crate) async fn final_external_resume_endpoint(source:&mut PersistentStore,
     let started=Instant::now();
     let result=async {
         let mut destination=PersistentStore::open(&root).map_err(|e|e.to_string())?;
-        let receiver=ExternalLwwEngine {provider:engine_provider,repository,library,root_key,admission,connection_id,connection_root,capabilities,descriptor};
+        let receiver=ExternalLwwEngine {provider:engine_provider,repository,library,root_key,admission,test_lease_clock,connection_id,connection_root,capabilities,descriptor};
         let reopened_ms=started.elapsed().as_secs_f64()*1000.0;
         receiver.receive_and_apply(&mut destination,authority,&[],&Cancellation::default()).await.map_err(|e|e.to_string())?;
         Ok::<_,String>((destination,receiver,reopened_ms,started.elapsed().as_secs_f64()*1000.0))
@@ -1911,7 +1911,7 @@ fn final_native_resume_reopens_same_registration_and_receives_only_missed_units(
 fn final_native_external_resume_reopens_same_writer_and_actual_bound_engine() {
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
         let driver=ExternalDriver::prepare(FixtureScale::small()).await;
-        let crate::external_storage::lww_tests::CycleFixture {directory_a,directory_b,mut a,b,provider,mut sender,receiver}=driver.fixture;
+        let crate::external_storage::lww_tests::CycleFixture {directory_a,directory_b,mut a,b,provider,clock:_,mut sender,receiver}=driver.fixture;
         let _directories=(directory_a,directory_b);
         let (mut b,mut receiver,first)=final_external_resume_endpoint(&mut a,&mut sender,b,receiver,&provider,
             &driver.asset_hashes,final_runner::Direction::AtoB,0,true).await.unwrap();

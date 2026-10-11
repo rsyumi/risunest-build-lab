@@ -161,6 +161,50 @@ describe('plugin API version gate', () => {
         ])
         expect(getDatabase().plugins[0].version).toBe('3.0')
     })
+
+    it('installs the expected default without a confirmation or an immediate reload', async () => {
+        const confirm = vi.spyOn(alertModule, 'alertConfirm')
+        expect(await importPlugin('//@name provider-manager\n//@api 3.0 2.1 2.0', {
+            installIfMissing: 'provider-manager', deferReload: true,
+        })).toBe(true)
+        expect(getDatabase().plugins.map(plugin => plugin.name)).toEqual(['provider-manager'])
+        expect(confirm).not.toHaveBeenCalled()
+        expect(loadV3Plugins).not.toHaveBeenCalled()
+    })
+
+    it.each(['3.0', '2.1'] as const)('preserves an existing disabled API %s default without asking to update', async version => {
+        const existing = { ...makePlugin('provider-manager', version), enabled: false, script: 'kept' }
+        getDatabase().plugins.push(existing)
+        const confirm = vi.spyOn(alertModule, 'alertConfirm')
+        expect(await importPlugin('//@name provider-manager\n//@api 3.0', {
+            installIfMissing: 'provider-manager', deferReload: true,
+        })).toBe(false)
+        expect(getDatabase().plugins).toEqual([existing])
+        expect(confirm).not.toHaveBeenCalled()
+        expect(loadV3Plugins).not.toHaveBeenCalled()
+    })
+
+    it.each([
+        '//@name another-plugin\n//@api 3.0',
+        '//@name provider-manager\n//@api 2.1',
+        '<html>Service unavailable</html>',
+    ])('rejects an unexpected automatic download without opening a dialog', async code => {
+        const confirm = vi.spyOn(alertModule, 'alertConfirm')
+        expect(await importPlugin(code, { installIfMissing: 'provider-manager', deferReload: true })).toBe(false)
+        expect(getDatabase().plugins).toEqual([])
+        expect(confirm).not.toHaveBeenCalled()
+        expect(alertError).not.toHaveBeenCalled()
+        expect(loadV3Plugins).not.toHaveBeenCalled()
+    })
+
+    it('still asks before replacing a manually imported duplicate', async () => {
+        const existing = makePlugin('manual', '3.0')
+        getDatabase().plugins.push(existing)
+        const confirm = vi.spyOn(alertModule, 'alertConfirm').mockResolvedValue(false)
+        expect(await importPlugin('//@name manual\n//@api 3.0')).toBe(false)
+        expect(confirm).toHaveBeenCalledOnce()
+        expect(getDatabase().plugins).toEqual([existing])
+    })
 })
 
 

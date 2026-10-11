@@ -57,12 +57,12 @@ async function hasLibraryContent(): Promise<boolean> {
     }
 }
 
-export async function confirmUpstreamLibraryReplacement(bound: boolean, warnings: string[] = []): Promise<boolean> {
+export async function confirmUpstreamLibraryReplacement(bound: boolean, warnings: string[] = [], options: { firstRun?: boolean } = {}): Promise<boolean> {
     const [alert, { language }, { nativeFileJobHost }] = await Promise.all([
         import('../alert'), import('../../lang'), import('./nativeFileJobManager'),
     ])
-    // In the onboarding, an unbound restore over a library without content replaces nothing.
-    if (!bound && get(nativeFileJobHost) === 'onboarding' && !await hasLibraryContent()) {
+    // Keep first-run intent across staging, independently of the current screen and library reads.
+    if (!bound && (options.firstRun || (get(nativeFileJobHost) === 'onboarding' && !await hasLibraryContent()))) {
         return warnings.length === 0 || await alert.alertActionConfirm({
             title: language.lwwSync.restoreTitle,
             description: warnings.join('\n\n'),

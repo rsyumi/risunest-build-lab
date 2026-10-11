@@ -24,6 +24,18 @@ afterEach(async () => {
     native.close.mockReset()
 })
 
+it('shows the current-version result without an error or install action', async () => {
+    appUpdateState.set({ ...initialAppUpdateState, phase: 'current', popupVisible: true })
+    target = document.createElement('div')
+    document.body.append(target)
+    component = mount(UpdatePopup, { target })
+    await tick()
+    expect(target.textContent).toContain(languageEnglish.risuNest.update.current)
+    expect(target.textContent).not.toContain(languageEnglish.risuNest.update.checkFailed)
+    expect(target.querySelector('[role=alert]')).toBeNull()
+    expect([...target.querySelectorAll('button')].map(button => button.textContent?.trim())).toEqual([languageEnglish.risuNest.update.close])
+})
+
 describe('staged Linux update exit', () => {
     it('uses the close coordinator and preserves a cancelled decision', async () => {
         let closeHandler!: (event: { preventDefault(): void }) => void | Promise<void>

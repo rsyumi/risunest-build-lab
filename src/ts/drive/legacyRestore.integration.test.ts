@@ -88,19 +88,17 @@ function databaseEntry() {
 
 async function restore(bytes: Uint8Array, controller = new AbortController(), lifecycle: { beforeActivation?(): Promise<void>; onCommitted?(): void } = {}) {
     const { importLegacyBackupWithWebView } = await import('src/ts/drive/backuplocal')
-    const input = {
-        type: '', accept: '',
-        files: [new File([Buffer.from(bytes)], 'synthetic.bin')],
-        onchange: null as null | (() => void),
-        click: vi.fn(), remove: vi.fn(),
-    }
-    vi.spyOn(document, 'createElement').mockReturnValueOnce(input as unknown as HTMLInputElement)
+    const input = document.createElement('input')
+    Object.defineProperty(input, 'files', { value: [new File([Buffer.from(bytes)], 'synthetic.bin')] })
+    const click = vi.spyOn(input, 'click').mockImplementation(() => {})
+    vi.spyOn(document, 'createElement').mockReturnValueOnce(input)
     const context = {
         signal: controller.signal,
         onStatus: vi.fn(), setSource: vi.fn(), setPartialWritesPossible: vi.fn(),
     }
     const pending = importLegacyBackupWithWebView(context, lifecycle)
-    input.onchange!()
+    await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
+    input.dispatchEvent(new Event('change'))
     return pending
 }
 

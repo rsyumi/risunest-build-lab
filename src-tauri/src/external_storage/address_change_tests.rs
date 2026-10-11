@@ -587,6 +587,7 @@ fn engine(device: &Device, handle: RepositoryHandle, capabilities: super::capabi
         library: created.descriptor.repository_id.clone(),
         root_key: zeroize::Zeroizing::new(created.root_key),
         admission: Some(Admission::synthetic(super::runtime::now_ms())),
+        test_lease_clock: Some(Arc::new(super::fake::FakeLeaseClock::new(super::runtime::now_ms()))),
         connection_id: id.into(),
         connection_root: device.directory.path().join(id),
         capabilities,

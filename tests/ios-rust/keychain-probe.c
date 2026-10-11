@@ -21,6 +21,10 @@ int main(void) {
     }
     printf("Simulator process limits: files-soft=%" PRIu64 " files-hard=%" PRIu64 " processors=%ld rust-test-threads=%ld\n",
         (uint64_t)files.rlim_cur, (uint64_t)files.rlim_max, sysconf(_SC_NPROCESSORS_ONLN), thread_count);
+    if (files.rlim_cur < 1024) {
+        fprintf(stderr, "The simulator test runner did not raise the open-file limit\n");
+        return 1;
+    }
     CFUUIDRef uuid = CFUUIDCreate(NULL);
     CFStringRef account = CFUUIDCreateString(NULL, uuid);
     const UInt8 bytes[] = "synthetic-keychain-probe";

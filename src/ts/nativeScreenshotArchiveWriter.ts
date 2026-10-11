@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { save } from '@tauri-apps/plugin-dialog'
+import { save } from './storage/fileSelection'
 import type { ScreenshotArchiveWriter } from './chatScreenshotArchive'
 import {
     acknowledgeAndroidSafExport,

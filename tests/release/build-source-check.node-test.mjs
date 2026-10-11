@@ -22,7 +22,7 @@ function repository(product, version) {
   const root = mkdtempSync(join(tmpdir(), "risunest-source-check-"));
   write(join(root, "crates/release-update/Cargo.lock"));
   write(join(root, "release-notes", product, `${version}.md`), [
-    `# ${product} ${version}`,
+    `# ${product === "app" ? "RisuNest" : "RisuNest Sync"} v${version}`,
     "",
     "## English",
     "",
@@ -83,7 +83,7 @@ test("source check binds an app tag, commit, notes and mobile build number", () 
   assert.equal(result.mobileBuildNumber, 2_026_008_250);
   assert.equal(result.iosBuildNumber, "2026.8.250");
   assert.equal(result.compatibility, null);
-  assert.match(result.notes, /## English[\s\S]*## 한국어/);
+  assert.match(result.notes, /^# RisuNest v2026\.8\.250\n[\s\S]*## English[\s\S]*## 한국어/);
   assert.deepEqual(result.localizedNotes, {
     en: "- Initial release.",
     ko: "- 최초 릴리즈.",
@@ -101,6 +101,11 @@ test("source check carries authoritative Sync compatibility and pinned vendor in
     registryUrl: "https://sync.example.invalid/registry/",
   });
   assert.equal(result.expectedDownloads.length, 16);
+  assert.match(result.notes, /^# RisuNest Sync v0\.1\.0\n/);
+  assert.deepEqual(result.localizedNotes, {
+    en: "- Initial release.",
+    ko: "- 최초 릴리즈.",
+  });
   assert.equal(result.compatibility.storeFormatId, "risunest-sync-store/v8");
   assert.equal(result.vendorInput.version, "2026.9.1");
   assert.equal(result.vendorInput.assets["windows-aarch64"].actualArch, "x86_64");

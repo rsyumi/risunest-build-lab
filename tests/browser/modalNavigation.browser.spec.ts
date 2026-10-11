@@ -33,6 +33,22 @@ test('Back across a foreign entry preserves the modal until its own token is rem
     expect((await state(page)).closed.parent).toBe(1)
 })
 
+test('cleanup cannot close layers opened while a previous history traversal is pending', async ({ page }) => {
+    await page.evaluate(() => window.modalHistory.open(true))
+    await page.evaluate(() => window.modalHistory.replaceDuringCleanup())
+    await expect.poll(async () => (await state(page)).pops).toBeGreaterThan(0)
+    await expect(page.locator('#child-control')).toBeFocused()
+    expect((await state(page)).closed).toEqual({ parent: 0, child: 0 })
+    await page.evaluate(() => history.back())
+    await expect(page.locator('#child')).toHaveCount(0)
+    await expect(page.locator('#parent')).toBeVisible()
+    await page.evaluate(() => history.back())
+    await expect.poll(async () => (await state(page)).state).toEqual({ page: 'baseline' })
+    expect((await state(page)).closed).toEqual({ parent: 1, child: 1 })
+    await page.evaluate(() => history.back())
+    await expect.poll(async () => (await state(page)).hash).toBe('#before')
+})
+
 test('Back cancels an alert before closing its host and restores host focus', async ({ page }) => {
     await page.evaluate(() => window.modalHistory.open())
     await expect(page.locator('#parent-control')).toBeFocused()

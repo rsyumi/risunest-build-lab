@@ -98,6 +98,8 @@ pub(super) struct GeneratedIds {
 #[serde(rename_all = "camelCase")]
 pub(super) struct AboutUser {
     pub permission_id: Option<String>,
+    #[serde(default)]
+    pub email_address: Option<String>,
 }
 #[derive(Deserialize)]
 pub(super) struct About {

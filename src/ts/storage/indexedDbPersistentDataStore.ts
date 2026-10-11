@@ -220,16 +220,12 @@ function validateOwnerHeadsForCommit(input: WorkingSetCommit): void {
             entries = ownArrayProperty(parent, 'additionalAssets')
         } else {
             if (owner.kind === 'root-module-assets') {
-                const parent = input.unitMutations?.find((mutation) => mutation.key === JSON.stringify(['record', 'modules', owner.moduleId]))
-                if (!input.root && !parent) throw new TypeError('Root asset owner head requires its parent root or module unit')
-                const module = parent ? parent.type === 'set' ? parent.value : null : input.root?.modules?.find((value) => value.id === owner.moduleId)
-                if (!module || typeof module !== 'object' || (module as {id?:unknown}).id !== owner.moduleId) throw new TypeError('Root module asset owner occurrence does not exist')
+                const module = input.root?.modules?.find((value) => value.id === owner.moduleId)
+                if (!module) throw new TypeError('Root module asset owner occurrence does not exist')
                 entries = ownArrayProperty(module, 'assets')
             } else {
-                const parent = input.unitMutations?.find((mutation) => mutation.key === JSON.stringify(['persona', owner.personaId, 'embeddedModule']))
-                if (!input.root && !parent) throw new TypeError('Root asset owner head requires its parent root or persona unit')
-                const module = parent ? parent.type === 'set' ? parent.value : null : input.root?.personas?.find((value) => value.id === owner.personaId && value.embeddedModule?.id === owner.moduleId)?.embeddedModule
-                if (!module || typeof module !== 'object' || (module as {id?:unknown}).id !== owner.moduleId) throw new TypeError('Persona module asset owner occurrence does not exist')
+                const module = input.root?.personas?.find((value) => value.id === owner.personaId && value.embeddedModule?.id === owner.moduleId)?.embeddedModule
+                if (!module) throw new TypeError('Persona module asset owner occurrence does not exist')
                 entries = ownArrayProperty(module, 'assets')
             }
         }
@@ -919,11 +915,12 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                 [...deletedIds].some((id) => !id || commitCharacterParents(input).has(id))) {
                 throw new TypeError('Deleted character IDs must be unique and cannot be written in the same commit')
             }
-            validateOwnerHeadsForCommit(input)
+            const ownerInput = await this.ownerValidationCommit(transaction, active.generation, input)
+            validateOwnerHeadsForCommit(ownerInput)
             const retainedOwnerHeads = await this.retainedCommitOwnerHeads(
                 transaction,
                 active.generation,
-                input,
+                ownerInput,
             )
 
             const revision = active.revision + 1
@@ -970,7 +967,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             await this.replaceChangedOwnerHeads(
                 transaction,
                 generation,
-                input,
+                ownerInput,
                 retainedOwnerHeads,
             )
             this.setActive(transaction, revision, generation)
@@ -1642,6 +1639,88 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         }
         validateAssetOwnerHead(record.value)
         return { revision, value: structuredClone(record.value) }
+    }
+
+    private async ownerValidationCommit(
+        transaction: IDBTransaction,
+        generation: string,
+        input: WorkingSetCommit,
+    ): Promise<WorkingSetCommit> {
+        let projected: WorkingSetCommit | undefined
+        const characters = new Map<string, CharacterDetail | null>()
+        for (const mutation of input.unitMutations ?? []) {
+            const [kind, scope, field] = JSON.parse(mutation.key) as string[]
+            const patch = (parent: object, key: string) => {
+                if (mutation.type === 'delete') delete (parent as Record<string, unknown>)[key]
+                else Object.defineProperty(parent, key, { value: structuredClone(mutation.value), enumerable: true, writable: true, configurable: true })
+            }
+            const characterId = kind === 'character' && field === 'additionalAssets' ? scope
+                : kind === 'exists' && scope === 'character' ? field : undefined
+            if (characterId !== undefined) {
+                projected ??= structuredClone(input)
+                if (!characters.has(characterId)) {
+                    const parent = commitCharacterParents(projected).get(characterId)
+                    const stored = parent ? undefined : await requestResult<StoredRecord<CharacterDetail> | undefined>(
+                        transaction.objectStore('characters').get(this.characterKey(generation, characterId)),
+                    )
+                    characters.set(characterId, parent ?? stored?.value ?? null)
+                }
+                if (kind === 'exists') {
+                    if (mutation.type === 'delete') characters.set(characterId, null)
+                    else if (!characters.get(characterId)) characters.set(characterId, { chaId: characterId, type: 'character', name: '' } as CharacterDetail)
+                } else {
+                    const parent = characters.get(characterId)
+                    if (!parent) throw new TypeError('Character asset owner occurrence does not exist')
+                    patch(parent, 'additionalAssets')
+                }
+                continue
+            }
+            const collection = (kind === 'root' || kind === 'record') && (scope === 'modules' || scope === 'personas') ? scope
+                : kind === 'persona' && field === 'embeddedModule' ? 'personas'
+                    : kind === 'exists' && (scope === 'modules' || scope === 'persona') ? scope === 'persona' ? 'personas' : 'modules'
+                        : undefined
+            if (collection === undefined) continue
+            projected ??= structuredClone(input)
+            if (!projected.root) {
+                const stored = await requestResult<StoredRecord<PersistentRoot> | undefined>(transaction.objectStore('root').get(generation))
+                if (!stored) throw new TypeError('Missing persistent root')
+                projected.root = stored.value
+            }
+            const root = projected.root as unknown as Record<string, unknown>
+            if (kind === 'root') { patch(root, collection); continue }
+            const values = root[collection] ??= []
+            if (!Array.isArray(values)) throw new TypeError('Asset owner collection must be an array')
+            const id = kind === 'persona' ? scope : field
+            const index = values.findIndex(value => value?.id === id)
+            if (kind === 'persona') {
+                if (index < 0) values.push({ id })
+                patch(values[index < 0 ? values.length - 1 : index], 'embeddedModule')
+            } else if (mutation.type === 'delete') {
+                if (index >= 0) values.splice(index, 1)
+            } else if (kind === 'exists') {
+                if (index < 0) values.push({ id })
+            } else if (index >= 0) values[index] = structuredClone(mutation.value)
+            else values.push(structuredClone(mutation.value))
+        }
+        if (!projected) return input
+        if (characters.size) {
+            const parents = commitCharacterParents(projected)
+            for (const [id, value] of characters) {
+                if (value) parents.set(id, value)
+                else {
+                    parents.delete(id)
+                    projected.deleteCharacterIds ??= []
+                    projected.deleteCharacterIds.push(id)
+                }
+            }
+            delete projected.character
+            delete projected.replaceCharacter
+            delete projected.addCharacter
+            projected.characterDetails = [...parents.values()]
+        }
+        // This view validates the final owners without turning unit edits into broad writes.
+        delete projected.unitMutations
+        return projected
     }
 
     private async replaceChangedOwnerHeads(

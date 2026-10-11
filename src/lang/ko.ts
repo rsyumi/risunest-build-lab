@@ -2035,6 +2035,18 @@ export const languageKorean = {
                 cleanupNote:
                     '휴지통에 없는 캐릭터의 현재 캐릭터 아이콘을 제외하고, 서버에 있는 파일의 이 기기 사본을 삭제합니다.',
                 clean: '이 기기의 사본 정리',
+                cleanup: {
+                    preparing: '정리할 파일 확인 중',
+                    checking: '서버 파일 확인 중',
+                    uploading: '서버에 파일 업로드 중',
+                    deleting: '이 기기의 사본 정리 중',
+                    finalizing: '정리 결과 확인 중',
+                    cancelling: '취소 중',
+                    complete: '이 기기의 사본 정리 완료',
+                    cancelled: '사본 정리 취소',
+                    failed: '사본 정리 실패',
+                    freed: '확보한 공간',
+                },
                 cancel: '취소',
                 working: '파일 처리 중… 현재 요청이 끝나면 취소됩니다.',
             
@@ -2084,7 +2096,8 @@ export const languageKorean = {
             complete: '동기화 완료',
             details: '자세히',
             verifiedBytes: '주고받은 데이터',
-            transferRate: '전송 속도',
+            uploadSpeed: '업로드 속도',
+            downloadSpeed: '다운로드 속도',
             progressItems: '처리한 항목',
             progressFiles: '처리한 파일',
             pendingChanges: '올릴 변경',
@@ -2631,6 +2644,9 @@ export const languageKorean = {
                 '알림이 꺼져 있으면 이 기능이 동작하지 않습니다.',
             operatingSystem: '운영체제',
             webView: 'WebView',
+            refreshScreen: '화면 새로고침',
+            refreshBusy: '진행 중인 작업을 마친 후 다시 시도해주세요.',
+            refreshFailed: '화면을 새로고침하지 못했습니다. 다시 시도해주세요.',
             "iosBackgroundLabel": '백그라운드 작업',
         },
         boot: {

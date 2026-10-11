@@ -4,7 +4,7 @@ import { languageEnglish } from '../../src/lang/en'
 import { languageKorean } from '../../src/lang/ko'
 
 export const language = new URLSearchParams(location.search).get('locale') === 'en' ? languageEnglish : languageKorean
-export const DBState = { db: { didFirstSetup: true, characters: [], keepSessionAlive: false } }
+export const DBState = { db: { didFirstSetup: true, characters: [{ name: 'Synthetic', chaId: 'character-a', chatPage: 0, chats: [{ id: 'chat-a' }] }], keepSessionAlive: false } }
 export const DynamicGUI = writable(false), settingsOpen = writable(false), sideBarStore = writable(true), sideBarClosing = writable(false)
 export const ShowRealmFrameStore = writable(false), openPresetList = writable(false), openPersonaList = writable(false)
 export const MobileGUI = writable(false), CustomGUISettingMenuStore = writable(false), loadedStore = writable(true)
@@ -15,6 +15,8 @@ export const popupStore = {}, easyPanelStore = {}, popUpEditorStore = {}, loadou
 export const hypaV3ModalOpen = writable(false), hypaV3ProgressStore = writable({ open: false })
 export const MobileGUIStack = writable(1), MobileSideBar = writable(0), selectedCharID = writable(-1), CharConfigSubMenu = writable(0)
 export const onboardingHold = writable(false), showRealmInfoStore = writable(null), SettingsMenuIndex = writable(0)
+export const MobileSearch = writable(''), additionalSettingsMenu = []
+export const clearCharacterSelection = async () => { selectedCharID.set(-1); return true }
 export const persistentWorkingSetInputBlocked = writable(false), navigationActivity = writable(null), isLite = writable(false)
 export const serverSyncNavigation = writable(null), serverSyncScreenRequest = writable(null), dataHealthNavigation = writable(null)
 export const isTauri = false, isTauriMobile = false, DATA_HEALTH_SECTION_ID = 'synthetic-data-health'
@@ -22,7 +24,7 @@ export const RECOVERY_EXCLUSIONS = []
 export const importCharacterProcess = () => {}, importPreset = () => {}, getDatabase = () => DBState.db, setDatabase = () => {}
 export const readModule = () => {}, alertConfirm = () => {}, alertNormal = () => {}, alertToast = () => {}, checkCharOrder = () => {}
 export const keepFocusedInputVisible = () => {}, restoreFocusAfterInputBlock = () => {}
-export { backNavigationLayer, handleRootBack } from '../../src/ts/ui/modalNavigation'
+export { modalNavigation, backNavigationLayer, handleRootBack } from '../../src/ts/ui/modalNavigation'
 export const offerToKeepRecoveryExclusions = async () => false, isStartupExcluded = () => true, getStartupExclusions = () => [], updateStartupExclusions = () => {}
 export const exportOriginalData = () => {}, openRisuNestSettingsTab = () => {}
 export const textEditorPopup = { request: null }
@@ -51,11 +53,14 @@ export function openRoute(route: string) {
     else if (route === 'presets') openPresetList.set(true)
     else if (route === 'personas') openPersonaList.set(true)
     else if (route === 'mobile') { MobileGUI.set(true); MobileGUIStack.set(2) }
+    else if (route === 'mobile-chat') { MobileGUI.set(true); selectedCharID.set(0); SettingsMenuIndex.set(-1) }
     else if (route === 'sidebar') { DynamicGUI.set(true); sideBarStore.set(true) }
     else throw new Error(`Unknown synthetic route: ${route}`)
 }
 
 export const navigationState = {
+    layout(mobile: boolean) { MobileGUI.set(mobile) },
+    selection() { return { selected: get(selectedCharID), menu: get(MobileSideBar), settings: get(settingsOpen), page: get(SettingsMenuIndex), stack: get(MobileGUIStack) } },
     showDialog() { alertStore.set({ type: 'ask', msg: 'Synthetic confirmation' }) },
     read() { return { sidebarClosing: get(sideBarClosing), dialog: get(alertStore).type, entries: history.state?.risunestModal?.length ?? 0 } },
 }

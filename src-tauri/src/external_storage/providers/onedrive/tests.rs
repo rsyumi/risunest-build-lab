@@ -1854,7 +1854,7 @@ fn redeeming_an_authorization_code_stores_the_first_token_document() {
         assert!(!body.contains("client_secret"));
         assert_eq!(
             line(&records[1]),
-            "GET /synthetic/me?$select=id HTTP/1.1"
+            "GET /synthetic/me?$select=id,mail,userPrincipalName HTTP/1.1"
         );
         assert!(head(&records[1]).contains("authorization: bearer first-access"));
     });

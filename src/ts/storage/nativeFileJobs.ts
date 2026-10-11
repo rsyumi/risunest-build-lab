@@ -582,6 +582,8 @@ export interface NativeIncompleteRestorePreview {
 }
 
 export interface NativeFileRestoreJobOptions extends NativeFileJobOptions {
+    /** The restore began as an onboarding import; an unbound device needs no overwrite acknowledgement. */
+    firstRun?: boolean
     /** Runs after staging and before taking the destructive replacement fence. */
     beforeActivation?(): void | Promise<void>
     /**
@@ -1501,7 +1503,7 @@ async function runNativeReplacementRestore(
                         const preview = status.incompleteRestorePreview
                         if (preview?.unavailableColdKeys.length) warnings.push(language.errors.coldStorageIncompleteRestoreConfirm(preview.characterNames.join(', '), preview.unavailableColdKeys.length, 0))
                         if (preview?.invalidInlays.length) warnings.push(language.portableBackup.invalidInlaysConfirm(preview.invalidInlays.length))
-                        if (!(await confirmUpstreamLibraryReplacement(upstreamBinding.bound, warnings))) {
+                        if (!(await confirmUpstreamLibraryReplacement(upstreamBinding.bound, warnings, options))) {
                             cancellationRequested = true
                             await invokeNative(dependencies, 'native_file_job_cancel', {jobId:started.jobId})
                             continue

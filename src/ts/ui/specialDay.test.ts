@@ -15,12 +15,12 @@ describe('getSpecialDay', () => {
     })
 
     it('starts the anniversary one year after release', () => {
-        expect(getSpecialDay(at(2026, 10, 10), 'en')).toBeNull()
-        expect(anniversaryYears(at(2026, 10, 10))).toBe(0)
-        expect(getSpecialDay(at(2027, 10, 10), 'en')).toBe('anniversary')
-        expect(anniversaryYears(at(2027, 10, 10))).toBe(1)
-        expect(anniversaryYears(at(2029, 10, 10))).toBe(3)
-        expect(anniversaryYears(at(2029, 10, 11))).toBe(0)
+        expect(getSpecialDay(at(2026, 10, 11), 'en')).toBeNull()
+        expect(anniversaryYears(at(2026, 10, 11))).toBe(0)
+        expect(getSpecialDay(at(2027, 10, 11), 'en')).toBe('anniversary')
+        expect(anniversaryYears(at(2027, 10, 11))).toBe(1)
+        expect(anniversaryYears(at(2029, 10, 11))).toBe(3)
+        expect(anniversaryYears(at(2029, 10, 10))).toBe(0)
     })
 
     it('finds the harvest moon on lunar 8/15 for Korean and Chinese only', () => {

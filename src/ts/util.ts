@@ -2,7 +2,8 @@ import { get, writable, type Writable } from "svelte/store"
 import type { Database, Message } from "./storage/database.svelte"
 import { getDatabase } from "./storage/database.svelte"
 import { DBState, selectedCharID } from "./stores.svelte"
-import {open} from '@tauri-apps/plugin-dialog'
+import { open, selectDomFiles } from './storage/fileSelection'
+import { withLibraryFileSelection } from './storage/libraryFileOperation'
 import { readFile } from "@tauri-apps/plugin-fs"
 import { basename } from "@tauri-apps/api/path"
 import { createBlankChar, getCharImage } from "./characters"
@@ -46,7 +47,11 @@ export function checkNullish(data:any){
 }
 
 const domSelect = true
-export async function selectSingleFile(ext:string[]){
+export function selectSingleFile(ext:string[]){
+    return withLibraryFileSelection(() => readSingleFile(ext))
+}
+
+async function readSingleFile(ext:string[]){
     if(domSelect){
         const v = await selectFileByDom(ext, 'single')
         const file = v[0]
@@ -69,7 +74,11 @@ export async function selectSingleFile(ext:string[]){
     }
 }
 
-export async function selectMultipleFile(ext:string[]){
+export function selectMultipleFile(ext:string[]){
+    return withLibraryFileSelection(() => readMultipleFiles(ext))
+}
+
+async function readMultipleFiles(ext:string[]){
     // The Android picker returns content URIs and drops extensions it does not know, so it uses
     // the same DOM input that selectSingleFile already relies on everywhere.
     if(!isTauri || isTauriMobile){
@@ -167,43 +176,13 @@ export function getUserIconProtrait(){
 }
 
 export function selectFileByDom(allowedExtensions:string[], multiple:'multiple'|'single' = 'single') {
-    return new Promise<File[]>((resolve, reject) => {
-        const fileInput = document.createElement('input');
-        fileInput.type = 'file';
-        fileInput.multiple = multiple === 'multiple';
-        const acceptAll = (getDatabase().allowAllExtentionFiles || isIOS() || allowedExtensions[0] === '*')
-        fileInput.accept = acceptAll ? '*' : allowedExtensions.map(ext => `.${ext}`).join(',');
-        let settled = false;
-        const cleanup = () => {
-            fileInput.removeEventListener('change', change);
-            fileInput.removeEventListener('cancel', cancel);
-            fileInput.remove();
-        };
-        const finish = (files: File[]) => {
-            if (settled) return;
-            settled = true;
-            cleanup();
-            resolve(files);
-        };
-        const change = () => {
-            const files = Array.from(fileInput.files ?? []);
-            finish(acceptAll ? files : files.filter(file =>
-                allowedExtensions.includes(file.name.split('.').pop().toLowerCase()),
-            ));
-        };
-        const cancel = () => finish([]);
-        fileInput.addEventListener('change', change);
-        fileInput.addEventListener('cancel', cancel);
-        document.body.appendChild(fileInput);
-        try {
-            fileInput.click();
-            fileInput.style.display = 'none';
-        } catch (error) {
-            settled = true;
-            cleanup();
-            reject(error);
-        }
-    });
+    const acceptAll = (getDatabase().allowAllExtentionFiles || isIOS() || allowedExtensions[0] === '*')
+    return selectDomFiles({
+        accept: acceptAll ? '*' : allowedExtensions.map(ext => `.${ext}`).join(','),
+        multiple: multiple === 'multiple',
+    }).then(files => acceptAll ? files : files.filter(file =>
+        allowedExtensions.includes(file.name.split('.').pop().toLowerCase()),
+    ))
 }
 
 function readFileAsUint8Array(file: File) {

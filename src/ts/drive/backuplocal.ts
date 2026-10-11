@@ -1,3 +1,4 @@
+import { selectDomFiles } from '../storage/fileSelection'
 import { prepareExternalDatabaseImport } from '../storage/upstreamImport'
 import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 import { BaseDirectory, open, writeFile } from "@tauri-apps/plugin-fs";
@@ -366,27 +367,7 @@ function cancelledError(): DOMException {
 }
 
 function pickWebBackupFile(signal: AbortSignal): Promise<File | null> {
-    if (signal.aborted) return Promise.resolve(null)
-    return new Promise((resolve) => {
-        const input = document.createElement('input')
-        input.type = 'file'
-        input.accept = '.bin'
-        let settled = false
-        const finish = (file: File | null) => {
-            if (settled) return
-            settled = true
-            signal.removeEventListener('abort', onAbort)
-            input.remove()
-            resolve(file)
-        }
-        const onAbort = () => finish(null)
-        input.onchange = async () => {
-            finish(input.files?.[0] ?? null)
-        }
-        input.oncancel = () => finish(null)
-        signal.addEventListener('abort', onAbort, { once: true })
-        input.click()
-    })
+    return selectDomFiles({ accept: '.bin', signal }).then(files => files[0] ?? null)
 }
 
 /**
@@ -397,7 +378,7 @@ function pickWebBackupFile(signal: AbortSignal): Promise<File | null> {
  */
 export async function importLegacyBackupWithWebView(
     context: LegacyLocalBackupFallbackContext,
-    lifecycle: { beforeActivation?(): Promise<void>; onCommitted?(): void } = {},
+    lifecycle: { firstRun?: boolean; beforeActivation?(): Promise<void>; onCommitted?(): void } = {},
     confirmationTitle = language.backupLoadConfirm,
 ): Promise<{ warningCodes: string[], upstreamLosses: { coldMissing: number, invalidInlays: number, pocketInlays: number } } | null> {
     const file = await pickWebBackupFile(context.signal)
@@ -602,8 +583,9 @@ export async function importLegacyBackupWithWebView(
             .filter((key) => !restoredColdStoragePayloads.has(key))
         const affectedCold = getColdStorageAffectedCharacters(dbData, missingColdStorageKeys)
         upstreamLosses.coldMissing = missingColdStorageKeys.length
-        const description = missingColdStorageKeys.length === 0 ? language.checkboxConfirmation.dataReplacementDescription
-            : `${language.checkboxConfirmation.dataReplacementDescription}\n\n${language.errors.coldStorageIncompleteRestoreConfirm(affectedCold.characterNames.join(', '), missingColdStorageKeys.length, affectedCold.unresolvedKeys.length, false)}`
+        const warnings = missingColdStorageKeys.length === 0 ? []
+            : [language.errors.coldStorageIncompleteRestoreConfirm(affectedCold.characterNames.join(', '), missingColdStorageKeys.length, affectedCold.unresolvedKeys.length, false)]
+        const description = [language.checkboxConfirmation.dataReplacementDescription, ...warnings].join('\n\n')
         if (!isTauri && !(await alertCheckboxConfirm({
             title: confirmationTitle,
             description,
@@ -623,7 +605,7 @@ export async function importLegacyBackupWithWebView(
 
         report('activating')
         await installLocalBackup(dbData, {
-            ...(isTauri ? {upstreamImportWarnings: [description]} : {}),
+            ...(isTauri ? {upstreamImportWarnings: warnings, firstRun: lifecycle.firstRun} : {}),
             replaceDatabase: async (...args) => {
                 await lifecycle.beforeActivation?.()
                 checkCancelled()

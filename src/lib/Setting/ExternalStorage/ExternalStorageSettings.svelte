@@ -1,23 +1,24 @@
 <script lang="ts">
     import { onDestroy, onMount } from 'svelte'
-    import QRCode from 'qrcode'
+    import ConnectionSettingsDialog from './ConnectionSettingsDialog.svelte'
     import { runWithMobileBackgroundTask, measuredTaskPercent } from 'src/ts/mobileBackgroundTask'
     import TextInput from 'src/lib/UI/GUI/TextInput.svelte'
     import NumberInput from 'src/lib/UI/GUI/NumberInput.svelte'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingButton from '../RisuNest/SettingButton.svelte'
-    import SettingProgress from '../RisuNest/SettingProgress.svelte'
+    import ExternalTransferProgress from './ExternalTransferProgress.svelte'
+    import { beginExternalProgress, clearExternalProgress, externalProgressFailure, externalJobFraction, externalJobTotalGrows, externalProgressFor, subscribeExternalProgress, type ExternalOperationProgress } from 'src/ts/storage/sync/external/progress'
     import SettingToggle from '../RisuNest/SettingToggle.svelte'
     import SettingNotice from '../RisuNest/SettingNotice.svelte'
     import StatusBadge from '../RisuNest/StatusBadge.svelte'
     import { CloudIcon, DatabaseIcon, MonitorSmartphoneIcon, PackageIcon, PinIcon, ServerIcon } from '@lucide/svelte'
-    import { alertConfirm, alertNormal, alertCheckboxConfirm } from 'src/ts/alert'
+    import { alertActionConfirm, alertConfirm, alertNormal, alertCheckboxConfirm } from 'src/ts/alert'
     import { DBState } from 'src/ts/stores.svelte'
     import { getExternalStorageBridge } from 'src/ts/storage/sync/external/bridge'
-    import { bindSyncTarget, unbindSyncTarget } from 'src/ts/storage/sync/bindingRegistry'
+    import { bindSyncTarget, resumeCurrentSyncBinding, unbindSyncTarget } from 'src/ts/storage/sync/bindingRegistry'
     import { createNativeSyncBindingBridge } from 'src/ts/storage/sync/bindingNative'
     import { subscribeSyncBindingChanges } from 'src/ts/storage/sync/bindingChanges'
-    import { requestExternalLwwNow, subscribeExternalLwwFailures, supportsExternalLwwNewDevice } from 'src/ts/storage/sync/external/lwwProduction'
+    import { isExternalLwwRunning, requestExternalLwwNow, subscribeExternalLwwFailures, supportsExternalLwwNewDevice } from 'src/ts/storage/sync/external/lwwProduction'
     import BindingTargetSwitch from 'src/ts/storage/sync/BindingTargetSwitch.svelte'
     import { PREVIOUS_FILES_DOWNLOAD_FAILED } from 'src/ts/storage/sync/bindingFlow'
     import { language } from 'src/lang'
@@ -45,9 +46,9 @@
     import { externalRestoreAreas } from 'src/ts/storage/sync/external/restoreScope'
     import { countConnectionOnlyAssets, downloadRemoteAssets } from 'src/ts/storage/sync/serverAssetResidency'
     import { formatRisuNestStorageBytes } from 'src/ts/storage/risuNestStorageDashboard'
-    import { createRemainingTimeEstimator, formatRemaining } from 'src/ts/storage/sync/remainingTime'
+    import { createRemainingTimeEstimator } from 'src/ts/storage/sync/remainingTime'
     import ConnectionForm from './ConnectionForm.svelte'
-    import { externalConnectionTitle, externalErrorKind, externalErrorMessage, externalStorageStrings } from './strings'
+    import { externalConnectionPlace, externalConnectionTitle, externalErrorKind, externalErrorMessage, externalStorageStrings } from './strings'
 
     const bridge = getExternalStorageBridge()
     /** How many empty history pages one request reads past before stopping. */
@@ -63,6 +64,8 @@
     let destroyed = false
     let stopJobEvents: (() => void) | undefined
     let stopSyncFailures: (() => void) | undefined
+    let stopProgress: (() => void) | undefined
+    let progress = $state<ReadonlyMap<string, ExternalOperationProgress>>(new Map())
     let syncFailures = $state<ReadonlyMap<string, unknown>>(new Map())
     let busy = $state(false)
     /** Which action is running, so only the button that started it shows a spinner. */
@@ -79,6 +82,8 @@
     let historyCursor = $state<Record<string, string | undefined>>({})
     let historyLoading = $state<Record<string, boolean>>({})
     let quota = $state<Record<string, ExternalQuotaSummary>>({})
+    const quotaLoading = new Map<string, Promise<void>>()
+    const quotaRequested = new Set<string>()
     let remoteOnly = $state<Record<string, number | null>>({})
     let removalDownload = $state<{ connectionId: string; controller: AbortController; cancelling: boolean } | null>(null)
     /** The disconnect waiting for its file check, which cancelling abandons. */
@@ -86,9 +91,6 @@
     let recoveryKey = $state('')
     let recoveryPanel = $state<HTMLDivElement | undefined>()
     let connectionSettings = $state<ExternalConnectionSettingsMaterial | null>(null)
-    let connectionSettingsPanel = $state<HTMLDivElement | undefined>()
-    let connectionSettingsQr = $state('')
-    let connectionSettingsQrSize = $state(0)
     /** The history entry whose restore scope is open, and what is ticked in it. */
     let exportRun = $state<{ id: string; connectionId: string; progress?: ExternalSnapshotExportProgress } | null>(null)
     /** Jobs that add or change history rows, by job ID, so the open history reloads when they finish. */
@@ -96,6 +98,10 @@
     let pollTimer: ReturnType<typeof setTimeout> | undefined
     /** The state a sync switch was set to while its change runs. Otherwise it shows the device's sync target. */
     let syncRequest = $state<Record<string, boolean>>({})
+    /** Whether sync with each connection was started in this session, read on every refresh. */
+    let syncRunning = $state<Record<string, boolean>>({})
+    /** A connection made for sync while its recovery key is on screen starts syncing once the key is closed. */
+    let pendingSyncStart: ExternalConnectionSummary | undefined
     /** The state an automatic backup switch was set to while its change runs. Otherwise it shows the stored setting. */
     let automaticRequest = $state<Record<string, boolean>>({})
     let stopBindingChanges: (() => void) | undefined
@@ -107,12 +113,12 @@
         busy = true
         syncRequest[connection.id] = enabled
         try {
-            if (enabled) await bindSyncTarget({ kind: 'external', connectionId: connection.id })
-            else {
-                // A switch left over from an older state must not stop another sync target.
-                const current = (await createNativeSyncBindingBridge().state()).target
-                if (current.kind === 'external' && current.connectionId === connection.id) await unbindSyncTarget()
-            }
+            const current = (await createNativeSyncBindingBridge().state()).target
+            const selected = current.kind === 'external' && current.connectionId === connection.id
+            // A start that left sync off keeps this target, so turning the switch on resumes it.
+            if (enabled) await (selected ? resumeCurrentSyncBinding(current) : bindSyncTarget({ kind: 'external', connectionId: connection.id }))
+            // A switch left over from an older state must not stop another sync target.
+            else if (selected) await unbindSyncTarget()
             await refreshExternalStorageProductionState()
             error = ''
         } catch (reason) {
@@ -128,7 +134,25 @@
         busy = true
         try { await requestExternalLwwNow(connection.id) }
         catch (reason) { error = externalErrorMessage(strings, reason) }
-        finally { busy = false }
+        finally {
+            await refresh(true)
+            busy = false
+        }
+    }
+    /** Makes a connection made for sync this device's sync target, asking first when another target is set. */
+    async function startSync(connection: ExternalConnectionSummary): Promise<void> {
+        const current = await createNativeSyncBindingBridge().state().then(binding => binding.target, reason => {
+            error = externalErrorMessage(strings, reason)
+            return undefined
+        })
+        if (!current) return
+        if (current.kind !== 'none' && !await alertActionConfirm({
+            title: strings.switchSyncTitle,
+            description: current.kind === 'server' ? strings.switchSyncFromServer : strings.switchSyncFromExternal,
+            actionLabel: strings.startSync,
+            cancelLabel: strings.cancel,
+        })) return
+        await setSyncBinding(connection, true)
     }
     function beginRestore(connection: ExternalConnectionSummary, item: ExternalHistoryItem): void {
         try {
@@ -158,6 +182,7 @@
         }
         try {
             storageState = await bridge.getState()
+            syncRunning = Object.fromEntries(storageState.connections.map(connection => [connection.id, isExternalLwwRunning(connection.id)]))
             estimateRemaining(storageState)
             for (const connection of storageState.connections) {
                 if (historyRequested.has(connection.id)) continue
@@ -176,6 +201,7 @@
                     await loadHistory(connection, false)
                 }
             }
+            await Promise.all(storageState.connections.filter(connection => selectedTab(connection.id) === 'quota').map(loadQuota))
             if (!silent) error = ''
             pollError = ''
         } catch (reason) {
@@ -234,6 +260,9 @@
         if (renewed) {
             const job = activeJob(result.connection)
             if (job && externalJobIsPaused(job)) await resumeJob(result.connection, job)
+        } else if (result.connection.purpose === 'sync') {
+            if (recoveryKey) pendingSyncStart = result.connection
+            else await startSync(result.connection)
         }
     }
 
@@ -439,12 +468,26 @@
         try {
             if (kind === 'history') await loadHistory(connection, false)
             if (kind === 'quota') {
-                void loadRemoteOnlyFiles(connection)
-                quota[connection.id] = await bridge.getQuota(connection.id)
+                await loadQuota(connection)
             }
         } catch (reason) {
             error = externalErrorMessage(strings, reason)
         }
+    }
+
+    function loadQuota(connection: ExternalConnectionSummary): Promise<void> {
+        quotaRequested.add(connection.id)
+        const pending = quotaLoading.get(connection.id)
+        if (pending) return pending
+        const request = (async () => {
+            do {
+                quotaRequested.delete(connection.id)
+                const [usage] = await Promise.all([bridge.getQuota(connection.id), loadRemoteOnlyFiles(connection)])
+                if (!destroyed) quota[connection.id] = usage
+            } while (!destroyed && quotaRequested.has(connection.id))
+        })().finally(() => { quotaLoading.delete(connection.id); quotaRequested.delete(connection.id) })
+        quotaLoading.set(connection.id, request)
+        return request
     }
 
     /** Files only this connection holds, as the residency status counts them. */
@@ -479,6 +522,7 @@
             history[connection.id] = items
             historyCursor[connection.id] = cursor
             delete historyError[connection.id]
+            if (selectedTab(connection.id) === 'quota') await loadQuota(connection)
         } catch (reason) {
             historyError[connection.id] = externalErrorMessage(strings, reason)
         } finally {
@@ -518,6 +562,27 @@
         if (value !== policy[limit]) void changeRetentionPolicy(connection, { ...policy, [limit]: value })
     }
 
+    async function commitTransferConcurrency(connection: ExternalConnectionSummary, input: HTMLInputElement): Promise<void> {
+        const saved = connection.transferConcurrency
+        const value = Number(input.value)
+        if (!input.value.trim() || !Number.isInteger(value) || value < 1 || value > 16) {
+            input.value = String(saved)
+            return
+        }
+        if (value === saved) return
+        busy = true
+        try {
+            await bridge.setTransferConcurrency(connection.id, value)
+            connection.transferConcurrency = value
+            await refresh(true)
+        } catch (failure) {
+            input.value = String(connection.transferConcurrency)
+            error = externalErrorMessage(strings, failure)
+        } finally {
+            busy = false
+        }
+    }
+
     async function removeConnection(connection: ExternalConnectionSummary): Promise<void> {
         busy = true
         activeAction = `remove:${connection.id}`
@@ -537,7 +602,7 @@
         if (check.signal.aborted) return
         const remoteOnly = held !== 0
         // The card's own two lines tell apart connections to one service and account.
-        const name = `${externalConnectionTitle(strings, connection)}\n${connectionPlace(connection)}`
+        const name = [externalConnectionTitle(strings, connection), externalConnectionPlace(strings, connection)].filter(Boolean).join('\n')
         const choice = await alertCheckboxConfirm({
             title: strings.removeTitle,
             description: remoteOnly ? `${name}\n\n${strings.removeDeletes}\n\n${held === undefined ? strings.removeRemoteOnlyUnknown : strings.removeRemoteOnly}` : name,
@@ -565,6 +630,7 @@
                 }
             }
             await bridge.removeConnection(connection.id)
+            clearExternalProgress(connection.id)
             await refreshExternalStorageProductionState()
             await refresh(true)
         } catch (reason) {
@@ -577,27 +643,11 @@
     }
 
 
-    async function displayConnectionSettings(material: ExternalConnectionSettingsMaterial): Promise<void> {
-        connectionSettings = material
-        if (!material.qrPayload) {
-            connectionSettingsQr = ''
-            return
-        }
-        try {
-            const modules = QRCode.create(material.qrPayload).modules.size + 8
-            const scale = Math.ceil(240 / modules)
-            connectionSettingsQrSize = modules * scale
-            connectionSettingsQr = await QRCode.toDataURL(material.qrPayload, { margin: 4, scale })
-        } catch {
-            connectionSettingsQr = ''
-        }
-    }
-
     async function createConnectionSettings(connection: ExternalConnectionSummary): Promise<void> {
         busy = true
         activeAction = `settings:${connection.id}`
         try {
-            await displayConnectionSettings(await bridge.beginConnectionSettingsExport(connection.id))
+            connectionSettings = await bridge.beginConnectionSettingsExport(connection.id)
         } catch (reason) {
             error = externalErrorMessage(strings, reason)
         } finally {
@@ -606,43 +656,41 @@
         }
     }
 
-    async function saveConnectionSettingsFile(): Promise<void> {
-        if (!connectionSettings) return
-        try {
-            await bridge.saveConnectionSettingsFile(connectionSettings.transferId)
-        } catch (reason) {
-            error = externalErrorMessage(strings, reason)
-        }
-    }
-
     function closeRecoveryKey(): void {
+        if (!recoveryKey) return
         recoveryKey = ''
+        const connection = pendingSyncStart
+        pendingSyncStart = undefined
+        if (connection) void startSync(connection)
     }
 
     function closeConnectionSettings(): void {
         connectionSettings = null
-        connectionSettingsQr = ''
     }
 
     async function exportSnapshot(connectionId: string, snapshotId: string): Promise<void> {
         if (busy || exportRun) return
         const id = crypto.randomUUID()
         exportRun = { id, connectionId }
+        const observation = beginExternalProgress(connectionId, 'export')
         busy = true
         try {
-            await runWithMobileBackgroundTask('export', async background => {
+            const result = await runWithMobileBackgroundTask('export', async background => {
                 const abort = () => { void bridge.cancelExport(id).catch(() => {}) }
                 background.signal?.addEventListener('abort', abort, { once: true })
                 try {
                     background.signal?.throwIfAborted()
                     const result = await bridge.exportSnapshot(connectionId, snapshotId, id, progress => {
                         if (exportRun?.id === id) exportRun = { id, connectionId, progress }
+                        observation.exported(progress)
                         background.progress(measuredTaskPercent(Number(progress.completedBytes), Number(progress.totalBytes)))
-                    })
+                    }, observation.networkChannel())
                     return result.cancelled ? null : result
                 } finally { background.signal?.removeEventListener('abort', abort) }
             }, undefined, true)
+            observation.finish(result ? 'complete' : 'cancelled')
         } catch (reason) {
+            observation.finish(externalProgressFailure(reason))
             if (externalErrorKind(reason) !== 'cancelled') error = externalErrorMessage(strings, reason)
         } finally {
             if (exportRun?.id === id) exportRun = null
@@ -701,10 +749,20 @@
             && connection.lastError?.reason === job?.error?.reason
     }
 
-    function connectionTone(connection: ExternalConnectionSummary): 'connected' | 'working' | 'attention' {
+    /** A sync target that this start left off, or that stopped, until its switch or sync button starts it again. */
+    function syncStopped(connection: ExternalConnectionSummary): boolean {
+        const selection = storageState?.selection
+        return connection.purpose === 'sync' && selection?.kind === 'external' && selection.connectionId === connection.id && !syncRunning[connection.id]
+    }
+
+    function connectionTone(connection: ExternalConnectionSummary): 'connected' | 'working' | 'attention' | 'idle' | 'paused' {
         const job = activeJob(connection)
+        if (!connectionUsable(connection)) return 'attention'
         if (job && (externalJobIsPaused(job) || job.state === 'uncertain')) return 'attention'
+        const operation = externalProgressFor(progress, connection.id)
+        if (operation?.state === 'running') return operation.stage === 'waiting' ? 'idle' : 'working'
         if (job && externalJobIsActive(job)) return 'working'
+        if (syncStopped(connection)) return 'paused'
         if (connectionUsable(connection)) return 'connected'
         return 'attention'
     }
@@ -712,24 +770,21 @@
     // The notice under the heading explains a paused job, so the badge names only the state.
     function connectionStatus(connection: ExternalConnectionSummary): string {
         const job = activeJob(connection)
+        if (!connectionUsable(connection)) return connectionStatusLabel(connection.status)
         if (job?.state === 'uncertain') return strings.statusError
         if (job && externalJobIsPaused(job)) return ['reauth-required', 'key-locked'].includes(connection.status) ? connectionStatusLabel(connection.status) : strings.statusError
+        const operation = externalProgressFor(progress, connection.id)
+        if (operation?.state === 'running') return operation.stage === 'waiting' ? strings.transfer.waiting : operation.kind === 'binding' ? strings.transfer.connecting : strings.transfer.syncing
         if (job && externalJobIsActive(job)) return strings.jobActive[job.kind]
+        if (syncStopped(connection)) return strings.statusPaused
         return connectionStatusLabel(connection.status)
     }
 
-    // Restore phases after the download apply data locally, so their progress has no byte fraction.
-    const RESTORE_APPLY_PHASES = new Set(['preparing-local', 'applying-local', 'awaiting-adoption'])
-
-    function activeJobLabel(job: ExternalJobSummary): string {
-        return (job.kind === 'restore' && strings.restorePhases[job.phase]) || strings.jobActive[job.kind]
-    }
-
     // A backup registers each pack as it seals it, so its upload has no total until it ends.
-    const uploadTotalGrows = (job: ExternalJobSummary) => job.kind === 'backup' && job.counters === 'transferred' && externalJobIsActive(job)
+    const uploadTotalGrows = externalJobTotalGrows
 
     function activeJobFraction(job: ExternalJobSummary): number | null {
-        return (job.kind === 'restore' && RESTORE_APPLY_PHASES.has(job.phase)) || uploadTotalGrows(job) ? null : externalJobProgress(job)
+        return externalJobFraction(job)
     }
 
     function jobSize(job: ExternalJobSummary): string {
@@ -759,10 +814,6 @@
         return value ? new Date(Number(value)).toLocaleString() : '—'
     }
 
-    function connectionPlace(connection: ExternalConnectionSummary): string {
-        return [connection.endpoint.authority, connection.endpoint.repositoryHint].join(' · ')
-    }
-
     function providerIcon(providerId: ExternalConnectionSummary['providerId']) {
         if (providerId === 'webdav') return ServerIcon
         if (providerId === 's3') return DatabaseIcon
@@ -777,12 +828,14 @@
     $effect(() => {
         if (recoveryKey) recoveryPanel?.focus()
     })
-    $effect(() => {
-        if (connectionSettings) connectionSettingsPanel?.focus()
-    })
 
     onMount(async () => {
         stopSyncFailures = subscribeExternalLwwFailures(value => syncFailures = value)
+        stopProgress = subscribeExternalProgress(value => {
+            const completed = [...value].some(([key, operation]) => operation.visible && operation.state === 'complete' && progress.get(key)?.state === 'running')
+            progress = value
+            if (completed && !destroyed) void refresh(true)
+        })
         stopBindingChanges = subscribeSyncBindingChanges(() => { if (!destroyed) void refresh(true) })
         try {
             const stop = await bridge.onJobStarted(() => {
@@ -803,6 +856,7 @@
         clearTimeout(pollTimer)
         stopJobEvents?.()
         stopSyncFailures?.()
+        stopProgress?.()
         stopBindingChanges?.()
         if (exportRun) void bridge.cancelExport(exportRun.id).catch(() => {})
     })
@@ -837,14 +891,16 @@
             {@const retryable = !!job && externalJobIsPaused(job) && ['retry', 'wait', 'free-space'].includes(job.error?.action ?? '') && ['backup', 'cleanup', 'restore', 'check-repository', 'pin-history', 'delete-history'].includes(job.kind)}
             {@const remedy = renewable || lockable || recheckable || retryable}
             {@const syncTarget = storageState.selection.kind === 'external' && storageState.selection.connectionId === connection.id}
+            {@const syncing = syncTarget && !!syncRunning[connection.id]}
             {@const backedUp = connection.purpose === 'backup' || !!connection.lastBackupAtMs}
             {@const synced = connection.purpose === 'sync' && !!connection.lastSyncAtMs}
+            {@const place = externalConnectionPlace(strings, connection)}
             <article class="card">
                 <header class="card-head">
                     <span class="provider" aria-hidden="true"><ProviderIcon size={18} /></span>
                     <div class="card-name">
                         <h3 class="card-title">{externalConnectionTitle(strings, connection)}</h3>
-                        <p class="card-sub">{connectionPlace(connection)}</p>
+                        {#if place}<p class="card-sub">{place}</p>{/if}
                     </div>
                     <div class="card-status"><StatusBadge label={connectionStatus(connection)} tone={connectionTone(connection)} /></div>
                 </header>
@@ -869,13 +925,6 @@
                     <SettingNotice role="status" text={strings.publicationDecision} />
                 {/if}
 
-                {#if exportRun?.connectionId === connection.id}
-                    {@const amount = exportRun.progress}
-                    <div class="running">
-                        <SettingProgress label={strings.download} detail={amount ? `${bytes(amount.completedBytes)}${amount.totalBytes ? ` / ${bytes(amount.totalBytes)}` : ''}` : ''} fraction={amount?.totalBytes && Number(amount.totalBytes) > 0 ? Number(amount.completedBytes) / Number(amount.totalBytes) : null} />
-                        <div class="actions"><SettingButton variant="secondary" size="sm" onclick={() => exportRun && bridge.cancelExport(exportRun.id)}>{strings.cancel}</SettingButton></div>
-                    </div>
-                {/if}
                 {#if backedUp || synced || job?.state === 'succeeded'}
                     <dl class="kv">
                         {#if synced}<dt>{language.risuNest.serverSync.lastSuccess}</dt><dd>{when(connection.lastSyncAtMs)}</dd>{/if}
@@ -884,12 +933,13 @@
                     </dl>
                 {/if}
                 {#if job && externalJobIsPaused(job) && job.error?.retryAtMs}<p class="note">{strings.retryAt.replace('{0}', when(job.error.retryAtMs))}</p>{/if}
-                {#if job && externalJobIsActive(job) && !externalJobIsPaused(job)}
-                    <SettingProgress label={activeJobLabel(job)} detail={jobSize(job)} fraction={activeJobFraction(job)} />
-                    {#if remaining[connection.id] !== undefined}
-                        <dl class="kv"><dt>{strings.remaining}</dt><dd>{formatRemaining(remaining[connection.id])}</dd></dl>
-                    {/if}
-                {/if}
+                <ExternalTransferProgress connectionId={connection.id} {strings} {job} remaining={remaining[connection.id]}>
+                    {#snippet exportActions()}
+                        {#if exportRun?.connectionId === connection.id}
+                            <SettingButton variant="secondary" size="sm" onclick={() => exportRun && bridge.cancelExport(exportRun.id)}>{strings.cancel}</SettingButton>
+                        {/if}
+                    {/snippet}
+                </ExternalTransferProgress>
 
                 {#if unlockConnection?.id === connection.id}
                     <div class="unlock">
@@ -905,7 +955,7 @@
                     {#if connection.purpose === 'backup'}
                         <SettingToggle showLabel label={strings.automaticBackup} disabled={busy} checked={automaticRequest[connection.id] ?? !connection.automaticBackupPaused} onchange={enabled => setAutomaticWork(connection, enabled)} />
                     {:else}
-                        <SettingToggle showLabel label={strings.makeSyncTarget} disabled={busy} checked={syncRequest[connection.id] ?? syncTarget} onchange={enabled => setSyncBinding(connection, enabled)} />
+                        <SettingToggle showLabel label={strings.makeSyncTarget} disabled={busy} checked={syncRequest[connection.id] ?? syncing} onchange={enabled => setSyncBinding(connection, enabled)} />
                     {/if}
                     <div class="actions">
                         {#if renewable}<SettingButton disabled={busy} onclick={() => renewalConnection = connection}>{strings.renew}</SettingButton>{/if}
@@ -917,6 +967,16 @@
                         {#if job && externalJobIsActive(job)}<SettingButton variant="secondary" onclick={() => cancelJob(job)}>{strings.cancel}</SettingButton>{/if}
                         {#if job && unfinishedRestore(job)}<SettingButton variant="secondary" disabled={busy} onclick={() => stopRestore(job)}>{strings.stopRestore}</SettingButton>{/if}
                     </div>
+                </div>
+
+                <div class="setting">
+                    <label class="field">
+                        <span>{strings.transferConcurrency}</span>
+                        <span class="amount">
+                            <NumberInput size="sm" className="w-20 text-right tabular-nums" disabled={busy} min={1} max={16} value={connection.transferConcurrency} onChange={event => commitTransferConcurrency(connection, event.currentTarget)} />
+                        </span>
+                    </label>
+                    <p class="help">{strings.transferConcurrencyHelp}</p>
                 </div>
 
                 <div class="details">
@@ -931,7 +991,7 @@
                         <div class="panel" role="tabpanel" id="{connection.id}-history-panel" aria-labelledby="{connection.id}-history-tab">
                             {#if historyLoading[connection.id]}<p class="empty">{strings.loading}</p>
                             {:else if historyError[connection.id]}<SettingNotice role="status" text={historyError[connection.id]} />
-                            {:else if items.length === 0}<p class="empty">{strings.noHistory}</p>{/if}
+                            {:else if items.length === 0}<p class="empty">{connection.purpose === 'sync' ? strings.noSyncHistory : strings.noHistory}</p>{/if}
                             {#if items.length > 0}
                                 <ul class="rows">
                                     {#each items as item (item.id)}
@@ -975,8 +1035,11 @@
                                         {/if}
                                         <div class="stat">
                                             <dt>{strings.uploadedLowerBound}</dt>
-                                            <dd class="stat-value">{bytes(usage.storage.locallyUploadedBytesLowerBound)}</dd>
-                                            <dd class="stat-note">{strings.files.replace('{0}', Number(usage.storage.locallyUploadedObjectCountLowerBound).toLocaleString())}</dd>
+                                            <dd class="stat-value">{usage.storage.observedAtMs === null ? strings.unknownUsage : bytes(usage.storage.locallyUploadedBytesLowerBound)}</dd>
+                                            {#if usage.storage.observedAtMs !== null}
+                                                <dd class="stat-note">{strings.files.replace('{0}', Number(usage.storage.locallyUploadedObjectCountLowerBound).toLocaleString())}</dd>
+                                                <dd class="stat-note">{strings.lastUsageUpdate}: {when(usage.storage.observedAtMs)}</dd>
+                                            {/if}
                                         </div>
                                         {#if usage.storage.latestReachable}
                                             <div class="stat">
@@ -1081,23 +1144,10 @@
 {/if}
 
 {#if connectionSettings}
-    <div class="fixed inset-0 z-[1000] flex items-center justify-center bg-black/60 p-4">
-        <div
-            bind:this={connectionSettingsPanel}
-            tabindex="-1"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="external-connection-settings-title"
-            class="dialog outline-hidden"
-            class:qr-dialog={!!connectionSettingsQr}
-        >
-            <h3 id="external-connection-settings-title" class="text-lg font-bold">{strings.connectionSettings}</h3>
-            <p class="text-sm text-textcolor2">{strings.connectionSettingsNotice}</p>
-            {#if connectionSettingsQr}<img class="connection-settings-qr mx-auto" src={connectionSettingsQr} width={connectionSettingsQrSize} height={connectionSettingsQrSize} alt={strings.connectionSettingsQr} />
-            {:else}<p class="rounded-md border border-darkborderc bg-darkbg p-3 text-sm">{strings.connectionSettingsFileOnly}</p>{/if}
-            <div class="actions"><SettingButton onclick={saveConnectionSettingsFile}>{strings.saveConnectionSettings}</SettingButton><SettingButton variant="secondary" onclick={closeConnectionSettings}>{strings.closeRecovery}</SettingButton></div>
-        </div>
-    </div>
+    {#key connectionSettings.transferId}
+        <ConnectionSettingsDialog payload={connectionSettings.payload} {strings}
+            onsave={() => bridge.saveConnectionSettingsFile(connectionSettings!.transferId)} onclose={closeConnectionSettings} />
+    {/key}
 {/if}
 
 <style>
@@ -1206,10 +1256,6 @@
         font-size: 13px;
         color: var(--risu-theme-textcolor2);
     }
-    .running {
-        display: grid;
-        gap: 0.5rem;
-    }
     .unlock {
         display: grid;
         gap: 0.625rem;
@@ -1242,6 +1288,14 @@
         border: 1px solid var(--risu-theme-darkborderc);
         border-radius: 0.5rem;
         background: var(--risu-theme-bgcolor);
+    }
+    .setting {
+        display: grid;
+        gap: 0.375rem;
+        min-width: 0;
+    }
+    .setting .help {
+        max-width: none;
     }
     .tabs {
         display: flex;
@@ -1481,12 +1535,17 @@
     }
     .fields {
         display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
         gap: 0.5rem;
+    }
+    /* The rows share one value column, so inputs line up whether or not a unit follows them. */
+    .fields .field {
+        grid-column: 1 / -1;
+        grid-template-columns: subgrid;
     }
     .field {
         display: grid;
-        grid-template-columns: minmax(8rem, max-content) auto;
-        justify-content: start;
+        grid-template-columns: minmax(0, 1fr) auto;
         align-items: center;
         gap: 0.75rem;
         font-size: 14px;
@@ -1535,14 +1594,5 @@
         border-radius: 0.5rem;
         background: var(--risu-theme-bgcolor);
         color: var(--risu-theme-textcolor);
-    }
-    .qr-dialog {
-        grid-template-columns: minmax(0, 1fr);
-        width: 28rem;
-    }
-    .connection-settings-qr {
-        max-width: 100%;
-        height: auto;
-        image-rendering: pixelated;
     }
 </style>

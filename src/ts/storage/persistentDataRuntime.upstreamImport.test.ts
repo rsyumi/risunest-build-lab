@@ -116,6 +116,14 @@ async function createHarness(officialPublisher?: OfficialRevisionPublisher, capt
 
 beforeEach(()=>{vi.clearAllMocks();plugins.restartPluginsAfterAuthorityReplacement.mockImplementation(async()=>{});binding.bound=true;binding.fence.mockClear();binding.assertAuthority.mockClear();binding.resume.mockReset();binding.resume.mockImplementation(async()=>{})})
 describe('direct native upstream import publication',()=>{
+    it('keeps first-run consent through the compatibility replacement runtime',async()=>{
+        binding.bound=false
+        const h=await createHarness()
+        await expect(h.runtime.replacePersistentDatabase(makeDatabase(),'local-backup',{upstreamImport:true,firstRun:true})).resolves.toEqual({kind:'committed',revision:2,projection:'applied'})
+        expect(alerts.checkbox).not.toHaveBeenCalled()
+        expect(binding.fence).toHaveBeenCalledOnce()
+        expect(h.store.replaceFromDatabase).toHaveBeenCalledOnce()
+    })
     it.each(['cursor','resume'] as const)('shares concurrent recovery after adoption while %s is blocked and retains failed resume',async phase=>{
         const h=await createHarness()
         const incoming={...makeDatabase(),username:'Concurrent import'}

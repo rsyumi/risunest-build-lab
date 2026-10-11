@@ -142,6 +142,28 @@ impl Recipe {
         }
         Ok(output)
     }
+    /// Returns the RNSD length after the same structural validation as encoding.
+    pub fn encoded_len(&self) -> Result<usize> {
+        self.validate()?;
+        let mut length = self
+            .bases
+            .len()
+            .checked_mul(40)
+            .and_then(|n| n.checked_add(49))
+            .ok_or(WireError("delta-limit"))?;
+        for op in &self.ops {
+            let size = match op {
+                Op::Insert(bytes) => bytes.len().checked_add(5),
+                Op::Copy { .. } => Some(14),
+            }
+            .ok_or(WireError("delta-limit"))?;
+            length = length
+                .checked_add(size)
+                .filter(|n| *n <= MAX_PATCH_BYTES)
+                .ok_or(WireError("delta-limit"))?;
+        }
+        Ok(length)
+    }
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.validate()?;
         self.encode_profile(b"RNSD")

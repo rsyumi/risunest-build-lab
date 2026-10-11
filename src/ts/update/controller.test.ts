@@ -139,6 +139,17 @@ describe('app update controller', () => {
         expect(fixture.check).toHaveBeenCalledTimes(1)
     })
 
+    it.each([false, true])('treats an already-current result as success and clears a prior error (manual: %s)', async (manual) => {
+        appUpdateState.set({ ...initialAppUpdateState, phase: 'error', error: 'previous failure' })
+        const fixture = dependencies({
+            check: async () => ({ status: 'current', currentVersion: '1.0.0', disabledReason: null, update: null }),
+        })
+        await checkForAppUpdate(manual, fixture.value)
+        expect(get(appUpdateState)).toMatchObject({ phase: 'current', error: '', update: null, popupVisible: manual })
+        expect(fixture.value.install).not.toHaveBeenCalled()
+        expect(fixture.value.restart).not.toHaveBeenCalled()
+    })
+
     it('never reports an unsupported newer release as current', async () => {
         const fixture = dependencies({
             check: async () => ({
