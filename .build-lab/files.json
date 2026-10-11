@@ -4105,6 +4105,12 @@
       "sha256": "029d620f2304829c66ce54878a67706f099ffc29ab00fa845528b80899196d8e"
     },
     {
+      "path": "server/sync/README.md",
+      "mode": "100644",
+      "bytes": 7147,
+      "sha256": "597a3e03b3fce9a2048b87d60ce9f04d0bcb760b9a5fccfb4f550068f3a09297"
+    },
+    {
       "path": "server/sync/distribution/.gitignore",
       "mode": "100644",
       "bytes": 11,
@@ -17655,8 +17661,8 @@
     {
       "path": "tests/release/build-workflow.node-test.mjs",
       "mode": "100644",
-      "bytes": 39617,
-      "sha256": "11ded3de6be9515266c2c3e9593c1cb4497000ec0fb6dbb28319ec3f4e26af09"
+      "bytes": 39640,
+      "sha256": "558c1b263a94dbb6ab23d47272ca9b3c20d6bcf17985df7e38d8c778d44a29e1"
     },
     {
       "path": "tests/release/catalog.node-test.mjs",
@@ -17955,8 +17961,8 @@
     {
       "path": ".github/workflows/release-cache.yml",
       "mode": "100644",
-      "bytes": 4043,
-      "sha256": "4d41751b54f5b9e073a4824db84997539bc3e44085cad7d86744f9dfafb21103",
+      "bytes": 1911,
+      "sha256": "1dcee3b561522ea23333d6721c5e958c5e5ec45dab663cd540313d6b653893a2",
       "reason": "private-control-or-generated"
     },
     {
@@ -17969,8 +17975,8 @@
     {
       "path": ".github/workflows/release.yml",
       "mode": "100644",
-      "bytes": 56344,
-      "sha256": "53ad272302ecc1a8745a3dfaf601e7b4ae4bf6d2494e9f0590fe3b4fc278d0f5",
+      "bytes": 56307,
+      "sha256": "914ac42cd37ac0bfbbf8159f76253c491060d6bed2b038446902895f8328e2a8",
       "reason": "private-control-or-generated"
     },
     {
@@ -18307,13 +18313,6 @@
       "mode": "100644",
       "bytes": 2073,
       "sha256": "44b7cf0a01d41fc00e08984ca79356884a6709684f4f95dca9dc31f0d91a989c",
-      "reason": "explanatory-document"
-    },
-    {
-      "path": "server/sync/README.md",
-      "mode": "100644",
-      "bytes": 7147,
-      "sha256": "597a3e03b3fce9a2048b87d60ce9f04d0bcb760b9a5fccfb4f550068f3a09297",
       "reason": "explanatory-document"
     },
     {

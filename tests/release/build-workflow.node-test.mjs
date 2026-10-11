@@ -314,14 +314,14 @@ test("release caches retain downloads without unpacked dependency trees", () => 
     assert.doesNotMatch(contents, /^\s+~\/.cargo\/registry\s*$/m);
     assert.doesNotMatch(contents, /^\s+~\/.cargo\/git\s*$/m);
   }
-  assert.match(cacheWorkflow, /~\/.cargo\/registry\/cache/);
-  assert.match(cacheWorkflow, /~\/.cargo\/registry\/index/);
-  assert.match(cacheWorkflow, /~\/.cargo\/git\/db/);
-  assert.match(cacheWorkflow, /release-cargo-1\.97\.1-/);
+  assert.doesNotMatch(cacheWorkflow, /cargo fetch|release-cargo-|strategy:|matrix:/);
+  assert.match(cacheWorkflow, /downloads:\n\s+needs: verify\n\s+runs-on: ubuntu-24\.04/);
+  for (const contents of [workflow, cacheWorkflow])
+    assert.match(contents, /key: release-pnpm-\$\{\{ runner.os \}\}-\$\{\{ runner.arch \}\}-\$\{\{ hashFiles\('pnpm-lock.yaml'\) \}\}/);
   const savedPaths = [...cacheWorkflow.matchAll(/uses: actions\/cache\/save@[a-f0-9]{40} # v5\s+with:\s+path: ([\s\S]*?)\s+key:/g)]
     .map((match) => match[1])
     .join("\n");
-  assert.equal((cacheWorkflow.match(/uses: actions\/cache\/save@[a-f0-9]{40}/g) ?? []).length, 2);
+  assert.equal((cacheWorkflow.match(/uses: actions\/cache\/save@[a-f0-9]{40}/g) ?? []).length, 1);
   assert.doesNotMatch(savedPaths, /src-tauri\/target|node_modules/);
 });
 
@@ -329,7 +329,6 @@ test("the independent Sync GUI lockfile bypasses outer workspace discovery", () 
   assert.match(workflow, /pnpm --dir server\/manager\/gui --ignore-workspace install --frozen-lockfile/);
   assert.match(workflow, /pnpm --dir server\/manager\/gui --ignore-workspace check/);
   assert.match(workflow, /pnpm --dir server\/manager\/gui --ignore-workspace test/);
-  assert.match(cacheWorkflow, /pnpm --dir server\/manager\/gui --ignore-workspace fetch --frozen-lockfile/);
   assert.doesNotMatch(workflow, /pnpm install --dir server\/manager\/gui/);
 });
 

@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "lane": "sync",
-  "source_commit": "3e8ce4ff930689bfcf0f679eb324a8b14ca32e8b",
-  "source_tree": "ccc24342da41ee8d2694698a94c0d82c74a64dfa",
-  "file_list_sha256": "03e76f7d863c86a0c9332d8bb00cc0aba68d02d5b6272dc6e9d46a37e6d36360",
-  "exclusion_rules_version": "risunest-build-inputs-v1"
+  "source_commit": "3831c5af0b428d7c19cd0049b461394ba6c157b2",
+  "source_tree": "d4a87c5d4f0428d4cce6d4a1a32a70a3615696aa",
+  "file_list_sha256": "903fbbba8108b508a67d063855c3cc3c94496cc012264e274d4dc1201abccd8e",
+  "exclusion_rules_version": "risunest-build-inputs-v2"
 }
