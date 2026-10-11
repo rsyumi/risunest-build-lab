@@ -23,21 +23,23 @@ test("both products and pull requests run shared native signature and catalog te
   assert.match(workflow, /needs: \[source, release-tooling-tests,/);
 });
 
-function assertRequiredVerificationGates(contents) {
-  const preparation = contents.slice(contents.indexOf("\n  prepare-draft:\n"));
+function assertRequiredVerificationGates(contents, gate = "collect-publish") {
+  const preparation = contents.slice(contents.indexOf(`\n  ${gate}:\n`));
   const expression = /if: >-\n([\s\S]*?)\n    needs:/.exec(preparation)?.[1];
   const dependencies = /needs: \[([^\]]+)\]/.exec(preparation)?.[1].split(",").map(value => value.trim());
   assert(expression && dependencies, "Missing preparation gate");
-  const shared = ["source", "release-tooling-tests", "endpoint-registry-tests", "shared-wasm-tests"];
+  const shared = ["source", "prepare-draft", "release-tooling-tests", "endpoint-registry-tests", "shared-wasm-tests"];
   const products = {
-    app: ["app-web-tests", "app-native-tests", "app-android-tests", "app-ios-tests"],
-    sync: ["sync-tests", "sync-gui-tests"],
+    app: ["app-web-tests", "app-desktop", "app-android-tests", "app-ios-tests", ...(gate === "collect-publish" ? ["app-android", "app-ios"] : [])],
+    sync: ["sync-suite", "sync-gui-tests"],
   };
   const all = [...shared, ...products.app, ...products.sync];
   for (const job of all) assert(dependencies.includes(job), `Missing dependency: ${job}`);
   const permits = (product, results) => runInNewContext(expression
     .replace(/always\(\)/g, "true")
+    .replace(/inputs\.publish/g, "true")
     .replace(/inputs\.product/g, JSON.stringify(product))
+    .replace(/needs\.prepare-draft\.outputs\.already_published/g, JSON.stringify(gate === "recover-published" ? "true" : "false"))
     .replace(/needs\.([\w-]+)\.result/g, (_, job) => JSON.stringify(results[job])),
   Object.create(null), { timeout: 100, contextCodeGeneration: { strings: false, wasm: false } });
   for (const product of Object.keys(products)) {
@@ -52,11 +54,16 @@ function assertRequiredVerificationGates(contents) {
   }
 }
 
-test("failed or cancelled mandatory checks cannot prepare either release", () => {
-  assertRequiredVerificationGates(workflow);
+test("failed, cancelled or skipped mandatory checks cannot publish or recover either release", () => {
+  for (const gate of ["collect-publish", "recover-published"]) {
+    assertRequiredVerificationGates(workflow, gate);
+    const start = workflow.indexOf(`\n  ${gate}:\n`);
+    const before = workflow.slice(0, start);
+    const after = workflow.slice(start);
+    assert.throws(() => assertRequiredVerificationGates(before + after.replace("endpoint-registry-tests, ", ""), gate), /Missing dependency/);
+    assert.throws(() => assertRequiredVerificationGates(before + after.replace("needs.shared-wasm-tests.result == 'success' &&", ""), gate));
+  }
   for (const job of ["endpoint-registry-tests", "shared-wasm-tests"]) {
-    assert.throws(() => assertRequiredVerificationGates(workflow.replace(`${job}, `, "")), /Missing dependency/);
-    assert.throws(() => assertRequiredVerificationGates(workflow.replace(new RegExp(`needs\\.${job}\\.result == 'success' &&\\s*`), "")));
     const block = new RegExp(`\\n  ${job}:\\n([\\s\\S]*?)(?=\\n  [a-z][\\w-]*:|$)`).exec(workflow)?.[1];
     assert(block);
     assert.match(block, /needs: source/);
@@ -71,7 +78,8 @@ test("packaging runs after successful preparation despite skipped other-product 
     const block = workflow.slice(workflow.indexOf(`\n  ${job}:\n`));
     const condition = /\n    if: ([\s\S]*?)\n    needs:/.exec(block)?.[1].replace(/^>-\n/, "");
     assert(condition, `${job} has a build condition`);
-    const permits = ({ product = owner, source = "success", preparation = "success", published = "false", cancelled = false } = {}) => {
+    const merged = ["app-desktop", "sync-suite"].includes(job);
+    const permits = ({ product = owner, source = "success", preparation = "success", native = "success", published = "false", cancelled = false } = {}) => {
       const expression = /\b(always|cancelled|failure|success)\s*\(/.test(condition)
         ? condition : `success() && (${condition})`;
       return runInNewContext(expression
@@ -81,16 +89,18 @@ test("packaging runs after successful preparation despite skipped other-product 
         .replace(/inputs\.product/g, JSON.stringify(product))
         .replace(/needs\.source\.result/g, JSON.stringify(source))
         .replace(/needs\.prepare-draft\.result/g, JSON.stringify(preparation))
+        .replace(/needs\.app-(?:android|ios)-tests\.result/g, JSON.stringify(native))
         .replace(/needs\.prepare-draft\.outputs\.already_published/g, JSON.stringify(published)),
       Object.create(null), { timeout: 100, contextCodeGeneration: { strings: false, wasm: false } });
     };
     assert.equal(permits(), true, `${job} must build when other-product ancestors are skipped`);
     assert.equal(permits({ product: owner === "app" ? "sync" : "app" }), false, `${job} product selection`);
-    assert.equal(permits({ published: "true" }), false, `${job} immutable published release`);
+    assert.equal(permits({ published: "true" }), merged, `${job} still verifies native code during published-release recovery`);
     assert.equal(permits({ cancelled: true }), false, `${job} cancelled workflow`);
     for (const result of ["failure", "cancelled", "skipped"]) {
       assert.equal(permits({ source: result }), false, `${job} source ${result}`);
       assert.equal(permits({ preparation: result }), false, `${job} preparation ${result}`);
+      if (!merged) assert.equal(permits({ native: result }), false, `${job} native tests ${result}`);
     }
   }
 });
@@ -303,10 +313,10 @@ test("release caches retain downloads without unpacked dependency trees", () => 
   for (const contents of [workflow, cacheWorkflow]) {
     assert.doesNotMatch(contents, /^\s+~\/.cargo\/registry\s*$/m);
     assert.doesNotMatch(contents, /^\s+~\/.cargo\/git\s*$/m);
-    assert.match(contents, /~\/.cargo\/registry\/cache/);
-    assert.match(contents, /~\/.cargo\/registry\/index/);
-    assert.match(contents, /~\/.cargo\/git\/db/);
   }
+  assert.match(cacheWorkflow, /~\/.cargo\/registry\/cache/);
+  assert.match(cacheWorkflow, /~\/.cargo\/registry\/index/);
+  assert.match(cacheWorkflow, /~\/.cargo\/git\/db/);
   assert.match(cacheWorkflow, /release-cargo-1\.97\.1-/);
   const savedPaths = [...cacheWorkflow.matchAll(/uses: actions\/cache\/save@[a-f0-9]{40} # v5\s+with:\s+path: ([\s\S]*?)\s+key:/g)]
     .map((match) => match[1])
@@ -389,7 +399,7 @@ test("both macOS app legs run the produced archive updater before upload", () =>
 
 test("both native installer rollback harnesses are required release gates", () => {
   assert.match(workflow, /if: runner\.os == 'Linux'\n\s+run: bash server\/manager\/install\/install\.test\.sh/);
-  assert.match(workflow, /if: matrix\.os == 'windows'\n\s+shell: pwsh\n\s+run: pwsh -NoProfile -File server\/manager\/install\/windows\.test\.ps1/);
+  assert.match(workflow, /if: matrix\.os == 'windows' && needs\.prepare-draft\.outputs\.already_published != 'true'\n\s+shell: pwsh\n\s+run: pwsh -NoProfile -File server\/manager\/install\/windows\.test\.ps1/);
 });
 
 test("both Linux release packages pass the real managed installer transaction", () => {
@@ -471,7 +481,8 @@ test("all workflow pnpm setups use the checked-out packageManager", () => {
 });
 
 test("Linux app native release tests retain all targets in the maintained credential environment", () => {
-  const native = workflow.slice(workflow.indexOf("\n  app-native-tests:"), workflow.indexOf("\n  app-android-tests:"));
+  const desktop = workflow.slice(workflow.indexOf("\n  app-desktop:"), workflow.indexOf("\n  app-android:"));
+  const native = desktop.slice(0, desktop.indexOf("      - name: Compile app desktop binary"));
   assert.match(native, /gnome-keyring dbus-x11/);
   const primaryRuns = [...native.matchAll(/^\s+run: ((?:dbus-run-session -- bash scripts\/linux-native-tests.sh|cargo test --manifest-path src-tauri\/Cargo.toml) --release[^\n]*)$/gm)]
     .map((match) => match[1]);
@@ -563,4 +574,62 @@ test("desktop releases compile once before packaging the same target and configu
       assert.match(step, /shell: bash/, "Windows desktop legs must select Bash for shell scripts");
     }
   }
+});
+
+test("native verification shares each platform job with packaging without losing checks", () => {
+  assert.doesNotMatch(workflow, /^  (?:app-native-tests|sync-tests):/m);
+  for (const [name, compile, required] of [
+    ["app-desktop", "Compile app desktop binary without signing key", [
+      "cargo test --manifest-path src-tauri/Cargo.toml --release --locked",
+      "--package tauri-plugin-updater", "--package tauri-plugin-window-state", "--package wry",
+      "pnpm desktop:test-boundary:agent", "scripts/linux-native-tests.sh --boundary",
+    ]],
+    ["sync-suite", "Build and package Sync distributions", [
+      "cargo clippy", "--all-targets --locked", "-- -D warnings",
+      "cargo test --manifest-path crates/sync-wire/Cargo.toml",
+      "cargo test --manifest-path server/sync/Cargo.toml", "cargo test --manifest-path server/manager/Cargo.toml",
+      "daemon-process.mjs", "windows-startup.ps1", "--test update_helper", "linux-process.py", "macos-startup.sh",
+    ]],
+  ]) {
+    const block = new RegExp(`\\n  ${name}:\\n([\\s\\S]*?)(?=\\n  [\\w-]+:\\n|$)`).exec(workflow)[1];
+    assert.equal((block.match(/- \{ runner:/g) ?? []).length, 6);
+    const prefix = block.slice(0, block.indexOf(`name: ${compile}`));
+    for (const command of required) assert(prefix.includes(command), `${name}: ${command}`);
+    assert.equal((block.match(/uses: actions\/checkout@/g) ?? []).length, 1);
+    assert.equal((block.match(/run: pnpm install --frozen-lockfile/g) ?? []).length, 1);
+    assert.match(prefix, /TEMP=\$nativeTestTemp/);
+    assert.match(prefix, /TMP=\$nativeTestTemp/);
+    assert.doesNotMatch(block, /cache\/save|path:.*target/);
+  }
+  for (const manifest of ["server/sync/Cargo.toml", "server/manager/Cargo.toml"]) {
+    assert.equal(workflow.split(`cargo fmt --manifest-path ${manifest} --check`).length - 1, 1);
+  }
+});
+
+test("merged jobs verify recovered releases but never rebuild or upload their immutable assets", () => {
+  for (const [name, first] of [["app-desktop", "Compile app desktop binary without signing key"], ["sync-suite", "Install Sync GUI dependencies"]]) {
+    const block = new RegExp(`\\n  ${name}:\\n([\\s\\S]*?)(?=\\n  [\\w-]+:\\n|$)`).exec(workflow)[1];
+    const packaging = block.slice(block.indexOf(`      - name: ${first}`));
+    for (const step of packaging.split(/^      - /m).filter(Boolean)) {
+      const condition = /^        if: (.+)$/m.exec(step)?.[1];
+      assert(condition, `${name}: missing package step condition`);
+      const evaluate = published => runInNewContext(condition
+        .replace(/needs\.prepare-draft\.outputs\.already_published/g, JSON.stringify(published))
+        .replace(/inputs\.publish == true/g, "true")
+        .replace(/matrix\.os (?:==|!=) '[^']+'/g, "true"));
+      assert.equal(evaluate("true"), false);
+      assert.equal(evaluate("false"), true);
+    }
+  }
+});
+
+test("Sync compiles its GUI once with the same configuration used for bundling", () => {
+  const build = readFileSync(new URL("../../server/manager/install/build.mjs", import.meta.url), "utf8");
+  const pack = readFileSync(new URL("../../server/manager/install/package.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(build, /\[cli, "build"/);
+  assert.equal((pack.match(/\[cli, "build"/g) ?? []).length, 1);
+  assert.match(pack, /\[cli, "build", "--target", target, "--no-bundle", \.\.\.configArgs, "--", "--locked"\]/);
+  assert.match(pack, /\[cli, "bundle", "--target", target, \.\.\.configArgs, "--bundles", bundles\]/);
+  assert(pack.indexOf('required(build.gui, "GUI output")') < pack.indexOf('[cli, "bundle"'));
+  assert.match(pack, /assertBundleSelection\(join\(temporary, "risunest-sync-gui.exe"\), "UNK"\)/);
 });

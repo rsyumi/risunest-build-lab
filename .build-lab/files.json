@@ -3873,8 +3873,8 @@
     {
       "path": "server/manager/install/build.mjs",
       "mode": "100644",
-      "bytes": 5800,
-      "sha256": "0abbedc154b3c57e77fba7a9ff419cb405babdae8fd16c6369619ccef8e16359"
+      "bytes": 5356,
+      "sha256": "9967ca8ed3d6075484b9aa392167aa27ec16baf36c0d1351eadda878653c5acf"
     },
     {
       "path": "server/manager/install/install.sh",
@@ -3903,8 +3903,8 @@
     {
       "path": "server/manager/install/package.mjs",
       "mode": "100644",
-      "bytes": 21954,
-      "sha256": "c0356503ade79bd228bbd3cd90520e6b3985dc2deb7d480293959554461b4ff0"
+      "bytes": 22251,
+      "sha256": "d90c8af96a378e70dd803c27f52293c81d621a1d4dbc360bbf8d6eef9769ad7a"
     },
     {
       "path": "server/manager/install/windows.nsh",
@@ -17655,8 +17655,8 @@
     {
       "path": "tests/release/build-workflow.node-test.mjs",
       "mode": "100644",
-      "bytes": 34928,
-      "sha256": "bb523081be656f78c9fccd2d5841dc82415624c76d0eb9109ea4c9f7b99556ce"
+      "bytes": 39617,
+      "sha256": "11ded3de6be9515266c2c3e9593c1cb4497000ec0fb6dbb28319ec3f4e26af09"
     },
     {
       "path": "tests/release/catalog.node-test.mjs",
@@ -17969,8 +17969,8 @@
     {
       "path": ".github/workflows/release.yml",
       "mode": "100644",
-      "bytes": 57567,
-      "sha256": "0a307c5d5476cbd57991e109e574a6bc480b6c3bc1cf63ba064c4dc243b07029",
+      "bytes": 56344,
+      "sha256": "53ad272302ecc1a8745a3dfaf601e7b4ae4bf6d2494e9f0590fe3b4fc278d0f5",
       "reason": "private-control-or-generated"
     },
     {

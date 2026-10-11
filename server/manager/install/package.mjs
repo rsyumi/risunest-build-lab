@@ -233,7 +233,7 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
     throw new Error("Set CARGO_TARGET_DIR to the repository shared target directory.");
   const requiredInputs = target.includes("linux")
     ? ["daemon", "manager", "cloudflared", "license"]
-    : ["daemon", "packagedDaemon", "manager", "gui", "cloudflared", "license"];
+    : ["daemon", "packagedDaemon", "manager", "cloudflared", "license"];
   if (target.includes("windows")) requiredInputs.push("managerBackground");
   for (const name of requiredInputs) {
     if (!existsSync(build[name])) throw new Error(`Native build input ${name} is missing.`);
@@ -299,7 +299,10 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
         },
       });
       const bundles = os === "windows" ? "nsis" : "app";
-      run(process.execPath, [cli, "build", "--target", target, "--config", "src-tauri/tauri.bundle.conf.json", "--config", config, "--bundles", bundles, "--", "--locked"], gui);
+      const configArgs = ["--config", "src-tauri/tauri.bundle.conf.json", "--config", config];
+      run(process.execPath, [cli, "build", "--target", target, "--no-bundle", ...configArgs, "--", "--locked"], gui);
+      copyFileSync(join(process.env.CARGO_TARGET_DIR, target, `release/risunest-sync-gui${os === "windows" ? ".exe" : ""}`), required(build.gui, "GUI output"));
+      run(process.execPath, [cli, "bundle", "--target", target, ...configArgs, "--bundles", bundles], gui);
       const bundleRoot = join(process.env.CARGO_TARGET_DIR, target, "release/bundle");
       if (os === "windows") {
         copyRuntime(temporary, build, releaseInput, true);
