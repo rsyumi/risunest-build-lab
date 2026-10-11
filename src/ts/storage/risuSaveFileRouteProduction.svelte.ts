@@ -1,5 +1,5 @@
 import type { ExportExclusions } from './exportExcludedReport'
-import { open, save } from '@tauri-apps/plugin-dialog'
+import { open, save } from './fileSelection'
 
 import { downloadFile } from '../globalApi.svelte'
 import { join } from '@tauri-apps/api/path'

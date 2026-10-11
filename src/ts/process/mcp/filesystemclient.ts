@@ -1,5 +1,6 @@
 import { MCPClientLike } from "./internalmcp";
 import type { MCPTool, RPCToolCallContent } from "./mcplib";
+import { withLibraryFileSelection } from '../../storage/libraryFileOperation';
 
 export class FileSystemClient extends MCPClientLike {
     private directoryHandle: FileSystemDirectoryHandle | null = null;
@@ -26,7 +27,7 @@ export class FileSystemClient extends MCPClientLike {
         }
 
         try {
-            this.directoryHandle = await (window as any).showDirectoryPicker();
+            this.directoryHandle = await withLibraryFileSelection(() => (window as any).showDirectoryPicker());
             if (!this.directoryHandle) {
                 throw new Error("Directory selection was cancelled or failed.");
             }

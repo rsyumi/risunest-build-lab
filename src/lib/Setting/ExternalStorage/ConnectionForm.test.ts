@@ -17,6 +17,8 @@ const state = vi.hoisted(() => ({
     selectFolder: vi.fn(),
     cancelFolderSelection: vi.fn(),
     openUrl: vi.fn(),
+    onAuthorizationReady: vi.fn(),
+    stopAuthorizationListener: vi.fn(),
 }))
 
 const platformState = vi.hoisted(() => ({ android: true, ios: false }))
@@ -43,6 +45,7 @@ vi.mock('src/ts/storage/sync/external/bridge', () => ({
         beginAuthorization: state.beginAuthorization,
         completeAuthorization: state.completeAuthorization,
         cancelAuthorization: state.cancelAuthorization,
+        onAuthorizationReady: state.onAuthorizationReady,
         listFolders: state.listFolders,
         selectFolder: state.selectFolder,
         cancelFolderSelection: state.cancelFolderSelection,
@@ -141,7 +144,7 @@ function typeInto(control: HTMLInputElement, value: string): void {
 
 async function settle(): Promise<void> {
     await tick()
-    await Promise.resolve()
+    await new Promise(resolve => setTimeout(resolve, 0))
     await tick()
 }
 
@@ -199,6 +202,7 @@ beforeEach(() => {
         state: 'browser-required',
     })
     state.cancelAuthorization.mockResolvedValue(undefined)
+    state.onAuthorizationReady.mockResolvedValue(state.stopAuthorizationListener)
     state.cancelFolderSelection.mockResolvedValue(undefined)
     state.listFolders.mockResolvedValue({ path: [], folders: [], selectable: false })
 })
@@ -604,6 +608,111 @@ describe('OAuth folder setup', () => {
 })
 
 describe('Android Google authorization lifecycle', () => {
+    it('finishes folder selection on callback without connecting an unconfirmed folder', async () => {
+        state.prepareConnection.mockResolvedValue(preparedForSelection)
+        state.completeAuthorization.mockResolvedValue({ folderSelected: true, folder: { name: 'Backups' } })
+        const onconnected = vi.fn()
+        component = mount(ConnectionForm, { target, props: { strings, onconnected, oncancel: vi.fn() } })
+        await settle()
+        await selectMode(strings.existing)
+        typeInto(labelControl<HTMLInputElement>(strings.recoveryCode), 'recovery-key')
+        await fillRequiredFields()
+        button(strings.prepare).click()
+        await settle()
+        button(strings.selectFolder).click()
+        await vi.waitFor(() => expect(state.openUrl).toHaveBeenCalled())
+        state.onAuthorizationReady.mock.calls[0][0]('authorization-1')
+        await vi.waitFor(() => expect(folderRow().dataset.state).toBe('selected'))
+        expect(state.completeAuthorization).toHaveBeenCalledTimes(1)
+        expect(onconnected).not.toHaveBeenCalled()
+        expect(state.commitConnection).not.toHaveBeenCalled()
+        expect(labelControl<HTMLInputElement>(strings.confirmEndpoint).checked).toBe(false)
+    })
+
+    it('releases a late listener without starting authorization after unmount', async () => {
+        let register!: (stop: () => void) => void
+        state.onAuthorizationReady.mockImplementationOnce(() => new Promise(resolve => { register = resolve }))
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+        await prepareGoogleConnection()
+        button(strings.signIn).click()
+        await vi.waitFor(() => expect(state.onAuthorizationReady).toHaveBeenCalled())
+        await unmount(component)
+        component = undefined
+        register(state.stopAuthorizationListener)
+        await settle()
+        expect(state.stopAuthorizationListener).toHaveBeenCalledOnce()
+        expect(state.beginAuthorization).not.toHaveBeenCalled()
+    })
+
+    it('automatically completes a matching callback once, including a callback during browser launch', async () => {
+        const onconnected = vi.fn()
+        component = mount(ConnectionForm, { target, props: { strings, onconnected, oncancel: vi.fn() } })
+        await settle()
+        state.completeAuthorization.mockResolvedValue({ connection: { id: 'google-connection' } })
+        state.openUrl.mockImplementation(async () => {
+            const ready = state.onAuthorizationReady.mock.calls[0]?.[0]
+            ready?.('unrelated-authorization')
+            ready?.('authorization-1')
+            ready?.('authorization-1')
+        })
+        await beginGoogleAuthorization()
+        await vi.waitFor(() => expect(onconnected).toHaveBeenCalledTimes(1))
+        expect(state.completeAuthorization).toHaveBeenCalledExactlyOnceWith('authorization-1', undefined, undefined)
+    })
+
+    it('ignores stale callbacks and disposes the listener when the form closes', async () => {
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+        await beginGoogleAuthorization()
+        expect(state.onAuthorizationReady).toHaveBeenCalledTimes(1)
+        const ready = state.onAuthorizationReady.mock.calls[0][0]
+        ready('unrelated-authorization')
+        await settle()
+        expect(state.completeAuthorization).not.toHaveBeenCalled()
+        await unmount(component)
+        component = undefined
+        expect(state.stopAuthorizationListener).toHaveBeenCalledTimes(1)
+        ready('authorization-1')
+        await settle()
+        expect(state.completeAuthorization).not.toHaveBeenCalled()
+    })
+
+    it('does not repeat completion when the callback arrives during manual completion', async () => {
+        let finish!: (value: unknown) => void
+        state.completeAuthorization.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+        const onconnected = vi.fn()
+        component = mount(ConnectionForm, { target, props: { strings, onconnected, oncancel: vi.fn() } })
+        await settle()
+        await beginGoogleAuthorization()
+        button(strings.finishSignIn).click()
+        await settle()
+        state.onAuthorizationReady.mock.calls[0][0]('authorization-1')
+        await settle()
+        expect(state.completeAuthorization).toHaveBeenCalledTimes(1)
+        finish({ connection: { id: 'google-connection' } })
+        await settle()
+        expect(onconnected).toHaveBeenCalledTimes(1)
+        expect(state.completeAuthorization).toHaveBeenCalledTimes(1)
+    })
+
+    it('reports a failed automatic completion and allows a fresh sign-in', async () => {
+        state.completeAuthorization.mockRejectedValueOnce({ kind: 'reauthRequired' })
+        const onconnected = vi.fn()
+        component = mount(ConnectionForm, { target, props: { strings, onconnected, oncancel: vi.fn() } })
+        await settle()
+        await beginGoogleAuthorization()
+        state.onAuthorizationReady.mock.calls[0][0]('authorization-1')
+        await settle()
+        expect(state.cancelAuthorization).toHaveBeenCalledExactlyOnceWith('authorization-1')
+        expect(onconnected).not.toHaveBeenCalled()
+        expect(target.querySelector('[role="alert"]')?.textContent).toContain(strings.reauthenticate)
+        button(strings.signIn).click()
+        await settle()
+        expect(state.beginAuthorization).toHaveBeenCalledTimes(2)
+        expect(state.onAuthorizationReady).toHaveBeenCalledTimes(1)
+    })
+
     it('keeps a rejected pasted callback editable, then locks parent cancel through successful completion', async () => {
         const onconnected = vi.fn()
         const busyStates: boolean[] = []
@@ -714,7 +823,8 @@ describe('Android Google authorization lifecycle', () => {
         await settle()
         await prepareGoogleConnection()
         button(strings.signIn).click()
-        await tick()
+        await settle()
+        expect(state.beginAuthorization).toHaveBeenCalledOnce()
 
         await unmount(component)
         component = undefined
@@ -1097,5 +1207,18 @@ describe('authorization waiting copy and renewal', () => {
         expect(state.commitConnection).toHaveBeenCalledWith('preparation-1', { kind: 'webdav', password: 'synthetic-renewed-password' })
         expect(connected).toHaveBeenCalledWith({ connection: renewed })
         expect(state.prepareConnection).not.toHaveBeenCalled()
+    })
+
+    it.each([
+        ['appDataFolder', 'Hidden app data'],
+        ['', undefined],
+    ])('reviews a signed-in renewal with the saved account and folder %#', async (repositoryHint, shown) => {
+        const renewed = { id: 'existing', providerId: 'google_drive', purpose: 'backup' } as import('src/ts/storage/sync/external/types').ExternalConnectionSummary
+        state.prepareRenewal.mockResolvedValue({ ...prepared, endpoint: { ...prepared.endpoint, accountHint: 'synthetic@example.invalid', repositoryHint } })
+        component = mount(ConnectionForm, { target, props: { strings, renewalConnection: renewed, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+        const terms = [...target.querySelectorAll('dt')]
+        expect(terms.find(term => term.textContent === strings.account)?.nextElementSibling?.textContent).toBe('synthetic@example.invalid')
+        expect(terms.find(term => term.textContent === strings.repository)?.nextElementSibling?.textContent).toBe(shown)
     })
 })

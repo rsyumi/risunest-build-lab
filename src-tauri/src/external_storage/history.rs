@@ -248,6 +248,7 @@ pub(crate) async fn external_storage_list_history(
                         &document.snapshot_id,
                         &reference,
                     )?;
+                    super::usage::remember_snapshot(&runtime::root(&app)?, &request.connection_id, &reference, &document);
                     let mut value = item(&document, kind, pinned, &store_id);
                     let row_id = point.document.point_id.clone();
                     value["id"] = json!(row_id);
@@ -291,6 +292,7 @@ pub(crate) async fn external_storage_list_history(
                 }
                 let (reference, document) = open_snapshot(&app, &connected, receipt, &cancel).await?;
                 cache.remember_discovery(&request.connection_id, &document.snapshot_id, &reference)?;
+                super::usage::remember_snapshot(&runtime::root(&app)?, &request.connection_id, &reference, &document);
                 remember_item(
                     &mut items,
                     document.snapshot_id.clone(),

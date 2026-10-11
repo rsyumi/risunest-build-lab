@@ -141,6 +141,38 @@ pub(crate) struct RemoteBodies {
     root:PathBuf,
     db:Option<Connection>,
 }
+
+pub(super) fn usage_receipts(root: &Path, connection: &StoredConnection) -> Result<Vec<ObjectReceipt>> {
+    let Some(db) = database(root, false)? else { return Ok(Vec::new()); };
+    let mut receipts = Vec::new();
+    let mut bodies = db.prepare("SELECT DISTINCT json_extract(source,'$.body') FROM sources
+        WHERE library=?1 AND json_extract(source,'$.connectionId')=?2").map_err(local)?;
+    let rows = bodies.query_map(params![connection.descriptor.repository_id, connection.id], |row| row.get::<_, String>(0)).map_err(local)?;
+    for row in rows {
+        let body: LargeBody = serde_json::from_str(&row.map_err(local)?).map_err(local)?;
+        let locator = body.locator.ok_or_else(segment::corrupt)?;
+        if locator.connection_identity != connection.descriptor_locator.connection_identity { continue; }
+        receipts.push(ObjectReceipt { locator, byte_length: body.byte_length.0, version: None, checksum: None, complete: true });
+    }
+    // A catalog or pack can be shared by thousands of assets. Decode each file once.
+    let mut packed = db.prepare("SELECT json_extract(source,'$.catalog') FROM packed_sources
+        WHERE library=?1 AND json_extract(source,'$.connectionId')=?2
+        UNION SELECT member.value FROM packed_sources,json_each(source,'$.packs') member
+        WHERE library=?1 AND json_extract(source,'$.connectionId')=?2").map_err(local)?;
+    let rows = packed.query_map(params![connection.descriptor.repository_id, connection.id], |row| row.get::<_, String>(0)).map_err(local)?;
+    for row in rows {
+        let object: StoredObject = serde_json::from_str(&row.map_err(local)?).map_err(local)?;
+        object.validate().map_err(local)?;
+        if object.locator.connection_identity != connection.descriptor_locator.connection_identity
+            || object.header.repository_id != connection.provider_repository_id { continue; }
+        receipts.push(ObjectReceipt {
+            locator: RemoteLocator { connection_identity: object.locator.connection_identity,
+                collection: object.locator.collection, object: object.locator.object },
+            byte_length: object.ciphertext_length, version: None, checksum: None, complete: true,
+        });
+    }
+    Ok(receipts)
+}
 /// Hashes one registry query asks about.
 const LOOKUP_PAGE:usize=512;
 type ConnectionKey=(PathBuf,String,String);

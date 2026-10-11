@@ -1,3 +1,4 @@
+import { selectDomFiles } from '../storage/fileSelection'
 import { prepareExternalDatabaseImport } from '../storage/upstreamImport'
 import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 import { BaseDirectory, open, writeFile } from "@tauri-apps/plugin-fs";
@@ -366,27 +367,7 @@ function cancelledError(): DOMException {
 }
 
 function pickWebBackupFile(signal: AbortSignal): Promise<File | null> {
-    if (signal.aborted) return Promise.resolve(null)
-    return new Promise((resolve) => {
-        const input = document.createElement('input')
-        input.type = 'file'
-        input.accept = '.bin'
-        let settled = false
-        const finish = (file: File | null) => {
-            if (settled) return
-            settled = true
-            signal.removeEventListener('abort', onAbort)
-            input.remove()
-            resolve(file)
-        }
-        const onAbort = () => finish(null)
-        input.onchange = async () => {
-            finish(input.files?.[0] ?? null)
-        }
-        input.oncancel = () => finish(null)
-        signal.addEventListener('abort', onAbort, { once: true })
-        input.click()
-    })
+    return selectDomFiles({ accept: '.bin', signal }).then(files => files[0] ?? null)
 }
 
 /**

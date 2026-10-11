@@ -90,7 +90,7 @@ export class GitHubReleases {
   }
 
   async prepareDraft(tag, commit, body = "") {
-    parseTag(tag);
+    const { product, version } = parseTag(tag);
     if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid-source-commit");
     let previous = await this.getByTag(tag);
     if (!previous) {
@@ -101,7 +101,8 @@ export class GitHubReleases {
     if (previous && (previous.target_commitish !== commit || previous.prerelease)) throw new Error("release-identity-conflict");
     await this.assertTagCommit(tag, commit);
     if (previous) return previous;
+    const name = `${product === "app" ? "RisuNest" : "RisuNest Sync"} v${version}`;
     return this.request("/releases", { method: "POST", body: { tag_name: tag,
-      target_commitish: commit, name: tag, body, draft: true, prerelease: false, make_latest: "false" } });
+      target_commitish: commit, name, body, draft: true, prerelease: false, make_latest: "false" } });
   }
 }

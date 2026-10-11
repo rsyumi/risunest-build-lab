@@ -2271,6 +2271,14 @@ export class SaveCoordinator {
                 const changes = diffMaterializedCharacter(JSON.parse(beforeCanonical!) as CompleteCharacter, replacement)
                 commit.unitMutations = changes.unitMutations
                 commit.conversations = changes.conversations
+                if (assetOwnerHeads?.length) {
+                    const key = JSON.stringify(['character', characterId, 'additionalAssets'])
+                    if (!commit.unitMutations.some((mutation) => mutation.key === key)) {
+                        commit.unitMutations.push(Object.hasOwn(replacement, 'additionalAssets')
+                            ? { key, type: 'set', value: replacement.additionalAssets }
+                            : { key, type: 'delete' })
+                    }
+                }
             } else {
                 if (includeInCharacterOrder !== false) {
                     appendCharacterIdToOrder(mutatedRoot, characterId)

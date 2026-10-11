@@ -30,7 +30,7 @@ pub(super) fn save(root: &Path, id: &str, descriptor: risunest_external_storage_
         id: id.into(), config: ConnectionConfig { provider: "synthetic".into(), profile: None, endpoint: "https://synthetic.invalid".into(), account_id: "account".into(), location: Default::default(), oauth_profile: None },
         descriptor, descriptor_locator: locator, provider_repository_id: fake::repository().repository_id,
         credential_ref: "credential".into(), root_key_ref: "root-key".into(), recovery_key_ref: "recovery-key".into(),
-        capabilities: fake::capabilities(false), retention_policy: None, transfer_concurrency: None,
+        capabilities: fake::capabilities(false), retention_policy: None, transfer_concurrency: None, labels: Default::default(),
         created_at_ms: 1, verified_at_ms: 1, last_sync_at_ms: None, last_backup_at_ms: None,
     };
     ConnectionStore::open(root).unwrap().insert(&stored).unwrap(); stored
@@ -54,6 +54,10 @@ fn both_saved_factories_share_the_same_body_admission() {
         let ConnectedRepository { provider: regular, handle, .. } = connection_commands::open_connected_with_cancel(app.handle(), &stored.id, &cancel).await.unwrap();
         let (source, source_handle, _, source_stored) = super::lww_residency::open_source_connection(root.path(), &stored.id, &stored.descriptor.repository_id, &cancel).await.unwrap();
         assert_eq!(source_stored.id, stored.id);
+        let usage = super::usage::summarize(root.path(), &stored.id).unwrap();
+        assert_eq!(usage.locally_uploaded_objects_lower_bound, 1);
+        assert!(usage.locally_uploaded_bytes_lower_bound > 0);
+        assert!(usage.observed_at_ms.is_some());
         transfer_limit::set_limit(root.path(), &stored.id, 1).unwrap();
         assert_eq!((regular.transfer_concurrency(), source.transfer_concurrency()), (1, 1));
         provider.seed("download", ObjectRole::Pack, b"test".to_vec());

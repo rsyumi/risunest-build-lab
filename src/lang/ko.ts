@@ -2632,6 +2632,9 @@ export const languageKorean = {
                 '알림이 꺼져 있으면 이 기능이 동작하지 않습니다.',
             operatingSystem: '운영체제',
             webView: 'WebView',
+            refreshScreen: '화면 새로고침',
+            refreshBusy: '진행 중인 작업을 마친 후 다시 시도해주세요.',
+            refreshFailed: '화면을 새로고침하지 못했습니다. 다시 시도해주세요.',
             "iosBackgroundLabel": '백그라운드 작업',
         },
         boot: {

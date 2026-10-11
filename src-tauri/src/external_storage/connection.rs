@@ -313,7 +313,7 @@ pub(crate) fn provider_descriptors() -> Vec<ProviderDescriptor> {
     vec![
         provider(
             "webdav",
-            "WebDAV / Koofr",
+            "WebDAV",
             false,
             &["sequential", "backup-only"],
             &["koofr"],
@@ -740,13 +740,27 @@ pub(crate) fn endpoint_confirmation(
     Ok(EndpointConfirmation {
         provider_id: config.provider.clone(),
         authority,
-        account_hint: ((config.provider == "webdav" || config.oauth_profile.is_some())
-            && !config.account_id.is_empty())
-        .then(|| config.account_id.clone()),
+        account_hint: (config.provider == "webdav" && !config.account_id.is_empty())
+            .then(|| config.account_id.clone()),
         repository_hint,
         warnings,
         remote_verified,
     })
+}
+
+/// The endpoint shown for a saved connection. Signed-in providers identify the
+/// account and folder by opaque ids, so they show the saved names instead.
+pub(crate) fn stored_endpoint(connection: &StoredConnection) -> Result<EndpointConfirmation> {
+    let mut endpoint = endpoint_confirmation(&connection.config, true)?;
+    if matches!(connection.config.provider.as_str(), "google_drive" | "onedrive") {
+        endpoint.account_hint = connection.labels.account.clone();
+        endpoint.repository_hint = match &connection.labels.folder {
+            Some(folder) => folder.clone(),
+            None if matches!(endpoint.repository_hint.as_str(), "appDataFolder" | "special/approot") => endpoint.repository_hint,
+            None => String::new(),
+        };
+    }
+    Ok(endpoint)
 }
 
 pub(crate) fn strategy_for_new_connection(
@@ -779,6 +793,14 @@ pub(crate) fn summary(connection: &StoredConnection) -> ConnectionSummary {
         Some(PublicationStrategy::Sequential) => ConnectionStrategy::Sequential,
         None => ConnectionStrategy::BackupOnly,
     };
+    let endpoint = stored_endpoint(connection).unwrap_or(EndpointConfirmation {
+        provider_id: connection.config.provider.clone(),
+        authority: "invalid endpoint".into(),
+        account_hint: None,
+        repository_hint: "unavailable".into(),
+        warnings: Vec::new(),
+        remote_verified: false,
+    });
     ConnectionSummary {
         id: connection.id.clone(),
         provider_id: connection.config.provider.clone(),
@@ -789,25 +811,11 @@ pub(crate) fn summary(connection: &StoredConnection) -> ConnectionSummary {
         },
         strategy,
         mode: ConnectionOpenMode::Existing,
-        display_name: if (connection.config.provider == "webdav"
-            || connection.config.oauth_profile.is_some())
-            && !connection.config.account_id.is_empty()
-        {
-            format!(
-                "{} · {}",
-                connection.config.provider, connection.config.account_id
-            )
-        } else {
-            connection.config.provider.clone()
+        display_name: match &endpoint.account_hint {
+            Some(account) => format!("{} · {account}", connection.config.provider),
+            None => connection.config.provider.clone(),
         },
-        endpoint: endpoint_confirmation(&connection.config, true).unwrap_or(EndpointConfirmation {
-            provider_id: connection.config.provider.clone(),
-            authority: "invalid endpoint".into(),
-            account_hint: None,
-            repository_hint: "unavailable".into(),
-            warnings: Vec::new(),
-            remote_verified: false,
-        }),
+        endpoint,
         retention_policy: connection
             .retention_policy
             .unwrap_or(RetentionPolicy::DEFAULT),
@@ -952,7 +960,7 @@ pub(crate) fn provider_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::external_storage::{contract::OAuthProfile, recovery};
+    use crate::external_storage::{connection_store::ConnectionLabels, contract::OAuthProfile, recovery};
     use std::collections::BTreeMap;
 
     #[test]
@@ -1415,13 +1423,76 @@ mod tests {
             verified_at_ms: 1,
             last_sync_at_ms: None,
             last_backup_at_ms: None,
-            retention_policy: None, transfer_concurrency: None,
+            retention_policy: None, transfer_concurrency: None, labels: Default::default(),
         };
         let summary = summary(&connection);
         assert_eq!(summary.display_name, "mybox");
         assert_eq!(summary.endpoint.account_hint, None);
         let serialized = serde_json::to_string(&summary).unwrap();
         assert!(!serialized.contains(&account_id));
+    }
+
+    #[test]
+    fn signed_in_connections_show_saved_names_instead_of_provider_ids() {
+        let stored = |provider: &str, location: &[(&str, &str)], labels: ConnectionLabels| StoredConnection {
+            id: "synthetic-connection".into(),
+            config: ConnectionConfig {
+                provider: provider.into(),
+                profile: None,
+                endpoint: if provider == "onedrive" { "https://graph.microsoft.com/v1.0".into() } else { String::new() },
+                account_id: "synthetic-permission-id".into(),
+                location: location.iter().map(|(key, value)| ((*key).into(), (*value).into())).collect(),
+                oauth_profile: Some(OAuthProfile { project_id: "123456789012".into(), platform_client_ids: BTreeMap::new() }),
+            },
+            descriptor: risunest_external_storage_format::format::Descriptor::new("synthetic-repository".into(), None).unwrap(),
+            descriptor_locator: super::super::fake::locator(),
+            provider_repository_id: "synthetic-root".into(),
+            credential_ref: "synthetic-credential-ref".into(),
+            root_key_ref: "synthetic-key-ref".into(),
+            recovery_key_ref: "synthetic-recovery-key-ref".into(),
+            capabilities: Capabilities::default(),
+            created_at_ms: 1,
+            verified_at_ms: 1,
+            last_sync_at_ms: None,
+            last_backup_at_ms: None,
+            retention_policy: None, transfer_concurrency: None,
+            labels,
+        };
+        let drive = [("space", "drive"), ("folderId", "synthetic-folder-id")];
+        let labelled = summary(&stored("google_drive", &drive,
+            ConnectionLabels::new(Some("synthetic@example.invalid".into()), Some("RisuNest".into()))));
+        assert_eq!(labelled.endpoint.account_hint.as_deref(), Some("synthetic@example.invalid"));
+        assert_eq!(labelled.endpoint.repository_hint, "RisuNest");
+        assert_eq!(labelled.display_name, "google_drive · synthetic@example.invalid");
+
+        let unlabelled = summary(&stored("google_drive", &drive, ConnectionLabels::default()));
+        assert_eq!(unlabelled.endpoint.account_hint, None);
+        assert_eq!(unlabelled.endpoint.repository_hint, "");
+        assert_eq!(unlabelled.display_name, "google_drive");
+        let serialized = serde_json::to_string(&unlabelled).unwrap();
+        assert!(!serialized.contains("synthetic-permission-id"));
+        assert!(!serialized.contains("synthetic-folder-id"));
+
+        let hidden = summary(&stored("google_drive", &[("space", "appDataFolder"), ("folderId", "appDataFolder")], ConnectionLabels::default()));
+        assert_eq!(hidden.endpoint.repository_hint, "appDataFolder");
+        let app_folder = summary(&stored("onedrive",
+            &[("accountType", "appFolder"), ("tenant", "consumers"), ("driveId", "synthetic-drive"), ("rootItemId", "special/approot")],
+            ConnectionLabels::new(Some("synthetic@example.invalid".into()), None)));
+        assert_eq!(app_folder.endpoint.repository_hint, "special/approot");
+        assert_eq!(app_folder.endpoint.account_hint.as_deref(), Some("synthetic@example.invalid"));
+        let picked = summary(&stored("onedrive",
+            &[("accountType", "personal"), ("tenant", "consumers"), ("driveId", "synthetic-drive"), ("rootItemId", "synthetic-item")],
+            ConnectionLabels::default()));
+        assert_eq!(picked.endpoint.repository_hint, "");
+
+        let mut webdav = stored("webdav", &[("root", "/RisuNest")], ConnectionLabels::default());
+        webdav.config.oauth_profile = None;
+        webdav.config.endpoint = "https://synthetic.invalid/dav".into();
+        webdav.config.account_id = "synthetic-user".into();
+        let webdav = summary(&webdav);
+        assert_eq!(webdav.endpoint.account_hint.as_deref(), Some("synthetic-user"));
+        assert_eq!(webdav.endpoint.repository_hint, "/RisuNest");
+        assert_eq!(webdav.display_name, "webdav · synthetic-user");
     }
 
     #[test]

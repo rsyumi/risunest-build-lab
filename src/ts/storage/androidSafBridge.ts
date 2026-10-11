@@ -1,3 +1,4 @@
+import { withLibraryFileSelection } from './libraryFileOperation'
 import '../androidNativeControl'
 import type { NativeFileJobSource } from './nativeFileJobs'
 
@@ -263,7 +264,7 @@ function pickAndroidSpoolSource(
         )
     }
     const requestId = dependencies.createRequestId()
-    return new Promise((resolve, reject) => {
+    return withLibraryFileSelection(() => new Promise((resolve, reject) => {
         let settled = false
         let receiving = false
         let aborted = false
@@ -398,7 +399,7 @@ function pickAndroidSpoolSource(
         } catch (error) {
             finish(() => reject(error))
         }
-    })
+    }))
 }
 
 
@@ -546,7 +547,7 @@ export function copyNativeExportToAndroidSaf(
     }
     const requestId = dependencies.createRequestId()
     activeDestinationRequestIds.add(requestId)
-    return new Promise((resolve, reject) => {
+    return withLibraryFileSelection(() => new Promise((resolve, reject) => {
         let settled = false
         let receiving = false
         const cleanup = () => {
@@ -629,7 +630,7 @@ export function copyNativeExportToAndroidSaf(
         catch (error) {
             finish(() => reject(error))
         }
-    })
+    }))
 }
 
 export function pickAndroidContentSource(

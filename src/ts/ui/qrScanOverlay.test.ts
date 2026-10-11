@@ -20,11 +20,15 @@ beforeEach(() => {
     lang.current = languageEnglish
     vi.spyOn(history, 'go').mockImplementation(() => {})
 })
-afterEach(() => {
+afterEach(async () => {
     hide?.()
     hide = undefined
-    vi.restoreAllMocks()
+    flushSync()
+    await Promise.resolve()
     history.replaceState(null, '')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await Promise.resolve()
+    vi.restoreAllMocks()
     document.head.querySelectorAll('style[data-test]').forEach(style => style.remove())
     document.body.replaceChildren()
 })

@@ -23,7 +23,7 @@ vi.mock('src/ts/stores.svelte', () => {
         ScrollToMessageStore: writable(null), additionalChatMenu: writable([]), additionalFloatingActionButtons: writable([]),
         easyPanelStore: writable(false), chatPanelStore: writable(false), HideIconStore: writable(false) }
 })
-vi.mock('src/ts/process/index.svelte', () => ({ doingChat: writable(false), chatProcessStage: writable(0), sendChat: mocks.generate, getSelectedBoundedGenerationFallbackReason: () => mocks.bounded ? null : 'test-complete-conversation',
+vi.mock('src/ts/process/index.svelte', async () => ({ doingChat: (await import('src/ts/process/generationState')).doingChat, chatProcessStage: writable(0), sendChat: mocks.generate, getSelectedBoundedGenerationFallbackReason: () => mocks.bounded ? null : 'test-complete-conversation',
     getHistoryWindowMemoryMode: (historyLimit: boolean) => historyLimit && mocks.historyLimit ? 'none' : null, openSelectedHistoryWindow: mocks.openWindow, notifyGenerationCompletion: mocks.notify }))
 vi.mock('src/ts/util', () => ({ sleep: async () => {}, getPersonaPrompt: () => '' }))
 vi.mock('src/ts/alert', () => ({ alertError: mocks.error, alertConfirm: mocks.confirm }))
@@ -272,8 +272,11 @@ it('runs the input step over a history window when the loading limit is on', asy
     type('Hello')
     send()
     await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
-    expect(mocks.openWindow).toHaveBeenCalledWith({ register: true })
-    expect(mocks.trigger).toHaveBeenCalledWith(DBState.db.characters[0], 'input', { chat: window.chat })
+    expect(mocks.openWindow).toHaveBeenCalledWith({ register: true, signal: expect.any(AbortSignal) })
+    expect(mocks.trigger).toHaveBeenCalledWith(DBState.db.characters[0], 'input', {
+        chat: window.chat,
+        generation: { signal: mocks.generate.mock.calls[0][0].signal, reservation: mocks.generate.mock.calls[0][1] },
+    })
     expect(mocks.createScope).toHaveBeenCalledWith(DBState.db.characters[0], {
         historyWindow: { chat: window.chat, conversationId: 'chat' },
     })
@@ -283,7 +286,7 @@ it('runs the input step over a history window when the loading limit is on', asy
     expect(store[4]).toEqual(expect.objectContaining({ role: 'user', chatId: expect.any(String) }))
     expect(window.release).toHaveBeenCalledOnce()
     expect(mocks.flush).toHaveBeenCalledWith('generation-input')
-    expect(mocks.generate).toHaveBeenCalledWith(expect.objectContaining({ historyLimit: true }))
+    expect(mocks.generate).toHaveBeenCalledWith(expect.objectContaining({ historyLimit: true }), expect.objectContaining({ isCurrent: expect.any(Function) }))
     expect(mocks.acquireComplete).not.toHaveBeenCalled()
     expect(DBState.db.characters[0].chats[0].message).toEqual([])
     expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('')
@@ -312,7 +315,7 @@ it('rerolls over a tail window when the loading limit is on', async () => {
     type('').dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true }))
     await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
     await vi.waitFor(() => expect(store.at(-1)?.responseVariants?.candidates).toHaveLength(2))
-    expect(mocks.generate).toHaveBeenCalledWith(expect.objectContaining({ historyLimit: true }))
+    expect(mocks.generate).toHaveBeenCalledWith(expect.objectContaining({ historyLimit: true }), expect.objectContaining({ isCurrent: expect.any(Function) }))
     expect(store.slice(0, 39)).toEqual(before)
     expect(store.at(-1).data).toBe('new')
     for (const [options] of mocks.openWindow.mock.calls) expect(options.tailStart(store.length)).toBeGreaterThan(30)
@@ -430,6 +433,71 @@ it('a send completing after remount preserves new typing in the restored compose
     finishTrigger()
     await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
     expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('Typed after Settings')
+})
+
+it('reserves generation while the submitted input is still being processed', async () => {
+    type('Preparing input')
+    send()
+    await vi.waitFor(() => expect(mocks.trigger).toHaveBeenCalledOnce())
+    const busyDuringInput = get(doingChat)
+    finishTrigger()
+    await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(get(doingChat)).toBe(false))
+    expect(busyDuringInput).toBe(true)
+})
+
+it.each(['send', 'continue', 'reroll'] as const)('stops a pending %s after the chat screen is remounted', async (action) => {
+    let requestSignal: AbortSignal | undefined
+    let finishRequest!: (completed: boolean) => void
+    mocks.generate.mockImplementation((options: { signal: AbortSignal }) => {
+        doingChat.set(true)
+        requestSignal = options.signal
+        return new Promise<boolean>(resolve => { finishRequest = resolve })
+    })
+    if (action === 'reroll') {
+        DBState.db.characters[0].chats[0].message = [{ role: 'char', data: 'Previous', chatId: 'previous' }]
+        type('').dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true }))
+    } else if (action === 'continue') {
+        DBState.db.characters[0].chats[0].message = [
+            { role: 'user', data: 'Question', chatId: 'question' },
+            { role: 'char', data: 'Previous', chatId: 'previous' },
+        ]
+        await tick()
+        const menu = document.querySelector('.button-icon-send')!.nextElementSibling as HTMLButtonElement
+        menu.click()
+        await tick()
+        const continueAction = [...document.querySelectorAll('span')].find(span => span.textContent === languageEnglish.continueResponse)!.parentElement!
+        continueAction.click()
+    } else {
+        type('Pending response')
+        send()
+        await vi.waitFor(() => expect(mocks.trigger).toHaveBeenCalledOnce())
+        finishTrigger()
+    }
+    await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
+    await unmount(instance!)
+    instance = mount(DefaultChatScreen, { target: document.body })
+    await tick()
+    send()
+    type('Next draft').dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true }))
+    await tick()
+    expect(mocks.generate).toHaveBeenCalledOnce()
+    document.querySelector<HTMLButtonElement>('button[aria-labelledby="cancel"]')!.click()
+    const aborted = requestSignal!.aborted
+    finishRequest(false)
+    await vi.waitFor(() => expect(get(doingChat)).toBe(false))
+    expect(aborted).toBe(true)
+    expect(mocks.error).not.toHaveBeenCalled()
+})
+
+it('does not start generation when input processing finishes after Stop', async () => {
+    type('Cancelled input')
+    send()
+    await vi.waitFor(() => expect(mocks.trigger).toHaveBeenCalledOnce())
+    document.querySelector<HTMLButtonElement>('button[aria-labelledby="cancel"]')!.click()
+    finishTrigger()
+    await vi.waitFor(() => expect(document.querySelector<HTMLButtonElement>('.button-icon-send')?.disabled).toBe(false))
+    expect(mocks.generate).not.toHaveBeenCalled()
 })
 
 it('a late translation cannot replace newer text or write into another conversation', async () => {
@@ -556,6 +624,27 @@ it('reports a completed send once the chat is no longer busy', async () => {
     type('Hello')
     send()
     await vi.waitFor(() => expect(records).toEqual([endOf('completed')]))
+})
+
+it.each(['completed', 'failed'] as const)('finishes a %s send once while its chat screen is unmounted', async (status) => {
+    mocks.bounded = true
+    const records = listenGenerationEnd()
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    const failure = new Error('Synthetic hidden response failure')
+    mocks.generate.mockImplementation(generation(status === 'completed' ? true : failure, () => pending))
+    type('Sent before settings')
+    send()
+    await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
+    await unmount(instance!)
+    instance = undefined
+    release()
+    await vi.waitFor(() => expect(records).toEqual([endOf(status)]))
+    if (status === 'failed') expect(mocks.error).toHaveBeenCalledExactlyOnceWith(failure)
+    instance = mount(DefaultChatScreen, { target: document.body })
+    await tick()
+    expect(document.querySelector('.button-icon-send')).not.toBeNull()
+    expect(mocks.generate).toHaveBeenCalledOnce()
 })
 
 it('reports a failed send after the error, once the chat is no longer busy', async () => {

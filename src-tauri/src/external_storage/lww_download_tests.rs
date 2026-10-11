@@ -16,7 +16,7 @@ fn connection(f:&CycleFixture,provider:Arc<dyn Provider>,limit:Option<usize>)->s
     let stored=StoredConnection{id:"receiver".into(),config:ConnectionConfig{provider:"synthetic".into(),profile:None,endpoint:"https://synthetic.invalid".into(),account_id:"fixture".into(),location:Default::default(),oauth_profile:None},
         descriptor:f.receiver.descriptor.clone(),descriptor_locator:RemoteLocator{connection_identity:f.receiver.repository.connection_identity.clone(),collection:None,object:"descriptor".into()},
         provider_repository_id:f.receiver.repository.repository_id.clone(),credential_ref:"credential".into(),root_key_ref:"key".into(),recovery_key_ref:"recovery".into(),retention_policy:None,
-        transfer_concurrency:limit,capabilities:f.receiver.capabilities.clone(),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None};
+        transfer_concurrency:limit,labels:Default::default(),capabilities:f.receiver.capabilities.clone(),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None};
     super::super::connection_commands::ConnectedRepository{stored,provider,handle:fake::repository(),dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new([7;32])}
 }
 fn runtime()->tokio::runtime::Runtime {tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap()}

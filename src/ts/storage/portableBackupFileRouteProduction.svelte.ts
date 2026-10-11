@@ -1,6 +1,6 @@
 import { portableBackupSuggestedName } from './portableBackupName'
 import { invoke } from '@tauri-apps/api/core'
-import { open, save } from '@tauri-apps/plugin-dialog'
+import { open, save } from './fileSelection'
 import { language } from 'src/lang'
 import { alertCheckboxConfirm, alertConfirm, alertNormal } from '../alert'
 import { pickIOSBackupSource, materializeIOSBackupSource, discardIOSFile } from './iosFiles'

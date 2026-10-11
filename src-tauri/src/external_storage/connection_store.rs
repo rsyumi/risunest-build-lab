@@ -28,6 +28,27 @@ pub(crate) struct StoredConnection {
     pub retention_policy: Option<super::connection::RetentionPolicy>,
     #[serde(default)]
     pub transfer_concurrency: Option<usize>,
+    #[serde(default)]
+    pub labels: ConnectionLabels,
+}
+/// Names shown with a connection. The provider ids that identify the account
+/// and folder stay in `config`; these are display text only.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConnectionLabels {
+    pub account: Option<String>,
+    pub folder: Option<String>,
+}
+impl ConnectionLabels {
+    pub fn new(account: Option<String>, folder: Option<String>) -> Self {
+        Self { account: display_label(account, 320), folder: display_label(folder, 255) }
+    }
+}
+/// A label the provider reported, or `None` when it is unusable as display text.
+fn display_label(value: Option<String>, limit: usize) -> Option<String> {
+    let value = value?.trim().to_owned();
+    (!value.is_empty() && value.chars().count() <= limit && !value.chars().any(char::is_control))
+        .then_some(value)
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -44,6 +65,8 @@ pub(crate) struct PendingStoredConnection {
     pub root_key_ref: String,
     pub recovery_key_ref: String,
     pub created_at_ms: u64,
+    #[serde(default)]
+    pub labels: ConnectionLabels,
 }
 /// How many identities one connection remembers as unusable.
 const UNUSABLE_OBJECT_LIMIT: i64 = 1024;
@@ -104,6 +127,10 @@ impl ConnectionStore {
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS connections(id TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS automatic_backup_pauses(connection_id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS usage_objects(connection_id TEXT NOT NULL,locator TEXT NOT NULL,byte_length TEXT NOT NULL,PRIMARY KEY(connection_id,locator));
+            CREATE TABLE IF NOT EXISTS usage_removed(connection_id TEXT NOT NULL,locator TEXT NOT NULL,PRIMARY KEY(connection_id,locator));
+            CREATE TABLE IF NOT EXISTS usage_observations(connection_id TEXT PRIMARY KEY,observed_at_ms INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS usage_snapshots(connection_id TEXT NOT NULL,locator TEXT NOT NULL,created_at_ms INTEGER NOT NULL,value TEXT NOT NULL,PRIMARY KEY(connection_id,locator));
             CREATE TABLE IF NOT EXISTS pending_connections(id TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS discovery(connection_id TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(connection_id,id));
             CREATE TABLE IF NOT EXISTS unusable_objects(connection_id TEXT NOT NULL,identity TEXT NOT NULL,object_id TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(connection_id,identity));").map_err(storage)?;
@@ -240,6 +267,7 @@ impl ConnectionStore {
         id: &str,
         expected: &str,
         replacement: &str,
+        account_label: Option<String>,
     ) -> Result<StoredConnection> {
         let tx = self.0.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
         let encoded: String = tx.query_row("SELECT value FROM connections WHERE id=?1", [id], |row| row.get(0))
@@ -249,6 +277,10 @@ impl ConnectionStore {
             return Err(ProviderError::new(ErrorKind::PreconditionFailed));
         }
         connection.credential_ref = replacement.to_owned();
+        // A sign-in that reported no usable name keeps the one already shown.
+        if let Some(account) = ConnectionLabels::new(account_label, None).account {
+            connection.labels.account = Some(account);
+        }
         connection.verified_at_ms = super::runtime::now_ms();
         let encoded = serde_json::to_string(&connection).map_err(storage)?;
         decode(&encoded)?;
@@ -379,6 +411,7 @@ impl ConnectionStore {
             provider_repository_id,
             credential_ref: pending.credential_ref,
             retention_policy: None, transfer_concurrency: None,
+            labels: pending.labels,
             root_key_ref: pending.root_key_ref,
             recovery_key_ref: pending.recovery_key_ref,
             capabilities,
@@ -421,6 +454,9 @@ impl ConnectionStore {
             .map_err(storage)?;
         tx.execute("DELETE FROM automatic_backup_pauses WHERE connection_id=?1", [id])
             .map_err(storage)?;
+        for table in ["usage_objects", "usage_removed", "usage_observations", "usage_snapshots"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE connection_id=?1"), [id]).map_err(storage)?;
+        }
         tx.execute("DELETE FROM connections WHERE id=?1", [id])
             .map_err(storage)?;
         tx.commit().map_err(storage)?;
@@ -455,6 +491,98 @@ impl ConnectionStore {
         let encoded = serde_json::to_string(&connection).map_err(storage)?;
         tx.execute("UPDATE connections SET value=?2 WHERE id=?1", params![id, encoded]).map_err(storage)?;
         tx.commit().map_err(storage)
+    }
+
+    pub(super) fn observe_usage(
+        &self, id: &str, repository: &super::contract::RepositoryHandle,
+        receipts: &[super::contract::ObjectReceipt], removed: Option<&RemoteLocator>,
+    ) -> Result<()> {
+        if receipts.iter().all(|receipt| !receipt.complete) && removed.is_none() { return Ok(()); }
+        let current = self.read(id)?;
+        if current.provider_repository_id != repository.repository_id
+            || current.descriptor_locator.connection_identity != repository.connection_identity
+        {
+            return Err(corrupt());
+        }
+        let tx = self.0.unchecked_transaction().map_err(storage)?;
+        for receipt in receipts.iter().filter(|receipt| receipt.complete) {
+            receipt.locator.validate_for(repository)?;
+            tx.execute("DELETE FROM usage_removed WHERE connection_id=?1 AND locator=?2",
+                params![id, serde_json::to_string(&receipt.locator).map_err(storage)?]).map_err(storage)?;
+            tx.execute("INSERT INTO usage_objects VALUES(?1,?2,?3) ON CONFLICT(connection_id,locator) DO UPDATE SET byte_length=excluded.byte_length",
+                params![id, serde_json::to_string(&receipt.locator).map_err(storage)?, receipt.byte_length.to_string()]).map_err(storage)?;
+        }
+        if let Some(locator) = removed {
+            locator.validate_for(repository)?;
+            let key = serde_json::to_string(locator).map_err(storage)?;
+            tx.execute("DELETE FROM usage_objects WHERE connection_id=?1 AND locator=?2", params![id, key]).map_err(storage)?;
+            tx.execute("INSERT OR IGNORE INTO usage_removed VALUES(?1,?2)", params![id, key]).map_err(storage)?;
+            tx.execute("DELETE FROM usage_snapshots WHERE connection_id=?1 AND locator=?2", params![id, key]).map_err(storage)?;
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map_err(storage)?.as_millis().min(i64::MAX as u128) as i64;
+        tx.execute("INSERT INTO usage_observations VALUES(?1,?2) ON CONFLICT(connection_id) DO UPDATE SET observed_at_ms=MAX(observed_at_ms,excluded.observed_at_ms)",
+            params![id, now]).map_err(storage)?;
+        tx.commit().map_err(storage)
+    }
+
+    pub(super) fn remember_known_usage(&self, id: &str, receipts: &[super::contract::ObjectReceipt]) -> Result<()> {
+        if receipts.is_empty() { return Ok(()); }
+        let current = self.read(id)?;
+        let tx = self.0.unchecked_transaction().map_err(storage)?;
+        let mut added = 0;
+        for receipt in receipts.iter().filter(|receipt| receipt.complete) {
+            if receipt.locator.connection_identity != current.descriptor_locator.connection_identity
+                || receipt.locator.object.is_empty() { return Err(corrupt()); }
+            // Direct observations and confirmed removals take precedence over cached references.
+            added += tx.execute("INSERT INTO usage_objects SELECT ?1,?2,?3
+                WHERE NOT EXISTS(SELECT 1 FROM usage_removed WHERE connection_id=?1 AND locator=?2)
+                ON CONFLICT(connection_id,locator) DO NOTHING",
+                params![id, serde_json::to_string(&receipt.locator).map_err(storage)?, receipt.byte_length.to_string()]).map_err(storage)?;
+        }
+        if added > 0 {
+            let observed = current.verified_at_ms.max(current.last_sync_at_ms.unwrap_or(0)).max(current.last_backup_at_ms.unwrap_or(0));
+            tx.execute("INSERT INTO usage_observations VALUES(?1,?2) ON CONFLICT(connection_id) DO UPDATE SET observed_at_ms=MAX(observed_at_ms,excluded.observed_at_ms)",
+                params![id, observed.min(i64::MAX as u64) as i64]).map_err(storage)?;
+        }
+        tx.commit().map_err(storage)
+    }
+
+    pub(super) fn remember_usage_snapshot(
+        &self, id: &str, locator: &RemoteLocator, created_at_ms: u64,
+        summary: &super::usage::ReachableUsage,
+    ) -> Result<()> {
+        let current = self.read(id)?;
+        if current.descriptor_locator.connection_identity != locator.connection_identity {
+            return Err(corrupt());
+        }
+        self.0.execute("INSERT INTO usage_snapshots VALUES(?1,?2,?3,?4) ON CONFLICT(connection_id,locator) DO UPDATE SET created_at_ms=excluded.created_at_ms,value=excluded.value",
+            params![id, serde_json::to_string(locator).map_err(storage)?, i64::try_from(created_at_ms).map_err(storage)?, serde_json::to_string(summary).map_err(storage)?]).map_err(storage)?;
+        Ok(())
+    }
+
+    pub(super) fn storage_usage(&self, id: &str) -> Result<super::usage::StorageUsage> {
+        self.read(id)?;
+        let tx = self.0.unchecked_transaction().map_err(storage)?;
+        let mut objects = 0u64;
+        let mut bytes = 0u64;
+        let mut statement = tx.prepare("SELECT byte_length FROM usage_objects WHERE connection_id=?1").map_err(storage)?;
+        for row in statement.query_map([id], |row| row.get::<_, String>(0)).map_err(storage)? {
+            let length: u64 = row.map_err(storage)?.parse().map_err(|_| corrupt())?;
+            objects = objects.checked_add(1).ok_or_else(corrupt)?;
+            bytes = bytes.checked_add(length).ok_or_else(corrupt)?;
+        }
+        let observed_at_ms = tx.query_row("SELECT observed_at_ms FROM usage_observations WHERE connection_id=?1", [id], |row| row.get::<_, i64>(0)).optional().map_err(storage)?
+            .map(u64::try_from).transpose().map_err(storage)?;
+        let latest: Option<String> = tx.query_row("SELECT s.value FROM usage_snapshots s JOIN usage_objects o ON s.connection_id=o.connection_id AND s.locator=o.locator WHERE s.connection_id=?1 ORDER BY s.created_at_ms DESC,s.locator LIMIT 1",
+            [id], |row| row.get(0)).optional().map_err(storage)?;
+        Ok(super::usage::StorageUsage {
+            provider_physical_bytes: None,
+            observed_at_ms,
+            locally_uploaded_objects_lower_bound: objects,
+            locally_uploaded_bytes_lower_bound: bytes,
+            latest_reachable: latest.map(|value| serde_json::from_str(&value).map_err(|_| corrupt())).transpose()?,
+        })
     }
 
     pub fn remember_discovery(
@@ -621,6 +749,9 @@ fn decode(encoded: &str) -> Result<StoredConnection> {
     {
         return Err(corrupt());
     }
+    if value.labels != ConnectionLabels::new(value.labels.account.clone(), value.labels.folder.clone()) {
+        return Err(corrupt());
+    }
     Ok(value)
 }
 fn validate_pending(value: &PendingStoredConnection) -> Result<()> {
@@ -680,6 +811,7 @@ mod tests {
             root_key_ref: "repository-key-v1:00000000-0000-4000-8000-000000000002".into(),
             recovery_key_ref: "repository-key-v1:00000000-0000-4000-8000-000000000003".into(),
             created_at_ms: 1,
+            labels: ConnectionLabels::default(),
         }
     }
 
@@ -1070,18 +1202,44 @@ mod tests {
         let pending = pending();
         store.put_pending(&pending).unwrap();
         let original = store.promote_pending(&pending.id, locator("shared"), Capabilities::default()).unwrap();
-        let changed = store.replace_credential(&original.id, &original.credential_ref, "new-secret").unwrap();
+        let changed = store.replace_credential(&original.id, &original.credential_ref, "new-secret", None).unwrap();
         let mut expected = serde_json::to_value(&original).unwrap();
         expected["credentialRef"] = "new-secret".into();
         assert!(changed.verified_at_ms >= original.verified_at_ms);
         expected["verifiedAtMs"] = changed.verified_at_ms.into();
         assert_eq!(serde_json::to_value(&changed).unwrap(), expected);
-        assert_eq!(store.replace_credential(&original.id, &original.credential_ref, "stale-secret").err().unwrap().kind,
+        assert_eq!(store.replace_credential(&original.id, &original.credential_ref, "stale-secret", None).err().unwrap().kind,
             ErrorKind::PreconditionFailed);
         assert_eq!(store.read(&original.id).unwrap().credential_ref, "new-secret");
         let unlocked = store.replace_repository_key(&original.id, &original.root_key_ref, "new-root").unwrap();
         assert_eq!(unlocked.credential_ref, "new-secret");
         assert_eq!(unlocked.recovery_key_ref, original.recovery_key_ref);
+    }
+
+    #[test]
+    fn labels_follow_the_connection_and_renewal_replaces_only_a_reported_account() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = ConnectionStore::open(root.path()).unwrap();
+        let mut pending = pending();
+        pending.labels = ConnectionLabels::new(Some(" synthetic@example.invalid ".into()), Some("RisuNest".into()));
+        assert_eq!(pending.labels.account.as_deref(), Some("synthetic@example.invalid"));
+        store.put_pending(&pending).unwrap();
+        let stored = store.promote_pending(&pending.id, locator("labels"), Capabilities::default()).unwrap();
+        assert_eq!(store.read(&stored.id).unwrap().labels, pending.labels);
+        let kept = store.replace_credential(&stored.id, &stored.credential_ref, "renewed", None).unwrap();
+        assert_eq!(kept.labels, pending.labels);
+        let kept = store.replace_credential(&stored.id, "renewed", "renewed-again", Some("\u{7}".into())).unwrap();
+        assert_eq!(kept.labels, pending.labels);
+        let changed = store.replace_credential(&stored.id, "renewed-again", "renewed-third", Some("other@example.invalid".into())).unwrap();
+        assert_eq!(changed.labels.account.as_deref(), Some("other@example.invalid"));
+        assert_eq!(store.read(&stored.id).unwrap().labels.folder.as_deref(), Some("RisuNest"));
+        assert_eq!(ConnectionLabels::new(Some(" ".into()), Some("x".repeat(256))), ConnectionLabels::default());
+        let mut invalid = serde_json::to_value(&changed).unwrap();
+        invalid["labels"]["folder"] = "".into();
+        assert!(decode(&invalid.to_string()).is_err());
+        let mut unlabeled = serde_json::to_value(&changed).unwrap();
+        unlabeled.as_object_mut().unwrap().remove("labels");
+        assert_eq!(decode(&unlabeled.to_string()).unwrap().labels, ConnectionLabels::default());
     }
 
     #[test]
@@ -1107,7 +1265,7 @@ mod tests {
         assert_eq!(store.read(&stored.id).unwrap().transfer_concurrency, Some(16));
         assert_eq!(super::super::transfer_limit::effective_limit(root.path(), &stored.id).unwrap(), 16);
         blocked.execute_batch("DROP TRIGGER reject_transfer_save;").unwrap();
-        store.replace_credential(&stored.id, &stored.credential_ref, "renewed").unwrap();
+        store.replace_credential(&stored.id, &stored.credential_ref, "renewed", None).unwrap();
         store.set_retention_policy(&stored.id, super::super::connection::RetentionPolicy::DEFAULT).unwrap();
         assert_eq!(store.read(&stored.id).unwrap().transfer_concurrency, Some(16));
         let mut invalid = serde_json::to_value(&stored).unwrap();

@@ -9,6 +9,7 @@ import { loadLoreBookV3PromptFromCompatibilitySnapshot } from "./lorebook.svelte
 import { runTrigger } from "./triggers";
 import { getActiveConversationSession } from '../storage/persistentDataRuntime.svelte'
 import type { ConversationOperationContext } from './conversationOperationContext'
+import type { GenerationReservation } from './generationState'
 import { ConversationSessionInactiveError } from '../storage/activeConversationSession'
 import {
     appendConversationComment,
@@ -21,7 +22,12 @@ import {
     retainConversationDeleteSlice,
 } from '../conversationMutations'
 
-export async function processMultiCommand(command:string, conversationOperation?: ConversationOperationContext) {
+export interface CommandGeneration {
+    signal: AbortSignal
+    reservation: GenerationReservation
+}
+
+export async function processMultiCommand(command:string, conversationOperation?: ConversationOperationContext, generation?: CommandGeneration) {
     let pipe = ''
     const splited:string[] = []
     let lastIndex = 0
@@ -39,7 +45,8 @@ export async function processMultiCommand(command:string, conversationOperation?
     splited.push(command.slice(lastIndex))
     console.log(splited)
     for(let i = 0; i<splited.length; i++){
-        const result = await processCommand(splited[i].trim(), pipe, conversationOperation)
+        if (generation?.signal.aborted) return pipe
+        const result = await processCommand(splited[i].trim(), pipe, conversationOperation, generation)
         console.log(pipe)
         if(result === false){
             return false
@@ -52,7 +59,7 @@ export async function processMultiCommand(command:string, conversationOperation?
 }
 
 
-async function processCommand(command:string, pipe:string, conversationOperation?: ConversationOperationContext):Promise<false | string>{
+async function processCommand(command:string, pipe:string, conversationOperation?: ConversationOperationContext, generation?: CommandGeneration):Promise<false | string>{
     const db = getDatabase()
     const selectedCharacterIndex = get(selectedCharID)
     const currentChar = db.characters[selectedCharacterIndex]
@@ -63,6 +70,7 @@ async function processCommand(command:string, pipe:string, conversationOperation
         getActiveConversationSession(),
     )
     const mutationTargetIsCurrent = () => {
+        if (generation?.signal.aborted) return false
         const currentDatabase = getDatabase()
         const currentIndex = get(selectedCharID)
         const character = currentDatabase.characters[currentIndex]
@@ -193,6 +201,7 @@ async function processCommand(command:string, pipe:string, conversationOperation
                 splited.shift()
             }
             for(const e of splited){
+                if (generation?.signal.aborted) return pipe
                 if (!mutationTargetIsCurrent()) return false
                 const message = {
                     role: 'user',
@@ -201,7 +210,8 @@ async function processCommand(command:string, pipe:string, conversationOperation
                 if(clearMode) resetConversationWithMessage(mutationTarget, message)
                 else appendConversationMessage(mutationTarget, message)
                 if (!refreshMutationTarget()) return false
-                await sendChat()
+                if (generation) await sendChat({ signal: generation.signal }, generation.reservation)
+                else await sendChat()
                 if (!refreshMutationTarget()) return false
             }
             return ''
@@ -262,8 +272,10 @@ async function processCommand(command:string, pipe:string, conversationOperation
                 chat: conversationOperation?.chat ?? getCurrentChat(),
                 manualName: arg,
                 conversationOperation,
+                generation,
             });
 
+            if (generation?.signal.aborted) return pipe
             if(triggerResult && !conversationOperation){
                setCurrentChat(triggerResult.chat);
             }

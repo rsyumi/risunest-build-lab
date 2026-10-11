@@ -2,7 +2,7 @@
 //! preserved when a verified server copy replaces a local payload file.
 use super::{snapshot_archive, PersistentStore};
 use crate::{
-    asset_repository::{object_physical_key, PayloadCas},
+    asset_repository::{job_pins, object_physical_key, PayloadCas},
     external_storage::lww_residency::RemoteBodies,
     server_sync::{
         client::ServerClient,
@@ -453,7 +453,21 @@ impl PersistentStore {
             crate::asset_repository::job_pins::collect_durable_cas_job_roots(&self.repository_root)
         };
         if !jobs.blockers.is_empty() {
-            return Err(SyncError::new("asset-jobs-unresolved", 409));
+            let busy = jobs.blockers.iter().all(|blocker| {
+                let Some(id) = blocker.strip_prefix("job-pin-unsealed:") else {
+                    return false;
+                };
+                if job_pins::durable_cas_job_held(&self.repository_root, id).unwrap_or(false) {
+                    return true;
+                }
+                // The worker may have sealed or released its job since collection.
+                match job_pins::inspect_durable_cas_job(&self.repository_root, id) {
+                    Ok(None) => true,
+                    Ok(Some(job)) => job.sealed,
+                    Err(_) => false,
+                }
+            });
+            return Err(SyncError::new(if busy { "asset-jobs-busy" } else { "asset-jobs-unresolved" }, 409));
         }
         local.extend(jobs.object_hashes);
         local.extend(jobs.manifest_hashes);

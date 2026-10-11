@@ -1,4 +1,4 @@
-import { save } from '@tauri-apps/plugin-dialog'
+import { save } from './fileSelection'
 
 import { isTauriIOS, isTauriAndroid, isTauriDesktop } from '../platform'
 import type { RisuModule } from '../process/modules'

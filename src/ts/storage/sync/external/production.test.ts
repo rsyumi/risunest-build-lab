@@ -279,6 +279,43 @@ describe('external storage production integration', () => {
         visibility.mockRestore()
     })
 
+    it.each([false, true])('defers automatic backups through file selection and waits for an existing backup (desktop=%s)', async desktop => {
+        vi.useFakeTimers()
+        mocks.desktop = desktop
+        const admission = await import('../../libraryFileOperation')
+        const { installExternalStorageProduction } = await import('./production')
+        const running: ExternalJobSummary = { ...succeeded('old-sync', '8'), state: 'running', phase: 'upload', result: undefined }
+        mocks.bridge.startJob.mockResolvedValue(running)
+        mocks.bridge.getJob.mockResolvedValue(running)
+        const dispose = await installExternalStorageProduction()
+        await vi.advanceTimersByTimeAsync(60_000)
+        expect(mocks.bridge.startJob).toHaveBeenCalledOnce()
+        const release = admission.reserveLibraryFileOperation()
+        const ready = vi.fn()
+        const waiting = Promise.resolve(admission.waitForLibraryFileOperation(new AbortController().signal)).then(ready)
+        const visibility = vi.spyOn(document, 'visibilityState', 'get')
+        try {
+            mocks.bridge.setExecutionSession.mockClear()
+            visibility.mockReturnValue('hidden'); document.dispatchEvent(new Event('visibilitychange'))
+            visibility.mockReturnValue('visible'); document.dispatchEvent(new Event('visibilitychange'))
+            window.dispatchEvent(new Event('focus'))
+            mocks.revision = 9; mocks.listener?.(9)
+            await vi.advanceTimersByTimeAsync(65_000)
+            expect(ready).not.toHaveBeenCalled()
+            expect(mocks.bridge.startJob).toHaveBeenCalledOnce()
+            expect(mocks.bridge.setExecutionSession).not.toHaveBeenCalled()
+            mocks.bridge.getJob.mockResolvedValue(succeeded('old-sync', '8'))
+            await vi.advanceTimersByTimeAsync(1_000); await waiting
+            expect(ready).toHaveBeenCalledOnce()
+            expect(mocks.bridge.startJob).toHaveBeenCalledOnce()
+            mocks.bridge.startJob.mockImplementation(async request => succeeded(request.connectionId, request.targetRevision))
+            release(); await vi.advanceTimersByTimeAsync(65_000)
+            expect(mocks.bridge.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ targetRevision: '9' }))
+        } finally {
+            release(); dispose(); visibility.mockRestore(); vi.useRealTimers()
+        }
+    })
+
     it('keeps a running automatic backup alive when the device goes offline', async () => {
         vi.useFakeTimers()
         try {

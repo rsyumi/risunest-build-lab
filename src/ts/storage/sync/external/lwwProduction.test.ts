@@ -4,7 +4,7 @@ import type { BindingContext, SyncBindingTransport } from '../bindingFlow'
 import type { ExternalStorageState } from './types'
 const fixture = vi.hoisted(() => ({
     native: true,
-    invoke: vi.fn(), listen: vi.fn(), state: vi.fn(), apply: vi.fn(), flush: vi.fn(), mobile: vi.fn(), outbox: vi.fn(), storageMutation: vi.fn(), resumeCurrent: vi.fn(),
+    invoke: vi.fn(), listen: vi.fn(), state: vi.fn(), apply: vi.fn(), flush: vi.fn(), mobile: vi.fn(), outbox: vi.fn(), storageMutation: vi.fn(), resumeCurrent: vi.fn(), download: vi.fn(),
     registrations: new Map<string, SyncBindingTransport>(), viewport: undefined as undefined | ((source: unknown) => void),
     revision: undefined as undefined | ((revision: number, cause: string) => void),
 }))
@@ -19,6 +19,7 @@ vi.mock('../../persistentDataRuntime.svelte', () => ({
 }))
 vi.mock('../../persistentRevisionEvents', () => ({ subscribeLocalPersistentRevision(callback: (revision: number, cause: string) => void) { fixture.revision = callback; return () => {} } }))
 vi.mock('../bindingNative', () => ({ createNativeSyncBindingBridge: () => ({ state: fixture.state }), replaceNativeSyncBinding: vi.fn(), replaceNativeSyncBindingAsNewDevice: vi.fn() }))
+vi.mock('../serverAssetResidency', () => ({ downloadRemoteAssets: fixture.download }))
 vi.mock('../bindingRegistry', () => ({ resumeCurrentSyncBinding: fixture.resumeCurrent, registerSyncBindingTransport(target: { connectionId: string }, transport: SyncBindingTransport) { fixture.registrations.set(target.connectionId, transport); return () => fixture.registrations.delete(target.connectionId) } }))
 import { installExternalLwwAdapters, refreshExternalLwwAdapters, externalLwwExitDrain, requestExternalLwwNow, subscribeExternalLwwFailures } from './lwwProduction'
 import { externalProgressFor, subscribeExternalProgress, type ExternalOperationProgress } from './progress'
@@ -32,6 +33,7 @@ beforeEach(() => {
     fixture.state.mockResolvedValue(binding); fixture.listen.mockResolvedValue(() => {})
     fixture.resumeCurrent.mockReset(); fixture.resumeCurrent.mockImplementation(async target => { const current = await fixture.state(); await fixture.registrations.get(target.connectionId)!.resumeBinding({ state: current, signal: new AbortController().signal }) })
     fixture.apply.mockReset(); fixture.flush.mockReset(); fixture.mobile.mockReset(); fixture.mobile.mockImplementation(async (_name, work) => work({ signal: new AbortController().signal }))
+    fixture.download.mockReset(); fixture.download.mockResolvedValue(undefined)
     fixture.outbox.mockReset(); fixture.outbox.mockResolvedValue({ revision: 12, entries: [] })
     fixture.storageMutation.mockReset(); fixture.storageMutation.mockImplementation(async work => { await work(12) })
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
@@ -39,6 +41,193 @@ beforeEach(() => {
 })
 afterEach(() => { dispose?.(); dispose = undefined; vi.useRealTimers() })
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
+const assetPage = (requestId = 'asset-page') => ({ header: { bindingAuthority: '4', requestId }, changes: [{ key: '["asset","synthetic-image"]', value: { kind: 'inline', value: { objectHash: 'synthetic-hash' } } }] })
+describe('external sync asset downloads', () => {
+    it('waits for external assets before file work and keeps them stopped across picker visibility changes', async () => {
+        const admission = await import('../../libraryFileOperation')
+        let finish!: () => void
+        fixture.download.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        const release = admission.reserveLibraryFileOperation()
+        const ready = vi.fn()
+        const waiting = Promise.resolve(admission.waitForLibraryFileOperation(new AbortController().signal)).then(ready)
+        try {
+            await settle(); expect(ready).not.toHaveBeenCalled()
+            finish(); await waiting
+            fixture.download.mockClear(); fixture.invoke.mockClear()
+            Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' }); document.dispatchEvent(new Event('visibilitychange'))
+            await settle()
+            Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }); document.dispatchEvent(new Event('visibilitychange'))
+            fixture.revision!(15, 'generation-complete')
+            await vi.advanceTimersByTimeAsync(65_000); await settle()
+            expect(fixture.download).not.toHaveBeenCalled()
+            expect(fixture.invoke.mock.calls.some(([command]) => ['external_lww_publish', 'external_lww_receive'].includes(command))).toBe(false)
+        } finally { finish(); release(); await settle() }
+        expect(fixture.download).toHaveBeenCalledOnce()
+    })
+    it('downloads missing bodies on resume without delaying metadata sync', async () => {
+        let finish!: () => void
+        fixture.download.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+        dispose = await installExternalLwwAdapters(state(['google_drive'])); await settle()
+        expect(fixture.download).toHaveBeenCalledExactlyOnceWith(undefined, { progressConnectionId: 'sync', signal: expect.any(AbortSignal), showEmpty: false })
+        await requestExternalLwwNow('sync')
+        expect(fixture.invoke.mock.calls.map(call => call[0])).toContain('external_lww_receive')
+        expect(fixture.download).toHaveBeenCalledOnce()
+        finish(); await settle()
+    })
+    it('leaves downloads stopped when sync is off and when the app starts hidden', async () => {
+        dispose = await installExternalLwwAdapters(state(), false); await settle()
+        expect(fixture.download).not.toHaveBeenCalled()
+        Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+        await fixture.registrations.get('sync')!.resumeBinding(context()); await settle()
+        expect(fixture.download).not.toHaveBeenCalled()
+        Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }); document.dispatchEvent(new Event('visibilitychange'))
+        await settle(); await settle()
+        expect(fixture.download).toHaveBeenCalledOnce()
+    })
+    it('downloads new references only after application and coalesces changes received during a download', async () => {
+        dispose = await installExternalLwwAdapters(state()); await settle(); fixture.download.mockClear()
+        let apply!: () => void; let finish!: () => void
+        fixture.apply.mockImplementationOnce(() => new Promise<void>(resolve => { apply = resolve }))
+        fixture.download.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+        fixture.invoke.mockResolvedValueOnce({ segments: '0', more: false }).mockResolvedValueOnce(assetPage())
+        const first = requestExternalLwwNow('sync'); await settle()
+        expect(fixture.download).not.toHaveBeenCalled()
+        apply(); await first; await settle()
+        expect(fixture.download).toHaveBeenCalledOnce()
+        for (let i = 0; i < 2; i++) {
+            fixture.invoke.mockResolvedValueOnce({ segments: '0', more: false }).mockResolvedValueOnce(assetPage(String(i)))
+            await requestExternalLwwNow('sync')
+        }
+        expect(fixture.download).toHaveBeenCalledOnce()
+        finish(); await settle()
+        expect(fixture.download).toHaveBeenCalledTimes(2)
+    })
+    it('does not scan all assets for empty listings or ordinary chat edits', async () => {
+        dispose = await installExternalLwwAdapters(state()); await settle(); fixture.download.mockClear()
+        await requestExternalLwwNow('sync')
+        fixture.invoke.mockResolvedValueOnce({ segments: '0', more: false }).mockResolvedValueOnce({ ...assetPage(), changes: [{ key: '["messages","char","chat"]', value: { kind: 'object', descriptor: { dependencies: ['message-body'] } } }] })
+        await requestExternalLwwNow('sync'); await settle()
+        expect(fixture.download).not.toHaveBeenCalled()
+    })
+    it.each([
+        { key: '["inlay","synthetic-inlay"]', value: { kind: 'inline', value: { objectHash: 'inlay-hash' } } },
+        { key: '["module","synthetic-module"]', value: { kind: 'object', descriptor: { dependencies: ['module-image'] } } },
+        { key: '["character","synthetic-character"]', value: { kind: 'object', descriptor: { dependencyRoot: 'dependency-root' } } },
+    ])('downloads bodies referenced by $key', async change => {
+        dispose = await installExternalLwwAdapters(state()); await settle(); fixture.download.mockClear()
+        fixture.invoke.mockResolvedValueOnce({ segments: '0', more: false }).mockResolvedValueOnce({ ...assetPage(), changes: [change] })
+        await requestExternalLwwNow('sync'); await settle()
+        expect(fixture.download).toHaveBeenCalledOnce()
+    })
+    it.each([
+        { code: 'download-unavailable' },
+        { code: 'asset-jobs-busy', status: 409, retryable: true },
+    ])('retains $code across successful metadata sync and retries pending bodies', async failure => {
+        fixture.download.mockRejectedValueOnce(failure)
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        let failures: ReadonlyMap<string, unknown> = new Map()
+        const unsubscribe = subscribeExternalLwwFailures(value => { failures = value })
+        expect(failures.get('sync')).toEqual(failure)
+        fixture.revision!(15, 'generation-complete'); await settle()
+        expect(failures.get('sync')).toEqual(failure)
+        expect(fixture.download).toHaveBeenCalledOnce()
+        await vi.advanceTimersByTimeAsync(20_000); await settle()
+        expect(fixture.download).toHaveBeenCalledTimes(2)
+        expect(failures.has('sync')).toBe(false)
+        unsubscribe()
+    })
+    it('respects a service retry deadline even when Sync Now is requested', async () => {
+        fixture.download.mockRejectedValueOnce({ kind: 'rateLimited', retryAtMs: String(Date.now() + 120_000) })
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        await requestExternalLwwNow('sync'); await vi.advanceTimersByTimeAsync(119_999)
+        expect(fixture.download).toHaveBeenCalledOnce()
+        await vi.advanceTimersByTimeAsync(1); await requestExternalLwwNow('sync'); await settle()
+        expect(fixture.download).toHaveBeenCalledTimes(2)
+    })
+    it.each([
+        { kind: 'localStorageFull', retryable: false },
+        { code: 'asset-jobs-unresolved', status: 409, retryable: false },
+    ])('retries a blocked download only after recovery or an explicit request: %j', async failure => {
+        fixture.download.mockRejectedValueOnce(failure)
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        await vi.advanceTimersByTimeAsync(120_000)
+        expect(fixture.download).toHaveBeenCalledOnce()
+        await requestExternalLwwNow('sync'); await settle()
+        expect(fixture.download).toHaveBeenCalledTimes(2)
+    })
+    it('cancels and settles the old download before completing a binding fence', async () => {
+        let finish!: () => void
+        fixture.download.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        const signal = fixture.download.mock.calls[0][1].signal as AbortSignal
+        let fenced = false
+        const fence = fixture.registrations.get('sync')!.fenceOldJobs(context()).then(() => { fenced = true })
+        await settle()
+        expect(signal.aborted).toBe(true)
+        expect(fenced).toBe(false)
+        finish(); await fence
+        await vi.advanceTimersByTimeAsync(120_000)
+        expect(fixture.download).toHaveBeenCalledOnce()
+    })
+    it.each(['hidden', 'offline'])('cancels a download when %s and resumes without overlapping the cancelled worker', async reason => {
+        let finish!: () => void
+        fixture.download.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        const signal = fixture.download.mock.calls[0][1].signal as AbortSignal
+        if (reason === 'hidden') Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+        else Object.defineProperty(navigator, 'onLine', { configurable: true, value: false })
+        document.dispatchEvent(new Event('visibilitychange')); await settle()
+        expect(signal.aborted).toBe(true)
+        Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+        Object.defineProperty(navigator, 'onLine', { configurable: true, value: true })
+        window.dispatchEvent(new Event('online')); await settle()
+        expect(fixture.download).toHaveBeenCalledOnce()
+        finish(); await settle(); await settle()
+        expect(fixture.download).toHaveBeenCalledTimes(2)
+    })
+    it('cancels removal and ignores late download failures', async () => {
+        let fail!: (error: unknown) => void
+        fixture.download.mockImplementationOnce(() => new Promise<void>((_, reject) => { fail = reject }))
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        const signal = fixture.download.mock.calls[0][1].signal as AbortSignal
+        let failures: ReadonlyMap<string, unknown> = new Map()
+        const unsubscribe = subscribeExternalLwwFailures(value => { failures = value })
+        await refreshExternalLwwAdapters({ connections: [] } as unknown as ExternalStorageState)
+        expect(signal.aborted).toBe(true)
+        fail(new Error('late failure')); await settle(); await vi.advanceTimersByTimeAsync(120_000)
+        expect(fixture.download).toHaveBeenCalledOnce()
+        expect(failures.has('sync')).toBe(false)
+        unsubscribe()
+    })
+    it('cancels the old download when its binding lifetime ends', async () => {
+        dispose = await installExternalLwwAdapters(state(), false)
+        const controller = new AbortController()
+        let finish!: () => void
+        fixture.download.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+        await fixture.registrations.get('sync')!.resumeBinding({ state: binding, signal: controller.signal }); await settle()
+        const signal = fixture.download.mock.calls[0][1].signal as AbortSignal
+        controller.abort()
+        expect(signal.aborted).toBe(true)
+        finish(); await settle(); await vi.advanceTimersByTimeAsync(120_000)
+        expect(fixture.download).toHaveBeenCalledOnce()
+    })
+    it('settles asset cancellation before exit and resumes unfinished bodies if exit is cancelled', async () => {
+        let finish!: () => void
+        fixture.download.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        const signal = fixture.download.mock.calls[0][1].signal as AbortSignal
+        const drain = externalLwwExitDrain('sync', 'selection', true)!
+        let drained = false
+        const pending = drain.drain({ revision: 12, libraryEpoch: 'epoch', selectionEpoch: 'selection', selectionId: drain.id }, new AbortController().signal).then(result => { drained = true; return result })
+        await settle()
+        expect(signal.aborted).toBe(true)
+        expect(drained).toBe(false)
+        finish(); expect(await pending).toEqual({ kind: 'complete' })
+        await drain.resumeAfterExitCancel!(); await settle()
+        expect(fixture.download).toHaveBeenCalledTimes(2)
+    })
+})
 describe('native external LWW adapter', () => {
     it('observes confirmation waiting within the binding attempt', async () => {
         dispose = await installExternalLwwAdapters(state(), false)

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { isLibraryFileOperationReserved } from './libraryFileOperation'
 
 import {
     consumeAndroidSpoolBatch,
@@ -15,6 +16,23 @@ import {
 } from './androidSafBridge'
 
 describe('Android SAF bridge', () => {
+    it('keeps the source picker reserved until its correlated native result', async () => {
+        const listeners = new Map<string, (event: Event) => void>()
+        const pending = pickAndroidContentSource({ destination: 'module' }, {
+            createRequestId: () => 'selection',
+            bridge: { copyExport: vi.fn(), pickContentSource: vi.fn() },
+            addEventListener: (name, listener) => { listeners.set(name, listener) },
+            removeEventListener: name => { listeners.delete(name) },
+        })
+        expect(isLibraryFileOperationReserved()).toBe(true)
+        window.dispatchEvent(new Event('focus'))
+        document.dispatchEvent(new Event('visibilitychange'))
+        await Promise.resolve()
+        expect(isLibraryFileOperationReserved()).toBe(true)
+        listeners.get('risu-android-content-source-picked')!(new CustomEvent('risu-android-content-source-picked', { detail: { requestId: 'selection', ready: [], failures: [] } }))
+        expect(await pending).toBeNull()
+        expect(isLibraryFileOperationReserved()).toBe(false)
+    })
     it.each(['androidSeekable', 'androidSpool'] as const)('keeps the portable selector custody receipt typed as %s', async (sourceType) => {
         const listeners = new Map<string, (event: Event) => void>()
         const picker = vi.fn((requestId: string) => queueMicrotask(() => listeners.get('risu-android-portable-source-picked')?.(

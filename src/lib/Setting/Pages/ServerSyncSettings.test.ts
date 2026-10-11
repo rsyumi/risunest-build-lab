@@ -994,8 +994,8 @@ describe('progress', () => {
             await settle()
             const sampled = { ...progress, network: { ...network, atMs: 1000, sentBytes: '2097152', receivedBytes: '1048576' } }
             publish({ ...base, progress: sampled }); await settle()
-            expect(panel()?.querySelector('[data-transfer-speed]')?.textContent).toContain('↑ 2.0 MiB/s')
-            expect(panel()?.querySelector('[data-transfer-speed]')?.textContent).toContain('↓ 1.0 MiB/s')
+            expect(panel()?.querySelector('[data-transfer-speed]')?.textContent).toContain(`${languageEnglish.risuNest.serverSync.uploadSpeed} 2.0 MiB/s`)
+            expect(panel()?.querySelector('[data-transfer-speed]')?.textContent).toContain(`${languageEnglish.risuNest.serverSync.downloadSpeed} 1.0 MiB/s`)
             expect(panel()?.querySelector('[data-transfer-speed]')?.closest('details')).toBeNull()
             expect(panel()?.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('25')
             for (const update of [{ pausedAt: Date.now() }, { active: ['applying'], current: 'applying' }, { active: ['refreshing'], current: 'refreshing' }]) {

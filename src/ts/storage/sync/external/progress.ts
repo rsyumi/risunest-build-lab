@@ -60,11 +60,11 @@ export function clearExternalSyncProgress(connectionId: string) {
 }
 
 /** One operation owns its observations; screens only subscribe. */
-export function beginExternalProgress(connectionId: string, kind: ExternalOperationProgress['kind']) {
+export function beginExternalProgress(connectionId: string, kind: ExternalOperationProgress['kind'], initiallyVisible = kind !== 'sync') {
     const slot = key(connectionId, kind)
     const prior = operations.get(slot)
     const previous = kind === 'sync' && prior?.state === 'complete' && prior.visible ? { ...prior, previous: undefined } : prior?.previous
-    let value: ExternalOperationProgress = { id: crypto.randomUUID(), connectionId, kind, stage: 'checking', state: 'running', visible: kind !== 'sync', amounts: emptyAmounts(), previous }
+    let value: ExternalOperationProgress = { id: crypto.randomUUID(), connectionId, kind, stage: 'checking', state: 'running', visible: initiallyVisible, amounts: emptyAmounts(), previous }
     let ended = false
     let phase = 0
     const owns = () => operations.get(slot)?.id === value.id
@@ -123,7 +123,7 @@ export function beginExternalProgress(connectionId: string, kind: ExternalOperat
         finish(state: Exclude<ExternalOperationProgress['state'], 'running'>, meaningful = true) {
             if (!current()) return
             ended = true
-            update({ state, visible: state !== 'complete' || meaningful || kind !== 'sync' })
+            update({ state, visible: state !== 'complete' || meaningful || initiallyVisible })
             // Recovery notices live in the connection/job state; this panel retains only a brief result.
             setTimeout(() => {
                 const latest = operations.get(slot)

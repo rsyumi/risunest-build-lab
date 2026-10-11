@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Chat, Database, Message, character } from '../storage/database.svelte'
-import { DBState, selectedCharID } from '../stores.svelte'
+import { DBState, selectedCharID, settingsOpen } from '../stores.svelte'
 import { IndexedDbPersistentDataStore } from '../storage/indexedDbPersistentDataStore'
 import {
     capturePersistentRoot,
@@ -251,6 +251,8 @@ function syntheticDatabase(messages: Message[]): Database {
 }
 
 async function bootWindowedConversation(messages: Message[], configure?: (seed: Database) => void) {
+    const { resetScriptCache } = await import('./scripts')
+    resetScriptCache()
     const seed = syntheticDatabase(messages)
     configure?.(seed)
     const name = `history-window-send-${crypto.randomUUID()}`
@@ -342,6 +344,60 @@ afterAll(() => {
 })
 
 describe('a windowed send through the production runtime', () => {
+    it.each(['success', 'streaming'] as const)('persists a delayed %s response while settings remain open', async (type) => {
+        const { reopen, backgroundErrors } = await bootWindowedConversation(storedMessages())
+        const { sendChat } = await import('./index.svelte')
+        const { requestChatData } = await import('./request/request')
+        const { reserveGeneration } = await import('./generationState')
+        const { beginGenerationEndRun, subscribeGenerationEnd } = await import('./generationEnd')
+        const controller = new AbortController()
+        const reservation = reserveGeneration(() => controller.abort())!
+        const target = current.runtime.captureSelectedConversationTarget()!
+        const navigation = current.runtime.getNavigationGeneration()
+        const finish = vi.fn()
+        const unsubscribe = subscribeGenerationEnd(finish)
+        const run = beginGenerationEndRun(target)
+        let entered!: () => void
+        const requested = new Promise<void>(resolve => { entered = resolve })
+        let release!: () => void
+        const responseReady = new Promise<void>(resolve => { release = resolve })
+        vi.mocked(requestChatData).mockImplementationOnce(async () => {
+            entered()
+            await responseReady
+            return type === 'success'
+                ? { type: 'success', result: 'hidden answer' }
+                : { type: 'streaming', result: new ReadableStream({ start(stream) {
+                    stream.enqueue({ response: 'hidden' })
+                    stream.enqueue({ response: 'hidden answer' })
+                    stream.close()
+                } }) }
+        })
+        vi.spyOn(console, 'log').mockImplementation(() => undefined)
+        const sending = run.capture(() => sendChat({ historyLimit: true, signal: controller.signal }, reservation))
+        try {
+            await requested
+            settingsOpen.set(true)
+            expect(current.runtime.getNavigationGeneration()).toBe(navigation)
+            expect(current.runtime.captureSelectedConversationTarget()?.conversationId).toBe(target.conversationId)
+            release()
+            await expect(sending).resolves.toBe(true)
+            reservation.release()
+            run.finish('completed')
+            const stored = await reopen()
+            expect(stored.message.filter(message => message.data === 'hidden answer')).toHaveLength(1)
+            expect(finish).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+                characterId: target.characterId, conversationId: target.conversationId, status: 'completed',
+            }))
+            expect(backgroundErrors).toEqual([])
+        } finally {
+            release()
+            await sending
+            reservation.release()
+            unsubscribe()
+            settingsOpen.set(false)
+        }
+    })
+
     it.each(['insert', 'remove'] as const)('persists the response after Lua %s moves its output target', async (action) => {
         const original = storedMessages()
         const { reopen, backgroundErrors } = await bootWindowedConversation(structuredClone(original), (seed) => {

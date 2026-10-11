@@ -2817,6 +2817,9 @@ export const languageEnglish = {
                 "This feature doesn't work while notifications are off.",
             operatingSystem: 'Operating system',
             webView: 'WebView',
+            refreshScreen: 'Refresh screen',
+            refreshBusy: 'Finish any ongoing tasks and try again.',
+            refreshFailed: 'Could not refresh the screen. Please try again.',
             "iosBackgroundLabel": 'Background tasks',
         },
         boot: {

@@ -27,6 +27,44 @@ function assetOwnerCharacterDetails(database: Database): CharacterDetail[] {
 
 export function persistentDataStoreContract(createHarness: () => Promise<PersistentDataStoreHarness>): void {
     describe('PersistentDataStore contract', () => {
+        it.each(['module', 'persona', 'character'] as const)('commits imported %s owner units and invalidates only changed assets', async kind => {
+            const { store, reopen } = await createHarness()
+            const seeded = await store.replaceFromDatabase(structuredClone(fixtureDatabase))
+            const characterId = fixtureDatabase.characters[0].chaId
+            const module = { id: 'imported-module', name: 'Imported', description: '', assets: [['synthetic', 'assets/imported', 'bin']] }
+            const owner: AssetOwnerHead['owner'] = kind === 'module'
+                ? { kind: 'root-module-assets', moduleId: module.id }
+                : kind === 'persona'
+                    ? { kind: 'persona-embedded-module-assets', personaId: 'imported-persona', moduleId: module.id }
+                    : { kind: 'character-additional-assets', characterId }
+            const head: AssetOwnerHead = { owner, present: true, manifestHash: 'ab'.repeat(32), entryCount: 1 }
+            const key = JSON.stringify(kind === 'module' ? ['record', 'modules', module.id]
+                : kind === 'persona' ? ['persona', 'imported-persona', 'embeddedModule']
+                    : ['character', characterId, 'additionalAssets'])
+            const value = kind === 'character' ? module.assets : module
+            const created = await store.commit({ expectedRevision: seeded.revision,
+                unitMutations: [
+                    ...(kind === 'character' ? [] : [{ key: JSON.stringify(['exists', kind === 'module' ? 'modules' : 'persona', kind === 'module' ? module.id : 'imported-persona']), type: 'set' as const, value: true }]),
+                    { key, type: 'set', value },
+                ], assetOwnerHeads: [head] })
+            expect((await store.readAssetOwnerHead(owner))?.value).toEqual(head)
+            const lease = await store.acquireRevision(created.revision)
+            const unchanged = await store.commit({ expectedRevision: created.revision, unitMutations: [{ key, type: 'set', value }] })
+            expect((await store.readAssetOwnerHead(owner))?.value).toEqual(head)
+            const changedValue = kind === 'character' ? [] : { ...module, assets: [] }
+            await expect(store.commit({ expectedRevision: unchanged.revision,
+                unitMutations: [{ key, type: 'set', value: changedValue }], assetOwnerHeads: [head] })).rejects.toThrow()
+            expect((await store.readRoot()).revision).toBe(unchanged.revision)
+            const changed = await store.commit({ expectedRevision: unchanged.revision, unitMutations: [{ key, type: 'set', value: changedValue }] })
+            expect(await store.readAssetOwnerHead(owner)).toBeNull()
+            const restored = await store.commit({ expectedRevision: changed.revision, unitMutations: [{ key, type: 'set', value }], assetOwnerHeads: [head] })
+            await store.commit({ expectedRevision: restored.revision, unitMutations: [{ key, type: 'delete' }] })
+            expect(await store.readAssetOwnerHead(owner)).toBeNull()
+            expect((await lease.readAssetOwnerHead(owner))?.value).toEqual(head)
+            await lease.release()
+            expect(await (await reopen()).readAssetOwnerHead(owner)).toBeNull()
+        })
+
         it('pages owner values with stable revisions, insertion order and byte bounds', async () => {
             const { store } = await createHarness()
             const empty = await store.replaceFromDatabase({ ...structuredClone(fixtureDatabase), pluginCustomStorage: {} })

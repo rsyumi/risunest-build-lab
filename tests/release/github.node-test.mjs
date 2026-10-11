@@ -13,14 +13,17 @@ function client(responses) {
 }
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status });
 
-test("draft creation resolves annotated tags and records the tested commit", async () => {
-  const commit = "a".repeat(40);
-  const { github, calls } = client([json({}, 404), json([]), json({ object: { type: "tag", sha: "b".repeat(40) } }),
-    json({ object: { type: "commit", sha: commit } }), json({ id: 7, draft: true })]);
-  assert.equal((await github.prepareDraft("app-v1.0.0", commit, "Release notes")).id, 7);
-  assert.deepEqual(JSON.parse(calls.at(-1).body), { tag_name: "app-v1.0.0", target_commitish: commit,
-    name: "app-v1.0.0", body: "Release notes", draft: true, prerelease: false, make_latest: "false" });
-});
+for (const [tag, name] of [["app-v1.0.0", "RisuNest v1.0.0"], ["sync-v1.0.0", "RisuNest Sync v1.0.0"]]) {
+  test(`draft creation names ${tag}, resolves annotated tags and records the tested commit`, async () => {
+    const commit = "a".repeat(40);
+    const { github, calls } = client([json({}, 404), json([]), json({ object: { type: "tag", sha: "b".repeat(40) } }),
+      json({ object: { type: "commit", sha: commit } }), json({ id: 7, draft: true })]);
+    const notes = `# ${name}\n\nRelease notes`;
+    assert.equal((await github.prepareDraft(tag, commit, notes)).id, 7);
+    assert.deepEqual(JSON.parse(calls.at(-1).body), { tag_name: tag, target_commitish: commit,
+      name, body: notes, draft: true, prerelease: false, make_latest: "false" });
+  });
+}
 
 test("mismatched tag commits and API errors cannot create a release", async () => {
   const { github, calls } = client([json({}, 404), json([]), json({ object: { type: "commit", sha: "b".repeat(40) } })]);

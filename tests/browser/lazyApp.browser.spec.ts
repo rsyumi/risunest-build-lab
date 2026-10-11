@@ -1,8 +1,56 @@
 import { test, expect } from './fixture'
 
-declare global { interface Window { lazyApp: { open(route: string): void; showDialog(): void; read(): { sidebarClosing: boolean; dialog: string; entries: number } }; lazyImportBoundary: { arm(route: string): void; hold(route: string): void; rejectHeld(): void; attempts(): number } } }
+declare global { interface Window { lazyApp: { open(route: string): void; layout(mobile: boolean): void; showDialog(): void; read(): { sidebarClosing: boolean; dialog: string; entries: number }; selection(): { selected: number; menu: number; settings: boolean; page: number; stack: number } }; lazyImportBoundary: { arm(route: string): void; hold(route: string): void; rejectHeld(): void; attempts(): number } } }
 
 const hosts = ['settings', 'custom', 'grid', 'presets', 'personas', 'mobile'] as const
+for (const back of ['header', 'Escape', 'history'] as const) {
+    test(`actual mobile chat menu opens Settings and returns through ${back}`, async ({ page }) => {
+        const errors: string[] = []
+        page.on('pageerror', error => errors.push(error.message))
+        await page.setViewportSize({ width: 390, height: 844 })
+        await page.goto('/lazyApp.html')
+        await page.evaluate(() => window.lazyApp.open('mobile-chat'))
+        await page.getByRole('button', { name: '메뉴', exact: true }).click()
+        await page.getByRole('button', { name: '설정', exact: true }).click()
+        await expect(page.locator('.rs-setting-cont')).toBeVisible()
+        await page.getByRole('button', { name: '소리 및 디스플레이', exact: true }).click()
+        await expect.poll(() => page.evaluate(() => window.lazyApp.selection().page)).toBe(3)
+        const goBack = async () => {
+            if (back === 'header') await page.getByRole('button', { name: '뒤로', exact: true }).click()
+            else if (back === 'Escape') await page.keyboard.press('Escape')
+            else await page.evaluate(() => history.back())
+        }
+        await goBack()
+        await expect.poll(() => page.evaluate(() => window.lazyApp.selection().page)).toBe(-1)
+        await goBack()
+        await expect(page.locator('.rs-setting-cont')).toHaveCount(0)
+        expect(await page.evaluate(() => window.lazyApp.selection())).toEqual({ selected: 0, menu: 1, settings: false, page: -1, stack: 1 })
+        await page.getByRole('button', { name: '뒤로', exact: true }).click()
+        await expect(page.getByRole('button', { name: '메뉴', exact: true })).toBeVisible()
+        expect(await page.evaluate(() => window.lazyApp.selection().selected)).toBe(0)
+        expect(errors).toEqual([])
+    })
+}
+test('actual Settings returns to the selected mobile menu after layout changes', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/lazyApp.html')
+    await page.evaluate(() => window.lazyApp.open('mobile-chat'))
+    await page.getByRole('button', { name: '메뉴', exact: true }).click()
+    await page.getByRole('button', { name: '설정', exact: true }).click()
+    await expect(page.locator('.rs-setting-cont')).toBeVisible()
+    await page.setViewportSize({ width: 1200, height: 800 })
+    await page.evaluate(() => window.lazyApp.layout(false))
+    await expect(page.locator('.rs-setting-cont-3')).toBeVisible()
+    await expect(page.locator('.rs-setting-cont-4')).toHaveCount(1)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.evaluate(() => window.lazyApp.layout(true))
+    await page.getByRole('button', { name: '뒤로', exact: true }).click()
+    await expect.poll(() => page.evaluate(() => window.lazyApp.selection().page)).toBe(-1)
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.rs-setting-cont')).toHaveCount(0)
+    expect(await page.evaluate(() => window.lazyApp.selection())).toEqual({ selected: 0, menu: 1, settings: false, page: -1, stack: 1 })
+})
+
 for (const host of hosts) {
     for (const action of ['retry', 'leave'] as const) {
         test(`actual App ${host} rejected import supports ${action}`, async ({ page }) => {

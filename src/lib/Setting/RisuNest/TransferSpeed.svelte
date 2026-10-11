@@ -1,5 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte'
+    import ArrowUpFromLineIcon from '@lucide/svelte/icons/arrow-up-from-line'
+    import ArrowDownToLineIcon from '@lucide/svelte/icons/arrow-down-to-line'
     import { createRateMeter, type TransferRateSample } from 'src/ts/storage/sync/transferRate'
     import { formatRisuNestStorageBytes as bytes } from 'src/ts/storage/risuNestStorageDashboard'
 
@@ -20,15 +22,20 @@
         refresh()
     })
     onMount(() => { const timer = setInterval(refresh, 500); return () => clearInterval(timer) })
+    // Request bodies leave in short bursts, so a direction stays while its average over the meter window is above zero.
+    const shown = (moving: boolean, rate: number | undefined) => active && rate !== undefined && (moving || rate > 0)
+    let uploading = $derived(shown(sample.sending, rates.upload))
+    let downloading = $derived(shown(sample.receiving, rates.download))
 </script>
 
-{#if active && ((sample.sending && rates.upload !== undefined) || (sample.receiving && rates.download !== undefined))}
-    <p class="speed" data-transfer-speed>
-        {#if sample.sending && rates.upload !== undefined}<span aria-label={uploadLabel}>↑ {bytes(rates.upload)}/s</span>{/if}
-        {#if sample.receiving && rates.download !== undefined}<span aria-label={downloadLabel}>↓ {bytes(rates.download)}/s</span>{/if}
-    </p>
+{#if uploading || downloading}
+    <span class="speed" data-transfer-speed>
+        {#if uploading}<span class="rate"><ArrowUpFromLineIcon size={13} class="shrink-0" aria-hidden="true" /><span class="sr-only">{uploadLabel}</span> {bytes(rates.upload!)}/s</span>{/if}
+        {#if downloading}<span class="rate"><ArrowDownToLineIcon size={13} class="shrink-0" aria-hidden="true" /><span class="sr-only">{downloadLabel}</span> {bytes(rates.download!)}/s</span>{/if}
+    </span>
 {/if}
 
 <style>
-    .speed { display: flex; flex-wrap: wrap; gap: 0 1rem; margin: 0; color: var(--risu-theme-textcolor2); font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; }
+    .speed { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 0 0.75rem; margin-left: auto; color: var(--risu-theme-textcolor2); font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .rate { display: inline-flex; align-items: center; gap: 3px; }
 </style>

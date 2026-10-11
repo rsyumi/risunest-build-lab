@@ -755,7 +755,7 @@ mod tests {
             recovery_key_ref: "synthetic-recovery".into(),
             capabilities: super::super::fake::capabilities(false),
             created_at_ms: 1, verified_at_ms: 1, last_sync_at_ms: None,
-            last_backup_at_ms: None, retention_policy: None, transfer_concurrency: None,
+            last_backup_at_ms: None, retention_policy: None, transfer_concurrency: None, labels: Default::default(),
         }
     }
 

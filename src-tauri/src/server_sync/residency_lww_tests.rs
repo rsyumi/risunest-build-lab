@@ -568,6 +568,49 @@ fn residency_classification_preserves_live_plugin_snapshot_and_durable_job_roots
 }
 
 #[test]
+fn active_durable_job_waits_for_sealing_before_asset_download() {
+    let (_directory, mut store) = local();
+    let mut job = DurableCasJob::begin(
+        store.repository_root(),
+        "synthetic-active-job",
+        CasJobKind::OfficialPublicationOrExportPreparation,
+        crate::asset_repository::job_pins::CasJobOwner::for_test(),
+        1,
+    )
+    .unwrap();
+    for guarded in [false, true] {
+        let _guard = guarded
+            .then(|| crate::asset_repository::coordinator::lock_repository_mutation().unwrap());
+        let error = store.residency_inventory_classification_test(guarded).unwrap_err();
+        assert_eq!(
+            (error.code.as_str(), error.status, error.retryable),
+            ("asset-jobs-busy", 409, true)
+        );
+    }
+    let error = store.asset_residency_download_remote(None, None, None, || Ok(())).err().unwrap();
+    assert_eq!((error.code.as_str(), error.retryable), ("asset-jobs-busy", true));
+    job.seal(&mut store, 2).unwrap();
+    store.asset_residency_download_remote(None, None, None, || Ok(())).unwrap();
+}
+
+#[test]
+fn abandoned_durable_job_keeps_asset_download_blocked() {
+    let (_directory, store) = local();
+    drop(DurableCasJob::begin(
+        store.repository_root(),
+        "synthetic-abandoned-job",
+        CasJobKind::OfficialPublicationOrExportPreparation,
+        crate::asset_repository::job_pins::CasJobOwner::for_test(),
+        1,
+    ).unwrap());
+    let error = store.asset_residency_download_remote(None, None, None, || Ok(())).err().unwrap();
+    assert_eq!(
+        (error.code.as_str(), error.status, error.retryable),
+        ("asset-jobs-unresolved", 409, false)
+    );
+}
+
+#[test]
 fn corrupt_durable_job_proof_blocks_residency_cleanup_before_any_release() {
     let (_directory, store) = local();
     let root = store.repository_root();
@@ -580,6 +623,13 @@ fn corrupt_durable_job_proof_blocks_residency_cleanup_before_any_release() {
     )
     .unwrap();
     drop(job);
+    let _active = DurableCasJob::begin(
+        root,
+        "synthetic-active-job",
+        CasJobKind::OfficialPublicationOrExportPreparation,
+        crate::asset_repository::job_pins::CasJobOwner::for_test(),
+        1,
+    ).unwrap();
     std::fs::write(
         root.join("assets/job-pins/job-synthetic-broken-job.journal"),
         b"synthetic corruption",

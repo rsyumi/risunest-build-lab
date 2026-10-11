@@ -135,18 +135,19 @@ fn concurrent_wave_refills_and_settles_siblings_before_returning_error() {
             tokio::join!(
                 upload_wave(&mut journal, &members, "format-repository", &[8; 32], &provider, &repository, &cancel),
                 async {
-                    let mut first = Vec::new();
-                    for _ in 0..4 { first.push(entered.recv().await.unwrap()); }
+                    let mut first = std::collections::BTreeSet::new();
+                    for _ in 0..4 { assert!(first.insert(entered.recv().await.unwrap())); }
+                    assert_eq!(first, members[..4].iter().map(|member| member.object_id.clone()).collect());
                     assert!(entered.try_recv().is_err());
-                    provider.release(&first[2]);
+                    provider.release(&members[2].object_id);
                     let refill = entered.recv().await.unwrap();
                     assert_eq!(refill, members[4].object_id);
-                    *provider.fail.lock().unwrap() = Some(first[0].clone());
-                    provider.release(&first[0]);
+                    *provider.fail.lock().unwrap() = Some(members[0].object_id.clone());
+                    provider.release(&members[0].object_id);
                     // Let the owner observe the stopping error before siblings return.
                     tokio::task::yield_now().await;
-                    provider.release(&first[1]);
-                    provider.release(&first[3]);
+                    provider.release(&members[1].object_id);
+                    provider.release(&members[3].object_id);
                     provider.release(&refill);
                 }
             )

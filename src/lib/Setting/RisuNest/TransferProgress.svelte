@@ -19,10 +19,7 @@
         collapsible?: boolean
         open?: boolean
         actions?: Snippet
-        /**
-         * The network samples of a transfer. Its line stays in place until the transfer is done,
-         * and shows the rates only while `active`.
-         */
+        /** The network samples of a transfer. Its rates follow the detail while `active`. */
         speed?: { sample: TransferRateSample; active: boolean; uploadLabel: string; downloadLabel: string }
     } = $props()
 </script>
@@ -52,7 +49,7 @@
 {/snippet}
 
 <div class="transfer-progress">
-    <SettingProgress {label} {detail} {fraction} {done} {stopped} {actions} footer={speed && !done ? rate : undefined} />
+    <SettingProgress {label} {detail} {fraction} {done} {stopped} {actions} trailing={speed && !done ? rate : undefined} />
     {#if activity || stages.length > 1 || counters.length}
         {#if collapsible}
             <details class="group" bind:open>

@@ -49,6 +49,35 @@ function deferred<T>() {
 }
 
 describe('external storage controller', () => {
+    it.each(['caller', 'connection'] as const)('keeps admission waiting until native cancellation finishes after %s cancellation', async source => {
+        const cancelled = deferred<ExternalJobSummary>()
+        const polling = deferred<void>()
+        const bridge: ExternalStorageJobBridge = {
+            startJob: vi.fn(async () => job('active-job', 'running')),
+            getJob: vi.fn(), cancelJob: vi.fn(() => cancelled.promise),
+        }
+        const controller = createExternalStorageController(bridge, state, {
+            wait: (_delay, signal) => new Promise((_resolve, reject) => {
+                polling.resolve()
+                signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+            }),
+        })
+        const abort = new AbortController()
+        const requested = controller.request({ connectionId: 'sync-1', kind: 'backup', targetRevision: '1', reason: 'manual', session: { kind: 'foreground', id: 'session' }, signal: abort.signal })
+        await polling.promise
+        const cancelling = source === 'connection' ? controller.cancel('sync-1') : Promise.resolve(abort.abort())
+        const ready = vi.fn()
+        const waiting = controller.settled().then(ready)
+        try {
+            for (let i = 0; i < 30; i++) await Promise.resolve()
+            expect(ready).not.toHaveBeenCalled()
+            expect(bridge.cancelJob).toHaveBeenCalledOnce()
+        } finally {
+            cancelled.resolve(job('active-job', 'cancelled'))
+            await cancelling; await requested; await waiting
+        }
+        expect(ready).toHaveBeenCalledOnce()
+    })
     it('retains structured native rejection causes', async () => {
         const cause = { kind: 'preconditionFailed', httpStatus: null, retryAtMs: null }
         const controller = createExternalStorageController({ startJob: vi.fn().mockRejectedValue(cause), getJob: vi.fn(), cancelJob: vi.fn() }, state)

@@ -1,6 +1,6 @@
 <script lang="ts">
     import { onDestroy, onMount } from 'svelte'
-    import QRCode from 'qrcode'
+    import ConnectionSettingsDialog from './ConnectionSettingsDialog.svelte'
     import { runWithMobileBackgroundTask, measuredTaskPercent } from 'src/ts/mobileBackgroundTask'
     import TextInput from 'src/lib/UI/GUI/TextInput.svelte'
     import NumberInput from 'src/lib/UI/GUI/NumberInput.svelte'
@@ -48,7 +48,7 @@
     import { formatRisuNestStorageBytes } from 'src/ts/storage/risuNestStorageDashboard'
     import { createRemainingTimeEstimator } from 'src/ts/storage/sync/remainingTime'
     import ConnectionForm from './ConnectionForm.svelte'
-    import { externalConnectionTitle, externalErrorKind, externalErrorMessage, externalStorageStrings } from './strings'
+    import { externalConnectionPlace, externalConnectionTitle, externalErrorKind, externalErrorMessage, externalStorageStrings } from './strings'
 
     const bridge = getExternalStorageBridge()
     /** How many empty history pages one request reads past before stopping. */
@@ -82,6 +82,8 @@
     let historyCursor = $state<Record<string, string | undefined>>({})
     let historyLoading = $state<Record<string, boolean>>({})
     let quota = $state<Record<string, ExternalQuotaSummary>>({})
+    const quotaLoading = new Map<string, Promise<void>>()
+    const quotaRequested = new Set<string>()
     let remoteOnly = $state<Record<string, number | null>>({})
     let removalDownload = $state<{ connectionId: string; controller: AbortController; cancelling: boolean } | null>(null)
     /** The disconnect waiting for its file check, which cancelling abandons. */
@@ -89,9 +91,6 @@
     let recoveryKey = $state('')
     let recoveryPanel = $state<HTMLDivElement | undefined>()
     let connectionSettings = $state<ExternalConnectionSettingsMaterial | null>(null)
-    let connectionSettingsPanel = $state<HTMLDivElement | undefined>()
-    let connectionSettingsQr = $state('')
-    let connectionSettingsQrSize = $state(0)
     /** The history entry whose restore scope is open, and what is ticked in it. */
     let exportRun = $state<{ id: string; connectionId: string; progress?: ExternalSnapshotExportProgress } | null>(null)
     /** Jobs that add or change history rows, by job ID, so the open history reloads when they finish. */
@@ -202,6 +201,7 @@
                     await loadHistory(connection, false)
                 }
             }
+            await Promise.all(storageState.connections.filter(connection => selectedTab(connection.id) === 'quota').map(loadQuota))
             if (!silent) error = ''
             pollError = ''
         } catch (reason) {
@@ -468,12 +468,26 @@
         try {
             if (kind === 'history') await loadHistory(connection, false)
             if (kind === 'quota') {
-                void loadRemoteOnlyFiles(connection)
-                quota[connection.id] = await bridge.getQuota(connection.id)
+                await loadQuota(connection)
             }
         } catch (reason) {
             error = externalErrorMessage(strings, reason)
         }
+    }
+
+    function loadQuota(connection: ExternalConnectionSummary): Promise<void> {
+        quotaRequested.add(connection.id)
+        const pending = quotaLoading.get(connection.id)
+        if (pending) return pending
+        const request = (async () => {
+            do {
+                quotaRequested.delete(connection.id)
+                const [usage] = await Promise.all([bridge.getQuota(connection.id), loadRemoteOnlyFiles(connection)])
+                if (!destroyed) quota[connection.id] = usage
+            } while (!destroyed && quotaRequested.has(connection.id))
+        })().finally(() => { quotaLoading.delete(connection.id); quotaRequested.delete(connection.id) })
+        quotaLoading.set(connection.id, request)
+        return request
     }
 
     /** Files only this connection holds, as the residency status counts them. */
@@ -508,6 +522,7 @@
             history[connection.id] = items
             historyCursor[connection.id] = cursor
             delete historyError[connection.id]
+            if (selectedTab(connection.id) === 'quota') await loadQuota(connection)
         } catch (reason) {
             historyError[connection.id] = externalErrorMessage(strings, reason)
         } finally {
@@ -587,7 +602,7 @@
         if (check.signal.aborted) return
         const remoteOnly = held !== 0
         // The card's own two lines tell apart connections to one service and account.
-        const name = `${externalConnectionTitle(strings, connection)}\n${connectionPlace(connection)}`
+        const name = [externalConnectionTitle(strings, connection), externalConnectionPlace(strings, connection)].filter(Boolean).join('\n')
         const choice = await alertCheckboxConfirm({
             title: strings.removeTitle,
             description: remoteOnly ? `${name}\n\n${strings.removeDeletes}\n\n${held === undefined ? strings.removeRemoteOnlyUnknown : strings.removeRemoteOnly}` : name,
@@ -628,41 +643,16 @@
     }
 
 
-    async function displayConnectionSettings(material: ExternalConnectionSettingsMaterial): Promise<void> {
-        connectionSettings = material
-        if (!material.qrPayload) {
-            connectionSettingsQr = ''
-            return
-        }
-        try {
-            const modules = QRCode.create(material.qrPayload).modules.size + 8
-            const scale = Math.ceil(240 / modules)
-            connectionSettingsQrSize = modules * scale
-            connectionSettingsQr = await QRCode.toDataURL(material.qrPayload, { margin: 4, scale })
-        } catch {
-            connectionSettingsQr = ''
-        }
-    }
-
     async function createConnectionSettings(connection: ExternalConnectionSummary): Promise<void> {
         busy = true
         activeAction = `settings:${connection.id}`
         try {
-            await displayConnectionSettings(await bridge.beginConnectionSettingsExport(connection.id))
+            connectionSettings = await bridge.beginConnectionSettingsExport(connection.id)
         } catch (reason) {
             error = externalErrorMessage(strings, reason)
         } finally {
             busy = false
             activeAction = ''
-        }
-    }
-
-    async function saveConnectionSettingsFile(): Promise<void> {
-        if (!connectionSettings) return
-        try {
-            await bridge.saveConnectionSettingsFile(connectionSettings.transferId)
-        } catch (reason) {
-            error = externalErrorMessage(strings, reason)
         }
     }
 
@@ -676,7 +666,6 @@
 
     function closeConnectionSettings(): void {
         connectionSettings = null
-        connectionSettingsQr = ''
     }
 
     async function exportSnapshot(connectionId: string, snapshotId: string): Promise<void> {
@@ -825,10 +814,6 @@
         return value ? new Date(Number(value)).toLocaleString() : '—'
     }
 
-    function connectionPlace(connection: ExternalConnectionSummary): string {
-        return [connection.endpoint.authority, connection.endpoint.repositoryHint].join(' · ')
-    }
-
     function providerIcon(providerId: ExternalConnectionSummary['providerId']) {
         if (providerId === 'webdav') return ServerIcon
         if (providerId === 's3') return DatabaseIcon
@@ -842,9 +827,6 @@
 
     $effect(() => {
         if (recoveryKey) recoveryPanel?.focus()
-    })
-    $effect(() => {
-        if (connectionSettings) connectionSettingsPanel?.focus()
     })
 
     onMount(async () => {
@@ -912,12 +894,13 @@
             {@const syncing = syncTarget && !!syncRunning[connection.id]}
             {@const backedUp = connection.purpose === 'backup' || !!connection.lastBackupAtMs}
             {@const synced = connection.purpose === 'sync' && !!connection.lastSyncAtMs}
+            {@const place = externalConnectionPlace(strings, connection)}
             <article class="card">
                 <header class="card-head">
                     <span class="provider" aria-hidden="true"><ProviderIcon size={18} /></span>
                     <div class="card-name">
                         <h3 class="card-title">{externalConnectionTitle(strings, connection)}</h3>
-                        <p class="card-sub">{connectionPlace(connection)}</p>
+                        {#if place}<p class="card-sub">{place}</p>{/if}
                     </div>
                     <div class="card-status"><StatusBadge label={connectionStatus(connection)} tone={connectionTone(connection)} /></div>
                 </header>
@@ -1052,8 +1035,11 @@
                                         {/if}
                                         <div class="stat">
                                             <dt>{strings.uploadedLowerBound}</dt>
-                                            <dd class="stat-value">{bytes(usage.storage.locallyUploadedBytesLowerBound)}</dd>
-                                            <dd class="stat-note">{strings.files.replace('{0}', Number(usage.storage.locallyUploadedObjectCountLowerBound).toLocaleString())}</dd>
+                                            <dd class="stat-value">{usage.storage.observedAtMs === null ? strings.unknownUsage : bytes(usage.storage.locallyUploadedBytesLowerBound)}</dd>
+                                            {#if usage.storage.observedAtMs !== null}
+                                                <dd class="stat-note">{strings.files.replace('{0}', Number(usage.storage.locallyUploadedObjectCountLowerBound).toLocaleString())}</dd>
+                                                <dd class="stat-note">{strings.lastUsageUpdate}: {when(usage.storage.observedAtMs)}</dd>
+                                            {/if}
                                         </div>
                                         {#if usage.storage.latestReachable}
                                             <div class="stat">
@@ -1158,23 +1144,10 @@
 {/if}
 
 {#if connectionSettings}
-    <div class="fixed inset-0 z-[1000] flex items-center justify-center bg-black/60 p-4">
-        <div
-            bind:this={connectionSettingsPanel}
-            tabindex="-1"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="external-connection-settings-title"
-            class="dialog outline-hidden"
-            class:qr-dialog={!!connectionSettingsQr}
-        >
-            <h3 id="external-connection-settings-title" class="text-lg font-bold">{strings.connectionSettings}</h3>
-            <p class="text-sm text-textcolor2">{strings.connectionSettingsNotice}</p>
-            {#if connectionSettingsQr}<img class="connection-settings-qr mx-auto" src={connectionSettingsQr} width={connectionSettingsQrSize} height={connectionSettingsQrSize} alt={strings.connectionSettingsQr} />
-            {:else}<p class="rounded-md border border-darkborderc bg-darkbg p-3 text-sm">{strings.connectionSettingsFileOnly}</p>{/if}
-            <div class="actions"><SettingButton onclick={saveConnectionSettingsFile}>{strings.saveConnectionSettings}</SettingButton><SettingButton variant="secondary" onclick={closeConnectionSettings}>{strings.closeRecovery}</SettingButton></div>
-        </div>
-    </div>
+    {#key connectionSettings.transferId}
+        <ConnectionSettingsDialog payload={connectionSettings.payload} {strings}
+            onsave={() => bridge.saveConnectionSettingsFile(connectionSettings!.transferId)} onclose={closeConnectionSettings} />
+    {/key}
 {/if}
 
 <style>
@@ -1621,14 +1594,5 @@
         border-radius: 0.5rem;
         background: var(--risu-theme-bgcolor);
         color: var(--risu-theme-textcolor);
-    }
-    .qr-dialog {
-        grid-template-columns: minmax(0, 1fr);
-        width: 28rem;
-    }
-    .connection-settings-qr {
-        max-width: 100%;
-        height: auto;
-        image-rendering: pixelated;
     }
 </style>

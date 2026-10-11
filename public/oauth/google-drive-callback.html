@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-EyknR0MDutiiQ+StzMp/+pkgSo3YK8S87UNDy+DQIgw='">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-CvDhRplq/yF3JfaKdiUwhP9CzqnSQLP3LcsSZ8t90oo='">
   <title>RisuNest · Google Drive</title>
   <style>
     /* The onboarding screen's palette and shapes, written out as literals
@@ -288,9 +288,11 @@
   const state = params.get('state');
   const code = params.get('code');
   const error = params.get('error');
+  const picked = params.get('picked_file_ids');
   const single = (name) => params.getAll(name).length <= 1;
   const valid = state && state.length <= 512 && !/[\x00-\x20\x7f]/.test(state)
     && single('state') && single('code') && single('error')
+    && single('picked_file_ids') && (picked === null || (code && /^[A-Za-z0-9_-]{1,256}$/.test(picked)))
     && !source.hash && ((code && code.length <= 8192 && !error) || (error && error.length <= 256 && !code));
   const result = new URL(source.origin + source.pathname);
   const app = new URL('risunestlocal://oauth/google-drive');
@@ -298,6 +300,10 @@
     for (const [name, value] of [['state', state], [code ? 'code' : 'error', code || error]]) {
       result.searchParams.set(name, value);
       app.searchParams.set(name, value);
+    }
+    if (picked !== null) {
+      result.searchParams.set('picked_file_ids', picked);
+      app.searchParams.set('picked_file_ids', picked);
     }
   }
   window.history.replaceState(null, '', source.pathname);

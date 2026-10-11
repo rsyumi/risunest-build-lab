@@ -15,6 +15,7 @@
     import { DBState } from "src/ts/stores.svelte";
     import { RISU_EFFECT_DRAG_TYPE, RISU_TRIGGER_DRAG_TYPE } from "src/ts/dragTypes";
     import { downloadFile } from "src/ts/globalApi.svelte";
+    import { selectDomFiles } from 'src/ts/storage/fileSelection';
 
     interface Props {
         value?: triggerscript[];
@@ -498,43 +499,36 @@
         lastSelectedTriggerIndex = -1
     }
 
-    const importTriggers = () => {
-        const input = document.createElement('input')
-        input.type = 'file'
-        input.accept = '.json'
-        input.onchange = async (event) => {
-            const file = (event.target as HTMLInputElement)?.files?.[0]
+    const importTriggers = async () => {
+        try {
+            const [file] = await selectDomFiles({ accept: '.json' })
             if (!file) return
-            
-            try {
-                const text = await file.text()
-                const importedTriggers = JSON.parse(text)
-                
-                if (!Array.isArray(importedTriggers)) {
+
+            const text = await file.text()
+            const importedTriggers = JSON.parse(text)
+
+            if (!Array.isArray(importedTriggers)) {
+                return
+            }
+
+            for (const trigger of importedTriggers) {
+                if (!trigger.hasOwnProperty('comment') ||
+                    !trigger.hasOwnProperty('type') ||
+                    !trigger.hasOwnProperty('conditions') ||
+                    !trigger.hasOwnProperty('effect') ||
+                    !Array.isArray(trigger.conditions) ||
+                    !Array.isArray(trigger.effect)) {
                     return
                 }
-                
-                for (const trigger of importedTriggers) {
-                    if (!trigger.hasOwnProperty('comment') || 
-                        !trigger.hasOwnProperty('type') ||
-                        !trigger.hasOwnProperty('conditions') ||
-                        !trigger.hasOwnProperty('effect') ||
-                        !Array.isArray(trigger.conditions) ||
-                        !Array.isArray(trigger.effect)) {
-                        return
-                    }
-                }
-                
-                for (const trigger of importedTriggers) {
-                    value.push(trigger)
-                }
-                
-            } catch (error) {
-                console.error('Import error:', error)
             }
+
+            for (const trigger of importedTriggers) {
+                value.push(trigger)
+            }
+
+        } catch (error) {
+            console.error('Import error:', error)
         }
-        
-        input.click()
     }
 
     const selectTriggerRange = (startIndex: number, endIndex: number) => {

@@ -32,7 +32,7 @@ describe('external storage shared panel', () => {
         await tick()
         jobs.set('current', { ...job, transfer: { ...transfer, sequence: 2, network: { ...network, atMs: 1000, sentBytes: '1048576', receivedBytes: '2097152' } } })
         await tick()
-        expect(target.textContent).toContain(kind === 'backup' ? '↑ 1.0 MiB/s' : '↓ 2.0 MiB/s')
+        expect(target.textContent).toContain(kind === 'backup' ? '업로드 속도 1.0 MiB/s' : '다운로드 속도 2.0 MiB/s')
         jobs.set('current', { ...jobs.get('current')!, phase: 'applying-local', kind: 'restore' }); await tick()
         expect(target.querySelector('[data-transfer-speed]')).toBeNull()
         jobs.set('current', { ...job, state: 'waiting', phase: 'paused' }); await tick()
@@ -48,7 +48,7 @@ describe('external storage shared panel', () => {
         const reading = { sequence: 1, stage: 'downloading', preparedBytes: '0', uploadedBytes: '0', downloadedBytes: '0', uploadedObjects: '0', downloadedObjects: '0', network: { id: 'native', atMs: 0, sentBytes: '0', receivedBytes: '0', sending: false, receiving: true } }
         report(reading); await tick()
         report({ ...reading, sequence: 2, network: { ...reading.network, atMs: 1000, receivedBytes: '1048576' } }); await tick()
-        expect(target.textContent).toContain('↓ 1.0 MiB/s')
+        expect(target.textContent).toContain('다운로드 속도 1.0 MiB/s')
         expect(target.textContent).not.toContain(strings.transfer.downloaded)
         run.stage('waiting'); await tick()
         expect(target.querySelector('[data-transfer-speed]')).toBeNull()
@@ -57,7 +57,7 @@ describe('external storage shared panel', () => {
         run.finish('complete'); await tick()
         expect(target.querySelector('[data-transfer-speed]')).toBeNull()
     })
-    it('keeps the speed line inside the progress box, outside its live region, until the transfer finishes', async () => {
+    it('shows the speed on the heading row, outside its live region, until the transfer finishes', async () => {
         vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'performance'] })
         await show()
         const run = beginExternalProgress('synthetic', 'binding')
@@ -66,16 +66,18 @@ describe('external storage shared panel', () => {
         await run.invoke('synthetic', {})
         const reading = { sequence: 1, stage: 'downloading', preparedBytes: '0', uploadedBytes: '0', downloadedBytes: '0', uploadedObjects: '0', downloadedObjects: '0', network: { id: 'native', atMs: 0, sentBytes: '0', receivedBytes: '0', sending: false, receiving: true } }
         report(reading); await tick()
-        const line = target.querySelector('[data-setting-progress] > :last-child')!
-        expect(line.closest('[role="status"]')).toBeNull()
-        expect(line.querySelector('[data-transfer-speed]')).toBeNull()
+        const status = target.querySelector('[data-setting-progress] [role="status"]')!
+        expect(target.querySelector('[data-transfer-speed]')).toBeNull()
         report({ ...reading, sequence: 2, network: { ...reading.network, atMs: 1000, receivedBytes: '1048576' } }); await tick()
-        expect(line.querySelector('[data-transfer-speed]')?.textContent).toContain('↓ 1.0 MiB/s')
+        const speed = target.querySelector('[data-transfer-speed]')!
+        expect(speed.textContent).toContain('다운로드 속도 1.0 MiB/s')
+        expect(speed.parentElement).toBe(status.parentElement)
+        expect(speed.closest('[role="status"]')).toBeNull()
+        expect(status.parentElement!.nextElementSibling?.getAttribute('role')).toBe('progressbar')
         run.stage('applying'); await tick()
         expect(target.querySelector('[data-transfer-speed]')).toBeNull()
-        expect(line.isConnected).toBe(true)
         run.finish('complete'); await tick()
-        expect(line.isConnected).toBe(false)
+        expect(target.querySelector('[data-transfer-speed]')).toBeNull()
     })
     it('observes an automatic operation started after mounting and keeps details collapsed', async () => {
         vi.useFakeTimers(); await show()

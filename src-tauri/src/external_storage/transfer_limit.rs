@@ -96,7 +96,7 @@ pub(crate) fn remove_connection(root: &Path, id: &str) -> Result<()> {
     Ok(())
 }
 pub(crate) fn wrap(root: &Path, connection_id: &str, provider: Arc<dyn Provider>) -> Result<Arc<dyn Provider>> {
-    Ok(Arc::new(LimitedProvider { provider, limiter: limiter(root, connection_id)? }))
+    Ok(super::usage::wrap(root, connection_id, Arc::new(LimitedProvider { provider, limiter: limiter(root, connection_id)? })))
 }
 struct LimitedProvider { provider: Arc<dyn Provider>, limiter: Arc<Limiter> }
 impl Provider for LimitedProvider {
@@ -258,7 +258,7 @@ mod tests {
             descriptor_locator: super::super::fake::locator(),
             provider_repository_id: super::super::fake::repository().repository_id,
             credential_ref: "credential".into(), root_key_ref: "root".into(), recovery_key_ref: "recovery".into(),
-            retention_policy: None, transfer_concurrency: None, capabilities: Capabilities::default(),
+            retention_policy: None, transfer_concurrency: None, labels: Default::default(), capabilities: Capabilities::default(),
             created_at_ms: 1, verified_at_ms: 1, last_sync_at_ms: None, last_backup_at_ms: None,
         };
         ConnectionStore::open(root).unwrap().insert(&stored).unwrap();

@@ -179,7 +179,8 @@ fn grant_verification_replies() -> Vec<Reply> {
         return Vec::new();
     }
     vec![json_reply(200, json!({
-        "issued_to": client_id(config::platform_key()),
+        "aud": client_id(config::platform_key()),
+        "azp": client_id(config::platform_key()),
         "scope": "https://www.googleapis.com/auth/drive.file"
     }))]
 }
@@ -2088,7 +2089,8 @@ fn android_grant_binding_fails_before_account_lookup() {
         let (wrong_client, request) = rejected_android_token_info(json_reply(
             200,
             json!({
-                "issued_to": "999999999999-foreign.apps.googleusercontent.com",
+                "aud": "999999999999-foreign.apps.googleusercontent.com",
+                "azp": "999999999999-foreign.apps.googleusercontent.com",
                 "scope": required_scope
             }),
         ))
@@ -2099,7 +2101,8 @@ fn android_grant_binding_fails_before_account_lookup() {
         let (missing_scope, _) = rejected_android_token_info(json_reply(
             200,
             json!({
-                "issued_to": client_id("android"),
+                "aud": client_id("android"),
+                "azp": client_id("android"),
                 "scope": "openid"
             }),
         ))
@@ -2113,6 +2116,46 @@ fn android_grant_binding_fails_before_account_lookup() {
         ))
         .await;
         assert_eq!(throttled.kind, ErrorKind::RateLimited);
+    });
+}
+
+#[test]
+fn token_info_accepts_the_documented_audience_and_authorized_party() {
+    runtime().block_on(async {
+        let client = client_id("android");
+        let server = WireServer::start(vec![json_reply(200, json!({
+            "aud": client,
+            "azp": client,
+            "scope": "https://www.googleapis.com/auth/drive.file",
+            "expires_in": "3599"
+        }))]);
+        let test = deps_with(None);
+        let config = connection(server.url.as_str());
+        let settings = AuthorizationSettings::parse(&config, "android").unwrap();
+        let account = AccountKey::pending(super::config::PROVIDER_ID, &settings.api("/").unwrap()).unwrap();
+        verify_google_grant(
+            &test.dependencies, settings.token_info_endpoint().unwrap(), &client,
+            &settings.scopes, "synthetic-token", &account, &Cancellation::default(),
+        ).await.unwrap();
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+    });
+}
+
+#[test]
+fn token_info_rejects_missing_or_foreign_client_bindings() {
+    runtime().block_on(async {
+        let client = client_id("android");
+        for mut fields in [
+            json!({ "aud": "foreign", "azp": client }),
+            json!({ "aud": client, "azp": "foreign" }),
+            json!({ "azp": client }),
+            json!({ "aud": client }),
+            json!({ "issued_to": client }),
+        ] {
+            fields["scope"] = json!("https://www.googleapis.com/auth/drive.file");
+            let (error, _) = rejected_android_token_info(json_reply(200, fields)).await;
+            assert_eq!(error.kind, ErrorKind::ReauthRequired);
+        }
     });
 }
 

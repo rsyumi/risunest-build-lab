@@ -1723,6 +1723,10 @@ async fn run_backup(
         &completed.snapshot_id,
         &completed.reference,
     )?;
+    super::usage::remember_completed_snapshot(
+        &root, &job.request.connection_id, &completed,
+        job.summary["startedAtMs"].as_str().and_then(|value| value.parse().ok()).unwrap_or(0),
+    );
     if journal
         .release_completed_sessions(connected.dependencies.vault.as_ref())
         .await
@@ -1752,12 +1756,12 @@ pub(crate) async fn external_storage_get_quota(
     connection_id: String,
 ) -> Result<Value> {
     logged("external_storage_get_quota", async move {
-        let connected = super::connection_commands::open_connected(&app, &connection_id).await?;
         let root = root(&app)?;
+        let stored = ConnectionStore::open(&root)?.read(&connection_id)?;
         let budget = super::connection_commands::budget(&app)?;
         let summaries = super::quota_profiles::connection_usage(
             &budget,
-            &connected.stored.config,
+            &stored.config,
             now_ms(),
         )?;
         let buckets = summaries
@@ -1776,9 +1780,7 @@ pub(crate) async fn external_storage_get_quota(
                 value
             })
             .collect::<Vec<_>>();
-        let usage =
-            super::usage::summarize(&root, &connection_id, &connected, &Cancellation::default())
-                .await?;
+        let usage = super::usage::summarize(&root, &connection_id)?;
         let latest_reachable = usage.latest_reachable.map(|reachable| {
             json!({
                 "snapshotId":reachable.snapshot_id,
@@ -1793,7 +1795,8 @@ pub(crate) async fn external_storage_get_quota(
             "providerPhysicalKnown":usage.provider_physical_bytes.is_some(),
             "locallyUploadedObjectCountLowerBound":usage.locally_uploaded_objects_lower_bound.to_string(),
             "locallyUploadedBytesLowerBound":usage.locally_uploaded_bytes_lower_bound.to_string(),
-            "locallyUploadedCoverage":"cached-upload-receipts"
+            "locallyUploadedCoverage":"observed-remote-files",
+            "observedAtMs":usage.observed_at_ms.map(|value|value.to_string())
         });
         if let Some(latest_reachable) = latest_reachable {
             storage["latestReachable"] = latest_reachable;

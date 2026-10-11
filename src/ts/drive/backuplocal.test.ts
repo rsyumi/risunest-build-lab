@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto'
 import { UNOWNED_PLUGIN_OWNER } from '../plugins/pluginOwner'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BlobStore } from '../storage/blobStore'
 import type { Database } from '../storage/database.svelte'
 import { IndexedDbPersistentDataStore } from '../storage/indexedDbPersistentDataStore'
@@ -147,6 +147,10 @@ function emptyBlobStore(): BlobStore {
 }
 
 describe('local backup persistent snapshot', () => {
+    afterEach(() => {
+        vi.restoreAllMocks()
+    })
+
     beforeEach(() => {
         state.native = true
         vi.clearAllMocks()
@@ -217,22 +221,17 @@ describe('local backup persistent snapshot', () => {
                 },
             }),
         } as File
-        const input = {
-            type: '',
-            accept: '',
-            files: [file],
-            onchange: null as null | (() => Promise<void>),
-            click: vi.fn(),
-            remove: vi.fn(),
-        }
+        const input = document.createElement('input')
+        Object.defineProperty(input, 'files', { value: [file] })
+        const click = vi.spyOn(input, 'click').mockImplementation(() => {})
         const createElement = vi.spyOn(document, 'createElement')
-            .mockReturnValueOnce(input as unknown as HTMLInputElement)
+            .mockReturnValueOnce(input)
         const { LoadLocalBackup } = await import('./backuplocal')
         const { alertWait } = await import('../alert')
 
         const pending = LoadLocalBackup()
-        await vi.waitFor(() => expect(input.onchange).not.toBeNull())
-        await input.onchange?.()
+        await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
+        input.dispatchEvent(new Event('change'))
         await pending
         createElement.mockRestore()
 
@@ -316,16 +315,11 @@ describe('local backup persistent snapshot', () => {
                 },
             }),
         } as File
-        const input = {
-            type: '',
-            accept: '',
-            files: [file],
-            onchange: null as null | (() => Promise<void>),
-            click: vi.fn(),
-            remove: vi.fn(),
-        }
+        const input = document.createElement('input')
+        Object.defineProperty(input, 'files', { value: [file] })
+        const click = vi.spyOn(input, 'click').mockImplementation(() => {})
         const createElement = vi.spyOn(document, 'createElement')
-            .mockReturnValueOnce(input as unknown as HTMLInputElement)
+            .mockReturnValueOnce(input)
         const { importLegacyBackupWithWebView } = await import('./backuplocal')
         const context = {
             signal: new AbortController().signal,
@@ -336,8 +330,8 @@ describe('local backup persistent snapshot', () => {
 
         const {language} = await import('../../lang')
         const pending = importLegacyBackupWithWebView(context, {}, language.pocketRisuImportConfirm)
-        await vi.waitFor(() => expect(input.onchange).not.toBeNull())
-        await input.onchange?.()
+        await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
+        input.dispatchEvent(new Event('change'))
         if (!confirmed) {
             await expect(pending).rejects.toMatchObject({name:'AbortError'})
             createElement.mockRestore()
@@ -398,16 +392,11 @@ describe('local backup persistent snapshot', () => {
                 },
             }),
         } as File
-        const input = {
-            type: '',
-            accept: '',
-            files: [file],
-            onchange: null as null | (() => Promise<void>),
-            click: vi.fn(),
-            remove: vi.fn(),
-        }
+        const input = document.createElement('input')
+        Object.defineProperty(input, 'files', { value: [file] })
+        const click = vi.spyOn(input, 'click').mockImplementation(() => {})
         const createElement = vi.spyOn(document, 'createElement')
-            .mockReturnValueOnce(input as unknown as HTMLInputElement)
+            .mockReturnValueOnce(input)
         const { importLegacyBackupWithWebView } = await import('./backuplocal')
         const context = {
             signal: controller.signal,
@@ -417,8 +406,8 @@ describe('local backup persistent snapshot', () => {
         }
 
         const pending = importLegacyBackupWithWebView(context)
-        await vi.waitFor(() => expect(input.onchange).not.toBeNull())
-        await input.onchange?.()
+        await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
+        input.dispatchEvent(new Event('change'))
         await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
         createElement.mockRestore()
 

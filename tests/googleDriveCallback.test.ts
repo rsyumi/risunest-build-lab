@@ -79,4 +79,22 @@ describe('standalone Google Drive callback', () => {
         expect((document.getElementById('manual') as HTMLElement).hidden).toBe(false)
         expect((document.getElementById('result') as unknown as HTMLTextAreaElement).value).toContain('code=synthetic')
     })
+
+    it('preserves the selected folder in both the app callback and copied result', async () => {
+        const { document, copy } = open('?code=synthetic&state=synthetic-state&picked_file_ids=folder_123-abc')
+        const link = document.getElementById('open') as unknown as HTMLAnchorElement
+        expect(new URL(link.href).searchParams.get('picked_file_ids')).toBe('folder_123-abc')
+        const copyButton = document.getElementById('copy') as HTMLButtonElement
+        copyButton.click()
+        await Promise.resolve()
+        expect(new URL(copy.mock.calls[0][0]).searchParams.get('picked_file_ids')).toBe('folder_123-abc')
+    })
+
+    it.each([
+        'picked_file_ids=', 'picked_file_ids=one&picked_file_ids=two',
+        'picked_file_ids=one,two', 'picked_file_ids=bad%2Fid',
+    ])('rejects ambiguous or unsupported folder selections: %s', selection => {
+        const { document } = open(`?code=synthetic&state=synthetic-state&${selection}`)
+        expect((document.getElementById('actions') as HTMLElement).hidden).toBe(true)
+    })
 })

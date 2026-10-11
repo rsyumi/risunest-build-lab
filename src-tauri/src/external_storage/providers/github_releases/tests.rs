@@ -339,7 +339,7 @@ fn backup_only_cleanup_reads_points_without_requesting_an_unsupported_head() {
                 recovery_key_ref: "synthetic-recovery-key".into(),
                 capabilities: super::capabilities(), created_at_ms: NOW_MS,
                 verified_at_ms: 1,
-                last_sync_at_ms: None, last_backup_at_ms: None, retention_policy: None, transfer_concurrency: None,
+                last_sync_at_ms: None, last_backup_at_ms: None, retention_policy: None, transfer_concurrency: None, labels: Default::default(),
             },
             provider, handle, dependencies: test.dependencies,
             root_key: zeroize::Zeroizing::new([7; 32]),

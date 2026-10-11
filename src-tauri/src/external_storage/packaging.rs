@@ -2268,6 +2268,30 @@ fn waiting(sealed: &[SealedObject]) -> usize {
         .count()
 }
 
+fn released_plain_object(
+    record: &super::journal::TransferRecord,
+    intent: &ObjectIntent,
+    plaintext_length: u64,
+    plaintext_sha256: &str,
+) -> Result<SealedObject> {
+    if !record.released || record.intent != *intent {
+        return Err(corrupt("journal ciphertext disappeared before release"));
+    }
+    let Some((length, digest)) = &record.plaintext else {
+        return Err(corrupt("released object was never registered"));
+    };
+    if *length != plaintext_length || digest != plaintext_sha256 {
+        return Err(corrupt("journal plaintext differs"));
+    }
+    Ok(SealedObject::Pending {
+        object_id: intent.object_id.clone(),
+        role: intent.role,
+        plaintext_length,
+        plaintext_sha256: plaintext_sha256.into(),
+        ciphertext_sha256: intent.sha256.clone(),
+    })
+}
+
 /// Seals one object to join a wave in which `wave` objects already wait.
 /// `None` means the spool has no room for it yet: the caller sends the wave
 /// it holds, which releases that room, and asks again.
@@ -2327,19 +2351,7 @@ async fn seal_plain_object(
         // the registration says which. Rebuilding the same plaintext is the
         // whole proof, so nothing is read back.
         if record.released {
-            let Some((length, digest)) = &record.plaintext else {
-                return Err(corrupt("released object was never registered"));
-            };
-            if *length != plaintext_length || digest != &plaintext_sha256 {
-                return Err(corrupt("journal plaintext differs"));
-            }
-            return Ok(Some(SealedObject::Pending {
-                object_id,
-                role,
-                plaintext_length,
-                plaintext_sha256,
-                ciphertext_sha256: record.intent.sha256,
-            }));
+            return released_plain_object(&record, &record.intent, plaintext_length, &plaintext_sha256).map(Some);
         }
         let spool = journal.spool_path(&object_id);
         let downloaded;
@@ -2374,16 +2386,20 @@ async fn seal_plain_object(
             }
             downloaded_path
         } else {
-            return Err(ProviderError::new(ErrorKind::NotFound));
+            let current = journal.record(&object_id)?.ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+            return released_plain_object(&current, &record.intent, plaintext_length, &plaintext_sha256).map(Some);
         };
         let expected_ciphertext = record.intent.sha256.clone();
         let expected_plaintext = plaintext_hash;
         let header_copy = header.clone();
         let key_copy = *key;
         let cpu = cpu_permit().await?;
-        spawn_blocking(move || {
-            let mut input =
-                crate::trust_boundary::open_regular_source(&cipher_path).map_err(corrupt)?;
+        let verified = spawn_blocking(move || {
+            let mut input = match crate::trust_boundary::open_regular_source(&cipher_path) {
+                Ok(input) => input,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(corrupt(error)),
+            };
             if input.metadata().map_err(corrupt)?.len() != ciphertext_length
                 || hex::encode(hash_reader(&mut input, ciphertext_length).map_err(corrupt)?)
                     != expected_ciphertext
@@ -2425,11 +2441,17 @@ async fn seal_plain_object(
             {
                 return Err(corrupt("journal plaintext differs"));
             }
-            Ok(())
+            Ok(true)
         })
         .await
         .map_err(transient)??;
         drop(cpu);
+        if !verified {
+            // Upload completion can release the spool while this worker waits
+            // for CPU. Only the same registered, durable object replaces that proof.
+            let current = journal.record(&object_id)?.ok_or_else(|| corrupt("journal object disappeared"))?;
+            return released_plain_object(&current, &record.intent, plaintext_length, &plaintext_sha256).map(Some);
+        }
         return Ok(Some(SealedObject::Pending {
             object_id,
             role,
@@ -5355,7 +5377,7 @@ mod tests {
                 stored:super::super::connection_store::StoredConnection {
                     id:"synthetic-connection".into(),config:super::super::contract::ConnectionConfig {provider:"synthetic".into(),profile:None,endpoint:"https://synthetic.invalid".into(),account_id:"account".into(),location:BTreeMap::new(),oauth_profile:None},
                     descriptor:risunest_external_storage_format::format::Descriptor::new("format-repository".into(),Some(risunest_external_storage_format::format::Strategy::Cas)).unwrap(),
-                    descriptor_locator:RemoteLocator{connection_identity:repository.connection_identity.clone(),collection:None,object:"descriptor".into()},provider_repository_id:repository.repository_id.clone(),credential_ref:"credential".into(),root_key_ref:"key".into(),recovery_key_ref:"recovery".into(),retention_policy:None,transfer_concurrency:None,capabilities:fake::capabilities(true),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
+                    descriptor_locator:RemoteLocator{connection_identity:repository.connection_identity.clone(),collection:None,object:"descriptor".into()},provider_repository_id:repository.repository_id.clone(),credential_ref:"credential".into(),root_key_ref:"key".into(),recovery_key_ref:"recovery".into(),retention_policy:None,transfer_concurrency:None,labels:Default::default(),capabilities:fake::capabilities(true),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
                 },provider:provider.clone(),handle:repository,dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new(key),
             };
             let connected=Arc::new(connected);
@@ -9116,6 +9138,72 @@ mod tests {
         }).unwrap();
         assert_eq!(empty.len(), 1);
         assert_eq!(empty[0].bytes, empty[0].document.encode(wire::MAX_METADATA_BYTES).unwrap());
+    }
+
+    #[test]
+    fn resealing_a_pack_tolerates_release_while_waiting_for_cpu_only_with_matching_proof() {
+        runtime().block_on(async {
+            for case in ["released", "changed-plaintext", "unreleased", "unregistered", "damaged"] {
+                let root = tempfile::tempdir().unwrap();
+                let provider = FakeProvider::new(false);
+                let repository = fake::repository();
+                let (capture, _) = captured(root.path(), "racing-capture", 1, b"record", b"asset");
+                let mut journal = journal(&root.path().join("job"), "racing-job", &capture);
+                let mut cache = PackageCache::open(&root.path().join("cache")).unwrap();
+                let mut evidence = ObjectEvidence::open(root.path(), journal.connection_id()).unwrap();
+                let path = root.path().join("plaintext");
+                let body = b"first immutable snapshot";
+                fs::write(&path, body).unwrap();
+                let key = derive_key(&[31; 32], "format-repository", "data").unwrap();
+                let cancel = Cancellation::default();
+                let object_id = "pack-racing";
+                seal_plain_object(&path, body.len() as u64, hash(body), object_id.into(), ObjectRole::Pack,
+                    "format-repository", &[31; 32], &key, limits(128 * 1024), 0,
+                    &mut cache, &mut evidence, &mut journal, &provider, &repository, &cancel)
+                    .await.unwrap().unwrap();
+                let mut uploader = journal.preparation_handle(Arc::new(std::sync::atomic::AtomicUsize::new(0))).unwrap();
+                let intent = uploader.record(object_id).unwrap().unwrap().intent;
+                if case != "unregistered" {
+                    uploader.cover("inventory-racing", &[super::super::journal::WaveMember {
+                        object_id: object_id.into(), plaintext_length: body.len() as u64,
+                        plaintext_sha256: hex::encode(hash(body)),
+                    }]).unwrap();
+                }
+                let requested = if case == "changed-plaintext" { b"other immutable snapshot" } else { body };
+                let cpu = cpu_permit().await.unwrap();
+                let repeated = seal_plain_object(&path, requested.len() as u64, hash(requested), object_id.into(), ObjectRole::Pack,
+                    "format-repository", &[31; 32], &key, limits(128 * 1024), 0,
+                    &mut cache, &mut evidence, &mut journal, &provider, &repository, &cancel);
+                tokio::pin!(repeated);
+                assert!(futures::poll!(&mut repeated).is_pending(), "{case}: revalidation must wait for CPU");
+                let spool = uploader.spool_path(object_id);
+                if case == "unreleased" {
+                    fs::remove_file(&spool).unwrap();
+                } else if case == "damaged" {
+                    let mut bytes = fs::read(&spool).unwrap();
+                    bytes[0] ^= 1;
+                    fs::write(&spool, bytes).unwrap();
+                } else {
+                    let source = super::super::transfer::SpoolSource::verified(&spool, intent.byte_length, &intent.sha256).unwrap();
+                    uploader.attempted(object_id, None).unwrap();
+                    let receipt = provider.create_object(&repository, &intent, &source, None, &cancel).await.unwrap();
+                    uploader.complete(&intent, &repository, &receipt).unwrap();
+                    assert!(!spool.exists());
+                }
+                drop(cpu);
+                let result = repeated.await;
+                if case == "released" {
+                    let Some(SealedObject::Pending { ciphertext_sha256, .. }) = result.unwrap() else {
+                        panic!("released pack must retain its upload identity");
+                    };
+                    assert_eq!(ciphertext_sha256, intent.sha256);
+                    assert_eq!(provider.upload_attempts(object_id), 1);
+                    assert_eq!(provider.read_count(), 0, "a durable matching receipt needs no download");
+                } else {
+                    assert_eq!(result.err().expect(case).kind, ErrorKind::Corrupt, "{case}");
+                }
+            }
+        });
     }
 
     #[test]

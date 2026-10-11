@@ -82,6 +82,11 @@ export class ExternalStorageBridge {
         return listen('external-storage-job-started', listener)
     }
 
+    onAuthorizationReady(listener: (authorizationId: string) => void): Promise<() => void> {
+        if (!this.supported) return Promise.resolve(() => {})
+        return listen<string>('external-storage-authorization-ready', event => listener(event.payload))
+    }
+
     prepareRenewal(connectionId: string): Promise<PreparedExternalConnection> {
         return this.native('external_storage_prepare_renewal', { connectionId })
     }
