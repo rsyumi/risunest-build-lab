@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { exportSnapshot, verifySnapshot, git, exclusion } from "./snapshot.mjs";
+import { exportSnapshot, verifySnapshot, git, exclusion, sha256 } from "./snapshot.mjs";
 
 function fixture(t) {
   const root = mkdtempSync(path.join(tmpdir(), "build-lab-synthetic-"));
@@ -32,6 +32,8 @@ function fixture(t) {
   put("LICENSE", "Synthetic license fixture\n");
   put("public/token/example/SOURCE.md", "Synthetic attribution\n");
   put("README.md", "Synthetic excluded explanation\n");
+  put("server/sync/README.md", "Synthetic packaged usage\n");
+  put("server/manager/README.md", "Synthetic excluded explanation\n");
   put(".github/workflows/release.yml", "synthetic\n");
   put(".env", "SYNTHETIC_ONLY=true\n");
   put(".env.agent", "VITE_SYNTHETIC=true\n");
@@ -85,10 +87,11 @@ test("exports only the selected commit, reproducibly, with licenses and every la
       "LICENSE",
       "package.json",
       "public/token/example/SOURCE.md",
+      "server/sync/README.md",
       "src/main.ts",
     ],
   );
-  assert.equal(manifest.excluded.length, 5);
+  assert.equal(manifest.excluded.length, 6);
   assert.deepEqual(
     exportSnapshot(f.repo, f.commit, "macos", path.join(f.root, "again")),
     first,
@@ -102,6 +105,31 @@ test("rejects wrong lane and abbreviated source revision", (t) => {
     () => exportSnapshot(f.repo, "HEAD", "macos", path.join(f.root, "other")),
     /full SHA/,
   );
+});
+
+test("old snapshots keep their original document exclusion rules", (t) => {
+  const f = fixture(t);
+  exportSnapshot(f.repo, f.commit, "sync", f.destination);
+  const filesPath = path.join(f.destination, ".build-lab/files.json");
+  const sourcePath = path.join(f.destination, ".build-lab/source.json");
+  const manifest = JSON.parse(readFileSync(filesPath));
+  const readme = manifest.included.find(record => record.path === "server/sync/README.md");
+  manifest.included = manifest.included.filter(record => record !== readme);
+  manifest.excluded.push({ ...readme, reason: "explanatory-document" });
+  manifest.excluded.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const bytes = Buffer.from(JSON.stringify(manifest));
+  writeFileSync(filesPath, bytes);
+  rmSync(path.join(f.destination, readme.path));
+  const metadata = JSON.parse(readFileSync(sourcePath));
+  metadata.exclusion_rules_version = "risunest-build-inputs-v1";
+  metadata.file_list_sha256 = sha256(bytes);
+  writeFileSync(sourcePath, JSON.stringify(metadata));
+  verifySnapshot(f.destination, "sync");
+  assert.equal(exclusion(readme.path, "risunest-build-inputs-v1"), "explanatory-document");
+  assert.equal(exclusion(readme.path), null);
+  metadata.exclusion_rules_version = "unknown";
+  writeFileSync(sourcePath, JSON.stringify(metadata));
+  assert.throws(() => verifySnapshot(f.destination, "sync"));
 });
 test("rejects content tampering, extra files, manifest tampering, and nonempty destination", (t) => {
   const f = fixture(t);

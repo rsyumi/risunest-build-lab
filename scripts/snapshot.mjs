@@ -11,7 +11,8 @@ import {
 import path from "node:path";
 import assert from "node:assert/strict";
 
-export const rulesVersion = "risunest-build-inputs-v1";
+export const rulesVersion = "risunest-build-inputs-v2";
+const previousRulesVersion = "risunest-build-inputs-v1";
 export const sha256 = (bytes) =>
   createHash("sha256").update(bytes).digest("hex");
 export const json = (value) => JSON.stringify(value, null, 2) + "\n";
@@ -41,7 +42,7 @@ export function validPath(name) {
       .every((p) => p && p !== "." && p !== ".." && !p.includes(":")),
   );
 }
-export function exclusion(name) {
+export function exclusion(name, rules = rulesVersion) {
   validPath(name);
   const parts = name.split("/");
   if (parts[0] === "docs") return "private-control-or-generated";
@@ -66,6 +67,7 @@ export function exclusion(name) {
     return "private-data-or-signing";
   if (
     /\.(?:md|mdx|rst)$/i.test(name) &&
+    (name !== "server/sync/README.md" || rules === previousRulesVersion) &&
     !/(?:^|\/)(?:LICENSE|COPYING|NOTICE|COPYRIGHT|SOURCE)(?:\.|$)/i.test(name)
   )
     return "explanatory-document";
@@ -200,7 +202,7 @@ export function verifySnapshot(root, lane) {
   assert.equal(metadata.lane, lane, "snapshot lane mismatch");
   assert.match(metadata.source_commit, /^[0-9a-f]{40}$/);
   assert.match(metadata.source_tree, /^[0-9a-f]{40}$/);
-  assert.equal(metadata.exclusion_rules_version, rulesVersion);
+  assert([rulesVersion, previousRulesVersion].includes(metadata.exclusion_rules_version));
   const bytes = readFileSync(path.join(root, ".build-lab/files.json"));
   assert.equal(
     sha256(bytes),
@@ -225,11 +227,11 @@ export function verifySnapshot(root, lane) {
       assert(Number.isSafeInteger(record.bytes) && record.bytes >= 0);
       assert.match(record.sha256, /^[0-9a-f]{64}$/);
       if (kind === "excluded") {
-        assert.equal(exclusion(record.path), record.reason);
+        assert.equal(exclusion(record.path, metadata.exclusion_rules_version), record.reason);
         assert(record.reason);
         continue;
       }
-      assert.equal(exclusion(record.path), null, "forbidden snapshot input");
+      assert.equal(exclusion(record.path, metadata.exclusion_rules_version), null, "forbidden snapshot input");
       const file = path.join(root, record.path);
       const stat = lstatSync(file);
       assert(stat.isFile() && !stat.isSymbolicLink());
