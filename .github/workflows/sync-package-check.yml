@@ -1,0 +1,118 @@
+name: Sync package check
+run-name: Sync packages ${{ inputs.source_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full Sync snapshot commit SHA
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2022, target: x86_64-pc-windows-msvc, os: windows, arch: x86_64, suffix: .exe }
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc, os: windows, arch: aarch64, suffix: .exe }
+          - { runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu, os: linux, arch: x86_64, suffix: '' }
+          - { runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, os: linux, arch: aarch64, suffix: '' }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, os: darwin, arch: x86_64, suffix: '' }
+          - { runner: macos-15, target: aarch64-apple-darwin, os: darwin, arch: aarch64, suffix: '' }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      TARGET: ${{ matrix.target }}
+      VENDOR_TARGET: ${{ matrix.os }}-${{ matrix.arch }}
+      RISUNEST_DEFAULT_REGISTRY_URL: https://synthetic.invalid/
+    steps:
+      - name: Validate dispatch
+        working-directory: ${{ github.workspace }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git config --global core.autocrlf false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: pnpm/action-setup@v5
+        with:
+          package_json_file: source/package.json
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Verify snapshot and create synthetic public inputs
+        run: |
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . sync
+          mkdir -p artifacts
+          cp .build-lab/source.json artifacts/source.json
+          node --input-type=module -e 'import fs from "node:fs"; import {createSigner} from "./tests/release/signing.mjs"; const version=JSON.parse(fs.readFileSync("server/version.json")); const vendorInput=JSON.parse(fs.readFileSync("scripts/release/cloudflared.json")); fs.writeFileSync("release-input.json",JSON.stringify({product:"sync",...version,vendorInput})); fs.appendFileSync(process.env.GITHUB_ENV,"RISUNEST_UPDATE_PUBLIC_KEY="+Buffer.from(createSigner().key).toString("base64")+"\n");'
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+      - name: Use runner temporary storage
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $nativeTestTemp = Join-Path $env:RUNNER_TEMP 'native-tests'
+          New-Item -ItemType Directory -Force -Path $nativeTestTemp | Out-Null
+          "TEMP=$nativeTestTemp" >> $env:GITHUB_ENV
+          "TMP=$nativeTestTemp" >> $env:GITHUB_ENV
+      - name: Use physical temporary path
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p "$RUNNER_TEMP/tests"
+          echo "TMPDIR=$(cd "$RUNNER_TEMP/tests" && pwd -P)" >> "$GITHUB_ENV"
+      - name: Install locked frontend inputs
+        run: pnpm install --frozen-lockfile
+      - name: Install GUI inputs
+        if: matrix.os != 'linux'
+        run: pnpm --dir server/manager/gui --ignore-workspace install --frozen-lockfile
+      - name: Lint and test native inputs
+        run: |
+          cargo clippy --manifest-path server/sync/Cargo.toml --all-targets --locked --target "$TARGET" -- -D warnings
+          cargo test --manifest-path crates/sync-wire/Cargo.toml --release --locked --target "$TARGET" 2>&1 | tee artifacts/wire-tests.log
+          cargo test --manifest-path server/sync/Cargo.toml --release --locked --target "$TARGET" 2>&1 | tee artifacts/server-tests.log
+          cargo test --manifest-path server/manager/Cargo.toml --release --locked --target "$TARGET" 2>&1 | tee artifacts/manager-tests.log
+          cargo build --manifest-path server/sync/Cargo.toml --release --locked --target "$TARGET"
+          cargo build --manifest-path server/manager/Cargo.toml --release --locked --target "$TARGET"
+          node server/manager/tests/daemon-process.mjs "$CARGO_TARGET_DIR/$TARGET/release/risunest-sync-server${{ matrix.suffix }}" "$CARGO_TARGET_DIR/$TARGET/release/risunest-sync-manager${{ matrix.suffix }}"
+      - name: Build and prove every native package
+        run: |
+          node scripts/release/vendor.mjs --target "$VENDOR_TARGET" --output vendor
+          export RISUNEST_CLOUDFLARED_INPUT="$(pwd)/vendor/vendor.json"
+          version=$(node -p "require('./server/version.json').version")
+          node server/manager/install/build.mjs --target "$TARGET" --output release-work/native --registry-url "$RISUNEST_DEFAULT_REGISTRY_URL" --version "$version" 2>&1 | tee artifacts/native-build.log
+          daemon=$(node -p "require('./release-work/native/native-build.json').daemon")
+          python server/sync/distribution/package.py --binary "$daemon" --target "$TARGET" --version "$version" --output release-work/raw
+          raw=$(find release-work/raw -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) -print -quit)
+          vendor_sha=$(node -p "require('./vendor/vendor.json').executableSha256")
+          node server/manager/install/package.mjs --native-build release-work/native/native-build.json --raw-archive "$raw" --release-input release-input.json --output release-work/packages --cloudflared-sha256 "$vendor_sha" 2>&1 | tee artifacts/packages.log
+          cp release-work/packages/assets.json artifacts/assets.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sync-package-${{ matrix.target }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
