@@ -82,7 +82,7 @@ async function main() {
   if (phase === "sidebar-touch") {
     document.getElementById("app")!.style.display = "none";
     const { mountSidebarTouchFixture } = await import("../sidebar-touch/fixture");
-    mountSidebarTouchFixture(document.getElementById("benchmark")!);
+    mountSidebarTouchFixture(document.getElementById("benchmark")!, true);
     return;
   }
   if (

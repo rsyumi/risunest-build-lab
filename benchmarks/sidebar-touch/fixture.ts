@@ -2,13 +2,36 @@ import { sidebarTouchDrag } from '../../src/ts/gui/sidebarTouchDrag'
 import { RISU_SIDEBAR_DRAG_TYPE } from '../../src/ts/dragTypes'
 import { polyfill } from 'mobile-drag-drop'
 
-export function mountSidebarTouchFixture(host: HTMLElement) {
+export function mountSidebarTouchFixture(host: HTMLElement, trace = false) {
     // Exercise coexistence with the legacy iOS document-level polyfill.
     polyfill({ forceApply: true })
     host.style.cssText = 'font:16px sans-serif;color:black;background:white;padding:8px'
     host.innerHTML = '<button id="reset-sidebar" style="padding:12px">Reset sidebar</button><div id="sidebar-status"></div><div id="touch-sidebar" style="width:100px;height:360px;overflow-y:auto;user-select:none;border:1px solid gray"></div>'
     const list = host.querySelector<HTMLElement>('#touch-sidebar')!
     const status = host.querySelector<HTMLElement>('#sidebar-status')!
+    let events: number[][] = []
+    let epoch = 0
+    if (trace) {
+        const output = document.createElement('p')
+        output.style.cssText = 'position:fixed;right:0;bottom:0;max-width:240px;max-height:20px;overflow:hidden;pointer-events:none'
+        host.append(output)
+        const types = ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'dragstart', 'dragend', 'drop', 'contextmenu']
+        for (const [kind, type] of types.entries()) {
+            document.addEventListener(type, event => {
+                if (!(event.target instanceof Node) || !list.contains(event.target)) return
+                if (type === 'touchstart') epoch = performance.now()
+                const point = (event as TouchEvent).changedTouches?.[0]
+                const row = [kind, Math.round(performance.now() - epoch),
+                    Math.round(point?.clientX ?? 0), Math.round(point?.clientY ?? 0),
+                    Number(event.cancelable), 0, Math.round(list.scrollTop), Number(event.isTrusted)]
+                if (events.length < 80) events.push(row)
+                queueMicrotask(() => {
+                    row[5] = Number(event.defaultPrevented)
+                    output.textContent = 'sidebar-events:' + JSON.stringify(events)
+                })
+            }, { capture: true, passive: true })
+        }
+    }
     let order: number[] = []
     let source = -1
     let drops = 0
@@ -51,6 +74,7 @@ export function mountSidebarTouchFixture(host: HTMLElement) {
     }
     function reset() {
         action?.destroy()
+        events = []
         order = Array.from({ length: 20 }, (_, i) => i + 1)
         drops = clicks = menus = 0
         render()

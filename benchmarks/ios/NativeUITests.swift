@@ -698,7 +698,10 @@ final class NativeUITests: XCTestCase {
         XCTAssertTrue(input.waitForExistence(timeout: 15))
         input.tap()
         input.typeText("synthetic draft")
-        XCTAssertTrue((input.value as? String)?.contains("synthetic draft") == true)
+        let typed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            (input.value as? String)?.contains("synthetic draft") == true
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [typed], timeout: 5), .completed)
         attachScreenshot(app, name: "05-product-chat")
     }
 
@@ -719,6 +722,8 @@ final class NativeUITests: XCTestCase {
         XCTAssertTrue(web.staticTexts["sidebar-clicks:0"].exists)
         reset.tap()
         web.buttons["Bot 3"].press(forDuration: 0.6, thenDragTo: web.buttons["Before Bot 1"])
+        let events = web.staticTexts.containing(NSPredicate(format: "label BEGINSWITH %@", "sidebar-events:")).firstMatch
+        if events.exists { print(events.label) }
         XCTAssertTrue(web.staticTexts["sidebar-drops:1"].waitForExistence(timeout: 5))
         XCTAssertTrue(web.staticTexts["sidebar-first:3"].exists)
         XCTAssertTrue(web.staticTexts["sidebar-clicks:0"].exists)

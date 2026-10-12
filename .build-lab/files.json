@@ -111,8 +111,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 49444,
-      "sha256": "9d4aadb2fe03bc18d510c2edde1858b6eabbfa0b378d8c3dfa0465dab63fe886"
+      "bytes": 49784,
+      "sha256": "ca8f44d1d0b2418e015a7cb4608bf03a132e05f3bdc0310aefc9ccbeec3c64bb"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -159,8 +159,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 16044,
-      "sha256": "8ca236f09c98c88bb770901993f992ddd01c4fc99ae32cda86dd439074bca3fc"
+      "bytes": 16050,
+      "sha256": "0e95745b5db9698b30699c8b9f961d61cb45398667856af1ab2c736aa810ca43"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -753,8 +753,8 @@
     {
       "path": "benchmarks/sidebar-touch/fixture.ts",
       "mode": "100644",
-      "bytes": 3376,
-      "sha256": "ac9b60b9d9b89f1b4535f94454b39972ad8154832ca18bfcc4bbc5a05c96fae2"
+      "bytes": 4742,
+      "sha256": "de936cb28fbb6a60dd2280f9bc2a3a6114331e65651c407756338d43dfd981b8"
     },
     {
       "path": "benchmarks/startup/android-device.mjs",
