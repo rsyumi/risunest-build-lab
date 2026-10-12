@@ -1041,8 +1041,8 @@
     {
       "path": "benchmarks/sync-ui/driver.ts",
       "mode": "100644",
-      "bytes": 26136,
-      "sha256": "bfc6ec6f7a189238905c2d8d9a880a4b903c450ddfcf2493e9a3db949e3eaf7c"
+      "bytes": 26700,
+      "sha256": "9d2f3211ec7ca74a765ef867b210626e31d504875f5db38bdb9c538609d9f64d"
     },
     {
       "path": "benchmarks/sync-ui/externalStorage.ts",
