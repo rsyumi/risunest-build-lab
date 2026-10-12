@@ -400,7 +400,15 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
             return ["cancelled": false, "path": destination.path, "name": url.lastPathComponent,
                     "bytes": values.fileSize ?? 0, "mimeType": UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? ""]
         } catch {
-            try? FileManager.default.removeItem(at: folder)
+            if FileManager.default.fileExists(atPath: folder.path) {
+                do { try FileManager.default.removeItem(at: folder) }
+                catch let cleanupError {
+                    throw NSError(domain: "RisuNest.FileSelection", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: error.localizedDescription + "\n" + cleanupError.localizedDescription,
+                        NSUnderlyingErrorKey: error
+                    ])
+                }
+            }
             throw error
         }
     }

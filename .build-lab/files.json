@@ -2157,8 +2157,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/ios/Sources/IosNativePlugin.swift",
       "mode": "100644",
-      "bytes": 35929,
-      "sha256": "63f14381439ca38f9e88ba821f518099c5ede2c85ccb6b4b89ce1e4852756e90"
+      "bytes": 36367,
+      "sha256": "f7fcf8da34a40774435beedcb0247df96e383183c326543a078d1139713b2502"
     },
     {
       "path": "crates/tauri-plugin-ios-native/ios/Sources/NativeFileState.swift",
