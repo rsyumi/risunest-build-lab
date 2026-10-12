@@ -25,6 +25,11 @@ export function sidebarTouchDrag(node: HTMLElement) {
     let frame = 0
     let suppressClickUntil = 0
     let previousFrame = 0
+    const touchStyles = ['-webkit-touch-callout', '-webkit-user-select', 'user-select'].map(name => ({
+        name, value: node.style.getPropertyValue(name), priority: node.style.getPropertyPriority(name),
+    }))
+    // Native image callouts and text selection can take over a stationary hold on iOS.
+    for (const { name } of touchStyles) node.style.setProperty(name, 'none')
 
     function valid(g: Gesture) {
         return node.isConnected && node.getClientRects().length > 0 && node.contains(g.source)
@@ -199,6 +204,7 @@ export function sidebarTouchDrag(node: HTMLElement) {
     return {
         destroy() {
             finish()
+            for (const { name, value, priority } of touchStyles) node.style.setProperty(name, value, priority)
             node.removeEventListener('touchstart', start)
             node.removeEventListener('dragstart', nativeDrag, true)
             node.removeEventListener('contextmenu', contextmenu, true)

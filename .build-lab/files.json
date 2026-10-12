@@ -11469,14 +11469,14 @@
     {
       "path": "src/ts/gui/sidebarTouchDrag.test.ts",
       "mode": "100644",
-      "bytes": 6946,
-      "sha256": "4c6b6793927b9553828a51bf8c398d7cf1b5c0edc5ae16914f6d6e7e3c99b0b7"
+      "bytes": 7374,
+      "sha256": "027117cefbc0adc6e844b7e4a8cbe97a60634d95a2b39f8b878064747f31dd53"
     },
     {
       "path": "src/ts/gui/sidebarTouchDrag.ts",
       "mode": "100644",
-      "bytes": 8541,
-      "sha256": "e7bfa64e62408519050f8a319dd418e392d441f10fb5eda33ba698e867a468d6"
+      "bytes": 9032,
+      "sha256": "fbf0259c976820a6a84eff466c2cb799f7bdb275298b74fb99c50134f9560ad0"
     },
     {
       "path": "src/ts/gui/textEditorPopup.svelte.ts",

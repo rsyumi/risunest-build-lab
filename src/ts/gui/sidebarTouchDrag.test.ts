@@ -161,3 +161,13 @@ it('does not intercept mouse dragging, right click or keyboard activation', () =
     avatar.dispatchEvent(click)
     expect(click.defaultPrevented).toBe(false)
 })
+
+it('restores the previous text-selection style when detached', () => {
+    action.destroy()
+    node.style.setProperty('user-select', 'text', 'important')
+    action = sidebarTouchDrag(node)
+    expect(node.style.getPropertyValue('user-select')).toBe('none')
+    action.destroy()
+    expect(node.style.getPropertyValue('user-select')).toBe('text')
+    expect(node.style.getPropertyPriority('user-select')).toBe('important')
+})
