@@ -141,9 +141,29 @@ describe('native mobile file selection', () => {
     })
 
     it('retains both read and cleanup errors', async () => {
+        mocks.pick.mockResolvedValue({ cancelled: false, files: [metadata(), { ...metadata(), path: '/owned/second/source' }] })
         mocks.open.mockRejectedValue(new Error('read denied'))
-        mocks.discard.mockRejectedValue(new Error('cleanup denied'))
+        mocks.discard.mockRejectedValueOnce(new Error('cleanup denied')).mockResolvedValueOnce(undefined)
         await expect(selectNativeFileData()).rejects.toThrow('Error: read denied\nError: cleanup denied')
+        expect(mocks.discard).toHaveBeenCalledTimes(2)
+        expect(isLibraryFileOperationReserved()).toBe(false)
+    })
+
+    it('releases more files than the Android control transport permits in flight', async () => {
+        const { createAndroidControlClient } = await import('../androidNativeControl')
+        const port: import('../androidNativeControl').AndroidControlMessagePort = {
+            postMessage: message => {
+                const { id } = JSON.parse(message)
+                queueMicrotask(() => port.onmessage?.({ data: JSON.stringify({ id, result: null }) }))
+            },
+        }
+        const client = createAndroidControlClient(port)
+        mocks.pick.mockResolvedValue({ cancelled: false, files: Array.from({ length: 40 }, (_, index) => ({
+            ...metadata(), path: `/owned/${index}/source`,
+        })) })
+        mocks.discard.mockImplementation(path => client.request('files.discard', path))
+        await expect(selectNativeFileData({ multiple: true, accept: '.txt' })).resolves.toEqual([])
+        expect(mocks.discard).toHaveBeenCalledTimes(40)
         expect(isLibraryFileOperationReserved()).toBe(false)
     })
 })

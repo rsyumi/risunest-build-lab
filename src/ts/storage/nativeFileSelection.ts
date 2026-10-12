@@ -96,9 +96,12 @@ export function selectNativeFileData(options: FileSelectionOptions = {}) {
             failure = error
             throw error
         } finally {
-            const cleanup = await Promise.allSettled(files.map(async file => native.discard(file.path)))
+            const errors: unknown[] = []
+            for (const file of files) {
+                try { await native.discard(file.path) }
+                catch (error) { errors.push(error) }
+            }
             selecting = false
-            const errors = cleanup.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
             if (errors.length) throw new Error([failure, ...errors].filter(Boolean).map(String).join('\n'), { cause: failure ?? errors[0] })
         }
     })

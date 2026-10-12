@@ -15243,14 +15243,14 @@
     {
       "path": "src/ts/storage/nativeFileSelection.test.ts",
       "mode": "100644",
-      "bytes": 7502,
-      "sha256": "794127efcf17b4b48f14ff3d837c32f0fdf90f786efb82295db2c963b3c7ad42"
+      "bytes": 8759,
+      "sha256": "f7be9ac43066fffc4c901a083ce0cdf277eab74797993a492298bfca210ae272"
     },
     {
       "path": "src/ts/storage/nativeFileSelection.ts",
       "mode": "100644",
-      "bytes": 4668,
-      "sha256": "122442387474f9a85676aa385ce4bd5ff7f0ca1fe78e12b135e5f0f3a8ad1eb9"
+      "bytes": 4661,
+      "sha256": "8a45ce5cdd0f72d964284d32d51fda235ed21cd6a02170f9c805eae12c6c356a"
     },
     {
       "path": "src/ts/storage/nativeFileSourceInfo.ts",

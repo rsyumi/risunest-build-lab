@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "lane": "ios",
-  "source_commit": "47cb958170ff762e525767bca6e15807d60a0c2e",
-  "source_tree": "0d93b5e66d5dba2e8bad536f214635f86ad400fa",
-  "file_list_sha256": "0b24baa024aaf1fbd56fe3b77762a1e8afcededd516c499fe0d78c3afe12b1cb",
+  "source_commit": "d6ad8678a03c720abcd7d33636f10099d376bb0f",
+  "source_tree": "0bc63abc7be3f65d0bc3ea58c9df9aaed2ff7566",
+  "file_list_sha256": "5755cb949ac6de0dc1d11e7bed869a70b00c866ddb6823a2026e4c570898e59b",
   "exclusion_rules_version": "risunest-build-inputs-v2"
 }
