@@ -93,6 +93,8 @@ it('tolerates finger jitter, then drags and drops after holding', () => {
     touch('touchstart')
     touch('touchmove', 32, 62)
     vi.advanceTimersByTime(450)
+    expect(touch('touchmove', 33, 63).defaultPrevented).toBe(true)
+    expect(document.querySelector('[data-sidebar-drag-ghost]')).toBeNull()
     expect(touch('touchmove', 30, 160).defaultPrevented).toBe(true)
     expect(started).toHaveBeenCalledOnce()
     expect(document.querySelector('[data-sidebar-drag-ghost]')).not.toBeNull()

@@ -151,8 +151,10 @@ export function sidebarTouchDrag(node: HTMLElement) {
                 if (moved) g.scrolling = true
                 return
             }
-            if (!moved) return
             if (!event.cancelable) { finish(); return }
+            // WebKit can commit scrolling before the movement reaches the drag threshold.
+            event.preventDefault()
+            if (!moved) return
             if (!startDrag(g)) return
         }
         event.preventDefault()

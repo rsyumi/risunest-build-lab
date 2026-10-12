@@ -753,8 +753,8 @@
     {
       "path": "benchmarks/sidebar-touch/fixture.ts",
       "mode": "100644",
-      "bytes": 4742,
-      "sha256": "de936cb28fbb6a60dd2280f9bc2a3a6114331e65651c407756338d43dfd981b8"
+      "bytes": 4810,
+      "sha256": "321c44b20486cb0c671e3ee50f1e83aa7707cc83db64491eac3773ae117f1dbe"
     },
     {
       "path": "benchmarks/startup/android-device.mjs",
@@ -11595,14 +11595,14 @@
     {
       "path": "src/ts/gui/sidebarTouchDrag.test.ts",
       "mode": "100644",
-      "bytes": 7374,
-      "sha256": "027117cefbc0adc6e844b7e4a8cbe97a60634d95a2b39f8b878064747f31dd53"
+      "bytes": 7516,
+      "sha256": "711d6763957d902613b51fe4ba83f698ff75f2347edb9cf15aa5e9a0ba0ddffb"
     },
     {
       "path": "src/ts/gui/sidebarTouchDrag.ts",
       "mode": "100644",
-      "bytes": 9032,
-      "sha256": "fbf0259c976820a6a84eff466c2cb799f7bdb275298b74fb99c50134f9560ad0"
+      "bytes": 9158,
+      "sha256": "3f7813bf2638dd88c7cf9b83586a1a802bcf8dd8e5548ea05cbdb300847eb5df"
     },
     {
       "path": "src/ts/gui/textEditorPopup.svelte.ts",

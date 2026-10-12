@@ -23,12 +23,13 @@ export function mountSidebarTouchFixture(host: HTMLElement, trace = false) {
                 const point = (event as TouchEvent).changedTouches?.[0]
                 const row = [kind, Math.round(performance.now() - epoch),
                     Math.round(point?.clientX ?? 0), Math.round(point?.clientY ?? 0),
-                    Number(event.cancelable), 0, Math.round(list.scrollTop), Number(event.isTrusted)]
+                    Number(event.cancelable), 0, Math.round(list.scrollTop), Number(event.isTrusted),
+                    Math.round(performance.now() - event.timeStamp)]
                 if (events.length < 80) events.push(row)
-                queueMicrotask(() => {
+                setTimeout(() => {
                     row[5] = Number(event.defaultPrevented)
                     output.textContent = 'sidebar-events:' + JSON.stringify(events)
-                })
+                }, 0)
             }, { capture: true, passive: true })
         }
     }
