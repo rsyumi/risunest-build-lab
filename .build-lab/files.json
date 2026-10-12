@@ -753,8 +753,8 @@
     {
       "path": "benchmarks/sidebar-touch/fixture.ts",
       "mode": "100644",
-      "bytes": 3176,
-      "sha256": "427f056a52570ba70293cecf9a1a7dc2102363e036d128a11f461786eff1f493"
+      "bytes": 3376,
+      "sha256": "ac9b60b9d9b89f1b4535f94454b39972ad8154832ca18bfcc4bbc5a05c96fae2"
     },
     {
       "path": "benchmarks/startup/android-device.mjs",

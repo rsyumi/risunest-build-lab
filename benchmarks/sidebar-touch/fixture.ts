@@ -39,7 +39,7 @@ export function mountSidebarTouchFixture(host: HTMLElement) {
             const row = document.createElement('div')
             row.dataset.sidebarDragId = String(id)
             row.draggable = true
-            row.innerHTML = `<span class="avatar" role="button" tabindex="0" style="display:flex;align-items:center;width:80px;height:56px;background:#bcd">Bot ${id}</span>`
+            row.innerHTML = `<span class="avatar" role="button" aria-label="Bot ${id}" tabindex="0" style="display:flex;align-items:center;width:80px;height:56px;background:#bcd"><img alt="" width="80" height="56" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='56'%3E%3Crect width='80' height='56' fill='%23bcd'/%3E%3C/svg%3E"></span>`
             row.addEventListener('dragstart', event => {
                 source = id
                 event.dataTransfer!.setData(RISU_SIDEBAR_DRAG_TYPE, 'true')
