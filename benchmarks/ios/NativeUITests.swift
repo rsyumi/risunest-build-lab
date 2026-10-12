@@ -702,6 +702,33 @@ final class NativeUITests: XCTestCase {
         attachScreenshot(app, name: "05-product-chat")
     }
 
+    func testSidebarTouchGestures() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "io.github.rsyumi.risunest.ios.bench")
+        app.launchEnvironment["RISUNEST_IOS_PHASE"] = "sidebar-touch"
+        app.launch()
+        let web = app.webViews
+        let reset = web.buttons["Reset sidebar"]
+        XCTAssertTrue(reset.waitForExistence(timeout: 60))
+        web.buttons["Bot 1"].tap()
+        XCTAssertTrue(web.staticTexts["sidebar-clicks:1"].waitForExistence(timeout: 5))
+        reset.tap()
+        web.buttons["Bot 4"].press(forDuration: 0.05, thenDragTo: web.buttons["Bot 1"])
+        XCTAssertTrue(web.staticTexts["sidebar-scrolled"].waitForExistence(timeout: 5))
+        XCTAssertTrue(web.staticTexts["sidebar-drops:0"].exists)
+        XCTAssertTrue(web.staticTexts["sidebar-clicks:0"].exists)
+        reset.tap()
+        web.buttons["Bot 3"].press(forDuration: 0.6, thenDragTo: web.buttons["Before Bot 1"])
+        XCTAssertTrue(web.staticTexts["sidebar-drops:1"].waitForExistence(timeout: 5))
+        XCTAssertTrue(web.staticTexts["sidebar-first:3"].exists)
+        XCTAssertTrue(web.staticTexts["sidebar-clicks:0"].exists)
+        reset.tap()
+        web.buttons["Bot 1"].press(forDuration: 0.7)
+        XCTAssertTrue(web.staticTexts["sidebar-menus:1"].waitForExistence(timeout: 5))
+        XCTAssertTrue(web.staticTexts["sidebar-drops:0"].exists)
+        XCTAssertTrue(web.staticTexts["sidebar-clicks:0"].exists)
+    }
+
     func testProductOnboardingScreenshots() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "io.github.rsyumi.risunest.ios.bench")

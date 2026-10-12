@@ -482,12 +482,17 @@ pub async fn run(root: &Path, executable: &Path) -> Result<()> {
     let client = Client::new(root.to_owned())?;
     loop {
         let status = client.status().await;
+        let version = status
+            .as_ref()
+            .ok()
+            .map(|status| text(&status["version"]))
+            .unwrap_or_else(|| "조회할 수 없음".into());
+        let title = format!(
+            "RisuNest 동기화 서버 · 버전 {version} · {}",
+            if status.is_ok() { "연결됨" } else { "연결 안 됨" }
+        );
         let Some(action) = menu(
-            if status.is_ok() {
-                "RisuNest 동기화 서버 · 연결됨"
-            } else {
-                "RisuNest 동기화 서버 · 연결 안 됨"
-            },
+            &title,
             &[
                 "개요",
                 "기기",

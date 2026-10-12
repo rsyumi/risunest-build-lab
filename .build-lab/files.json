@@ -111,8 +111,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 46898,
-      "sha256": "25e169586253e8af366aa0d2b73da532317a00bbed9291bb88f5952381e43d15"
+      "bytes": 48381,
+      "sha256": "fbf5a5733e0fb989606a2016e787e16bd3f7ff45391a81ab9881a224c3ec783d"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -159,8 +159,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 15727,
-      "sha256": "0055c895a301485f1c5b8328ec6d4b64e4d61e4da2fb8dc7122ab2ce313edf55"
+      "bytes": 15990,
+      "sha256": "9fa58f52edb7b96818060291063e52fd15c985648249196bd45172a9d25d5f05"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -749,6 +749,12 @@
       "mode": "100644",
       "bytes": 14708,
       "sha256": "0bf4ef3152be4512401a66b46cfdb4b860c506f8bb088ecfed97e0ff9355e45c"
+    },
+    {
+      "path": "benchmarks/sidebar-touch/fixture.ts",
+      "mode": "100644",
+      "bytes": 3176,
+      "sha256": "427f056a52570ba70293cecf9a1a7dc2102363e036d128a11f461786eff1f493"
     },
     {
       "path": "benchmarks/startup/android-device.mjs",
@@ -3999,8 +4005,8 @@
     {
       "path": "server/manager/src/tui.rs",
       "mode": "100644",
-      "bytes": 28916,
-      "sha256": "5096b306866a853b2cce34e171c05b4a4b4b59f1271172cdf66b08f004f5948c"
+      "bytes": 29112,
+      "sha256": "ce283321a42d0d305724cfd93b9f984ce4fb7f9b2f1bbbeaa7d990b760f42aeb"
     },
     {
       "path": "server/manager/src/update/archive.rs",
@@ -4041,8 +4047,8 @@
     {
       "path": "server/manager/tests/daemon-process.mjs",
       "mode": "100644",
-      "bytes": 2336,
-      "sha256": "5405eb48393c149012588355a68d8cbbe1649c52fad791890350104fed32e684"
+      "bytes": 2796,
+      "sha256": "79bafa3e5852a48af26f464490d122b17d7d1350a4558be2ed626a2662af6b16"
     },
     {
       "path": "server/manager/tests/linux-process.py",
@@ -4167,8 +4173,8 @@
     {
       "path": "server/sync/src/main.rs",
       "mode": "100644",
-      "bytes": 13193,
-      "sha256": "ef000725845ebcc18c052582bb2485147061efd59cf8546582edf6728114786e"
+      "bytes": 13441,
+      "sha256": "e16699484a48cb0f71d5a29b9fb62786c368853caa554e00e19751178e69de85"
     },
     {
       "path": "server/sync/src/management/discovery.rs",
@@ -4401,8 +4407,8 @@
     {
       "path": "server/sync/tests/cli.rs",
       "mode": "100644",
-      "bytes": 6286,
-      "sha256": "db4e6c1e51129c3d5aeb104dcee7c9827d1ce57375f24cb165cc8633a0487b1a"
+      "bytes": 6932,
+      "sha256": "902e7aef32e6bfcf78e0b66e6cb46824c319c0f495c1d6df87c1a10a5577181d"
     },
     {
       "path": "server/sync/tests/common/mod.rs",
@@ -10245,8 +10251,8 @@
     {
       "path": "src/lib/SideBars/Sidebar.svelte",
       "mode": "100644",
-      "bytes": 34474,
-      "sha256": "451bbaaaae1c0375fd06214106a21350c9b1e109e679c5a835726d45e253b325"
+      "bytes": 34891,
+      "sha256": "d6fcb039108eaba6b6f8955696ca556fa7b99b7ff9979d9e1842d5167576cd7e"
     },
     {
       "path": "src/lib/SideBars/SidebarAvatar.svelte",
@@ -11459,6 +11465,18 @@
       "mode": "100644",
       "bytes": 1595,
       "sha256": "15129997d489310ced9768c90ce2b3e560b2f8e3293f685055ed4ad6eff751f7"
+    },
+    {
+      "path": "src/ts/gui/sidebarTouchDrag.test.ts",
+      "mode": "100644",
+      "bytes": 6946,
+      "sha256": "4c6b6793927b9553828a51bf8c398d7cf1b5c0edc5ae16914f6d6e7e3c99b0b7"
+    },
+    {
+      "path": "src/ts/gui/sidebarTouchDrag.ts",
+      "mode": "100644",
+      "bytes": 8541,
+      "sha256": "e7bfa64e62408519050f8a319dd418e392d441f10fb5eda33ba698e867a468d6"
     },
     {
       "path": "src/ts/gui/textEditorPopup.svelte.ts",
@@ -17301,8 +17319,8 @@
     {
       "path": "tests/browser/fixture.ts",
       "mode": "100644",
-      "bytes": 1781,
-      "sha256": "c6791e3c46384f44546505c66a48512c718bc7579749abb10702b37a7f44595c"
+      "bytes": 1818,
+      "sha256": "f24e9c8c16fbc1497bb36dd62191d04f16d72f6d61692a87bb6aeb8054f7d88f"
     },
     {
       "path": "tests/browser/hostAdapters.ts",
@@ -17449,6 +17467,36 @@
       "sha256": "329fac9ec6c701ed38e94c3077ff10797112227122d1d3ecfaf831c1c46a4f9f"
     },
     {
+      "path": "tests/browser/sidebarProductAdapters.svelte.ts",
+      "mode": "100644",
+      "bytes": 1744,
+      "sha256": "320123f56757c4a280435cca90d3ab0402c2646e3791aa8551d8526aaf2ebb85"
+    },
+    {
+      "path": "tests/browser/sidebarProductPlugin.ts",
+      "mode": "100644",
+      "bytes": 1072,
+      "sha256": "c20104404fb2bf2e0af8756afde5df22f13dbc531b4eaa0ee829e2427223baaf"
+    },
+    {
+      "path": "tests/browser/sidebarTouch.browser.spec.ts",
+      "mode": "100644",
+      "bytes": 3929,
+      "sha256": "31f3ccbc923c43b69e52b36d610f20fe4df6c8d77c7030a88bdf23b22eb1a557"
+    },
+    {
+      "path": "tests/browser/sidebarTouch.html",
+      "mode": "100644",
+      "bytes": 290,
+      "sha256": "ea9b694a30c8a590a6aa83c8447a2d9b1d60fcf306559958d5bffb30c85e4afe"
+    },
+    {
+      "path": "tests/browser/sidebarTouch.ts",
+      "mode": "100644",
+      "bytes": 663,
+      "sha256": "22fdb411639277608e69352ebf23e10e04e9c0bbd97c59baeb1a0cf6dca875f5"
+    },
+    {
       "path": "tests/browser/switchContainment.browser.spec.ts",
       "mode": "100644",
       "bytes": 1724,
@@ -17475,8 +17523,8 @@
     {
       "path": "tests/browser/vite.config.ts",
       "mode": "100644",
-      "bytes": 4714,
-      "sha256": "53c11591b17bbe964696759189fbdb6614f110ecaa0d9c20c64eeaafe84bf78f"
+      "bytes": 4859,
+      "sha256": "f27c396cd5bba037858b7bae6cb42b55b896bc279f6e1afed904d7be76d42c42"
     },
     {
       "path": "tests/buildLocal.node-test.mjs",
@@ -18066,14 +18114,14 @@
       "path": "README.ko.md",
       "mode": "100644",
       "bytes": 9737,
-      "sha256": "2e75f10970f7a18f3c177e58e99463d7bab388b42ef6e52389ad592c3dd361a9",
+      "sha256": "33c62882f49b4eb3db1e9632997882c76fb9e5edd9505594ee48b4d59b341496",
       "reason": "explanatory-document"
     },
     {
       "path": "README.md",
       "mode": "100644",
       "bytes": 9150,
-      "sha256": "7e36b6c31b7b3d3bb62f315cbb90c264696848ffc44c619f654ae9602b223de3",
+      "sha256": "4ea830af94e74d8ff1efeeae73a31cdf1f17071b36023a2c17f169a2b00f5ad7",
       "reason": "explanatory-document"
     },
     {

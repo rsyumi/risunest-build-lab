@@ -79,6 +79,12 @@ async function main() {
   await guard();
   check(isTauriIOS && !isTauriDesktop, "iOS runtime classification");
   const phase = await invoke<string>("ios_bench_phase");
+  if (phase === "sidebar-touch") {
+    document.getElementById("app")!.style.display = "none";
+    const { mountSidebarTouchFixture } = await import("../sidebar-touch/fixture");
+    mountSidebarTouchFixture(document.getElementById("benchmark")!);
+    return;
+  }
   if (
     phase !== "app" &&
     phase !== "app-restart" &&
