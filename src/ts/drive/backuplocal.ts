@@ -1,4 +1,5 @@
 import { selectDomFiles } from '../storage/fileSelection'
+import type { SelectedFileSlices } from '../storage/nativeFileSelection'
 import { prepareExternalDatabaseImport } from '../storage/upstreamImport'
 import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 import { BaseDirectory, open, writeFile } from "@tauri-apps/plugin-fs";
@@ -23,7 +24,7 @@ import {
 } from "./backupAssets";
 import { classifyPocketRisuEntry, PocketRisuInlayImporter } from "./pocketRisuBackup";
 import { createLegacyBackupAttachments } from './legacyBackupAttachments';
-import { isTauri, isTauriDesktop } from "src/ts/platform"
+import { isTauri, isTauriDesktop, isTauriMobile } from "src/ts/platform"
 import { decodeRisuSave } from "../storage/risuSave";
 import { relaunch } from "../desktopRelaunch";
 import { decryptBuffer, encryptBuffer, sleep } from "../util";
@@ -382,8 +383,22 @@ export async function importLegacyBackupWithWebView(
     lifecycle: { firstRun?: boolean; beforeActivation?(): Promise<void>; onCommitted?(): void } = {},
     confirmationTitle = language.backupLoadConfirm,
 ): Promise<{ warningCodes: string[], upstreamLosses: { coldMissing: number, invalidInlays: number, pocketInlays: number } } | null> {
+    if (isTauriMobile) {
+        const { withNativeSelectedFile } = await import('../storage/nativeFileSelection')
+        return withNativeSelectedFile({ accept: '.bin', signal: context.signal },
+            (file, release) => importLegacyBackupFile(file, context, lifecycle, confirmationTitle, release))
+    }
     const file = await pickWebBackupFile(context.signal)
-    if (!file) return null
+    return file ? importLegacyBackupFile(file, context, lifecycle, confirmationTitle) : null
+}
+
+async function importLegacyBackupFile(
+    file: SelectedFileSlices,
+    context: LegacyLocalBackupFallbackContext,
+    lifecycle: { firstRun?: boolean; beforeActivation?(): Promise<void>; onCommitted?(): void },
+    confirmationTitle: string,
+    releaseSource?: () => Promise<void>,
+): Promise<{ warningCodes: string[], upstreamLosses: { coldMissing: number, invalidInlays: number, pocketInlays: number } } | null> {
     context.setSource({ name: file.name, bytes: file.size })
 
     const encryptionMeta: {
@@ -637,6 +652,7 @@ export async function importLegacyBackupWithWebView(
                 await attachments.activate(checkCancelled)
                 currentItem = undefined
                 report('activating')
+                await releaseSource?.()
                 return outcome
             },
             onPostCommitError: (error) => {

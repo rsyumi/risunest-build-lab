@@ -14,6 +14,7 @@ import {
 } from "../../src/ts/iosNative";
 import { nativeDataPath } from "../../src/ts/storage/nativePaths";
 import { selectDomFiles } from "../../src/ts/storage/fileSelection";
+import { withNativeSelectedFile } from "../../src/ts/storage/nativeFileSelection";
 
 /** Installed only in the isolated synthetic UI-test app. */
 export async function installPickerContracts(generalOnly = false) {
@@ -60,6 +61,17 @@ export async function installPickerContracts(generalOnly = false) {
         throw new Error("Incorrect general picker file name or binary content");
       }
       return "general-single-exact";
+    });
+    action("General sliced synthetic file", async () => {
+      const result = await withNativeSelectedFile({ accept: ".risup" }, async file => {
+        const bytes = new Uint8Array(await file.slice(2, 5).arrayBuffer());
+        if (file.name !== "native-general.risup" || file.size !== 6 ||
+            bytes.length !== 3 || bytes[0] !== 127 || bytes[1] !== 128 || bytes[2] !== 254) {
+          throw new Error("Incorrect native slice content");
+        }
+        return "general-slice-exact";
+      });
+      return result ?? "general-slice-cancelled";
     });
     action("General multiple synthetic files", async () => {
       const files = await selectDomFiles({ accept: ".risup", multiple: true });

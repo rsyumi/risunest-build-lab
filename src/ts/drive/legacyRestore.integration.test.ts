@@ -54,7 +54,7 @@ vi.mock('src/ts/process/coldstorage.svelte', () => ({
     isColdStorageBackupData: () => false,
     listColdDataKeys: async () => [],
 }))
-vi.mock('src/ts/platform', () => ({ isTauri: false, isTauriDesktop: false }))
+vi.mock('src/ts/platform', () => ({ isTauri: false, isTauriDesktop: false, isTauriMobile: false }))
 vi.mock('@tauri-apps/plugin-fs', () => ({ BaseDirectory: {}, open: vi.fn(), readFile: vi.fn(), writeFile: vi.fn() }))
 vi.mock('../desktopRelaunch', () => ({ relaunch: vi.fn() }))
 

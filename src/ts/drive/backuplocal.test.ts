@@ -13,6 +13,7 @@ import { getBackupInlayName } from './backupAssets'
 
 const state = vi.hoisted(() => ({
     native: true,
+    mobile: false,
     characters: true,
     blobStore: null as BlobStore | null,
     currentDatabase: null as Database | null,
@@ -114,12 +115,14 @@ vi.mock('../process/coldstorage.svelte', () => ({
 vi.mock('src/ts/platform', () => ({
     get isTauri() {return state.native},
     isTauriDesktop: true,
-    isTauriAndroid: false,
+    get isTauriAndroid() { return state.mobile },
     isTauriIOS: false,
+    get isTauriMobile() { return state.mobile },
 }))
 
 vi.mock('@tauri-apps/plugin-fs', () => ({
     BaseDirectory: {},
+    SeekMode: { Start: 0 },
     open: state.openNativeFile,
     readFile: state.fullReadFile,
     writeFile: vi.fn(),
@@ -156,6 +159,8 @@ describe('local backup persistent snapshot', () => {
 
     beforeEach(() => {
         state.native = true
+        state.mobile = false
+        delete window.RisuNativeFileSelection
         state.characters = true
         vi.clearAllMocks()
         state.written.clear()
@@ -182,7 +187,8 @@ describe('local backup persistent snapshot', () => {
         })
     })
 
-    it('expands cold payloads into the replaced local backup database', async () => {
+    it.each([false, true])('expands cold payloads into the replaced local backup database on mobile=%s', async (mobile) => {
+        state.mobile = mobile
         const coldKey = 'local-restore-cold'
         const database = structuredClone(risuSaveFixtureDatabase) as Database
         database.characters[0].coldstorage = coldKey
@@ -228,15 +234,43 @@ describe('local backup persistent snapshot', () => {
         const input = document.createElement('input')
         Object.defineProperty(input, 'files', { value: [file] })
         const click = vi.spyOn(input, 'click').mockImplementation(() => {})
-        const createElement = vi.spyOn(document, 'createElement')
-            .mockReturnValueOnce(input)
+        const createElement = vi.spyOn(document, 'createElement').mockReturnValueOnce(input)
+        const discard = vi.fn(async () => {})
+        const nativeReadSizes: number[] = []
+        if (mobile) {
+            window.RisuNativeFileSelection = {
+                pick: vi.fn(async () => ({ cancelled: false, files: [{ path: '/owned/backup', name: file.name, bytes: file.size, mimeType: '' }] })),
+                discard,
+            }
+            state.openNativeFile.mockImplementation(async () => {
+                let position = 0
+                return {
+                    seek: async (offset: number) => { position = offset },
+                    read: async (buffer: Uint8Array) => {
+                        expect(discard).not.toHaveBeenCalled()
+                        nativeReadSizes.push(buffer.length)
+                        const data = archive.subarray(position, position + buffer.length)
+                        buffer.set(data)
+                        position += data.length
+                        return data.length || null
+                    },
+                    close: state.nativeFileClose,
+                }
+            })
+        }
         const { LoadLocalBackup } = await import('./backuplocal')
         const { alertWait } = await import('../alert')
-
         const pending = LoadLocalBackup()
-        await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
-        input.dispatchEvent(new Event('change'))
+        if (!mobile) {
+            await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
+            input.dispatchEvent(new Event('change'))
+        }
         await pending
+        if (mobile) {
+            expect(click).not.toHaveBeenCalled()
+            expect(Math.max(...nativeReadSizes)).toBeLessThanOrEqual(256 * 1024)
+            expect(discard).toHaveBeenCalledExactlyOnceWith('/owned/backup')
+        }
         createElement.mockRestore()
 
         expect(state.restoreEvents).toEqual(['database'])

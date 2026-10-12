@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SandboxHost } from './factory'
+import { invoke } from '@tauri-apps/api/core'
+const platform = vi.hoisted(() => ({ native: false }))
+vi.mock('../../platform', () => ({ get isTauri() { return platform.native } }))
+vi.mock('@tauri-apps/api/core', async importOriginal => ({
+    ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke: vi.fn(async () => {}),
+}))
 import { collectPluginReadProvenance, PluginReadBaselines } from '../pluginReadBaselines'
 import type { fetchNative, GlobalFetchArgs } from '../../globalApi.svelte'
 
@@ -52,7 +58,9 @@ function bridgeStubs(): Record<string, unknown> {
 }
 
 describe('sandbox script completion', () => {
-    it('shows a file-read failure while retaining the plugin error event', async () => {
+    it.each([false, true])('shows a file-read failure and logs only on native=%s', async native => {
+        platform.native = native
+        vi.mocked(invoke).mockClear()
         const alertError = vi.fn()
         const host = new SandboxHost({ ...bridgeStubs(), alertError })
         const child = await runGuest(host, `
@@ -67,6 +75,9 @@ describe('sandbox script completion', () => {
         })
         await vi.waitFor(() => expect((child as any).readError).toBe('NotReadableError'))
         expect(alertError).toHaveBeenCalledWith('[settled-test] NotReadableError: Provider denied access')
+        const logged = { message: '[settled-test] NotReadableError: Provider denied access' }
+        if (native) expect(invoke).toHaveBeenCalledWith('native_log_error', logged)
+        else expect(invoke).not.toHaveBeenCalledWith('native_log_error', logged)
         host.terminate()
     })
 
@@ -91,6 +102,19 @@ describe('sandbox script completion', () => {
         await runGuest(host, `throw new Error('Failed to read file', {cause: new DOMException('Provider failed', 'NotReadableError')});`)
         await vi.waitFor(() => expect(alertError).toHaveBeenCalledWith('[settled-test] Error: Failed to read file\nNotReadableError: Provider failed'))
         expect(host.isIdle()).toBe(true)
+        host.terminate()
+    })
+
+    it.each([
+        'Object.create(null)',
+        'new Proxy({}, { get() { throw new Error("getter failed"); } })',
+        'Object.defineProperty(new Error("original"), "cause", { get() { throw new Error("cause getter failed"); } })',
+    ])('settles even when error reporting cannot stringify %s', async (expression) => {
+        const alertError = vi.fn()
+        const host = new SandboxHost({ ...bridgeStubs(), alertError })
+        await runGuest(host, `throw ${expression};`)
+        await vi.waitFor(() => expect(host.isIdle()).toBe(true))
+        expect(alertError).toHaveBeenCalledOnce()
         host.terminate()
     })
 

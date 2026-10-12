@@ -1,3 +1,5 @@
+import { recordNativeLogError } from '../../nativeLog'
+import { isTauri } from '../../platform'
 import { attachPluginReadProvenance, collectPluginReadProvenance, type PluginReadProvenance } from '../pluginReadBaselines'
 
 type MsgType =
@@ -1064,7 +1066,9 @@ export class SandboxHost {
 
             if (data.type === 'PLUGIN_ERROR') {
                 if (typeof data.error === 'string' && data.error.trim()) {
-                    this.apiFactory.alertError?.(`[${sourceLabel}] ${data.error.slice(0, 8192)}`);
+                    const message = `[${sourceLabel}] ${data.error.slice(0, 8192)}`;
+                    if (isTauri) void recordNativeLogError(message).catch(() => {});
+                    this.apiFactory.alertError?.(message);
                 }
                 return;
             }
@@ -1242,8 +1246,10 @@ export class SandboxHost {
                 let current = error;
                 while (current != null && parts.length < 5 && !seen.has(current)) {
                     seen.add(current);
-                    parts.push(current.message ? (current.name ? current.name + ': ' : '') + current.message : String(current));
-                    current = current.cause;
+                    try {
+                        parts.push(current.message ? (current.name ? current.name + ': ' : '') + current.message : String(current));
+                    } catch (_) { parts.push('Unprintable plugin error'); }
+                    try { current = current.cause; } catch (_) { break; }
                 }
                 try { parent.postMessage({ type: 'PLUGIN_ERROR', error: parts.join('\\n').slice(0, 8192) }, '*'); } catch (_) {}
             };
@@ -1279,7 +1285,7 @@ export class SandboxHost {
                 };
                 (async () => {
                     ${userCode}
-                })().then(settled, error => { reportPluginError(error); settled(); })
+                })().then(settled, error => { try { reportPluginError(error); } finally { settled(); } })
             })();
             //# sourceURL=risu-plugin-v3/${encodeURIComponent(sourceLabel)}.js
         </script>

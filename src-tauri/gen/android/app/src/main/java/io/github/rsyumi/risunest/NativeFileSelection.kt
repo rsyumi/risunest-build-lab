@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import kotlinx.coroutines.CompletableDeferred
@@ -27,6 +28,13 @@ internal fun copySelectedDocument(input: InputStream, output: OutputStream, chec
     val count = input.read(buffer)
     if (count < 0) break
     output.write(buffer, 0, count)
+  }
+}
+
+internal fun cleanupStaleSelectedDocuments(root: File, staleBefore: Long, discard: (String) -> Unit, onError: (Exception) -> Unit) {
+  root.listFiles()?.filter { it.isDirectory && it.lastModified() < staleBefore }?.forEach {
+    try { discard(File(it, "source").absolutePath) }
+    catch (error: Exception) { onError(error) }
   }
 }
 
@@ -66,8 +74,8 @@ internal class NativeFileSelection(private val activity: ComponentActivity) {
       val uris = request.await() ?: return JSONObject().put("cancelled", true)
       val files = withContext(Dispatchers.IO) {
         val staleBefore = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
-        root.listFiles()?.filter { it.isDirectory && it.lastModified() < staleBefore }?.forEach {
-          discard(File(it, "source").absolutePath)
+        cleanupStaleSelectedDocuments(root, staleBefore, ::discard) { error ->
+          Log.e("NativeFileSelection", "Could not clean up a stale selected document", error)
         }
         val values = JSONArray()
         for (uri in if (multiple) uris else uris.take(1)) {
