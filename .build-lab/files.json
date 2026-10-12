@@ -135,14 +135,14 @@
     {
       "path": "benchmarks/ios/contracts.test.ts",
       "mode": "100644",
-      "bytes": 4713,
-      "sha256": "8e908a060d3904b5bc6f83f01b7b68c8381ef9b1cecf33d32fb290d09848e56f"
+      "bytes": 4936,
+      "sha256": "c28e5b6e86b838c3d8ab10fd6a30f18ba6b495d7110217536c3b19a84684eb2e"
     },
     {
       "path": "benchmarks/ios/contracts.ts",
       "mode": "100644",
       "bytes": 8985,
-      "sha256": "18f4708b38545b2f5de398f5509fae63ff6d5a8a16e9f39286d8facf640e2cf4"
+      "sha256": "93b08d14443a3cfa8964da1653dbc0dec6f6bb423779a1acccb51b85bf505ace"
     },
     {
       "path": "benchmarks/ios/externalStorageContracts.ts",
