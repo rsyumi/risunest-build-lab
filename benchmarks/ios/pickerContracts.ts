@@ -21,8 +21,9 @@ export async function installPickerContracts(generalOnly = false) {
   await mkdir(folder, { recursive: true });
   const path = await join(folder, "synthetic.bin");
   await writeFile(path, Uint8Array.from([0, 1, 127, 128, 254, 255]));
-  await mkdir(await join(await documentDir(), "Exports"), { recursive: true });
-  await writeFile(await join(await documentDir(), "Exports", "native-general.risup"), Uint8Array.from([0, 1, 127, 128, 254, 255]));
+  if (generalOnly) {
+    await writeFile(await join(await documentDir(), "native-general.risup"), Uint8Array.from([0, 1, 127, 128, 254, 255]));
+  }
   const status = document.getElementById("status")!;
   const action = (name: string, work: () => Promise<string>) => {
     const button = document.createElement("button");
@@ -31,9 +32,11 @@ export async function installPickerContracts(generalOnly = false) {
       "display:block;margin:20px;padding:20px;font-size:18px";
     button.onclick = async () => {
       status.textContent = "working";
+      let errorDetail: string | undefined;
       try {
         status.textContent = await work();
       } catch (error) {
+        errorDetail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
         status.textContent =
           error instanceof DOMException && error.name === "AbortError"
             ? "export-cancelled"
@@ -41,7 +44,7 @@ export async function installPickerContracts(generalOnly = false) {
       }
       await invoke("ios_bench_report", {
         stage: "ui",
-        result: { action: name, outcome: status.textContent },
+        result: { action: name, outcome: status.textContent, error: errorDetail },
       });
     };
     document.body.append(button);

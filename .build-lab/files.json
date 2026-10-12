@@ -225,8 +225,8 @@
     {
       "path": "benchmarks/ios/pickerContracts.ts",
       "mode": "100644",
-      "bytes": 4247,
-      "sha256": "eb22836d73840cdb7a456764d624e689f3fe1c616bb0c80dc8e574745e400670"
+      "bytes": 4344,
+      "sha256": "8c64b648df04ffa16f38ebc28939c4dd38a597c8fb208315deb908503c4eaa0c"
     },
     {
       "path": "benchmarks/ios/productContracts.ts",
