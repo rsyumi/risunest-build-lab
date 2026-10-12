@@ -40,6 +40,11 @@ async function guard() {
 }
 async function initialize() {
   await guard();
+  // Keep the synthetic profile free of downloaded defaults and their permission dialogs.
+  await invoke("pds_set_device_setting", {
+    key: "risuNestDefaultPluginsAttempted",
+    value: JSON.stringify(["provider-manager", "yumi-translator"]),
+  });
   const opened = await invoke<{ revision: number }>("pds_open");
   const { stagingId } = await invoke<{ stagingId: string }>(
     "pds_replace_begin",

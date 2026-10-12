@@ -10,6 +10,7 @@ const native = vi.hoisted(() => ({
   revision: 0,
   owner: undefined as Uint8Array | undefined,
   calls: [] as string[],
+  settings: new Map<string, unknown>(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: native.invoke }));
@@ -33,6 +34,7 @@ beforeEach(() => {
   native.revision = 0;
   native.owner = undefined;
   native.calls = [];
+  native.settings.clear();
   native.getIdentifier.mockResolvedValue("io.github.rsyumi.risunest.ios.bench");
   native.exists.mockImplementation(async () => native.owner !== undefined);
   native.readFile.mockImplementation(async () => native.owner);
@@ -41,8 +43,12 @@ beforeEach(() => {
     native.calls.push("owner-write");
     native.owner = bytes.slice();
   });
-  native.invoke.mockImplementation(async (command: string) => {
+  native.invoke.mockImplementation(async (command: string, args?: { key: string; value: unknown }) => {
     native.calls.push(command);
+    if (command === "pds_set_device_setting" && args) {
+      native.settings.set(args.key, args.value);
+      return;
+    }
     if (command === "pds_open") return { revision: native.revision };
     if (command === "pds_replace_begin") return { stagingId: "synthetic-stage" };
     if (command.startsWith("pds_replace_put_") || command === "pds_replace_add_characters") return;
@@ -59,6 +65,7 @@ describe("iOS synthetic profile ownership", () => {
   it("establishes fresh ownership before an earlier contract writes, then admits the legacy guard", async () => {
     await initialize();
     expect(native.revision).toBe(1);
+    expect(native.settings.get("risuNestDefaultPluginsAttempted")).toBe(JSON.stringify(["provider-manager", "yumi-translator"]));
     expect(native.calls.indexOf("owner-write")).toBeLessThan(native.calls.indexOf("pds_replace_begin"));
     await guard();
     expect(native.writeFile).toHaveBeenCalledTimes(1);
