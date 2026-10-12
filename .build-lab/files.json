@@ -111,8 +111,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 48381,
-      "sha256": "fbf5a5733e0fb989606a2016e787e16bd3f7ff45391a81ab9881a224c3ec783d"
+      "bytes": 49214,
+      "sha256": "d27cc64078d461f2418a6c2f995b44db8e0a92aab6617447308a53c991782fba"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -159,8 +159,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 15990,
-      "sha256": "9fa58f52edb7b96818060291063e52fd15c985648249196bd45172a9d25d5f05"
+      "bytes": 16044,
+      "sha256": "8ca236f09c98c88bb770901993f992ddd01c4fc99ae32cda86dd439074bca3fc"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -189,8 +189,8 @@
     {
       "path": "benchmarks/ios/native/capabilities/ios.json",
       "mode": "100644",
-      "bytes": 1898,
-      "sha256": "d8cb76fa27b92de3f2577d9dae73b5cfc1f2c9aae50fc04950c87d124ceb2df7"
+      "bytes": 1933,
+      "sha256": "ccb13eb2b7fbef125708f8664d76d3cc445759185e5cf1892174681b866c404a"
     },
     {
       "path": "benchmarks/ios/native/src/legacy_restore_memory.rs",
@@ -225,8 +225,8 @@
     {
       "path": "benchmarks/ios/pickerContracts.ts",
       "mode": "100644",
-      "bytes": 3139,
-      "sha256": "2835f2f6fc11d5083613cb5b9e320f5961506df0e9f06148efce122da9218b2f"
+      "bytes": 4247,
+      "sha256": "eb22836d73840cdb7a456764d624e689f3fe1c616bb0c80dc8e574745e400670"
     },
     {
       "path": "benchmarks/ios/productContracts.ts",
@@ -1065,8 +1065,8 @@
     {
       "path": "benchmarks/sync-ui/roundTrip.ts",
       "mode": "100644",
-      "bytes": 6955,
-      "sha256": "498d0eeddd589a195089e720fcbf505d2c660dd50533523189df2c95af97175d"
+      "bytes": 6967,
+      "sha256": "92d05779c6e26621149a9edef01e42ba32e7b726ebb57453278246516dfc6bca"
     },
     {
       "path": "benchmarks/tokenizer/corpus.mjs",
@@ -1143,8 +1143,8 @@
     {
       "path": "benchmarks/tsconfig.json",
       "mode": "100644",
-      "bytes": 389,
-      "sha256": "252908715e7479c29ccf2666b1ee29fd0a7c5e3c173fe4ac44ef4655816eb456"
+      "bytes": 410,
+      "sha256": "9ce803d76c2a14f7ec7429cce0d2f213b8e0f710afb6b23f7bc7d7f1ded5026f"
     },
     {
       "path": "benchmarks/ui-responsiveness/.gitignore",

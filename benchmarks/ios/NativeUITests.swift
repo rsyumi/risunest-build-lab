@@ -640,8 +640,8 @@ final class NativeUITests: XCTestCase {
         XCTFail("The native file picker has no reachable Cancel action")
     }
 
-    private func openPublishedFile(_ app: XCUIApplication) {
-        let file = app.cells.containing(NSPredicate(format: "label CONTAINS %@", "synthetic.bin")).firstMatch
+    private func openPublishedFile(_ app: XCUIApplication, name: String = "synthetic.bin") {
+        let file = app.cells.containing(NSPredicate(format: "label CONTAINS %@", name)).firstMatch
         // A new import picker opens Recents, which does not include a newly exported file.
         let browse = app.buttons["Browse"]
         if browse.waitForExistence(timeout: 5) { browse.tap() }
@@ -852,6 +852,21 @@ final class NativeUITests: XCTestCase {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    func testNativeGeneralFileSelection() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "io.github.rsyumi.risunest.ios.bench")
+        app.launchEnvironment["RISUNEST_IOS_PHASE"] = "general-files"
+        app.launch()
+        let single = app.webViews.buttons["General single synthetic file"]
+        XCTAssertTrue(single.waitForExistence(timeout: 30))
+        single.tap()
+        openPublishedFile(app, name: "native-general.risup")
+        XCTAssertTrue(app.webViews.staticTexts["general-single-exact"].waitForExistence(timeout: 30))
+        app.webViews.buttons["General multiple synthetic files"].tap()
+        cancelPicker(app, step: 207)
+        XCTAssertTrue(app.webViews.staticTexts["general-multiple-cancelled"].waitForExistence(timeout: 10))
     }
 
     func testExportPublication() throws {

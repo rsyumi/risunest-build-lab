@@ -175,8 +175,8 @@ async function main() {
     await report(phase, await productSettings());
     return;
   }
-  if (phase === "ui") {
-    await installPickerContracts();
+  if (phase === "ui" || phase === "general-files") {
+    await installPickerContracts(phase === "general-files");
     return;
   }
   if (phase === "sync" || phase === "sync-restart" || phase === "sync-publish") {

@@ -13,14 +13,16 @@ import {
   getIOSNativeState,
 } from "../../src/ts/iosNative";
 import { nativeDataPath } from "../../src/ts/storage/nativePaths";
+import { selectDomFiles } from "../../src/ts/storage/fileSelection";
 
 /** Installed only in the isolated synthetic UI-test app. */
-export async function installPickerContracts() {
+export async function installPickerContracts(generalOnly = false) {
   const folder = await nativeDataPath("ios-file-staging", crypto.randomUUID());
   await mkdir(folder, { recursive: true });
   const path = await join(folder, "synthetic.bin");
   await writeFile(path, Uint8Array.from([0, 1, 127, 128, 254, 255]));
   await mkdir(await join(await documentDir(), "Exports"), { recursive: true });
+  await writeFile(await join(await documentDir(), "Exports", "native-general.risup"), Uint8Array.from([0, 1, 127, 128, 254, 255]));
   const status = document.getElementById("status")!;
   const action = (name: string, work: () => Promise<string>) => {
     const button = document.createElement("button");
@@ -44,6 +46,25 @@ export async function installPickerContracts() {
     };
     document.body.append(button);
   };
+  if (generalOnly) {
+    action("General single synthetic file", async () => {
+      const [file] = await selectDomFiles({ accept: ".risup" });
+      if (!file) return "general-single-cancelled";
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const expected = [0, 1, 127, 128, 254, 255];
+      if (file.name !== "native-general.risup" || bytes.length !== expected.length ||
+          !bytes.every((byte, index) => byte === expected[index])) {
+        throw new Error("Incorrect general picker file name or binary content");
+      }
+      return "general-single-exact";
+    });
+    action("General multiple synthetic files", async () => {
+      const files = await selectDomFiles({ accept: ".risup", multiple: true });
+      return files.length ? "general-multiple-selected" : "general-multiple-cancelled";
+    });
+    status.textContent = "ui-ready";
+    return;
+  }
   action("Import synthetic file", async () => {
     const picked = await pickIOSFile();
     if (!picked) return "import-cancelled";
