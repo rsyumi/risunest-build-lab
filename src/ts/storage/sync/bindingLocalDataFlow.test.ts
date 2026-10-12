@@ -1,20 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-const f = vi.hoisted(() => ({ invoke: vi.fn(), dialog: vi.fn() }))
+const f = vi.hoisted(() => ({ invoke: vi.fn(), dialog: vi.fn(), characters: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: f.invoke }))
 vi.mock('src/ts/alert', () => ({ alertCheckboxConfirm: f.dialog }))
+vi.mock('../libraryCharacters', () => ({ hasLibraryCharacters: f.characters }))
 vi.mock('src/ts/process/modules', () => ({ moduleUpdate: vi.fn(), getModules: () => [] }))
 vi.mock('src/ts/parser/parser.svelte', () => ({ risuChatParser: (text: string) => text }))
 import { language } from 'src/lang'
 import { DBState } from 'src/ts/stores.svelte'
 import { normalizeDatabaseDefaults, type Database } from '../database.svelte'
-import { prepareDatabaseForBootstrap } from '../databasePreparation'
-import { nativeFileJobHost } from '../nativeFileJobManager'
-import { NEW_DATABASE_SEED } from '../persistentBootstrap'
 import type { InspectedSyncTarget, SyncBindingDependencies, SyncBindingState } from './bindingFlow'
 import { installSyncBindingFlow } from './bindingProduction'
 import { bindSyncTarget, registerSyncBindingTransport } from './bindingRegistry'
 
-// The binding table composed through the real native content check, defaults comparison and dialogs.
+// The binding table composed through the real character check wiring, native content check and dialogs.
 const target = { kind: 'server', connectionId: 'server' } as const
 const residency = { policy: 'remote', localBytes: 0, remoteBytes: 0, remoteObjects: 0, serverBytes: 0, serverObjects: 0, externalObjects: [], unavailableObjects: 0, previousStorageObjects: 0, evictedBytes: 0 }
 const factory = () => structuredClone(normalizeDatabaseDefaults({} as Database))
@@ -23,14 +21,6 @@ let cleanup: (() => void)[] = []
 
 function content(pluginLocalValueCount: string, pluginLocalParticipating: boolean) {
     return { library: factory(), characterCount: '0', managedAliasCount: '0', ordinaryPluginValueCount: '0', hypaValueCount: '0', pluginLocalValueCount, opaqueSharedUnitCount: '0', sharedVariables: {}, pluginLocalParticipating }
-}
-
-// What a new device stores, as the native store reports it, with the language the onboarding chose.
-async function newDevice() {
-    const { database } = await prepareDatabaseForBootstrap({ ...NEW_DATABASE_SEED } as Database)
-    const library = structuredClone({ ...database, language: 'ko', characters: [] }) as Record<string, unknown>
-    delete library.account
-    return { ...content('0', false), library }
 }
 
 function install(native: Omit<ReturnType<typeof content>, 'library'> & { library: object }, empty: boolean, at: typeof target | { kind: 'external'; connectionId: string } = target, inspection: Partial<InspectedSyncTarget> = {}) {
@@ -64,23 +54,24 @@ function install(native: Omit<ReturnType<typeof content>, 'library'> & { library
 }
 
 beforeEach(() => {
-    f.invoke.mockReset(); f.dialog.mockReset()
+    f.invoke.mockReset(); f.dialog.mockReset(); f.characters.mockReset().mockResolvedValue(false)
     DBState.db = factory()
     state = { target: { kind: 'none' }, targetAuthority: '0', selectionEpoch: 'none', libraryId: null, progress: null }
 })
-afterEach(() => { for (const dispose of cleanup.reverse()) dispose(); cleanup = []; nativeFileJobHost.set('dialog') })
+afterEach(() => { for (const dispose of cleanup.reverse()) dispose(); cleanup = [] })
 
-it('asks before replacing a library that holds only plugin-local values, and declining keeps it', async () => {
-    const { transport, switchTarget } = install(content('2', false), false)
+it('asks before replacing a library that holds a character, and declining keeps it', async () => {
+    f.characters.mockResolvedValue(true)
+    const { transport, switchTarget } = install(content('0', false), false)
     f.dialog.mockResolvedValue({ confirmed: false, checked: false })
     expect(await bindSyncTarget(target)).toEqual({ kind: 'cancelled' })
     expect(f.dialog).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ title: language.lwwSync.replaceTitle, description: language.lwwSync.replaceDescription, requireChecked: true }))
     expect(transport.pullAvailableState).not.toHaveBeenCalled(); expect(switchTarget).not.toHaveBeenCalled()
 })
 
-it('replaces a factory library from the target without asking', async () => {
-    const { transport, switchTarget } = install(content('0', false), false)
-    expect(await bindSyncTarget(target)).toMatchObject({ kind: 'bound', action: 'replaced' })
+it.each([target, { kind: 'external', connectionId: 'external' } as const])('replaces a library without characters from $kind without asking, whatever else it holds', async at => {
+    const { transport, switchTarget } = install({ ...content('2', true), ordinaryPluginValueCount: '3', managedAliasCount: '1', library: { ...factory(), language: 'ko', loreBook: [{ name: 'Lore', data: [] }] } }, false, at)
+    expect(await bindSyncTarget(at)).toMatchObject({ kind: 'bound', action: 'replaced' })
     expect(f.dialog).not.toHaveBeenCalled()
     expect(transport.replaceFromTarget).toHaveBeenCalledOnce(); expect(switchTarget).toHaveBeenCalledOnce()
 })
@@ -94,33 +85,23 @@ it.each([false, true])('publishes plugin-local values to an empty target only wh
     expect(transport.publishInitialSharedState).toHaveBeenCalledTimes(participating ? 1 : 0)
 })
 
-describe('a new device library', () => {
-    it('asks outside the onboarding before replacing it, and declining keeps it', async () => {
-        const { transport, switchTarget } = install(await newDevice(), false)
-        f.dialog.mockResolvedValue({ confirmed: false, checked: false })
-        expect(await bindSyncTarget(target)).toEqual({ kind: 'cancelled' })
-        expect(f.dialog).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ title: language.lwwSync.replaceTitle, description: language.lwwSync.replaceDescription, requireChecked: true }))
-        expect(transport.pullAvailableState).not.toHaveBeenCalled(); expect(switchTarget).not.toHaveBeenCalled()
-    })
-    it.each([target, { kind: 'external', connectionId: 'external' } as const])('replaces it from $kind without asking in the onboarding', async at => {
-        nativeFileJobHost.set('onboarding')
-        const { transport, switchTarget } = install(await newDevice(), false, at)
-        expect(await bindSyncTarget(at)).toMatchObject({ kind: 'bound', action: 'replaced' })
+describe('a restored server', () => {
+    const bound = () => { state = { target, targetAuthority: '1', selectionEpoch: 'bound', libraryId: 'library', progress: null } }
+    it('replaces a bound device without characters without asking', async () => {
+        bound()
+        const { transport } = install(content('0', false), false, target, { previouslyBoundLibrary: true, serverRestored: true })
+        transport.replaceAsNewDevice.mockImplementation(async () => {
+            state = { ...state, targetAuthority: '2' }
+            return { revision: 1, writerId: 'writer', bindingAuthority: '2' }
+        })
+        expect(await bindSyncTarget(target)).toMatchObject({ kind: 'bound', action: 'new-device' })
         expect(f.dialog).not.toHaveBeenCalled()
-        expect(transport.replaceFromTarget).toHaveBeenCalledOnce(); expect(switchTarget).toHaveBeenCalledOnce()
+        expect(transport.replaceAsNewDevice).toHaveBeenCalledOnce()
     })
-    it('still asks in the onboarding before replacing a library that holds a character, and declining keeps it', async () => {
-        nativeFileJobHost.set('onboarding')
-        const { transport, switchTarget } = install({ ...await newDevice(), characterCount: '1' }, false)
-        f.dialog.mockResolvedValue({ confirmed: false, checked: false })
-        expect(await bindSyncTarget(target)).toEqual({ kind: 'cancelled' })
-        expect(f.dialog).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ title: language.lwwSync.replaceTitle, description: language.lwwSync.replaceDescription, requireChecked: true }))
-        expect(transport.pullAvailableState).not.toHaveBeenCalled(); expect(switchTarget).not.toHaveBeenCalled()
-    })
-    it('still asks in the onboarding before a restored server replaces a bound device', async () => {
-        nativeFileJobHost.set('onboarding')
-        state = { target, targetAuthority: '1', selectionEpoch: 'bound', libraryId: 'library', progress: null }
-        const { transport } = install(await newDevice(), false, target, { previouslyBoundLibrary: true, serverRestored: true })
+    it('asks before it replaces a bound device that holds a character, and declining keeps it', async () => {
+        bound()
+        f.characters.mockResolvedValue(true)
+        const { transport } = install(content('0', false), false, target, { previouslyBoundLibrary: true, serverRestored: true })
         f.dialog.mockResolvedValue({ confirmed: false, checked: false })
         expect(await bindSyncTarget(target)).toEqual({ kind: 'cancelled' })
         expect(f.dialog).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ title: language.lwwSync.replaceTitle, description: language.lwwSync.serverRestoredDescription, requireChecked: true }))

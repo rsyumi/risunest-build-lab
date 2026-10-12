@@ -18,12 +18,14 @@ const mocks = vi.hoisted(() => ({
     capturePersistentMutationToken: vi.fn(),
     runtime: { store: {}, revision: 7, flushPendingData: vi.fn() },
     native: { enabled: false },
+    characters: vi.fn(),
     beginReplacement: vi.fn(),
     confirmReplacement: vi.fn(),
     release: vi.fn(),
     hold: vi.fn(),
 }))
 vi.mock('../../platform', () => ({ get isTauri() { return mocks.native.enabled } }))
+vi.mock('../libraryCharacters', () => ({ hasLibraryCharacters: mocks.characters }))
 vi.mock('./serverSyncProduction', () => ({
     getServerSyncController: () => ({ beginReplacement: mocks.beginReplacement, confirmReplacement: mocks.confirmReplacement }),
     holdServerSyncAfterRestore: mocks.hold,
@@ -91,6 +93,7 @@ describe('openSyncConflictBackups', () => {
         mocks.backupStore.save.mockReset().mockResolvedValue(undefined)
         mocks.alertSelect.mockReset().mockResolvedValue('0')
         mocks.alertConfirm.mockReset().mockResolvedValue(true)
+        mocks.characters.mockReset().mockResolvedValue(true)
         mocks.alertError.mockReset()
         mocks.alertNormal.mockReset()
         mocks.decodeRisuSave.mockReset().mockResolvedValue({
@@ -134,6 +137,20 @@ describe('openSyncConflictBackups', () => {
         expect(mocks.installLocalBackup).toHaveBeenCalledOnce()
         expect(mocks.beginReplacement).not.toHaveBeenCalled()
         expect(mocks.hold).not.toHaveBeenCalled()
+    })
+
+    it('restores over a library without characters without asking on the web', async () => {
+        mocks.characters.mockResolvedValue(false)
+        await (await import('./syncConflictRestore')).openSyncConflictBackups()
+        expect(mocks.alertConfirm).not.toHaveBeenCalled()
+        expect(mocks.installLocalBackup).toHaveBeenCalledOnce()
+    })
+
+    it('keeps the library when the web confirmation is declined', async () => {
+        mocks.alertConfirm.mockResolvedValue(false)
+        await (await import('./syncConflictRestore')).openSyncConflictBackups()
+        expect(mocks.alertConfirm).toHaveBeenCalledWith('restore database only?')
+        expect(mocks.installLocalBackup).not.toHaveBeenCalled()
     })
 
     it.each(['missing', 'decode', 'shape'])('localizes an unreadable %s backup without beginning replacement', async (failure) => {

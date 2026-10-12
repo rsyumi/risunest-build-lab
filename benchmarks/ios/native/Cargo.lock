@@ -4244,7 +4244,7 @@ dependencies = [
 
 [[package]]
 name = "risunest"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -4275,6 +4275,7 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "risunest-external-storage-format",
+ "risunest-network-log",
  "risunest-release-update",
  "risunest-small-object-store",
  "risunest-sync-connect",
@@ -4362,6 +4363,21 @@ dependencies = [
  "tauri-plugin-os",
  "tauri-plugin-process",
  "tauri-plugin-shell",
+]
+
+[[package]]
+name = "risunest-network-log"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -5584,6 +5600,7 @@ dependencies = [
  "http",
  "regex",
  "reqwest 0.12.28",
+ "risunest-network-log",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -5727,6 +5744,7 @@ dependencies = [
  "osakit",
  "percent-encoding",
  "reqwest 0.13.5",
+ "risunest-network-log",
  "rustls",
  "semver",
  "serde",

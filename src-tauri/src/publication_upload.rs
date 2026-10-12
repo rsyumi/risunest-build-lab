@@ -1,3 +1,4 @@
+use risunest_network_log::reqwest::RequestBuilderExt;
 use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE,
 };
@@ -214,7 +215,7 @@ async fn acquire_session(
             "/api/account/getsessionnumber",
         )?)
         .headers(authenticated_headers(&request.credential)?)
-        .send()
+        .send_logged("publication-upload")
         .await
         .map_err(|error| OfficialPublicationUploadError::Transport {
             message: error.to_string(),
@@ -298,7 +299,7 @@ pub(crate) async fn upload_open_file_attempt(
         .post(endpoint(&request.base_url, "/api/account/write")?)
         .headers(headers)
         .body(reqwest::Body::wrap_stream(ReaderStream::new(file)))
-        .send()
+        .send_logged("publication-upload")
         .await
         .map_err(|error| OfficialPublicationUploadError::Transport {
             message: error.to_string(),

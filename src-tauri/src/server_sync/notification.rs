@@ -58,6 +58,7 @@ pub(crate) async fn run(
             .parse()
             .map_err(|_| SyncError::new("invalid-library", 400))?,
     );
+    let capture = risunest_network_log::begin("sync-websocket", "WS", url.as_str(), request.headers());
     let secure = url.scheme() == "wss";
     let result = async {
         let connector = if secure {
@@ -66,19 +67,28 @@ pub(crate) async fn run(
         } else {
             tokio_tungstenite::Connector::Plain
         };
-        let (socket, _) = tokio::time::timeout(
+        let (socket, response) = tokio::time::timeout(
             Duration::from_secs(10),
             tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector)),
         )
         .await
-        .map_err(|_| SyncError::new("server-timeout", 503))?
-        .map_err(|_| SyncError::new("websocket-unavailable", 503))?;
+        .map_err(|_| { capture.finish("error"); SyncError::new("server-timeout", 503) })?
+        .map_err(|error| {
+            if let tokio_tungstenite::tungstenite::Error::Http(response) = &error {
+                capture.response(response.status().as_u16(), url.as_str(), response.headers());
+                if let Some(body) = response.body() { capture.append(risunest_network_log::Side::Response, body); }
+            }
+            capture.finish("error"); SyncError::new("websocket-unavailable", 503)
+        })?;
+        capture.response(response.status().as_u16(), url.as_str(), response.headers());
         connected(true);
         run_socket(
             socket,
             &mut notice,
             ping_every,
             pong_timeout,
+            capture,
+            url.to_string(),
             #[cfg(test)]
             counters,
         )
@@ -94,6 +104,8 @@ async fn run_socket<S>(
     notice: &mut impl FnMut(SeqNotification),
     ping_every: Duration,
     pong_timeout: Duration,
+    mut capture: risunest_network_log::CaptureGuard,
+    url: String,
     #[cfg(test)] counters: Option<std::sync::Arc<FrameCounters>>,
 ) -> Result<()>
 where
@@ -103,13 +115,17 @@ where
         tokio::time::interval_at(tokio::time::Instant::now() + ping_every, ping_every);
     let mut pending: Option<(Vec<u8>, tokio::time::Instant)> = None;
     let mut serial = 0u64;
-    loop {
+    let mut observing = risunest_network_log::enabled();
+    let result = async { loop {
         let deadline = pending
             .as_ref()
             .map(|p| p.1)
             .unwrap_or(tokio::time::Instant::now() + Duration::from_secs(3600));
         tokio::select! {
-            frame=socket.next()=>match frame {
+            frame=socket.next()=> {
+                refresh_capture(&mut capture, &mut observing, &url);
+                if let Some(Ok(message)) = &frame { record_message(&capture, risunest_network_log::Side::Response, message); }
+                match frame {
                 Some(Ok(Message::Text(body)))=> {
                     #[cfg(test)]
                     if let Some(counters)=&counters {counters.text.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}
@@ -125,15 +141,19 @@ where
                 Some(Ok(Message::Ping(bytes)))=> {
                     #[cfg(test)]
                     if let Some(counters)=&counters {counters.ping_in.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}
+                    capture.append_message(risunest_network_log::Side::Request, &bytes, Some("pong"));
                     tokio::time::timeout(pong_timeout,socket.send(Message::Pong(bytes))).await.map_err(|_|SyncError::new("server-timeout",503))?.map_err(|_|SyncError::new("websocket-unavailable",503))?;
                     #[cfg(test)]
                     if let Some(counters)=&counters {counters.pong_out.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}
                 },
-                _=>return Err(SyncError::new("websocket-unavailable",503)),
+                _=> { capture.finish("error"); return Err(SyncError::new("websocket-unavailable",503)); },
+                }
             },
             _=interval.tick()=> {
+                refresh_capture(&mut capture, &mut observing, &url);
                 serial=serial.checked_add(1).ok_or_else(||SyncError::new("notification-overflow",409))?;
                 let bytes=serial.to_be_bytes().to_vec();
+                capture.append_message(risunest_network_log::Side::Request, &bytes, Some("ping"));
                 tokio::time::timeout(pong_timeout,socket.send(Message::Ping(bytes.clone().into()))).await.map_err(|_|SyncError::new("server-timeout",503))?.map_err(|_|SyncError::new("websocket-unavailable",503))?;
                 #[cfg(test)]
                 if let Some(counters)=&counters {counters.ping_out.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}
@@ -141,6 +161,32 @@ where
             },
             _=tokio::time::sleep_until(deadline),if pending.is_some()=>return Err(SyncError::new("websocket-pong-timeout",503)),
         }
+    }}.await;
+    if result.is_err() { capture.finish("error"); }
+    result
+}
+
+fn refresh_capture(capture: &mut risunest_network_log::CaptureGuard, observing: &mut bool, url: &str) {
+    let enabled = risunest_network_log::enabled();
+    if enabled && (!*observing || capture.was_stopped()) {
+        *capture = risunest_network_log::begin("sync-websocket", "WS", url, &Default::default());
+        capture.mark_partial();
+    }
+    *observing = enabled;
+}
+fn record_message(capture: &risunest_network_log::CaptureGuard, side: risunest_network_log::Side, message: &Message) {
+    match message {
+        Message::Text(bytes) => capture.append_message(side, bytes.as_bytes(), Some("text")),
+        Message::Binary(bytes) => capture.append_message(side, bytes, Some("binary")),
+        Message::Ping(bytes) => capture.append_message(side, bytes, Some("ping")),
+        Message::Pong(bytes) => capture.append_message(side, bytes, Some("pong")),
+        Message::Close(frame) => {
+            if capture.is_active() {
+                let text = frame.as_ref().map(|frame| format!("{} {}", u16::from(frame.code), frame.reason)).unwrap_or_default();
+                capture.append_message(side, text.as_bytes(), Some("close"));
+            }
+        },
+        _ => {},
     }
 }
 
@@ -241,6 +287,8 @@ mod tests {
             &mut notice,
             Duration::from_millis(80),
             Duration::from_millis(20),
+            risunest_network_log::Capture::default().guard(),
+            "ws://synthetic.invalid/notify".into(),
             Some(frames.clone()),
         );
         tokio::pin!(run);

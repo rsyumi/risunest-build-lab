@@ -48,7 +48,8 @@ vi.mock('./bindingProduction', async importOriginal => ({
 }))
 vi.mock('../committedWorkingSetContinuation', () => ({ registerCommittedWorkingSetContinuation: f.continuation }))
 vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: vi.fn(), confirmPreviousStorageFiles: vi.fn(async () => 'connect'), downloadPreviousStorageFiles: vi.fn() }))
-vi.mock('./bindingLocalData', () => ({ hasLocalBindingData: vi.fn(), hasLocalSharedBindingData: vi.fn() }))
+vi.mock('./bindingLocalData', () => ({ hasLocalSharedBindingData: vi.fn() }))
+vi.mock('../libraryCharacters', () => ({ hasLibraryCharacters: vi.fn() }))
 vi.mock('./bindingRegistry', () => ({ registerSyncBindingTransport: f.register, resumeCurrentSyncBinding: f.resumeCurrent, getSyncBindingTransport: vi.fn(), bindSyncTarget: vi.fn(), unbindSyncTarget: vi.fn() }))
 vi.mock('./bindingNative', () => ({ createNativeSyncBindingBridge: () => ({ state: f.nativeState, assertAuthority: vi.fn(), switchTarget: f.switchTarget }), replaceNativeSyncBinding: vi.fn(), replaceNativeSyncBindingAsNewDevice: vi.fn() }))
 vi.mock('../persistentDataRuntime.svelte', () => ({

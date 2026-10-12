@@ -15,7 +15,8 @@
     import { alertActionConfirm, alertConfirm, alertNormal, alertCheckboxConfirm } from 'src/ts/alert'
     import { DBState } from 'src/ts/stores.svelte'
     import { getExternalStorageBridge } from 'src/ts/storage/sync/external/bridge'
-    import { bindSyncTarget, resumeCurrentSyncBinding, unbindSyncTarget } from 'src/ts/storage/sync/bindingRegistry'
+    import { bindSyncTarget, prepareBoundLibraryReplacement, resumeCurrentSyncBinding, unbindSyncTarget } from 'src/ts/storage/sync/bindingRegistry'
+    import { hasLibraryCharacters } from 'src/ts/storage/libraryCharacters'
     import { createNativeSyncBindingBridge } from 'src/ts/storage/sync/bindingNative'
     import { subscribeSyncBindingChanges } from 'src/ts/storage/sync/bindingChanges'
     import { isExternalLwwRunning, requestExternalLwwNow, subscribeExternalLwwFailures, supportsExternalLwwNewDevice } from 'src/ts/storage/sync/external/lwwProduction'
@@ -285,6 +286,21 @@
         finally { busy = false }
     }
 
+    async function confirmRestore(): Promise<boolean> {
+        // A device that syncs receives the latest changes first, so its characters match the remote.
+        const prepared = await prepareBoundLibraryReplacement().catch(() => undefined)
+        if (prepared && !await hasLibraryCharacters()) return true
+        const bound = prepared?.bound ?? (await createNativeSyncBindingBridge().state()).target.kind !== 'none'
+        return (await alertCheckboxConfirm({
+            title: language.lwwSync.restoreTitle,
+            description: bound ? language.lwwSync.restoreDescriptionBound : language.lwwSync.restoreDescription,
+            checkboxLabel: language.lwwSync.restoreAcknowledge,
+            actionLabel: language.lwwSync.restoreAction,
+            cancelLabel: strings.cancel,
+            requireChecked: true,
+        })).confirmed
+    }
+
     async function runJob(
         connection: ExternalConnectionSummary,
         job: 'backup' | 'restore' | 'pin-history' | 'cleanup' | 'check-repository',
@@ -295,18 +311,9 @@
         } = {},
     ): Promise<void> {
         if (job === 'restore') {
-            const binding = await createNativeSyncBindingBridge().state()
-            const answer = await alertCheckboxConfirm({
-                title: language.lwwSync.restoreTitle,
-                description: binding.target.kind === 'none'
-                    ? language.lwwSync.restoreDescription
-                    : language.lwwSync.restoreDescriptionBound,
-                checkboxLabel: language.lwwSync.restoreAcknowledge,
-                actionLabel: language.lwwSync.restoreAction,
-                cancelLabel: strings.cancel,
-                requireChecked: true,
-            })
-            if (!answer.confirmed) return
+            busy = true
+            const confirmed = await confirmRestore().finally(() => { busy = false })
+            if (!confirmed) return
         }
         busy = true
         activeAction = `${job}:${connection.id}`

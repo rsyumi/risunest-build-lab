@@ -188,3 +188,7 @@ features = [
 version = "4"
 optional = true
 default-features = false
+
+[dependencies.risunest-network-log]
+path = "../network-log"
+features = ["reqwest"]

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 
 const platform = vi.hoisted(() => ({ native: false, android: false, desktop: false }))
+const characters = vi.hoisted(() => vi.fn(async () => true))
 
 vi.mock('src/ts/platform', async (importOriginal) => ({
     ...(await importOriginal<typeof import('src/ts/platform')>()),
@@ -19,6 +20,7 @@ vi.mock('src/ts/alert', () => ({
     alertSelect: vi.fn(),
 }))
 vi.mock('src/ts/drive/backuplocal', () => ({ LoadLocalBackup: vi.fn() }))
+vi.mock('src/ts/storage/libraryCharacters', () => ({ hasLibraryCharacters: characters }))
 vi.mock('src/ts/storage/sync/syncConflictRestore', () => ({ openSyncConflictBackups: vi.fn() }))
 vi.mock('src/ts/storage/nativePersistentMaintenance', () => ({
     restoreNativePersistentSnapshot: vi.fn(),
@@ -80,10 +82,10 @@ vi.mock('src/ts/storage/sync/external/production', () => ({
 }))
 
 import { language } from 'src/lang'
-import { nativeFileOperation } from 'src/ts/storage/risuSaveFileRouteProduction.svelte'
+import { importRisuSaveFromSystemPicker, nativeFileOperation } from 'src/ts/storage/risuSaveFileRouteProduction.svelte'
 import { restoreBackupFromSystemPicker } from 'src/ts/storage/portableBackupFileRouteProduction.svelte'
 import { LoadLocalBackup } from 'src/ts/drive/backuplocal'
-import { alertConfirm } from 'src/ts/alert'
+import { alertCheckboxConfirm, alertConfirm } from 'src/ts/alert'
 import RisuNestBackupRestore from './RisuNestBackupRestore.svelte'
 
 let mounted: ReturnType<typeof mount> | undefined
@@ -144,4 +146,17 @@ it('preserves the distinct web PocketRisu importer', async () => {
     await vi.waitFor(() => expect(LoadLocalBackup).toHaveBeenCalledOnce())
     expect(LoadLocalBackup).toHaveBeenCalledWith(language.pocketRisuImportConfirm)
     expect(restoreBackupFromSystemPicker).not.toHaveBeenCalled()
+})
+
+it.each([true, false])('asks before a web RisuSave import only when the library holds a character (%s)', async held => {
+    characters.mockResolvedValue(held)
+    nativeFileOperation.set(null)
+    const target = document.createElement('div')
+    document.body.append(target)
+    mounted = mount(RisuNestBackupRestore, { target })
+    await tick()
+    const button = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === language.risuNest.backup.importFile)!
+    button.click()
+    await vi.waitFor(() => expect(importRisuSaveFromSystemPicker).toHaveBeenCalledOnce())
+    expect(alertCheckboxConfirm).toHaveBeenCalledTimes(held ? 1 : 0)
 })

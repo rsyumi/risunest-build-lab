@@ -8,7 +8,8 @@ type MsgType =
     | 'RESPONSE'
     | 'RELEASE_INSTANCE'
     | 'ABORT_SIGNAL'
-    | 'SCRIPT_SETTLED';
+    | 'SCRIPT_SETTLED'
+    | 'PLUGIN_ERROR';
 
 interface RpcMessage {
     type: MsgType;
@@ -1061,6 +1062,13 @@ export class SandboxHost {
             const data = event.data as RpcMessage;
             if (!data || typeof data !== 'object' || Array.isArray(data)) return;
 
+            if (data.type === 'PLUGIN_ERROR') {
+                if (typeof data.error === 'string' && data.error.trim()) {
+                    this.apiFactory.alertError?.(`[${sourceLabel}] ${data.error.slice(0, 8192)}`);
+                }
+                return;
+            }
+
 
             if (data.type === 'CALLBACK_RETURN') {
                 const req = this.pendingCallbacks.get(data.reqId!);
@@ -1223,6 +1231,46 @@ export class SandboxHost {
         </style>
         <script nonce="${this.nonce}">
             document.querySelector('meta#csp-meta')?.remove();
+            const reportedErrors = new WeakSet();
+            const reportPluginError = (error) => {
+                if (error && typeof error === 'object') {
+                    if (reportedErrors.has(error)) return;
+                    reportedErrors.add(error);
+                }
+                const parts = [];
+                const seen = new Set();
+                let current = error;
+                while (current != null && parts.length < 5 && !seen.has(current)) {
+                    seen.add(current);
+                    parts.push(current.message ? (current.name ? current.name + ': ' : '') + current.message : String(current));
+                    current = current.cause;
+                }
+                try { parent.postMessage({ type: 'PLUGIN_ERROR', error: parts.join('\\n').slice(0, 8192) }, '*'); } catch (_) {}
+            };
+            window.addEventListener('error', event => { if (event.error) reportPluginError(event.error); });
+            window.addEventListener('unhandledrejection', event => reportPluginError(event.reason));
+            const observedReaders = new WeakSet();
+            for (const method of ['readAsArrayBuffer', 'readAsText', 'readAsDataURL', 'readAsBinaryString']) {
+                const read = FileReader.prototype[method];
+                if (typeof read !== 'function') continue;
+                FileReader.prototype[method] = function(...args) {
+                    if (!observedReaders.has(this)) {
+                        observedReaders.add(this);
+                        this.addEventListener('error', () => reportPluginError(this.error));
+                    }
+                    try { return read.apply(this, args); }
+                    catch (error) { reportPluginError(error); throw error; }
+                };
+            }
+            for (const method of ['arrayBuffer', 'text', 'bytes']) {
+                const read = Blob.prototype[method];
+                if (typeof read !== 'function') continue;
+                Blob.prototype[method] = function(...args) {
+                    try {
+                        return read.apply(this, args).catch(error => { reportPluginError(error); throw error; });
+                    } catch (error) { reportPluginError(error); throw error; }
+                };
+            }
             (async () => {
                 ${GUEST_BRIDGE_SCRIPT}
                     
@@ -1231,7 +1279,7 @@ export class SandboxHost {
                 };
                 (async () => {
                     ${userCode}
-                })().then(settled, settled)
+                })().then(settled, error => { reportPluginError(error); settled(); })
             })();
             //# sourceURL=risu-plugin-v3/${encodeURIComponent(sourceLabel)}.js
         </script>

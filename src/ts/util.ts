@@ -52,6 +52,10 @@ export function selectSingleFile(ext:string[]){
 }
 
 async function readSingleFile(ext:string[]){
+    if (isTauriMobile) {
+        const { selectNativeFileData } = await import('./storage/nativeFileSelection')
+        return (await selectNativeFileData({ accept: fileAccept(ext) }))[0] ?? null
+    }
     if(domSelect){
         const v = await selectFileByDom(ext, 'single')
         const file = v[0]
@@ -79,9 +83,11 @@ export function selectMultipleFile(ext:string[]){
 }
 
 async function readMultipleFiles(ext:string[]){
-    // The Android picker returns content URIs and drops extensions it does not know, so it uses
-    // the same DOM input that selectSingleFile already relies on everywhere.
-    if(!isTauri || isTauriMobile){
+    if (isTauriMobile) {
+        const { selectNativeFileData } = await import('./storage/nativeFileSelection')
+        return selectNativeFileData({ accept: fileAccept(ext), multiple: true })
+    }
+    if(!isTauri){
         const v = await selectFileByDom(ext, 'multiple')
         let arr:{name:string, data:Uint8Array}[] = []
         for(const file of v){
@@ -175,6 +181,11 @@ export function getUserIconProtrait(){
     }
 }
 
+function fileAccept(allowedExtensions: string[]): string {
+    return getDatabase().allowAllExtentionFiles || isIOS() || allowedExtensions[0] === '*'
+        ? '*' : allowedExtensions.map(ext => `.${ext}`).join(',')
+}
+
 export function selectFileByDom(allowedExtensions:string[], multiple:'multiple'|'single' = 'single') {
     const acceptAll = (getDatabase().allowAllExtentionFiles || isIOS() || allowedExtensions[0] === '*')
     return selectDomFiles({
@@ -196,7 +207,7 @@ function readFileAsUint8Array(file: File) {
       };
   
       reader.onerror = () => {
-        reject(new Error('Failed to read file', { cause: reader.error }));
+        reject(new Error(`Failed to read file${reader.error ? `: ${reader.error.name}: ${reader.error.message}` : ''}`, { cause: reader.error }));
       };
   
       reader.readAsArrayBuffer(file);

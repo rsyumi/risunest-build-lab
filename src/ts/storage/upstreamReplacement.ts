@@ -1,4 +1,3 @@
-import { get } from 'svelte/store'
 import type { PersistentDataRuntime, PersistentDestructiveReplacementFence } from './persistentDataRuntime'
 import type {PersistentMutationToken} from './saveCoordinator'
 
@@ -48,21 +47,12 @@ export async function acquireUpstreamImportPause(runtime: UpstreamReplacementRun
     }
 }
 
-async function hasLibraryContent(): Promise<boolean> {
-    try {
-        return await (await import('./sync/bindingLocalData')).hasLocalLibraryContent()
-    } catch {
-        // An unreadable library still asks.
-        return true
-    }
-}
-
 export async function confirmUpstreamLibraryReplacement(bound: boolean, warnings: string[] = [], options: { firstRun?: boolean } = {}): Promise<boolean> {
-    const [alert, { language }, { nativeFileJobHost }] = await Promise.all([
-        import('../alert'), import('../../lang'), import('./nativeFileJobManager'),
+    const [alert, { language }, { hasLibraryCharacters }] = await Promise.all([
+        import('../alert'), import('../../lang'), import('./libraryCharacters'),
     ])
-    // Keep first-run intent across staging, independently of the current screen and library reads.
-    if (!bound && (options.firstRun || (get(nativeFileJobHost) === 'onboarding' && !await hasLibraryContent()))) {
+    // Keep first-run intent across staging, independently of library reads.
+    if ((!bound && options.firstRun) || !await hasLibraryCharacters()) {
         return warnings.length === 0 || await alert.alertActionConfirm({
             title: language.lwwSync.restoreTitle,
             description: warnings.join('\n\n'),

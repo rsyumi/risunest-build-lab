@@ -23,6 +23,7 @@
     } from '@lucide/svelte'
 
     import { changeLanguage, language } from 'src/lang'
+    import { UI_LANGUAGES } from 'src/lang/uiLanguages'
     import { alertConfirm, alertError, alertNormal, openRisuAccountLogin } from 'src/ts/alert'
     import { restoreNativeOfficialAccountBackup } from 'src/ts/storage/sync/nativeOfficialAccountOperations'
     import { NativeAccountLoginError } from 'src/ts/storage/sync/nativeOfficialAccountFlow'
@@ -99,15 +100,6 @@
     import { onboardingHold } from './onboardingGate'
     import { observeOnboardingWeave } from './onboardingWeave'
 
-    const UI_LANGUAGES = [
-        { value: 'de', label: 'Deutsch' },
-        { value: 'en', label: 'English' },
-        { value: 'ko', label: '한국어' },
-        { value: 'cn', label: '中文' },
-        { value: 'zh-Hant', label: '中文(繁體)' },
-        { value: 'vi', label: 'Tiếng Việt' },
-    ]
-
     // `language` is a plain module binding, so a change has to be announced for
     // the markup to read the new strings.
     let languageRevision = $state(0)
@@ -119,11 +111,9 @@
 
     {
         const browserLangShort = navigator.language.split('-')[0]
-        const usableLangs = ['de', 'en', 'ko', 'cn', 'vi', 'zh-Hant']
-        if (usableLangs.includes(browserLangShort)) {
-            changeLanguage(browserLangShort)
-            DBState.db.language = browserLangShort
-        }
+        const initialLanguage = UI_LANGUAGES.find((option) => option.value === browserLangShort)?.value ?? 'en'
+        changeLanguage(initialLanguage)
+        DBState.db.language = initialLanguage
     }
 
     let flow = $state(INITIAL_ONBOARDING_FLOW)

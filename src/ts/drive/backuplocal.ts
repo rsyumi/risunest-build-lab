@@ -3,7 +3,8 @@ import { prepareExternalDatabaseImport } from '../storage/upstreamImport'
 import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 import { BaseDirectory, open, writeFile } from "@tauri-apps/plugin-fs";
 import localforage from "localforage";
-import { alertError, alertNormal, alertWait, alertMd, alertCheckboxConfirm } from "../alert";
+import { alertError, alertNormal, alertWait, alertMd, alertCheckboxConfirm, alertActionConfirm } from "../alert";
+import { hasLibraryCharacters } from "../storage/libraryCharacters";
 import { LocalWriter, forageStorage } from "../globalApi.svelte";
 import { resolveBlobStore } from "../storage/platformBlobStore";
 import type { BlobStore } from "../storage/blobStore";
@@ -586,14 +587,21 @@ export async function importLegacyBackupWithWebView(
         const warnings = missingColdStorageKeys.length === 0 ? []
             : [language.errors.coldStorageIncompleteRestoreConfirm(affectedCold.characterNames.join(', '), missingColdStorageKeys.length, affectedCold.unresolvedKeys.length, false)]
         const description = [language.checkboxConfirmation.dataReplacementDescription, ...warnings].join('\n\n')
-        if (!isTauri && !(await alertCheckboxConfirm({
-            title: confirmationTitle,
-            description,
-            checkboxLabel: language.checkboxConfirmation.dataReplacement,
-            actionLabel: language.confirm,
-            cancelLabel: language.cancel,
-            requireChecked: true,
-        })).confirmed) {
+        if (!isTauri && !(await hasLibraryCharacters()
+            ? (await alertCheckboxConfirm({
+                title: confirmationTitle,
+                description,
+                checkboxLabel: language.checkboxConfirmation.dataReplacement,
+                actionLabel: language.confirm,
+                cancelLabel: language.cancel,
+                requireChecked: true,
+            })).confirmed
+            : warnings.length === 0 || await alertActionConfirm({
+                title: confirmationTitle,
+                description: warnings.join('\n\n'),
+                actionLabel: language.confirm,
+                cancelLabel: language.cancel,
+            }))) {
             throw cancelledError()
         }
         if (missingColdStorageKeys.length > 0 && !warningCodes.includes('upstream-restore-losses')) warningCodes.push('upstream-restore-losses')

@@ -489,7 +489,11 @@ pub async fn run(root: &Path, executable: &Path) -> Result<()> {
             .unwrap_or_else(|| "조회할 수 없음".into());
         let title = format!(
             "RisuNest 동기화 서버 · 버전 {version} · {}",
-            if status.is_ok() { "연결됨" } else { "연결 안 됨" }
+            if status.is_ok() {
+                "연결됨"
+            } else {
+                "연결 안 됨"
+            }
         );
         let Some(action) = menu(
             &title,

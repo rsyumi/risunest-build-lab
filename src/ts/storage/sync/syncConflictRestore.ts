@@ -10,6 +10,7 @@ import {
     replacePersistentDatabase,
 } from '../persistentDataRuntime.svelte'
 import { decodeRisuSave } from '../risuSave'
+import { hasLibraryCharacters } from '../libraryCharacters'
 import {
     getSyncConflictBackupStore,
     type SyncConflictBackupEntry,
@@ -37,7 +38,7 @@ export async function openSyncConflictBackups(): Promise<void> {
     const entry = entries[Number(selected)]
     if (!entry) return
     // Native replacement asks once in its own restore dialog, after the sync pull.
-    if (!isTauri && !await alertConfirm(language.syncConflictRestoreConfirm)) return
+    if (!isTauri && await hasLibraryCharacters() && !await alertConfirm(language.syncConflictRestoreConfirm)) return
     let decoded: Database
     try {
         const bytes = await store.read(entry.id)

@@ -8,7 +8,7 @@ import type { fetchNative, GlobalFetchArgs } from '../../globalApi.svelte'
  * opened for that script must stay open until the calls the script already made
  * have answered.
  */
-async function runGuest(host: SandboxHost, code: string): Promise<Window & typeof globalThis> {
+async function runGuest(host: SandboxHost, code: string, prepare?: (child: Window & typeof globalThis) => void): Promise<Window & typeof globalThis> {
     const frame = document.createElement('iframe')
     document.body.appendChild(frame)
     host.run(frame, code, 'settled-test')
@@ -38,6 +38,7 @@ async function runGuest(host: SandboxHost, code: string): Promise<Window & typeo
     })
     const source = frame.srcdoc.match(/<script nonce="[^"]+">([\s\S]*)<\/script>/)?.[1]
     if (!source) throw new Error('Sandbox guest script was not found')
+    prepare?.(child)
     await childRealm.eval(source)
     return child
 }
@@ -51,6 +52,65 @@ function bridgeStubs(): Record<string, unknown> {
 }
 
 describe('sandbox script completion', () => {
+    it('shows a file-read failure while retaining the plugin error event', async () => {
+        const alertError = vi.fn()
+        const host = new SandboxHost({ ...bridgeStubs(), alertError })
+        const child = await runGuest(host, `
+            const reader = new FileReader();
+            reader.onerror = () => { globalThis.readError = reader.error.name; };
+            reader.readAsArrayBuffer(new File(['synthetic'], 'synthetic.risup'));
+        `, child => {
+            vi.spyOn(child.FileReader.prototype, 'readAsArrayBuffer').mockImplementation(function () {
+                Object.defineProperty(this, 'error', { value: new child.DOMException('Provider denied access', 'NotReadableError') })
+                this.dispatchEvent(new child.Event('error'))
+            })
+        })
+        await vi.waitFor(() => expect((child as any).readError).toBe('NotReadableError'))
+        expect(alertError).toHaveBeenCalledWith('[settled-test] NotReadableError: Provider denied access')
+        host.terminate()
+    })
+
+    it('shows the original promise-based read error without converting the rejection to success', async () => {
+        const alertError = vi.fn()
+        const host = new SandboxHost({ ...bridgeStubs(), alertError })
+        const failure = new DOMException('File disappeared', 'NotFoundError')
+        const child = await runGuest(host, `
+            try { await new File(['synthetic'], 'synthetic.risup').arrayBuffer(); }
+            catch (error) { globalThis.readError = error.message; }
+        `, child => {
+            vi.spyOn(child.Blob.prototype, 'arrayBuffer').mockRejectedValue(failure)
+        })
+        await vi.waitFor(() => expect((child as any).readError).toBe('File disappeared'))
+        expect(alertError).toHaveBeenCalledWith('[settled-test] NotFoundError: File disappeared')
+        host.terminate()
+    })
+
+    it('does not silently swallow top-level plugin failures and includes their causes', async () => {
+        const alertError = vi.fn()
+        const host = new SandboxHost({ ...bridgeStubs(), alertError })
+        await runGuest(host, `throw new Error('Failed to read file', {cause: new DOMException('Provider failed', 'NotReadableError')});`)
+        await vi.waitFor(() => expect(alertError).toHaveBeenCalledWith('[settled-test] Error: Failed to read file\nNotReadableError: Provider failed'))
+        expect(host.isIdle()).toBe(true)
+        host.terminate()
+    })
+
+    it('rejects file error reports from unrelated frames and from terminated sandboxes', () => {
+        const alertError = vi.fn()
+        const host = new SandboxHost({ alertError })
+        const frame = document.createElement('iframe')
+        document.body.append(frame)
+        host.run(frame, '', 'file-plugin')
+        const data = { type: 'PLUGIN_ERROR', error: 'NotReadableError: synthetic' }
+        window.dispatchEvent(new MessageEvent('message', { source: window, data }))
+        expect(alertError).not.toHaveBeenCalled()
+        const source = frame.contentWindow
+        window.dispatchEvent(new MessageEvent('message', { source, data }))
+        expect(alertError).toHaveBeenCalledOnce()
+        host.terminate()
+        window.dispatchEvent(new MessageEvent('message', { source, data }))
+        expect(alertError).toHaveBeenCalledOnce()
+    })
+
     it('stays busy after a callback returns until its stream finishes', async () => {
         let callback!: () => Promise<{content: ReadableStream}>
         const host = new SandboxHost({ register: (fn: typeof callback) => { callback = fn } })

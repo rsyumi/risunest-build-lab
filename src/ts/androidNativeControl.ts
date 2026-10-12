@@ -1,5 +1,6 @@
 import type { AndroidGenerationKeepAliveBridge } from './androidGenerationKeepAlive'
 import type { AndroidSafJavascriptBridge } from './storage/androidSafBridge'
+import type { NativeFileSelectionBridge } from './storage/nativeFileSelection'
 
 export interface AndroidControlMessagePort {
     postMessage(message: string): void
@@ -21,6 +22,7 @@ declare global {
         RisuNestSafControl?: AndroidControlMessagePort
         RisuLifecycleBridge?: AndroidLifecycleControl
         RisuSafBridge?: AndroidSafJavascriptBridge
+        RisuNativeFileSelection?: NativeFileSelectionBridge
         RisuCompletionNotifications?: { enabled(): Promise<boolean>; notify(body: string): Promise<boolean> }
     }
 }
@@ -29,7 +31,7 @@ export function createAndroidControlClient(port: AndroidControlMessagePort) {
     const pending = new Map<string, {
         resolve(value: unknown): void
         reject(error: Error): void
-        timer: ReturnType<typeof setTimeout>
+        timer: ReturnType<typeof setTimeout> | undefined
     }>()
     port.onmessage = (event) => {
         let response: { id?: unknown; result?: unknown; error?: unknown }
@@ -54,7 +56,7 @@ export function createAndroidControlClient(port: AndroidControlMessagePort) {
             if (pending.size >= 32) return Promise.reject(new Error('android-control-busy'))
             const id = crypto.randomUUID()
             return new Promise<T>((resolve, reject) => {
-                const timer = setTimeout(() => {
+                const timer = method === 'files.pick' ? undefined : setTimeout(() => {
                     pending.delete(id)
                     reject(new Error('android-control-timeout'))
                 }, 15_000)
@@ -74,6 +76,10 @@ export function createAndroidControlClient(port: AndroidControlMessagePort) {
 function installAndroidNativeControl(): void {
     if (typeof window === 'undefined' || !window.RisuNestControl) return
     const control = createAndroidControlClient(window.RisuNestControl)
+    window.RisuNativeFileSelection = {
+        pick: multiple => control.request('files.pick', String(multiple)),
+        discard: path => control.request('files.discard', path),
+    }
     window.RisuLifecycleBridge = {
         onFlushComplete: (token) => control.notify('lifecycle.onFlushComplete', token),
         onFlushHold: (token) => control.notify('lifecycle.onFlushHold', token),

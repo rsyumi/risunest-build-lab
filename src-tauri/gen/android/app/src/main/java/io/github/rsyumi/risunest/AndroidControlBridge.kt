@@ -40,7 +40,7 @@ internal fun androidControlArgumentCount(method: String): Int? = when (method) {
   "saf.pickBackupSource", "saf.pickPortableBackupSource", "saf.discardPortableSource", "saf.materializeBackupSource", "saf.pickLegacyBackupSource", "saf.cancelExport",
   "saf.cancelSource", "saf.discardSource", "saf.markExportPublicationReady",
   "saf.acknowledgeExport" -> 1
-  "background.begin", "background.end", "notification.completion" -> 1
+  "background.begin", "background.end", "notification.completion", "files.pick", "files.discard" -> 1
   "background.progress", "saf.pickContentSource" -> 2
   "saf.copyExport" -> 3
   "lifecycle.requestExit", "lifecycle.requestRestart", "lifecycle.onFrontendReady",
@@ -90,7 +90,8 @@ internal class AndroidControlBridge private constructor(
             val response = JSONObject().put("id", id)
             result.fold(
               onSuccess = { response.put("result", if (it == null || it == Unit) JSONObject.NULL else it) },
-              onFailure = { response.put("error", "android-control-failed") },
+              onFailure = { response.put("error", if (method.startsWith("files."))
+                "${it.javaClass.simpleName}: ${it.message ?: "File operation failed"}" else "android-control-failed") },
             )
             // The proxy replies only to the document that made this request.
             runCatching { reply.postMessage(response.toString()) }

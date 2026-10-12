@@ -33,6 +33,8 @@ const state = vi.hoisted(() => ({
     connectionOnly: vi.fn(),
     downloadRemote: vi.fn(),
     binding: { target: { kind: 'none' } } as { target: { kind: string; connectionId?: string } },
+    prepareReplacement: vi.fn(async () => ({ bound: false })),
+    characters: vi.fn(async () => true),
 }))
 
 vi.mock('src/ts/platform', () => ({ isTauri: true, isTauriAndroid: false, isTauriIOS: false }))
@@ -45,11 +47,12 @@ vi.mock('qrcode', async importOriginal => {
 })
 vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertNormal: vi.fn(), alertCheckboxConfirm: vi.fn(), alertActionConfirm: state.actionConfirm }))
 vi.mock('src/ts/storage/sync/external/lwwProduction', () => ({ requestExternalLwwNow: state.syncNow, isExternalLwwRunning: (id: string) => !state.stopped.has(id), supportsExternalLwwNewDevice: () => state.remedy, subscribeExternalLwwFailures(callback: (value: ReadonlyMap<string, unknown>) => void) { callback(new Map(state.failures)); return () => {} } }))
-vi.mock('src/ts/storage/sync/bindingRegistry', () => ({ bindSyncTarget: state.bind, unbindSyncTarget: state.unbind, resumeCurrentSyncBinding: state.resume }))
+vi.mock('src/ts/storage/sync/bindingRegistry', () => ({ bindSyncTarget: state.bind, unbindSyncTarget: state.unbind, resumeCurrentSyncBinding: state.resume, prepareBoundLibraryReplacement: state.prepareReplacement }))
+vi.mock('src/ts/storage/libraryCharacters', () => ({ hasLibraryCharacters: state.characters }))
 // The form's own steps are covered by its tests; here it only reports a finished connection.
 vi.mock('./ConnectionForm.svelte', () => ({ default: (_anchor: unknown, props: { onconnected: (result: unknown) => Promise<void> }) => { state.form = props } }))
 vi.mock('src/ts/storage/sync/bindingNative', () => ({ createNativeSyncBindingBridge: () => ({ state: async () => state.binding }) }))
-vi.mock('src/lang', () => ({ language: { risuNest: { serverSync: { lastSuccess: 'Last sync' } }, lwwSync: { newDeviceAction: 'Connect as new device', clockBlocked: 'Correct the device clock and retry.', previousStorageUnavailable: 'The previous storage could not be reached.', downloadFailedNotConnected: 'The files could not be downloaded, so the connection was not made.' } } }))
+vi.mock('src/lang', () => ({ language: { risuNest: { serverSync: { lastSuccess: 'Last sync' } }, lwwSync: { restoreTitle: 'Restore the backup?', restoreDescription: 'Replace this library.', restoreDescriptionBound: 'Replace this library and sync it.', newDeviceAction: 'Connect as new device', clockBlocked: 'Correct the device clock and retry.', previousStorageUnavailable: 'The previous storage could not be reached.', downloadFailedNotConnected: 'The files could not be downloaded, so the connection was not made.' } } }))
 vi.mock('src/ts/storage/sync/serverAssetResidency', () => ({ countConnectionOnlyAssets: state.connectionOnly, downloadRemoteAssets: state.downloadRemote }))
 vi.mock('src/ts/stores.svelte' , () => ({ DBState: { db: { language: 'en' } } }))
 vi.mock('src/ts/storage/sync/external/production', () => ({
@@ -474,6 +477,59 @@ describe('the storage usage tab', () => {
         expect(requestExternalStorageRestore).toHaveBeenCalledWith('connection-1', 'snapshot', expect.any(Array))
         expect(statusNotices()).toContainEqual(['danger', `${strings.retry}\nsynthetic`])
         expect([...target.querySelectorAll('[role="alert"]')].map(item => item.textContent?.trim())).toEqual([])
+    })
+
+    describe('confirming a snapshot restore', () => {
+        async function restoreSnapshot() {
+            state.listHistory.mockResolvedValue({ items: [{ id: 'point', snapshotId: 'snapshot', kind: 'backup-point',
+                createdAtMs: '1', logicalRevision: '1', complete: true, verified: true, pinned: false,
+                includedSections: ['hypa', 'local-plugins', 'local-settings'], sameDevice: true }] })
+            const tab = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.history)!
+            tab.click()
+            await settle()
+            const restore = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.restore)!
+            restore.click()
+            await settle()
+            await settle()
+        }
+        afterEach(() => {
+            state.prepareReplacement.mockReset().mockResolvedValue({ bound: false })
+            state.characters.mockReset().mockResolvedValue(true)
+        })
+
+        it('restores over a library without characters without asking', async () => {
+            state.characters.mockResolvedValue(false)
+            await restoreSnapshot()
+            expect(alertCheckboxConfirm).not.toHaveBeenCalled()
+            expect(requestExternalStorageRestore).toHaveBeenCalledWith('connection-1', 'snapshot', expect.any(Array))
+        })
+        it('counts the characters of a synced library after receiving its latest changes', async () => {
+            const order: string[] = []
+            state.prepareReplacement.mockImplementation(async () => { order.push('receive'); return { bound: true } })
+            state.characters.mockImplementation(async () => { order.push('count'); return false })
+            await restoreSnapshot()
+            expect(order).toEqual(['receive', 'count'])
+            expect(alertCheckboxConfirm).not.toHaveBeenCalled()
+            expect(requestExternalStorageRestore).toHaveBeenCalledOnce()
+        })
+        it('asks before restoring over a synced library that holds a character, and declining keeps it', async () => {
+            state.prepareReplacement.mockResolvedValue({ bound: true })
+            vi.mocked(alertCheckboxConfirm).mockResolvedValue({ confirmed: false, checked: false })
+            await restoreSnapshot()
+            expect(alertCheckboxConfirm).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+                title: 'Restore the backup?', description: 'Replace this library and sync it.', requireChecked: true,
+            }))
+            expect(requestExternalStorageRestore).not.toHaveBeenCalled()
+        })
+        it('asks without counting when the latest changes cannot be received', async () => {
+            state.binding = { target: { kind: 'server', connectionId: 'server' } }
+            state.prepareReplacement.mockRejectedValue(new Error('unreachable'))
+            vi.mocked(alertCheckboxConfirm).mockResolvedValue({ confirmed: true, checked: true })
+            await restoreSnapshot()
+            expect(state.characters).not.toHaveBeenCalled()
+            expect(alertCheckboxConfirm).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ description: 'Replace this library and sync it.' }))
+            expect(requestExternalStorageRestore).toHaveBeenCalledOnce()
+        })
     })
 
     it('owns one snapshot export, reports progress and cancels that export ID', async () => {

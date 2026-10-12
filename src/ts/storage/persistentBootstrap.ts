@@ -12,7 +12,7 @@ import {
 import { yieldToMainThread } from '../ui/yieldToUi'
 
 const BOOTSTRAP_CATALOG_PAGE_SIZE = 200
-export const NEW_DATABASE_SEED: Partial<Database> = {
+const NEW_DATABASE_SEED: Partial<Database> = {
     streamingDisplayOptimizationMode: 'balanced',
 }
 

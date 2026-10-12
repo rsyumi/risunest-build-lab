@@ -1,3 +1,4 @@
+import { FetchBodyPreview, previewFetchRequest } from './network/boundedFetchPreview'
 import {
     writeFile,
     open as openFile,
@@ -1350,7 +1351,7 @@ export async function fetchNative(url: string, arg: {
     let fetchLogIndex: number | null = null
     if (shouldLogFetch) {
         fetchLogIndex = addFetchLog({
-            body: textBody ?? new TextDecoder().decode(realBody),
+            body: route === 'tauri' ? previewFetchRequest(textBody, realBody) : (textBody ?? new TextDecoder().decode(realBody)),
             headers: arg.headers,
             response: 'Streamed Fetch',
             success: true,
@@ -1369,8 +1370,7 @@ export async function fetchNative(url: string, arg: {
         })
         }
         else if (route === 'tauri') {
-            const decoder = shouldLogFetch && fetchLogIndex !== null ? new TextDecoder() : null
-            const responseParts: string[] = []
+            const preview = shouldLogFetch && fetchLogIndex !== null ? new FetchBodyPreview() : null
             return await fetchTauriHttpStream({
                 url,
                 method: arg.method,
@@ -1380,12 +1380,9 @@ export async function fetchNative(url: string, arg: {
                 // The native route enforces the budget as an inactivity window, so a
                 // long running generation keeps going while a silent one is released.
                 idleTimeoutMs: arg.requestTimeoutMs,
-                onChunk: decoder ? (chunk) => {
-                    responseParts.push(decoder.decode(chunk, { stream: true }))
-                } : undefined,
-                onFinish: decoder ? () => {
-                    responseParts.push(decoder.decode())
-                    fetchLog[fetchLogIndex].response = responseParts.join('')
+                onChunk: preview ? chunk => preview.append(chunk) : undefined,
+                onFinish: preview ? () => {
+                    if (fetchLog[fetchLogIndex]) fetchLog[fetchLogIndex].response = preview.finish()
                 } : undefined,
             })
         }

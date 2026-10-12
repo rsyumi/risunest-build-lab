@@ -1,0 +1,24 @@
+[package]
+name = "risunest-network-log"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+http = "1"
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json"], optional = true }
+futures-util = { version = "0.3", optional = true }
+http-body = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+
+[features]
+reqwest = ["dep:reqwest", "dep:futures-util", "dep:http-body", "dep:bytes"]
+
+[dev-dependencies]
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "gzip"] }

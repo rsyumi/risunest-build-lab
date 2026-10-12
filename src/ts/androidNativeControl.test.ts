@@ -19,6 +19,7 @@ afterEach(() => {
     delete window.RisuGenerationKeepAlive
     delete window.RisuCompletionNotifications
     delete window.RisuSafBridge
+    delete window.RisuNativeFileSelection
 })
 
 describe('scoped Android control transport', () => {
@@ -91,6 +92,35 @@ describe('scoped Android control transport', () => {
         expect(await Promise.all(pending)).toEqual(Array(32).fill('android-control-timeout'))
         expect(sent).toHaveLength(32)
         expect(vi.getTimerCount()).toBe(0)
+    })
+
+    it('keeps the file picker request alive while the user chooses a document', async () => {
+        vi.useFakeTimers()
+        const { client, sent, reply } = fixture()
+        const selected = client.request('files.pick', 'true')
+        await vi.advanceTimersByTimeAsync(60_000)
+        expect(sent).toHaveLength(1)
+        reply({ id: sent[0].id, result: { cancelled: true } })
+        await expect(selected).resolves.toEqual({ cancelled: true })
+        expect(vi.getTimerCount()).toBe(0)
+    })
+
+    it('preserves native file errors through the installed bridge', async () => {
+        vi.resetModules()
+        const sent: { id?: string; method: string; args: string[] }[] = []
+        const port: AndroidControlMessagePort = { postMessage: text => sent.push(JSON.parse(text)) }
+        window.RisuNestControl = port
+        await import('./androidNativeControl')
+        const selected = window.RisuNativeFileSelection!.pick(true)
+        const message = sent.find(item => item.method === 'files.pick')!
+        expect(message.args).toEqual(['true'])
+        port.onmessage?.({ data: JSON.stringify({ id: message.id, error: 'IOException: provider read failed' }) })
+        await expect(selected).rejects.toThrow('IOException: provider read failed')
+        const discarded = window.RisuNativeFileSelection!.discard('/owned/source')
+        const cleanup = sent.find(item => item.method === 'files.discard')!
+        expect(cleanup.args).toEqual(['/owned/source'])
+        port.onmessage?.({ data: JSON.stringify({ id: cleanup.id, result: null }) })
+        await discarded
     })
 
     it('releases pending state when sending fails', async () => {

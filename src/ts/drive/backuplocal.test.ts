@@ -13,6 +13,7 @@ import { getBackupInlayName } from './backupAssets'
 
 const state = vi.hoisted(() => ({
     native: true,
+    characters: true,
     blobStore: null as BlobStore | null,
     currentDatabase: null as Database | null,
     runtime: null as PersistentDataRuntime | null,
@@ -36,6 +37,7 @@ const state = vi.hoisted(() => ({
 
 vi.mock('../alert', () => ({
     alertConfirm: vi.fn(async () => true), alertCheckboxConfirm: vi.fn(async () => ({ confirmed: true, checked: true })),
+    alertActionConfirm: vi.fn(async () => true),
     alertError: vi.fn(),
     alertMd: vi.fn(),
     alertNormal: vi.fn(),
@@ -44,6 +46,7 @@ vi.mock('../alert', () => ({
 }))
 
 vi.mock('../nativeLog', () => ({ recordNativeLogError: vi.fn(async () => undefined) }))
+vi.mock('../storage/libraryCharacters', () => ({ hasLibraryCharacters: async () => state.characters }))
 
 vi.mock('../globalApi.svelte', () => ({
     forageStorage: { Init: vi.fn(async () => undefined), isAccount: false },
@@ -153,6 +156,7 @@ describe('local backup persistent snapshot', () => {
 
     beforeEach(() => {
         state.native = true
+        state.characters = true
         vi.clearAllMocks()
         state.written.clear()
         state.restoreEvents = []
@@ -272,8 +276,9 @@ describe('local backup persistent snapshot', () => {
         expect(JSON.stringify(context.onStatus.mock.calls)).toContain(`coldstorage_${coldKey}.json`)
     })
 
-    it.each([[true,false,false,false],[false,false,false,false],[true,true,false,false],[true,false,true,false],[true,false,true,true]])('preflights, acknowledges, and preserves committed outcomes (%s,%s,%s, first run %s)', async (confirmed, bodyFails, native, firstRun) => {
+    it.each([[true,false,false,false,true],[false,false,false,false,true],[true,true,false,false,true],[true,false,true,false,true],[true,false,true,true,true],[true,false,false,false,false]])('preflights, acknowledges, and preserves committed outcomes (%s,%s,%s, first run %s, characters %s)', async (confirmed, bodyFails, native, firstRun, characters) => {
         state.native = native
+        state.characters = characters
         const { alertCheckboxConfirm } = await import('../alert')
         vi.mocked(alertCheckboxConfirm).mockResolvedValueOnce({ confirmed, checked: confirmed })
         const database = structuredClone(risuSaveFixtureDatabase) as Database
@@ -353,9 +358,11 @@ describe('local backup persistent snapshot', () => {
         if (native) {
             expect(alertCheckboxConfirm).not.toHaveBeenCalled()
             expect(state.replacePersistentDatabase.mock.calls[0][2]).toMatchObject({upstreamImport:true, upstreamImportWarnings:[], ...(firstRun ? {firstRun:true} : {})})
-        } else {
+        } else if (characters) {
             expect(alertCheckboxConfirm).toHaveBeenCalledOnce()
             expect(alertCheckboxConfirm).toHaveBeenCalledWith(expect.objectContaining({title:language.pocketRisuImportConfirm}))
+        } else {
+            expect(alertCheckboxConfirm).not.toHaveBeenCalled()
         }
 
         expect(result).toEqual({ warningCodes: ['upstream-restore-losses'], upstreamLosses: {coldMissing:0,invalidInlays:1,pocketInlays:0} })
@@ -367,6 +374,45 @@ describe('local backup persistent snapshot', () => {
             assets: 0,
             skipped: 1,
         })
+    })
+
+    it.each([true, false])('shows only the cold storage warning on the web when the library holds no character, answer=%s', async answer => {
+        state.native = false
+        state.characters = false
+        const { alertActionConfirm, alertCheckboxConfirm } = await import('../alert')
+        vi.mocked(alertActionConfirm).mockResolvedValueOnce(answer)
+        const database = structuredClone(risuSaveFixtureDatabase) as Database
+        database.characters[0].coldstorage = 'missing-cold'
+        const encoded = encodeRisuSaveLegacy(database, 'compression')
+        const encodedName = new TextEncoder().encode('database.risudat')
+        const archive = new Uint8Array(8 + encodedName.byteLength + encoded.byteLength)
+        const view = new DataView(archive.buffer)
+        view.setUint32(0, encodedName.byteLength, true)
+        archive.set(encodedName, 4)
+        view.setUint32(4 + encodedName.byteLength, encoded.byteLength, true)
+        archive.set(encoded, 8 + encodedName.byteLength)
+        const file = {
+            name: 'cold-missing.bin',
+            size: archive.byteLength,
+            slice: (start: number, end: number) => ({ arrayBuffer: async () => archive.slice(start, end).buffer }),
+            stream: () => new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(archive); controller.close() } }),
+        } as File
+        const input = document.createElement('input')
+        Object.defineProperty(input, 'files', { value: [file] })
+        const click = vi.spyOn(input, 'click').mockImplementation(() => {})
+        const createElement = vi.spyOn(document, 'createElement').mockReturnValueOnce(input)
+        const { importLegacyBackupWithWebView } = await import('./backuplocal')
+        const { language } = await import('../../lang')
+        const pending = importLegacyBackupWithWebView(state.fallbackContext, {}, language.backupLoadConfirm)
+        await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
+        input.dispatchEvent(new Event('change'))
+        if (answer) await pending
+        else await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+        createElement.mockRestore()
+        expect(alertCheckboxConfirm).not.toHaveBeenCalled()
+        expect(alertActionConfirm).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ title: language.backupLoadConfirm }))
+        expect(vi.mocked(alertActionConfirm).mock.calls[0][0].description).not.toContain(language.checkboxConfirmation.dataReplacementDescription)
+        expect(state.replacePersistentDatabase).toHaveBeenCalledTimes(answer ? 1 : 0)
     })
 
     it('stops a WebView import after cancellation without publishing staged attachments', async () => {

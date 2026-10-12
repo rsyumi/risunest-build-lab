@@ -266,6 +266,7 @@ pub(crate) struct Reply {
 /// marker is set.
 pub(crate) struct PreparedBody {
     wire: Vec<u8>,
+    log_body: Option<Vec<u8>>,
     encoded: bool,
     #[cfg(test)]
     raw_len: usize,
@@ -301,14 +302,19 @@ impl ServerClient {
         };
         self.ensure_active()?;
         // A separate unauthenticated request. Device and library headers are never sent.
-        let response = self
+        let request = self
             .http
             .get(directory.record_url()?)
             .header("accept-encoding", "identity")
             .header("cache-control", "no-cache")
             .timeout(Duration::from_secs(15))
-            .send()
+            .build()
             .map_err(|_| SyncError::new("directory-unreachable", 503))?;
+        let capture = risunest_network_log::begin("sync-directory", request.method().as_str(), request.url().as_str(), request.headers());
+        let response = self.http.execute(request).map_err(|_| {
+            capture.finish("error"); SyncError::new("directory-unreachable", 503)
+        })?;
+        capture.response(response.status().as_u16(), response.url().as_str(), response.headers());
         if response.status().as_u16() != 200 {
             return Err(SyncError::new("directory-response-error", 503));
         }
@@ -322,10 +328,11 @@ impl ServerClient {
             return Err(SyncError::new("invalid-directory-envelope", 502));
         }
         let mut bytes = Vec::new();
-        response
-            .take(limit as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| SyncError::new("directory-incomplete-response", 503))?;
+        let read = response.take(limit as u64 + 1).read_to_end(&mut bytes);
+        capture.append(risunest_network_log::Side::Response, &bytes);
+        if read.is_err() { capture.finish("error"); }
+        read.map_err(|_| SyncError::new("directory-incomplete-response", 503))?;
+        capture.finish("complete");
         if bytes.len() > limit {
             return Err(SyncError::new("invalid-directory-envelope", 502));
         }
@@ -665,11 +672,13 @@ impl ServerClient {
                 encoded: true,
                 #[cfg(test)]
                 raw_len: raw.len(),
+                log_body: risunest_network_log::enabled().then_some(raw),
             },
             None => PreparedBody {
                 #[cfg(test)]
                 raw_len: raw.len(),
                 wire: raw,
+                log_body: None,
                 encoded: false,
             },
         }))
@@ -745,7 +754,19 @@ impl ServerClient {
             let reader = super::progress::WireReader::new(std::io::Cursor::new(body.wire.clone()), self.lane.clone(), true, Some(length));
             request = request.body(reqwest::blocking::Body::sized(reader, length));
         }
-        let response = request.send().map_err(|e| {
+        let request = request.build().map_err(|_| SyncError::new("server-unreachable", 503))?;
+        let capture = risunest_network_log::begin("sync", request.method().as_str(), request.url().as_str(), request.headers());
+        if capture.is_active() {
+            if let Some(body) = body {
+                let raw = body.log_body.as_deref().unwrap_or(&body.wire);
+                if body.encoded {
+                    capture.representation(risunest_network_log::Side::Request, if body.log_body.is_some() { "decoded-sync" } else { "encoded-sync" });
+                }
+                capture.append(risunest_network_log::Side::Request, raw);
+            }
+        }
+        let response = self.http.execute(request).map_err(|e| {
+            capture.finish("error");
             SyncError::new(
                 if e.is_timeout() {
                     "server-timeout"
@@ -755,6 +776,7 @@ impl ServerClient {
                 503,
             )
         })?;
+        capture.response(response.status().as_u16(), response.url().as_str(), response.headers());
         let status = response.status().as_u16();
         let object_range = response
             .headers()
@@ -787,28 +809,30 @@ impl ServerClient {
             return Err(SyncError::new("response-too-large", 502));
         }
         let mut bytes = Vec::new();
-        super::progress::WireReader::new(response.take(limit as u64 + 1), self.lane.clone(), false, None)
-            .read_to_end(&mut bytes)
-            .map_err(|_| SyncError::new("incomplete-response", 503))?;
-        if bytes.len() > limit {
-            return Err(SyncError::new("response-too-large", 502));
+        let read = super::progress::WireReader::new(response.take(limit as u64 + 1), self.lane.clone(), false, None)
+            .read_to_end(&mut bytes);
+        if read.is_err() || bytes.len() > limit {
+            if encoded { capture.representation(risunest_network_log::Side::Response, "encoded-sync"); }
+            capture.append(risunest_network_log::Side::Response, &bytes);
+            capture.finish("error");
         }
+        read.map_err(|_| SyncError::new("incomplete-response", 503))?;
+        if bytes.len() > limit { return Err(SyncError::new("response-too-large", 502)); }
         #[cfg(test)]
         let wire = bytes.len() as u64;
         let bytes = if encoded {
-            body_codec::decode(&bytes, limit).map_err(|error| {
-                SyncError::new(
-                    if error.0 == "body-too-large" {
-                        "response-too-large"
-                    } else {
-                        "invalid-response-encoding"
-                    },
-                    502,
-                )
-            })?
-        } else {
-            bytes
-        };
+            match body_codec::decode(&bytes, limit) {
+                Ok(raw) => { capture.representation(risunest_network_log::Side::Response, "decoded-sync"); raw },
+                Err(error) => {
+                    capture.representation(risunest_network_log::Side::Response, "encoded-sync");
+                    capture.append(risunest_network_log::Side::Response, &bytes);
+                    capture.finish("error");
+                    return Err(SyncError::new(if error.0 == "body-too-large" { "response-too-large" } else { "invalid-response-encoding" }, 502));
+                }
+            }
+        } else { bytes };
+        capture.append(risunest_network_log::Side::Response, &bytes);
+        capture.finish("complete");
         #[cfg(test)]
         if let Some(counter)=&self.test_io {
             counter.response_body_bytes.fetch_add(wire,std::sync::atomic::Ordering::Relaxed);
@@ -998,7 +1022,7 @@ mod progress_tests {
         let worker_lane = lane.clone();
         let worker = std::thread::spawn(move || super::super::progress::within(&worker_lane, || {
             let client = ServerClient::new(super::tests::config(&endpoint)).unwrap();
-            let body = PreparedBody { wire: vec![7; UPLOAD], encoded: false, raw_len: UPLOAD };
+            let body = PreparedBody { wire: vec![7; UPLOAD], log_body: None, encoded: false, raw_len: UPLOAD };
             client.request_once(Method::PUT, "synthetic", &[], Some(&body), &[], 8192).unwrap().body
         }));
         noticed.recv_timeout(Duration::from_secs(5)).unwrap();

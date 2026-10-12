@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const protocolManifests = [
+  'crates/network-log/Cargo.toml',
   'crates/sync-wire/Cargo.toml',
   'crates/sync-connect/Cargo.toml',
   'crates/external-storage-format/Cargo.toml',
@@ -90,6 +91,8 @@ export function nativeCommands(group, platform = process.platform) {
   for (const manifest of group === 'protocol' ? protocolManifests : hostManifests) {
     if (manifest === 'src-tauri/Cargo.toml' && platform === 'linux') {
       commands.push(['dbus-run-session', '--', 'bash', 'scripts/linux-native-tests.sh', '--release'])
+    } else if (manifest === 'crates/network-log/Cargo.toml') {
+      commands.push(['cargo', 'test', '--manifest-path', manifest, '--features', 'reqwest', '--release', '--locked'])
     } else if (manifest === 'server/sync/Cargo.toml') {
       commands.push(['cargo', 'test', '--manifest-path', manifest, '--release', '--locked', '--', '--skip', 'source_observer'])
     } else {

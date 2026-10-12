@@ -5,6 +5,9 @@ fn main() {
         println!("cargo:rerun-if-changed=src/cleanup_webview.m");
         cc::Build::new().file("src/cleanup_webview.m").flag("-fobjc-arc")
             .flag("-fblocks").compile("risunest_cleanup_webview");
+        println!("cargo:rerun-if-changed=src/network_log_backup.m");
+        cc::Build::new().file("src/network_log_backup.m").flag("-fobjc-arc").compile("risunest_network_log_backup");
+        println!("cargo:rustc-link-lib=framework=Foundation");
         println!("cargo:rustc-link-lib=framework=WebKit");
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {

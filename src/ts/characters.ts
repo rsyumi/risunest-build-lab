@@ -942,6 +942,16 @@ export async function addCharacter(arg:{
     }
 }
 
+// Applied to the activation candidate rather than after selection, so the
+// switch records the toggle with its other activation changes.
+function applyHypaV3AlwaysToggleOn(candidate: character): character {
+    const db = getDatabase()
+    if (db.hypaV3 && db.hypaV3Presets?.[db.hypaV3PresetId]?.settings?.alwaysToggleOn) {
+        candidate.supaMemory = true
+    }
+    return candidate
+}
+
 export async function changeChar(index: number, arg:{
     reseter?:()=>any,
 } = {}): Promise<boolean> {
@@ -979,9 +989,9 @@ export async function changeChar(index: number, arg:{
         const expectedNavigationGeneration = restoreNavigationGeneration + 1
         const activationOptions = {
             normalize: (candidate: character) =>
-                characterFormatUpdate(candidate, {
+                applyHypaV3AlwaysToggleOn(characterFormatUpdate(candidate, {
                     updateInteraction: true,
-                }),
+                })),
         }
         let activated = await activateCharacter(chaId, activationOptions)
         if (!activated) {

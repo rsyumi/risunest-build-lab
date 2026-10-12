@@ -9,7 +9,8 @@ import { embeddedCrateTests, hostManifests, nativeCommands, packageCrateTests, p
 test('native groups explicitly own dependency packages and full app integration targets', () => {
   const protocol = nativeCommands('protocol', 'win32')
   assert.deepEqual(protocol.map(command => command[3]), protocolManifests)
-  assert.equal(protocol.length, 5)
+  assert.equal(protocol.length, 6)
+  assert(protocol.find(command => command[3] === 'crates/network-log/Cargo.toml').includes('reqwest'))
   const host = nativeCommands('host', 'win32')
   assert.deepEqual(host.slice(0, 4).map(command => command[3]), hostManifests)
   for (const command of [...protocol, ...host]) {
@@ -137,4 +138,37 @@ test('every local Rust crate with tests has an explicit runner', () => {
   }
   assert.deepEqual(missing, [], `Missing native test runners: ${missing.join(', ')}`)
   assert(protocolManifests.includes('crates/small-object-store/Cargo.toml'))
+})
+
+
+function nativeNetworkBypasses(source) {
+  return [...source.matchAll(/\.send\s*\(\s*\)|\.execute\s*\(\s*request\s*\)|\bconnect_async(?:_tls_with_config|_with_config)?\s*\(/g)].map(match => match[0].replace(/\s+/g, ''))
+}
+
+test('native HTTP and WebSocket raw entry points stay in the reviewed adapters and fixtures', () => {
+  const root = fileURLToPath(new URL('../', import.meta.url))
+  const found = {}
+  function scan(directory) {
+    for (const entry of readdirSync(join(root, directory), { withFileTypes: true })) {
+      const path = `${directory}/${entry.name}`
+      if (entry.isDirectory()) scan(path)
+      else if (entry.name.endsWith('.rs')) {
+        const calls = nativeNetworkBypasses(readFileSync(join(root, path), 'utf8'))
+        if (calls.length) found[path] = calls
+      }
+    }
+  }
+  for (const directory of ['src-tauri/src', 'crates/network-log/src', 'crates/tauri-plugin-http/src', 'crates/tauri-plugin-updater/src']) scan(directory)
+  assert.deepEqual(found, {
+    'src-tauri/src/native_media/streaming/tests.rs': ['.send()', '.send()'],
+    'src-tauri/src/platform_tls.rs': ['.send()', '.send()', '.send()', '.send()', 'connect_async_tls_with_config('],
+    'src-tauri/src/server_sync/client.rs': ['.execute(request)', '.execute(request)'],
+    'src-tauri/src/server_sync/directory_tests.rs': ['.send()'],
+    'src-tauri/src/server_sync/media_admission_tests.rs': ['.send()'],
+    'src-tauri/src/server_sync/notification.rs': ['connect_async_tls_with_config('],
+    'crates/network-log/src/reqwest.rs': ['.send()', '.execute(request)', '.execute(request)'],
+    'crates/tauri-plugin-updater/src/network_log.rs': ['.send()', '.execute(request)'],
+  })
+  assert.equal(nativeNetworkBypasses('client.get(url).send().await?;').length, 1)
+  assert.equal(nativeNetworkBypasses('client.get(url).send_logged("test").await?;').length, 0)
 })

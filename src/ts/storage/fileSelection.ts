@@ -1,5 +1,6 @@
 import { open as nativeOpen, save as nativeSave, type OpenDialogOptions, type SaveDialogOptions } from '@tauri-apps/plugin-dialog'
 import { withLibraryFileSelection } from './libraryFileOperation'
+import { isTauriMobile } from '../platform'
 
 export const open = <T extends OpenDialogOptions>(options?: T) =>
     withLibraryFileSelection(() => nativeOpen(options))
@@ -8,6 +9,7 @@ export const save = (options?: SaveDialogOptions) =>
     withLibraryFileSelection(() => nativeSave(options))
 
 export function selectDomFiles(options: { accept?: string; multiple?: boolean; signal?: AbortSignal }): Promise<File[]> {
+    if (isTauriMobile) return import('./nativeFileSelection').then(({ selectNativeFiles }) => selectNativeFiles(options))
     return withLibraryFileSelection(() => new Promise((resolve, reject) => {
         if (options.signal?.aborted) { resolve([]); return }
         const input = document.createElement('input')

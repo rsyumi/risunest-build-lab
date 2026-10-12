@@ -15,7 +15,8 @@ vi.mock('src/ts/platform', () => ({ isTauri: true }))
 vi.mock('src/ts/stores.svelte', () => ({ selectedCharID: { subscribe: (run: (value: number) => void) => { run(-1); return () => {} } } }))
 vi.mock('../database.svelte', () => ({ getDatabase: () => ({ characters: [] }) }))
 vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: async () => true, confirmPreviousStorageFiles: async () => 'connect', downloadPreviousStorageFiles: async () => {} }))
-vi.mock('./bindingLocalData', () => ({ hasLocalBindingData: async () => false, hasLocalSharedBindingData: async () => f.sharedData }))
+vi.mock('./bindingLocalData', () => ({ hasLocalSharedBindingData: async () => f.sharedData }))
+vi.mock('../libraryCharacters', () => ({ hasLibraryCharacters: async () => false }))
 vi.mock('../persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: () => f.runtime,
     withPausedPersistentWrites: async (_reason: string, operation: (token: unknown) => Promise<unknown>) => operation({ id: 'paused' }),

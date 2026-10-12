@@ -1,5 +1,6 @@
 //! One-dispatch HTTP boundary: account waits, actual MYBOX reservations,
 //! cancellation, bounded control requests and observed server-clock facts.
+use risunest_network_log::reqwest::RequestBuilderExt;
 use super::{
     contract::*,
     leases::{observe_time_sample, TimeSample},
@@ -182,7 +183,7 @@ impl HttpTransport for NativeHttpTransport {
             let response = tokio::select! {
                 _ = cancel.cancelled() => return Err(ProviderError::new(ErrorKind::Cancelled)),
                 detail = upload_watchdog(progress) => return Err(ProviderError::new(ErrorKind::Transient).caused(&detail)),
-                result = builder.send() => result.map_err(network_error)?,
+                result = builder.send_logged("external-storage") => result.map_err(network_error)?,
             };
             let status = response.status().as_u16();
             let mut headers: BTreeMap<String, String> = BTreeMap::new();

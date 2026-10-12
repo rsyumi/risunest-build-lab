@@ -59,14 +59,14 @@ describe('RisuNest settings navigation', () => {
         expect(settingsSource).not.toContain('$SettingsMenuIndex === 18')
     })
 
-    it('offers four tabs in order, each named in both shipped languages', () => {
-        expect(RISUNEST_SETTINGS_TABS).toEqual(['settings', 'storage', 'sync', 'plugin-data'])
+    it('offers native and shared tabs in order, each named in both shipped languages', () => {
+        expect(RISUNEST_SETTINGS_TABS).toEqual(['settings', 'storage', 'sync', 'plugin-data', 'network-logs'])
         expect(pageSource).toContain('role="tablist"')
         expect(pageSource).toContain('role="tab"')
         expect(pageSource).toContain('aria-selected={active}')
         expect(pageSource).toContain('role="tabpanel"')
         for (const translation of [languageEnglish, languageKorean]) {
-            for (const key of ['settings', 'storage', 'sync', 'pluginData'] as const) {
+            for (const key of ['settings', 'storage', 'sync', 'networkLogs', 'pluginData'] as const) {
                 expect(translation.risuNest.tabs[key]).toEqual(expect.any(String))
             }
             expect(translation.risuNest.tabList).toEqual(expect.any(String))

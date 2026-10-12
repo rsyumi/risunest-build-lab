@@ -591,6 +591,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private val lifecycleCommands = LifecycleFlushBridge()
   private val generationCommands = GenerationKeepAliveBridge()
   private val safCommands = SafBridge()
+  private val fileSelection = NativeFileSelection(this)
   private val lifecycleFlushDispatcher = LifecycleFlushDispatcher(::dispatchLifecycleFlush)
   private val exitFlushGate = ExitFlushGate()
   private var exitListenerReady = false
@@ -1017,6 +1018,8 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       error("android-saf-unavailable")
     }
     return when (method) {
+      "files.pick" -> fileSelection.pick(args[0].toBooleanStrict())
+      "files.discard" -> withContext(Dispatchers.IO) { fileSelection.discard(args[0]) }
       "lifecycle.onFrontendReady" -> onFrontendReady()
       "lifecycle.acknowledgeOpenedFile" -> withContext(Dispatchers.IO) { acknowledgeLegacyOpenedFile(args[0]) }
       "lifecycle.exitListenerReady" -> { exitListenerReady = args[0] == "true" }
