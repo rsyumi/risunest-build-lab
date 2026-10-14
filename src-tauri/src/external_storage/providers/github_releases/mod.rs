@@ -48,8 +48,6 @@ mod tests;
 
 /// A batch may open this many successive releases before the adapter stops.
 const MAX_BATCH_ROLLOVERS: u32 = 4096;
-/// Reconciliation walks batch releases from the first sequence upwards.
-const RECONCILE_SEQ_SCAN: u32 = 8;
 
 pub(crate) fn create(dependencies: Dependencies) -> Result<Arc<dyn Provider>> {
     Ok(Arc::new(GithubReleases { dependencies }))
@@ -1002,7 +1000,10 @@ impl Provider for GithubReleases {
             let first_tag = context.tag(&batch, 0);
             let prefix = first_tag.strip_suffix('0').ok_or_else(corrupt)?;
             let mut found = None;
-            for page in 1..=api::MAX_RELEASE_SCAN_PAGES {
+            // A match is only unique after every release page has been checked.
+            let mut page = 1;
+            loop {
+                cancel.check()?;
                 let releases = self.releases_page(context, page, cancel).await?;
                 let complete = releases.len() < api::RELEASE_PAGE_SIZE;
                 for release in releases {
@@ -1017,8 +1018,8 @@ impl Provider for GithubReleases {
                     found = Some(Self::receipt(context, &release.tag_name, release.id, &asset, intent));
                 }
                 if complete { return Ok(found); }
+                page = page.checked_add(1).ok_or_else(|| ProviderError::new(ErrorKind::Transient))?;
             }
-            Err(ProviderError::new(ErrorKind::Transient))
         })
     }
 
@@ -1039,26 +1040,39 @@ impl Provider for GithubReleases {
             }
             let batch = api::batch_key(intent.role, &intent.job_id);
             let name = api::asset_name(intent.role, &intent.object_id);
-            for seq in 0..RECONCILE_SEQ_SCAN {
-                let tag = context.tag(&batch, seq);
-                let Some(release) = self.find_release(context, &tag, cancel).await? else {
-                    break;
-                };
-                let Some(asset) = self.find_asset(context, release, &name, cancel).await? else {
-                    continue;
-                };
-                if self.remove_owned_starter(context, &tag, release, &asset, intent, cancel).await? {
-                    return Ok(UploadResolution::RestartRequired);
+            let first_tag = context.tag(&batch, 0);
+            let prefix = first_tag.strip_suffix('0').ok_or_else(corrupt)?;
+            let mut found = None;
+            let mut page = 1;
+            loop {
+                cancel.check()?;
+                let releases = self.releases_page(context, page, cancel).await?;
+                let complete = releases.len() < api::RELEASE_PAGE_SIZE;
+                for release in releases {
+                    if !release.draft { continue; }
+                    let Some(sequence) = release.tag_name.strip_prefix(prefix) else { continue; };
+                    if sequence.parse::<u32>().ok().is_none_or(|seq| seq.to_string() != sequence) { continue; }
+                    let Some(asset) = self.find_asset(context, release.id, &name, cancel).await? else {
+                        continue;
+                    };
+                    if found.is_some() { return Ok(UploadResolution::Conflict); }
+                    found = Some((release, asset));
                 }
-                return Ok(if asset.uploaded() && asset.matches(intent) {
-                    UploadResolution::Complete(Self::receipt(
-                        context, &tag, release, &asset, intent,
-                    ))
-                } else {
-                    UploadResolution::Conflict
-                });
+                if complete { break; }
+                page = page.checked_add(1).ok_or_else(|| ProviderError::new(ErrorKind::Transient))?;
             }
-            Ok(UploadResolution::RestartRequired)
+            // Absence and starter removal both require a complete, unique observation.
+            let Some((release, asset)) = found else { return Ok(UploadResolution::RestartRequired); };
+            if self.remove_owned_starter(context, &release.tag_name, release.id, &asset, intent, cancel).await? {
+                return Ok(UploadResolution::RestartRequired);
+            }
+            Ok(if asset.uploaded() && asset.matches(intent) {
+                UploadResolution::Complete(Self::receipt(
+                    context, &release.tag_name, release.id, &asset, intent,
+                ))
+            } else {
+                UploadResolution::Conflict
+            })
         })
     }
 

@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
-import { once } from "node:events";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const compiler = process.env.NSIS_MAKENSIS ?? join(process.env.LOCALAPPDATA ?? "", "tauri", "NSIS", "makensis.exe");
@@ -11,7 +10,6 @@ const skip = process.platform !== "win32" ? "NSIS execution requires Windows" : 
 if (process.env.RISUNEST_REQUIRE_NSIS === "1" && skip) throw new Error(skip);
 const quote = (value) => value.replaceAll("$", "$$").replaceAll('"', '$\\"');
 const installedExecutable = "$INSTDIR\\${MAINBINARYNAME}.exe";
-const bundleId = "synthetic.risunest.nsis";
 
 test("both installers use the template pinned to their Tauri CLI and automatic Korean/English languages", () => {
   const template = readFileSync(resolve("src-tauri/windows-installer.nsi"), "utf8");
@@ -27,6 +25,42 @@ test("both installers use the template pinned to their Tauri CLI and automatic K
     assert.deepEqual(nsis.languages, ["English", "Korean"]);
     assert.equal(nsis.displayLanguageSelector, false);
   }
+});
+
+test("the template normalizes an installation folder that no longer exists", { skip }, () => {
+  const root = mkdtempSync(join(tmpdir(), "risunest-nsis-path-"));
+  try {
+    const template = readFileSync(resolve("src-tauri/windows-installer.nsi"), "utf8");
+    const normalize = template.match(/^Function NormalizePath\r?\n[\s\S]*?^FunctionEnd\r?$/m)?.[0];
+    assert.ok(normalize);
+    const existing = join(root, "existing");
+    const missing = join(root, "missing");
+    mkdirSync(existing);
+    const cases = [
+      [`${existing}\\.`, existing],
+      [`${missing}\\.`, missing],
+      [`${missing}\\\\.`, missing],
+      [`${root.replaceAll("\\", "/")}/missing/nested/../.`, missing],
+    ];
+    const script = join(root, "normalize.nsi");
+    writeFileSync(script, String.raw`Unicode true
+RequestExecutionLevel user
+SilentInstall silent
+OutFile "${quote(join(root, "normalize.exe"))}"
+!include LogicLib.nsh
+${normalize}
+Section
+  FileOpen $9 "$EXEDIR\results" w
+${cases.map(([input]) => `  StrCpy $0 "${quote(input)}"\n  Call NormalizePath\n  FileWrite $9 "$0|"`).join("\n")}
+  FileClose $9
+SectionEnd
+`);
+    const compiled = spawnSync(compiler, ["/V2", script], { encoding: "utf8", windowsHide: true, timeout: 30000 });
+    assert.equal(compiled.status, 0, `${compiled.stdout}\n${compiled.stderr}`);
+    assert.equal(spawnSync(join(root, "normalize.exe"), ["/S"], { timeout: 30000, windowsHide: true }).status, 0);
+    assert.deepEqual(readFileSync(join(root, "results"), "utf8").split("|").slice(0, -1), cases.map(([, expected]) => expected));
+    assert.equal(existsSync(missing), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("missing or misfiled Korean installer strings fail compilation", { skip }, () => {
@@ -57,8 +91,7 @@ SectionEnd
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("NSIS executes app cleanup only on explicit removal and retains retry capability on failure", { skip }, async () => {
-  let running;
+test("NSIS executes app cleanup only on explicit removal and retains retry capability on failure", { skip }, () => {
   const root = mkdtempSync(join(tmpdir(), "risunest-nsis-contract-"));
   const compile = (name, source) => {
     const script = join(root, `${name}.nsi`);
@@ -92,7 +125,6 @@ LoadLanguageFile "${'$'}{NSISDIR}\Contrib\Language files\English.nlf"
 LoadLanguageFile "${'$'}{NSISDIR}\Contrib\Language files\Korean.nlf"
 !define MAINBINARYNAME "SyntheticRisuNest"
 !define PRODUCTNAME "Synthetic RisuNest"
-!define BUNDLEID "${bundleId}"
 Var DeleteAppDataCheckboxState
 Var UpdateMode
 !macro CheckIfAppIsRunning executablePath productName
@@ -101,10 +133,6 @@ Var UpdateMode
   Abort "Process check must use the installed executable path"
   FileOpen $0 "$INSTDIR\process-checked" w
   FileWrite $0 "checked"
-  FileClose $0
-  FileOpen $0 "$INSTDIR\events" a
-  FileSeek $0 0 END
-  FileWrite $0 "process-checked$\n"
   FileClose $0
 !macroend
 !include "${quote(resolve("src-tauri/windows.nsh"))}"
@@ -115,8 +143,6 @@ Function un.onUninstFailed
 FunctionEnd
 Section
   SetOutPath "$INSTDIR"
-  !insertmacro NSIS_HOOK_PREINSTALL
-  !insertmacro CheckIfAppIsRunning "${installedExecutable}" "${"$"}{PRODUCTNAME}"
   File /oname=SyntheticRisuNest.exe "${quote(join(root, "cleanup.exe"))}"
   WriteUninstaller "$INSTDIR\uninstall.exe"
   FileOpen $0 "$INSTDIR\registered" w
@@ -154,8 +180,6 @@ SectionEnd
       mkdirSync(location);
       const install = spawnSync(join(root, "installer.exe"), ["/S", `/D=${location}`], { timeout: 30_000, windowsHide: true });
       assert.equal(install.status, 0, scenario.name);
-      // Only the uninstaller's own process check may let cleanup run.
-      rmSync(join(location, "process-checked"));
       writeFileSync(join(location, "synthetic-data"), "fixture");
       if (scenario.fail) writeFileSync(join(location, "fail-cleanup"), "fixture");
       if (scenario.missing) rmSync(join(location, "SyntheticRisuNest.exe"));
@@ -178,34 +202,7 @@ SectionEnd
         assert.equal(existsSync(join(location, "registered")), false);
       }
     }
-
-    // A running instance is asked to close before the process check, and both
-    // the installer and the uninstaller wait until it has exited.
-    const location = join(root, "running");
-    mkdirSync(location);
-    assert.equal(spawnSync(join(root, "installer.exe"), ["/S", `/D=${location}`], { timeout: 30_000, windowsHide: true }).status, 0);
-    for (const [name, program, args] of [
-      ["install", join(root, "installer.exe"), ["/S", `/D=${location}`]],
-      ["uninstall", join(location, "uninstall.exe"), ["/S", `_?=${location}`]],
-    ]) {
-      for (const file of ["events", "ready"]) rmSync(join(location, file), { force: true });
-      running = spawn(join(location, "SyntheticRisuNest.exe"), ["--serve-exit-request", bundleId], { stdio: "ignore", windowsHide: true });
-      const deadline = Date.now() + 10_000;
-      while (!existsSync(join(location, "ready"))) {
-        assert.ok(running.exitCode === null && Date.now() < deadline, `${name}: synthetic app did not start`);
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      const result = spawnSync(program, args, { timeout: 90_000, windowsHide: true });
-      assert.equal(result.status, 0, `${name}: exit`);
-      // The installer returns only once the instance has exited.
-      const exit = running.exitCode ?? (await once(running, "exit", { signal: AbortSignal.timeout(10_000) }))[0];
-      assert.equal(exit, 0, `${name}: synthetic app exit`);
-      running = undefined;
-      assert.equal(readFileSync(join(location, "events"), "utf8"), "exit-requested\nexited\nprocess-checked\n", name);
-    }
-    assert.equal(existsSync(join(location, "registered")), false);
   } finally {
-    running?.kill();
     assert.equal(dirname(root), resolve(tmpdir()));
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }

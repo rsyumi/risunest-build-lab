@@ -39,13 +39,21 @@ function run(filter, fails = false) {
 try {
     run('PortableSourceCustodyTests')
     const original = readFileSync(source, 'utf8')
-    for (const [before, after, test] of [
-        ['source.copyCancelled = true', 'source.copyCancelled = false', 'testCopyCancellationBeforeDuringAndAtCompletionRemovesPartialFiles'],
+    for (const [before, after, test, occurrence = 0, count = 1] of [
+        ['source.copyCancelled = true', 'source.copyCancelled = false', 'testCopyCancelledBeforeOrDuringTheCopyRemovesPartialFiles'],
         ['time - previous < 0.25', 'time - previous < 0.0', 'testCopyProgressThrottlesLargeByteCountsAndAlwaysSendsCompletion'],
         ['progress.report(copied: copied, total: source.bytes)', '_ = progress', 'testOnlyConfirmedUpstreamSourceCanCopyTheHeldDescriptor'],
+        ['guard !source.copying else { lock.unlock(); throw PortableSourceError.busy }', '', 'testCopyFailuresReportStableCodes'],
+        // The loop, post-loop and post-synchronize checks share one line; each mutation removes one of them.
+        ...[
+            'testCopyCancelledBeforeOrDuringTheCopyRemovesPartialFiles',
+            'testCopyCancelledAfterItsLastByteIsNotSynchronized',
+            'testCopyCancelledWhileSynchronizingRemovesTheFinishedFile',
+        ].map((test, occurrence) => ['try checkCopyCancellation(source)', '', test, occurrence, 3]),
     ]) {
-        assert.equal(original.split(before).length, 2, 'Mutation must match exactly once')
-        writeFileSync(source, original.replace(before, after))
+        const parts = original.split(before)
+        assert.equal(parts.length, count + 1, 'Mutation must match its expected occurrences')
+        writeFileSync(source, parts.slice(0, occurrence + 1).join(before) + after + parts.slice(occurrence + 1).join(before))
         try { run(`PortableSourceCustodyTests/${test}`, true) }
         finally { writeFileSync(source, original) }
     }

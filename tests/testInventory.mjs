@@ -60,6 +60,12 @@ export function browserInventory(root) {
   return [...files].sort()
 }
 
+// The exporter runs `node --test tests/*.test.mjs` from its own package, so only top-level entries run.
+export function webExportInventory(files, testScript) {
+  if (testScript !== 'node --test tests/*.test.mjs') throw new Error(`Unexpected web export test script: ${testScript}`)
+  return files.map(normalizePath).filter(path => /^tools\/web-risu-export\/tests\/[^/]+\.test\.mjs$/.test(path)).sort()
+}
+
 export async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
   const files = await discoverTestEntries(root)
@@ -71,6 +77,7 @@ export async function main() {
     node: selectNodeTests(files),
     'harness-node': selectNodeTests(files, 'harness-node'),
     browser: browserInventory(root),
+    'web-export': webExportInventory(files, JSON.parse(readFileSync(join(root, 'tools/web-risu-export/package.json'), 'utf8')).scripts?.test),
   }
   assertInventory(files, inventories)
   for (const [owner, selected] of Object.entries(inventories)) console.log(`${owner}: ${selected.length} files`)

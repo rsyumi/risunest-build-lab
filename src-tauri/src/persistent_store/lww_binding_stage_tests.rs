@@ -766,6 +766,84 @@ fn observed_binding_reports_stored_work_and_cancellation_retries_without_partial
 }
 
 #[test]
+fn binding_scratch_commits_bounded_batches_so_its_wal_never_holds_the_whole_stage() {
+    struct Restore((i64, i64), std::time::Duration);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SCRATCH_BATCH_LIMITS.with(|limits| limits.set(self.0));
+            REPORT_INTERVAL.with(|interval| interval.set(self.1));
+        }
+    }
+    let _restore = Restore(SCRATCH_BATCH_LIMITS.with(std::cell::Cell::get), REPORT_INTERVAL.with(|interval| interval.replace(std::time::Duration::ZERO)));
+    fn fixture(store: &PersistentStore) -> Vec<Change> {
+        let mut incoming = vec![change(&["exists","character","character"], json!(true)), change(&["character","character","name"], json!("Synthetic"))];
+        for chat in 0..32 {
+            let conversation = format!("conversation-{chat:02}");
+            let values = (0..32).map(|index| json!({"role":"char","data":"x".repeat(4096),"chatId":format!("{conversation}-{index}")})).collect::<Vec<_>>();
+            let mut messages = change(&["messages","character",&conversation], Value::Null);
+            messages.value = message_value(store, &values);
+            incoming.push(change(&["exists","conversation","character",&conversation], json!(true)));
+            incoming.push(messages);
+        }
+        incoming
+    }
+    // Every observation while the scratch WAL exists, in order. Its file keeps the
+    // largest size any commit reached, since a checkpoint lets later commits reuse it.
+    fn staged(store: &mut PersistentStore, header: &Header, inspection: &str, incoming: &[Change], cancel_at: Option<u64>) -> (StoreResult<BindingUnitStage>, Vec<(&'static str, u64)>) {
+        STAGE_SCRATCH.with(|scratch| scratch.replace(None));
+        let mut sizes = Vec::new();
+        let staged = store.lww_stage_binding_units_observed(header, inspection, incoming, 7.into(), |progress| {
+            let wal = STAGE_SCRATCH.with(|scratch| scratch.borrow().as_ref().and_then(|path| std::fs::metadata(path.join("incoming.sqlite-wal")).ok()));
+            if let Some(wal) = wal { sizes.push((progress.phase, wal.len())); }
+            if progress.phase == "project" && Some(progress.done) == cancel_at { return Err(error("synthetic-observer-cancelled")); }
+            Ok(())
+        });
+        (staged, sizes)
+    }
+    let growth = |sizes: &[(&str, u64)]| sizes.iter().map(|(_, size)| *size).max().unwrap() - sizes[0].1;
+    let digests = |store: &PersistentStore, stage: &BindingUnitStage| store.connection.query_row(
+        "SELECT status_digest,catalog_digest FROM lww_binding_sources WHERE staging_id=?1", [&stage.staging_id],
+        |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?)),
+    ).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(dir.path()).unwrap();
+    let incoming = fixture(&store);
+    let controls: i64 = store.connection.query_row("SELECT sum(length(body)) FROM message_page_objects", [], |row| row.get(0)).unwrap();
+    assert!(controls > 4 << 20);
+    let (header, inspection) = context(&store);
+    let generation = active_generation(&store.connection).unwrap();
+    SCRATCH_BATCH_LIMITS.with(|limits| limits.set((i64::MAX, 64 << 10)));
+    // A cancellation after committed scratch batches leaves nothing behind.
+    let (failed, _) = staged(&mut store, &header, &inspection, &incoming, Some(incoming.len() as u64 * 3 / 2));
+    assert!(failed.unwrap_err().to_string().contains("synthetic-observer-cancelled"));
+    assert!(!STAGE_SCRATCH.with(|scratch| scratch.take()).unwrap().exists());
+    for &(table, _) in GENERATION_TABLES {
+        assert_eq!(store.connection.query_row(&format!("SELECT count(*) FROM {table} WHERE generation LIKE 'staging-%'"), [], |row| row.get::<_,i64>(0)).unwrap(), 0, "{table}");
+    }
+    for table in ["lww_binding_stages", "lww_binding_sources", "lww_binding_source_units"] {
+        assert_eq!(store.connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get::<_,i64>(0)).unwrap(), 0, "{table}");
+    }
+    assert_eq!(active_generation(&store.connection).unwrap(), generation);
+    let (stage, sizes) = staged(&mut store, &header, &inspection, &incoming, None);
+    let stage = stage.unwrap();
+    assert!(sizes.iter().any(|(phase, _)| *phase == "validate") && sizes.iter().any(|(phase, _)| *phase == "project"));
+    // The WAL grows by about one batch past the schema, never by the copied controls or projected messages.
+    assert!(growth(&sizes) < 1 << 20, "{}", growth(&sizes));
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM messages WHERE generation=?1", [&stage.staging_id], |row| row.get::<_,i64>(0)).unwrap(), 32 * 32);
+    // One batch for the same input holds every page in the WAL and stages identical content.
+    SCRATCH_BATCH_LIMITS.with(|limits| limits.set((SCRATCH_BATCH_ROWS, SCRATCH_BATCH_BYTES)));
+    let reference_dir = tempfile::tempdir().unwrap();
+    let mut reference = PersistentStore::open(reference_dir.path()).unwrap();
+    let reference_incoming = fixture(&reference);
+    let (header, inspection) = context(&reference);
+    let (unbatched, sizes) = staged(&mut reference, &header, &inspection, &reference_incoming, None);
+    let unbatched = unbatched.unwrap();
+    assert!(growth(&sizes) > controls as u64, "{}", growth(&sizes));
+    assert_eq!(unbatched.source_digest, stage.source_digest);
+    assert_eq!(digests(&reference, &unbatched), digests(&store, &stage));
+}
+
+#[test]
 fn streamed_binding_source_digest_matches_the_complete_sorted_input() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = PersistentStore::open(dir.path()).unwrap();

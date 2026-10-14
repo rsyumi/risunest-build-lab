@@ -166,6 +166,7 @@ internal class SafSpoolStore(
     importDestination: SafContentImportDestination? = null,
     isCancelled: () -> Boolean = { false },
     onProgress: (SafSpoolProgress) -> Unit = {},
+    delivered: Boolean = false,
   ): SafSpoolBatch {
     root.mkdirs()
     val ready = mutableListOf<SafSpoolReady>()
@@ -219,6 +220,8 @@ internal class SafSpoolStore(
           importDestination = importDestination,
           operationId = source.operationId,
         )
+        // A spool handed straight to a request is never offered again as a new import.
+        if (delivered) writeDurableJson(stagingDirectory, SPOOL_DELIVERY_MARKER, "{}", "SAF spool delivery marker")
         atomicPublisher.publish(stagingDirectory, ownedDirectory)
         ready.add(SafSpoolReady(
           token,
@@ -1022,7 +1025,7 @@ internal fun androidSafDestinationJson(
     "}"
 }
 
-private fun jsonString(value: String): String = buildString {
+internal fun jsonString(value: String): String = buildString {
   append('"')
   for (character in value) {
     when {

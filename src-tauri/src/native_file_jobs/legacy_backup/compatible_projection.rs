@@ -101,9 +101,16 @@ impl Projector {
                 for (local, upstream) in [("messageNameTemplate", "groupTemplate"), ("namedMessageRole", "groupOtherBotRole")] {
                     if let Some(setting) = object.shift_remove(local) { object.insert(upstream.to_owned(), setting); }
                 }
+                // The option is required, so a model the target rejects would fail the
+                // whole export. Context 3 replaces Context 4 only where the contract says so.
+                let field = self.schema["nodes"][node]["fields"]["hypaModel"]["node"].as_str();
+                let accepts = |model: &str| field.is_some_and(|field| {
+                    project_node(&self.schema, field, &Value::String(model.to_owned()), 0).is_ok()
+                });
                 if matches!(name, "Database" | "DataBase")
-                    && self.target == CompatibilityTarget::RisuAi
                     && object.get("hypaModel").and_then(Value::as_str) == Some("voyageContext4")
+                    && !accepts("voyageContext4")
+                    && accepts("voyageContext3")
                 {
                     object.insert("hypaModel".to_owned(), Value::String("voyageContext3".to_owned()));
                     self.losses.add("unsupported-option-value", 1);
@@ -634,25 +641,46 @@ mod tests {
     }
 
     #[test]
-    fn compatible_projection_falls_back_to_context_3_only_for_risuai() {
+    fn compatible_projection_falls_back_to_context_3_only_where_the_contract_rejects_context_4() {
+        // Rewrites the required hypaModel union so it accepts or rejects Context 4.
+        fn accept_context_4(projector: &mut Projector, name: &str, accepted: bool) {
+            let schema = &mut projector.schema;
+            let database = schema["types"][name].as_str().unwrap().to_owned();
+            let field = schema["nodes"][&database]["fields"]["hypaModel"]["node"].as_str().unwrap().to_owned();
+            let mut variants = schema["nodes"][&field]["variants"].as_array().unwrap().iter()
+                .filter(|variant| schema["nodes"][variant.as_str().unwrap()]["value"] != "voyageContext4")
+                .cloned().collect::<Vec<_>>();
+            if accepted {
+                schema["nodes"]["synthetic-context-4"] = json!({"kind": "literal", "value": "voyageContext4"});
+                variants.push(json!("synthetic-context-4"));
+            }
+            schema["nodes"][&field]["variants"] = Value::Array(variants);
+        }
         for name in ["Database", "DataBase"] {
             for target in [CompatibilityTarget::RisuAi, CompatibilityTarget::PocketRisu] {
-                for model in ["voyageContext3", "voyageContext4"] {
-                    let mut projector = Projector::new(target).unwrap();
-                    let source = json!({"hypaModel": model, "voyageApiKey": "synthetic-key"});
-                    let fallback = target == CompatibilityTarget::RisuAi && model == "voyageContext4";
-                    let projected = projector.project(name, &source).unwrap();
-                    assert_eq!(projected, json!({
-                        "hypaModel": if fallback { "voyageContext3" } else { model },
-                        "voyageApiKey": "synthetic-key",
-                    }));
-                    let expected_losses = if fallback {
-                        BTreeMap::from([("unsupported-option-value".to_owned(), 1)])
-                    } else {
-                        BTreeMap::new()
-                    };
-                    assert_eq!(projector.losses.0, expected_losses);
-                    assert_eq!(source["hypaModel"], model);
+                // None keeps the shipped contract, which rejects Context 4 only for RisuAI.
+                for accepted in [None, Some(true), Some(false)] {
+                    for model in ["voyageContext3", "voyageContext4"] {
+                        let mut projector = Projector::new(target).unwrap();
+                        if let Some(accepted) = accepted {
+                            accept_context_4(&mut projector, name, accepted);
+                        }
+                        let rejected = accepted.map_or(target == CompatibilityTarget::RisuAi, |accepted| !accepted);
+                        let fallback = rejected && model == "voyageContext4";
+                        let source = json!({"hypaModel": model, "voyageApiKey": "synthetic-key"});
+                        let projected = projector.project(name, &source).unwrap();
+                        assert_eq!(projected, json!({
+                            "hypaModel": if fallback { "voyageContext3" } else { model },
+                            "voyageApiKey": "synthetic-key",
+                        }));
+                        let expected_losses = if fallback {
+                            BTreeMap::from([("unsupported-option-value".to_owned(), 1)])
+                        } else {
+                            BTreeMap::new()
+                        };
+                        assert_eq!(projector.losses.0, expected_losses);
+                        assert_eq!(source["hypaModel"], model);
+                    }
                 }
                 let mut projector = Projector::new(target).unwrap();
                 assert!(projector.project(name, &json!({"hypaModel": "unknown-model"})).is_err());

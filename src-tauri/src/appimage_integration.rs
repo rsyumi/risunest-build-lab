@@ -11,11 +11,9 @@ pub(crate) struct IntegrationState {
     error: Option<String>,
 }
 
-/// A named launch profile cannot register the global URL handler, which would
-/// start the default profile and not the one that registered it.
 #[cfg(any(test, target_os = "linux"))]
-fn permitted(debug: bool, agent: bool, named_profile: bool, bundle: Option<&str>) -> bool {
-    !debug && !agent && !named_profile && bundle == Some("appimage")
+fn permitted(debug: bool, agent: bool, bundle: Option<&str>) -> bool {
+    !debug && !agent && bundle == Some("appimage")
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -45,7 +43,7 @@ mod linux {
     pub(super) fn available(app: &AppHandle) -> bool {
         let agent = app.config().plugins.0.get("risunest")
             .and_then(|value| value.get("agent")).and_then(|value| value.as_bool()).unwrap_or(false);
-        permitted(cfg!(debug_assertions), agent, crate::launch_profile::current(app).is_some(),
+        permitted(cfg!(debug_assertions), agent,
             tauri::utils::platform::bundle_type().as_ref().map(|value| value.to_string()).as_deref())
             && app.env().appimage.is_some()
     }
@@ -247,12 +245,11 @@ mod tests {
     }
     #[test]
     fn integration_requires_a_production_appimage() {
-        assert!(permitted(false, false, false, Some("appimage")));
-        assert!(!permitted(true, false, false, Some("appimage")));
-        assert!(!permitted(false, true, false, Some("appimage")));
-        assert!(!permitted(false, false, true, Some("appimage")));
-        assert!(!permitted(false, false, false, Some("deb")));
-        assert!(!permitted(false, false, false, None));
+        assert!(permitted(false, false, Some("appimage")));
+        assert!(!permitted(true, false, Some("appimage")));
+        assert!(!permitted(false, true, Some("appimage")));
+        assert!(!permitted(false, false, Some("deb")));
+        assert!(!permitted(false, false, None));
     }
 
     #[test]

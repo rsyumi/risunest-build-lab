@@ -232,20 +232,65 @@ describe.each([
         ])
     })
 
-    it('keeps cancelled document results out of the cache', async () => {
+    it.each(['document', 'query'] as const)('batches %s inputs within the model budget and preserves vector order', async (inputType) => {
+        const limit = model === 'voyageContext4' ? 32000 : 120000
+        const text = inputType === 'document' ? '가'.repeat(Math.floor(limit / 6)) : '\u0344'.repeat(limit / 8)
+        const input = inputType === 'document'
+            ? [[text + '0', 'context 1'], [text + '2', 'context 3'], [text + '4']]
+            : [[text + '0'], [text + '1'], [text + '2']]
+        vi.mocked(globalApi.globalFetch).mockImplementation(async (_url, options) => {
+            const groups = options.body.inputs as string[][]
+            const bytes = groups.flat().reduce((total, value) => total + Buffer.byteLength(value.normalize('NFC'), 'utf8'), 0)
+            if (bytes > limit) return { ok: false, status: 400, headers: {}, data: { detail: 'Too many tokens' } }
+            return { ok: true, status: 200, headers: {}, data: { data: groups.map(group => ({
+                data: group.map(value => ({ embedding: [Number(value.at(-1)), group.length] })),
+            })) } }
+        })
+        const provider = getContextProvider(model)
+        if (inputType === 'document') {
+            expect(await provider.embedDocumentGroups(input)).toEqual([[[0, 2], [1, 2]], [[2, 2], [3, 2]], [[4, 1]]])
+        } else {
+            expect(await provider.embedQueries(input.flat())).toEqual([[0, 1], [1, 1], [2, 1]])
+        }
+    })
+
+    it('sends a large contextual group intact without rejecting a conservative byte estimate', async () => {
+        const limit = model === 'voyageContext4' ? 32000 : 120000
+        const large = ['a'.repeat(limit), 'same document']
+        const input = [['first'], large, ['last']]
+        vi.mocked(globalApi.globalFetch).mockImplementation(async (_url, options) => {
+            const groups = options.body.inputs as string[][]
+            const oversized = groups.some(group => group.some(text => text.length >= limit))
+            if (oversized && groups.length > 1) return { ok: false, status: 400, headers: {}, data: { detail: 'Too many tokens' } }
+            return { ok: true, status: 200, headers: {}, data: { data: groups.map(group => ({
+                data: group.map(value => ({ embedding: [value.length, group.length] })),
+            })) } }
+        })
+        expect(await getContextProvider(model).embedDocumentGroups(input))
+            .toEqual([[[5, 1]], [[limit, 2], [13, 2]], [[4, 1]]])
+    })
+
+    it.each(['cancel', 'failure'] as const)('keeps earlier batches out of the cache after a later %s', async (outcome) => {
         const recorder = recordingCache()
         state.cache = recorder.cache
         const controller = new AbortController()
         const processor = new HypaProcesserEx(model)
         processor.signal = controller.signal
-        vi.mocked(globalApi.globalFetch).mockImplementationOnce(async (_url, options) => {
+        const fetch = vi.mocked(globalApi.globalFetch)
+        fetch.mockImplementationOnce(fetch.getMockImplementation()!)
+        fetch.mockImplementationOnce(async (_url, options) => {
             expect(options.abortSignal).toBe(controller.signal)
-            controller.abort()
-            return { ok: true, status: 200, headers: {}, data: { data: [] } }
+            if (outcome === 'cancel') controller.abort()
+            return { ok: false, status: 503, headers: {}, data: { detail: 'Synthetic outage' } }
         })
-        await expect(processor.addSummaryChunks(chunksOf(groups))).rejects.toMatchObject({ name: 'AbortError' })
+        const limit = model === 'voyageContext4' ? 32000 : 120000
+        const text = '가'.repeat(Math.floor(limit / 6))
+        const pending = processor.addSummaryChunks(chunksOf([[text + ' first'], [text + ' second'], [text + ' third']]))
+        if (outcome === 'cancel') await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+        else await expect(pending).rejects.toThrow('Synthetic outage')
         expect(recorder.stored.size).toBe(0)
         expect(processor.summaryChunkVectors).toEqual([])
+        expect(fetch).toHaveBeenCalledTimes(2)
     })
 
     it('rejects a missing Voyage key before sending a request', async () => {

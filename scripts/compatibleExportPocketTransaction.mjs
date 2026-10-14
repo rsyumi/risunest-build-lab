@@ -7,8 +7,7 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
 
-export function createPocketTransactionHarness(directory) {
-  const referenceRequire = createRequire(path.join(directory, "package.json"));
+export function createPocketTransactionHarness(directory, referenceRequire) {
   const sources = new Set([
     "server/node/server.cjs",
     "package.json",

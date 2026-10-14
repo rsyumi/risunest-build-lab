@@ -110,28 +110,56 @@ internal object PortableSourceNative {
 
   fun retireUnclaimed(owner: PortableSourceOwner) { owner.retire { discard(it) } }
 
-  fun materialize(token: String, store: SafSpoolStore, onProgress: (SafSpoolProgress) -> Unit): SafSpoolBatch {
-    val source = selected[token] ?: throw IOException("source-reselect-required")
-    if (!source.copying.compareAndSet(false, true)) throw IOException("source-busy")
+  /** Copies a confirmed source and releases its custody. Expected failures are reported in the batch. */
+  fun materialize(
+    token: String,
+    store: SafSpoolStore,
+    isCancelled: () -> Boolean,
+    onProgress: (SafSpoolProgress) -> Unit,
+  ): SafSpoolBatch {
+    val source = selected[token] ?: return portableSourceCopyFailure(PORTABLE_SOURCE_NAME, "source-reselect-required")
+    if (!source.copying.compareAndSet(false, true)) return portableSourceCopyFailure(source.name, "source-busy")
+    val cancelled = { source.cancelled.get() || isCancelled() }
     var batch: SafSpoolBatch? = null
     try {
       val fd = duplicateForCopy(token)
-      if (fd < 0) throw IOException("source-format-not-confirmed")
-      val input = ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.adoptFd(fd))
-      val wrapped = object : SafInputSource {
-        override val displayName = source.name
-        override val totalBytes = source.bytes
-        override fun open(): InputStream = input
+      batch = if (fd < 0) portableSourceCopyFailure(source.name, "source-reselect-required") else {
+        val input = ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.adoptFd(fd))
+        val wrapped = object : SafInputSource {
+          override val displayName = source.name
+          override val totalBytes = source.bytes
+          override fun open(): InputStream = input
+        }
+        val copied = input.use { store.spool(listOf(wrapped), isCancelled = cancelled, onProgress = onProgress, delivered = true) }
+        settlePortableSourceCopy(store, copied, verified = { verifyCopy(token) }, cancelled = cancelled)
       }
-      input.use { batch = store.spool(listOf(wrapped), isCancelled = { source.cancelled.get() }, onProgress = onProgress) }
-      if (!verifyCopy(token)) {
-        batch!!.ready.forEach { store.discardReady(it.token) }
-        throw IOException("source-changed")
-      }
-      return batch!!
     } finally {
       source.copied.countDown()
-      if (!discard(token)) batch?.ready?.forEach { store.discardReady(it.token) }
+      if (!discard(token)) batch = batch?.let { withdrawPortableSourceCopy(store, it, "cleanup-failed") }
     }
+    return batch!!
   }
+}
+
+private const val PORTABLE_SOURCE_NAME = "backup"
+
+internal fun portableSourceCopyFailure(displayName: String, code: String) =
+  SafSpoolBatch(emptyList(), listOf(SafSpoolFailure(displayName, code)))
+
+/** Removes every ready spool of a copy that must not reach the page, reporting [code] for each. */
+internal fun withdrawPortableSourceCopy(store: SafSpoolStore, batch: SafSpoolBatch, code: String): SafSpoolBatch =
+  SafSpoolBatch(emptyList(), batch.failures + batch.ready.map { spool ->
+    SafSpoolFailure(spool.displayName, if (store.discardReady(spool.token)) code else "cleanup-failed")
+  })
+
+/** A copy reaches the page only when nobody cancelled it after its last byte and its source is unchanged. */
+internal fun settlePortableSourceCopy(
+  store: SafSpoolStore,
+  batch: SafSpoolBatch,
+  verified: () -> Boolean,
+  cancelled: () -> Boolean,
+): SafSpoolBatch = when {
+  cancelled() -> withdrawPortableSourceCopy(store, batch, "cancelled")
+  !verified() -> withdrawPortableSourceCopy(store, batch, "source-changed")
+  else -> batch
 }

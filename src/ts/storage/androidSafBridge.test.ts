@@ -64,6 +64,20 @@ describe('Android SAF bridge', () => {
         expect(commands).toEqual(['copy'])
     })
 
+    // iosFiles.test.ts expects the same reasons for the same native codes.
+    it.each([
+        ['source-changed', 'source-reselect-required'],
+        ['cancelled', 'source-reselect-required'],
+        ['spool-create-failed', 'spool-write-failed'],
+        ['source-busy', 'source-busy'],
+        ['source-read-failed', 'source-read-failed'],
+    ])('reports a native %s copy failure with the %s dialog reason', async (nativeCode, code) => {
+        await expect(materializeAndroidBackupSource('source', {}, {
+            copyExport() {},
+            materializeBackupSource: () => JSON.stringify({ ready: [], failures: [{ displayName: 'backup', code: nativeCode }] }),
+        })).rejects.toMatchObject({ code, message: expect.stringContaining(nativeCode) })
+    })
+
     it('keeps the source picker reserved until its correlated native result', async () => {
         const listeners = new Map<string, (event: Event) => void>()
         const pending = pickAndroidContentSource({ destination: 'module' }, {

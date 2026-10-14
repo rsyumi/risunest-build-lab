@@ -1,33 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 
-/** `remove-profile` is requested only from the desktop command line. */
-export type AppCleanupMode = 'reset' | 'prepare-removal' | 'remove-profile'
-
-export interface AppCleanupStatus {
-    pending: boolean
-    mode: AppCleanupMode | null
-    error: string | null
-    canCancel: boolean
-    /** The launch profile this window runs, or null for the default profile. */
-    profile: string | null
-    /** Whether any named launch profile exists beside the default one. */
-    namedProfiles: boolean
-}
-
-function hasCode(error: unknown, code: string): boolean {
-    return error === code || (error instanceof Error && error.message === code)
-}
+export type AppCleanupMode = 'reset' | 'prepare-removal'
 
 export function cleanupNeedsWebViewUpdate(error: unknown): boolean {
-    return hasCode(error, 'cleanup-webview-update-required')
-}
-
-export function cleanupBlockedByOtherProfiles(error: unknown): boolean {
-    return hasCode(error, 'cleanup-other-profiles-running')
-}
-
-export async function readAppCleanupStatus(): Promise<AppCleanupStatus> {
-    return await invoke<AppCleanupStatus>('app_cleanup_status')
+    return error === 'cleanup-webview-update-required'
+        || (error instanceof Error && error.message === 'cleanup-webview-update-required')
 }
 
 export async function requestAppCleanup(options: {

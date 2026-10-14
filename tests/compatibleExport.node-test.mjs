@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import os from "node:os";
+import { createReferenceRequire } from "../scripts/compatibleExportDependencies.mjs";
 import { gzipSync } from "node:zlib";
 import { createRequire } from "node:module";
 import {
@@ -86,6 +88,29 @@ function accepts(contract, id, value) {
       throw new Error(`Unknown contract node ${node.kind}`);
   }
 }
+
+test("reference libraries reject parent fallback and locked version drift before execution", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "reference-dependencies-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const reference = path.join(root, "reference");
+  fs.mkdirSync(reference);
+  fs.writeFileSync(path.join(reference, "package.json"), JSON.stringify({ dependencies: { msgpackr: "^1.11.0" } }));
+  fs.writeFileSync(path.join(reference, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n      msgpackr:\n        specifier: ^1.11.0\n        version: 1.11.9\n");
+  const install = (directory, version, source) => {
+    const module = path.join(directory, "node_modules", "msgpackr");
+    fs.mkdirSync(module, { recursive: true });
+    fs.writeFileSync(path.join(module, "package.json"), JSON.stringify({ name: "msgpackr", version, main: "index.cjs" }));
+    fs.writeFileSync(path.join(module, "index.cjs"), source);
+  };
+  install(root, "1.11.9", 'throw new Error("parent library executed")');
+  assert.throws(() => createReferenceRequire(reference, reference, ["msgpackr"]), /Missing reference dependency msgpackr@1\.11\.9/);
+  install(reference, "1.10.1", 'throw new Error("wrong version executed")');
+  assert.throws(() => createReferenceRequire(reference, reference, ["msgpackr"]), /msgpackr expected 1\.11\.9, found 1\.10\.1/);
+  install(reference, "1.11.9", 'module.exports = { version: "1.11.9" }');
+  const checkedRequire = createReferenceRequire(reference, reference, ["msgpackr"]);
+  assert.equal(checkedRequire("msgpackr").version, "1.11.9");
+  assert.throws(() => checkedRequire("fflate"), /Unapproved reference dependency/);
+});
 
 for (const target of ["risuai", "pocket"]) {
   test(
@@ -274,6 +299,10 @@ for (const target of ["risuai", "pocket"]) {
             "base64",
           );
           const database = compressedWire({
+            characterOrder: [
+              { id: "empty-folder", name: "Empty", color: "", data: [] },
+              { id: "image-folder", name: "Image", color: "", data: ["synthetic-asset-char"], img: "assets/synthetic.png" },
+            ],
             characters: [
               {
                 chaId: "synthetic-asset-char",
@@ -312,8 +341,22 @@ for (const target of ["risuai", "pocket"]) {
           const source = await harness.decode(database);
           assert.deepEqual(
             await verifyRoundTripAssets(harness, source, result.resaved),
-            { references: 2, distinctAssets: 1, bytes: png.length },
+            { references: 3, distinctAssets: 1, bytes: png.length },
           );
+          assert.equal(source.characterOrder[1].id, "image-folder");
+          assert.equal(result.resaved.characterOrder[0].id, "image-folder");
+          for (const change of [
+            value => { value.characterOrder[0].img = "assets/changed.png"; },
+            value => { value.characterOrder[0].id = "different-folder"; },
+            value => { value.characterOrder.splice(0, 1); },
+          ]) {
+            const changedFolder = plain(result.resaved);
+            change(changedFolder);
+            await assert.rejects(verifyRoundTripAssets(harness, source, changedFolder), /changed a declared synthetic asset reference/);
+          }
+          const duplicateFolder = plain(result.resaved);
+          duplicateFolder.characterOrder.push({ ...duplicateFolder.characterOrder[0] });
+          await assert.rejects(verifyRoundTripAssets(harness, source, duplicateFolder), /Duplicate synthetic folder id/);
           const changed = plain(result.resaved);
           changed.characters[0].additionalAssets[0][1] = "assets/changed.png";
           await assert.rejects(

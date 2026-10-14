@@ -66,6 +66,59 @@ fn report_interval() -> std::time::Duration { STAGING_REPORT_INTERVAL }
 #[cfg(test)]
 fn report_interval() -> std::time::Duration { REPORT_INTERVAL.with(std::cell::Cell::get) }
 
+const SCRATCH_BATCH_ROWS: i64 = 4096;
+const SCRATCH_BATCH_BYTES: i64 = 16 * 1024 * 1024;
+#[cfg(not(test))]
+fn scratch_batch_limits() -> (i64, i64) { (SCRATCH_BATCH_ROWS, SCRATCH_BATCH_BYTES) }
+#[cfg(test)]
+fn scratch_batch_limits() -> (i64, i64) { SCRATCH_BATCH_LIMITS.with(std::cell::Cell::get) }
+
+/// Writes the scratch database in bounded transactions. A failed stage discards the
+/// whole scratch file, so only the final copy into the store has to be atomic, and one
+/// transaction would keep every written page in the WAL until its closing checkpoint.
+struct ScratchBatches<'c> {
+    db: &'c Connection,
+    tx: Option<Transaction<'c>>,
+    page_size: i64,
+    pages: i64,
+    rows: i64,
+}
+
+impl<'c> ScratchBatches<'c> {
+    fn begin(db: &'c Connection) -> StoreResult<Self> {
+        let page_size: i64 = db.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        // A commit checkpoints once the WAL holds a batch, so later batches reuse its start.
+        db.pragma_update(None, "wal_autocheckpoint", (scratch_batch_limits().1 / page_size).max(1))?;
+        let mut batches = Self { db, tx: None, page_size, pages: 0, rows: 0 };
+        batches.open()?;
+        Ok(batches)
+    }
+    fn open(&mut self) -> StoreResult<()> {
+        self.tx = Some(Transaction::new_unchecked(self.db, TransactionBehavior::Immediate)?);
+        self.pages = self.page_count()?;
+        self.rows = 0;
+        Ok(())
+    }
+    fn page_count(&self) -> StoreResult<i64> {
+        Ok(self.db.prepare_cached("PRAGMA page_count")?.query_row([], |row| row.get(0))?)
+    }
+    fn tx(&self) -> &Transaction<'c> { self.tx.as_ref().expect("open scratch batch") }
+    /// Commits after a row once the batch reaches either bound.
+    fn row(&mut self) -> StoreResult<()> {
+        self.rows += 1;
+        let (rows, bytes) = scratch_batch_limits();
+        if self.rows >= rows || (self.page_count()? - self.pages) * self.page_size >= bytes {
+            if let Some(tx) = self.tx.take() { tx.commit()?; }
+            self.open()?;
+        }
+        Ok(())
+    }
+    fn commit(mut self) -> StoreResult<()> {
+        if let Some(tx) = self.tx.take() { tx.commit()?; }
+        Ok(())
+    }
+}
+
 struct HashWriter(Sha256, #[cfg(test)] &'static str);
 impl Write for HashWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -288,16 +341,17 @@ impl PersistentStore {
             let mut isolated = crate::sqlite_open::open(&path)?;
             schema::initialize(&mut isolated)?;
             isolated.execute_batch("INSERT INTO meta VALUES('activeGeneration','\"incoming\"'),('currentRevision','0'); INSERT INTO root VALUES('incoming','{}');")?;
-            let controls = isolated.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut controls = ScratchBatches::begin(&isolated)?;
             changes.visit(false, |key, stamp, value, _| {
                 let change = Change { key, stamp: stamp.ok_or_else(|| error("request-id-integrity"))?, value };
-                copy_controls(&self.connection, &controls, &change, &mut || progress.poll())?;
-                projection::validate_received(&controls, &change.key, &change.value)?;
+                copy_controls(&self.connection, controls.tx(), &change, &mut || progress.poll())?;
+                projection::validate_received(controls.tx(), &change.key, &change.value)?;
+                controls.row()?;
                 progress.advance()
             })?;
             controls.commit()?;
             progress.begin("project", Some(count * 4))?;
-            project_source(&mut isolated, &changes, &header.request_id, &mut progress)?;
+            project_source(&isolated, &changes, &header.request_id, &mut progress)?;
             let statuses = stored_status_digest_observed(&isolated, "incoming", &mut || progress.advance())?;
             isolated.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
             drop(isolated);
@@ -335,58 +389,61 @@ impl PersistentStore {
     }
 }
 
-fn project_source(db: &mut Connection, changes: &super::FrozenRows, version: &str, progress: &mut StagingObserver<'_>) -> StoreResult<()> {
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+fn project_source(db: &Connection, changes: &super::FrozenRows, version: &str, progress: &mut StagingObserver<'_>) -> StoreResult<()> {
+    let mut batches = ScratchBatches::begin(db)?;
     changes.visit(false, |key, stamp, value, _| {
-        if !is_device(&key) { put_unit(&tx, &key, &stamp.ok_or_else(|| error("request-id-integrity"))?, &value, version, None)?; }
+        if !is_device(&key) { put_unit(batches.tx(), &key, &stamp.ok_or_else(|| error("request-id-integrity"))?, &value, version, None)?; }
+        batches.row()?;
         progress.advance()
     })?;
     let mut statement = changes.db.prepare("SELECT key,value FROM rows ORDER BY CASE WHEN json_extract(key,'$[0]')='exists' AND json_extract(key,'$[1]')<>'conversation' THEN 0 WHEN json_extract(key,'$[0]')='archive' THEN 2 WHEN json_extract(key,'$[0]')='exists' THEN 3 WHEN json_extract(key,'$[0]') IN ('conversation','messages') THEN 4 ELSE 1 END,key")?;
     let mut rows = statement.query([])?;
     let mut pending_detail: Option<(String, serde_json::Value)> = None;
     while let Some(row) = rows.next()? {
+        let tx = batches.tx();
         let key = wire(row.get::<_,String>(0)?.try_into())?;
         let value: UnitValue = serde_json::from_str(&row.get::<_,String>(1)?)?;
         let character = projection::character_detail_key(&key);
         if pending_detail.as_ref().map(|(id, _)| id) != character.as_ref() {
             if let Some((_, detail)) = pending_detail.take() {
-                super::commit::put_character_detail(&tx, "incoming", &detail)?;
+                super::commit::put_character_detail(tx, "incoming", &detail)?;
             }
         }
         if !is_device(&key) {
             let hard_delete = key.components()[0] == "exists" && matches!(value, UnitValue::Deleted);
-            if parent_status(&tx, &key)? == "ready" || hard_delete {
+            if parent_status(tx, &key)? == "ready" || hard_delete {
                 if let Some(id) = character {
                     if pending_detail.is_none() {
-                        let detail = projection::character_detail(&tx, "incoming", &id)?;
+                        let detail = projection::character_detail(tx, "incoming", &id)?;
                         pending_detail = Some((id, detail));
                     }
                     if let Some((_, detail)) = pending_detail.as_mut() {
-                        projection::patch_character_detail(&tx, detail, &key, &value)?;
+                        projection::patch_character_detail(tx, detail, &key, &value)?;
                     }
                 } else {
-                    projection::apply(&tx, "incoming", &key, &value)?;
+                    projection::apply(tx, "incoming", &key, &value)?;
                 }
             }
         }
+        batches.row()?;
         progress.advance()?;
     }
     if let Some((_, detail)) = pending_detail {
-        super::commit::put_character_detail(&tx, "incoming", &detail)?;
+        super::commit::put_character_detail(batches.tx(), "incoming", &detail)?;
     }
     let affected = super::FrozenRows::new()?;
     changes.visit(false, |key, stamp, value, _| {
-        let status = if is_device(&key) { "ready" } else { parent_status(&tx, &key)? };
+        let status = if is_device(&key) { "ready" } else { parent_status(batches.tx(), &key)? };
         if status == "ready" && projection::known(&key) && !is_device(&key) {
             affected.insert(super::intent_rows::replacement_row(&key, &value, false)?)?;
         }
-        tx.execute("INSERT INTO lww_binding_source_units VALUES('incoming',?1,?2,?3,?4)", params![key.as_str(),serde_json::to_string(&stamp.ok_or_else(|| error("request-id-integrity"))?)?,serde_json::to_string(&value)?,status])?;
+        batches.tx().execute("INSERT INTO lww_binding_source_units VALUES('incoming',?1,?2,?3,?4)", params![key.as_str(),serde_json::to_string(&stamp.ok_or_else(|| error("request-id-integrity"))?)?,serde_json::to_string(&value)?,status])?;
+        batches.row()?;
         progress.advance()
     })?;
     // Order scopes are known only after this pass, so it reports time rather than work.
-    affected.refresh_orders_observed(&tx, "incoming", &mut || progress.poll())?;
-    tx.commit()?;
-    Ok(())
+    affected.refresh_orders_observed(batches.tx(), "incoming", &mut || progress.poll())?;
+    batches.commit()
 }
 
 fn copy_required_object(source: &Connection, target: &Connection, hash: &str) -> StoreResult<Vec<u8>> {
@@ -547,6 +604,8 @@ thread_local! { static FAIL_AFTER_STAGE_COPY: std::cell::Cell<bool> = const { st
 thread_local! { static STAGE_SCRATCH: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) }; }
 #[cfg(test)]
 thread_local! { static REPORT_INTERVAL: std::cell::Cell<std::time::Duration> = const { std::cell::Cell::new(STAGING_REPORT_INTERVAL) }; }
+#[cfg(test)]
+thread_local! { static SCRATCH_BATCH_LIMITS: std::cell::Cell<(i64, i64)> = const { std::cell::Cell::new((SCRATCH_BATCH_ROWS, SCRATCH_BATCH_BYTES)) }; }
 
 pub(in crate::persistent_store) fn seed_binding_holds(tx: &Transaction<'_>, staging_id: &str, header: &Header) -> StoreResult<()> {
     tx.execute("INSERT INTO lww_receive_rows(request_id,key,stamp,value,status) SELECT ?2,key,stamp,value,'held' FROM lww_binding_source_units WHERE staging_id=?1 AND status='held'", params![staging_id,header.request_id])?;

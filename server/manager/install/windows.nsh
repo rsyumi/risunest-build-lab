@@ -79,6 +79,8 @@ LangString SyncFilesFailed 1042 "RisuNest Sync 프로그램 파일을 모두 제
 !ifndef RISUNEST_SYNC_INSTALL_DIR
   !define RISUNEST_SYNC_INSTALL_DIR "$LOCALAPPDATA\RisuNestSync"
 !endif
+; installer delete-data removes the GUI profile unless another registered instance shares it.
+!define RISUNEST_HOOK_OWNS_APP_DATA
 
 Var SyncFailureMessage
 Var SyncForce
@@ -86,6 +88,80 @@ Var SyncForceOption
 Var SyncDeleteMode
 Var SyncDiagnostic
 Var SyncPreviousInstall
+
+!macro SyncSkipMarkerBlanks
+  ${Do}
+    StrCpy $3 $1 1 $2
+    ${If} $3 != " "
+    ${AndIf} $3 != "$\t"
+      ${Break}
+    ${EndIf}
+    IntOp $2 $2 + 1
+  ${Loop}
+!macroend
+
+; Archive updates replace the program files without the uninstall entry, so the bundle marker
+; carries the installed version. The generated marker writes the bundle's "version" key before
+; "vendor", the only key holding nested versions. Leaves $0 unchanged when the marker cannot be
+; read. Uses $1-$6.
+!macro NSIS_HOOK_INSTALLED_VERSION
+  ClearErrors
+  FileOpen $5 "$INSTDIR\risunest-sync-bundle.json" r
+  ${IfNot} ${Errors}
+    StrCpy $6 0
+    ${Do}
+      ClearErrors
+      FileRead $5 $1
+      ${If} ${Errors}
+        ${Break}
+      ${EndIf}
+      StrCpy $2 0
+      ${Do}
+        StrCpy $3 $1 1 $2
+        ${If} $3 == ""
+          ${Break}
+        ${EndIf}
+        StrCpy $4 $1 9 $2
+        StrCpy $3 $1 8 $2
+        IntOp $2 $2 + 1
+        ${If} $4 S== '"version"'
+          IntOp $2 $2 + 8
+        ${ElseIf} $3 S== '"vendor"'
+          IntOp $2 $2 + 7
+        ${Else}
+          ${Continue}
+        ${EndIf}
+        !insertmacro SyncSkipMarkerBlanks
+        ${If} $3 == ":"
+          StrCpy $6 1
+          ${If} $4 S== '"version"'
+            IntOp $2 $2 + 1
+            !insertmacro SyncSkipMarkerBlanks
+            ${If} $3 == '"'
+              StrCpy $4 ""
+              ${Do}
+                IntOp $2 $2 + 1
+                StrCpy $3 $1 1 $2
+                ${If} $3 == '"'
+                  ${If} $4 != ""
+                    StrCpy $0 $4
+                  ${EndIf}
+                  ${Break}
+                ${ElseIf} $3 == ""
+                  ${Break}
+                ${EndIf}
+                StrCpy $4 "$4$3"
+              ${Loop}
+            ${EndIf}
+          ${EndIf}
+          ${Break}
+        ${EndIf}
+      ${Loop}
+    ${LoopUntil} $6 = 1
+    FileClose $5
+  ${EndIf}
+  ClearErrors
+!macroend
 
 !macro NSIS_HOOK_PREINSTALL
   SetDetailsPrint both
@@ -97,8 +173,11 @@ Var SyncPreviousInstall
   sync_install_dir_ready:
   !insertmacro CheckInstallDestination
   InitPluginsDir
+  ; An unfinished install keeps its baseline so a retry still removes the files it replaced.
+  IfFileExists "$INSTDIR\risunest-sync-bundle.previous.json" sync_baseline_ready
   ClearErrors
-  CopyFiles /SILENT "$INSTDIR\risunest-sync-bundle.json" "$PLUGINSDIR\previous-bundle.json"
+  CopyFiles /SILENT "$INSTDIR\risunest-sync-bundle.json" "$INSTDIR\risunest-sync-bundle.previous.json"
+  sync_baseline_ready:
   ClearErrors
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   StrCpy $R7 ""
@@ -147,13 +226,15 @@ Var SyncPreviousInstall
   sync_obsolete:
   StrCmp $SyncPreviousInstall "" sync_schedule
   DetailPrint "$(SyncObsolete)"
-  nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" installer obsolete-files "$PLUGINSDIR\previous-bundle.json"'
+  nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" installer obsolete-files "$INSTDIR\risunest-sync-bundle.previous.json"'
   Pop $0
   Pop $1
   StrCmp $0 "0" sync_obsolete_checked
   StrCpy $SyncFailureMessage "$(SyncObsoleteFailed)"
   Goto sync_install_failed
   sync_obsolete_checked:
+  Delete "$INSTDIR\risunest-sync-bundle.previous.json"
+  ClearErrors
   StrCpy $2 $1 7
   ${If} $2 == "skipped"
     DetailPrint "$(SyncObsoleteSkipped)"
@@ -244,11 +325,6 @@ Var SyncPreviousInstall
   ReadEnvStr $1 RISUNEST_SYNC_UNINSTALL_DATA_DIR
   ${If} $1 != ""
     StrCpy $R9 $1
-  ${EndIf}
-  ClearErrors
-  ${un.GetOptions} $0 "/DELETEAPPDATA" $1
-  ${IfNot} ${Errors}
-    StrCpy $DeleteAppDataCheckboxState 1
   ${EndIf}
   StrCpy $SyncFailureMessage "$(SyncCheckFailed)"
   DetailPrint "$(SyncCheck)"

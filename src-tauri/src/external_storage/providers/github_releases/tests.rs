@@ -156,33 +156,121 @@ fn existing_repository_replies() -> Vec<Reply> {
 }
 
 #[test]
-fn inventory_lookup_finds_later_releases_after_gaps_and_rejects_duplicates() {
+fn batch_lookup_finds_later_releases_after_gaps_and_rejects_duplicates() {
     runtime().block_on(async {
-        for duplicate in [false, true] {
-            let bytes = b"inventory-payload";
-            let mut replies = existing_repository_replies();
-            replies.push(reply(200, json!([
-                release(40, &job_tag("job-1", 9)),
-                release(41, &job_tag("job-1", 12)),
-                release(42, &job_tag("other-job", 0)),
-            ])));
-            replies.push(reply(200, json!([asset(90, "pack-object", bytes.len() as u64, Some(digest_of(bytes)))])));
-            replies.push(reply(200, if duplicate {
-                json!([asset(91, "pack-object", bytes.len() as u64, Some(digest_of(bytes)))])
-            } else { json!([]) }));
-            let server = github_server(replies);
-            let provider = adapter(dependencies().dependencies);
-            let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
-            let intent = object_intent(&handle, ObjectRole::Pack, "object", bytes);
-            let result = provider.lookup_metadata(&handle, &intent, None, &Cancellation::default()).await;
-            if duplicate {
-                assert_eq!(result.unwrap_err().kind, ErrorKind::PreconditionFailed);
-            } else {
-                assert_eq!(result.unwrap().unwrap().locator.object, "40/90");
+        for reconcile in [false, true] {
+            for (early, late) in [(true, false), (false, true), (false, false), (true, true)] {
+                for (last_page, full_last_page) in [
+                    (api::MAX_RELEASE_SCAN_PAGES, true),
+                    (api::MAX_RELEASE_SCAN_PAGES + 1, false),
+                    (api::MAX_RELEASE_SCAN_PAGES + 1, true),
+                ] {
+                    let bytes = b"inventory-payload";
+                    let mut replies = existing_repository_replies();
+                    for page in 1..=last_page {
+                        let count = if page == last_page && !full_last_page { 1 } else { api::RELEASE_PAGE_SIZE };
+                        let mut releases: Vec<_> = (0..count).map(|index| {
+                            release(u64::from(page) * 1000 + index as u64, &job_tag("other-job", index as u32))
+                        }).collect();
+                        if page == 1 || page == last_page {
+                            let (id, seq, present) = if page == 1 { (40, 9, early) } else { (41, 12, late) };
+                            releases[0] = release(id, &job_tag("job-1", seq));
+                            replies.push(reply(200, json!(releases)));
+                            replies.push(reply(200, if present {
+                                json!([asset(id + 50, "pack-object", bytes.len() as u64, Some(digest_of(bytes)))])
+                            } else { json!([]) }));
+                        } else {
+                            replies.push(reply(200, json!(releases)));
+                        }
+                    }
+                    if full_last_page { replies.push(reply(200, json!([]))); }
+                    let server = github_server(replies);
+                    let provider = adapter(dependencies().dependencies);
+                    let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
+                    let intent = object_intent(&handle, ObjectRole::Pack, "object", bytes);
+                    let cancel = Cancellation::default();
+                    let result = if reconcile {
+                        let resolution = provider.reconcile_upload(&handle, &intent, None, &cancel).await.unwrap();
+                        match resolution {
+                            UploadResolution::Complete(receipt) => Ok(Some(receipt)),
+                            UploadResolution::RestartRequired => Ok(None),
+                            UploadResolution::Conflict => Err(ProviderError::new(ErrorKind::PreconditionFailed)),
+                            UploadResolution::Resumable(_) => panic!("GitHub uploads have no resume session"),
+                        }
+                    } else {
+                        provider.lookup_metadata(&handle, &intent, None, &cancel).await
+                    };
+                    match (early, late) {
+                        (true, true) => assert_eq!(result.unwrap_err().kind, ErrorKind::PreconditionFailed),
+                        (false, false) => assert!(result.unwrap().is_none()),
+                        _ => assert_eq!(result.unwrap().unwrap().locator.object, if early { "40/90" } else { "41/91" }),
+                    }
+                    assert!(server.requests.lock().unwrap().iter().all(|request| method_of(request) == "GET"));
+                }
             }
-            let requests = server.requests.lock().unwrap();
-            assert_eq!(requests.len(), 4);
-            assert!(requests.iter().all(|request| method_of(request) == "GET"));
+        }
+    });
+}
+
+#[test]
+fn batch_lookup_keeps_late_failures_and_cancellation_after_finding_an_asset() {
+    runtime().block_on(async {
+        for reconcile in [false, true] {
+            for outcome in ["transient", "rate-limited", "cancelled"] {
+                let bytes = b"inventory-payload";
+                let mut replies = existing_repository_replies();
+                for page in 1..=api::MAX_RELEASE_SCAN_PAGES {
+                    let mut releases: Vec<_> = (0..api::RELEASE_PAGE_SIZE).map(|index| {
+                        release(u64::from(page) * 1000 + index as u64, &job_tag("other-job", index as u32))
+                    }).collect();
+                    if page == 1 { releases[0] = release(40, &job_tag("job-1", 9)); }
+                    replies.push(reply(200, json!(releases)));
+                    if page == 1 {
+                        replies.push(reply(200, json!([asset(90, "pack-object", bytes.len() as u64, Some(digest_of(bytes)))])));
+                    }
+                }
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let (_release_tx, release_rx) = std::sync::mpsc::channel();
+                replies.push(match outcome {
+                    "cancelled" => Reply::Gated { send_headers: true, ready: ready_tx, release: release_rx },
+                    "rate-limited" => Reply::Http {
+                        status: 429,
+                        headers: vec![("retry-after".into(), "120".into())],
+                        body: Vec::new(),
+                    },
+                    _ => reply(503, json!({})),
+                });
+                let server = github_server(replies);
+                let provider = adapter(dependencies().dependencies);
+                let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
+                let intent = object_intent(&handle, ObjectRole::Pack, "object", bytes);
+                let cancel = Cancellation::default();
+                let lookup = async {
+                    if reconcile {
+                        provider.reconcile_upload(&handle, &intent, None, &cancel).await.map(|_| ())
+                    } else {
+                        provider.lookup_metadata(&handle, &intent, None, &cancel).await.map(|_| ())
+                    }
+                };
+                tokio::pin!(lookup);
+                let result = if outcome == "cancelled" {
+                    tokio::select! {
+                        result = &mut lookup => result,
+                        ready = ready_rx => {
+                            ready.unwrap();
+                            cancel.cancel();
+                            lookup.await
+                        }
+                    }
+                } else { lookup.await };
+                let error = result.unwrap_err();
+                assert_eq!(error.kind, match outcome {
+                    "cancelled" => ErrorKind::Cancelled,
+                    "rate-limited" => ErrorKind::RateLimited,
+                    _ => ErrorKind::Transient,
+                });
+                if outcome == "rate-limited" { assert_eq!(error.retry_at_ms, Some(NOW_MS + 120_000)); }
+            }
         }
     });
 }
@@ -2001,37 +2089,69 @@ fn concurrent_first_use_and_rollover_reserve_each_attempt_before_upload() {
 #[test]
 fn uncertain_upload_keeps_the_last_slot_through_reconciliation_and_rollover() {
     runtime().block_on(async {
-        let bytes = vec![4u8; 16];
-        let server = github_server(vec![
-            repository_reply(true), reply(200, json!([])), Reply::Lost,
-            reply(200, json!([release(20, &job_tag("job-1", 0))])),
-            reply(200, json!([asset(88, "pack-object-1", 16, Some(digest_of(&bytes)))])),
-            reply(201, release(21, &job_tag("job-1", 1))),
-            reply(201, asset(89, "pack-object-2", 16, Some(digest_of(&bytes)))),
+        for seq in [0, 8, 12] {
+            let bytes = vec![4u8; 16];
+            let mut replies = vec![repository_reply(true), reply(200, json!([])), Reply::Lost];
+            if seq == 12 {
+                for page in 0..=api::MAX_RELEASE_SCAN_PAGES {
+                    replies.push(reply(200, json!((0..api::RELEASE_PAGE_SIZE).map(|index| {
+                        release(1000 + u64::from(page) * 100 + index as u64, &job_tag("other-job", index as u32))
+                    }).collect::<Vec<_>>())));
+                }
+            }
+            replies.extend([
+                reply(200, json!([release(20, &job_tag("job-1", seq))])),
+                reply(200, json!([asset(88, "pack-object-1", 16, Some(digest_of(&bytes)))])),
+                reply(201, release(21, &job_tag("job-1", seq + 1))),
+                reply(201, asset(89, "pack-object-2", 16, Some(digest_of(&bytes)))),
+            ]);
+            let server = github_server(replies);
+            let test = dependencies();
+            let provider = adapter(test.dependencies.clone());
+            let handle = open(provider.as_ref(), &server, OpenMode::Create).await.unwrap();
+            let context = handle.context.downcast_ref::<api::Context>().unwrap();
+            let batch = api::batch_key(ObjectRole::Pack, "job-1");
+            context.batches().insert(batch.clone(), api::Batch { seq, release: 20, assets: 99 });
+            let directory = tempfile::tempdir().unwrap();
+            let source = source(directory.path(), "pack", &bytes);
+            let intent = object_intent(&handle, ObjectRole::Pack, "object-1", &bytes);
+            let cancel = Cancellation::default();
+            let lost = provider.create_object(&handle, &intent, &source, None, &cancel).await.err().unwrap();
+            assert_eq!(lost.kind, ErrorKind::Transient);
+            assert_eq!(context.batches()[&batch].assets, 100);
+            let resolution = provider.reconcile_upload(&handle, &intent, None, &cancel).await.unwrap();
+            let UploadResolution::Complete(receipt) = resolution else { panic!("uncertain asset must reconcile"); };
+            assert_eq!(receipt.locator.object, "20/88");
+            assert_eq!(context.batches()[&batch].assets, 100);
+            let next = object_intent(&handle, ObjectRole::Pack, "object-2", &bytes);
+            let receipt = provider.create_object(&handle, &next, &source, None, &cancel).await.unwrap();
+            assert_eq!(receipt.locator.object, "21/89");
+            assert_eq!(context.batches()[&batch].assets, 1);
+            let requests = server.requests.lock().unwrap();
+            assert!(head_line(&requests[2]).contains("/releases/20/assets?name=pack-object-1"));
+            assert!(head_line(requests.last().unwrap()).contains("/releases/21/assets?name=pack-object-2"));
+            assert_eq!(requests.iter().filter(|request| method_of(request) == "POST"
+                && head_line(request).contains("/assets?name=pack-object-1")).count(), 1);
+        }
+    });
+}
+
+#[test]
+fn reconciliation_refuses_a_starter_when_another_release_holds_the_object() {
+    runtime().block_on(async {
+        let bytes = b"stored-payload";
+        let mut replies = existing_repository_replies();
+        replies.extend([
+            reply(200, json!([release(60, &job_tag("job-1", 8)), release(61, &job_tag("job-1", 12))])),
+            reply(200, json!([{ "id": 88, "name": "pack-object", "size": 0, "state": "starter" }])),
+            reply(200, json!([asset(89, "pack-object", bytes.len() as u64, Some(digest_of(bytes)))])),
         ]);
-        let test = dependencies();
-        let provider = adapter(test.dependencies.clone());
-        let handle = open(provider.as_ref(), &server, OpenMode::Create).await.unwrap();
-        let context = handle.context.downcast_ref::<api::Context>().unwrap();
-        let batch = api::batch_key(ObjectRole::Pack, "job-1");
-        context.batches().insert(batch.clone(), api::Batch { seq: 0, release: 20, assets: 99 });
-        let directory = tempfile::tempdir().unwrap();
-        let source = source(directory.path(), "pack", &bytes);
-        let intent = object_intent(&handle, ObjectRole::Pack, "object-1", &bytes);
-        let cancel = Cancellation::default();
-        let lost = provider.create_object(&handle, &intent, &source, None, &cancel).await.err().unwrap();
-        assert_eq!(lost.kind, ErrorKind::Transient);
-        assert_eq!(context.batches()[&batch].assets, 100);
-        let resolution = provider.reconcile_upload(&handle, &intent, None, &cancel).await.unwrap();
-        let UploadResolution::Complete(receipt) = resolution else { panic!("uncertain asset must reconcile"); };
-        assert_eq!(receipt.locator.object, "20/88");
-        assert_eq!(context.batches()[&batch].assets, 100);
-        let next = object_intent(&handle, ObjectRole::Pack, "object-2", &bytes);
-        let receipt = provider.create_object(&handle, &next, &source, None, &cancel).await.unwrap();
-        assert_eq!(receipt.locator.object, "21/89");
-        assert_eq!(context.batches()[&batch].assets, 1);
-        let requests = server.requests.lock().unwrap();
-        assert!(head_line(&requests[2]).contains("/releases/20/assets?name=pack-object-1"));
-        assert!(head_line(&requests[6]).contains("/releases/21/assets?name=pack-object-2"));
+        let server = github_server(replies);
+        let provider = adapter(dependencies().dependencies);
+        let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
+        let intent = object_intent(&handle, ObjectRole::Pack, "object", bytes);
+        let resolution = provider.reconcile_upload(&handle, &intent, None, &Cancellation::default()).await.unwrap();
+        assert!(matches!(resolution, UploadResolution::Conflict));
+        assert!(server.requests.lock().unwrap().iter().all(|request| method_of(request) == "GET"));
     });
 }

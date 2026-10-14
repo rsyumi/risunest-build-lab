@@ -47,8 +47,13 @@ type LegacyLocalBackupFallbackContext = Pick<SharedNativeFileOperationContext,
 
 const NATIVE_BACKUP_READ_BYTES = 1024 * 1024
 
+// msgpackr appends up to 100 characters of the decoded data to this message.
+const MSGPACK_TRAILING_DATA_ERROR = 'Data read, but end of buffer not reached'
+
 function backupFailure(code: string, message: string, error: unknown): NativeFileJobError {
-    const detail = error instanceof Error ? error.message : String(error)
+    let detail = error instanceof Error ? error.message : String(error)
+    // The detail reaches the error dialog and the native log, so it never carries backup content.
+    if (detail.startsWith(MSGPACK_TRAILING_DATA_ERROR)) detail = MSGPACK_TRAILING_DATA_ERROR
     return new NativeFileJobError(code, detail ? `${message}: ${detail}` : message)
 }
 
@@ -581,11 +586,11 @@ async function importLegacyBackupFile(
                     sawEncryption = true
                     try {
                         const meta = JSON.parse(new TextDecoder().decode(data))
-                        if (meta?.type === 'account' && Number.isSafeInteger(meta.time) && meta.time > 0) {
+                        // Only account metadata marks an encrypted database, as in the native importer.
+                        if (meta?.type === 'account') {
+                            if (!Number.isSafeInteger(meta.time) || meta.time <= 0) throw new Error('Invalid account encryption time')
                             encryptionMeta.type = 'account'
                             encryptionMeta.time = meta.time
-                        } else if (meta?.type !== 'none') {
-                            throw new Error('Invalid encryption metadata')
                         }
                     } catch (error) {
                         throw backupFailure('backup-encryption-invalid', 'The backup has invalid encryption metadata', error)
