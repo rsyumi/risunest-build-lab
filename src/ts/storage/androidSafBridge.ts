@@ -1,5 +1,6 @@
 import { withLibraryFileSelection } from './libraryFileOperation'
 import '../androidNativeControl'
+import { BackupSourceCopyError } from './backupSourceCopyFailure'
 import type { NativeFileJobSource } from './nativeFileJobs'
 
 const SPOOL_EVENT = 'risu-android-spool-ready'
@@ -443,28 +444,33 @@ export async function materializeAndroidBackupSource(
 ): Promise<NativeFileJobSource> {
     const cancelled = () => new DOMException('Android backup copy was cancelled', 'AbortError')
     if (options.signal?.aborted) throw cancelled()
+    let stopWaiting!: (error: DOMException) => void
+    const aborted = new Promise<never>((_resolve, reject) => { stopWaiting = reject })
     const onAbort = () => {
-        // Releasing custody cancels the native copy before waiting for its cleanup.
+        // Releasing custody cancels the native copy, and the page stops waiting for its reply.
         void Promise.resolve().then(() => bridge.discardPortableSource?.(token)).catch(() => {})
+        stopWaiting(cancelled())
     }
     options.signal?.addEventListener('abort', onAbort, { once: true })
+    let copy: Promise<string | null | undefined> = Promise.resolve(undefined)
     try {
-        const response = await bridge.materializeBackupSource?.(token, progress => {
+        copy = Promise.resolve(bridge.materializeBackupSource?.(token, progress => {
             if (!options.signal?.aborted) options.onProgress?.({ ...progress, requestId: token, token, operation: 'source-copy' })
-        })
+        }))
+        const response = await Promise.race([copy, aborted])
+        if (options.signal?.aborted) throw cancelled()
         if (!response) throw new AndroidSafSourceError('source-reselect-required', 'Backup source custody is unavailable')
         const batch = JSON.parse(response) as AndroidSpoolBatch
-        if (options.signal?.aborted) {
-            await Promise.all(batch.ready.map(source => bridge.discardSource?.(source.token)))
-            throw cancelled()
-        }
         const failure = batch.failures[0]
-        if (failure) throw new AndroidSafSourceError(failure.code, failure.code)
+        if (failure) throw new BackupSourceCopyError(failure.code)
         if (batch.ready.length !== 1) throw new AndroidSafSourceError('source-reselect-required', 'Backup source copy is unavailable')
         return {type: 'androidSpool', token: batch.ready[0].token}
     } catch (error) {
-        if (options.signal?.aborted) throw cancelled()
-        throw error
+        if (!options.signal?.aborted) throw error
+        // A copy that still finishes after cancellation is removed whenever its reply arrives.
+        void copy.then(response => response && Promise.all((JSON.parse(response) as AndroidSpoolBatch).ready
+            .map(source => bridge.discardSource?.(source.token)))).catch(() => {})
+        throw cancelled()
     } finally {
         options.signal?.removeEventListener('abort', onAbort)
     }

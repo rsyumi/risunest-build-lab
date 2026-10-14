@@ -104,6 +104,32 @@ describe('iOS file publication', () => {
         expect(reports).toEqual([{ copiedBytes: 4 * 1024 ** 3, totalBytes: 8 * 1024 ** 3 }])
         expect(invoke.mock.calls.map(call => call[0])).toEqual(['plugin:ios-native|materialize_backup_source'])
     })
+    it('ignores copy progress that arrives after a finished copy nobody cancelled', async () => {
+        const reports: unknown[] = []
+        let channel!: Channel<{ copiedBytes: number; totalBytes: number }>
+        invoke.mockImplementation(async (_command, args) => {
+            channel = args.onProgress
+            return { path: '/owned/copied.risudat', name: 'copied.risudat', bytes: 42 }
+        })
+        await materializeIOSBackupSource('source', { onProgress: progress => reports.push(progress) })
+        channel.onmessage({ copiedBytes: 42, totalBytes: 42 })
+        expect(reports).toEqual([])
+    })
+    // androidSafBridge.test.ts expects the same reasons for the same native codes.
+    it.each([
+        ['source-changed', 'source-reselect-required'],
+        ['cancelled', 'source-reselect-required'],
+        ['spool-create-failed', 'spool-write-failed'],
+        ['source-busy', 'source-busy'],
+        ['source-read-failed', 'source-read-failed'],
+    ])('reports a native %s copy failure with the %s dialog reason', async (nativeCode, code) => {
+        invoke.mockRejectedValue({ message: 'Backup source could not be copied', code: nativeCode })
+        await expect(materializeIOSBackupSource('source')).rejects.toMatchObject({ code, message: expect.stringContaining(nativeCode) })
+    })
+    it('passes on a copy rejection that carries no failure code', async () => {
+        invoke.mockRejectedValue('plugin unavailable')
+        await expect(materializeIOSBackupSource('source')).rejects.toBe('plugin unavailable')
+    })
     it.each([false, true])('cancels the selected copy and cleans any late result (failed %s)', async failed => {
         const controller = new AbortController()
         let finish!: (value: unknown) => void

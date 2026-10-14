@@ -221,6 +221,31 @@ function escapeHtmlText(value: unknown) {
     return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+// The same filter as parseMarkdownSafe.
+const exportedChatSanitizeConfig = {
+    FORBID_TAGS: ["a", "style"],
+    FORBID_ATTR: ["style", "href", "class"]
+}
+
+/** Replaces a name case-insensitively in text and attribute values, never in the markup itself. */
+function hideNameInExportedHtml(html: string, name: string) {
+    if (!name) return html
+    const pattern = new RegExp(name.replace(/[-\/\\^$*+\?\.()|[\]{}]/g, '\\$&'), 'gi')
+    const template = document.createElement('template')
+    template.innerHTML = html
+    const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT)
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (node.nodeType === Node.TEXT_NODE) {
+            node.nodeValue = node.nodeValue.replace(pattern, '×××')
+            continue
+        }
+        for (const attribute of (node as Element).attributes) {
+            attribute.value = attribute.value.replace(pattern, '×××')
+        }
+    }
+    return DOMPurify.sanitize(template.innerHTML, exportedChatSanitizeConfig)
+}
+
 export async function exportChat(page:number){
     try {
 
@@ -240,17 +265,11 @@ export async function exportChat(page:number){
 
             if(doTranslate){
                 // Translation can return new markup, so it gets the same filter as parseMarkdownSafe.
-                v = DOMPurify.sanitize(await translateHTML(v, false, '', -1), {
-                    FORBID_TAGS: ["a", "style"],
-                    FORBID_ATTR: ["style", "href", "class"]
-                })
+                v = DOMPurify.sanitize(await translateHTML(v, false, '', -1), exportedChatSanitizeConfig)
             }
 
             if(anonymous){
-                //case insensitive match, replace all
-                const excapedName = char.name.replace(/[-\/\\^$*+\?\.()|[\]{}]/g, '\\$&')
-
-                v = v.replace(new RegExp(`${excapedName}`, 'gi'), '×××')
+                v = hideNameInExportedHtml(v, char.name)
             }
 
             return v

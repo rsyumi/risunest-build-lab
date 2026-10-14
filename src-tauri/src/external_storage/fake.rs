@@ -97,6 +97,7 @@ pub(super) struct FakeState {
     upload_locators: BTreeMap<String, String>,
     reconcile_attempts: Vec<String>,
     metadata_attempts: Vec<String>,
+    metadata_delay: Option<std::time::Duration>,
     scripted_pages: Vec<(Collection, Result<ObjectPage>)>,
     inventory_upload_failure: Option<ErrorKind>,
     upload_failure: Option<(usize, ErrorKind)>,
@@ -286,6 +287,9 @@ impl FakeProvider {
     }
     pub(crate) fn reconcile_attempts(&self, object: &str) -> usize {
         self.state.lock().unwrap().reconcile_attempts.iter().filter(|id| id.as_str() == object).count()
+    }
+    pub(crate) fn delay_metadata(&self, delay: std::time::Duration) {
+        self.state.lock().unwrap().metadata_delay = Some(delay);
     }
     pub(crate) fn metadata_attempts(&self, object: &str) -> usize {
         self.state.lock().unwrap().metadata_attempts.iter().filter(|id| id.as_str() == object).count()
@@ -739,6 +743,8 @@ impl Provider for FakeProvider {
             if let Some(locator) = known {
                 locator.validate_for(repository)?;
             }
+            let delay = self.state.lock().unwrap().metadata_delay;
+            if let Some(delay) = delay { tokio::time::sleep(delay).await; }
             let mut state = self.state.lock().unwrap();
             let remote_id = match known {
                 Some(locator) => locator.object.clone(),

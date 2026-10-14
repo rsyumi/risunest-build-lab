@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assertInventory, assertListedTestsExist, discoverTestEntries, extendedAppTests, nodeAppTests, ownerOf, selectNodeTests } from './suiteOwnership.mjs'
-import { parseVitestInventory } from './testInventory.mjs'
+import { parseVitestInventory, webExportInventory } from './testInventory.mjs'
 
 const ordinary = 'src/ts/storage/newRegression.test.ts'
 const extended = 'src/ts/storage/selectedConversationEvictionCorpus.test.ts'
@@ -23,6 +23,7 @@ test('classifies ordinary, extended, harness, Node and independent entries', () 
     ['crates/sync-wire/tests/golden.test.mjs', 'node'],
     ['server/manager/gui/tests/App.test.ts', 'manager'],
     ['server/endpoint-registry/tests/registry.worker.ts', 'registry'],
+    ['tools/web-risu-export/tests/core.test.mjs', 'web-export'],
     ['tests/browser/settings.browser.spec.ts', 'browser'],
     ['src/lib/Others/BookmarkDisplayState.test.svelte.ts', null],
     ['src/ts/storage/nativeCommitEncoder.worker.ts', null],
@@ -56,6 +57,16 @@ test('accepts the installed CLI JSON shape and rejects unexpected output', () =>
     assert.throws(() => parseVitestInventory(invalid, root))
   }
   assert.throws(() => parseVitestInventory(JSON.stringify([{ file: join(root, '..', 'outside.test.ts'), projectName: 'app' }]), root), /outside/)
+})
+
+test('the web export inventory matches only what its own test script runs', () => {
+  const top = 'tools/web-risu-export/tests/core.test.mjs'
+  const nested = 'tools/web-risu-export/tests/nested/deep.test.mjs'
+  const files = [ordinary, top, nested, 'tools/web-risu-export/tests/browser.mjs']
+  const selected = webExportInventory(files, 'node --test tests/*.test.mjs')
+  assert.deepEqual(selected, [top])
+  assert.throws(() => assertInventory([top, nested], { 'web-export': selected }), /omitted/)
+  assert.throws(() => webExportInventory(files, 'node --test tests/**/*.test.mjs'), /Unexpected web export test script/)
 })
 
 test('Node selection is bounded, deterministic and never selects measurement scripts', () => {

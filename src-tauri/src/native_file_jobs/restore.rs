@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::io::{self, BufReader, Read, Seek, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 
 const RISU_SAVE_HEADER: &[u8] = b"RISUSAVE\0";
 const LEGACY_RISU_SAVE_PREFIX: &[u8] = b"\0RISUSAVE\0";
@@ -1256,8 +1256,15 @@ fn parse_and_stage<R: Read>(
             continue;
         }
 
-        let (mut value, decoded_bytes) =
-            read_block_value(reader, &name, compression, encoded_length, limits, job)?;
+        let (mut value, decoded_bytes) = read_block_value(
+            reader,
+            &name,
+            compression,
+            encoded_length,
+            limits,
+            job,
+            block_type == 11 && name == "pluginStorage",
+        )?;
 
         match block_type {
             0 if name == "config" => {
@@ -1459,6 +1466,7 @@ fn read_block_value<R: Read>(
     encoded_length: u64,
     limits: RestoreLimits,
     job: &dyn RestoreControl,
+    blank_is_empty_object: bool,
 ) -> Result<(Value, usize), NativeJobError> {
     let block = EncodedBlockReader {
         reader,
@@ -1470,7 +1478,7 @@ fn read_block_value<R: Read>(
         }
         let decoded = DecodedLimitReader::new(block, limits.max_decoded_block_bytes, job, name);
         let mut buffered = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
-        let value = serde_json::from_reader(&mut buffered)
+        let value = read_block_json(&mut buffered, blank_is_empty_object)
             .map_err(|error| json_error(name, compression, error, job))?;
         if !buffered.buffer().is_empty() || buffered.get_ref().inner.remaining != 0 {
             return Err(corrupt(format!("trailing data in block {name}")));
@@ -1482,7 +1490,7 @@ fn read_block_value<R: Read>(
     let decoder = GzDecoder::new(buffered);
     let decoded = DecodedLimitReader::new(decoder, limits.max_decoded_block_bytes, job, name);
     let mut json_reader = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
-    let value = serde_json::from_reader(&mut json_reader)
+    let value = read_block_json(&mut json_reader, blank_is_empty_object)
         .map_err(|error| json_error(name, compression, error, job))?;
     let decoded_bytes = json_reader.get_ref().completed as usize;
     let mut decoded = json_reader.into_inner();
@@ -1501,6 +1509,32 @@ fn read_block_value<R: Read>(
         return Err(corrupt(format!("trailing data in gzip block {name}")));
     }
     Ok((value, decoded_bytes))
+}
+
+// Upstream writes an unset pluginCustomStorage as an empty body and its decoder
+// skips the block, which leaves the storage empty.
+fn read_block_json<R: BufRead>(
+    reader: &mut R,
+    blank_is_empty_object: bool,
+) -> Result<Value, serde_json::Error> {
+    if blank_is_empty_object {
+        loop {
+            let buffer = reader.fill_buf().map_err(serde_json::Error::io)?;
+            if buffer.is_empty() {
+                return Ok(Value::Object(Map::new()));
+            }
+            let blank = buffer
+                .iter()
+                .take_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+                .count();
+            let content = blank < buffer.len();
+            reader.consume(blank);
+            if content {
+                break;
+            }
+        }
+    }
+    serde_json::from_reader(reader)
 }
 
 fn read_character_block<R: Read>(
@@ -3347,8 +3381,13 @@ mod tests {
     }
 
     fn try_restore_cold_container(source: &Path, directory: &Path, sink: &mut StoreSink, job: &JobControl) -> Result<JobResultSummary, crate::local_backup::LocalBackupError> {
+        restore_container_payloads(source, directory, sink, job).map(|(result, _)| result)
+    }
+
+    /// Restores a legacy backup container and reports its prepared asset aliases and invalid inlays.
+    fn restore_container_payloads(source: &Path, directory: &Path, sink: &mut StoreSink, job: &JobControl) -> Result<(JobResultSummary, Value), crate::local_backup::LocalBackupError> {
         use crate::local_backup::{LocalBackupError, NeverCancelled, PayloadTarget, StagedLocalBackupEntry, StrictLocalBackupDatabaseRestore};
-        struct Restore<'a> { directory: &'a Path, sink: &'a mut StoreSink, job: &'a JobControl, result: Option<JobResultSummary> }
+        struct Restore<'a> { directory: &'a Path, sink: &'a mut StoreSink, job: &'a JobControl, result: Option<JobResultSummary>, payloads: Value }
         impl StrictLocalBackupDatabaseRestore for Restore<'_> {
             fn restore_database(&mut self, database: &StagedLocalBackupEntry, entries: &[StagedLocalBackupEntry]) -> Result<(), LocalBackupError> {
                 use crate::asset_repository::job_pins::{CasJobKind, CasReleaseOutcome, DurableCasJob};
@@ -3356,6 +3395,13 @@ mod tests {
                 let cas = PayloadCas::new(self.directory).unwrap();
                 let mut durable = DurableCasJob::begin(self.directory, &self.job.id(), CasJobKind::LocalBackupRestore, crate::asset_repository::job_pins::CasJobOwner::for_test(), 0).unwrap();
                 let payloads = super::super::legacy_backup::prepare_legacy_restore_payloads(entries, &cas, &mut durable, &NeverCancelled)?;
+                let mut cold_keys: Vec<&String> = payloads.cold_payloads.keys().collect();
+                cold_keys.sort();
+                self.payloads = json!({
+                    "aliases": payloads.asset_aliases,
+                    "invalidInlays": payloads.invalid_inlays,
+                    "coldPayloads": cold_keys,
+                });
                 self.sink.cold_payloads = Some(payloads.cold_payloads);
                 durable.seal(&mut self.sink.store.lock().unwrap(), 0).unwrap();
                 self.result = Some(restore_block_risu_save_path(database.staged_path.as_ref().unwrap(), 1, self.job, self.sink)
@@ -3364,9 +3410,28 @@ mod tests {
                 Ok(())
             }
         }
-        let mut restore = Restore { directory, sink, job, result: None };
+        let mut restore = Restore { directory, sink, job, result: None, payloads: Value::Null };
         crate::local_backup::parse_legacy_local_backup_v1(&mut File::open(source).unwrap(), directory, PayloadTarget::JobStaging, &mut restore, &NeverCancelled)?;
-        Ok(restore.result.unwrap())
+        Ok((restore.result.unwrap(), restore.payloads))
+    }
+
+    // tools/web-risu-export `npm run test:native` exports a synthetic archive, runs this test and checks the report.
+    #[test]
+    #[ignore = "run by tools/web-risu-export npm run test:native"]
+    fn web_export_archive_restores_through_the_legacy_backup_path() {
+        let archive = std::env::var_os("RISUNEST_WEB_EXPORT_ARCHIVE").expect("RISUNEST_WEB_EXPORT_ARCHIVE names the exported archive");
+        let report = std::env::var_os("RISUNEST_WEB_EXPORT_REPORT").expect("RISUNEST_WEB_EXPORT_REPORT names the report file");
+        let (directory, mut sink) = fixture();
+        let job = JobRegistry::default().create(JobKind::RestoreLegacyLocalBackup).unwrap();
+        let (result, payloads) = restore_container_payloads(Path::new(&archive), directory.path(), &mut sink, &job).unwrap();
+        let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+        let unavailable: Vec<String> = sink.unavailable_cold.lock().unwrap().iter().map(|(key, _)| key.clone()).collect();
+        fs::write(report, serde_json::to_vec(&json!({
+            "characterCount": result.character_count,
+            "root": restored,
+            "payloads": payloads,
+            "unavailableCold": unavailable,
+        })).unwrap()).unwrap();
     }
 
     #[test]
@@ -3850,6 +3915,26 @@ mod tests {
         assert_eq!(restored["modules"][0]["name"], "Module");
         assert_eq!(restored["pluginCustomStorage"]["plugin"]["enabled"], true);
         assert_eq!(restored["characters"][0]["chaId"], "char-1");
+    }
+
+    #[test]
+    fn strict_block_restore_reads_an_unset_upstream_plugin_storage_as_empty() {
+        // Upstream encodes JSON.stringify(undefined) as a zero-byte body, gzip of nothing when compressed.
+        for (compression, body) in [(0, Vec::new()), (1, gzip(b"")), (0, b" \r\n\t".to_vec()), (1, gzip(b"\n"))] {
+            let (directory, sink) = fixture();
+            let mut blocks = valid_blocks();
+            blocks[5] = raw_block(11, compression, "pluginStorage", &body);
+            let source = directory.path().join("unset-plugin-storage.risudat");
+            fs::write(&source, save_bytes(blocks)).unwrap();
+            let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+            restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
+            let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+            assert_eq!(restored["pluginCustomStorage"], json!({}));
+            assert_eq!(restored["characters"][0]["chaId"], "char-1");
+        }
+        let mut plugins = valid_blocks();
+        plugins[4] = raw_block(9, 0, "plugins", b"");
+        assert_failed_restore_preserves_active(&save_bytes(plugins), "invalid JSON in block plugins");
     }
 
     #[test]

@@ -26,6 +26,7 @@ mod external_storage;
 pub mod import_export_jobs;
 #[cfg(target_os = "ios")]
 mod ios_lifecycle;
+#[cfg_attr(not(desktop), allow(dead_code))]
 mod launch_profile;
 #[cfg(target_os = "linux")]
 mod linux_session;

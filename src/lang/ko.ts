@@ -2663,7 +2663,7 @@ export const languageKorean = {
             "reasonCompatibilityImport": '이 형식의 백업을 가져오려면 백업 파일을 다시 선택하세요.',
             "reasonBackupEncryptionInvalid": '백업의 암호화 정보를 읽을 수 없습니다. 백업 파일을 다시 생성해주세요.',
             "reasonBackupKeyRequest": 'RisuAI 서버에서 백업의 복호화 키를 가져오지 못했습니다. 인터넷 연결을 확인한 후 다시 시도해주세요.',
-            "reasonBackupKeyHttp": 'RisuAI 서버가 백업 복호화 키 요청에 오류를 반환했습니다. 오류 상세에서 HTTP 상태 코드를 확인해주세요.',
+            "reasonBackupKeyHttp": 'RisuAI 서버가 백업 복호화 키 요청에 오류를 반환했습니다. 잠시 후 다시 시도해주세요.',
             "reasonBackupKeyInvalid": 'RisuAI 서버에서 올바른 백업 복호화 키를 받지 못했습니다. 잠시 후 다시 시도해주세요.',
             "reasonBackupDecryption": '백업의 암호화를 해제하지 못했습니다. 백업 파일을 확인해주세요.',
             "reasonBackupDatabase": '백업의 데이터베이스를 읽을 수 없습니다. 백업 파일을 확인해주세요.',

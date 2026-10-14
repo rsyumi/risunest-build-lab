@@ -1,5 +1,6 @@
 package io.github.rsyumi.risunest
 
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -7,6 +8,37 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AndroidControlBridgeTest {
+  /** The same golden messages drive the JavaScript control client test. */
+  private fun progressFixture(): String {
+    var current: File? = File(System.getProperty("user.dir")).absoluteFile
+    repeat(8) {
+      val candidate = current?.resolve("src/ts/storage/tests/fixtures/androidBackupCopyProgressV1Golden.json")
+      if (candidate != null && candidate.isFile) return candidate.readText(Charsets.UTF_8)
+      current = current?.parentFile
+    }
+    error("androidBackupCopyProgressV1Golden.json was not found above ${System.getProperty("user.dir")}")
+  }
+
+  @Test fun backupCopyProgressMatchesTheSharedWireFormat() {
+    val fixture = progressFixture()
+    val method = Regex("\"method\"\\s*:\\s*\"([^\"]+)\"").find(fixture)!!.groupValues[1]
+    val id = Regex("\"id\"\\s*:\\s*\"([^\"]+)\"").find(fixture)!!.groupValues[1]
+    val messages = Regex(
+      "\\{\\s*\"copiedBytes\"\\s*:\\s*(\\d+)\\s*,\\s*\"totalBytes\"\\s*:\\s*(\\d+|null)\\s*," +
+        "\\s*\"wire\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"\\s*\\}",
+    ).findAll(fixture).toList()
+    assertEquals(3, messages.size)
+    for (message in messages) {
+      val (copied, total, wire) = message.destructured
+      val progress = SafSpoolProgress("spool-token", copied.toLong(), total.toLongOrNull())
+      assertEquals(wire.replace("\\\"", "\""), androidControlProgressMessage(id, method, progress))
+    }
+    val progress = SafSpoolProgress("spool-token", 1, 2)
+    for (other in listOf("saf.discardPortableSource", "saf.copyExport", "files.pick", "background.progress")) {
+      assertNull(other, androidControlProgressMessage(id, other, progress))
+    }
+  }
+
   @Test fun copyReportsAdvancingBytesWithoutFloodingTheWebView() {
     var now = 0L
     val delivered = mutableListOf<SafSpoolProgress>()

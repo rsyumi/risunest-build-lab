@@ -223,11 +223,19 @@ pub(crate) async fn control_request<T>(
     cancel: &Cancellation,
     operation: impl Future<Output = Result<T>>,
 ) -> Result<T> {
+    control_request_with_timeout(cancel, operation, Duration::from_millis(CONTROL_DEADLINE_MS)).await
+}
+
+pub(crate) async fn control_request_with_timeout<T>(
+    cancel: &Cancellation,
+    operation: impl Future<Output = Result<T>>,
+    timeout: Duration,
+) -> Result<T> {
     cancel.check()?;
     tokio::select! {
         biased;
         _ = cancel.cancelled() => Err(ProviderError::new(ErrorKind::Cancelled)),
-        result = tokio::time::timeout(Duration::from_millis(CONTROL_DEADLINE_MS), operation) => {
+        result = tokio::time::timeout(timeout, operation) => {
             result.map_err(|_| transient())?
         }
     }
@@ -825,6 +833,17 @@ mod tests {
     pub(super) const NOW: u64 = 1000 * 24 * 60 * MINUTE_MS;
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    }
+    #[test]
+    fn ordinary_control_requests_keep_the_one_minute_deadline() {
+        runtime().block_on(async {
+            tokio::time::pause();
+            let result = control_request(&Cancellation::default(), async {
+                tokio::time::sleep(Duration::from_secs(61)).await;
+                Ok(())
+            }).await;
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Transient);
+        });
     }
     #[test]
     fn restore_cancellation_drains_same_future_before_releasing_admission() {

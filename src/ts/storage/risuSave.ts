@@ -635,8 +635,17 @@ export class RisuSaveDecoder {
     }
 }
 
+// msgpackr appends up to 100 characters of the decoded data to this message.
+const MSGPACK_TRAILING_DATA_ERROR = 'Data read, but end of buffer not reached'
+
 export async function decodeRisuSave(data: Uint8Array) {
-    return normalizePocketFeatures(await decodeRisuSaveRaw(data))
+    try {
+        return normalizePocketFeatures(await decodeRisuSaveRaw(data))
+    } catch (error) {
+        // Callers show and log this message, so it never carries decoded save content.
+        if (error instanceof Error && error.message.startsWith(MSGPACK_TRAILING_DATA_ERROR)) throw new Error(MSGPACK_TRAILING_DATA_ERROR)
+        throw error
+    }
 }
 
 async function decodeRisuSaveRaw(data: Uint8Array) {

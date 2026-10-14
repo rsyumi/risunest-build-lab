@@ -581,11 +581,11 @@ async function importLegacyBackupFile(
                     sawEncryption = true
                     try {
                         const meta = JSON.parse(new TextDecoder().decode(data))
-                        if (meta?.type === 'account' && Number.isSafeInteger(meta.time) && meta.time > 0) {
+                        // Only account metadata marks an encrypted database, as in the native importer.
+                        if (meta?.type === 'account') {
+                            if (!Number.isSafeInteger(meta.time) || meta.time <= 0) throw new Error('Invalid account encryption time')
                             encryptionMeta.type = 'account'
                             encryptionMeta.time = meta.time
-                        } else if (meta?.type !== 'none') {
-                            throw new Error('Invalid encryption metadata')
                         }
                     } catch (error) {
                         throw backupFailure('backup-encryption-invalid', 'The backup has invalid encryption metadata', error)

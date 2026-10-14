@@ -2848,7 +2848,7 @@ export const languageEnglish = {
             "reasonCompatibilityImport": 'Select the backup file again to import this format.',
             "reasonBackupEncryptionInvalid": 'The backup encryption information could not be read. Create the backup again.',
             "reasonBackupKeyRequest": 'The backup decryption key could not be retrieved from the RisuAI server. Check your internet connection and try again.',
-            "reasonBackupKeyHttp": 'The RisuAI server returned an error for the backup decryption key request. Check the HTTP status code in the error details.',
+            "reasonBackupKeyHttp": 'The RisuAI server returned an error for the backup decryption key request. Try again later.',
             "reasonBackupKeyInvalid": 'The RisuAI server did not return a valid backup decryption key. Try again later.',
             "reasonBackupDecryption": 'The backup could not be decrypted. Check the backup file.',
             "reasonBackupDatabase": 'The backup database could not be read. Check the backup file.',

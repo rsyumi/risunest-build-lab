@@ -3,6 +3,7 @@ import { alertError } from './alert'
 import { backgroundErrorMessage } from './storage/backgroundErrorMessage'
 import type { character } from './storage/database.svelte'
 import { mutatePersistentCharacterDetail } from './storage/persistentDataRuntime.svelte'
+import { applyToggleValues, type ToggleValues } from './toggleBindings'
 import {
     captureChatBindingTarget,
     conversationMutationBlockedByGeneration,
@@ -30,6 +31,24 @@ export async function setToggleValue(key: string, value: string): Promise<void> 
             if (local) return
         }
         DBState.db.globalChatVariables[key] = value
+    } catch (error) {
+        reportFailure(error)
+    }
+}
+
+/** Applies preset values outside a toggle binding. Outside local mode they replace the chat's local overrides, as setToggleValue does. */
+export async function applyGlobalToggleValues(values: ToggleValues, keys: readonly string[]): Promise<void> {
+    try {
+        const conversation = captureChatBindingTarget()?.conversation
+        const replaced = [...keys, ...Object.keys(values)]
+            .filter((key) => key.startsWith('toggle_') && conversation?.GLGlobalVariables?.[key] !== undefined)
+        if (conversation && !conversation.useLocallySetGlobalVariables && replaced.length > 0) {
+            if (conversationMutationBlockedByGeneration(conversation.id)) return
+            const overrides = { ...conversation.GLGlobalVariables }
+            for (const key of replaced) delete overrides[key]
+            await updateChatBinding(conversation, { GLGlobalVariables: overrides })
+        }
+        applyToggleValues(DBState.db.globalChatVariables, values, keys)
     } catch (error) {
         reportFailure(error)
     }

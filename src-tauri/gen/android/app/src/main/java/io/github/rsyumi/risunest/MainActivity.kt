@@ -35,9 +35,11 @@ import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
@@ -743,6 +745,8 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         controlBridge = null
         safControlBridge?.close()
         safControlBridge = null
+        // Releasing waits for a running copy, so it stays off the main thread.
+        safScope.launch(Dispatchers.IO) { PortableSourceNative.retireUnclaimed(portableSourceOwner) }
       },
       destroyView = webView::destroy,
       clearReference = {
@@ -1048,12 +1052,12 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       "saf.pickContentSource" -> safCommands.pickContentSource(args[0], args[1])
       "saf.copyExport" -> safCommands.copyExport(args[0], args[1], args[2])
       "saf.cancelSource" -> safCommands.cancelSource(args[0])
+      "saf.materializeBackupSource" -> materializeBackupSource(args[0], onProgress)
       else -> withContext(Dispatchers.IO) {
         when (method) {
           "saf.cancelExport" -> safCommands.cancelExport(args[0])
           "saf.discardSource" -> safCommands.discardSource(args[0])
           "saf.discardPortableSource" -> PortableSourceNative.discard(args[0])
-          "saf.materializeBackupSource" -> portableSourceBatchJson(PortableSourceNative.materialize(args[0], safSpoolStore(), onProgress), sourceType = "androidSpool")
           "saf.getActiveSourceRequestIds" -> safCommands.getActiveSourceRequestIds()
           "saf.getExportStatus" -> safCommands.getExportStatus()
           "saf.getExportSourceId" -> safCommands.getExportSourceId()
@@ -1061,6 +1065,29 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
           "saf.acknowledgeExport" -> safCommands.acknowledgeExport(args[0])
           else -> error("android-control-unavailable")
         }
+      }
+    }
+  }
+
+  private suspend fun materializeBackupSource(token: String, onProgress: (SafSpoolProgress) -> Unit): String {
+    val copyContext = currentCoroutineContext()
+    val store = safSpoolStore()
+    val copied = AtomicReference<SafSpoolBatch?>()
+    var handedOff = false
+    try {
+      // The copy finishes even when the bridge closes, so its result is never lost unreleased.
+      withContext(NonCancellable + Dispatchers.IO) {
+        copied.set(PortableSourceNative.materialize(token, store, { !copyContext.isActive }, onProgress))
+      }
+      val batch = copied.get()!!
+      val reply = portableSourceBatchJson(batch, sourceType = "androidSpool")
+      batch.ready.forEach { deliveredSpoolTokens.add(it.token) }
+      handedOff = true
+      return reply
+    } finally {
+      // A closed bridge has no page that could receive or remove this copy.
+      if (!handedOff) copied.get()?.let { batch ->
+        safScope.launch(Dispatchers.IO) { withdrawPortableSourceCopy(store, batch, "cancelled") }
       }
     }
   }

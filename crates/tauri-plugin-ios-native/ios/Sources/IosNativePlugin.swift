@@ -551,7 +551,10 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
                     try? args.onProgress?.send(progress)
                 })
             }
-            catch { invoke.reject("Backup source could not be copied") }
+            catch {
+                let code = (error as? PortableSourceError)?.copyFailureCode ?? "spool-write-failed"
+                invoke.reject("Backup source could not be copied", code: code)
+            }
         }
     }
 

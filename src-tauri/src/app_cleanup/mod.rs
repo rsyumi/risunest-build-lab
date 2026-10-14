@@ -495,7 +495,7 @@ fn remove(profiles: &DesktopProfiles, profile: Option<&ProfileName>, paths: &Pat
             }
         }
         erase_retrying(paths, request, effects)?;
-        if request.mode != Mode::Reset && profile.is_some() {
+        if request.mode != Mode::Reset {
             (effects.remove_webview)(profile)?;
         }
         if request.mode == Mode::PrepareRemoval {
@@ -842,6 +842,7 @@ mod tests {
         struct Fixture {
             _root: tempfile::TempDir,
             profiles: DesktopProfiles,
+            webview_root: PathBuf,
         }
 
         impl Fixture {
@@ -852,7 +853,7 @@ mod tests {
                 let base = fs::canonicalize(root.path()).unwrap();
                 let base = if cfg!(target_os = "macos") { base } else { root.path().to_owned() };
                 let profiles = DesktopProfiles::synthetic(&base, false);
-                Self { _root: root, profiles }
+                Self { _root: root, profiles, webview_root: base.join("webview") }
             }
 
             fn create(&self, profile: Option<&str>) -> PathBuf {
@@ -861,7 +862,13 @@ mod tests {
                     fs::create_dir_all(&root).unwrap();
                     fs::write(root.join("synthetic"), b"fixture").unwrap();
                 }
+                fs::create_dir_all(self.webview(profile)).unwrap();
+                fs::write(self.webview(profile).join("synthetic"), b"fixture").unwrap();
                 manifest.data
+            }
+
+            fn webview(&self, profile: Option<&str>) -> PathBuf {
+                self.webview_root.join(profile.unwrap_or("default"))
             }
 
             fn exists(&self, profile: Option<&str>) -> bool {
@@ -875,12 +882,17 @@ mod tests {
 
             fn run(&self, args: &[&str], profile: Option<&str>, secrets: &dyn Fn(&std::path::Path) -> Result<()>,
                 relaunched: &RefCell<Vec<Option<String>>>) -> Result<()> {
-                let webview = |_: Option<&ProfileName>| Ok(());
+                let webview = |profile: Option<&ProfileName>| files::remove(&self.webview(profile.map(ProfileName::as_str)));
+                self.run_with_webview(args, profile, secrets, &webview, relaunched)
+            }
+
+            fn run_with_webview(&self, args: &[&str], profile: Option<&str>, secrets: &dyn Fn(&std::path::Path) -> Result<()>,
+                webview: &dyn Fn(Option<&ProfileName>) -> Result<()>, relaunched: &RefCell<Vec<Option<String>>>) -> Result<()> {
                 let relaunch = |_: &Request, profile: Option<&ProfileName>| {
                     relaunched.borrow_mut().push(profile.map(|profile| profile.as_str().to_owned()));
                     Ok(())
                 };
-                let effects = Effects { remove_secrets: secrets, remove_webview: &webview, relaunch: &relaunch };
+                let effects = Effects { remove_secrets: secrets, remove_webview: webview, relaunch: &relaunch };
                 let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
                 cli(&args, &self.profiles, name(profile).as_ref(), &effects)
             }
@@ -908,6 +920,9 @@ mod tests {
             }
             assert!(fixture.exists(None));
             assert!(fixture.exists(Some("test")));
+            assert!(!fixture.webview(Some("work")).exists());
+            assert!(fixture.webview(None).join("synthetic").exists());
+            assert!(fixture.webview(Some("test")).join("synthetic").exists());
             assert_eq!(fixture.profiles.names().unwrap(), vec![ProfileName::parse("test").unwrap()]);
             // A profile that was never created is already removed.
             fixture.run(&REMOVE, Some("absent"), &secrets, &relaunched).unwrap();
@@ -927,10 +942,29 @@ mod tests {
             // The profile holding the request goes last.
             assert_eq!(*removed.borrow(), vec![test, work, default]);
             assert!(!fixture.exists(None));
+            for profile in [None, Some("work"), Some("test")] {
+                assert!(!fixture.webview(profile).exists());
+            }
             assert!(!fixture.paths(None).control.exists());
             let bases = fixture.profiles.bases().unwrap();
             assert!(!bases.profiles.exists());
             assert!(bases.caches.is_none_or(|caches| !caches.exists()));
+        }
+
+        #[test]
+        fn a_failed_default_webview_removal_keeps_the_journal_and_can_be_retried() {
+            let fixture = Fixture::new();
+            fixture.create(None);
+            let failing = |_: Option<&ProfileName>| Err("cleanup-webview-timeout".into());
+            assert_eq!(fixture.run_with_webview(&REMOVE, None, &|_| Ok(()), &failing, &RefCell::new(Vec::new())),
+                Err("cleanup-webview-timeout".into()));
+            assert!(fixture.webview(None).join("synthetic").exists());
+            let pending = read_request(&fixture.paths(None)).unwrap().unwrap();
+            assert_eq!(pending.mode, Mode::PrepareRemoval);
+            assert_eq!(pending.error.as_deref(), Some("cleanup-webview-timeout"));
+            fixture.run(&REMOVE, None, &|_| Ok(()), &RefCell::new(Vec::new())).unwrap();
+            assert!(!fixture.webview(None).exists());
+            assert!(!fixture.paths(None).control.exists());
         }
 
         #[test]
@@ -996,6 +1030,7 @@ mod tests {
             // A reset keeps the profile itself, and every other profile.
             assert!(!fixture.exists(Some("work")));
             assert!(fixture.profiles.directories(&ProfileName::parse("work").unwrap()).unwrap()[0].exists());
+            assert!(fixture.webview(Some("work")).exists());
             assert!(fixture.exists(None));
         }
 

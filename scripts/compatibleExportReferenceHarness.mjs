@@ -7,6 +7,7 @@ import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { createTargetReferenceRequire } from "./compatibleExportDependencies.mjs";
 import { createPocketTransactionHarness } from "./compatibleExportPocketTransaction.mjs";
 import {
   references,
@@ -41,11 +42,11 @@ function browserMessagePack(referenceRequire) {
 
 export function createReferenceHarness(target) {
   const directory = path.resolve(references[target].directory);
-  const referenceRequire = createRequire(path.join(directory, "package.json"));
+  const referenceRequire = createTargetReferenceRequire(target);
   const msgpackr = browserMessagePack(referenceRequire);
   const fflate = referenceRequire("fflate");
   const transaction =
-    target === "pocket" ? createPocketTransactionHarness(directory) : null;
+    target === "pocket" ? createPocketTransactionHarness(directory, referenceRequire) : null;
   let lastSourceDatabase = null;
   const entryPaths = [
     "storage/risuSave.ts",
@@ -153,7 +154,7 @@ export function createReferenceHarness(target) {
     setInterval: forbidden,
     ...msgpackr,
     fflate,
-    rfdc: require("rfdc"),
+    rfdc: referenceRequire("rfdc"),
     DBState: state,
     $state: { snapshot: structuredClone },
     fflateCompress: fflate.compress,
@@ -502,12 +503,28 @@ export async function verifyRoundTripAssets(harness, source, resaved) {
       "botPresets",
       "modules",
       "personas",
-      "characterOrder",
     ])
       if (Array.isArray(value[key]))
         value[key].forEach((child, index) =>
           collect(child, `${location}.${key}[${index}]`, out),
         );
+    // Reference bootstrap can remove empty folders and shift the remaining ones.
+    if (Array.isArray(value.characterOrder)) {
+      const ids = new Set();
+      value.characterOrder.forEach((folder, index) => {
+        let identity = index;
+        if (
+          folder && typeof folder === "object" &&
+          typeof folder.id === "string" && folder.id
+        ) {
+          if (ids.has(folder.id))
+            throw new Error("Duplicate synthetic folder id in characterOrder");
+          ids.add(folder.id);
+          identity = `id=${JSON.stringify(folder.id)}`;
+        }
+        collect(folder, `${location}.characterOrder[${identity}]`, out);
+      });
+    }
     if (value.embeddedModule)
       collect(value.embeddedModule, `${location}.embeddedModule`, out);
     return out;
@@ -673,10 +690,8 @@ if (
   }
   const file = path.join(contractDirectory, "runtime.json");
   if (process.argv.includes("--check")) {
-    if (
-      JSON.stringify(JSON.parse(fs.readFileSync(file, "utf8"))) !==
-      JSON.stringify(pins)
-    )
-      throw new Error("Reference runtime source drift");
+    const expected = JSON.parse(fs.readFileSync(file, "utf8"));
+    for (const target of Object.keys(references))
+      verifySourceFilePins(target, Object.keys(pins[target]), expected[target]);
   } else fs.writeFileSync(file, JSON.stringify(pins, null, 2) + "\n");
 }

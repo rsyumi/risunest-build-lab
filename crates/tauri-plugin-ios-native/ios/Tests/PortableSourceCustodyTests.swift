@@ -88,21 +88,89 @@ final class PortableSourceCustodyTests: XCTestCase {
         XCTAssertTrue(custody.release(token: token, jobId: nil))
     }
 
-    func testCopyCancellationBeforeDuringAndAtCompletionRemovesPartialFiles() throws {
-        for cancelledAt: UInt64 in [0, 65536, 131072] {
+    private func assertCopyFails(
+        _ custody: PortableSourceCustody, _ token: String, with expected: PortableSourceError,
+        onProgress: @escaping (PortableSourceCopyProgress) -> Void = { _ in }, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        XCTAssertThrowsError(try custody.materialize(token: token, staging: root, onProgress: onProgress), file: file, line: line) { error in
+            XCTAssertEqual(error as? PortableSourceError, expected, file: file, line: line)
+        }
+    }
+
+    private func assertOnlySourceRemains(file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["synthetic.risunest"], file: file, line: line)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("synthetic.risunest")), Data(repeating: 7, count: 131072), file: file, line: line)
+    }
+
+    func testCopyCancelledBeforeOrDuringTheCopyRemovesPartialFiles() throws {
+        for cancelledAt: UInt64 in [0, 65536] {
             let custody = PortableSourceCustody()
             let token = try select(custody, owner: "owner")
             try custody.confirm(token: token, format: "local-backup")
             if cancelledAt == 0 { XCTAssertTrue(custody.cancelCopy(token: token, jobId: nil)) }
-            XCTAssertThrowsError(try custody.materialize(token: token, staging: root) { progress in
-                if progress.copiedBytes == cancelledAt {
-                    XCTAssertTrue(custody.cancelCopy(token: token, jobId: nil))
-                }
-            })
+            var reported = [UInt64]()
+            assertCopyFails(custody, token, with: cancelledAt == 0 ? .ownership : .cancelled) { progress in
+                reported.append(progress.copiedBytes)
+                if progress.copiedBytes == cancelledAt { XCTAssertTrue(custody.cancelCopy(token: token, jobId: nil)) }
+            }
+            // The copy stops at the chunk where it was cancelled.
+            XCTAssertEqual(reported, cancelledAt == 0 ? [] : [cancelledAt])
             XCTAssertTrue(custody.release(token: token, jobId: nil))
-            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["synthetic.risunest"])
-            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("synthetic.risunest")), Data(repeating: 7, count: 131072))
+            try assertOnlySourceRemains()
         }
+    }
+
+    func testCopyCancelledAfterItsLastByteIsNotSynchronized() throws {
+        var synchronized = false
+        let custody = PortableSourceCustody(synchronizeCopy: { _ in synchronized = true })
+        let token = try select(custody, owner: "owner")
+        try custody.confirm(token: token, format: "local-backup")
+        assertCopyFails(custody, token, with: .cancelled) { progress in
+            if progress.copiedBytes == progress.totalBytes { XCTAssertTrue(custody.cancelCopy(token: token, jobId: nil)) }
+        }
+        XCTAssertFalse(synchronized)
+        XCTAssertTrue(custody.release(token: token, jobId: nil))
+        try assertOnlySourceRemains()
+    }
+
+    func testCopyCancelledWhileSynchronizingRemovesTheFinishedFile() throws {
+        var custody: PortableSourceCustody!
+        var token = ""
+        custody = PortableSourceCustody(synchronizeCopy: { output in
+            try output.synchronize()
+            XCTAssertTrue(custody.cancelCopy(token: token, jobId: nil))
+        })
+        token = try select(custody, owner: "owner")
+        try custody.confirm(token: token, format: "block-risu-save")
+        assertCopyFails(custody, token, with: .cancelled)
+        XCTAssertTrue(custody.release(token: token, jobId: nil))
+        try assertOnlySourceRemains()
+    }
+
+    func testCopyFailuresReportStableCodes() throws {
+        let custody = PortableSourceCustody()
+        let unconfirmed = try select(custody, owner: "owner")
+        try custody.confirm(token: unconfirmed, format: "portable")
+        assertCopyFails(custody, unconfirmed, with: .ownership)
+        try custody.confirm(token: unconfirmed, format: "local-backup")
+        let copied = try custody.materialize(token: unconfirmed, staging: root)
+        assertCopyFails(custody, unconfirmed, with: .busy)
+        XCTAssertTrue(custody.release(token: unconfirmed, jobId: nil))
+        try FileManager.default.removeItem(at: URL(fileURLWithPath: copied["path"] as! String).deletingLastPathComponent())
+
+        let changed = try select(custody, owner: "owner")
+        try custody.confirm(token: changed, format: "local-backup")
+        let writer = try FileHandle(forWritingTo: root.appendingPathComponent("synthetic.risunest"))
+        try writer.truncate(atOffset: 1)
+        try writer.close()
+        assertCopyFails(custody, changed, with: .changed)
+        XCTAssertTrue(custody.release(token: changed, jobId: nil))
+
+        // JavaScript maps these codes to the same dialog reasons on Android and iOS.
+        XCTAssertEqual(
+            [PortableSourceError.ownership, .busy, .changed, .cancelled, .readFailed, .writeFailed].map { $0.copyFailureCode },
+            ["source-reselect-required", "source-busy", "source-changed", "cancelled", "source-read-failed", "spool-write-failed"]
+        )
     }
 
     func testCopyProgressThrottlesLargeByteCountsAndAlwaysSendsCompletion() {

@@ -380,6 +380,7 @@ export function ownerOf(path) {
   if (under(path, 'tests/native')) return 'native'
   if (under(path, 'server/endpoint-registry/tests') && path.endsWith('.worker.ts')) return 'registry'
   if (under(path, 'server/manager/gui') && ordinaryTest.test(path)) return 'manager'
+  if (under(path, 'tools/web-risu-export/tests') && ordinaryTest.test(path)) return 'web-export'
   if (extendedAppTests.includes(path)) return 'app-extended'
   if (nodeAppTestSet.has(path)) return 'app-node'
   if (ordinaryTest.test(path) && (under(path, 'benchmarks') || harnessVitestTests.includes(path))) return 'harness'
