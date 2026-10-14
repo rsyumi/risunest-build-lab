@@ -79,6 +79,7 @@ pub(crate) fn credential_principal(provider: &str, credential: &[u8]) -> String 
 #[derive(Default)]
 struct AccountWait {
     next_allowed: Option<Instant>,
+    error_pause_until: Option<Instant>,
     failures: u32,
     last_error: Option<ErrorKind>,
 }
@@ -145,10 +146,20 @@ impl AccountBackoff {
         if !matches!(kind, ErrorKind::Transient | ErrorKind::RateLimited | ErrorKind::DailyQuotaExhausted) {
             return Ok(());
         }
-        value.failures = value.failures.saturating_add(1);
-        let delay = Duration::from_secs(next_delay_seconds(value.failures, None))
-            .max(retry_after.unwrap_or_default());
-        let until = now.checked_add(delay).ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))?;
+        let active_pause = value.error_pause_until.filter(|until| *until > now);
+        let until = if let Some(previous) = active_pause {
+            match retry_after {
+                Some(delay) => previous.max(now.checked_add(delay)
+                    .ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))?),
+                None => previous,
+            }
+        } else {
+            value.failures = value.failures.saturating_add(1);
+            let delay = Duration::from_secs(next_delay_seconds(value.failures, None))
+                .max(retry_after.unwrap_or_default());
+            now.checked_add(delay).ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))?
+        };
+        value.error_pause_until = Some(until);
         value.next_allowed = Some(value.next_allowed.map_or(until, |previous| previous.max(until)));
         Ok(())
     }
@@ -164,12 +175,17 @@ impl AccountBackoff {
     }
 
     pub fn success(&self, account: &AccountKey) -> Result<()> {
+        self.success_at(account, Instant::now())
+    }
+
+    fn success_at(&self, account: &AccountKey, now: Instant) -> Result<()> {
         let mut accounts = self.accounts.lock().map_err(poisoned)?;
         if let Some(value) = accounts.get_mut(account) {
-            value.failures = 0;
-            value.last_error = None;
-            // An earlier in-flight request can succeed after another request
-            // has imposed a longer pause. That pause must not be shortened.
+            if !value.error_pause_until.is_some_and(|until| until > now) {
+                value.failures = 0;
+                value.last_error = None;
+                value.error_pause_until = None;
+            }
         }
         Ok(())
     }
@@ -185,6 +201,7 @@ impl AccountBackoff {
                 target.next_allowed = source.next_allowed;
                 target.last_error = source.last_error;
             }
+            target.error_pause_until = target.error_pause_until.max(source.error_pause_until);
             target.failures = target.failures.max(source.failures);
         }
         Ok(())
@@ -257,8 +274,40 @@ mod tests {
         state.success(&account).unwrap();
         assert_eq!(state.remaining(&account, now).unwrap(), Duration::from_secs(3600));
         let state = state.accounts.lock().unwrap();
-        assert_eq!(state[&account].failures, 0);
-        assert_eq!(state[&account].last_error, None);
+        assert_eq!(state[&account].failures, 1);
+        assert_eq!(state[&account].last_error, Some(ErrorKind::Transient));
+    }
+
+    #[test]
+    fn failures_coalesce_per_error_pause_and_spacing_does_not_count_as_a_pause() {
+        let state = AccountBackoff::default();
+        let account = account("a", "https://synthetic.invalid");
+        let now = Instant::now();
+        state.defer_for(&account, Duration::from_secs(60), now).unwrap();
+        state.failure(&account, ErrorKind::Transient, None, now).unwrap();
+        let later = now + Duration::from_millis(500);
+        for _ in 0..16 {
+            state.failure(&account, ErrorKind::Transient, None, later).unwrap();
+        }
+        state.success_at(&account, later).unwrap();
+        {
+            let accounts = state.accounts.lock().unwrap();
+            assert_eq!(accounts[&account].failures, 1);
+            assert_eq!(accounts[&account].error_pause_until, Some(now + Duration::from_secs(1)));
+        }
+        let expired = now + Duration::from_secs(1);
+        state.failure(&account, ErrorKind::Transient, None, expired).unwrap();
+        {
+            let accounts = state.accounts.lock().unwrap();
+            assert_eq!(accounts[&account].failures, 2);
+            assert_eq!(accounts[&account].error_pause_until, Some(now + Duration::from_secs(3)));
+        }
+        state.failure(&account, ErrorKind::RateLimited, Some(Duration::from_secs(120)), expired).unwrap();
+        state.success_at(&account, expired).unwrap();
+        assert_eq!(state.remaining(&account, now).unwrap(), Duration::from_secs(121));
+        assert_eq!(state.accounts.lock().unwrap()[&account].failures, 2);
+        state.success_at(&account, now + Duration::from_secs(121)).unwrap();
+        assert_eq!(state.accounts.lock().unwrap()[&account].failures, 0);
     }
 
     #[test]

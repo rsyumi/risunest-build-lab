@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
+use crate::network_log::RequestBuilderExt;
 use std::{
     collections::HashMap,
     ffi::OsString,
@@ -614,7 +615,7 @@ impl Updater {
                 .build()?
                 .get(url)
                 .headers(headers.clone())
-                .send()
+                .send_logged()
                 .await;
 
             match response {
@@ -810,7 +811,7 @@ impl Update {
             .build()?
             .get(self.download_url.clone())
             .headers(headers)
-            .send()
+            .send_logged()
             .await?;
 
         if !response.status().is_success() {

@@ -1,10 +1,10 @@
-import { UNOWNED_PLUGIN_OWNER } from '../plugins/pluginOwner'
 import { runNativeDataHealthRepair } from './nativeDataHealthRepair'
 import { notifyLocalPersistentRevision, subscribeLocalPersistentRevision } from './persistentRevisionEvents'
 import { describe, expect, it, vi } from 'vitest'
+import { createPersistentStoreHarness } from '../../../tests/support/persistentStoreHarness'
 import type { Database } from './database.svelte'
 import { capturePersistentPluginStorage, capturePersistentPresets, capturePersistentRoot, createPersistentDataRuntime, publishPersistentCharacterMutationToWorkingSet, publishPersistentConversationReplacementToWorkingSet, restoreStableWorkingSetSelection } from './persistentDataRuntime'
-import type { PersistentDataStore, PersistentRevisionLease } from './persistentDataStore'
+import type { PersistentDataStore } from './persistentDataStore'
 import { RevisionConflictError } from './persistentDataStore'
 import {
     createCatalogCharacterStub,
@@ -55,30 +55,12 @@ function makeConversationDatabase(username: string): Database {
 
 async function createActiveSessionRuntimeHarness(
     prepareDatabase: (value: Database) => Promise<Database> = async (value) => value,
+    initial = makeConversationDatabase('Initial'),
 ) {
-    let database = makeConversationDatabase('Initial')
-    let revision = 1
-    const store = {
-        open: vi.fn(async () => undefined),
-        readRoot: vi.fn(async () => ({
-            revision,
-            value: capturePersistentRoot(database),
-        })),
-        readConversation: vi.fn(async (characterId: string, conversationId: string) => {
-            const conversation = database.characters
-                .find((character) => character.chaId === characterId)
-                ?.chats.find((chat) => chat.id === conversationId)
-            return conversation
-                ? { revision, value: structuredClone(conversation) }
-                : null
-        }),
-        commit: vi.fn(async () => ({ revision: ++revision })),
-        replaceFromDatabase: vi.fn(async () => ({ revision: 2 })),
-        acquireRevision: vi.fn(async (revision: number) =>
-            makeDatabaseLease(structuredClone(database), revision)),
-    } as unknown as PersistentDataStore
+    let database = initial
+    const storage = await createPersistentStoreHarness(structuredClone(database))
     const runtime = createPersistentDataRuntime({
-        store,
+        store: storage.store,
         state: {
             captureRoot: () => capturePersistentRoot(database),
             capturePresets: () => database.botPresets,
@@ -105,167 +87,22 @@ async function createActiveSessionRuntimeHarness(
     await runtime.initializeActiveWorkingSet(database)
     return {
         runtime,
-        store,
+        storage,
         get database() {
             return database
         },
     }
 }
 
-function makeDatabaseLease(database: Database, revision: number): PersistentRevisionLease {
-    const {
-        characters,
-        botPresets = [],
-        pluginCustomStorage = {},
-        ...root
-    } = database
-    return {
-        revision,
-        readRoot: vi.fn(async () => ({ revision, value: structuredClone(root) })),
-        queryPresets: vi.fn(async () => ({
-            revision,
-            items: botPresets.map((preset, configuredIndex) => ({
-                id: String(configuredIndex),
-                configuredIndex,
-                name: preset.name ?? '',
-                image: preset.image,
-            })),
-        })),
-        readPreset: vi.fn(async (id) => {
-            const preset = botPresets[Number(id)]
-            return preset ? { revision, value: structuredClone(preset) } : null
-        }),
-        queryCharacters: vi.fn(async ({ trash }) => ({
-            revision,
-            items: characters.flatMap((character, configuredIndex) =>
-                (character.trashTime !== undefined) === trash ? [{
-                    id: character.chaId,
-                    name: character.name,
-                    image: character.image,
-                    configuredIndex,
-                    recentAt: character.lastInteraction ?? 0,
-                    trashed: trash,
-                    conversationCount: character.chats.length,
-                    type: character.type,
-                    creatorNotes: character.creatorNotes,
-                    trashTime: character.trashTime,
-                }] : []),
-        })),
-        readCharacterSummary: vi.fn(async (id) => {
-            const configuredIndex = characters.findIndex(
-                (candidate) => candidate.chaId === id,
-            )
-            if (configuredIndex < 0) return null
-            const character = characters[configuredIndex]
-            return {
-                id: character.chaId,
-                name: character.name,
-                image: character.image,
-                configuredIndex,
-                recentAt: character.lastInteraction ?? 0,
-                trashed: character.trashTime !== undefined,
-                conversationCount: character.chats.length,
-                type: character.type,
-                creatorNotes: character.creatorNotes,
-                trashTime: character.trashTime,
-            }
-        }),
-        readCharacter: vi.fn(async (id) => {
-            const character = characters.find((candidate) => candidate.chaId === id)
-            if (!character) return null
-            const { chats: _chats, ...detail } = character
-            return { revision, value: structuredClone(detail) }
-        }),
-        queryConversations: vi.fn(async ({ characterId }) => {
-            const character = characters.find((candidate) => candidate.chaId === characterId)
-            return {
-                revision,
-                items: (character?.chats ?? []).map((chat, configuredIndex) => ({
-                    id: chat.id!,
-                    characterId,
-                    name: chat.name ?? '',
-                    folderId: chat.folderId,
-                    bindedPersona: chat.bindedPersona,
-                    configuredIndex,
-                    recentAt: chat.lastDate ?? 0,
-                    messageCount: chat.message.length,
-                })),
-            }
-        }),
-        readConversation: vi.fn(async (characterId, conversationId) => {
-            const conversation = characters.find((candidate) =>
-                candidate.chaId === characterId)?.chats.find((candidate) =>
-                candidate.id === conversationId)
-            return conversation
-                ? { revision, value: structuredClone(conversation) }
-                : null
-        }),
-        readConversationMetadata: vi.fn(async () => null),
-        readConversationWindow: vi.fn(async () => null),
-        readPluginStorageValues: vi.fn(async ({ owner, afterKey, limit = 256 }) => {
-            const records = Object.keys(pluginCustomStorage).map((key, ordinal) => ({
-                owner: UNOWNED_PLUGIN_OWNER, key, ordinal,
-            })).filter((item) => (!owner || owner === item.owner) && item.ordinal > (afterKey?.ordinal ?? -1))
-            const selected = records.slice(0, limit)
-            const last = selected.at(-1)
-            return {
-                revision,
-                items: selected.map(({ owner, key }) => ({ owner, key, value: structuredClone(pluginCustomStorage[key]) })),
-                nextCursor: records.length > limit && last ? last : null,
-            }
-        }),
-        queryPluginStorage: vi.fn(async () => ({
-            revision,
-            items: Object.keys(pluginCustomStorage).map((key) => ({
-                owner: UNOWNED_PLUGIN_OWNER,
-                key,
-                byteSize: 0,
-            })),
-        })),
-        readPluginStorage: vi.fn(async (_owner, key) => Object.hasOwn(pluginCustomStorage, key)
-            ? { revision, value: structuredClone(pluginCustomStorage[key]) }
-            : null),
-        readAssetAlias: vi.fn(async () => null),
-        readAssetAliasesByKeys: vi.fn(async () => ({ revision, value: [] })),
-        listAssetAliases: vi.fn(async () => ({ revision, items: [] })),
-        readAssetOwnerHead: vi.fn(async () => null),
-        release: vi.fn(async () => undefined),
-    }
-}
-
-function createFenceRuntimeHarness(
+async function createFenceRuntimeHarness(
     initial: Database,
     restored: Database = initial,
-    restoredRevision = 2,
     onLocalRevision: (revision: number) => void = (revision) => notifyLocalPersistentRevision(revision),
 ) {
     let database = structuredClone(initial)
-    let revision = 1
-    const store = {
-        open: vi.fn(async () => undefined),
-        readRoot: vi.fn(async () => ({
-            revision,
-            value: capturePersistentRoot(database),
-        })),
-        commit: vi.fn(async ({ expectedRevision }: { expectedRevision: number }) => {
-            revision = expectedRevision + 1
-            return { revision }
-        }),
-        acquireRevision: vi.fn(async (requestedRevision: number) => {
-            if (requestedRevision === restoredRevision) {
-                return makeDatabaseLease(restored, restoredRevision)
-            }
-            return makeDatabaseLease(database, requestedRevision)
-        }),
-        materializeDatabase: vi.fn(async (requestedRevision?: number) => {
-            if (requestedRevision !== restoredRevision) {
-                throw new Error(`Unexpected materialized revision ${requestedRevision}`)
-            }
-            return structuredClone(restored)
-        }),
-    } as unknown as PersistentDataStore
+    const storage = await createPersistentStoreHarness(structuredClone(initial))
     const runtime = createPersistentDataRuntime({
-        store,
+        store: storage.store,
         state: {
             captureRoot: () => capturePersistentRoot(database),
             capturePluginStorage: () => database.pluginCustomStorage ?? {},
@@ -287,21 +124,31 @@ function createFenceRuntimeHarness(
     })
     return {
         runtime,
-        store,
+        storage,
         get database() { return database },
         set username(value: string) { database.username = value },
+        /** Writes the restored database as the next revision, as a native restore does outside the runtime. */
+        async commitRestored() {
+            const { revision } = await storage.store.readRoot()
+            return (await storage.store.replaceFromDatabase(structuredClone(restored), revision)).revision
+        },
+        /** The username and revision the store holds now. */
+        async stored() {
+            const { revision, value } = await storage.store.readRoot()
+            return { revision, username: value.username }
+        },
     }
 }
 
 describe('native data health repair coordination', () => {
     it.each(['repair', 'undo'])('refreshes the loaded root after %s and saves a later edit at the new revision', async () => {
         const repaired = makeConversationDatabase('Corrected root')
-        const harness = createFenceRuntimeHarness(makeConversationDatabase('Broken root'), repaired)
+        const harness = await createFenceRuntimeHarness(makeConversationDatabase('Broken root'), repaired)
         await harness.runtime.initializeActiveWorkingSet(harness.database)
         const mutate = vi.fn(async (revision: number) => {
             expect(revision).toBe(1)
             expect(() => harness.runtime.assertPersistentMutationAllowed()).toThrow()
-            return { revision: 2 }
+            return { revision: await harness.commitRestored() }
         })
         const notified = vi.fn()
         const unsubscribe = subscribeLocalPersistentRevision(notified)
@@ -316,11 +163,11 @@ describe('native data health repair coordination', () => {
         harness.username = 'Later edit'
         harness.runtime.markPersistentDataDirty(1)
         await harness.runtime.flushPendingDataLocally('after-repair')
-        expect(harness.store.commit).toHaveBeenLastCalledWith(expect.objectContaining({ expectedRevision: 2 }))
+        expect(await harness.stored()).toEqual({ revision: 3, username: 'Later edit' })
     })
 
     it('flushes pending edits and rejects a diagnosis that became stale before native mutation', async () => {
-        const harness = createFenceRuntimeHarness(makeConversationDatabase('Initial'))
+        const harness = await createFenceRuntimeHarness(makeConversationDatabase('Initial'))
         await harness.runtime.initializeActiveWorkingSet(harness.database)
         harness.username = 'Pending edit'
         harness.runtime.markPersistentDataDirty(1)
@@ -332,13 +179,13 @@ describe('native data health repair coordination', () => {
     })
 
     it('keeps the committed repair read-only when projection fails', async () => {
-        const harness = createFenceRuntimeHarness(makeConversationDatabase('Initial'))
+        const harness = await createFenceRuntimeHarness(makeConversationDatabase('Initial'), makeConversationDatabase('Repaired'))
         await harness.runtime.initializeActiveWorkingSet(harness.database)
-        vi.mocked(harness.store.acquireRevision).mockRejectedValueOnce(new Error('projection failed'))
+        harness.storage.failNext('acquireRevision', new Error('projection failed'))
         const notified = vi.fn()
         const unsubscribe = subscribeLocalPersistentRevision(notified)
         try {
-            await expect(runNativeDataHealthRepair(1, async () => ({ revision: 2 }), harness.runtime))
+            await expect(runNativeDataHealthRepair(1, async () => ({ revision: await harness.commitRestored() }), harness.runtime))
                 .rejects.toMatchObject({ committedRevision: 2, code: 'activation-committed-refresh-failed' })
         } finally {
             unsubscribe()
@@ -349,9 +196,12 @@ describe('native data health repair coordination', () => {
     })
 
     it('does not replay a native repair whose journal or diagnosis failed after commit', async () => {
-        const harness = createFenceRuntimeHarness(makeConversationDatabase('Initial'))
+        const harness = await createFenceRuntimeHarness(makeConversationDatabase('Initial'), makeConversationDatabase('Repaired'))
         await harness.runtime.initializeActiveWorkingSet(harness.database)
-        const mutate = vi.fn(async () => { throw { code: 'committed', revision: 2, message: 'diagnosis failed' } })
+        const mutate = vi.fn(async () => {
+            const revision = await harness.commitRestored()
+            throw { code: 'committed', revision, message: 'diagnosis failed' }
+        })
         const notified = vi.fn()
         const unsubscribe = subscribeLocalPersistentRevision(notified)
         try {
@@ -422,26 +272,18 @@ describe('received unit projection into the selected conversation', () => {
     async function selectedConversationReceiveHarness(receive: (persisted: Database) => string[]) {
         const database = makeConversationDatabase('Initial')
         const persisted = structuredClone(database)
-        let revision = 1
-        const store = {
-            open: vi.fn(async () => undefined),
-            readRoot: vi.fn(async () => ({ revision, value: capturePersistentRoot(persisted) })),
-            commit: vi.fn(async () => ({ revision: ++revision })),
-            acquireRevision: vi.fn(async (pinned: number) => {
-                const lease = makeDatabaseLease(structuredClone(persisted), pinned)
-                lease.readConversationMetadata = vi.fn(async (characterId: string, conversationId: string) => {
-                    const { message, ...conversation } = persisted.characters.find((value) => value.chaId === characterId)!.chats.find((value) => value.id === conversationId)!
-                    return { revision: pinned, value: { characterId, conversationId, conversation: structuredClone(conversation), totalMessages: message.length } }
-                }) as PersistentRevisionLease['readConversationMetadata']
-                return lease
-            }),
-            lwwStageReceive: vi.fn(async () => undefined),
-            lwwApplyReceive: vi.fn(async () => {
+        const storage = await createPersistentStoreHarness(structuredClone(persisted))
+        // The IndexedDB store has no LWW receive, so the received change lands as one replacement revision.
+        const store: PersistentDataStore = Object.assign(storage.store, {
+            lwwStageReceive: async () => undefined,
+            lwwApplyReceive: async () => {
                 const affectedKeys = receive(persisted)
-                return { revision: affectedKeys.length ? ++revision : revision, affectedKeys, heldKeys: [], deferredKeys: [] }
-            }),
-            lwwFinishReceive: vi.fn(async () => undefined),
-        } as unknown as PersistentDataStore
+                let { revision } = await storage.store.readRoot()
+                if (affectedKeys.length) revision = (await storage.store.replaceFromDatabase(structuredClone(persisted), revision)).revision
+                return { revision, affectedKeys, heldKeys: [], deferredKeys: [] }
+            },
+            lwwFinishReceive: async () => undefined,
+        })
         const runtime = createPersistentDataRuntime({
             store,
             state: {
@@ -552,8 +394,8 @@ describe('persistent conversation replacement publication', () => {
     })
 
     it('forwards inactive replacement options without changing active selection', async () => {
-        const harness = await createActiveSessionRuntimeHarness()
-        harness.database.characters.push({
+        const initial = makeConversationDatabase('Initial')
+        initial.characters.push({
             type: 'character',
             chaId: 'char-b',
             name: 'Inactive',
@@ -566,6 +408,7 @@ describe('persistent conversation replacement publication', () => {
                 message: [],
             }],
         } as any)
+        const harness = await createActiveSessionRuntimeHarness(undefined, initial)
         const selectedCharacterId = harness.database.characters[0].chaId
         const selectedConversationId = harness.database.characters[0].chats[0].id
         expect(harness.runtime.captureSelectedConversationTarget()).toMatchObject({
@@ -592,13 +435,7 @@ describe('persistent conversation replacement publication', () => {
             conversationId: selectedConversationId,
         })
         expect(harness.database.characters[1].chats[0]).toEqual(replacement)
-        expect(harness.store.commit).toHaveBeenCalledWith(expect.objectContaining({
-            expectedRevision: 1,
-            conversations: [expect.objectContaining({
-                characterId: 'char-b',
-                conversationId: 'chat-b',
-            })],
-        }))
+        expect((await harness.storage.store.readConversation('char-b', 'chat-b'))?.value).toEqual(replacement)
         await expect(harness.runtime.replacePersistentConversation(
             'char-b',
             'chat-b',
@@ -855,9 +692,9 @@ describe('prepared persistent replacement', () => {
         await replacing
 
         expect(prepareDatabase).toHaveBeenCalledOnce()
-        expect(harness.store.replaceFromDatabase).toHaveBeenCalledWith(captured, 1)
+        expect(harness.runtime.revision).toBe(harness.storage.revision + 1)
+        expect(await harness.storage.store.materializeDatabase(harness.runtime.revision)).toEqual({ ...captured, pluginCustomStorage: {} })
         expect(harness.database).toEqual(captured)
-        expect(harness.store.commit).not.toHaveBeenCalled()
     })
 
     it('invalidates a resident session before publishing a cloned conversation', async () => {
@@ -905,13 +742,9 @@ describe('prepared persistent replacement', () => {
     it('rejects a catalog working set before database preparation', async () => {
         let database = makeDatabase('Initial')
         const prepareDatabase = vi.fn(async (value: Database) => value)
-        const store = {
-            open: vi.fn(async () => undefined),
-            readRoot: vi.fn(async () => ({ revision: 1, value: { username: 'Initial' } })),
-            replaceFromDatabase: vi.fn(),
-        } as unknown as PersistentDataStore
+        const storage = await createPersistentStoreHarness(structuredClone(database))
         const runtime = createPersistentDataRuntime({
-            store,
+            store: storage.store,
             state: {
                 captureRoot: () => capturePersistentRoot(database),
                 capturePresets: () => database.botPresets,
@@ -943,21 +776,16 @@ describe('prepared persistent replacement', () => {
             .rejects.toThrow('incomplete persistent working set')
 
         expect(prepareDatabase).not.toHaveBeenCalled()
-        expect(store.replaceFromDatabase).not.toHaveBeenCalled()
+        expect((await storage.store.readRoot()).revision).toBe(storage.revision)
     })
 
     it('preserves newer local edits and rejects a stale prepared replacement', async () => {
         let database = makeDatabase('Initial')
         const preparation = deferred<Database>()
         const prepareDatabase = vi.fn(() => preparation.promise)
-        const store = {
-            open: vi.fn(async () => undefined),
-            readRoot: vi.fn(async () => ({ revision: 1, value: { username: 'Initial' } })),
-            replaceFromDatabase: vi.fn(async () => ({ revision: 2 })),
-            commit: vi.fn(async ({ expectedRevision }) => ({ revision: expectedRevision + 1 })),
-        } as unknown as PersistentDataStore
+        const storage = await createPersistentStoreHarness(structuredClone(database))
         const runtime = createPersistentDataRuntime({
-            store,
+            store: storage.store,
             state: {
                 captureRoot: () => {
                     const { characters: _characters, botPresets: _botPresets, ...root } = database
@@ -989,24 +817,23 @@ describe('prepared persistent replacement', () => {
         await expect(replacement).rejects.toBeInstanceOf(RevisionConflictError)
 
         expect(database.username).toBe('Edited during preparation')
-        expect(store.replaceFromDatabase).not.toHaveBeenCalled()
-        expect(store.commit).toHaveBeenCalledOnce()
         expect(runtime.revision).toBe(2)
+        const stored = await storage.store.materializeDatabase(2)
+        expect(stored.username).toBe('Edited during preparation')
+        expect(stored.characters.map((character) => character.chaId)).toEqual(['char-a'])
     })
 
     it('returns a detached materialized snapshot without installing it', async () => {
         let database = makeDatabase('Initial')
         const snapshot = makeDatabase('Snapshot')
-        const store = {
-            open: vi.fn(async () => undefined),
-            readRoot: vi.fn(async () => ({ revision: 4, value: { username: 'Initial' } })),
-            materializeDatabase: vi.fn(async () => snapshot),
-        } as unknown as PersistentDataStore
+        const storage = await createPersistentStoreHarness(structuredClone(snapshot))
+        // A store that hands out its own object is the case the runtime must detach from.
+        storage.spy('materializeDatabase').mockResolvedValue(snapshot)
         const replaceDatabase = vi.fn((replacement: Database) => {
             database = replacement
         })
         const runtime = createPersistentDataRuntime({
-            store,
+            store: storage.store,
             state: {
                 captureRoot: () => capturePersistentRoot(database),
                 capturePresets: () => database.botPresets,
@@ -1034,8 +861,8 @@ describe('prepared persistent replacement', () => {
             username: 'Authoritative',
             botPresetsId: 1,
             botPresets: [
-                { name: 'Inactive', mainPrompt: 'inactive body' },
-                { name: 'Active', mainPrompt: 'active body' },
+                { id: 'preset-inactive', name: 'Inactive', mainPrompt: 'inactive body' },
+                { id: 'preset-active', name: 'Active', mainPrompt: 'active body' },
             ],
             characters: [
                 {
@@ -1057,18 +884,12 @@ describe('prepared persistent replacement', () => {
         } as unknown as Database
         let database = structuredClone(complete)
         let projectedActiveIds: string[] = []
-        const lease = makeDatabaseLease(complete, 4)
-        const store = {
-            open: vi.fn(async () => undefined),
-            readRoot: vi.fn(async () => ({ revision: 4, value: capturePersistentRoot(complete) })),
-            acquireRevision: vi.fn(async () => lease),
-            materializeDatabase: vi.fn(async () => {
-                throw new Error('legacy materializer must not be called')
-            }),
-        } as unknown as PersistentDataStore
+        const storage = await createPersistentStoreHarness(structuredClone(complete))
+        const leases = storage.leases()
+        const materializeDatabase = storage.spy('materializeDatabase')
         const restoreSelection = vi.fn()
         const runtime = createPersistentDataRuntime({
-            store,
+            store: storage.store,
             state: {
                 captureRoot: () => capturePersistentRoot(database),
                 capturePresets: () => database.botPresets,
@@ -1092,8 +913,8 @@ describe('prepared persistent replacement', () => {
 
         await runtime.releaseInactiveWorkingSet()
 
-        expect(store.materializeDatabase).not.toHaveBeenCalled()
-        expect(store.acquireRevision).toHaveBeenCalledWith(4)
+        expect(materializeDatabase).not.toHaveBeenCalled()
+        expect(leases.map((lease) => lease.revision)).toEqual([storage.revision])
         expect(database.username).toBe('Authoritative')
         expect(isCatalogCharacterStub(database.characters[0])).toBe(true)
         expect(database.characters[0]).not.toHaveProperty('personality')
@@ -1108,24 +929,10 @@ describe('prepared persistent replacement', () => {
 
     it('does not publish a scalable snapshot when the final release guard becomes false', async () => {
         const database = makeDatabase('Initial')
-        const snapshot = makeDatabase('Snapshot')
-        const materialization = deferred<Awaited<
-            ReturnType<PersistentRevisionLease['queryCharacters']>
-        >>()
-        const lease = makeDatabaseLease(snapshot, 4)
-        const originalQuery = lease.queryCharacters.bind(lease)
-        lease.queryCharacters = vi.fn(() => materialization.promise)
-        const store = {
-            open: vi.fn(async () => undefined),
-            readRoot: vi.fn(async () => ({
-                revision: 4,
-                value: capturePersistentRoot(database),
-            })),
-            acquireRevision: vi.fn(async () => lease),
-        } as unknown as PersistentDataStore
+        const storage = await createPersistentStoreHarness(makeDatabase('Snapshot'))
         const replaceDatabase = vi.fn()
         const runtime = createPersistentDataRuntime({
-            store,
+            store: storage.store,
             state: {
                 captureRoot: () => capturePersistentRoot(database),
                 capturePresets: () => database.botPresets,
@@ -1141,13 +948,12 @@ describe('prepared persistent replacement', () => {
         })
         await runtime.initializeActiveWorkingSet(database)
 
-        const release = runtime.releaseInactiveWorkingSet(() => false)
-        await vi.waitFor(() => expect(lease.queryCharacters).toHaveBeenCalledOnce())
-        materialization.resolve(await originalQuery({
-            order: 'configured',
-            trash: false,
-            limit: 128,
-        }))
+        let allowed = true
+        const materialization = storage.gate('acquireRevision')
+        const release = runtime.releaseInactiveWorkingSet(() => allowed)
+        await materialization.entered
+        allowed = false
+        materialization.release()
 
         await expect(release).resolves.toBe(false)
         expect(replaceDatabase).not.toHaveBeenCalled()
@@ -1158,16 +964,9 @@ describe('prepared persistent replacement', () => {
         const releasePermission = deferred<boolean>()
         let transitionCurrent = true
         const replaceDatabase = vi.fn()
-        const snapshot = makeDatabase('Snapshot')
+        const storage = await createPersistentStoreHarness(makeDatabase('Snapshot'))
         const runtime = createPersistentDataRuntime({
-            store: {
-                open: vi.fn(async () => undefined),
-                readRoot: vi.fn(async () => ({
-                    revision: 4,
-                    value: capturePersistentRoot(database),
-                })),
-                acquireRevision: vi.fn(async () => makeDatabaseLease(snapshot, 4)),
-            } as unknown as PersistentDataStore,
+            store: storage.store,
             state: {
                 captureRoot: () => capturePersistentRoot(database),
                 capturePresets: () => database.botPresets,
@@ -1199,7 +998,7 @@ describe('prepared persistent replacement', () => {
             username: 'Initial',
             customBackground: '',
             botPresetsId: 0,
-            botPresets: [{ name: 'Active', mainPrompt: 'body' }],
+            botPresets: [{ id: 'preset-active', name: 'Active', mainPrompt: 'body' }],
             pluginCustomStorage: { cached: true },
             characters: [{
                 type: 'character',
@@ -1221,29 +1020,12 @@ describe('prepared persistent replacement', () => {
             }],
         } as unknown as Database
         let database = structuredClone(complete)
-        const replacementWrite = deferred<{ revision: number }>()
-        const commit = vi.fn(async ({ expectedRevision }) => ({
-            revision: expectedRevision + 1,
-        }))
-        const acquireRevision = vi.fn(async () => {
-            throw new Error('replacement publication must not acquire a revision')
-        })
-        const materializeDatabase = vi.fn(async () => {
-            throw new Error('replacement publication must not materialize the database')
-        })
-        const store = {
-            open: vi.fn(async () => undefined),
-            readRoot: vi.fn(async () => ({
-                revision: 7,
-                value: capturePersistentRoot(complete),
-            })),
-            replaceFromDatabase: vi.fn(() => replacementWrite.promise),
-            commit,
-            acquireRevision,
-            materializeDatabase,
-        } as unknown as PersistentDataStore
+        const storage = await createPersistentStoreHarness(structuredClone(complete))
+        const replacementWrite = storage.gate('replaceFromDatabase')
+        const acquireRevision = storage.spy('acquireRevision')
+        const materializeDatabase = storage.spy('materializeDatabase')
         const runtime = createPersistentDataRuntime({
-            store,
+            store: storage.store,
             state: {
                 captureRoot: () => capturePersistentRoot(database),
                 capturePluginStorage: () => database.pluginCustomStorage,
@@ -1273,12 +1055,12 @@ describe('prepared persistent replacement', () => {
         replacement.username = 'Replacement'
 
         const replacing = runtime.replacePersistentDatabase(replacement, 'delayed-replacement')
-        await vi.waitFor(() => expect(store.replaceFromDatabase).toHaveBeenCalledOnce())
+        await replacementWrite.entered
         expect(() => {
             runtime.assertPersistentMutationAllowed()
             database.customBackground = 'blocked edit during replacement'
         }).toThrow(/replacement is active/i)
-        replacementWrite.resolve({ revision: 8 })
+        replacementWrite.release()
         await replacing
 
         expect(database.username).toBe('Replacement')
@@ -1289,25 +1071,21 @@ describe('prepared persistent replacement', () => {
         expect(acquireRevision).not.toHaveBeenCalled()
         expect(materializeDatabase).not.toHaveBeenCalled()
 
-        expect(commit).not.toHaveBeenCalled()
+        const replaced = storage.revision + 1
+        expect(runtime.revision).toBe(replaced)
         database.customBackground = 'live edit during replacement'
         runtime.markPersistentDataDirty(1)
         await runtime.flushPendingData('persist-new-live-edit')
-        expect(commit).toHaveBeenCalledWith(
-            expect.objectContaining({
-                expectedRevision: 8,
-                rootMutations: [
-                    { type: 'set', key: 'customBackground', value: 'live edit during replacement' },
-                ],
-            }),
-        )
+        const stored = await storage.store.readRoot()
+        expect(stored.revision).toBe(replaced + 1)
+        expect(stored.value).toMatchObject({ username: 'Replacement', customBackground: 'live edit during replacement' })
     })
 
     it('cannot split committed replacement publication on revision read or release failure', async () => {
         const complete = {
             username: 'Initial',
             botPresetsId: 0,
-            botPresets: [{ name: 'Active', mainPrompt: 'body' }],
+            botPresets: [{ id: 'preset-active', name: 'Active', mainPrompt: 'body' }],
             pluginCustomStorage: { cached: true },
             characters: [{
                 type: 'character',
@@ -1324,24 +1102,11 @@ describe('prepared persistent replacement', () => {
             }],
         } as unknown as Database
         let database = structuredClone(complete)
-        const acquireRevision = vi.fn(async () => {
-            throw new Error('revision reads are unavailable')
-        })
-        const materializeDatabase = vi.fn(async () => {
-            throw new Error('full materialization is unavailable')
-        })
-        const store = {
-            open: vi.fn(async () => undefined),
-            readRoot: vi.fn(async () => ({
-                revision: 7,
-                value: capturePersistentRoot(complete),
-            })),
-            replaceFromDatabase: vi.fn(async () => ({ revision: 8 })),
-            acquireRevision,
-            materializeDatabase,
-        } as unknown as PersistentDataStore
+        const storage = await createPersistentStoreHarness(structuredClone(complete))
+        const acquireRevision = storage.spy('acquireRevision').mockRejectedValue(new Error('revision reads are unavailable'))
+        const materializeDatabase = storage.spy('materializeDatabase').mockRejectedValue(new Error('full materialization is unavailable'))
         const runtime = createPersistentDataRuntime({
-            store,
+            store: storage.store,
             state: {
                 captureRoot: () => capturePersistentRoot(database),
                 capturePluginStorage: () => database.pluginCustomStorage,
@@ -1370,7 +1135,8 @@ describe('prepared persistent replacement', () => {
 
         await runtime.replacePersistentDatabase(replacement, 'nonthrowing-publication')
 
-        expect(runtime.revision).toBe(8)
+        expect(runtime.revision).toBe(storage.revision + 1)
+        expect((await storage.store.readRoot()).value.username).toBe('Committed replacement')
         expect(database.username).toBe('Committed replacement')
         expect(database.pluginCustomStorage).toEqual({})
         expect(database.characters[0].personality).toBe('selected detail')
@@ -1398,24 +1164,10 @@ describe('native replacement working-set refresh', () => {
                 message: [{ role: 'user', data: 'inactive payload', chatId: 'message-b' }],
             }],
         } as Database['characters'][number])
-        const lease = makeDatabaseLease(restored, 2)
-        const materializeDatabase = vi.fn(async () => {
-            throw new Error('native refresh must not materialize the complete database')
-        })
-        const store = {
-            open: vi.fn(async () => undefined),
-            readRoot: vi.fn(async () => ({
-                revision: 1,
-                value: capturePersistentRoot(database),
-            })),
-            acquireRevision: vi.fn(async (revision: number) => {
-                expect(revision).toBe(2)
-                return lease
-            }),
-            materializeDatabase,
-        } as unknown as PersistentDataStore
+        const storage = await createPersistentStoreHarness(structuredClone(database))
+        const materializeDatabase = storage.spy('materializeDatabase')
         const runtime = createPersistentDataRuntime({
-            store,
+            store: storage.store,
             state: {
                 captureRoot: () => capturePersistentRoot(database),
                 capturePluginStorage: () => database.pluginCustomStorage ?? null,
@@ -1435,7 +1187,8 @@ describe('native replacement working-set refresh', () => {
             prepareDatabase: async (value) => value,
         })
         await runtime.initializeActiveWorkingSet(database)
-        vi.mocked(store.readRoot).mockResolvedValue({ revision: 2, value: capturePersistentRoot(restored) })
+        await storage.store.replaceFromDatabase(restored, storage.revision)
+        const leases = storage.leases()
 
         await expect(runtime.refreshActiveWorkingSetFromStore(2)).resolves.toEqual({
             kind: 'committed', revision: 2, projection: 'applied',
@@ -1449,11 +1202,12 @@ describe('native replacement working-set refresh', () => {
         expect(isCatalogCharacterStub(database.characters[1])).toBe(true)
         expect(database.characters[1]).not.toHaveProperty('personality')
         expect(materializeDatabase).not.toHaveBeenCalled()
-        expect(lease.release).toHaveBeenCalledOnce()
+        expect(leases.map((lease) => lease.revision)).toEqual([2])
+        expect(leases[0].release).toHaveBeenCalledOnce()
     })
 
     it('edit_during_prepare_invalidates_auto_apply without discarding the local edit', async () => {
-        const harness = createFenceRuntimeHarness(
+        const harness = await createFenceRuntimeHarness(
             makeConversationDatabase('Before native restore'),
         )
         const { runtime } = harness
@@ -1469,18 +1223,12 @@ describe('native replacement working-set refresh', () => {
         expect(apply).not.toHaveBeenCalled()
         expect(runtime.revision).toBe(token.revision + 1)
         expect(harness.database.username).toBe('Live edit during native parse')
-        expect(harness.store.commit).toHaveBeenCalledWith(
-            expect.objectContaining({
-                rootMutations: [
-                    { type: 'set', key: 'username', value: 'Live edit during native parse' },
-                ],
-            }),
-        )
+        expect(await harness.stored()).toEqual({ revision: token.revision + 1, username: 'Live edit during native parse' })
         expect(() => runtime.assertPersistentMutationAllowed()).not.toThrow()
     })
 
     it('requires a fresh explicit-choice token after even a no-op dirty notice', async () => {
-        const harness = createFenceRuntimeHarness(
+        const harness = await createFenceRuntimeHarness(
             makeConversationDatabase('Before native restore'),
         )
         const { runtime } = harness
@@ -1491,7 +1239,7 @@ describe('native replacement working-set refresh', () => {
 
         await expect(runtime.acquireDestructiveReplacementFence(token)).rejects.toThrow(/replacement is active/i)
         expect(runtime.revision).toBe(token.revision)
-        expect(harness.store.commit).not.toHaveBeenCalled()
+        expect((await harness.stored()).revision).toBe(token.revision)
         const chosenAgain = await runtime.capturePersistentMutationToken('user-selected-restore-again', {
             publishOfficial: false,
         })
@@ -1501,7 +1249,7 @@ describe('native replacement working-set refresh', () => {
     })
 
     it('persists outstanding edits but never promotes a stale token during local drain', async () => {
-        const harness = createFenceRuntimeHarness(
+        const harness = await createFenceRuntimeHarness(
             makeConversationDatabase('Before native restore'),
         )
         const { runtime } = harness
@@ -1510,30 +1258,20 @@ describe('native replacement working-set refresh', () => {
 
         harness.username = 'Live edit during native parse'
         runtime.markPersistentDataDirty(1)
-        vi.mocked(harness.store.commit).mockImplementationOnce(async (commit) => {
-            harness.username = 'Edit landed while the fence was flushing'
-            return { revision: commit.expectedRevision + 1 }
-        })
+        const flush = harness.storage.gate('commit')
 
-        await expect(runtime.acquireDestructiveReplacementFence(token)).rejects.toThrow(/revision/i)
+        const fencing = runtime.acquireDestructiveReplacementFence(token)
+        await flush.entered
+        harness.username = 'Edit landed while the fence was flushing'
+        flush.release()
+        await expect(fencing).rejects.toThrow(/revision/i)
         expect(runtime.revision).toBeGreaterThan(token.revision)
         expect(() => runtime.assertPersistentMutationAllowed()).not.toThrow()
-        expect(harness.store.commit).toHaveBeenLastCalledWith(
-            expect.objectContaining({
-                rootMutations: [
-                    {
-                        type: 'set',
-                       
-                        key: 'username',
-                        value: 'Edit landed while the fence was flushing',
-                    },
-                ],
-            }),
-        )
+        expect(await harness.stored()).toEqual({ revision: runtime.revision, username: 'Edit landed while the fence was flushing' })
     })
 
     it('rejects a destructive fence when a live edit happened after the captured token', async () => {
-        const harness = createFenceRuntimeHarness(
+        const harness = await createFenceRuntimeHarness(
             makeConversationDatabase('Before native restore'),
         )
         const { runtime } = harness
@@ -1552,7 +1290,7 @@ describe('native replacement working-set refresh', () => {
 
     it('keeps edits fenced through committed refresh and releases only after acknowledgement', async () => {
         const restored = makeConversationDatabase('After native restore')
-        const harness = createFenceRuntimeHarness(
+        const harness = await createFenceRuntimeHarness(
             makeConversationDatabase('Before native restore'),
             restored,
         )
@@ -1562,7 +1300,7 @@ describe('native replacement working-set refresh', () => {
         const fence = await runtime.acquireDestructiveReplacementFence(token)
 
         expect(() => runtime.markPersistentDataDirty(1)).toThrow(/replacement is active/i)
-        await fence.refreshCommittedWorkingSet(2)
+        await fence.refreshCommittedWorkingSet(await harness.commitRestored())
         expect(harness.database.username).toBe('After native restore')
         expect(runtime.revision).toBe(2)
         expect(() => runtime.markPersistentDataDirty(1)).toThrow(/replacement is active/i)
@@ -1574,17 +1312,11 @@ describe('native replacement working-set refresh', () => {
         runtime.markPersistentDataDirty(1)
         await runtime.flushPendingData('post-native-commit-edit')
         expect(harness.database.username).toBe('Edit after native commit')
-        expect(harness.store.commit).toHaveBeenCalledWith(
-            expect.objectContaining({
-                rootMutations: [
-                    { type: 'set', key: 'username', value: 'Edit after native commit' },
-                ],
-            }),
-        )
+        expect(await harness.stored()).toEqual({ revision: 3, username: 'Edit after native commit' })
     })
 
     it('keeps a stale working set read-only when native acknowledgement fails after commit', async () => {
-        const harness = createFenceRuntimeHarness(
+        const harness = await createFenceRuntimeHarness(
             makeConversationDatabase('Before native restore'),
             makeConversationDatabase('After native restore'),
         )
@@ -1594,7 +1326,7 @@ describe('native replacement working-set refresh', () => {
         const fence = await runtime.acquireDestructiveReplacementFence(token)
 
         runtime.markCommittedWorkingSetRefreshRequired(
-            2,
+            await harness.commitRestored(),
             new Error('synthetic native acknowledgement failure'),
         )
         fence.release()
@@ -1604,31 +1336,25 @@ describe('native replacement working-set refresh', () => {
         expect(harness.database.username).toBe('Before native restore')
         expect(() => runtime.assertPersistentMutationAllowed()).toThrow(/replacement is active/i)
         expect(() => runtime.markPersistentDataDirty(1)).toThrow(/replacement is active/i)
-        expect(harness.store.commit).not.toHaveBeenCalled()
+        expect(await harness.stored()).toEqual({ revision: 2, username: 'After native restore' })
     })
 
     it('does not overwrite an already-applied edit during committed working-set projection', async () => {
         const restored = makeConversationDatabase('After native restore')
-        const harness = createFenceRuntimeHarness(
+        const harness = await createFenceRuntimeHarness(
             makeConversationDatabase('Before native restore'),
             restored,
         )
-        const projectionStarted = deferred<void>()
-        const allowProjection = deferred<void>()
-        vi.mocked(harness.store.acquireRevision).mockImplementationOnce(async () => {
-            projectionStarted.resolve()
-            await allowProjection.promise
-            return makeDatabaseLease(restored, 2)
-        })
         const { runtime } = harness
         await runtime.initializeActiveWorkingSet(harness.database)
         const token = await runtime.capturePersistentMutationToken('native-restore-start')
         const fence = await runtime.acquireDestructiveReplacementFence(token)
+        const projection = harness.storage.gate('acquireRevision')
 
-        const refreshing = fence.refreshCommittedWorkingSet(2)
-        await projectionStarted.promise
+        const refreshing = fence.refreshCommittedWorkingSet(await harness.commitRestored())
+        await projection.entered
         harness.username = 'Edit resumed after native commit'
-        allowProjection.resolve()
+        projection.release()
 
         await expect(refreshing).resolves.toEqual({
             kind: 'committed', revision: 2, projection: 'refresh-required',
@@ -1638,12 +1364,12 @@ describe('native replacement working-set refresh', () => {
         fence.release()
         expect(runtime.pendingWorkingSetRefreshRevision).toBe(2)
         expect(() => runtime.assertPersistentMutationAllowed()).toThrow(/replacement is active/i)
-        expect(harness.store.commit).not.toHaveBeenCalled()
+        expect(await harness.stored()).toEqual({ revision: 2, username: 'After native restore' })
     })
 
     it('keeps a large post-publication edit blocked until fence release', async () => {
         const restored = makeConversationDatabase('After native restore')
-        const harness = createFenceRuntimeHarness(
+        const harness = await createFenceRuntimeHarness(
             makeConversationDatabase('Before native restore'),
             restored,
         )
@@ -1651,7 +1377,7 @@ describe('native replacement working-set refresh', () => {
         await runtime.initializeActiveWorkingSet(harness.database)
         const token = await runtime.capturePersistentMutationToken('native-restore-start')
         const fence = await runtime.acquireDestructiveReplacementFence(token)
-        await fence.refreshCommittedWorkingSet(2)
+        await fence.refreshCommittedWorkingSet(await harness.commitRestored())
 
         harness.username = 'Large post-publication edit'
         expect(() => runtime.markPersistentDataDirty(2 * 1024 * 1024)).toThrow(
@@ -1661,28 +1387,21 @@ describe('native replacement working-set refresh', () => {
         runtime.markPersistentDataDirty(2 * 1024 * 1024)
         await runtime.flushPendingData('large-post-publication-edit')
 
-        expect(harness.store.commit).toHaveBeenCalledWith(
-            expect.objectContaining({
-                rootMutations: [
-                    { type: 'set', key: 'username', value: 'Large post-publication edit' },
-                ],
-            }),
-        )
+        expect(await harness.stored()).toEqual({ revision: 3, username: 'Large post-publication edit' })
     })
 
     it('reports a revision committed under the fence once, after release', async () => {
         const onLocalRevision = vi.fn()
-        const harness = createFenceRuntimeHarness(
+        const harness = await createFenceRuntimeHarness(
             makeConversationDatabase('Before native commit'),
             makeConversationDatabase('After native commit'),
-            2,
             onLocalRevision,
         )
         const { runtime } = harness
         await runtime.initializeActiveWorkingSet(harness.database)
         const token = await runtime.capturePersistentMutationToken('native-commit')
         const fence = await runtime.acquireDestructiveReplacementFence(token)
-        await fence.refreshCommittedWorkingSet(2)
+        await fence.refreshCommittedWorkingSet(await harness.commitRestored())
         expect(onLocalRevision).not.toHaveBeenCalled()
         fence.release()
         fence.release()
@@ -1691,27 +1410,25 @@ describe('native replacement working-set refresh', () => {
 
     it('reports a revision committed under the fence whose refresh is still pending', async () => {
         const onLocalRevision = vi.fn()
-        const harness = createFenceRuntimeHarness(
+        const harness = await createFenceRuntimeHarness(
             makeConversationDatabase('Before native commit'),
             makeConversationDatabase('After native commit'),
-            2,
             onLocalRevision,
         )
         const { runtime } = harness
         await runtime.initializeActiveWorkingSet(harness.database)
         const token = await runtime.capturePersistentMutationToken('native-commit')
         const fence = await runtime.acquireDestructiveReplacementFence(token)
-        runtime.markCommittedWorkingSetRefreshRequired(2, new Error('synthetic projection failure'))
+        runtime.markCommittedWorkingSetRefreshRequired(await harness.commitRestored(), new Error('synthetic projection failure'))
         fence.release()
         expect(onLocalRevision).toHaveBeenCalledExactlyOnceWith(2)
     })
 
     it('reports nothing for a fence released at the revision it held', async () => {
         const onLocalRevision = vi.fn()
-        const harness = createFenceRuntimeHarness(
+        const harness = await createFenceRuntimeHarness(
             makeConversationDatabase('Unchanged'),
             makeConversationDatabase('Unchanged'),
-            2,
             onLocalRevision,
         )
         const { runtime } = harness
@@ -1725,15 +1442,14 @@ describe('native replacement working-set refresh', () => {
 
     it('does not report a revision committed elsewhere and projected through a refresh', async () => {
         const onLocalRevision = vi.fn()
-        const harness = createFenceRuntimeHarness(
+        const harness = await createFenceRuntimeHarness(
             makeConversationDatabase('Before received change'),
             makeConversationDatabase('After received change'),
-            2,
             onLocalRevision,
         )
         const { runtime } = harness
         await runtime.initializeActiveWorkingSet(harness.database)
-        await harness.store.commit({ expectedRevision: 1 } as Parameters<PersistentDataStore['commit']>[0])
+        await harness.commitRestored()
         await expect(runtime.refreshActiveWorkingSetFromStore(2)).resolves.toMatchObject({ revision: 2, projection: 'applied' })
         expect(harness.database.username).toBe('After received change')
         expect(onLocalRevision).not.toHaveBeenCalled()

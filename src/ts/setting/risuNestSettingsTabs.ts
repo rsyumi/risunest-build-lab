@@ -1,13 +1,14 @@
 import { writable } from 'svelte/store'
 
 /** The tabs of the RisuNest settings page, in display order. */
-export type RisuNestSettingsTab = 'settings' | 'storage' | 'sync' | 'plugin-data'
+export type RisuNestSettingsTab = 'settings' | 'storage' | 'sync' | 'plugin-data' | 'network-logs'
 
 export const RISUNEST_SETTINGS_TABS: readonly RisuNestSettingsTab[] = [
     'settings',
     'storage',
     'sync',
     'plugin-data',
+    'network-logs',
 ]
 
 /**

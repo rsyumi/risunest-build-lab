@@ -204,7 +204,7 @@ export function createExternalStorageController(
             const background = acquisition instanceof Promise ? await acquisition : acquisition
             const expired = () => {
                 run.abort.abort(background.signal?.reason)
-                if (run.active) void bridge.cancelJob(run.active.id).catch(() => {})
+                if (run.active) run.cancelling ??= bridge.cancelJob(run.active.id).then(() => undefined, () => undefined)
             }
             background.signal?.addEventListener('abort', expired, { once: true })
             let success = false
@@ -280,6 +280,8 @@ export function createExternalStorageController(
                 }
             } finally {
                 background.signal?.removeEventListener('abort', expired)
+                await run.cancelling
+                run.cancelling = undefined
                 if (!request.backgroundTask) await background.dispose(success)
                 run.active = undefined
                 run.activeGoal = undefined
@@ -343,6 +345,13 @@ export function createExternalStorageController(
 
     return {
         snapshot,
+        async settled(): Promise<void> {
+            for (;;) {
+                const running = [...runs.values()].flatMap(run => run.running ? [run.running] : [])
+                if (!running.length) return
+                await Promise.allSettled(running)
+            }
+        },
         replaceState(next: ExternalStorageState): void {
             state = next
             publish()
@@ -354,11 +363,8 @@ export function createExternalStorageController(
             run.cancelled = true
             run.abort.abort()
             if (run.active && !terminalStates.has(run.active.state)) {
-                try {
-                    await bridge.cancelJob(run.active.id)
-                } catch {
-                    // The native session guard remains authoritative after cancellation races.
-                }
+                run.cancelling ??= bridge.cancelJob(run.active.id).then(() => undefined, () => undefined)
+                await run.cancelling
             }
             await run.running
             settleAll(run, { kind: 'cancelled' })

@@ -1,7 +1,7 @@
 import {describe, expect, it, vi} from 'vitest'
-vi.mock('../platform', () => ({isTauri:true}))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({runtime:'tauri',os:'windows'}))
 import {SaveCoordinator} from './saveCoordinator'
-import type {PersistentDataStore, PersistentRevisionLease} from './persistentDataStore'
+import {createLeaseStub,createStoreStub} from './persistentDataStore.testSupport'
 import {RevisionConflictError} from './persistentDataStore'
 import {makeDatabase} from './saveCoordinator.testSupport'
 import {capturePersistentRoot} from './persistentDataRuntime'
@@ -13,12 +13,12 @@ function fixture(stamp: string | undefined, recheck=stamp) {
     database.loadouts=[{id:'loadout',characterIds:['char-a','char-b']}] as typeof database.loadouts
     const summary={id:'char-a',name:'Synthetic',type:'character' as const,configuredIndex:0,recentAt:0,trashed:true,conversationCount:0,trashTime:1,trashStampMs:stamp}
     const commit=vi.fn(async()=>({revision:2}))
-    const lease={revision:1,readRoot:async()=>({revision:1,value:capturePersistentRoot(database)}),
+    const lease=createLeaseStub({revision:1,readRoot:async()=>({revision:1,value:capturePersistentRoot(database)}),
         readCharacter:async()=>({revision:1,value:{...database.characters[0],trashTime:1}}),
         readCharacterSummary:async()=>({...summary,trashStampMs:recheck}),
         queryCharacters:async()=>({revision:1,items:[]}),release:vi.fn(async()=>{}),
-    } as unknown as PersistentRevisionLease
-    const store={queryCharacters:async()=>({revision:1,items:[summary]}),acquireRevision:async()=>lease,commit} as unknown as PersistentDataStore
+    })
+    const store=createStoreStub({queryCharacters:async()=>({revision:1,items:[summary]}),acquireRevision:async()=>lease,commit})
     const coordinator=new SaveCoordinator({store,captureRoot:()=>capturePersistentRoot(database),captureCharacter:()=>null,captureSelectedCharacter:()=>null,replaceDatabase:()=>{}})
     coordinator.initialize(1)
     return {coordinator,commit,lease}

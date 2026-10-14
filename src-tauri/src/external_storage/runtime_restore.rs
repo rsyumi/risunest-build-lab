@@ -492,6 +492,8 @@ pub(crate) async fn run_restore<R: Runtime>(
         return Ok(result);
     }
     let root = runtime::root(app)?;
+    let observation = super::progress::JobProgress::begin(runtime::job_directory(&root, &job.request.connection_id, &job.id));
+    observation.scope(async {
     let store=runtime::native_store(app)?;
     if let Some(result)=completed_restore_in_store(&store,job)? {
         return finish_restore_bodies(app,connected,job,result,None,store,cancel).await;
@@ -544,6 +546,7 @@ pub(crate) async fn run_restore<R: Runtime>(
         }
     };
     finish_restore_bodies(app,connected,job,result.0,Some(result.1),result.2,cancel).await
+    }).await
 }
 
 fn restore_pins(root:&Path,id:&str)->Result<crate::asset_repository::job_pins::DurableCasJob> {
@@ -1330,7 +1333,7 @@ pub(super) mod tests {
                 Some(risunest_external_storage_format::format::Strategy::Cas)).unwrap(),
             descriptor_locator:RemoteLocator{connection_identity:repository.connection_identity.clone(),collection:None,object:"descriptor".into()},
             provider_repository_id:repository.repository_id.clone(),credential_ref:"credential".into(),root_key_ref:"key".into(),
-            recovery_key_ref:"recovery".into(),retention_policy:None,capabilities:fake::capabilities(true),
+            recovery_key_ref:"recovery".into(),retention_policy:None,transfer_concurrency:None,labels:Default::default(),capabilities:fake::capabilities(true),
             created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
         }
     }
@@ -1520,8 +1523,10 @@ pub(super) mod tests {
     fn receiving_restored_bodies_opens_the_restore_journal_once() {
         use crate::asset_repository::job_pins::journal_opens;
         use std::sync::Arc;
+        // Three source pages: two full ones and a short last one.
+        super::super::job_store::TEST_RESTORE_BODY_PAGE.with(|page| page.set(16));
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-            let bodies=(0..300u16).map(|index| {
+            let bodies=(0..40u16).map(|index| {
                 let mut body=index.to_le_bytes().to_vec();
                 body.resize(1024+usize::from(index%64),(index%251) as u8);
                 body

@@ -103,7 +103,11 @@ fn management_registration_can_inspect_then_claim_and_forward_original_stamps() 
         })
         .unwrap();
     let uri = store
-        .issue_named_registration("Synthetic new device", &"a".repeat(64), None)
+        .issue_named_registration(
+            "Synthetic new device",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            None,
+        )
         .unwrap();
     let registration = risunest_sync_connect::Registration::parse_uri(&uri).unwrap();
     let new = store

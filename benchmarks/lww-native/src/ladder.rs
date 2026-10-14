@@ -902,7 +902,7 @@ async fn connected_repository(fixture:&CycleFixture)->Result<Arc<crate::external
         stored:StoredConnection {id:fixture.sender.connection_id.clone(),config,descriptor:fixture.sender.descriptor.clone(),
             descriptor_locator:RemoteLocator {connection_identity:handle.connection_identity.clone(),collection:None,object:"descriptor".into()},
             provider_repository_id:handle.repository_id.clone(),credential_ref:"fixture".into(),root_key_ref:"fixture-key".into(),
-            recovery_key_ref:"fixture-recovery".into(),retention_policy:None,capabilities,
+            recovery_key_ref:"fixture-recovery".into(),retention_policy:None,transfer_concurrency:None,labels:Default::default(),capabilities,
             created_at_ms:crate::external_storage::runtime::now_ms(),verified_at_ms:crate::external_storage::runtime::now_ms(),
             last_sync_at_ms:None,last_backup_at_ms:None},provider:fixture.provider.clone(),handle,dependencies,
         root_key:zeroize::Zeroizing::new(*fixture.sender.root_key)}))
@@ -961,6 +961,7 @@ fn serverless_group(recorder:&Recorder,library:&Path,work:&Path,settings:&Settin
         };
         let engine=crate::external_storage::lww_engine::ExternalLwwEngine {provider:sender.provider.clone(),repository,
             library:sender.library.clone(),root_key:zeroize::Zeroizing::new(*sender.root_key),admission:sender.admission,
+            test_lease_clock:sender.test_lease_clock.clone(),
             connection_id:sender.connection_id.clone(),connection_root:root.clone(),capabilities,descriptor:sender.descriptor.clone()};
         crate::external_storage::connection_store::ConnectionStore::open(&root).at("connection store")?.insert(&connected.stored)
             .at("store connection")?;
@@ -1034,7 +1035,7 @@ fn serverless_group(recorder:&Recorder,library:&Path,work:&Path,settings:&Settin
         Ok(line)
     }));
     // Stores close before their temporary directories are removed.
-    if let Some(CycleFixture {directory_a,directory_b,a,b,provider,sender,receiver})=fixture {
+    if let Some(CycleFixture {directory_a,directory_b,a,b,provider,clock:_,sender,receiver})=fixture {
         drop((a,b,sender,receiver,provider));drop((directory_a,directory_b));
     }
 }

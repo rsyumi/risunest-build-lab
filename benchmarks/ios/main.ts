@@ -79,6 +79,12 @@ async function main() {
   await guard();
   check(isTauriIOS && !isTauriDesktop, "iOS runtime classification");
   const phase = await invoke<string>("ios_bench_phase");
+  if (phase === "sidebar-touch") {
+    document.getElementById("app")!.style.display = "none";
+    const { mountSidebarTouchFixture } = await import("../sidebar-touch/fixture");
+    mountSidebarTouchFixture(document.getElementById("benchmark")!, true);
+    return;
+  }
   if (
     phase !== "app" &&
     phase !== "app-restart" &&
@@ -169,8 +175,8 @@ async function main() {
     await report(phase, await productSettings());
     return;
   }
-  if (phase === "ui") {
-    await installPickerContracts();
+  if (phase === "ui" || phase === "general-files") {
+    await installPickerContracts(phase === "general-files");
     return;
   }
   if (phase === "sync" || phase === "sync-restart" || phase === "sync-publish") {

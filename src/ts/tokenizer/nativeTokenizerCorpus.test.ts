@@ -1,4 +1,9 @@
 import { afterAll, describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Tiktoken } from '@dqbd/tiktoken'
 import cl100kBase from '@dqbd/tiktoken/encoders/cl100k_base.json'
 import o200kBase from '../../etc/o200k_base.json'
@@ -38,11 +43,17 @@ const tokenizers: Record<TokenizerId, Tiktoken> = {
     ),
 }
 
+const artifactPaths: Record<TokenizerId, string> = {
+    cl100k_base: createRequire(import.meta.url).resolve('@dqbd/tiktoken/encoders/cl100k_base.json'),
+    o200k_base: resolve(dirname(fileURLToPath(import.meta.url)), '../../etc/o200k_base.json'),
+}
+
 afterAll(() => {
     for (const tokenizer of Object.values(tokenizers)) tokenizer.free()
 })
 
 describe('native tokenizer compatibility corpus', () => {
+    // A 32 KiB whitespace run is one BPE piece, which the oracle merges in quadratic time.
     it.each(corpus.cases)('$name matches the JavaScript oracle', (entry) => {
         const encode = () =>
             tokenizers[entry.tokenizerId as TokenizerId].encode(resolveInput(entry.input as CorpusInput))
@@ -58,13 +69,17 @@ describe('native tokenizer compatibility corpus', () => {
         }
 
         expect(Array.from(encode())).toEqual(entry.ids)
-    })
+    }, 30_000)
 
     it('covers both artifacts and every required compatibility class', () => {
         expect(NATIVE_TOKENIZER_FINGERPRINTS).toEqual({
             cl100k_base: corpus.artifacts.cl100k_base.fingerprint,
             o200k_base: corpus.artifacts.o200k_base.fingerprint,
         })
+        for (const [tokenizerId, path] of Object.entries(artifactPaths)) {
+            expect(createHash('sha256').update(readFileSync(path)).digest('hex'), tokenizerId)
+                .toBe(corpus.artifacts[tokenizerId as TokenizerId].sha256)
+        }
         expect(new Set(corpus.cases.map((entry) => entry.tokenizerId))).toEqual(
             new Set<TokenizerId>(['cl100k_base', 'o200k_base']),
         )

@@ -7,7 +7,6 @@ import UpdatePopup from './UpdatePopup.svelte'
 
 const native = vi.hoisted(() => ({ close: vi.fn() }))
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => native }))
-vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish }))
 vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => ({ language: 'en' }) }))
 vi.mock('src/ts/globalApi.svelte', () => ({ openURL: vi.fn() }))
 vi.mock('src/ts/update/controller', () => ({
@@ -22,6 +21,18 @@ afterEach(async () => {
     target?.remove()
     appUpdateState.set({ ...initialAppUpdateState })
     native.close.mockReset()
+})
+
+it('shows the current-version result without an error or install action', async () => {
+    appUpdateState.set({ ...initialAppUpdateState, phase: 'current', popupVisible: true })
+    target = document.createElement('div')
+    document.body.append(target)
+    component = mount(UpdatePopup, { target })
+    await tick()
+    expect(target.textContent).toContain(languageEnglish.risuNest.update.current)
+    expect(target.textContent).not.toContain(languageEnglish.risuNest.update.checkFailed)
+    expect(target.querySelector('[role=alert]')).toBeNull()
+    expect([...target.querySelectorAll('button')].map(button => button.textContent?.trim())).toEqual([languageEnglish.risuNest.update.close])
 })
 
 describe('staged Linux update exit', () => {

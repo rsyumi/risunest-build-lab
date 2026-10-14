@@ -1,7 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
-import { languageEnglish } from '../../lang/en'
-vi.mock('src/lang', () => ({ language: languageEnglish }))
 import Controls from './ResponseCandidateControls.svelte'
 let instance: ReturnType<typeof mount>
 afterEach(async () => {

@@ -172,3 +172,7 @@ version = "2"
 
 [build-dependencies.urlpattern]
 version = "0.3"
+
+[dependencies.risunest-network-log]
+path = "../network-log"
+features = ["reqwest"]

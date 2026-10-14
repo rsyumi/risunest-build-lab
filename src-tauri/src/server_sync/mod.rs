@@ -1,6 +1,10 @@
 pub(crate) mod cache;
 pub(crate) mod client;
 pub(crate) mod commands;
+pub(crate) mod asset_download_progress;
+pub(crate) mod asset_cleanup_progress;
+#[cfg(test)]
+mod asset_cleanup_tests;
 pub(crate) mod credentials;
 pub(crate) mod events;
 pub(crate) mod management;
@@ -72,10 +76,11 @@ impl SyncError {
 }
 /// Client-side waits, another library operation that has not finished yet and
 /// ordering outcomes, whatever their status.
-pub(crate) const TRANSIENT_CODES: [&str; 14] = [
+pub(crate) const TRANSIENT_CODES: [&str; 15] = [
     "cancelled",
     "library-operation-busy",
     "server-sync-busy",
+    "asset-jobs-busy",
     "stale-head",
     "operation-already-pending",
     "local-revision-changed",
@@ -204,6 +209,7 @@ mod classification_tests {
             ("cancelled", 409),
             ("library-operation-busy", 409),
             ("server-sync-busy", 409),
+            ("asset-jobs-busy", 409),
             ("device-busy", 429),
             ("server-busy", 429),
             ("server-updating", 503),
@@ -242,6 +248,7 @@ mod classification_tests {
             ("unsupported-media-type", 415),
             ("precondition-required", 428),
             ("page-intent-conflict", 409),
+            ("asset-jobs-unresolved", 409),
             ("page-gap", 409),
             ("staging-sealed", 409),
             ("staging-not-sealed", 409),

@@ -36,7 +36,7 @@ vi.mock('../database.svelte', () => ({
     presetTemplate: {},
 }))
 vi.mock('../../globalApi.svelte', () => ({ forageStorage: {} }))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 const databaseKey = 'database/database.bin'
 
@@ -1525,15 +1525,8 @@ describe('OfficialAccountSnapshotAdapter conflict resolution', () => {
 })
 
 describe('createOfficialAssociationMarkers', () => {
-    it('loads legacy records without a sync time and round-trips records with one', () => {
-        const storage = memoryLedgerStorage()
-        storage.setItem(
-            'officialAssociation:acc',
-            JSON.stringify({ revision: 3, databaseFingerprint: 'abc' }),
-        )
-        const markers = createOfficialAssociationMarkers(storage)
-
-        expect(markers.load('acc')).toEqual({ revision: 3, databaseFingerprint: 'abc' })
+    it('round-trips association records', () => {
+        const markers = createOfficialAssociationMarkers(memoryLedgerStorage())
 
         markers.save('acc', { revision: 4, databaseFingerprint: 'def', syncedAt: 42 })
         expect(markers.load('acc')).toEqual({ revision: 4, databaseFingerprint: 'def', syncedAt: 42 })

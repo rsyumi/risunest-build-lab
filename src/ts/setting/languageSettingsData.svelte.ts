@@ -9,6 +9,7 @@ import type { SettingItem } from './types';
 import { isTauri } from '../platform';
 import { changeLanguage, language } from 'src/lang';
 import { languageEnglish } from 'src/lang/en';
+import { UI_LANGUAGES } from 'src/lang/uiLanguages';
 import { sleep } from '../util';
 import { alertNormal, alertSelect, alertConfirm, alertError, alertWait } from '../alert';
 import { downloadFile } from '../globalApi.svelte';
@@ -34,12 +35,7 @@ export const languageSettingsItems: SettingItem[] = [
         classes: 'mt-4',
         options: {
             selectOptions: [
-                { value: 'de', label: 'Deutsch' },
-                { value: 'en', label: 'English' },
-                { value: 'ko', label: '한국어' },
-                { value: 'cn', label: '中文' },
-                { value: 'zh-Hant', label: '中文(繁體)' },
-                { value: 'vi', label: 'Tiếng Việt' },
+                ...UI_LANGUAGES,
                 { value: 'translang', label: '[Translate in your own language]' },
             ],
         },

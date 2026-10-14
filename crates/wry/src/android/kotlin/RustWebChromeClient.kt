@@ -318,12 +318,12 @@ class RustWebChromeClient(private val activity: WryActivity, private val webView
     val captureVideo = captureEnabled && acceptTypes.contains("video/*")
     if (capturePhoto || captureVideo) {
       if (isMediaCaptureSupported) {
-        showMediaCaptureOrFilePicker(filePathCallback, fileChooserParams, captureVideo)
+        showMediaCaptureOrFilePicker(webView, filePathCallback, fileChooserParams, captureVideo)
       } else {
         val camPermission = arrayOf(Manifest.permission.CAMERA)
         activity.requestPermissions(camPermission) { isGranted ->
           if (isGranted == true) {
-            showMediaCaptureOrFilePicker(filePathCallback, fileChooserParams, captureVideo)
+            showMediaCaptureOrFilePicker(webView, filePathCallback, fileChooserParams, captureVideo)
           } else {
             Logger.warn(Logger.tags("FileChooser"), "Camera permission not granted")
             filePathCallback.onReceiveValue(null)
@@ -331,7 +331,7 @@ class RustWebChromeClient(private val activity: WryActivity, private val webView
         }
       }
     } else {
-      showFilePicker(filePathCallback, fileChooserParams)
+      showFilePicker(webView, filePathCallback, fileChooserParams)
     }
     return true
   }
@@ -344,6 +344,7 @@ class RustWebChromeClient(private val activity: WryActivity, private val webView
     }
 
   private fun showMediaCaptureOrFilePicker(
+    webView: WebView,
     filePathCallback: ValueCallback<Array<Uri?>?>,
     fileChooserParams: FileChooserParams,
     isVideo: Boolean
@@ -359,7 +360,7 @@ class RustWebChromeClient(private val activity: WryActivity, private val webView
         Logger.tags("FileChooser"),
         "Media capture intent could not be launched. Falling back to default file picker."
       )
-      showFilePicker(filePathCallback, fileChooserParams)
+      showFilePicker(webView, filePathCallback, fileChooserParams)
     }
   }
 
@@ -401,41 +402,50 @@ class RustWebChromeClient(private val activity: WryActivity, private val webView
   }
 
   private fun showFilePicker(
+    webView: WebView,
     filePathCallback: ValueCallback<Array<Uri?>?>,
     fileChooserParams: FileChooserParams
   ) {
-    val intent = fileChooserParams.createIntent()
-    if (fileChooserParams.mode == FileChooserParams.MODE_OPEN_MULTIPLE) {
-      intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-    }
-    if (fileChooserParams.acceptTypes.size > 1 || intent.type!!.startsWith(".")) {
-      val validTypes = getValidTypes(fileChooserParams.acceptTypes)
-      intent.putExtra(Intent.EXTRA_MIME_TYPES, validTypes)
-      if (intent.type!!.startsWith(".")) {
-        intent.type = validTypes[0]
-      }
-    }
     try {
+      val intent = fileChooserParams.createIntent()
+      if (fileChooserParams.mode == FileChooserParams.MODE_OPEN_MULTIPLE) {
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+      }
+      if (fileChooserParams.acceptTypes.size > 1 || intent.type?.startsWith(".") == true) {
+        val validTypes = getValidTypes(fileChooserParams.acceptTypes)
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, validTypes)
+        if (intent.type?.startsWith(".") == true || validTypes.contains("*/*")) {
+          intent.type = validTypes[0]
+        }
+      }
       activity.launchActivityForResult(intent) { result ->
-        val res: Array<Uri?>?
-        val resultIntent = result?.data
-        if (result?.resultCode == Activity.RESULT_OK && resultIntent!!.clipData != null) {
-          val numFiles = resultIntent.clipData!!.itemCount
-          res = arrayOfNulls(numFiles)
-          for (i in 0 until numFiles) {
-            res[i] = resultIntent.clipData!!.getItemAt(i).uri
+        val res = try {
+          if (result == null || result.resultCode == Activity.RESULT_CANCELED) {
+            null
+          } else {
+            check(result.resultCode == Activity.RESULT_OK) { "File picker failed (${result.resultCode})" }
+            val resultIntent = result.data
+            val clip = resultIntent?.clipData
+            val uris = if (clip != null) Array<Uri?>(clip.itemCount) { clip.getItemAt(it).uri }
+              else FileChooserParams.parseResult(result.resultCode, resultIntent)
+            check(!uris.isNullOrEmpty()) { "The file picker returned no document" }
+            uris
           }
-        } else {
-          res = FileChooserParams.parseResult(
-            result?.resultCode ?: 0,
-            resultIntent
-          )
+        } catch (e: Exception) {
+          reportFilePickerFailure(webView, filePathCallback, e)
+          return@launchActivityForResult
         }
         filePathCallback.onReceiveValue(res)
       }
-    } catch (e: ActivityNotFoundException) {
-      filePathCallback.onReceiveValue(null)
+    } catch (e: Exception) {
+      reportFilePickerFailure(webView, filePathCallback, e)
     }
+  }
+
+  private fun reportFilePickerFailure(webView: WebView, callback: ValueCallback<Array<Uri?>?>, error: Exception) {
+    callback.onReceiveValue(null)
+    val message = org.json.JSONObject.quote("${error.javaClass.simpleName}: ${error.message ?: "Failed to open file picker"}")
+    webView.evaluateJavascript("window.dispatchEvent(new ErrorEvent('error',{error:new Error($message),message:$message}));", null)
   }
 
   private fun getValidTypes(currentTypes: Array<String>): Array<String> {
@@ -445,7 +455,8 @@ class RustWebChromeClient(private val activity: WryActivity, private val webView
       if (mime.startsWith(".")) {
         val extension = mime.substring(1)
         val extensionMime = mtm.getMimeTypeFromExtension(extension)
-        if (extensionMime != null && !validTypes.contains(extensionMime)) {
+        if (extensionMime == null) return arrayOf("*/*")
+        if (!validTypes.contains(extensionMime)) {
           validTypes.add(extensionMime)
         }
       } else if (!validTypes.contains(mime)) {

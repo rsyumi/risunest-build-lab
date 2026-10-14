@@ -13,7 +13,6 @@ use std::{
     collections::BTreeMap,
     path::Path,
     sync::Arc,
-    time::Duration,
 };
 
 const NOW: u64 = 1_000;
@@ -1287,10 +1286,10 @@ fn object_metadata_lists_package_files_without_downloading_an_undigested_file() 
 
 #[test]
 fn cancelling_an_in_flight_download_stops_the_transfer() {
+    use crate::external_storage::provider_contract::{a_read_cancelled_during_its_body_stops, held_body};
     runtime().block_on(async {
-        let harness = fixture(
-            vec![marker_present(), json(200, "[]"), Reply::DelayedHeaders],
-        );
+        let (held, _release) = held_body();
+        let harness = fixture(vec![marker_present(), json(200, "[]"), held]);
         let (repository, _) = harness.open(OpenMode::Existing).await.unwrap();
         let locator = RemoteLocator {
             connection_identity: repository.connection_identity.clone(),
@@ -1301,30 +1300,8 @@ fn cancelling_an_in_flight_download_stops_the_transfer() {
                 encoded("slow")
             ),
         };
-        let directory = tempfile::tempdir().unwrap();
-        let mut sink = SpoolSink::create(&directory.path().join("slow"), 256).unwrap();
-        let cancel = harness.cancel.clone();
-        let perform = async {
-            let error = harness
-                .provider
-                .read_object(&repository, &locator, None, &mut sink, &cancel)
-                .await
-                .unwrap_err();
-            assert_eq!(error.kind, ErrorKind::Cancelled);
-        };
-        let trigger = async {
-            while harness.server.requests.lock().unwrap().len() < 3 {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            harness.cancel.cancel();
-        };
-        tokio::time::timeout(
-            Duration::from_millis(3_000),
-            futures::future::join(perform, trigger),
-        )
-        .await
-        .unwrap();
+        a_read_cancelled_during_its_body_stops(harness.provider.as_ref(), &repository, &locator, &harness.cancel)
+            .await;
         // A cancelled repository refuses further work without a request.
         assert_eq!(
             harness

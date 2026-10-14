@@ -12,14 +12,14 @@ const inlayMocks = vi.hoisted(() => ({
 vi.mock('src/ts/process/files/inlays', () => inlayMocks)
 vi.mock('src/ts/parser/parser.svelte', async () => {
     const { renderDeferredInlaySourceMarkup } = await import('src/ts/process/files/inlayRenderSource')
-    return {
+    return (await import('src/ts/parser/parser.testSupport')).parserStubModule({
         ParseMarkdown: vi.fn(async (data: string, ...args: unknown[]) => {
             const context = args[4] as { deferredInlays?: import('src/ts/process/files/inlayRenderSource').DeferredInlayMarkerRegistry }
             return renderDeferredInlaySourceMarkup(data, {
                 url: '', mime: 'image/png', type: 'image', name: 'x', size: 1, objectUrl: false,
             }, context.deferredInlays)
         }),
-    }
+    })
 })
 
 import DeferredMarkdown from './DeferredMarkdown.svelte'

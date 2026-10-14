@@ -1,8 +1,24 @@
 import { describe, expect, it, vi } from 'vitest'
 import { IDBFactory } from 'fake-indexeddb'
+import { listen } from '@tauri-apps/api/event'
 import { ExternalStorageBridge, ExternalStorageUnsupportedError } from './bridge'
 
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }))
+
 describe('ExternalStorageBridge', () => {
+    it('delivers only the native authorization identity and releases its listener', async () => {
+        const stop = vi.fn()
+        vi.mocked(listen).mockResolvedValueOnce(stop)
+        const callback = vi.fn()
+        const bridge = new ExternalStorageBridge({ supported: () => true, invoke: vi.fn() })
+        const dispose = await bridge.onAuthorizationReady(callback)
+        expect(listen).toHaveBeenCalledWith('external-storage-authorization-ready', expect.any(Function))
+        vi.mocked(listen).mock.calls.at(-1)![1]({ event: 'external-storage-authorization-ready', id: 1, payload: 'authorization-1' })
+        expect(callback).toHaveBeenCalledExactlyOnceWith('authorization-1')
+        dispose()
+        expect(stop).toHaveBeenCalledOnce()
+    })
+
     it('renews and unlocks only the existing connection identity', async () => {
         const invoke = vi.fn(async () => ({}))
         const bridge = new ExternalStorageBridge({ supported: () => true, invoke })
@@ -182,7 +198,7 @@ describe('ExternalStorageBridge', () => {
 
     it('exports connection settings through an opaque staged file transfer', async () => {
         const invoke = vi.fn(async (command: string) => command.includes('begin')
-            ? { transferId: 'transfer', expiresAtMs: '1', qrPayload: null }
+            ? { transferId: 'transfer', expiresAtMs: '1', payload: 'synthetic' }
             : undefined)
         const bridge = new ExternalStorageBridge({ supported: () => true, invoke })
 

@@ -1,5 +1,6 @@
 import "./ts/polyfill";
 import "core-js/actual";
+import "./ts/consoleLogStartup";
 import "katex/dist/katex.min.css";
 import "./ts/storage/deviceSettingsStartup";
 import "./ts/storage/database.svelte";

@@ -53,6 +53,7 @@
     import QuickSettingsGui from "../Others/QuickSettingsGUI.svelte";
     import PluginDefinedIcon from "../Others/PluginDefinedIcon.svelte";
     import { RISU_SIDEBAR_DRAG_TYPE } from "src/ts/dragTypes";
+    import { sidebarTouchDrag } from "src/ts/gui/sidebarTouchDrag";
   import { clearCharacterSelection } from "../workingSetNavigation";
   let sideBarMode = $state(0);
   let editMode = $state(false);
@@ -541,8 +542,8 @@
     {/if}
   </div>
   {/if}
-  <div class="flex grow w-full flex-col items-center overflow-x-hidden overflow-y-auto pr-0">
-    <div class="h-4 min-h-4 w-14" role="listitem" ondragover={(e) => {
+  <div class="flex grow w-full flex-col items-center overflow-x-hidden overflow-y-auto pr-0" use:sidebarTouchDrag>
+    <div class="h-4 min-h-4 w-14" role="listitem" data-sidebar-drop ondragover={(e) => {
       if(!getCurrentSidebarDrag(e)){ return }
       e.preventDefault()
       e.stopPropagation()
@@ -566,6 +567,8 @@
       <div class="group relative flex items-center px-2"
         role="listitem"
         draggable="true"
+        data-sidebar-drag-id={char.type === 'folder' ? `folder:${char.id}` : DBState.db.characters[char.index]?.chaId}
+        data-sidebar-drop
         ondragstart={(e) => {avatarDragStart({index:ind}, e)}}
         ondragend={clearCurrentDrag}
         ondragover={avatarDragOver}
@@ -703,7 +706,7 @@
             char.color === 'pink' ? 'bg-pink-700/20' :
             'bg-darkbg/20'
           }"></div>
-          <div class="h-4 min-h-4 w-14 relative z-10" role="listitem" ondragover={(e) => {
+          <div class="h-4 min-h-4 w-14 relative z-10" role="listitem" data-sidebar-drop ondragover={(e) => {
             if(!getCurrentSidebarDrag(e)){ return }
             e.preventDefault()
             e.stopPropagation()
@@ -729,6 +732,8 @@
               <div class="group relative flex items-center px-2 z-10"
               role="listitem"
               draggable="true"
+              data-sidebar-drag-id={DBState.db.characters[char2.index]?.chaId}
+              data-sidebar-drop
               ondragstart={(e) => {if(char.type === 'folder'){avatarDragStart({index: ind, folder:char.id}, e)}}}
               ondragend={clearCurrentDrag}
               ondragover={avatarDragOver}
@@ -763,7 +768,7 @@
                 />
               </div>
             </div>
-            <div class="h-4 min-h-4 w-14 relative z-20" role="listitem" ondragover={(e) => {
+            <div class="h-4 min-h-4 w-14 relative z-20" role="listitem" data-sidebar-drop ondragover={(e) => {
               if(!getCurrentSidebarDrag(e)){ return }
               e.preventDefault()
               e.stopPropagation()
@@ -789,7 +794,7 @@
         </div>
         {/key}
       {/if}
-      <div class="h-4 min-h-4 w-14" role="listitem" ondragover={((e) => {
+      <div class="h-4 min-h-4 w-14" role="listitem" data-sidebar-drop ondragover={((e) => {
         if(!getCurrentSidebarDrag(e)){ return }
         e.preventDefault()
         e.stopPropagation()

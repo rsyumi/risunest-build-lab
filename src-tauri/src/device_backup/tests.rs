@@ -472,6 +472,9 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
         "local-plugins".to_owned(),
         "local-settings".to_owned(),
     ];
+    source.device_store().unwrap()
+        .write_setting("risuNestDefaultPluginsAttempted", &serde_json::json!(r#"["source-plugin"]"#))
+        .unwrap();
     capture_native_sections(&mut source, &selected, &catalog, &Never).unwrap();
     assert_eq!(
         catalog
@@ -519,6 +522,9 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
             .unwrap();
         device
             .write_setting("risu_lastsaved", &serde_json::json!("target-control"))
+            .unwrap();
+        device
+            .write_setting("risuNestDefaultPluginsAttempted", &serde_json::json!(r#"["provider-manager","yumi-translator"]"#))
             .unwrap();
     }
     let rows = prepared.iter().map(PreparedDeviceSection::rows).collect::<Vec<_>>();
@@ -585,6 +591,10 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
     assert_eq!(permissions[0].code_hash, "plugin-hash");
     assert_eq!(permissions[0].permission, "network");
     assert!(permissions[0].granted);
+    assert_eq!(
+        device.read_setting("risuNestDefaultPluginsAttempted").unwrap(),
+        Some(serde_json::json!(r#"["provider-manager","yumi-translator"]"#))
+    );
 }
 
 #[test]
@@ -660,6 +670,9 @@ fn selected_empty_native_sections_clear_device_data_and_keep_coordination_settin
         device
             .write_plugin_permission("plugin-hash", "network", true)
             .unwrap();
+        device
+            .write_setting("risuNestDefaultPluginsAttempted", &serde_json::json!(r#"["provider-manager","yumi-translator"]"#))
+            .unwrap();
     }
     let rows = prepared.iter().map(PreparedDeviceSection::rows).collect::<Vec<_>>();
     let (header, stage) = native_restore_stage(&mut target, "synthetic-empty-restore");
@@ -677,6 +690,10 @@ fn selected_empty_native_sections_clear_device_data_and_keep_coordination_settin
         Some(serde_json::json!("target-control"))
     );
     assert!(device.read_plugin_permissions().unwrap().is_empty());
+    assert_eq!(
+        device.read_setting("risuNestDefaultPluginsAttempted").unwrap(),
+        Some(serde_json::json!(r#"["provider-manager","yumi-translator"]"#))
+    );
 }
 
 #[test]

@@ -18,35 +18,6 @@ const ORACLE_ARTIFACTS = {
     },
 }
 
-export const REQUIRED_COMPATIBILITY_CLASSES = [
-    'empty',
-    'ascii',
-    'whitespace',
-    'punctuation',
-    'contractions',
-    'numbers',
-    'source-code',
-    'json',
-    'markdown',
-    'url',
-    'base64',
-    'korean',
-    'simplified-chinese',
-    'traditional-chinese',
-    'japanese',
-    'arabic-rtl',
-    'cyrillic',
-    'devanagari',
-    'unicode-normalization',
-    'emoji',
-    'control-characters',
-    'utf16-boundary',
-    'prompt-segment',
-    'long-input',
-    'allocation-boundary',
-    'special-token-error',
-]
-
 export async function loadTokenizerCorpus() {
     return JSON.parse(await readFile(CORPUS_URL, 'utf8'))
 }

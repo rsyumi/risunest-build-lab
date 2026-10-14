@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
+use risunest_network_log::reqwest::RequestBuilderExt;
 use std::{future::Future, pin::Pin, str::FromStr, sync::Arc, time::Duration};
 
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
@@ -386,7 +387,7 @@ pub async fn fetch<R: Runtime>(
             #[cfg(feature = "tracing")]
             tracing::trace!("{:?}", request);
 
-            let fut = async move { request.send().await.map_err(map_request_error) };
+            let fut = async move { request.send_logged("http-plugin").await.map_err(map_request_error) };
 
             let mut resources_table = webview.resources_table();
             let rid = resources_table.add_request(Box::pin(fut));
@@ -643,7 +644,7 @@ mod tests {
             .unwrap();
         let request = client.get(url);
         tauri::async_runtime::block_on(
-            async move { request.send().await.map_err(map_request_error) },
+            async move { request.send_logged("http-plugin").await.map_err(map_request_error) },
         )
     }
 

@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../alert', () => ({ alertConfirm: vi.fn() }))
-vi.mock('../../lang', () => ({ language: { lowLevelAccessConfirm: 'confirm', mcpStdioModuleImportBlocked: 'Local MCP module import blocked' } }))
 vi.mock('./persistentDataRuntime.svelte', () => ({ appendPersistentRootModule: vi.fn() }))
 
 import type {

@@ -55,19 +55,9 @@ vi.mock('src/ts/util', async () => {
     }
 })
 vi.mock('src/ts/gui/guisize', async () => ({ sideBarSize: (await import('svelte/store')).writable(300) }))
-vi.mock('src/lang', () => ({
-    language: {
-        goback: 'Go Back', menu: 'Menu', search: 'Search', home: 'Home', settings: 'Settings',
-        character: 'Character', Chat: 'Chat', playground: { playground: 'Playground', inlayExplorer: 'Inlays' },
-        embedding: 'Embedding', tokenizer: 'Tokenizer', syntax: 'Syntax', imageGeneration: 'Images',
-        subtitles: 'Subtitles', imageTranslation: 'Image translation', translator: 'Translation',
-        promptConvertion: 'Prompts',
-        navigationBlockedWhileGenerating: 'Generation is active',
-    },
-}))
 
 import { language } from 'src/lang'
-import { DBState, MobileSideBar, PlaygroundStore, selectedCharID, settingsOpen } from 'src/ts/stores.svelte'
+import { DBState, MobileSideBar, PlaygroundStore, selectedCharID, settingsOpen, SettingsMenuIndex } from 'src/ts/stores.svelte'
 import { createCatalogCharacterStub } from 'src/ts/storage/workingSetCatalog'
 
 const visualPanels = [
@@ -104,6 +94,7 @@ beforeEach(() => {
     selectedCharID.set(0)
     PlaygroundStore.set(0)
     settingsOpen.set(false)
+    SettingsMenuIndex.set(-1)
     MobileSideBar.set(0)
     persistence.deactivate.mockResolvedValue(true)
     persistence.changeChar.mockImplementation(async (index) => {
@@ -146,6 +137,32 @@ function buttonNamed(name: string): HTMLButtonElement {
 }
 
 describe('mounted navigation waits for persistence', () => {
+    it('opens mobile settings from the chat menu and returns without deactivating the conversation', async () => {
+        MobileSideBar.set(1)
+        persistence.deactivate.mockResolvedValue(false)
+        mounted = mount(MobileHeader, { target })
+        await tick()
+        buttonNamed(language.settings).click()
+        await tick()
+        expect(get(settingsOpen)).toBe(true)
+        expect(get(selectedCharID)).toBe(0)
+        expect(get(MobileSideBar)).toBe(1)
+        expect(persistence.deactivate).not.toHaveBeenCalled()
+
+        SettingsMenuIndex.set(1)
+        await tick()
+        buttonNamed(language.goback).click()
+        await tick()
+        expect(get(SettingsMenuIndex)).toBe(-1)
+        expect(get(settingsOpen)).toBe(true)
+        buttonNamed(language.goback).click()
+        await tick()
+        expect(get(settingsOpen)).toBe(false)
+        expect(get(selectedCharID)).toBe(0)
+        expect(get(MobileSideBar)).toBe(1)
+        expect(persistence.deactivate).not.toHaveBeenCalled()
+    })
+
     it('keeps the open chat drawer safe while Home releases the selected character before clearing selection', async () => {
         persistence.deactivate.mockImplementationOnce(async () => {
             DBState.db.characters[0] = createCatalogCharacterStub({id: 'synthetic-owner', name: 'Synthetic owner',

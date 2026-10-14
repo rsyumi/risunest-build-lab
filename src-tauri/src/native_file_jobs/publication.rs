@@ -1,3 +1,4 @@
+use risunest_network_log::reqwest::RequestBuilderExt;
 use super::error::{self, cancelled, invalid_input};
 use super::transfer_retry::{retry_delay, wait_for_retry};
 use super::{
@@ -306,7 +307,7 @@ async fn upload_attempt(
                 .post(endpoint(base_url, "/api/account/write")?)
                 .headers(headers)
                 .body(body)
-                .send(),
+                .send_logged("file-publication"),
             &job,
             &activity,
             IDLE_TIMEOUT,
@@ -418,7 +419,7 @@ async fn acquire_session(
         client
             .get(endpoint(base_url, "/api/account/getsessionnumber")?)
             .headers(authenticated_headers(credential)?)
-            .send(),
+            .send_logged("file-publication"),
         &job,
         &activity,
         IDLE_TIMEOUT,
@@ -1219,7 +1220,7 @@ mod tests {
             build_client()
                 .unwrap()
                 .get(format!("http://{address}/closed"))
-                .send(),
+                .send_logged("file-publication"),
             &job,
             &AtomicU64::new(0),
             Duration::from_secs(1),
@@ -1268,7 +1269,7 @@ mod tests {
             build_client()
                 .unwrap()
                 .get(format!("http://{address}/start"))
-                .send(),
+                .send_logged("file-publication"),
         )
         .unwrap();
         assert_eq!(response.status().as_u16(), 302);

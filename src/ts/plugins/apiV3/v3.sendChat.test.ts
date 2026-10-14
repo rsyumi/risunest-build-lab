@@ -23,111 +23,56 @@ const mocks = vi.hoisted(() => ({
     doingChat: false,
 }))
 
-const ownedStorageStub = {
-    getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn(),
-    key: vi.fn(), keys: vi.fn(), length: vi.fn(), snapshot: vi.fn(async () => ({})),
-    mutate: vi.fn(),
-}
-
-vi.mock('../plugins.svelte', () => {
-    const oldApis = new Proxy({}, { get: () => vi.fn() })
-    return {
-        loadPluginsAfterAuthoritativeRestore: mocks.authoritativeLoad,
-        allowedDbKeys: [],
-        applyPreparedPluginDatabaseUpdate: vi.fn(),
-        customProviderStore: { subscribe: (run: (value: string[]) => void) => { run([]); return () => undefined }, set: vi.fn() },
-        getV2PluginAPIs: () => oldApis,
-        handlePluginInstallViaPlugin: vi.fn(),
-        pluginCompatibility: { profile: 'scalable' },
-        pluginStorageStore: {
-            forOwner: () => ownedStorageStub,
-            ownerOf: () => 'test-plugin',
-            invalidateOwner: vi.fn(),
-            synchronizeCommittedMutation: vi.fn(),
-            snapshot: () => [], mutate: vi.fn(), invalidate: vi.fn(), getItem: vi.fn(),
-            setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn(), key: vi.fn(),
-            keys: vi.fn(), length: vi.fn(),
-        },
-        pluginV2: { providers: new Map(), providerOptions: new Map() },
-    }
-})
-vi.mock('./factory', () => ({
-    SandboxHost: class {
-        constructor(api: unknown) { mocks.api = api }
-        run() {}
-        terminate() {}
-    },
+vi.mock('../plugins.svelte', async () => (await import('./v3Host.testSupport')).pluginsModule({
+    loadPluginsAfterAuthoritativeRestore: mocks.authoritativeLoad,
+    pluginV2: { providers: new Map(), providerOptions: new Map() },
 }))
-vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => mocks.database }))
-vi.mock('../pluginSafeClass', () => ({ SafeLocalPluginStorage: class {}, SafeLocalStorage: class {}, tagWhitelist: [] }))
-vi.mock('src/ts/stores.svelte', () => ({
-    DBState: { get db() { return mocks.database }, set db(value) { mocks.database = value } },
-    selectedCharID: {
-        subscribe(run: (value: number) => void) {
-            run(mocks.selectedId)
-            return () => undefined
-        },
-    },
-    additionalChatMenu: [], additionalFloatingActionButtons: [], additionalHamburgerMenu: [],
-    additionalSettingsMenu: [], bodyIntercepterStore: [], chatPanelStore: [],
+vi.mock('./factory', async () => (await import('./v3Host.testSupport')).sandboxHostModule((api) => { mocks.api = api }))
+vi.mock('src/ts/storage/database.svelte', async () => (await import('./v3Host.testSupport')).databaseModule({
+    read: () => mocks.database,
+    write: (database) => { mocks.database = database },
+    selectedIndex: () => mocks.selectedId,
 }))
-vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(async () => true), alertError: vi.fn(), alertNormal: vi.fn() }))
-vi.mock('src/ts/util', () => ({ sleep: vi.fn(async () => undefined) }))
-vi.mock('src/lang', () => ({ language: {
-    fetchLogConsent: '{}', getFullDatabaseConsent: '{}', mainDomAccessConsent: '{}',
-    replacerPermissionConsent: '{}', providerPermissionConsent: '{}', sendChatConsent: '{}',
-    inlayPermissionConsent: '{}',
-} }))
+vi.mock('../pluginSafeClass', async () => (await import('./v3Host.testSupport')).pluginSafeClassModule())
+vi.mock('src/ts/stores.svelte', async () => (await import('./v3Host.testSupport')).storesModule({
+    read: () => mocks.database,
+    write: (database) => { mocks.database = database },
+    selectedIndex: () => mocks.selectedId,
+}))
+vi.mock('src/ts/alert', async () => (await import('./v3Host.testSupport')).alertModule())
+vi.mock('src/ts/util', async () => (await import('./v3Host.testSupport')).utilModule())
 vi.mock('src/ts/globalApi.svelte', () => ({ checkCharOrder: vi.fn(), forageStorage: {}, getFetchLogs: vi.fn() }))
-vi.mock('src/ts/gui/colorscheme', () => ({ changeColorScheme: vi.fn(), updateColorScheme: vi.fn(), updateTextThemeAndCSS: vi.fn() }))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
-vi.mock('src/ts/process/mcp/pluginmcp', () => ({ registerMCPModule: vi.fn(), unregisterMCPModule: vi.fn() }))
-vi.mock('src/ts/process/files/inlays', () => ({ getInlayAsset: vi.fn() }))
-vi.mock('src/ts/translator/translator', () => ({ getLLMCache: vi.fn(), searchLLMCache: vi.fn() }))
-vi.mock('src/ts/parser/parser.svelte', () => ({ hasher: vi.fn(async () => 'hash') }))
-vi.mock('localforage', () => ({ default: { createInstance: () => ({ getItem: vi.fn(), setItem: vi.fn() }) } }))
-vi.mock('src/ts/process/index.svelte', () => ({
+vi.mock('src/ts/gui/colorscheme', async () => (await import('./v3Host.testSupport')).colorschemeModule())
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
+vi.mock('src/ts/process/mcp/pluginmcp', async () => (await import('./v3Host.testSupport')).pluginMcpModule())
+vi.mock('src/ts/process/files/inlays', async () => (await import('./v3Host.testSupport')).inlaysModule())
+vi.mock('src/ts/translator/translator', async () => (await import('./v3Host.testSupport')).translatorModule())
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
+vi.mock('localforage', async () => (await import('../localforage.testSupport')).localforageModule())
+vi.mock('src/ts/process/index.svelte', async () => (await import('./v3Host.testSupport')).processIndexModule({
     sendChat: mocks.processSendChat,
     doingChat: {
         subscribe(run: (value: boolean) => void) { run(mocks.doingChat); return () => undefined },
         set(value: boolean) { mocks.doingChat = value },
     },
 }))
-vi.mock('src/ts/model/modellist', () => ({ getModelInfo: () => ({ id: 'test-model' }) }))
-vi.mock('src/ts/process/request/request', () => ({ requestChatDataMain: vi.fn() }))
-vi.mock('src/ts/process/modules', () => ({ getModuleLorebooks: vi.fn() }))
-vi.mock('src/ts/process/ttsHooks', () => ({
-    registerTTSPreprocessor: vi.fn(), unregisterTTSPreprocessor: vi.fn(),
-    registerTTSPostprocessor: vi.fn(), unregisterTTSPostprocessor: vi.fn(),
-}))
-vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
-    refreshSelectedConversationAfterReplacement: vi.fn(),
+vi.mock('src/ts/model/modellist', async () => (await import('./v3Host.testSupport')).modellistModule())
+vi.mock('src/ts/process/request/request', async () => (await import('./v3Host.testSupport')).requestModule())
+vi.mock('src/ts/process/modules', async () => (await import('./v3Host.testSupport')).modulesModule())
+vi.mock('src/ts/process/ttsHooks', async () => (await import('./v3Host.testSupport')).ttsHooksModule())
+vi.mock('src/ts/storage/persistentDataRuntime.svelte', async () => (await import('./v3Host.testSupport')).persistentRuntimeModule({
     getPersistentRevision: () => 1,
-    commitPersistentUnitIntent: vi.fn(async()=>{}),
+    commitPersistentUnitIntent: vi.fn(async () => {}),
     acquireCompleteConversation: mocks.acquireCompleteConversation,
     captureSelectedConversationTarget: () => mocks.selectedTarget,
-    flushPendingDataLocally: vi.fn(),
     assertPersistentMutationAllowed: (epoch = mocks.authorityEpoch) => {
         if (epoch !== mocks.authorityEpoch) throw new Error('Persistent mutation fenced')
     },
     getPersistentStorageAuthorityEpoch: () => mocks.authorityEpoch,
     getActiveConversationSession: () => mocks.session,
-    getPersistentNavigationGeneration: () => 0,
     getPersistentDataRuntime: vi.fn(),
-    getPersistentDataStore: vi.fn(),
-    invalidateActiveConversationSession: vi.fn(),
-    materializePersistentDatabaseSnapshotWithRevision: vi.fn(),
-    replacePersistentDatabase: vi.fn(),
 }))
-vi.mock('../pluginCompatibility', () => ({
-    assertPluginFullObjectCompatibility: vi.fn(),
-    preparePluginFullObjectCallbackRegistration: vi.fn(),
-    runPluginFullObjectReplacement: vi.fn(),
-}))
-vi.mock('../pluginDatabaseAccess', () => ({
-    createProductionPluginDatabaseAccess: vi.fn(() => ({})),
-    linkPluginQueryAbortSignals: vi.fn(),
-}))
+vi.mock('../pluginDatabaseAccess', async () => (await import('./v3Host.testSupport')).pluginDatabaseAccessModule())
 
 import { executePluginV3 } from './v3.svelte'
 

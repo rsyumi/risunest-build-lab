@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('../platform', () => ({ isTauri: true }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 
 import {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import type { PersistentRevisionLease } from './persistentDataStore'
+import { createLeaseStub } from './persistentDataStore.testSupport'
 import {
     nativePersistentRevisionLease,
     withPinnedNativePersistentRisuSaveFile,
@@ -30,10 +30,10 @@ function harness() {
 describe('native persistent RisuSave export', () => {
     it('exports from an existing pinned lease without acquiring or releasing another lease', async () => {
         const { events, dependencies } = harness()
-        const lease = {
-            revision: 5,
-            [nativePersistentRevisionLease]: 'snapshot-5-existing',
-        } as unknown as PersistentRevisionLease
+        const lease = createLeaseStub(
+            { revision: 5 },
+            { [nativePersistentRevisionLease]: 'snapshot-5-existing' },
+        )
 
         await expect(withPinnedNativePersistentRisuSaveFile(
             lease,
@@ -55,10 +55,10 @@ describe('native persistent RisuSave export', () => {
     it('cleans an existing pinned lease export when its consumer fails', async () => {
         const { events, dependencies } = harness()
         const readError = new Error('read cancelled')
-        const lease = {
-            revision: 5,
-            [nativePersistentRevisionLease]: 'snapshot-5-existing',
-        } as unknown as PersistentRevisionLease
+        const lease = createLeaseStub(
+            { revision: 5 },
+            { [nativePersistentRevisionLease]: 'snapshot-5-existing' },
+        )
 
         await expect(withPinnedNativePersistentRisuSaveFile(
             lease,
@@ -79,7 +79,7 @@ describe('native persistent RisuSave export', () => {
     it('rejects callers without a native lease', async () => {
         const { dependencies } = harness()
         expect(() => withPinnedNativePersistentRisuSaveFile(
-                { revision: 5 } as PersistentRevisionLease,
+                createLeaseStub({ revision: 5 }),
                 {},
                 async () => undefined,
                 dependencies,

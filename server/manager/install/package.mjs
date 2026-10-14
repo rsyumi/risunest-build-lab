@@ -16,6 +16,7 @@ import {
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertNoIdentifierOverride, assertSyncIdentifier, mergeTauriConfig } from "../../../scripts/release/tauri-config.mjs";
+import { writeZipArchive } from "../../../scripts/release/platform/package.mjs";
 
 const manager = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const gui = join(manager, "gui");
@@ -232,7 +233,7 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
     throw new Error("Set CARGO_TARGET_DIR to the repository shared target directory.");
   const requiredInputs = target.includes("linux")
     ? ["daemon", "manager", "cloudflared", "license"]
-    : ["daemon", "packagedDaemon", "manager", "gui", "cloudflared", "license"];
+    : ["daemon", "packagedDaemon", "manager", "cloudflared", "license"];
   if (target.includes("windows")) requiredInputs.push("managerBackground");
   for (const name of requiredInputs) {
     if (!existsSync(build[name])) throw new Error(`Native build input ${name} is missing.`);
@@ -259,6 +260,7 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
     checks: ["archive-layout"],
   }];
   const temporary = mkdtempSync(join(destination, ".sync-package-"));
+  const installerHooks = `${temporary}.nsh`;
   try {
     if (os === "linux") {
       copyRuntime(temporary, build, releaseInput, false);
@@ -283,11 +285,21 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
         writeOwnedInventory(join(gui, "src-tauri/binaries"), releaseInput, owned, "cloudflared.exe", build);
       }
       const bundleConfig = JSON.parse(readFileSync(join(tauriRoot, "tauri.bundle.conf.json"), "utf8"));
+      if (os === "windows") {
+        const quote = (path) => resolve(path).replaceAll("$", "$$").replaceAll('"', '$\\"');
+        writeFileSync(installerHooks, [
+          `!define SYNC_INSTALLER_MANAGER "${quote(build.manager)}"`,
+          `!define SYNC_INSTALLER_BACKGROUND "${quote(build.managerBackground)}"`,
+          `!include "${quote(join(manager, "install/windows.nsh"))}"`,
+          "",
+        ].join("\n"));
+      }
       const config = JSON.stringify({
         version: releaseInput.version,
         bundle: {
           active: true,
           createUpdaterArtifacts: false,
+          ...(os === "windows" ? { windows: { nsis: { installerHooks } } } : {}),
           // The macOS bundle shares the base list; only Windows ships the windowless manager.
           ...(os === "windows"
             ? { externalBin: [...bundleConfig.bundle.externalBin, "binaries/risunest-sync-manager-background"] }
@@ -298,14 +310,17 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
         },
       });
       const bundles = os === "windows" ? "nsis" : "app";
-      run(process.execPath, [cli, "build", "--target", target, "--config", "src-tauri/tauri.bundle.conf.json", "--config", config, "--bundles", bundles, "--", "--locked"], gui);
+      const configArgs = ["--config", "src-tauri/tauri.bundle.conf.json", "--config", config];
+      run(process.execPath, [cli, "build", "--target", target, "--no-bundle", ...configArgs, "--", "--locked"], gui);
+      copyFileSync(join(process.env.CARGO_TARGET_DIR, target, `release/risunest-sync-gui${os === "windows" ? ".exe" : ""}`), required(build.gui, "GUI output"));
+      run(process.execPath, [cli, "bundle", "--target", target, ...configArgs, "--bundles", bundles], gui);
       const bundleRoot = join(process.env.CARGO_TARGET_DIR, target, "release/bundle");
       if (os === "windows") {
         copyRuntime(temporary, build, releaseInput, true);
         assertBundleSelection(join(temporary, "risunest-sync-gui.exe"), "UNK");
         validateOwnedInventory(temporary, join(temporary, "risunest-sync-bundle.json"), releaseInput, build);
         const archive = join(destination, "managed.zip");
-        run("tar", ["-a", "-cf", archive, "-C", temporary, ...archiveEntries(temporary)]);
+        writeZipArchive(temporary, archive);
         const installer = unique(bundleRoot, (path) => basename(path).startsWith(`RisuNest Sync_${releaseInput.version}_`) && path.endsWith("-setup.exe"), "NSIS installer");
         const installerStage = mkdtempSync(join(destination, ".sync-nsis-proof-"));
         run("7z", ["x", "-y", `-o${installerStage}`, installer]);
@@ -398,6 +413,7 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
     writeFileSync(manifest, `${JSON.stringify(result, null, 2)}\n`);
     return { assets: result, manifest };
   } finally {
+    rmSync(installerHooks, { force: true });
     rmSync(temporary, { recursive: true, force: true });
   }
 }

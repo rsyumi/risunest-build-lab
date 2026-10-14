@@ -144,7 +144,7 @@ fn both_pocket_versions_restore_database_and_media_into_the_persistent_store() {
         job.start(JobPhase::ReadingSource).unwrap();
         parse_legacy_local_backup_v1(
             &mut Cursor::new(archive),
-            directory.path(),
+            &test_legacy_staging(directory.path()),
             PayloadTarget::JobStaging,
             &mut Import {
                 root: directory.path(),
@@ -221,7 +221,7 @@ fn invalid_database_never_activates_prepared_pocket_media() {
     job.start(JobPhase::ReadingSource).unwrap();
     assert!(parse_legacy_local_backup_v1(
         &mut Cursor::new(V112),
-        directory.path(),
+        &test_legacy_staging(directory.path()),
         PayloadTarget::JobStaging,
         &mut Import {
             root: directory.path(),
@@ -267,7 +267,7 @@ fn private_backup_diagnostic() {
     job.start(JobPhase::ReadingSource).unwrap();
     let result = parse_legacy_local_backup_v1(
         &mut source,
-        directory.path(),
+        &test_legacy_staging(directory.path()),
         PayloadTarget::JobStaging,
         &mut Import {
             root: directory.path(),
@@ -379,7 +379,7 @@ fn plan(
     let mut planner = Planner(&cas, &mut durable, cancellation, None);
     let outcome = parse_legacy_local_backup_v1(
         &mut Cursor::new([entries, archive_entry(DATABASE_ENTRY, b"RISUSAVE\0")].concat()),
-        directory.path(),
+        &test_legacy_staging(directory.path()),
         PayloadTarget::JobStaging,
         &mut planner,
         &NeverCancelled,
@@ -512,7 +512,7 @@ fn pocket_backup_payload_restores_through_source_reads_of_at_most_64_kib() {
     job.start(JobPhase::ReadingSource).unwrap();
     let report = parse_legacy_local_backup_v1(
         &mut source,
-        directory.path(),
+        &test_legacy_staging(directory.path()),
         PayloadTarget::JobStaging,
         &mut Import {
             root: directory.path(),

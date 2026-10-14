@@ -3,6 +3,8 @@ import { isLibraryFileOperationReserved } from '../storage/libraryFileOperation'
 
 let activeReservation: symbol | null = null
 const doingChatState = writable(false)
+const generationCancellationState = writable<(() => void) | null>(null)
+export const generationCancellation = { subscribe: generationCancellationState.subscribe }
 export const doingChat: Writable<boolean> = {
     subscribe: doingChatState.subscribe,
     set(busy) {
@@ -19,12 +21,18 @@ export interface GenerationReservation {
     release(options?: { preserveBusy?: boolean }): void
 }
 
-export function reserveGeneration(): GenerationReservation | null {
+export function reserveGeneration(cancel?: () => void): GenerationReservation | null {
     if (activeReservation || get(doingChat) || isLibraryFileOperationReserved()) return null
     const token = Symbol('generation-reservation')
     activeReservation = token
-    doingChat.set(true)
     let released = false
+    let cancelled = false
+    generationCancellationState.set(cancel ? () => {
+        if (released || cancelled || activeReservation !== token) return
+        cancelled = true
+        cancel()
+    } : null)
+    doingChat.set(true)
     return {
         isCurrent: () => !released && activeReservation === token,
         release(options) {
@@ -32,6 +40,7 @@ export function reserveGeneration(): GenerationReservation | null {
             released = true
             if (activeReservation !== token) return
             activeReservation = null
+            generationCancellationState.set(null)
             if (!options?.preserveBusy) doingChat.set(false)
         },
     }

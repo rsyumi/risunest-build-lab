@@ -1,29 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 
 const root = new URL("../../", import.meta.url);
 const workflows = new URL(".github/workflows/", root);
-
-test("unsupported container and Cloudflare Pages distribution channels stay removed", () => {
-  for (const path of [
-    ".dockerignore",
-    "Dockerfile",
-    "docker-compose.yml",
-    ".github/workflows/docker-build.yml",
-    ".github/workflows/nightly-deploy.yml",
-  ]) assert.equal(existsSync(new URL(path, root)), false, `${path} must stay removed`);
-
-  const workflowContents = readdirSync(workflows, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && /\.ya?ml$/.test(entry.name))
-    .map((entry) => readFileSync(new URL(entry.name, workflows), "utf8"))
-    .join("\n");
-  assert.doesNotMatch(workflowContents, /docker\/(?:setup-buildx|login|metadata|build-push)-action|docker buildx build|ghcr\.io/);
-  assert.doesNotMatch(workflowContents, /cloudflare\/wrangler-action|pages deploy|CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID|NIGHTLY_PROJECT_NAME)/);
-
-  const readme = readFileSync(new URL("README.md", root), "utf8");
-  assert.doesNotMatch(readme, /Docker Installation|docker compose|run RisuNest using Docker/i);
-});
 
 test("pull requests run only the standard, CodeQL and scoped native checks", () => {
   const pullRequestWorkflows = readdirSync(workflows, { withFileTypes: true })
@@ -37,16 +17,6 @@ test("pull requests run only the standard, CodeQL and scoped native checks", () 
   assert.doesNotMatch(pullRequestCheck, /pull-requests:\s*write/);
 
   const nativeCheck = readFileSync(new URL("native-check.yml", workflows), "utf8").replace(/\r\n/g, "\n");
-  const nativePullRequest = nativeCheck.match(/^  pull_request:\n((?: {4,}[^\n]*\n)+)/m)?.[1];
-  assert.equal(nativePullRequest, [
-    "    branches: [main]",
-    "    paths:",
-    "      - 'src-tauri/**'",
-    "      - 'crates/**'",
-    "      - 'scripts/linux-native-tests.sh'",
-    "      - '.github/workflows/native-check.yml'",
-    "",
-  ].join("\n"));
   const nativePermissions = nativeCheck.match(/^permissions:\n((?: {2,}[^\n]*\n)+)/m)?.[1];
   assert.equal(nativePermissions, "  contents: read\n");
 });

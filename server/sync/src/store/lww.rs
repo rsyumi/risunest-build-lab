@@ -12,6 +12,9 @@ use risunest_sync_wire::{
 use rusqlite::{params, Connection, OptionalExtension};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// Allow slow restores without letting repeated reads retain a snapshot indefinitely.
+const STATE_PIN_LIFETIME_SECONDS: i64 = 24 * 60 * 60;
+
 pub(super) fn time_ms() -> Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -493,7 +496,7 @@ impl Store {
         )?;
         let head = Self::read_head(&tx)?;
         let expires = super::uploads::now()?
-            .checked_add(3600)
+            .checked_add(STATE_PIN_LIFETIME_SECONDS)
             .ok_or(Error::new("clock-overflow", 503))?;
         let id = random_id()?;
         tx.execute(

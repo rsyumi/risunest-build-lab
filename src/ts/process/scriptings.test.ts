@@ -10,10 +10,13 @@ import { readImage } from '../globalApi.svelte'
 import { getCurrentCharacter, getCurrentChat, getDatabase } from '../storage/database.svelte'
 import { asBuffer, getUserIcon } from '../util'
 import { writeInlayImage } from './files/inlays'
-import { ActiveConversationSession } from '../storage/activeConversationSession'
+import {
+  ActiveConversationSession,
+  ConversationSessionStaleError,
+} from '../storage/activeConversationSession'
 import { createConversationOperationContext } from './conversationOperationContext'
 import type { Chat, character } from '../storage/database.svelte'
-import { DBState } from '../stores.svelte'
+import { DBState, ScriptDisplayRefreshPointer } from '../stores.svelte'
 import { risuChatParser } from '../parser/parser.svelte'
 import type { LuaEngine } from 'wasmoon'
 import { appendDefaultChatInput } from '../../lib/ChatScreens/defaultChatInput'
@@ -23,88 +26,46 @@ import {
 } from '../conversationMutations'
 import { captureGenerationConversationOperation } from './generationConversationOperation'
 import { createChatParserDependencyStamp } from '../chatRenderIdentity'
-import { alertConfirm, alertNormal } from '../alert'
+import { alertConfirm, alertNormal, alertToast } from '../alert'
+import { language } from '../../lang'
+import { DisplayReadRecord, recordAmbientChatVariableReads } from './scriptVariableReads'
 
 const continuationRuntime = vi.hoisted(() => ({
   session: null as ActiveConversationSession | null,
 }))
-vi.mock('../storage/persistentDataRuntime.svelte', () => ({
-  peekActiveConversationSession: () => continuationRuntime.session,
-}))
+vi.mock('../storage/persistentDataRuntime.svelte', async () => (await import('./tests/scriptingsTestHarness')).persistentRuntimeModule(() => continuationRuntime.session))
 
 const scriptingSelectionState = vi.hoisted(() => ({ index: 0 }))
 const createdLuaEngines = vi.hoisted(() => [] as LuaEngine[])
 const createdLuaEngineOptions = vi.hoisted(() => [] as unknown[])
 const diagnosticEngineSetup = vi.hoisted(() => ({ next: null as ((engine: LuaEngine) => void) | null }))
+// Replaces the product's function deadline, whose value the engine option tests check, so a run that waits it out is short.
+const engineFunctionTimeout = vi.hoisted(() => ({ ms: null as number | null }))
 
-vi.mock('../parser/parser.svelte', () => ({
-  hasher: vi.fn(),
-  risuChatParser: vi.fn(),
-}))
+vi.mock('../parser/parser.svelte', async () => (await import('./tests/scriptingsTestHarness')).parserModule())
 
-vi.mock('../alert', () => ({
-  alertConfirm: vi.fn(),
-  alertError: vi.fn(),
-  alertInput: vi.fn(),
-  alertNormal: vi.fn(),
-  alertSelect: vi.fn(),
-}))
+vi.mock('../alert', async () => (await import('./tests/scriptingsTestHarness')).alertModule())
 
 vi.mock('../globalApi.svelte', () => ({ fetchNative: vi.fn(), readImage: vi.fn() }))
-vi.mock('../platform', () => ({ isTauriMobile: true }))
-vi.mock('../tokenizer', () => ({ tokenize: vi.fn() }))
-vi.mock('../util', () => ({
-  asBuffer: vi.fn(),
-  getPersonaPrompt: vi.fn(),
-  getUserIcon: vi.fn(),
-  getUserName: vi.fn(),
-  parseKeyValue: vi.fn(() => []),
-}))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'android' }))
+vi.mock('../tokenizer', async () => (await import('./tests/scriptingsTestHarness')).tokenizerModule())
+vi.mock('../util', async () => (await import('./tests/scriptingsTestHarness')).utilModule())
 
-vi.mock('../storage/database.svelte', () => ({
-  getCurrentCharacter: vi.fn(() => ({})),
-  getCurrentChat: vi.fn(() => ({ message: [] })),
-  getDatabase: vi.fn(() => ({ characters: [] })),
-  setDatabase: vi.fn(),
-}))
+vi.mock('../storage/database.svelte', async () => (await import('./tests/scriptingsTestHarness')).databaseModule())
 
-vi.mock('../stores.svelte', () => ({
-  DBState: { db: {} },
-  ReloadChatPointer: { update: vi.fn() },
-  ReloadGUIPointer: {
-    subscribe: (run: (value: number) => void) => {
-      run(0)
-      return () => {}
-    },
-    set: vi.fn(),
-    update: vi.fn(),
-  },
-  CurrentTriggerIdStore: {
-    subscribe: (run: (value: null) => void) => {
-      run(null)
-      return () => {}
-    },
-    set: vi.fn(),
-  },
-  selectedCharID: {
-    subscribe: (run: (value: number) => void) => (
-      run(scriptingSelectionState.index),
-      () => undefined
-    ),
-  },
-}))
+vi.mock('../stores.svelte', async () => (await import('./tests/scriptingsTestHarness')).storesModule(() => scriptingSelectionState.index))
 
-vi.mock('./modules', () => ({
-  getModuleLorebooks: vi.fn(() => []),
-  getModuleTriggers: vi.fn(() => []),
-}))
+vi.mock('./modules', async () => (await import('./tests/scriptingsTestHarness')).modulesModule())
+vi.mock('../plugins/plugins.svelte', () => ({ pluginV2: {
+  editdisplay: new Set(), editinput: new Set(), editoutput: new Set(), editprocess: new Set(),
+} }))
 
-vi.mock('./files/inlays', () => ({ getInlayAsset: vi.fn(), writeInlayImage: vi.fn() }))
-vi.mock('./lorebook.svelte', () => ({ loadLoreBookV3PromptFromCompatibilitySnapshot: vi.fn() }))
-vi.mock('./memory/hypamemory', () => ({ HypaProcesser: vi.fn() }))
-vi.mock('./request/request', () => ({ requestChatData: vi.fn() }))
-vi.mock('./stableDiff', () => ({ generateAIImage: vi.fn() }))
-vi.mock('./command', () => ({ processMultiCommand: vi.fn() }))
+vi.mock('./files/inlays', async () => (await import('./tests/scriptingsTestHarness')).inlaysModule())
+vi.mock('./lorebook.svelte', async () => (await import('./tests/scriptingsTestHarness')).lorebookModule())
+vi.mock('./memory/hypamemory', async () => (await import('./tests/scriptingsTestHarness')).hypamemoryModule())
+vi.mock('./request/request', async () => (await import('./tests/scriptingsTestHarness')).requestModule())
+vi.mock('./stableDiff', async () => (await import('./tests/scriptingsTestHarness')).stableDiffModule())
+vi.mock('./command', async () => (await import('./tests/scriptingsTestHarness')).commandModule())
 vi.mock('./luaRuntime', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./luaRuntime')>()
   return {
@@ -114,7 +75,7 @@ vi.mock('./luaRuntime', async (importOriginal) => {
       const createEngine = factory.createEngine.bind(factory)
       factory.createEngine = async (options) => {
         createdLuaEngineOptions.push(options)
-        const engine = await createEngine(options)
+        const engine = await createEngine(engineFunctionTimeout.ms === null ? options : { ...options, functionTimeout: engineFunctionTimeout.ms })
         createdLuaEngines.push(engine)
         const setup = diagnosticEngineSetup.next
         diagnosticEngineSetup.next = null
@@ -132,10 +93,11 @@ let jsonLuaSource = ''
 function operationCharacterFixture(
   suffix: string,
   onMutation?: () => void,
+  messages: Chat['message'] = [{ role: 'user', data: 'message', chatId: `message-${suffix}` }],
 ) {
   const chat = {
     id: `lua-metadata-chat-${suffix}`,
-    message: [{ role: 'user', data: 'message', chatId: `message-${suffix}` }],
+    message: messages,
     localLore: [],
   } as unknown as Chat
   const char = {
@@ -698,7 +660,7 @@ test('releases cached invocation state while preserving Lua globals', async () =
   vi.mocked(risuChatParser).mockClear()
 
   expect(first.res).toBe(1)
-  expect(() => getFullChat('inactive')).toThrow(/Cannot read properties of undefined/)
+  expect(() => getFullChat('inactive')).toThrow(/is not a function/)
   expect(() => getChatVar('inactive', 'key')).toThrow(/is not a function/)
   parseCbs('after invocation')
   expect(risuChatParser).toHaveBeenLastCalledWith('after invocation', {
@@ -719,7 +681,7 @@ test('releases cached invocation state while preserving Lua globals', async () =
   consoleError.mockRestore()
 
   expect(failed.res).toBeUndefined()
-  expect(() => getFullChat('inactive')).toThrow(/Cannot read properties of undefined/)
+  expect(() => getFullChat('inactive')).toThrow(/is not a function/)
 
   const second = await runScripted(code, {
     char: { chaId: fixture.char.chaId } as never,
@@ -731,7 +693,7 @@ test('releases cached invocation state while preserving Lua globals', async () =
   expect(second.res).toBe(3)
   expect(second.stopSending).toBe(true)
   expect(createdLuaEngines.at(-1)).toBe(engine)
-  expect(() => getFullChat('inactive')).toThrow(/Cannot read properties of undefined/)
+  expect(() => getFullChat('inactive')).toThrow(/is not a function/)
 })
 
 test('records nil, null, false, arrays, and JSON round trips', async () => {
@@ -1453,6 +1415,7 @@ test('Lua history and chat variables stay bound to the captured character', asyn
     storeRevision: 13,
   })
   const operationContext = createConversationOperationContext(session, originalChat)
+  // The global selection points at the replacement, so reading it instead of the captured character fails this test.
   scriptingSelectionState.index = 1
   vi.mocked(getDatabase).mockReturnValue(database as never)
   vi.mocked(getCurrentCharacter).mockReturnValue(replacementCharacter as never)
@@ -1566,17 +1529,37 @@ test('records the synthetic LLM Promise await result in a supported listener mod
   }, 'model')
 })
 
-test('creates production Lua engines with the handler deadline', async () => {
-  await runScripted('', {
-    char: { chaId: 'bounded-handler-options' } as never,
-    chat: { message: [] } as never,
-    mode: 'bounded-handler-options',
-  })
+test.each([
+  ['listener', 2_000],
+  ['button', 60_000],
+  ['manual trigger', 60_000],
+] as const)('creates production Lua engines with the %s deadline', async (entry, functionTimeout) => {
+  const char = {
+    type: 'character',
+    chaId: `bounded-${entry.replace(' ', '-')}-options`,
+    chatPage: 0,
+    chats: [{ message: [] }],
+    triggerscript: [{
+      comment: 'manualAction',
+      type: 'manual',
+      conditions: [],
+      effect: [{ type: 'triggerlua', code: `-- ${entry} deadline` }],
+    }],
+    defaultVariables: '',
+  } as unknown as character
+  DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+  vi.mocked(getDatabase).mockReturnValue(DBState.db as never)
+  if (entry === 'listener') {
+    await runScripted(`-- ${entry} deadline`, { char, chat: { message: [] } as never, mode: 'output' })
+  } else if (entry === 'button') {
+    const { runLuaButtonTrigger } = await import('./scriptings')
+    await runLuaButtonTrigger(char, 'click')
+  } else {
+    const { runTrigger } = await import('./triggers')
+    await runTrigger(char, 'manual', { chat: char.chats[0], manualName: 'manualAction' })
+  }
 
-  expect(createdLuaEngineOptions.at(-1)).toEqual({
-    injectObjects: true,
-    functionTimeout: 2_000,
-  })
+  expect(createdLuaEngineOptions.at(-1)).toEqual({ injectObjects: true, functionTimeout })
 })
 
 test.each(['timeout', 'ordinary'] as const)('classifies the actual Wasmoon instruction-hook timeout without changing ordinary diagnostics (%s)', async (kind) => {
@@ -1589,6 +1572,7 @@ test.each(['timeout', 'ordinary'] as const)('classifies the actual Wasmoon instr
     })
   }
   const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+  vi.mocked(alertToast).mockClear()
   const elapsedClock = vi.spyOn(performance, 'now').mockReturnValueOnce(100).mockReturnValueOnce(125)
   const deadlineClock = vi.spyOn(Date, 'now').mockImplementation(() => now)
   try {
@@ -1603,10 +1587,12 @@ test.each(['timeout', 'ordinary'] as const)('classifies the actual Wasmoon instr
       mode: 'output',
     })
     if (kind === 'timeout') {
+      expect(alertToast).toHaveBeenCalledExactlyOnceWith(language.risuNest.scriptTimeout)
       expect(errors.mock.calls).toEqual([[{ code: 'lua-listener-timeout', mode: 'output', elapsedMs: 25 }]])
       expect(Number.isFinite(errors.mock.calls[0][0].elapsedMs)).toBe(true)
       expect(errors.mock.calls[0][0].elapsedMs).toBeGreaterThanOrEqual(0)
     } else {
+      expect(alertToast).not.toHaveBeenCalled()
       expect(errors).toHaveBeenCalledOnce()
       expect(errors.mock.calls[0]).toHaveLength(1)
       expect(errors.mock.calls[0][0]).toBeInstanceOf(Error)
@@ -1619,6 +1605,54 @@ test.each(['timeout', 'ordinary'] as const)('classifies the actual Wasmoon instr
     elapsedClock.mockRestore()
     deadlineClock.mockRestore()
     errors.mockRestore()
+  }
+})
+
+test('shows one Lua timeout notice for queued display pipelines and another for a later refresh', async () => {
+  const fixture = operationCharacterFixture('display-timeout-notice')
+  fixture.char.customscript = []
+  let now = Date.now()
+  diagnosticEngineSetup.next = (engine) => {
+    engine.global.set('slowDisplay', () => {
+      now += 2_001
+    })
+  }
+  fixture.char.triggerscript = luaTriggerScript(`
+    listenEdit('editDisplay', function(id, value)
+      slowDisplay()
+      local total = 0
+      for i = 1, 10000 do total = total + i end
+      return value .. total
+    end)
+  `)
+  installOperationCharacterFixture(fixture)
+  vi.mocked(getCurrentChat).mockReturnValue(fixture.chat)
+  vi.mocked(getCurrentCharacter).mockReturnValue(fixture.char)
+  continuationRuntime.session = fixture.session
+  const previousLocalStorage = globalThis.localStorage
+  vi.stubGlobal('localStorage', { getItem: () => null })
+  vi.mocked(risuChatParser).mockImplementation(value => value)
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+  const deadlineClock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+  vi.mocked(alertToast).mockClear()
+  try {
+    const { processScriptFull } = await import('./scripts')
+    await expect(Promise.all([
+      processScriptFull(fixture.char, 'first', 'editdisplay', 0),
+      processScriptFull(fixture.char, 'second', 'editdisplay', 1),
+    ])).resolves.toMatchObject([{ data: 'first' }, { data: 'second' }])
+    expect(errors.mock.calls.filter(([error]) => error?.code === 'lua-listener-timeout')).toHaveLength(2)
+    expect(alertToast).toHaveBeenCalledExactlyOnceWith(language.risuNest.scriptTimeout)
+
+    await processScriptFull(fixture.char, 'later', 'editdisplay', 0)
+    expect(alertToast).toHaveBeenCalledTimes(2)
+  } finally {
+    diagnosticEngineSetup.next = null
+    deadlineClock.mockRestore()
+    errors.mockRestore()
+    continuationRuntime.session = null
+    vi.mocked(risuChatParser).mockReset()
+    vi.stubGlobal('localStorage', previousLocalStorage)
   }
 })
 
@@ -1787,20 +1821,21 @@ test.each(['complete', 'navigate', 'external-edit'] as const)(
         ])
         expect(alertNormal).not.toHaveBeenCalled()
       } else {
+        // The first handler read no message before the external edit, so its append
+        // applies to the edited conversation.
         expect(settled.map((result) => result.status)).toEqual([
-          outcome === 'complete' ? 'fulfilled' : 'rejected',
+          'fulfilled',
           'fulfilled',
           'fulfilled',
         ])
-        expect(fixture.chat.scriptstate.$counter).toBe(
-          outcome === 'complete' ? '3' : '2',
-        )
+        expect(fixture.chat.scriptstate.$counter).toBe('3')
         expect(alertNormal).toHaveBeenCalledTimes(2)
-        expect(fixture.chat.message.map((entry) => entry.data)).toEqual(
-          outcome === 'complete'
-            ? ['message', 'first', 'manual', 'last']
-            : ['external', 'manual', 'last'],
-        )
+        expect(fixture.chat.message.map((entry) => entry.data)).toEqual([
+          outcome === 'complete' ? 'message' : 'external',
+          'first',
+          'manual',
+          'last',
+        ])
       }
       expect(fixture.session.activePinReasons).toEqual([])
     } finally {
@@ -1810,6 +1845,328 @@ test.each(['complete', 'navigate', 'external-edit'] as const)(
     }
   },
 )
+
+function luaTriggerScript(code: string) {
+  return [
+    { type: 'start', conditions: [], effect: [{ type: 'triggerlua', code }] },
+  ] as never
+}
+
+test('runs variable-only Lua handlers and display listeners without visiting messages', async () => {
+  const fixture = operationCharacterFixture('variables-without-messages')
+  fixture.chat.scriptstate = { $counter: '0' }
+  fixture.char.triggerscript = luaTriggerScript(`
+    function onButtonClick(id, data)
+      setChatVar(id, 'counter', tostring(tonumber(getChatVar(id, 'counter')) + 1))
+    end
+    listenEdit('editDisplay', function(id, value)
+      setChatVar(id, 'seen', getChatVar(id, 'counter'))
+      return value .. ':' .. getChatVar(id, 'counter')
+    end)
+  `)
+  installOperationCharacterFixture(fixture)
+  vi.mocked(getCurrentChat).mockReturnValue(fixture.chat)
+  vi.mocked(getCurrentCharacter).mockReturnValue(fixture.char)
+  continuationRuntime.session = fixture.session
+  // The length is a constant-time read; any element read or iteration visits messages.
+  let messagesReadable = true
+  fixture.chat.message = new Proxy(fixture.chat.message, {
+    get(target, property, receiver) {
+      if (!messagesReadable && property !== 'length') {
+        throw new Error(`message read: ${String(property)}`)
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+  const { runLuaButtonTrigger, runLuaEditTrigger } = await import('./scriptings')
+  try {
+    messagesReadable = false
+    await runLuaButtonTrigger(fixture.char, 'click')
+    // The display pipeline records what its listener reads for the row it renders.
+    const reads = new DisplayReadRecord()
+    const stopRecording = recordAmbientChatVariableReads(reads)
+    try {
+      await expect(runLuaEditTrigger(fixture.char, 'editdisplay', 'row')).resolves.toBe('row:1')
+    } finally {
+      stopRecording()
+    }
+    expect([...reads.keys]).toEqual(['counter'])
+    expect(errors).not.toHaveBeenCalled()
+    expect(fixture.chat.scriptstate).toEqual({ $counter: '1', $seen: '1' })
+    // One variable commit each for the handler and the listener.
+    expect(fixture.session.version).toBe(2)
+  } finally {
+    messagesReadable = true
+    errors.mockRestore()
+    continuationRuntime.session = null
+  }
+})
+
+test.each(['after', 'before'].flatMap(edit => ['content', 'metadata'].map(change => ({ edit, change }))))('rejects a Lua message edit made $edit the message $change changed and keeps its variables', async ({ edit, change }) => {
+  const fixture = operationCharacterFixture(`stale-message-edit-${edit}-${change}`)
+  if (change === 'metadata') fixture.chat.scriptstate = { $asked: 'yes' }
+  const setChat = `setChat(id, 0, 'edited from ' .. before)`
+  fixture.char.triggerscript = luaTriggerScript(`
+    onButtonClick = async(function(id, data)
+      local before = getChatMain(id, 0)
+      setChatVar(id, 'asked', 'yes')
+      ${edit === 'before' ? setChat : ''}
+      alertConfirm(id, 'synthetic confirmation'):await()
+      setChatVar(id, 'answered', 'yes')
+      ${edit === 'after' ? setChat : ''}
+    end)
+  `)
+  installOperationCharacterFixture(fixture)
+  vi.mocked(getCurrentChat).mockReturnValue(fixture.chat)
+  vi.mocked(getCurrentCharacter).mockReturnValue(fixture.char)
+  continuationRuntime.session = fixture.session
+  let confirm!: (value: boolean) => void
+  let askedWhileWaiting: unknown
+  vi.mocked(alertConfirm).mockImplementationOnce(() => {
+    askedWhileWaiting = fixture.chat.scriptstate?.$asked
+    return new Promise<boolean>((resolve) => { confirm = resolve })
+  })
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+  const { runLuaButtonTrigger } = await import('./scriptings')
+  try {
+    const click = runLuaButtonTrigger(fixture.char, 'click')
+    await vi.waitFor(() => expect(confirm).toBeTypeOf('function'))
+    expect(askedWhileWaiting).toBe('yes')
+    if (change === 'metadata') {
+      expect(fixture.session.adoptPersistedMetadata({
+        ...fixture.chat,
+        message: fixture.chat.message.map(message => ({ ...message, pluginMetadata: 'external' })),
+      }, 15)).toBe(true)
+    } else {
+      fixture.session.edit(fixture.session.locate(0), {
+        ...fixture.chat.message[0],
+        data: 'external',
+      })
+    }
+    confirm(true)
+
+    await expect(click).rejects.toThrow(ConversationSessionStaleError)
+    expect(fixture.chat.message[0]).toMatchObject(change === 'metadata'
+      ? { data: 'message', pluginMetadata: 'external' }
+      : { data: 'external' })
+    expect(fixture.chat.scriptstate).toEqual({ $asked: 'yes', $answered: 'yes' })
+    expect(fixture.session.activePinReasons).toEqual([])
+  } finally {
+    confirm?.(true)
+    errors.mockRestore()
+    continuationRuntime.session = null
+    vi.mocked(alertConfirm).mockReset()
+  }
+})
+
+test('shows Lua variables at reloadDisplay and commits message edits at the end', async () => {
+  const fixture = operationCharacterFixture('reload-display-flush')
+  fixture.chat.scriptstate = { $other: 'kept' }
+  fixture.char.triggerscript = luaTriggerScript(`
+    function onButtonClick(id, data)
+      setChat(id, 0, 'edited')
+      setChatVar(id, 'counter', '1')
+      reloadDisplay(id)
+      setChatVar(id, 'after', '2')
+    end
+  `)
+  installOperationCharacterFixture(fixture)
+  vi.mocked(getCurrentChat).mockReturnValue(fixture.chat)
+  vi.mocked(getCurrentCharacter).mockReturnValue(fixture.char)
+  continuationRuntime.session = fixture.session
+  const atRefresh: unknown[] = []
+  vi.mocked(ScriptDisplayRefreshPointer.update).mockImplementation(() => {
+    atRefresh.push({
+      messages: fixture.chat.message.map((entry) => entry.data),
+      scriptstate: { ...fixture.chat.scriptstate },
+    })
+  })
+  const { runLuaButtonTrigger } = await import('./scriptings')
+  try {
+    const result = await runLuaButtonTrigger(fixture.char, 'click')
+
+    // The end commit refreshes for the variable written after reloadDisplay.
+    expect(atRefresh).toEqual([
+      { messages: ['message'], scriptstate: { $other: 'kept', $counter: '1' } },
+      { messages: ['edited'], scriptstate: { $other: 'kept', $counter: '1', $after: '2' } },
+    ])
+    expect(result.chat).toBe(fixture.chat)
+    expect(fixture.chat.message.map((entry) => entry.data)).toEqual(['edited'])
+    expect(fixture.chat.scriptstate).toEqual({ $other: 'kept', $counter: '1', $after: '2' })
+  } finally {
+    vi.mocked(ScriptDisplayRefreshPointer.update).mockReset()
+    continuationRuntime.session = null
+  }
+})
+
+test.each([
+  ['field edits', `
+    setChat(id, 1, 'edited ' .. getChatData(id, 1))
+    setChatRole(id, 3, 'char')
+    setChatVar(id, 'read', getChatData(id, 1) .. '/' .. getChatRole(id, 3) .. '/' .. cbs('{{message 1}}'))
+  `, ['user:zero', 'user:edited one', 'user:two', 'char:three'], 'edited one/char/edited one'],
+  ['an edit and an append', `
+    setChat(id, 3, 'edited ' .. getChatData(id, 3))
+    addChat(id, 'char', 'tail')
+    setChatVar(id, 'read', getChatData(id, -2) .. '/' .. getChatData(id, -1))
+  `, ['user:zero', 'user:one', 'user:two', 'user:edited three', 'char:tail'], 'edited three/tail'],
+] as const)('copies only the messages a Lua handler edits or appends (%s)', async (name, body, stored, read) => {
+  // Every property read of the other messages throws once the handler starts.
+  let locked = false
+  const messages = ['zero', 'one', 'two', 'three'].map((data, index) => {
+    const message = { role: 'user', data, chatId: `message-${index}` }
+    if (index % 2 === 1) return message
+    return new Proxy(message, {
+      get(target, property, receiver) {
+        if (locked) throw new Error(`read of message ${index}: ${String(property)}`)
+        return Reflect.get(target, property, receiver)
+      },
+    })
+  }) as Chat['message']
+  const fixture = operationCharacterFixture(`edit-set-${name.replaceAll(' ', '-')}`, undefined, messages)
+  fixture.char.triggerscript = luaTriggerScript(`
+    function onButtonClick(id, data)
+      ${body}
+    end
+  `)
+  installOperationCharacterFixture(fixture)
+  vi.mocked(getCurrentChat).mockReturnValue(fixture.chat)
+  vi.mocked(getCurrentCharacter).mockReturnValue(fixture.char)
+  continuationRuntime.session = fixture.session
+  // CBS reads the conversation from the database it is given.
+  vi.mocked(risuChatParser).mockImplementation((_value, options) =>
+    options!.db!.characters[0].chats[0].message[1].data)
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+  const { runLuaButtonTrigger } = await import('./scriptings')
+  try {
+    locked = true
+    await runLuaButtonTrigger(fixture.char, 'click')
+    locked = false
+    expect(errors).not.toHaveBeenCalled()
+    expect(fixture.chat.message.map((entry) => `${entry.role}:${entry.data}`)).toEqual(stored)
+    expect(fixture.chat.scriptstate).toEqual({ $read: read })
+    expect(fixture.session.activePinReasons).toEqual([])
+  } finally {
+    locked = false
+    vi.mocked(risuChatParser).mockReset()
+    errors.mockRestore()
+    continuationRuntime.session = null
+  }
+})
+
+test.each([
+  ['field edits and appends', `
+    setChat(id, 1, 'edited ' .. getChatData(id, 1))
+    setChatRole(id, 1, 'user')
+    addChat(id, 'char', 'tail')
+    setChat(id, -1, getChatData(id, -1) .. ' after ' .. getChatData(id, 1))
+    setChat(id, 9, 'ignored')
+    setChat(id, -9, 'ignored')
+    setChatVar(id, 'read', getChatData(id, -1))
+  `, ['user:zero', 'user:edited one', 'user:two', 'char:tail after edited one']],
+  ['a structural edit after field edits', `
+    setChat(id, 0, 'edited')
+    addChat(id, 'user', 'tail')
+    insertChat(id, 1, 'char', 'inserted')
+    setChat(id, -1, getChatData(id, -1) .. ' edited')
+    setChatVar(id, 'read', getChatData(id, 1))
+  `, ['user:edited', 'char:inserted', 'char:one', 'user:two', 'user:tail edited']],
+  ['an unchanged value', `
+    setChat(id, 0, getChatData(id, 0))
+  `, ['user:zero', 'char:one', 'user:two']],
+] as const)('stores what a whole conversation copy stores for Lua edits (%s)', async (name, body, stored) => {
+  const code = `
+    function mutate(id)
+      ${body}
+    end
+    function onButtonClick(id, data)
+      mutate(id)
+    end
+    listenEdit('editInput', function(id, value)
+      mutate(id)
+      return value
+    end)
+  `
+  const slug = name.replaceAll(' ', '-')
+  const messages = () => ['zero', 'one', 'two'].map((data, index) => ({
+    role: index % 2 === 0 ? 'user' : 'char',
+    data,
+    chatId: `message-${index}`,
+  })) as Chat['message']
+  const normalize = (chat: Chat) => chat.message.map((entry) => ({
+    role: entry.role,
+    data: entry.data,
+    id: entry.chatId?.startsWith('message-') ? entry.chatId : typeof entry.chatId,
+  }))
+
+  const copy = operationCharacterFixture(`whole-copy-${slug}`, undefined, messages())
+  const operationContext = createConversationOperationContext(copy.session, copy.chat)
+  await runScripted(code, { char: copy.char, mode: 'editInput', operationContext })
+  operationContext.commit(copy.session)
+
+  const fixture = operationCharacterFixture(`edit-set-copy-${slug}`, undefined, messages())
+  fixture.char.triggerscript = luaTriggerScript(code)
+  installOperationCharacterFixture(fixture)
+  vi.mocked(getCurrentChat).mockReturnValue(fixture.chat)
+  vi.mocked(getCurrentCharacter).mockReturnValue(fixture.char)
+  continuationRuntime.session = fixture.session
+  const { runLuaButtonTrigger } = await import('./scriptings')
+  try {
+    await runLuaButtonTrigger(fixture.char, 'click')
+  } finally {
+    continuationRuntime.session = null
+  }
+
+  expect(copy.chat.message.map((entry) => `${entry.role}:${entry.data}`)).toEqual(stored)
+  expect(normalize(fixture.chat)).toEqual(normalize(copy.chat))
+  expect(fixture.chat.scriptstate).toEqual(copy.chat.scriptstate)
+  expect(fixture.session.version > 0).toBe(copy.session.version > 0)
+  expect(fixture.session.activePinReasons).toEqual([])
+})
+
+test('later trigger effects read the messages a Lua trigger edited', async () => {
+  const fixture = operationCharacterFixture('trigger-after-lua', undefined, [
+    { role: 'user', data: 'zero', chatId: 'message-0' },
+    { role: 'char', data: 'one', chatId: 'message-1' },
+  ])
+  fixture.char.triggerscript = [{
+    comment: 'luaThenRead',
+    type: 'manual',
+    conditions: [],
+    effect: [
+      { type: 'triggerlua', code: `
+        function luaThenRead(id)
+          setChat(id, -1, 'lua edited')
+          addChat(id, 'user', 'lua tail')
+        end
+      ` },
+      { type: 'v2GetMessageAtIndex', index: '1', indexType: 'value', outputVar: 'edited', indent: 0 },
+      { type: 'v2GetMessageCount', outputVar: 'count', indent: 0 },
+      { type: 'modifychat', index: '0', value: 'trigger edited' },
+    ],
+  }] as never
+  installOperationCharacterFixture(fixture)
+  vi.mocked(getCurrentChat).mockReturnValue(fixture.chat)
+  vi.mocked(getCurrentCharacter).mockReturnValue(fixture.char)
+  vi.mocked(risuChatParser).mockImplementation((value) => value)
+  continuationRuntime.session = fixture.session
+  const { runTrigger } = await import('./triggers')
+  try {
+    await runTrigger(fixture.char, 'manual', { chat: fixture.chat, manualName: 'luaThenRead' })
+
+    expect(fixture.chat.message.map((entry) => entry.data)).toEqual([
+      'trigger edited',
+      'lua edited',
+      'lua tail',
+    ])
+    expect(fixture.chat.scriptstate).toEqual({ $edited: 'lua edited', $count: '3' })
+    expect(fixture.session.activePinReasons).toEqual([])
+  } finally {
+    vi.mocked(risuChatParser).mockReset()
+    continuationRuntime.session = null
+  }
+})
 
 test('renders concurrent Lua display listeners that update chat variables', async () => {
   const fixture = operationCharacterFixture('concurrent-display-variables')
@@ -1942,8 +2299,9 @@ test('keeps stored trigger permissions and parser identity stable during Lua dis
   }
 })
 
-test('releases a read-only Lua edit operation without publishing an empty commit', async () => {
-  const fixture = operationCharacterFixture('read-only-edit-operation')
+test.each(['current', 'navigated'] as const)('releases a read-only Lua edit operation without publishing an empty commit (%s)', async (state) => {
+  const fixture = operationCharacterFixture(`read-only-edit-operation-${state}`)
+  const replacement = operationCharacterFixture(`read-only-edit-replacement-${state}`)
   fixture.char.customscript = []
   fixture.char.triggerscript = [
     {
@@ -1956,7 +2314,8 @@ test('releases a read-only Lua edit operation without publishing an empty commit
           code: `
       listenEdit('editOutput', function(id, value)
         getChatVar(id, 'missing')
-        return value
+        alertNormal(id, 'synthetic read')
+        return value .. ':read'
       end)
     `,
         },
@@ -1966,13 +2325,17 @@ test('releases a read-only Lua edit operation without publishing an empty commit
   installOperationCharacterFixture(fixture)
   vi.mocked(getCurrentChat).mockReturnValue(fixture.chat)
   continuationRuntime.session = fixture.session
+  // The conversation closes after the listener's last read.
+  vi.mocked(alertNormal).mockImplementationOnce(() => {
+    if (state === 'navigated') continuationRuntime.session = replacement.session
+  })
   const applyOperation = vi.spyOn(fixture.session, 'applyOperation')
   const { runLuaEditTrigger } = await import('./scriptings')
 
   try {
     await expect(
       runLuaEditTrigger(fixture.char, 'editoutput', 'unchanged'),
-    ).resolves.toBe('unchanged')
+    ).resolves.toBe('unchanged:read')
     expect(applyOperation).not.toHaveBeenCalled()
     expect(fixture.session.activePinReasons).toEqual([])
   } finally {
@@ -2048,6 +2411,7 @@ test('settles a resumed coroutine rejection without leaving an unhandled rejecti
     unhandledRejections.push(reason)
   }
   process.on('unhandledRejection', onUnhandledRejection)
+  engineFunctionTimeout.ms = 50
   vi.mocked(requestChatData).mockReset()
   vi.mocked(requestChatData).mockImplementationOnce(async () => {
     // The coroutine has reached its async boundary; only its resumed execution remains.
@@ -2074,6 +2438,7 @@ test('settles a resumed coroutine rejection without leaving an unhandled rejecti
     expect(requestChatData).toHaveBeenCalledOnce()
     expect(unhandledRejections).toEqual([])
   } finally {
+    engineFunctionTimeout.ms = null
     process.off('unhandledRejection', onUnhandledRejection)
     vi.mocked(requestChatData).mockReset()
   }

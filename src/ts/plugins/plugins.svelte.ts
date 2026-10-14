@@ -154,7 +154,9 @@ export async function importPlugin(code:string|null = null, argu:{
     originalPluginName?: string
     isHotReload?: boolean
     isTypescript?: boolean
-} = {}) {
+    installIfMissing?: string
+    deferReload?: boolean
+} = {}): Promise<boolean> {
     try {
         const authorityEpoch = getPersistentStorageAuthorityEpoch()
         assertPersistentMutationAllowed(authorityEpoch)
@@ -168,7 +170,7 @@ export async function importPlugin(code:string|null = null, argu:{
         if(!code){
             const f = await selectSingleFile(['js','ts'])
             if (!f) {
-                return
+                return false
             }
             if(f.name.endsWith('.ts')){
                 isTypescript = true
@@ -190,8 +192,8 @@ export async function importPlugin(code:string|null = null, argu:{
         }
 
         const showError = (msg: string) => {
-            if(argu.isHotReload){
-                console.error(`Hot-reload plugin "${name}" error: ${msg}`)
+            if(argu.isHotReload || argu.installIfMissing){
+                console.error(`Plugin "${name}" error: ${msg}`)
             }
             else{
                 alertError(msg)
@@ -212,7 +214,7 @@ export async function importPlugin(code:string|null = null, argu:{
                 const provied = line.slice(7)
                 if (provied === '') {
                     showError('plugin name must be longer than 0, did you put it correctly?')
-                    return
+                    return false
                 }
                 name = provied.trim()
             }
@@ -233,7 +235,7 @@ export async function importPlugin(code:string|null = null, argu:{
                 const provied = line.slice('//@display-name'.length + 1)
                 if (provied === '') {
                     showError('plugin display name must be longer than 0, did you put it correctly?')
-                    return
+                    return false
                 }
                 displayName = provied.trim()
             }
@@ -242,11 +244,11 @@ export async function importPlugin(code:string|null = null, argu:{
                 const link = line.split(" ")[1]
                 if (!link || link === '') {
                     showError('plugin link is empty, did you put it correctly?')
-                    return
+                    return false
                 }
                 if (!link.startsWith('https')) {
                     showError('plugin link must start with https, did you check it?')
-                    return
+                    return false
                 }
                 const hoverText = line.split(' ').slice(2).join(' ').trim()
                 if (hoverText === '') {
@@ -266,13 +268,13 @@ export async function importPlugin(code:string|null = null, argu:{
                 const provied = line.trim().split(' ')
                 if (provied.length < 3) {
                     showError('plugin argument is incorrect, did you put space in argument name?')
-                    return
+                    return false
                 }
                 const provKey = provied[1]
 
                 if (provied[2] !== 'int' && provied[2] !== 'string') {
                     showError(`plugin argument type is "${provied[2]}", which is an unknown type.`)
-                    return
+                    return false
                 }
                 if (provied[2] === 'int') {
                     arg[provKey] = 'int'
@@ -310,11 +312,11 @@ export async function importPlugin(code:string|null = null, argu:{
                     const url = new URL(updateURL)
                     if(url.protocol !== 'https:'){
                         showError('plugin update URL must start with https, did you put it correctly?')
-                        return
+                        return false
                     }
                 } catch (error) {
                     showError('plugin update URL is not a valid URL, did you put it correctly?')
-                    return
+                    return false
                 }
             }
 
@@ -325,7 +327,7 @@ export async function importPlugin(code:string|null = null, argu:{
                 const numberOfBytesBefore = new TextEncoder().encode(jsFile.slice(0, versionLocation) + line).length
                 if(numberOfBytesBefore > 500){
                     showError('plugin version declaration must be within the first 512 Bytes of the file for proper parsing. move //@version line to the top of the file.')
-                    return
+                    return false
                 }
             }
 
@@ -333,7 +335,7 @@ export async function importPlugin(code:string|null = null, argu:{
                 const provied = line.trim().split(' ')
                 if(provied.length < 2){
                     showError('plugin allowed IPC declaration is incorrect, did you put space after //@allowed-ipc?')
-                    return
+                    return false
                 }
 
                 const allowedIPCList = provied.slice(1)
@@ -344,22 +346,22 @@ export async function importPlugin(code:string|null = null, argu:{
 
         if (name.length === 0) {
             showError('plugin name not found, did you put it correctly?')
-            return
+            return false
         }
 
         if (name === '*') {
             showError('plugin name cannot be "*".')
-            return
+            return false
         }
 
         if(updateURL && versionOfPlugin.length === 0){
             showError('plugin version not found, did you put it correctly? It is required when update URL is provided.')
-            return
+            return false
         }
 
         if(versionOfPlugin && compareVersions(versionOfPlugin, '0.0.1') === -1){
             showError('plugin version must be at least 0.0.1')
-            return
+            return false
         }
 
         
@@ -373,7 +375,12 @@ export async function importPlugin(code:string|null = null, argu:{
 
         if(apiVersion !== '3.0'){
             showError(language.risuNest.plugins.unsupportedApiVersionInstall.replace('{version}', apiVersion))
-            return
+            return false
+        }
+
+        if(argu.installIfMissing && name !== argu.installIfMissing){
+            showError(`Expected plugin "${argu.installIfMissing}", received "${name}".`)
+            return false
         }
         
         let pluginData: RisuPlugin = {
@@ -397,27 +404,33 @@ export async function importPlugin(code:string|null = null, argu:{
 
         let oldPluginIndex = db.plugins.findIndex((p: RisuPlugin) => p.name === pluginData.name);
 
+        if(argu.installIfMissing && oldPluginIndex !== -1) return false
+
         if(originalPluginName && originalPluginName !== pluginData.name){
             showError(`When updating plugin "${originalPluginName}", the plugin name cannot be changed to "${pluginData.name}". Please keep the original name to update.`)
-            return
+            return false
         }
 
 
         if(!isUpdate && oldPluginIndex !== -1){
             const c = await alertConfirm(language.duplicatePluginFoundUpdateIt)
             if(!c){
-                return
+                return false
             }
         }
 
         assertPersistentMutationAllowed(authorityEpoch)
         db = getDatabase()
         oldPluginIndex = db.plugins.findIndex((p: RisuPlugin) => p.name === pluginData.name)
+        if(argu.installIfMissing && oldPluginIndex !== -1) return false
         if(oldPluginIndex !== -1){
             db.plugins[oldPluginIndex] = pluginData;
         }
         else if(!isUpdate || argu.isHotReload){
             db.plugins.push(pluginData)
+        }
+        else{
+            return false
         }
 
         if(argu.isHotReload && !hotReloading.includes(pluginData.name)){
@@ -427,11 +440,13 @@ export async function importPlugin(code:string|null = null, argu:{
         console.log(`Imported plugin: ${pluginData.name} (API v${apiVersion})`)
         setDatabaseLite(db)
 
-        loadPlugins()
+        if(!argu.deferReload) loadPlugins()
+        return true
         
     } catch (error) {
         console.error(error)
-        alertError(language.errors.noData)
+        if(!argu.installIfMissing) alertError(language.errors.noData)
+        return false
     }
 }
 

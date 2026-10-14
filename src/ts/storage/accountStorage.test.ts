@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { language } from 'src/lang'
 import type { AccountNativeOfficialWriteAttemptContext } from './accountStorage'
 import {
     createNativeOfficialAccountFlowService,
@@ -76,17 +77,6 @@ vi.mock('../globalApi.svelte', () => ({
 }))
 vi.mock('../sionyw', () => ({ fetchProtectedResource: mocks.fetchProtectedResource }))
 vi.mock('../util', () => ({ sleep: mocks.sleep }))
-vi.mock('src/lang', () => ({
-    language: {
-        activeTabChange: 'active tab changed',
-        accountUnmigration: {
-            preparing: 'Preparing local data',
-            cold: 'Checking cold data',
-            assets: 'Checking assets',
-            finishing: 'Disabling account sync',
-        },
-    },
-}))
 vi.mock('./databaseRestore', async (importOriginal) => ({
     ...await importOriginal<typeof import('./databaseRestore')>(),
     completeAccountUnmigration: mocks.completeAccountUnmigration,
@@ -97,11 +87,7 @@ vi.mock('./persistentDataRuntime.svelte', () => ({
     materializePersistentDatabaseSnapshotWithRevision:
         mocks.materializePersistentDatabaseSnapshotWithRevision,
 }))
-vi.mock('../platform', () => ({
-    get isTauri() {
-        return mocks.isTauri
-    },
-}))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({ runtime: mocks.isTauri ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('./platformBlobStore', () => ({
     resolveBlobStore: async () => ({
         read: async (key: string) => mocks.blobAssets.get(key) ?? null,
@@ -349,7 +335,7 @@ describe('AccountStorage structured wire contract', () => {
         const first = unMigrationAccount()
         const second = unMigrationAccount()
         expect(first).toBe(second)
-        expect(mocks.alertSet).toHaveBeenCalledWith({ type: 'wait', msg: 'Preparing local data' })
+        expect(mocks.alertSet).toHaveBeenCalledWith({ type: 'wait', msg: language.accountUnmigration.preparing })
         const rejection = expect(first).rejects.toThrow('Expected mutation generation')
         await vi.waitFor(() => expect(mocks.completeAccountUnmigration).toHaveBeenCalledOnce())
         fail(new Error('Expected mutation generation'))

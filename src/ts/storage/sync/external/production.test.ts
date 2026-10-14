@@ -2,6 +2,7 @@ import type { MobileBackgroundTask, MobileTaskKind } from '../../../mobileBackgr
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ExternalJobSummary, ExternalStorageState } from './types'
 import type { CommittedApplyOutcome } from '../../persistentDataRuntime'
+import { createLeaseStub, createStoreStub } from '../../persistentDataStore.testSupport'
 
 const mocks = vi.hoisted(() => ({
     protected: false,
@@ -10,7 +11,7 @@ const mocks = vi.hoisted(() => ({
     scopes: 0,
     backgroundChanged: undefined as (() => void) | undefined,
     backgroundSignal: undefined as AbortSignal | undefined,
-    persistentRuntime: {},
+    persistentRuntime: { subscribeActiveConversationViewportSource: () => () => {} },
     revision: 8,
     listener: undefined as ((revision: number) => void) | undefined,
     bridge: {
@@ -69,7 +70,18 @@ vi.mock('../../../mobileBackgroundTask', async original => {
     }
 })
 
-vi.mock('../../../platform', () => ({ isTauri: false, isTauriAndroid: false, isTauriIOS: false, get isTauriDesktop() { return mocks.desktop } }))
+// Tauri desktop also starts the sync adapters, which read the native binding; this library has none.
+vi.mock('@tauri-apps/api/core', async importOriginal => ({
+    ...await importOriginal<typeof import('@tauri-apps/api/core')>(),
+    invoke: vi.fn(async (command: string) => {
+        if (command === 'pds_lww_binding_state') return { target: { kind: 'none' }, targetAuthority: '0', selectionEpoch: '0', libraryId: null, progress: null }
+        throw new Error(`Unexpected native command ${command}`)
+    }),
+}))
+vi.mock('@tauri-apps/api/event', async importOriginal => ({
+    ...await importOriginal<typeof import('@tauri-apps/api/event')>(), listen: vi.fn(async () => () => {}),
+}))
+vi.mock('../../../platform', async () => (await import('../../../platform.testSupport')).platformModule(() => ({ runtime: mocks.desktop ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('../../../stores.svelte', async () => ({ selectedCharID: (await import('svelte/store')).writable(-1) }))
 vi.mock('../../database.svelte', () => ({ getDatabase: () => ({ characters: [] }) }))
 vi.mock('../../deviceStateRestore', () => ({ flushDeviceStateBeforeRestore: vi.fn(), refreshDeviceStateAfterRestore: vi.fn() }))
@@ -140,6 +152,7 @@ const initialState: ExternalStorageState = {
             warnings: [], remoteVerified: true,
         },
         retentionPolicy: { keepCount: 10, keepDays: 30 },
+        transferConcurrency: 4,
         capabilities: {
             immutableCreate: true,
             directCompleteRead: true,
@@ -187,17 +200,17 @@ async function installActualRestorePause() {
     Object.assign(mocks.persistentRuntime, {
         store: { open: mocks.openStore },
         async withPausedPersistentWrites(reason: string, operation: (token: unknown) => Promise<unknown>) {
-            const store = {
+            const store = createStoreStub({
                 open: async () => undefined,
                 readRoot: async () => ({ revision: mocks.revision, value: capturePersistentRoot(database) }),
-                acquireRevision: async (revision: number) => ({
+                acquireRevision: async (revision: number) => createLeaseStub({
                     revision, readRoot: async () => ({ revision, value: capturePersistentRoot(database) }),
                     queryPresets: async () => ({ revision, items: [] }),
                     queryCharacters: async () => ({ revision, items: [] }),
                     queryPluginStorage: async () => ({ revision, items: [] }),
                     release: async () => {},
                 }),
-            } as unknown as import('../../persistentDataStore').PersistentDataStore
+            })
             actual = createPersistentDataRuntime({
                 store, state: {
                     captureRoot: () => capturePersistentRoot(database), captureSelectedCharacter: () => null,
@@ -276,6 +289,43 @@ describe('external storage production integration', () => {
         expect(mocks.bridge.setExecutionSession).not.toHaveBeenCalled()
         expect(mocks.bridge.cancelJob).not.toHaveBeenCalled()
         visibility.mockRestore()
+    })
+
+    it.each([false, true])('defers automatic backups through file selection and waits for an existing backup (desktop=%s)', async desktop => {
+        vi.useFakeTimers()
+        mocks.desktop = desktop
+        const admission = await import('../../libraryFileOperation')
+        const { installExternalStorageProduction } = await import('./production')
+        const running: ExternalJobSummary = { ...succeeded('old-sync', '8'), state: 'running', phase: 'upload', result: undefined }
+        mocks.bridge.startJob.mockResolvedValue(running)
+        mocks.bridge.getJob.mockResolvedValue(running)
+        const dispose = await installExternalStorageProduction()
+        await vi.advanceTimersByTimeAsync(60_000)
+        expect(mocks.bridge.startJob).toHaveBeenCalledOnce()
+        const release = admission.reserveLibraryFileOperation()
+        const ready = vi.fn()
+        const waiting = Promise.resolve(admission.waitForLibraryFileOperation(new AbortController().signal)).then(ready)
+        const visibility = vi.spyOn(document, 'visibilityState', 'get')
+        try {
+            mocks.bridge.setExecutionSession.mockClear()
+            visibility.mockReturnValue('hidden'); document.dispatchEvent(new Event('visibilitychange'))
+            visibility.mockReturnValue('visible'); document.dispatchEvent(new Event('visibilitychange'))
+            window.dispatchEvent(new Event('focus'))
+            mocks.revision = 9; mocks.listener?.(9)
+            await vi.advanceTimersByTimeAsync(65_000)
+            expect(ready).not.toHaveBeenCalled()
+            expect(mocks.bridge.startJob).toHaveBeenCalledOnce()
+            expect(mocks.bridge.setExecutionSession).not.toHaveBeenCalled()
+            mocks.bridge.getJob.mockResolvedValue(succeeded('old-sync', '8'))
+            await vi.advanceTimersByTimeAsync(1_000); await waiting
+            expect(ready).toHaveBeenCalledOnce()
+            expect(mocks.bridge.startJob).toHaveBeenCalledOnce()
+            mocks.bridge.startJob.mockImplementation(async request => succeeded(request.connectionId, request.targetRevision))
+            release(); await vi.advanceTimersByTimeAsync(65_000)
+            expect(mocks.bridge.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ targetRevision: '9' }))
+        } finally {
+            release(); dispose(); visibility.mockRestore(); vi.useRealTimers()
+        }
     })
 
     it('keeps a running automatic backup alive when the device goes offline', async () => {
@@ -598,6 +648,40 @@ describe('external storage production integration', () => {
             expect(mocks.bridge.startJob).toHaveBeenCalledWith(expect.objectContaining({
                 connectionId: 'new-sync', targetRevision: '21', reason: 'automatic',
             }))
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('resumes automatic backup after a newly verified connection repair', async () => {
+        vi.useFakeTimers()
+        try {
+            const { installExternalStorageProduction, refreshExternalStorageProductionState } = await import('./production')
+            await installExternalStorageProduction()
+            mocks.bridge.startJob.mockRejectedValueOnce({ kind: 'reauthRequired' })
+            mocks.listener?.(8)
+            await vi.advanceTimersByTimeAsync(60_000)
+            expect(mocks.bridge.startJob).toHaveBeenCalledTimes(1)
+            mocks.revision = 9
+            mocks.listener?.(9)
+            await refreshExternalStorageProductionState()
+            await vi.advanceTimersByTimeAsync(300_000)
+            expect(mocks.bridge.startJob).toHaveBeenCalledTimes(1)
+            mocks.bridge.getState.mockResolvedValue({
+                ...initialState,
+                connections: [{ ...initialState.connections[0], status: 'paused', automaticBackupPaused: true, lastVerifiedAtMs: '400000' }],
+            })
+            await refreshExternalStorageProductionState()
+            await vi.advanceTimersByTimeAsync(60_000)
+            expect(mocks.bridge.startJob).toHaveBeenCalledTimes(1)
+            mocks.bridge.getState.mockResolvedValue({
+                ...initialState,
+                connections: [{ ...initialState.connections[0], lastVerifiedAtMs: '400000' }],
+            })
+            await refreshExternalStorageProductionState()
+            await vi.advanceTimersByTimeAsync(60_000)
+            expect(mocks.bridge.startJob).toHaveBeenCalledTimes(2)
+            expect(mocks.bridge.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ targetRevision: '9' }))
         } finally {
             vi.useRealTimers()
         }

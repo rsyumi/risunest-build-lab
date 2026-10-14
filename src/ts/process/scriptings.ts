@@ -8,7 +8,7 @@ import {
 } from "../parser/chatVar.svelte";
 import { hasher, type simpleCharacterArgument, risuChatParser } from "../parser/parser.svelte";
 import type { LuaEngine, LuaFactory } from "wasmoon";
-import { getCurrentCharacter, getCurrentChat, getDatabase, setDatabase, type Chat, type Database, type character, type triggerscript } from "../storage/database.svelte";
+import { getCurrentCharacter, getCurrentChat, getDatabase, setDatabase, type Chat, type Database, type Message, type character, type triggerscript } from "../storage/database.svelte";
 import { get } from "svelte/store";
 import { DBState, ReloadChatPointer, ReloadGUIPointer, selectedCharID } from "../stores.svelte";
 import { alertSelect, alertError, alertInput, alertNormal, alertConfirm } from "../alert";
@@ -29,7 +29,6 @@ import { getRuntimePerformanceBudgets, subscribeRuntimePerformanceProfile } from
 import { createLuaFactory, runLuaSource } from './luaRuntime';
 import { withObjectUrl } from '../objectUrl';
 import {
-    createConversationOperationContext,
     type ConversationOperationContext,
     type ConversationCommitObserver,
 } from './conversationOperationContext';
@@ -45,6 +44,17 @@ import {
 } from './historyWindowIndex';
 import { openHistoryWindowCopy, type HistoryWindowCopy } from './historyWindowWrite';
 import { PersistentMutationFencedError } from '../storage/saveCoordinator';
+import {
+    createScriptConversationAccess,
+    type ScriptConversationAccess,
+} from './scriptConversationAccess';
+import { requestScriptDisplayRefresh } from './scriptDisplayRefresh';
+import { beginDisplayScriptRun, noticeScriptTimeout } from './scriptTimeoutNotice';
+
+/** Deadline for each synchronous Lua segment of a listener. */
+const LUA_LISTENER_TIMEOUT_MS = 2_000
+/** Deadline for each synchronous Lua segment of a handler the user started. */
+const LUA_USER_HANDLER_TIMEOUT_MS = 60_000
 let luaFactory:LuaFactory
 let luaTimeoutErrorConstructor: typeof import('wasmoon').LuaTimeoutError | undefined
 let ScriptingSafeIds = new Set<string>()
@@ -75,6 +85,11 @@ interface BasicScriptingEngineState {
     selectedCharacterId?: string
     capturedCharacterOwner?: CapturedCharacterOwner
     ensureConversationOperation?: () => void
+    access?: ScriptConversationAccess
+    readChat?: () => Chat
+    writeChat?: () => Chat
+    readDatabase?: () => Database
+    flushVariables?: () => void
     stopSending?: boolean
 }
 
@@ -99,6 +114,11 @@ function clearScriptingEngineInvocationState(state: ScriptingEngineState) {
     state.selectedCharacterId = undefined
     state.capturedCharacterOwner = undefined
     state.ensureConversationOperation = undefined
+    state.access = undefined
+    state.readChat = undefined
+    state.writeChat = undefined
+    state.readDatabase = undefined
+    state.flushVariables = undefined
     state.stopSending = undefined
 }
 
@@ -122,7 +142,10 @@ export async function runScripted(code:string, arg:{
     mode?: string,
     type?: 'lua'|'py'
     operationContext?: ConversationOperationContext
-    createConversationOperation?: () => ConversationOperationContext | undefined
+    /** The selected conversation through a variable scope and copy-on-edit messages. */
+    access?: ScriptConversationAccess
+    /** A button or manual trigger the user started, which gets the longer deadline. */
+    userStarted?: boolean
     createConversationChat?: () => Chat
 }){
     const type: 'lua'|'py' = arg.type ?? 'lua'
@@ -150,15 +173,20 @@ export async function runScripted(code:string, arg:{
         }
         : undefined
     const data = arg.data ?? ''
+    const access = arg.access
     const operationDatabase = arg.operationContext?.createDatabaseView(getDatabase())
-    const setVar = arg.setVar ?? (arg.operationContext
+    const setVar = arg.setVar ?? (access
+        ? (key: string, value: string) => access.setVariable(key, value)
+        : arg.operationContext
         ? (key: string, value: string) => setChatVarOnConversation(
             arg.operationContext!.chat,
             key,
             value,
         )
         : setChatVar)
-    const getVar = arg.getVar ?? (arg.operationContext
+    const getVar = arg.getVar ?? (access
+        ? (key: string) => access.getVariable(key)
+        : arg.operationContext
         ? (key: string) => getChatVarFromConversation(
             operationDatabase!,
             arg.operationContext!.characterId,
@@ -169,14 +197,15 @@ export async function runScripted(code:string, arg:{
     const meta = arg.meta ?? {}
     const mode = arg.mode ?? 'manual'
 
-    let chat = arg.operationContext?.chat ?? arg.chat ?? getCurrentChat()
+    let chat = access?.currentChat() ?? arg.operationContext?.chat ?? arg.chat ?? getCurrentChat()
     let lowLevelAccess = arg.lowLevelAccess ?? false
 
     if(type === 'lua'){
         await ensureLuaFactory()
     }
     const ownerChaId = char?.chaId ?? 'global'
-    const ScriptingEngineState = getOrCreateEngineState(mode, type, ownerChaId, code);
+    const functionTimeout = arg.userStarted ? LUA_USER_HANDLER_TIMEOUT_MS : LUA_LISTENER_TIMEOUT_MS
+    const ScriptingEngineState = getOrCreateEngineState(mode, type, ownerChaId, code, functionTimeout);
     ScriptingEngineState.activeUses++
     let invocationFinished = false
     
@@ -190,33 +219,34 @@ export async function runScripted(code:string, arg:{
         ScriptingEngineState.operationDatabase = operationDatabase
         ScriptingEngineState.selectedCharacterId = selectedCharacterId
         ScriptingEngineState.capturedCharacterOwner = capturedCharacterOwner
-        let invocationOperationContext = arg.operationContext
         let invocationChatReady = false
         ScriptingEngineState.ensureConversationOperation = () => {
-            if (arg.createConversationChat) {
-                if (invocationChatReady) return
-                const ownedChat = arg.createConversationChat()
-                invocationChatReady = true
-                ScriptingEngineState.chat = ownedChat
-                ScriptingEngineState.setVar = (key: string, value: string) =>
-                    setChatVarOnConversation(ownedChat, key, value)
-                ScriptingEngineState.getVar = (key: string) =>
-                    getChatVarFromConversation(capturedDatabase, selectedCharacterId, ownedChat, key)
-                return
-            }
-            if (invocationOperationContext || !arg.createConversationOperation) return
-            const context = arg.createConversationOperation()
-            if (!context) return
-            invocationOperationContext = context
-            const database = context.createDatabaseView(getDatabase())
-            ScriptingEngineState.chat = context.chat
-            ScriptingEngineState.operationDatabase = database
-            ScriptingEngineState.selectedCharacterId = context.characterId
+            if (!arg.createConversationChat || invocationChatReady) return
+            const ownedChat = arg.createConversationChat()
+            invocationChatReady = true
+            ScriptingEngineState.chat = ownedChat
             ScriptingEngineState.setVar = (key: string, value: string) =>
-                setChatVarOnConversation(context.chat, key, value)
+                setChatVarOnConversation(ownedChat, key, value)
             ScriptingEngineState.getVar = (key: string) =>
-                getChatVarFromConversation(database, context.characterId, context.chat, key)
+                getChatVarFromConversation(capturedDatabase, selectedCharacterId, ownedChat, key)
         }
+        const legacyChat = () => {
+            ScriptingEngineState.ensureConversationOperation?.()
+            return ScriptingEngineState.chat
+        }
+        ScriptingEngineState.access = access
+        ScriptingEngineState.readChat = access ? () => access.readChat() : legacyChat
+        ScriptingEngineState.writeChat = access ? () => access.writeChat() : legacyChat
+        ScriptingEngineState.readDatabase = access
+            ? () => {
+                access.readChat()
+                return access.databaseView(getDatabase())
+            }
+            : () => {
+                ScriptingEngineState.ensureConversationOperation?.()
+                return ScriptingEngineState.operationDatabase ?? getDatabase()
+            }
+        ScriptingEngineState.flushVariables = access ? () => { access.flushVariables() } : undefined
         ScriptingEngineState.stopSending = false
         if (code !== ScriptingEngineState.code) {
             try {
@@ -227,7 +257,7 @@ export async function runScripted(code:string, arg:{
                 ScriptingEngineState.engine?.global.close()
                 ScriptingEngineState.engine = await luaFactory.createEngine({
                     injectObjects: true,
-                    functionTimeout: 2_000,
+                    functionTimeout,
                 })
                 const luaEngine = ScriptingEngineState.engine
                 declareAPI = (name:string, func:Function) => {
@@ -242,12 +272,26 @@ export async function runScripted(code:string, arg:{
                     ScriptingEngineState.pyodide?.declareAPI(name, func as any)
                 }
             }
-            const ensureScriptingConversation = () =>
-                ScriptingEngineState.ensureConversationOperation?.()
-            const getScriptingDatabase = () => {
-                ensureScriptingConversation()
-                return ScriptingEngineState.operationDatabase ?? getDatabase()
+            const ensureScriptingVariables = () => {
+                if (!ScriptingEngineState.access) {
+                    ScriptingEngineState.ensureConversationOperation?.()
+                }
             }
+            const readScriptingChat = () => ScriptingEngineState.readChat()
+            const writeScriptingChat = () => ScriptingEngineState.writeChat()
+            const editScriptingMessage = (index: number, edit: (message: Message) => void) => {
+                if (ScriptingEngineState.access) {
+                    ScriptingEngineState.access.editMessage(index, edit)
+                    return
+                }
+                const chat = writeScriptingChat()
+                const message = chat.message
+                    ? getHistoryMessageAt(chat, index)
+                    : undefined
+                if (message) edit(message)
+            }
+            const flushScriptingVariables = () => ScriptingEngineState.flushVariables?.()
+            const getScriptingDatabase = () => ScriptingEngineState.readDatabase?.() ?? getDatabase()
             const getScriptingCharacterIndex = (db: Database) => {
                 if (ScriptingEngineState.selectedCharacterId !== undefined) {
                     return db.characters.findIndex(
@@ -296,21 +340,21 @@ export async function runScripted(code:string, arg:{
                 return true
             }
             declareAPI('getChatVar', (id:string,key:string) => {
-                ensureScriptingConversation()
+                ensureScriptingVariables()
                 return ScriptingEngineState.getVar(key)
             })
             declareAPI('setChatVar', (id:string,key:string, value:string) => {
                 if(!ScriptingSafeIds.has(id) && !ScriptingEditDisplayIds.has(id)){
                     return
                 }
-                ensureScriptingConversation()
+                ensureScriptingVariables()
                 ScriptingEngineState.setVar(key, value)
             })
             declareAPI('setChatVarChanged', (id:string,key:string, value:string) => {
                 if(!ScriptingSafeIds.has(id) && !ScriptingEditDisplayIds.has(id)){
                     return
                 }
-                ensureScriptingConversation()
+                ensureScriptingVariables()
                 if(ScriptingEngineState.setVar(key, value) === true){
                     return true
                 }
@@ -340,24 +384,26 @@ export async function runScripted(code:string, arg:{
                 if(!ScriptingSafeIds.has(id)){
                     return
                 }
+                flushScriptingVariables()
                 return alertInput(value)
             })
             declareAPI('alertSelect', (id:string, value:string[]) => {
                 if(!ScriptingSafeIds.has(id)){
                     return
                 }
+                flushScriptingVariables()
                 return alertSelect(value)
             })
             declareAPI('alertConfirm', (id:string, value:string) => {
                 if(!ScriptingSafeIds.has(id)){
                     return
                 }
+                flushScriptingVariables()
                 return alertConfirm(value).then(res => res ? true : false)
             })
 
             declareAPI('getChatMain', (id:string, index:number) => {
-                ensureScriptingConversation()
-                const chat = getHistoryMessageAt(ScriptingEngineState.chat, index)
+                const chat = getHistoryMessageAt(readScriptingChat(), index)
                 if(!chat){
                     return JSON.stringify(null)
                 }
@@ -370,20 +416,17 @@ export async function runScripted(code:string, arg:{
             })
 
             declareAPI('getChatData', (id:string, index:number) => {
-                ensureScriptingConversation()
-                const chat = getHistoryMessageAt(ScriptingEngineState.chat, index)
+                const chat = getHistoryMessageAt(readScriptingChat(), index)
                 return chat?.data ?? ''
             })
 
             declareAPI('getChatRole', (id:string, index:number) => {
-                ensureScriptingConversation()
-                const chat = getHistoryMessageAt(ScriptingEngineState.chat, index)
+                const chat = getHistoryMessageAt(readScriptingChat(), index)
                 return chat?.role ?? ''
             })
 
             declareAPI('getRecentChatsMain', (id:string, count:number) => {
-                ensureScriptingConversation()
-                const chats = ScriptingEngineState.chat.message
+                const chats = readScriptingChat().message
                 const safeCount = Math.max(0, Math.floor(count || 0))
                 const start = Math.max(0, chats.length - safeCount)
                 return JSON.stringify(chats.slice(start).map((v) => ({
@@ -397,59 +440,55 @@ export async function runScripted(code:string, arg:{
                 if(!ScriptingSafeIds.has(id)){
                     return
                 }
-                ensureScriptingConversation()
-                const message = ScriptingEngineState.chat.message
-                    ? getHistoryMessageAt(ScriptingEngineState.chat, index)
-                    : undefined
-                if(message){
+                editScriptingMessage(index, (message) => {
                     message.data = value ?? ''
-                }
+                })
             })
             declareAPI('setChatRole', (id:string, index:number, value:string) => {
                 if(!ScriptingSafeIds.has(id)){
                     return
                 }
-                ensureScriptingConversation()
-                const message = ScriptingEngineState.chat.message
-                    ? getHistoryMessageAt(ScriptingEngineState.chat, index)
-                    : undefined
-                if(message){
+                editScriptingMessage(index, (message) => {
                     message.role = value === 'user' ? 'user' : 'char'
-                }
+                })
             })
             declareAPI('cutChat', (id:string, start:number, end:number) => {
                 if(!ScriptingSafeIds.has(id)){
                     return
                 }
-                ensureScriptingConversation()
-                ScriptingEngineState.chat.message = sliceHistory(ScriptingEngineState.chat, start, end)
+                const chat = writeScriptingChat()
+                chat.message = sliceHistory(chat, start, end)
             })
             declareAPI('removeChat', (id:string, index:number) => {
                 if(!ScriptingSafeIds.has(id)){
                     return
                 }
-                ensureScriptingConversation()
-                const start = toHistorySpliceIndex(ScriptingEngineState.chat, index)
+                const chat = writeScriptingChat()
+                const start = toHistorySpliceIndex(chat, index)
                 if (start === null) return
-                ScriptingEngineState.chat.message.splice(start, 1)
+                chat.message.splice(start, 1)
             })
             declareAPI('addChat', (id:string, role:string, value:string) => {
                 if(!ScriptingSafeIds.has(id)){
                     return
                 }
-                ensureScriptingConversation()
                 let roleData:'user'|'char' = role === 'user' ? 'user' : 'char'
-                ScriptingEngineState.chat.message.push({role: roleData, data: value ?? '', chatId: v4()})
+                const message = {role: roleData, data: value ?? '', chatId: v4()}
+                if (ScriptingEngineState.access) {
+                    ScriptingEngineState.access.appendMessage(message)
+                    return
+                }
+                writeScriptingChat().message.push(message)
             })
             declareAPI('insertChat', (id:string, index:number, role:string, value:string) => {
                 if(!ScriptingSafeIds.has(id)){
                     return
                 }
-                ensureScriptingConversation()
+                const chat = writeScriptingChat()
                 let roleData:'user'|'char' = role === 'user' ? 'user' : 'char'
-                const start = toHistorySpliceIndex(ScriptingEngineState.chat, index)
+                const start = toHistorySpliceIndex(chat, index)
                 if (start === null) return
-                ScriptingEngineState.chat.message.splice(start, 0, {role: roleData, data: value ?? '', chatId: v4()})
+                chat.message.splice(start, 0, {role: roleData, data: value ?? '', chatId: v4()})
             })
 
             declareAPI('getTokens', async (id:string, value:string) => {
@@ -460,13 +499,11 @@ export async function runScripted(code:string, arg:{
             })
 
             declareAPI('getChatLength', (id:string) => {
-                ensureScriptingConversation()
-                return historyLength(ScriptingEngineState.chat)
+                return historyLength(readScriptingChat())
             })
 
             declareAPI('getFullChatMain', (id:string) => {
-                ensureScriptingConversation()
-                const data = JSON.stringify(ScriptingEngineState.chat.message.map((v) => {
+                const data = JSON.stringify(readScriptingChat().message.map((v) => {
                     return {
                         role: v.role,
                         data: v.data,
@@ -489,14 +526,14 @@ export async function runScripted(code:string, arg:{
             })
 
             declareAPI('cbs', (value) => {
-                ensureScriptingConversation()
+                const database = getScriptingDatabase()
                 const operationCharacter = ScriptingEngineState.operationCharacter
                 const parserCharacter = operationCharacter?.type === 'simple'
                     ? getScriptingCharacter()
                     : operationCharacter ?? getScriptingCharacter()
                 return risuChatParser(value, {
                     chara: parserCharacter,
-                    db: ScriptingEngineState.operationDatabase,
+                    db: ScriptingEngineState.access ? database : ScriptingEngineState.operationDatabase,
                     selectedCharacterId: ScriptingEngineState.selectedCharacterId,
                     getChatVar: ScriptingEngineState.getVar,
                     setChatVar: ScriptingEngineState.setVar,
@@ -507,10 +544,10 @@ export async function runScripted(code:string, arg:{
                 if(!ScriptingSafeIds.has(id)){
                     return
                 }
-                ensureScriptingConversation()
+                const chat = writeScriptingChat()
                 const realValue = JSON.parse(value)
                 const originals = new Map<string, { count: number, message: Chat['message'][number] | null }>()
-                for (const message of ScriptingEngineState.chat.message) {
+                for (const message of chat.message) {
                     if (!message.chatId) continue
                     const entry = originals.get(message.chatId)
                     if (entry) {
@@ -524,7 +561,7 @@ export async function runScripted(code:string, arg:{
                         counts.set(message.chatId, (counts.get(message.chatId) ?? 0) + 1)
                 }
                 const kept = new Map<string, number>()
-                ScriptingEngineState.chat.message = realValue.map((v) => {
+                chat.message = realValue.map((v) => {
                     // A stored chatId is kept for as many messages as the chat holds it, in order;
                     // further copies and unknown ids become new messages, never another output
                     // target. Plugin metadata carries over only when the id names one message on both sides.
@@ -550,13 +587,15 @@ export async function runScripted(code:string, arg:{
                 if(!ScriptingSafeIds.has(id)){
                     return
                 }
-                ReloadGUIPointer.set(get(ReloadGUIPointer) + 1)
+                flushScriptingVariables()
+                requestScriptDisplayRefresh({ all: true })
             })
 
             declareAPI('reloadChat', (id: string, index: number) => {
                 if(!ScriptingSafeIds.has(id)){
                     return
                 }
+                flushScriptingVariables()
                 ReloadChatPointer.update((v) => {
                     v[index] = (v[index] ?? 0) + 1
                     return v
@@ -979,8 +1018,7 @@ export async function runScripted(code:string, arg:{
             })
 
             declareAPI('getAuthorsNote', (id:string) => {
-                ensureScriptingConversation()
-                return ScriptingEngineState.chat?.note ?? ''
+                return readScriptingChat()?.note ?? ''
             })
 
             declareAPI('getBackgroundEmbedding', (id:string) => {
@@ -1044,7 +1082,7 @@ export async function runScripted(code:string, arg:{
                     return
                 }
 
-                ensureScriptingConversation()
+                const currentChat = writeScriptingChat()
 
                 const {
                     alwaysActive = false,
@@ -1054,7 +1092,6 @@ export async function runScripted(code:string, arg:{
                     secondKey = '',
                 } = options
 
-                const currentChat = ScriptingEngineState.chat
                 if (!currentChat) {
                     return
                 }
@@ -1228,8 +1265,7 @@ export async function runScripted(code:string, arg:{
             })
 
             declareAPI('getCharacterLastMessage', (id: string) => {
-                ensureScriptingConversation()
-                const chat = ScriptingEngineState.chat
+                const chat = readScriptingChat()
                 if (!chat) {
                     return ''
                 }
@@ -1249,8 +1285,7 @@ export async function runScripted(code:string, arg:{
             })
 
             declareAPI('getUserLastMessage', (id: string) => {
-                ensureScriptingConversation()
-                const chat = ScriptingEngineState.chat
+                const chat = readScriptingChat()
                 if (!chat) {
                     return ''
                 }
@@ -1268,8 +1303,7 @@ export async function runScripted(code:string, arg:{
             })
 
             declareAPI('getCharacterLastMessage', (id: string) => {
-                ensureScriptingConversation()
-                const chat = ScriptingEngineState.chat
+                const chat = readScriptingChat()
                 if (!chat) {
                     return ''
                 }
@@ -1289,8 +1323,7 @@ export async function runScripted(code:string, arg:{
             })
 
             declareAPI('getUserLastMessage', (id: string) => {
-                ensureScriptingConversation()
-                const chat = ScriptingEngineState.chat
+                const chat = readScriptingChat()
                 if (!chat) {
                     return ''
                 }
@@ -1394,6 +1427,7 @@ export async function runScripted(code:string, arg:{
                         'editDisplay', 'editInput', 'editOutput', 'manual'].includes(mode) ? mode : 'custom'
                     console.error({ code: 'lua-listener-timeout', mode: diagnosticMode,
                         elapsedMs: performance.now() - listenerStartedAt })
+                    noticeScriptTimeout(mode === 'editDisplay')
                 } else {
                     console.error(error)
                 }
@@ -1431,7 +1465,7 @@ export async function runScripted(code:string, arg:{
                 }
             }
         }
-        chat = ScriptingEngineState.chat
+        chat = access?.currentChat() ?? ScriptingEngineState.chat
 
         return {
             stopSending: ScriptingEngineState.stopSending ?? false, chat, res
@@ -1494,8 +1528,9 @@ function getOrCreateEngineState(
     type: 'lua'|'py',
     ownerChaId: string,
     code: string,
+    functionTimeout: number,
 ): ScriptingEngineState {
-    const cacheKey = JSON.stringify([type, ownerChaId, mode, code])
+    const cacheKey = JSON.stringify([type, ownerChaId, mode, code, functionTimeout])
     let engineState = ScriptingEngines.get(cacheKey);
     if (engineState) {
         engineState.lastUsed = ++scriptingEngineRecency
@@ -1726,23 +1761,28 @@ ${code}
 `
 }
 
-function createCurrentConversationOperation(
-    onCommitted?: ConversationCommitObserver,
-): {
-    context: ConversationOperationContext
-    sourceChat: Chat
-} | null {
-    const session = peekActiveConversationSession()
-    if (!session?.isActive) return null
-    const sourceChat = getCurrentChat()
-    if (session.materializeCompatibilityArray() !== sourceChat.message) return null
-    return {
-        context: createConversationOperationContext(session, sourceChat, onCommitted),
-        sourceChat,
+export async function runLuaEditTrigger<T extends string | OpenAIChat[]>(
+    char: character | simpleCharacterArgument,
+    mode: string,
+    content: T,
+    meta?: object,
+    conversationOperation?: ConversationOperationContext,
+    onConversationCommit?: ConversationCommitObserver,
+    signal?: AbortSignal,
+): Promise<T> {
+    const run = () => runLuaEditTriggerForMode(
+        char, mode, content, meta, conversationOperation, onConversationCommit, signal,
+    )
+    if (mode !== 'editdisplay' && mode !== 'editDisplay') return run()
+    const endDisplayRun = beginDisplayScriptRun()
+    try {
+        return await run()
+    } finally {
+        endDisplayRun()
     }
 }
 
-export async function runLuaEditTrigger<T extends string | OpenAIChat[]>(
+async function runLuaEditTriggerForMode<T extends string | OpenAIChat[]>(
     char: character | simpleCharacterArgument,
     mode: string,
     content: T,
@@ -1829,9 +1869,9 @@ async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
     onConversationCommit?: ConversationCommitObserver,
     signal?: AbortSignal,
 ): Promise<T> {
-    let ownedOperation: ReturnType<typeof createCurrentConversationOperation> = null
     let operationContext = conversationOperation
     let historyWindowCopy: HistoryWindowCopy | null = null
+    let access: ScriptConversationAccess | null = null
     try {
         let data = content
 
@@ -1861,9 +1901,13 @@ async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
             }
             return historyWindowCopy.chat
         } : undefined
-        const createOperation = () => {
-            ownedOperation ??= createCurrentConversationOperation(onConversationCommit)
-            return ownedOperation?.context
+        if (!operationContext && !historyWindow) {
+            access = createScriptConversationAccess(getCurrentChat(), getDatabase(), {
+                onCommitted: onConversationCommit,
+                ...(mode === 'editDisplay'
+                    ? { origin: 'display' as const }
+                    : { onVariablesCommitted: (keys) => requestScriptDisplayRefresh({ keys }) }),
+            })
         }
 
         for (let trigger of triggers) {
@@ -1876,11 +1920,9 @@ async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
                     data,
                     meta,
                     operationContext,
+                    access: access ?? undefined,
                     chat: historyWindow?.chat,
                     createConversationChat: createWindowChat,
-                    createConversationOperation: operationContext || historyWindow
-                        ? undefined
-                        : createOperation,
                 })
                 data = runResult.res ?? data
             }
@@ -1893,15 +1935,8 @@ async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
         if (historyWindowCopy && !historyWindowCopy.commit()) {
             throw new PersistentMutationFencedError()
         }
-        if (ownedOperation) {
-            if (ownedOperation.context.hasPendingMutations()) {
-                ownedOperation.context.commit(peekActiveConversationSession(), {
-                    origin: mode === 'editDisplay' ? 'display' : undefined,
-                })
-            } else {
-                ownedOperation.context.release()
-            }
-        }
+        // A listener that changed nothing keeps its result after the conversation closes.
+        access?.commitIfChanged()
     }
 }
 
@@ -1924,8 +1959,7 @@ async function runLuaButtonTriggerBatch(
     conversationOperation?: ConversationOperationContext,
 ): Promise<any>{
     let runResult
-    let ownedOperation: ReturnType<typeof createCurrentConversationOperation> = null
-    let operationContext = conversationOperation
+    let access: ScriptConversationAccess | null = null
     try {
         const triggers = char.triggerscript.map<triggerscript>((v) => ({
             ...v,
@@ -1934,9 +1968,10 @@ async function runLuaButtonTriggerBatch(
         if (!triggers.some((trigger) => trigger?.effect?.[0]?.type === 'triggerlua')) {
             return undefined
         }
-        if (!operationContext) {
-            ownedOperation = createCurrentConversationOperation()
-            operationContext = ownedOperation?.context
+        if (!conversationOperation) {
+            access = createScriptConversationAccess(getCurrentChat(), getDatabase(), {
+                onVariablesCommitted: (keys) => requestScriptDisplayRefresh({ keys }),
+            })
         }
 
         for(let trigger of triggers){
@@ -1946,16 +1981,18 @@ async function runLuaButtonTriggerBatch(
                     lowLevelAccess: trigger.lowLevelAccess,
                     mode: 'onButtonClick',
                     data: data,
-                    operationContext,
+                    operationContext: conversationOperation,
+                    access: access ?? undefined,
+                    userStarted: true,
                 })
             }
         }
     } catch (error) {
         throw(error)
     } finally {
-        if (ownedOperation) {
-            ownedOperation.context.commit(peekActiveConversationSession())
-            if (runResult) runResult.chat = ownedOperation.sourceChat
+        if (access) {
+            access.commit()
+            if (runResult) runResult.chat = access.liveChat
         }
     }
     return runResult   

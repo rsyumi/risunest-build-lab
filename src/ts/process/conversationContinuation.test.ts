@@ -21,9 +21,7 @@ vi.mock('./modules', async (importOriginal) => ({
     getModuleTriggers: () => [],
 }))
 vi.mock('../tokenizer', () => ({ tokenize: vi.fn(async () => 0) }))
-vi.mock('../parser/parser.svelte', () => ({
-    risuChatParser: (value: string) => value,
-}))
+vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('./command', () => ({ processMultiCommand: vi.fn() }))
 vi.mock('./request/request', () => ({ requestChatData: vi.fn() }))
 vi.mock('./stableDiff', () => ({ generateAIImage: vi.fn() }))

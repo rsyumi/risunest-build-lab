@@ -147,12 +147,7 @@ export async function alertErrorWait(msg:string){
     })
 }
 
-export function alertMd(msg:string){
-    alertStoreImported.set({
-        'type': 'markdown',
-        'msg': msg
-    })
-}
+export { alertMd } from './alertQueue'
 
 export function doingAlert(){
     if (get(alertStoreImported).dialogPending) return true

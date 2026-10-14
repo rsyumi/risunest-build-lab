@@ -1,6 +1,6 @@
 <script lang="ts">
     import { onMount, onDestroy } from 'svelte'
-    import { CheckIcon, ChevronRightIcon, CloudDownloadIcon, HardDriveIcon, LoaderCircleIcon } from '@lucide/svelte'
+    import { CloudDownloadIcon, HardDriveIcon, LoaderCircleIcon } from '@lucide/svelte'
     import { language } from 'src/lang'
     import { alertActionConfirm, alertCheckboxConfirm, alertConfirm } from 'src/ts/alert'
     import { isTauri } from 'src/ts/platform'
@@ -10,16 +10,17 @@
     import { serverRegistrationInbox } from 'src/ts/storage/sync/serverSyncRegistrationInbox'
     import { canScanServerRegistration, createServerQrScanner } from 'src/ts/storage/sync/serverSyncQr'
     import { isQrScanCancelled } from 'src/ts/ui/qrScanner'
-    import { getAssetResidencyStatus, setAssetResidencyPolicy, evictLocalAssets, cancelAssetResidencyOperation, type AssetResidencyPolicy, type AssetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency'
+    import { getAssetResidencyStatus, setAssetResidencyPolicy, evictLocalAssets, cancelLocalAssetCleanup, cancelAssetResidencyOperation, type AssetResidencyPolicy, type AssetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency'
+    import { assetCleanupProgress, isAssetCleanupRunning } from 'src/ts/storage/sync/serverAssetCleanupProgress'
     import { describeBlockedReason } from 'src/ts/storage/sync/blockedReasonText'
     import type { ServerConfig } from 'src/ts/storage/sync/serverSync'
     import { PREVIOUS_FILES_DOWNLOAD_FAILED } from 'src/ts/storage/sync/bindingFlow'
     import { formatRisuNestStorageBytes as bytes } from 'src/ts/storage/risuNestStorageDashboard'
-    import { serverSyncProgressView, serverSyncRoutineView, type ServerSyncProgressView } from 'src/ts/storage/sync/serverSyncProgress'
+    import { serverSyncProgressView, serverSyncRoutineView } from 'src/ts/storage/sync/serverSyncProgress'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingButton from '../RisuNest/SettingButton.svelte'
-    import SettingProgress from '../RisuNest/SettingProgress.svelte'
+    import TransferProgress from '../RisuNest/TransferProgress.svelte'
     import SettingNotice from '../RisuNest/SettingNotice.svelte'
     import StatusBadge from '../RisuNest/StatusBadge.svelte'
 
@@ -39,7 +40,10 @@
     let view = $state(controller.snapshot())
     let code = $state('')
     let candidate = $state<ServerConfig | undefined>()
-    let busy = $state(false)
+    let operating = $state(false)
+    let cleaning = $derived(isAssetCleanupRunning($assetCleanupProgress))
+    let busy = $derived(operating || cleaning)
+    let cleanupDetailsOpen = $state(false)
     let scanning = $state(false)
     let failure = $state('')
     let residency = $state<AssetResidencyStatus | undefined>()
@@ -57,6 +61,8 @@
     let dispose = () => {}
     let inboxDispose = () => {}
     let stopWatching = () => {}
+    let stopCleanup = () => {}
+    let mounted = false
     const writerRecoveryCodes = ['writer-collision', 'equal-stamp-integrity']
     const registrationCodes = ['unauthorized', 'invalid-device-token', 'server-epoch-changed']
     // The server refused the registration code itself, so only a new one can connect.
@@ -126,9 +132,19 @@
     }
     async function run(operation: () => Promise<AssetResidencyStatus | void>) {
         if (busy) return
-        busy = true; failure = ''
+        operating = true; failure = ''
+        assetCleanupProgress.set(undefined); cleanupDetailsOpen = false
         // A failure the operation already explained stays over a later refresh error.
-        try { await refresh(await operation()) } catch (error) { failure ||= message(error) } finally { busy = false }
+        try { const result = await operation(); if (mounted) await refresh(result) } catch (error) { failure ||= message(error) } finally { operating = false }
+    }
+    async function cleanCopies() {
+        try { return await evictLocalAssets() }
+        catch (error) {
+            if ($assetCleanupProgress?.state === 'cancelled') return
+            failure ||= message(error)
+            if (mounted) await readResidency().catch(() => {})
+            throw error
+        }
     }
     // A new code replaces the refusal of the previous one. Other connection failures stay.
     function replaceCandidate(next: ServerConfig) {
@@ -202,12 +218,19 @@
     })
     onMount(() => {
         if (!isTauri) return
+        mounted = true
+        let wasCleaning = cleaning
+        stopCleanup = assetCleanupProgress.subscribe(value => {
+            const active = isAssetCleanupRunning(value)
+            if (wasCleaning && !active && !operating) void readResidency().catch(error => { failure ||= message(error) })
+            wasCleaning = active
+        })
         dispose = controller.subscribe(value => { view = value })
         stopWatching = controller.watchProgress()
         inboxDispose = serverRegistrationInbox.changed.subscribe(() => { const pending = serverRegistrationInbox.take(); if (pending) candidate = pending })
         void refresh().catch(error => { failure ||= message(error) })
     })
-    onDestroy(() => { dispose(); stopWatching(); inboxDispose(); scanner.cancel(); serverRegistrationInbox.releaseConsumed() })
+    onDestroy(() => { mounted = false; stopCleanup(); dispose(); stopWatching(); inboxDispose(); scanner.cancel(); serverRegistrationInbox.releaseConsumed() })
 </script>
 
 {#snippet statusPill()}
@@ -310,45 +333,25 @@
     </div>
 {/snippet}
 
-{#snippet progressSteps(steps: ServerSyncProgressView)}
-    {#if steps.stages.length > 1}
-        <ol class="stages">
-            {#each steps.stages as stage (stage.stage)}
-                <li data-state={stage.state} aria-current={stage.state === 'active' ? 'step' : undefined}>
-                    {#if stage.state === 'done'}<CheckIcon size={14} aria-hidden="true" />{:else}<LoaderCircleIcon size={14} class="motion-safe:animate-spin" aria-hidden="true" />{/if}
-                    <span>{stage.label}</span>
-                </li>
-            {/each}
-        </ol>
-    {/if}
-    <dl class="kv">
-        {#each steps.counters as counter (counter.key)}<dt>{counter.label}</dt><dd>{counter.value}</dd>{/each}
-    </dl>
-{/snippet}
-
 {#snippet progressPanel()}
-    {#if summary && progress}
-        <div class="progress" data-sync-progress data-mode="routine">
-            <SettingProgress label={summary.label} fraction={summary.fraction} done={summary.complete} />
-            <details class="group" bind:open={detailsOpen}>
-                <summary class="flex cursor-pointer list-none items-center gap-2 text-sm text-textcolor2 select-none [&::-webkit-details-marker]:hidden">
-                    <ChevronRightIcon size={16} class="shrink-0 transition-transform duration-200 group-open:rotate-90" aria-hidden="true" />
-                    <span>{copy.details}</span>
-                </summary>
-                <div class="details">
-                    {#if !summary.complete}<p class="activity">{progress.detail ? `${progress.label} · ${progress.detail}` : progress.label}</p>{/if}
-                    {@render progressSteps(progress)}
-                </div>
-            </details>
-        </div>
-    {:else if progress}
-        <div class="progress" data-sync-progress>
-            <SettingProgress label={progress.label} detail={progress.detail} fraction={progress.fraction} />
-            {@render progressSteps(progress)}
+    {#if progress}
+        <div class="progress" data-sync-progress data-mode={summary ? 'routine' : undefined}>
+            <TransferProgress
+                label={summary?.label ?? progress.label}
+                detail={summary ? '' : progress.detail}
+                fraction={summary ? summary.fraction : progress.fraction}
+                done={summary?.complete}
+                activity={summary && !summary.complete ? (progress.detail ? `${progress.label} · ${progress.detail}` : progress.label) : ''}
+                stages={progress.stages} counters={progress.counters} detailsLabel={copy.details}
+                collapsible={!!summary} bind:open={detailsOpen}
+                speed={view.progress?.network ? {
+                    sample: view.progress.network,
+                    active: view.progress.pausedAt === undefined && !view.paused && view.progress.active.some(stage => stage !== 'applying' && stage !== 'refreshing'),
+                    uploadLabel: copy.uploadSpeed, downloadLabel: copy.downloadSpeed,
+                } : undefined} />
         </div>
     {/if}
 {/snippet}
-
 {#snippet place(part: 'local' | 'server' | 'external' | 'missing', label: string, value?: string)}
     <div class="place" data-part={part}>
         <span class="place-label"><i class="place-dot" aria-hidden="true"></i><span>{label}</span></span>
@@ -406,9 +409,24 @@
             <div class="sync-block">
                 <div class="actions">
                     {#if residency?.policy === 'full' && residency.remoteObjects > 0}<SettingButton onclick={() => void run(downloadHeld)} busy={downloading} disabled={busy}>{copy.residency.download}</SettingButton>{/if}
-                    <SettingButton variant="secondary" onclick={() => void run(evictLocalAssets)} disabled={busy}>{copy.residency.clean}</SettingButton>
-                    {#if busy}<SettingButton variant="secondary" onclick={() => void cancelAssetResidencyOperation()}>{copy.residency.cancel}</SettingButton>{/if}
+                    <SettingButton variant="secondary" onclick={() => void run(cleanCopies)} disabled={busy}>{copy.residency.clean}</SettingButton>
+                    {#if cleaning || (operating && !$assetCleanupProgress)}<SettingButton variant="secondary" disabled={$assetCleanupProgress?.state === 'cancelling'} onclick={() => cleaning ? cancelLocalAssetCleanup() : void cancelAssetResidencyOperation()}>{copy.residency.cancel}</SettingButton>{/if}
                 </div>
+                {#if $assetCleanupProgress}
+                    {@const cleanup = $assetCleanupProgress}
+                    {@const terminal = !isAssetCleanupRunning(cleanup)}
+                    {@const measured = cleanup.state === 'running' && cleanup.totalItems !== null && cleanup.totalItems > 0}
+                    <div data-asset-cleanup-progress>
+                        <TransferProgress
+                            label={copy.residency.cleanup[cleanup.state === 'running' ? cleanup.stage : cleanup.state]}
+                            detail={cleanup.state === 'complete' ? copy.count.replace('{0}', cleanup.evictedItems.toLocaleString()) : measured ? `${cleanup.completedItems.toLocaleString()} / ${cleanup.totalItems!.toLocaleString()}` : ''}
+                            fraction={cleanup.state === 'complete' ? 1 : measured ? cleanup.completedItems / cleanup.totalItems! : null}
+                            done={cleanup.state === 'complete'} stopped={terminal && cleanup.state !== 'complete'}
+                            counters={cleanup.evictedBytes > 0 || cleanup.state === 'complete' ? [{ key: 'freed', label: copy.residency.cleanup.freed, value: bytes(cleanup.evictedBytes) }] : []}
+                            detailsLabel={copy.details} collapsible bind:open={cleanupDetailsOpen}
+                        />
+                    </div>
+                {/if}
                 {#if progressPlace === 'assets'}{@render progressPanel()}{/if}
                 {#if downloading}<p role="status" class="text-sm">{copy.residency.working}</p>{/if}
                 <p class="help">{copy.residency.cleanupNote}</p>
@@ -523,37 +541,6 @@
         from {
             width: 0;
         }
-    }
-    .details {
-        display: grid;
-        gap: 0.625rem;
-        min-width: 0;
-        margin-top: 0.5rem;
-        padding-left: 1.5rem;
-    }
-    .activity {
-        font-size: 13px;
-    }
-    .stages {
-        display: grid;
-        gap: 0.375rem;
-        margin: 0;
-        padding: 0;
-        list-style: none;
-        font-size: 13px;
-    }
-    .stages li {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        min-width: 0;
-        color: var(--risu-theme-textcolor2);
-    }
-    .stages li[data-state='active'] {
-        color: var(--risu-theme-textcolor);
-    }
-    .stages li[data-state='done'] :global(svg) {
-        color: var(--risu-theme-success-500);
     }
     .value {
         font-size: 14px;

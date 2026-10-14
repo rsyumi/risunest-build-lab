@@ -63,6 +63,7 @@
     import cloneDeep from 'lodash/cloneDeep'
     import isEqual from 'lodash/isEqual'
     import { chatViewEvents } from 'src/ts/plugins/chatViewHost.svelte'
+    import { reconcileChatViewportChildren } from 'src/ts/chatViewportDom'
 
     let {
         messages,
@@ -256,6 +257,7 @@
         message: Readonly<Message> | null
     } | null = null
     let suppressScroll = false
+    let finishViewportLayoutChange: (() => void) | null = null
     const identityRegistry = new ChatRenderIdentityRegistry()
     const ownerSessionIds = new WeakMap<object, number>()
     const conversationSessionIds = new WeakMap<object, number>()
@@ -839,16 +841,21 @@
         const containerRect = scrollContainer.getBoundingClientRect()
         if (containerRect.height <= 0) return viewportAnchor
         let closest: { key: string; index: number; offset: number; distance: number } | null = null
+        let pending: typeof closest = null
         for (const [key, element] of mountedElements) {
+            if (!element.isConnected) continue
             const indexText = element.dataset.chatViewportIndex
             if (indexText === undefined) continue
             const index = Number(indexText)
             const rect = element.getBoundingClientRect()
-            if (rect.bottom < containerRect.top || rect.top > containerRect.bottom) continue
+            if (rect.bottom <= rect.top || rect.bottom <= containerRect.top || rect.top >= containerRect.bottom) continue
             const offset = rect.top - containerRect.top
             const distance = Math.abs(offset)
-            if (!closest || distance < closest.distance) closest = { key, index, offset, distance }
+            if (element.dataset.chatHeightPending === 'true') {
+                if (!pending || distance < pending.distance) pending = { key, index, offset, distance }
+            } else if (!closest || distance < closest.distance) closest = { key, index, offset, distance }
         }
+        closest ??= pending
         return closest
             ? { key: closest.key, indexHint: closest.index, relativeOffset: closest.offset }
             : viewportAnchor
@@ -863,8 +870,10 @@
             element.getBoundingClientRect().top -
             scrollContainer.getBoundingClientRect().top
         const delta = currentOffset - anchor.relativeOffset
-        if (Math.abs(delta) < 0.5 || typeof scrollContainer.scrollBy !== 'function')
+        if (Math.abs(delta) < 0.5 || typeof scrollContainer.scrollBy !== 'function') {
+            lastScrollTop = scrollContainer.scrollTop
             return
+        }
         suppressScroll = true
         const correctionGeneration = positionGeneration
         scrollContainer.scrollBy({ top: delta, behavior: 'instant' })
@@ -873,6 +882,20 @@
             if (correctionGeneration !== positionGeneration) return
             suppressScroll = false
             if (scrollContainer) lastScrollTop = scrollContainer.scrollTop
+        })
+    }
+
+    function beginViewportLayoutChange(): void {
+        if (!scrollContainer || initialLatestFollow || currentPendingJump() || finishViewportLayoutChange) return
+        const finish = () => {
+            if (finishViewportLayoutChange !== finish) return
+            finishViewportLayoutChange = null
+        }
+        finishViewportLayoutChange = finish
+        scheduleFrame(() => {
+            finish()
+            // Process input that arrived during the structural change using the final layout.
+            handleScroll()
         })
     }
 
@@ -957,6 +980,7 @@
         viewportResult = result
         syncSourcePins(result, currentChat, sourceSnapshot)
         requestMissingSourceRows(result, sourceSnapshot)
+        beginViewportLayoutChange()
         renderViewportRows(
             scope,
             result,
@@ -1405,6 +1429,7 @@
             orderedElements.push(element)
         }
 
+        reconcileChatViewportChildren(chatBody, orderedElements)
         for (const key of renderKeys) {
             if (!currentRenderKeys.has(key)) removeMountedRow(key)
         }
@@ -1419,7 +1444,6 @@
         } else if (!sourceSnapshot) {
             lastMountedSourceTailKey = null
         }
-        reconcileChatBodyChildren(orderedElements)
         renderKeys = currentRenderKeys
         for (const key of [...pendingRowMounts.keys()]) {
             if (!currentRenderKeys.has(key)) pendingRowMounts.delete(key)
@@ -1444,26 +1468,11 @@
         })
     }
 
-    function reconcileChatBodyChildren(orderedElements: readonly HTMLElement[]): void {
-        const retained = new Set<Node>(orderedElements)
-        for (const child of [...chatBody.childNodes]) {
-            if (!retained.has(child)) child.remove()
-        }
-
-        let cursor = chatBody.firstChild
-        for (const element of orderedElements) {
-            if (cursor === element) {
-                cursor = cursor.nextSibling
-                continue
-            }
-            chatBody.insertBefore(element, cursor)
-        }
-    }
-
     function markRowMountPending(key: string, element: HTMLElement): void {
         element.dataset.chatMountPending = 'true'
         if (!mountInstances.has(key)) {
             const height = measuredHeights.get(key) ?? ESTIMATED_MESSAGE_HEIGHT
+            element.dataset.chatHeightPending = 'true'
             element.style.minHeight = `${height}px`
             element.style.flexBasis = `${height}px`
         }
@@ -1473,6 +1482,7 @@
         element.style.removeProperty('min-height')
         element.style.removeProperty('flex-basis')
         delete element.dataset.chatMountPending
+        delete element.dataset.chatHeightPending
     }
 
     function nextPendingRowMount(): PendingRowMount | undefined {
@@ -1506,7 +1516,13 @@
     function settlePreparedRow(key: string, token: object): void {
         if (activeRowPreparations.get(key) !== token) return
         const element = mountedElements.get(key)
-        if (element) clearQueuedRowHeight(element)
+        if (element?.dataset.chatMountPending === 'true') {
+            const anchor = initialLatestFollow || currentPendingJump() ? null : captureDomAnchor()
+            beginViewportLayoutChange()
+            clearQueuedRowHeight(element)
+            correctDomAnchor(anchor)
+            keepInitialLatestPosition()
+        }
         if (element && !element.dataset.chatConversationStartSignature) {
             hasMountedUsableRow = true
             initialRowsLoading = false
@@ -2301,6 +2317,7 @@
     }
 
     function clearScheduledWork(): void {
+        finishViewportLayoutChange?.()
         projectionReconcileGeneration += 1
         projectionReconcileQueued = false
         clearPendingRowMounts()
@@ -2492,6 +2509,7 @@
                 return
         }
         userScrollIntentAt = performance.now()
+        finishViewportLayoutChange?.()
         if (event.type === 'pointerdown') scrollPointerHeld = true
         positionGeneration += 1
         initialLatestFollow = false
@@ -2516,7 +2534,7 @@
     }
 
     function handleScroll(): void {
-        if (!scrollContainer || suppressScroll || !viewportResult) return
+        if (!scrollContainer || suppressScroll || finishViewportLayoutChange || !viewportResult) return
         // Layout and browser scroll anchoring also emit scroll events. Only input
         // or an explicit jump transfers initial positioning to a history anchor.
         if (initialLatestFollow) {
@@ -2571,7 +2589,7 @@
             indexHint: target,
             relativeOffset,
         }
-        reconcileViewport({ jumpTarget: target })
+        reconcileViewport({ anchor: viewportAnchor })
     }
 
     function isMountedKeyAtBottom(key: string): boolean {

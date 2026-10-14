@@ -499,6 +499,16 @@ pub(crate) fn known_remote_objects(
     format_repository_id: &str,
     repository: &RepositoryHandle,
 ) -> Result<Vec<RemoteObject>> {
+    let objects = cached_remote_objects(root, format_repository_id, &repository.connection_identity)?;
+    for object in &objects { object.stored(repository)?; }
+    Ok(objects)
+}
+
+pub(super) fn cached_remote_objects(
+    root: &Path,
+    format_repository_id: &str,
+    connection_identity: &str,
+) -> Result<Vec<RemoteObject>> {
     let path = root.join("snapshot-cache.sqlite");
     match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -515,7 +525,7 @@ pub(crate) fn known_remote_objects(
         "SELECT object_id,plaintext_sha256,value FROM remote_objects
          WHERE repository_id=?1 AND connection_identity=?2 ORDER BY object_id",
     ).map_err(transient)?;
-    let rows = query.query_map(params![format_repository_id, repository.connection_identity], |row| {
+    let rows = query.query_map(params![format_repository_id, connection_identity], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
     }).map_err(transient)?;
     let mut objects = Vec::new();
@@ -523,9 +533,8 @@ pub(crate) fn known_remote_objects(
         let (id, digest, encoded) = row.map_err(transient)?;
         if encoded.len() > 128 * 1024 { return Err(corrupt("inventory object exceeds limit")); }
         let object: RemoteObject = serde_json::from_str(&encoded).map_err(corrupt)?;
-        object.stored(repository)?;
         if object.repository_id != format_repository_id || object.object_id != id
-            || object.plaintext_sha256 != digest
+            || object.plaintext_sha256 != digest || object.receipt.locator.connection_identity != connection_identity
         {
             return Err(corrupt("inventory object identity differs"));
         }

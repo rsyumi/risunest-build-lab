@@ -66,7 +66,8 @@ export function registerSyncBindingTransport(target: Exclude<BindingTarget, { ki
 export async function bindSyncTarget(target: Exclude<BindingTarget, { kind: 'none' }>, options: SyncBindingOptions = {}) {
     const transport = transports.get(key(target))
     if (!bindingFlow || !transport) throw new Error('Sync binding transport is unavailable')
-    try { return await bindingFlow.bind(target, transport, options) }
+    const bind = () => bindingFlow!.bind(target, transport, options)
+    try { return await (transport.observeBinding ? transport.observeBinding(bind) : bind()) }
     finally { notifySyncBindingChanged() }
 }
 

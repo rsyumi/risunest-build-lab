@@ -1,5 +1,6 @@
 //! One-dispatch HTTP boundary: account waits, actual MYBOX reservations,
 //! cancellation, bounded control requests and observed server-clock facts.
+use risunest_network_log::reqwest::RequestBuilderExt;
 use super::{
     contract::*,
     leases::{observe_time_sample, TimeSample},
@@ -170,7 +171,7 @@ impl HttpTransport for NativeHttpTransport {
             }));
             match (request.body, request.content_length) {
                 (Some(body), Some(length)) => {
-                    let reader = UploadReader { reader: body, progress: progress.clone() };
+                    let reader = UploadReader { reader: super::progress::network_reader(body, true), progress: progress.clone() };
                     builder = builder.header(reqwest::header::CONTENT_LENGTH, length)
                         .body(reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::with_capacity(
                             reader.take(length), 64 * 1024,
@@ -182,7 +183,7 @@ impl HttpTransport for NativeHttpTransport {
             let response = tokio::select! {
                 _ = cancel.cancelled() => return Err(ProviderError::new(ErrorKind::Cancelled)),
                 detail = upload_watchdog(progress) => return Err(ProviderError::new(ErrorKind::Transient).caused(&detail)),
-                result = builder.send() => result.map_err(network_error)?,
+                result = builder.send_logged("external-storage") => result.map_err(network_error)?,
             };
             let status = response.status().as_u16();
             let mut headers: BTreeMap<String, String> = BTreeMap::new();
@@ -206,7 +207,7 @@ impl HttpTransport for NativeHttpTransport {
             Ok(HttpResponse {
                 status,
                 headers,
-                body: Box::pin(ResponseBody::new(reader, cancel, None)),
+                body: Box::pin(ResponseBody::new(super::progress::network_reader(reader, false), cancel, None)),
             })
         })
     }

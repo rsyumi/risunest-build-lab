@@ -7,6 +7,7 @@ fn main() {
         "notify",
         "open_settings",
         "pick_file",
+        "pick_files",
         "pick_backup_source",
         "discard_backup_source",
         "materialize_backup_source",

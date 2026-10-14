@@ -18,7 +18,7 @@ impl Store {
         &self,
         changes: &[risunest_sync_wire::lww::UnitChange],
     ) -> Result<()> {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "source-observer"))]
         let _observed = crate::source_observer::ingress(&self.root);
         let mut pending = PendingIndex::default();
         for change in changes {

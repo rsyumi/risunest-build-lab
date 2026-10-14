@@ -1,5 +1,6 @@
 import { test, expect } from './fixture'
 import type { Locator, Page } from '@playwright/test'
+import { languageEnglish as language } from '../../src/lang/en'
 
 async function order(page: Page, kind: string) {
     return page.evaluate(kind => {
@@ -133,7 +134,7 @@ async function center(locator: Locator) {
     return { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2, top: box!.y + 3 }
 }
 const zone = (page: Page, direction: 'previous' | 'next') => page.locator(`[data-lore-page-zone="${direction}"]`)
-const pagerText = (page: Page) => page.getByRole('navigation', { name: 'Pages' }).first()
+const pagerText = (page: Page) => page.getByRole('navigation', { name: language.risuNest.pager.pages }).first()
 const itemButton = (page: Page, name: string) => page.getByRole('button', { name, exact: true })
 async function position(page: Page, name: string) {
     return (await order(page, 'lore')).indexOf(name)
@@ -141,13 +142,14 @@ async function position(page: Page, name: string) {
 
 /** Hovers the top edge of a row at a pace Sortable's move animation keeps up with. */
 async function settleOn(page: Page, target: string, via?: string) {
-    await page.waitForTimeout(250)
-    // Rows shift once the dragged row leaves its pinned edge, so measure the target after that.
+    // Leave the repeat zone before waiting for the drop target to settle.
     if (via) {
         const pass = await center(itemButton(page, via).locator('..'))
         await page.mouse.move(pass.x, pass.y, { steps: 6 })
-        await page.waitForTimeout(250)
+        // A delayed drop must stay on this page past the 700 ms repeat interval.
+        await page.waitForTimeout(750)
     }
+    // Rows shift once the dragged row leaves its pinned edge, so measure the target after that.
     const drop = await center(itemButton(page, target).locator('..'))
     await page.mouse.move(drop.x, drop.top, { steps: 6 })
     await page.waitForTimeout(250)
@@ -171,6 +173,7 @@ test.describe('lore pages', () => {
         }
         await expect(pagerText(page)).toContainText(expected)
         await settleOn(page, target, via)
+        await expect(pagerText(page)).toContainText(expected)
         await mouse.up()
     }
 
@@ -190,7 +193,7 @@ test.describe('lore pages', () => {
         const errors: string[] = []
         page.on('pageerror', error => errors.push(error.message))
         await open(page, 'lore-pages')
-        await page.getByRole('button', { name: 'Next page' }).first().click()
+        await page.getByRole('button', { name: language.risuNest.pager.next }).first().click()
         await dragThroughZone(page, 'Item 100', 'previous', '1 / 3', 'Item 5')
         await expect.poll(async () => (await position(page, 'Item 5')) - (await position(page, 'Item 100'))).toBe(1)
         await expect(itemButton(page, 'Item 100')).toBeVisible()

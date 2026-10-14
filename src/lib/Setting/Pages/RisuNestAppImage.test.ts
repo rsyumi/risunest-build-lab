@@ -3,10 +3,6 @@ import { mount, tick, unmount } from 'svelte'
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), confirm: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
 vi.mock('src/ts/alert', () => ({ alertConfirm: mocks.confirm }))
-vi.mock('src/lang', () => ({ language: { risuNest: { platform: {
-    title: 'Platform', appImageLinks: 'AppImage links', appImageLinksHelp: 'Register again after moving the file.',
-    appImageRegister: 'Register', appImageRegistered: 'Registered', appImageReplace: 'Replace existing handler?',
-} } } }))
 import Component from './RisuNestAppImage.svelte'
 let component: ReturnType<typeof mount> | undefined
 afterEach(async () => { if (component) await unmount(component); component = undefined; document.body.replaceChildren(); vi.resetAllMocks() })

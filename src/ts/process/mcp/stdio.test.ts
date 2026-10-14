@@ -17,7 +17,7 @@ vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => mocks.data
 vi.mock('src/ts/stores.svelte', () => ({ DBState: { db: {} } }))
 vi.mock('../modules', () => ({ getModuleMcps: () => [...mocks.configured] }))
 vi.mock('src/ts/alert', () => ({ alertError: mocks.error, alertInput: mocks.input, alertConfirm: mocks.confirm, alertNormal: vi.fn() }))
-vi.mock('src/ts/platform', () => ({ get isTauriDesktop() { return mocks.desktop } }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({ runtime: mocks.desktop ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('src/ts/util', () => ({ sleep: async () => {} }))
 vi.mock('./pluginmcp', () => ({ registeredCustomPluginMCPs: new Map() }))
 vi.mock('@tauri-apps/plugin-shell', () => ({ Command: { create: mocks.create } }))

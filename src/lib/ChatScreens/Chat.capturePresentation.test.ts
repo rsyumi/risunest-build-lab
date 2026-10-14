@@ -14,6 +14,7 @@ import type { SelectedConversationTarget } from 'src/ts/storage/activeWorkingSet
 import { cancelTextEditorPopup, textEditorPopup } from 'src/ts/gui/textEditorPopup.svelte'
 import { discardEditorDraftsExcept, keepEditorDraft, pendingEditorDrafts, type ChatEditorDraft } from 'src/ts/chatEditorDrafts'
 import { chatScreenState } from 'src/ts/ui/chatScreenState.svelte'
+import { language } from 'src/lang'
 
 const live = vi.hoisted(() => ({
     db: {} as Record<string, any>,
@@ -60,7 +61,7 @@ class TestIntersectionObserver {
 }
 
 vi.mock('../SideBars/Scripts/RegexData.svelte', () => ({ default: () => {} }))
-vi.mock('src/ts/parser/parser.svelte', () => ({ ParseMarkdown: vi.fn(async (value: string) => value) }))
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('./ChatBody.svelte', async () => ({
     default: (await import('./ChatBodyCaptureProbe.test.svelte')).default,
 }))
@@ -83,6 +84,7 @@ vi.mock('src/ts/stores.svelte', () => {
     selectedCharID: writable(0),
     HideIconStore: writable(false),
     ReloadGUIPointer: writable(0),
+    ScriptDisplayRefreshPointer: writable(0),
     selIdState: { selId: 0 },
     createSimpleCharacter: (char: character) => ({ ...char, type: 'simple' }),
     }
@@ -96,7 +98,9 @@ vi.mock('src/ts/globalApi.svelte', () => ({
     getFileSrc: vi.fn(async (source: string) => source),
     createChatCopyName: vi.fn(),
 }))
-vi.mock('src/ts/process/scripts', () => ({
+vi.mock('src/ts/process/scripts', async () => {
+    const { getChatVar } = await import('src/ts/parser/chatVar.svelte')
+    return {
     risuChatParser: (value: string, arg: {
         chara?: any
         role?: string
@@ -110,11 +114,13 @@ vi.mock('src/ts/process/scripts', () => ({
             projectedChatID: arg.projectedChatID,
             historyOffset: (arg as any).historyOffset,
         })
+        value = value.replace(/\{\{getvar::([^}]+)\}\}/g, (_, key: string) => getChatVar(key))
         if (!value.includes('{{char}}')) return value
         if (typeof arg.chara === 'string') return value.replaceAll('{{char}}', arg.chara)
         return value.replaceAll('{{char}}', arg.chara?.name ?? '')
     },
-}))
+    }
+})
 vi.mock('src/ts/model/modellist', () => ({
     getModelInfo: (model: string) => ({ shortName: model || 'model' }),
 }))
@@ -128,37 +134,6 @@ vi.mock('src/ts/util', () => ({
     getUserIcon: () => '',
     getUserName: () => 'Live User',
     sleep: () => Promise.resolve(),
-}))
-vi.mock('../../lang', () => ({
-    language: {
-        branchedText: 'Branched from {}',
-        noMessage: 'No message',
-        editTranslation: 'Edit translation',
-        editTranslationSave: 'Save translation',
-        cancel: 'Cancel',
-        confirm: 'Confirm',
-        chatMessageActionFailed: 'Message action failed',
-        partialEdit: {
-            cancel: 'Cancel',
-            cancelShortcut: 'Cancel',
-            deleteButtonTooltip: 'Delete block',
-            deleteConfirmMessage: 'Delete this block?',
-            deleteModalTitle: 'Delete block',
-            deleteNo: 'No',
-            deleteYes: 'Yes',
-            editButtonTooltip: 'Edit block',
-            editModalTitle: 'Edit block',
-            lineNumber: (line: number) => `Line ${line}`,
-            matchesFound: 'matches',
-            matchFailedMessage: 'No match',
-            matchFailedTitle: 'No match',
-            matchFound: (method: string) => `Match ${method}`,
-            save: 'Save',
-            saveShortcut: 'Save',
-            selectDeleteMatch: 'Select block',
-            selectMatch: 'Select block',
-        },
-    },
 }))
 vi.mock('../../ts/alert', () => ({
     alertClear: vi.fn(), alertConfirm: vi.fn(), alertError: vi.fn(), alertInput: vi.fn(), alertNormal: vi.fn(),
@@ -183,6 +158,7 @@ import { alertToast } from 'src/ts/alert'
 import ChatCaptureBatchHarness from './ChatCaptureBatchHarness.test.svelte'
 import ChatsHarness from './ChatsHarness.test.svelte'
 import { chatViewEvents } from 'src/ts/plugins/chatViewHost.svelte'
+import { requestScriptDisplayRefresh } from 'src/ts/process/scriptDisplayRefresh'
 import type { ChatViewEvent } from 'src/ts/plugins/chatViewEvents'
 
 function context(overrides: Record<string, unknown> = {}) {
@@ -585,6 +561,46 @@ describe('Chat frozen capture presentation', () => {
         },
     )
 
+    test('shows a greeting variable again only when a script changes that variable', async () => {
+        const scriptstate = { $hp: '10', $mood: 'calm' }
+        live.db = {
+            ...live.db,
+            characters: [{
+                type: 'character',
+                name: 'Live Character',
+                chaId: 'live',
+                chatPage: 0,
+                chats: [{ id: 'greeting', message: [], scriptstate }],
+            }],
+        }
+        mounted = mount(Chat, {
+            target,
+            props: {
+                message: 'HP {{getvar::hp}}',
+                name: 'Live Character',
+                role: 'char',
+                idx: -1,
+                firstMessage: true,
+                totalLength: 0,
+                isLastMemory: false,
+            },
+        })
+        const shown = () => target.querySelector('[data-chat-body-probe]')?.textContent
+        await vi.waitFor(() => expect(shown()).toBe('HP 10'))
+
+        scriptstate.$hp = '4'
+        scriptstate.$mood = 'tense'
+        const parsesBefore = parserCalls.length
+        requestScriptDisplayRefresh({ keys: ['mood'] })
+        await Promise.resolve()
+        await tick()
+        expect(parserCalls).toHaveLength(parsesBefore)
+        expect(shown()).toBe('HP 10')
+
+        requestScriptDisplayRefresh({ keys: ['hp'] })
+        await vi.waitFor(() => expect(shown()).toBe('HP 4'))
+    })
+
     test('renders normal branch comment presentation from the frozen message', async () => {
         const message = {
             role: 'char' as const,
@@ -984,7 +1000,7 @@ describe('Chat frozen capture presentation', () => {
                             messageEvidence: expect.objectContaining({ data: 'Original edited row' }) }), 'edit-message')
                         expect(row.querySelector('.message-edit-area')).toBeNull()
                     } else {
-                        await vi.waitFor(() => expect(alertToast).toHaveBeenCalledWith('Message action failed'))
+                        await vi.waitFor(() => expect(alertToast).toHaveBeenCalledWith(language.chatMessageActionFailed))
                         expect(conversation.message[2].data).toBe('Concurrent edited row')
                         expect(row.querySelector('.message-edit-area')).toBe(editor)
                         expect(editor.value).toBe('Retained draft')
@@ -1064,7 +1080,7 @@ describe('Chat frozen capture presentation', () => {
                     expect(acquireEdit).toHaveBeenCalledWith(expect.objectContaining({ absoluteIndex: 2 }), 'edit-message')
                 } else {
                     await expect(request.save('Popup draft')).resolves.toBe(false)
-                    expect(alertToast).toHaveBeenCalledWith('Message action failed')
+                    expect(alertToast).toHaveBeenCalledWith(language.chatMessageActionFailed)
                     expect(conversation.message[2].data).toBe('Concurrent edited row')
                 }
                 expect(conversation.message[1].data).toBe('Earlier row')
@@ -1169,7 +1185,7 @@ describe('Chat frozen capture presentation', () => {
                     await vi.waitFor(() => expect(target.querySelector('textarea.message-edit-area')).toBeNull())
                     expect(alertToast).not.toHaveBeenCalled()
                 } else {
-                    await vi.waitFor(() => expect(alertToast).toHaveBeenCalledWith('Message action failed'))
+                    await vi.waitFor(() => expect(alertToast).toHaveBeenCalledWith(language.chatMessageActionFailed))
                     expect(harness.conversation.message[1].data).toBe('Concurrent edited row')
                     expect(target.querySelector<HTMLTextAreaElement>('textarea.message-edit-area')?.value).toBe('Inline draft')
                 }
@@ -1367,7 +1383,7 @@ describe('Chat frozen capture presentation', () => {
             }), expect.objectContaining({ message: expect.objectContaining({ data: external }) }))
             expect(document.querySelector('.partial-edit-modal textarea')).toBe(editor)
             document.querySelector<HTMLButtonElement>('.partial-edit-save-btn')!.click()
-            await vi.waitFor(() => expect(alertToast).toHaveBeenCalledWith('Message action failed'))
+            await vi.waitFor(() => expect(alertToast).toHaveBeenCalledWith(language.chatMessageActionFailed))
             expect(acquireEdit).toHaveBeenCalledWith(expect.objectContaining({
                 messageEvidence: expect.objectContaining({ data: original }),
             }), 'partial-edit-message')
@@ -1620,7 +1636,7 @@ describe('Chat frozen capture presentation', () => {
             target.querySelector<HTMLButtonElement>('.button-icon-translate')!.click()
             ;(await vi.waitFor(() => {
                 const button = [...target.querySelectorAll<HTMLButtonElement>('button')]
-                    .find(element => element.textContent?.includes('Edit translation'))
+                    .find(element => element.textContent?.includes(language.editTranslation))
                 expect(button).toBeDefined()
                 return button!
             })).click()
@@ -1746,7 +1762,7 @@ describe('Chat frozen capture presentation', () => {
         const { request } = await openPopupEditor()
 
         await expect(request.save('Refused edit')).resolves.toBe(false)
-        expect(alertToast).toHaveBeenCalledWith('Message action failed')
+        expect(alertToast).toHaveBeenCalledWith(language.chatMessageActionFailed)
         expect(harness.completeConversation.message[1].data).toBe('Original viewport message')
         expect(hasPopupRowEditor()).toBe(true)
         await tick()
@@ -1837,8 +1853,8 @@ describe('Chat frozen capture presentation', () => {
                 return button!
             })).click()
             ;(await vi.waitFor(() => {
-                expect(translationButton('Edit translation')).toBeDefined()
-                return translationButton('Edit translation')!
+                expect(translationButton(language.editTranslation)).toBeDefined()
+                return translationButton(language.editTranslation)!
             })).click()
             const opened = await vi.waitFor(() => {
                 expect(translationEditor()?.value).toBe('Cached translation')
@@ -1861,7 +1877,7 @@ describe('Chat frozen capture presentation', () => {
                 (mounted as unknown as RowEditor).refreshMessageDisplay({ message: 'Changed source message', totalMessages: 2 })
                 await tick()
             }
-            translationButton('Save translation')!.click()
+            translationButton(language.editTranslationSave)!.click()
 
             if (source === 'unchanged') {
                 await vi.waitFor(() => expect(setLLMCache).toHaveBeenCalledWith(key, 'Restored translation'))
@@ -1869,7 +1885,7 @@ describe('Chat frozen capture presentation', () => {
                 expect(onEditorClose).toHaveBeenCalledOnce()
                 expect(alertToast).not.toHaveBeenCalled()
             } else {
-                await vi.waitFor(() => expect(alertToast).toHaveBeenCalledWith('Message action failed'))
+                await vi.waitFor(() => expect(alertToast).toHaveBeenCalledWith(language.chatMessageActionFailed))
                 expect(setLLMCache).not.toHaveBeenCalled()
                 expect(translationEditor()?.value).toBe('Restored translation')
                 expect(onEditorClose).not.toHaveBeenCalled()

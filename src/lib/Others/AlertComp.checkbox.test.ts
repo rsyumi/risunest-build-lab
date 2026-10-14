@@ -10,86 +10,34 @@ const branchMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('src/ts/gui/branches', () => branchMocks)
-vi.mock('src/ts/stores.svelte', async () => {
-    const { writable } = await import('svelte/store')
-    const { createAlertQueue } = await import('src/ts/alertQueue')
-    return {
-        DBState: { db: { characters: [], botPresets: [], botPresetsId: 0 } },
-        alertStore: createAlertQueue({ type: 'none', msg: '' }, { gapMs: 0 }),
-        selectedCharID: writable(-1),
-    }
-})
+vi.mock('src/ts/stores.svelte', async () => (await import('./AlertComp.testSupport')).storesModule({ alertQueue: true }))
 vi.mock('src/ts/util', () => ({ sleep: vi.fn() }))
 vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => ({}) }))
 vi.mock('src/ts/storage/deviceMarkers', () => ({ getDeviceMarkers: vi.fn() }))
-vi.mock('../../ts/characters', () => ({ getCharImage: vi.fn() }))
-vi.mock('../../ts/parser/parser.svelte', () => ({ ParseMarkdown: vi.fn() }))
-vi.mock('src/ts/characterCards', () => ({
-    hubURL: '',
-    isCharacterHasAssets: () => false,
-}))
+vi.mock('../../ts/characters', async () => (await import('./AlertComp.testSupport')).charactersModule())
+vi.mock('../../ts/parser/parser.svelte', async () => (await import('../../ts/parser/parser.testSupport')).parserStubModule({ ParseMarkdown: vi.fn() }))
+vi.mock('src/ts/characterCards', async () => (await import('./AlertComp.testSupport')).characterCardsModule())
 vi.mock('src/ts/globalApi.svelte', () => ({
     aiLawApplies: () => false,
     getFetchData: vi.fn(),
     getFetchLogs: () => [],
     openURL: vi.fn(),
 }))
-vi.mock('src/ts/tokenizer', () => ({
-    tokenize: vi.fn(async (text: string) => `tokens:${text}`),
-}))
-vi.mock('src/ts/gui/colorscheme', async () => {
-    const { writable } = await import('svelte/store')
-    return { ColorSchemeTypeStore: writable(false) }
-})
-vi.mock('../../ts/sourcemap', () => ({ translateStackTrace: vi.fn() }))
-vi.mock('src/ts/platform', () => ({
-    isTauri: false,
-    getDetailedOSLabel: async () => 'Test OS',
-    getFallbackOSLabel: () => 'Test OS',
-    getRisuEnvironmentLabel: () => 'Test',
-}))
-vi.mock('src/ts/storage/officialAccountMessage', () => ({
-    isExpectedHubMessage: () => false,
-}))
-vi.mock('@lucide/svelte', async () => {
-    const { default: Stub } = await import('./AlertCompDependencyStub.test.svelte')
-    return {
-        CheckIcon: Stub,
-        ChevronDownIcon: Stub,
-        ChevronRightIcon: Stub,
-        ChevronUpIcon: Stub,
-        CopyIcon: Stub,
-        User: Stub,
-        XIcon: Stub,
-    }
-})
-vi.mock('../SideBars/BarIcon.svelte', async () => ({
-    default: (await import('./AlertCompDependencyStub.test.svelte')).default,
-}))
-vi.mock('../UI/GUI/TextInput.svelte', async () => ({
-    default: (await import('./AlertCompDependencyStub.test.svelte')).default,
-}))
-vi.mock('../UI/GUI/Button.svelte', async () => ({
-    default: (await import('./AlertCompButtonStub.test.svelte')).default,
-}))
-vi.mock('../UI/GUI/SelectInput.svelte', async () => ({
-    default: (await import('./AlertCompDependencyStub.test.svelte')).default,
-}))
-vi.mock('../UI/GUI/OptionInput.svelte', async () => ({
-    default: (await import('./AlertCompDependencyStub.test.svelte')).default,
-}))
-vi.mock('../UI/DeferredMarkdown.svelte', async () => ({
-    default: (await import('./AlertCompDependencyStub.test.svelte')).default,
-}))
-vi.mock('../UI/GUI/TextAreaInput.svelte', async () => ({
-    default: (await import('./AlertCompDependencyStub.test.svelte')).default,
-}))
-vi.mock('../Setting/Pages/Module/ModuleChatMenu.svelte', async () => ({
-    default: (await import('./AlertCompDependencyStub.test.svelte')).default,
-}))
-vi.mock('./Help.svelte', async () => ({
-    default: (await import('./AlertCompDependencyStub.test.svelte')).default,
-}))
+vi.mock('src/ts/tokenizer', async () => (await import('./AlertComp.testSupport')).tokenizerModule())
+vi.mock('src/ts/gui/colorscheme', async () => (await import('./AlertComp.testSupport')).colorschemeModule())
+vi.mock('../../ts/sourcemap', async () => (await import('./AlertComp.testSupport')).sourcemapModule())
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
+vi.mock('src/ts/storage/officialAccountMessage', async () => (await import('./AlertComp.testSupport')).officialAccountMessageModule())
+vi.mock('@lucide/svelte', async () => (await import('./AlertComp.testSupport')).lucideModule())
+vi.mock('../SideBars/BarIcon.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
+vi.mock('../UI/GUI/TextInput.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
+vi.mock('../UI/GUI/Button.svelte', async () => (await import('./AlertComp.testSupport')).componentModule('button'))
+vi.mock('../UI/GUI/SelectInput.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
+vi.mock('../UI/GUI/OptionInput.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
+vi.mock('../UI/DeferredMarkdown.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
+vi.mock('../UI/GUI/TextAreaInput.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
+vi.mock('../Setting/Pages/Module/ModuleChatMenu.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
+vi.mock('./Help.svelte', async () => (await import('./AlertComp.testSupport')).componentModule())
 
 vi.mock('src/ts/process/index.svelte', async () => ({
     doingChat: (await import('svelte/store')).writable(false),

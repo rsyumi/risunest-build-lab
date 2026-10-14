@@ -82,12 +82,7 @@ export function buildNativeSuite({ target, output, registryUrl, version }) {
       copyFileSync(managerBackground, join(binaries, `risunest-sync-manager-background-${target}.exe`));
     copyFileSync(cloudflared, join(binaries, `cloudflared-${target}${extension}`));
     copyFileSync(license, join(binaries, "CLOUDFLARED-LICENSE"));
-    const cli = join(gui, "node_modules/@tauri-apps/cli/tauri.js");
-    if (!existsSync(cli)) throw new Error("Install the Sync GUI dependencies before building.");
-    const config = JSON.stringify({ version, bundle: { active: false } });
-    run(process.execPath, [cli, "build", "--target", target, "--no-bundle", "--config", config, "--", "--locked"], gui);
     guiBinary = join(destination, `risunest-sync-gui${extension}`);
-    copyFileSync(join(targetRelease, `risunest-sync-gui${extension}`), guiBinary);
   }
   return {
     target,

@@ -1,3 +1,4 @@
+use risunest_network_log::reqwest::RequestBuilderExt;
 use super::{restore, JobControl, JobPhase, JobProgress, JobResultSummary, NativeJobError, OpenedJobSource};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
@@ -135,7 +136,7 @@ async fn download_snapshot_attempt(
             .headers(authenticated_headers(&request.credential)?)
             .header("x-risu-key", DATABASE_KEY)
             .header("x-risu-save-date", "0")
-            .send(),
+            .send_logged("snapshot-download"),
         job,
         response_timeout,
         "Official account snapshot request was cancelled",

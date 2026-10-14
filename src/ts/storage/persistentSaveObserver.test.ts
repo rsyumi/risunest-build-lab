@@ -1,12 +1,15 @@
 import { flushSync } from 'svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Database } from './database.svelte'
+import type { Chat, Database } from './database.svelte'
+import { ActiveConversationSession } from './activeConversationSession'
 import { observePersistentSaveChanges } from './persistentSaveObserver.svelte'
 import { PersistentMutationFencedError, SaveCoordinator } from './saveCoordinator'
 import type { PersistentDataStore } from './persistentDataStore'
+import { createStoreStub } from './persistentDataStore.testSupport'
 import { PENDING_SAVE_BYTE_LIMIT } from './pendingDataSize'
 import { createMetadataOnlySelectedConversation } from './selectedConversationLifecycle'
 import { createPersistentSaveObserverHarness } from './tests/persistentSaveObserverHarness.svelte'
+import { createPersistenceCanonicalCapture } from './reactivePersistenceCapture.svelte'
 
 const disposers: Array<() => void> = []
 afterEach(() => {
@@ -312,7 +315,7 @@ describe('persistent save mutation observation', () => {
         let revision = 1
         const commit = vi.fn(async () => ({ revision: ++revision }))
         const coordinator = new SaveCoordinator({
-            store: { commit } as unknown as PersistentDataStore,
+            store: createStoreStub({ commit }),
             captureRoot,
             captureSelectedCharacter: () => state.database.characters[0],
             captureCharacter: () => state.database.characters[0],
@@ -439,5 +442,103 @@ describe('persistent save mutation observation', () => {
         delete state.database.pluginCustomStorage.nested
         flushSync()
         expect(markDirty).toHaveBeenCalledOnce()
+    })
+
+    it('saves variable-only conversation changes without reading message bodies and writes what a whole-conversation projection writes', async () => {
+        const body = 'synthetic message body'
+        const flush = async (capture: 'reactive' | 'plain') => {
+            const initial = {
+                username: 'Synthetic user',
+                characters: [{
+                    type: 'character',
+                    chaId: 'synthetic-character',
+                    chatPage: 0,
+                    name: 'Synthetic',
+                    chats: [{
+                        id: 'synthetic-chat',
+                        name: 'Synthetic chat',
+                        note: '',
+                        localLore: [],
+                        message: [
+                            { role: 'user', data: `first: ${body}` },
+                            { role: 'char', data: `second: ${body}` },
+                        ],
+                    }],
+                }],
+            } as unknown as Database
+            const state = capture === 'reactive' ? createPersistentSaveObserverHarness(initial) : null
+            const database = state?.database ?? initial
+            let revision = 1
+            const commit = vi.fn(async (_request: Parameters<PersistentDataStore['commit']>[0]) => ({ revision: ++revision }))
+            const onPersisted = vi.fn()
+            const coordinator = new SaveCoordinator({
+                store: createStoreStub({ commit, replaceFromDatabase: vi.fn() }),
+                ...(state ? {
+                    canonicalCapture: createPersistenceCanonicalCapture({
+                        root: () => state.database,
+                        presets: () => [],
+                        pluginStorage: () => null,
+                        character: () => state.database.characters[0],
+                        characters: () => state.database.characters,
+                    }),
+                } : {}),
+                captureRoot: () => {
+                    const { characters: _characters, ...root } = database
+                    return root
+                },
+                captureCharacters: () => database.characters,
+                captureSelectedCharacter: () => database.characters[0],
+                captureCharacter: () => database.characters[0],
+                replaceDatabase: () => undefined,
+                onConversationMutationPersisted: onPersisted,
+            })
+            coordinator.initialize(revision)
+            const session = new ActiveConversationSession({
+                characterId: 'synthetic-character',
+                conversationId: 'synthetic-chat',
+                conversation: database.characters[0].chats[0],
+                storeRevision: revision,
+                onMutation: (event) => coordinator.recordActiveConversationMutation(event),
+            })
+            session.updateChatVariables(new Map([['hp', '9']]))
+            session.updateChatVariables(new Map([['mood', 'calm']]))
+
+            // Whether the flush serializes or copies a message body.
+            const readsMessages: string[] = []
+            const stringify = JSON.stringify
+            const clone = globalThis.structuredClone
+            const serialized = vi.spyOn(JSON, 'stringify').mockImplementation(((...args: Parameters<typeof JSON.stringify>) => {
+                const json = stringify(...args)
+                if (typeof json === 'string' && json.includes(body)) readsMessages.push('serialize')
+                return json
+            }) as typeof JSON.stringify)
+            const copied = vi.spyOn(globalThis, 'structuredClone').mockImplementation(((value: unknown, options?: StructuredSerializeOptions) => {
+                try {
+                    if (stringify(value)?.includes(body)) readsMessages.push('copy')
+                } catch {
+                    // Not serializable as JSON; the clone below decides.
+                }
+                return clone(value, options)
+            }) as typeof structuredClone)
+            try {
+                await coordinator.flushPendingDataLocally('variable-only')
+            } finally {
+                serialized.mockRestore()
+                copied.mockRestore()
+            }
+            expect(onPersisted).toHaveBeenCalledTimes(2)
+            expect(coordinator.hasPendingPersistenceWork).toBe(false)
+            return { request: commit.mock.calls[0][0], readsMessages }
+        }
+
+        const reactive = await flush('reactive')
+        const plain = await flush('plain')
+
+        expect(reactive.readsMessages).toEqual([])
+        expect(plain.readsMessages).not.toEqual([])
+        expect(reactive.request).toEqual(plain.request)
+        expect(reactive.request.conversations?.map((mutation) =>
+            'conversation' in mutation ? (mutation.conversation as Chat).scriptstate : null,
+        )).toEqual([{ $hp: '9' }, { $hp: '9', $mood: 'calm' }])
     })
 })

@@ -13,7 +13,6 @@ vi.mock('./storage/database.svelte', async () => {
 })
 vi.mock('./alert', () => ({}))
 vi.mock('./globalApi.svelte', () => ({}))
-vi.mock('src/lang', () => ({ language: {} }))
 vi.mock('./process/files/inlays', () => ({}))
 vi.mock('./pngChunk', () => ({}))
 

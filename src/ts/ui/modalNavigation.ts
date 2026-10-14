@@ -5,16 +5,27 @@ import { isCompositionKey } from '../hotkeyModifier'
 const key = 'risunestModal'
 const live = new Set<string>()
 let cleanupQueued = false
+let cleanupInFlight = false
+let pendingHistoryTokens: string[] = []
 const historyTokens = (): string[] => Array.isArray(history.state?.[key]) ? history.state[key] : []
+const pushHistoryToken = (token: string) => history.pushState({ ...history.state, [key]: [...historyTokens(), token] }, '')
 function scheduleCleanup() {
-    if (cleanupQueued) return
+    if (cleanupQueued || cleanupInFlight) return
     cleanupQueued = true
     queueMicrotask(() => {
         cleanupQueued = false
         const tokens = historyTokens()
         let count = 0
         for (let index = tokens.length - 1; index >= 0 && !live.has(tokens[index]); index--) count++
-        if (count) history.go(-count)
+        if (!count) return
+        cleanupInFlight = true
+        window.addEventListener('popstate', () => {
+            cleanupInFlight = false
+            for (const token of pendingHistoryTokens) if (live.has(token)) pushHistoryToken(token)
+            pendingHistoryTokens = []
+            scheduleCleanup()
+        }, { once: true })
+        history.go(-count)
     })
 }
 const alertVisible = () => !['none', 'toast', 'wait', 'progress'].includes(get(alertStore).type)
@@ -44,14 +55,16 @@ function navigationLayer(node: HTMLElement, initial: NavigationOptions, trapFocu
         opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
         token = crypto.randomUUID()
         live.add(token)
-        history.pushState({ ...history.state, [key]: [...historyTokens(), token] }, '')
+        // A pending traversal must finish before adding a replacement screen's entry.
+        if (cleanupInFlight) pendingHistoryTokens.push(token)
+        else pushHistoryToken(token)
         queueMicrotask(() => {
             if (trapFocus && node.isConnected && isTopmost()) node.querySelector<HTMLElement>('button')?.focus()
         })
     }
     const isTopmost = () => token !== null && [...live].at(-1) === token
     const closeOnBack = () => {
-        if (!token || historyTokens().includes(token)) return
+        if (cleanupInFlight || !token || historyTokens().includes(token)) return
         if (isTopmost() && cancelVisibleAlert()) {
             history.pushState({ ...history.state, [key]: [...historyTokens(), token] }, '')
             if (lastFocused?.isConnected) lastFocused.focus()
@@ -112,6 +125,7 @@ function navigationLayer(node: HTMLElement, initial: NavigationOptions, trapFocu
 export function handleRootBack(event: Event) {
     if (get(alertStore).type === 'tos') return
     if (cancelVisibleAlert()) event.preventDefault()
+    else if (cleanupInFlight) event.preventDefault()
     else if (historyTokens().some(token => live.has(token))) {
         event.preventDefault()
         history.back()

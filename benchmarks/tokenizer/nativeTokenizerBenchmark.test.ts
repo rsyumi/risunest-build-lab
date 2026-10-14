@@ -9,27 +9,6 @@ afterEach(() => {
 })
 
 describe('native tokenizer benchmark WebView seam', () => {
-    it.each([
-        ['cl100k_base', 34, 10],
-        ['o200k_base', 34, 4],
-    ] as const)(
-        'proves the %s JavaScript implementation against the literal corpus',
-        (tokenizerId, idCases, errorCases) => {
-            const seam = createNativeTokenizerBenchmarkSeam()
-            seams.push(seam)
-
-            const initialized = seam.initialize(tokenizerId)
-
-            expect(initialized.durationMs).toBeGreaterThanOrEqual(0)
-            expect(seam.verifyJavaScriptCorpus(tokenizerId)).toEqual({
-                tokenizerId,
-                idCases,
-                errorCases,
-                passed: true,
-            })
-        },
-    )
-
     it('warms both implementations and measures equivalent typed-array ID results', async () => {
         const invokeCalls: Array<{ command: string; args: Record<string, unknown> }> = []
         const seam = createNativeTokenizerBenchmarkSeam(async (command, args) => {

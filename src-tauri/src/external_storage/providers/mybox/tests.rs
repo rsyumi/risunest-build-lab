@@ -1191,12 +1191,13 @@ fn foreign_handles_locators_and_intents_are_refused_without_a_request() {
 
 #[test]
 fn cancellation_during_a_download_body_stops_the_transfer() {
+    use crate::external_storage::provider_contract::{a_read_cancelled_during_its_body_stops, held_body};
     runtime().block_on(async {
         let open_cancel = Cancellation::default();
-        let directory = tempfile::tempdir().unwrap();
         let deps = fixture();
         let provider = create(deps.dependencies.clone()).unwrap();
-        let storage = WireServer::start(vec![Reply::DelayedBody]);
+        let (held, _release) = held_body();
+        let storage = WireServer::start(vec![held]);
         let mut replies = open_replies(1024, 4096, 0);
         replies.extend([
             json(
@@ -1210,30 +1211,8 @@ fn cancellation_during_a_download_body_stops_the_transfer() {
             .await
             .unwrap();
         let locator = config::locator(&handle.connection_identity, config::SNAPSHOTS, "snap-a.bin");
-        let mut sink = SpoolSink::create(&directory.path().join("partial"), 100).unwrap();
-        let cancel = Cancellation::default();
-        let read = async {
-            assert!(provider
-                .read_object(&handle, &locator, None, &mut sink, &cancel)
-                .await
-                .is_err());
-        };
-        let trigger = async {
-            while storage.requests.lock().unwrap().is_empty() {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            cancel.cancel();
-        };
-        // A guard against a transfer that never stops, not a latency budget: a loaded test run
-        // can take far longer than the cancellation itself does.
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            futures::future::join(read, trigger),
-        )
-        .await
-        .unwrap();
-        assert!(!sink.is_verified());
+        a_read_cancelled_during_its_body_stops(provider.as_ref(), &handle, &locator, &Cancellation::default())
+            .await;
     });
 }
 
@@ -1386,5 +1365,192 @@ fn upload_confirmation_uses_verified_newest_first_entries() {
         }
         assert_eq!(context.cached("packs", "new-a.bin").unwrap().unwrap().id, "file-a");
         assert!(context.cached("packs", "unknown.bin").is_none());
+    });
+}
+
+#[test]
+fn partial_upload_confirmations_preserve_a_complete_multipage_cache() {
+    runtime().block_on(async {
+        let existing: Vec<String> = (0..=PAGE_SIZE).map(|index| {
+            resource(&format!("old-{index:04}.bin"), &format!("old-{index:04}"), "file", 4)
+        }).collect();
+        let mut replies = open_replies(1024, 4096, 0);
+        replies.push(json(200, &listing(&existing[..PAGE_SIZE as usize], Some("last-page"))));
+        replies.push(json(200, &listing(&existing[PAGE_SIZE as usize..], None)));
+        for name in ["new-a", "new-b"] {
+            let mut newest = vec![resource(&format!("{name}.bin"), name, "file", 5)];
+            newest.extend_from_slice(&existing[..PAGE_SIZE as usize - 1]);
+            replies.push(json(200, &listing(&newest, Some("older"))));
+        }
+        let api = WireServer::start(replies);
+        let provider = Mybox { deps: fixture().dependencies };
+        let cancel = Cancellation::default();
+        let (repository, _) = provider.open_repository(&settings(&api), &secret(), OpenMode::Existing, &cancel).await.unwrap();
+        let context = provider.context(&repository).unwrap();
+        assert!(provider.lookup(context, "packs", "new-a.bin", &cancel).await.unwrap().is_none());
+        assert_eq!(api.requests.lock().unwrap().len(), 6);
+
+        for (name, next) in [("new-a", "new-b"), ("new-b", "new-c")] {
+            let confirmed = provider.confirm(context, "packs", &format!("{name}.bin"), &cancel).await.unwrap().unwrap();
+            assert_eq!(confirmed.id, name);
+            assert_eq!(confirmed.size, 5);
+            assert!(context.cached("packs", &format!("{next}.bin")).unwrap().is_none(),
+                "a partial confirmation must retain the complete listing's negative answers");
+            assert!(provider.lookup(context, "packs", &format!("{next}.bin"), &cancel).await.unwrap().is_none());
+            let older = provider.lookup(context, "packs", "old-1000.bin", &cancel).await.unwrap().unwrap();
+            assert_eq!(older.id, "old-1000");
+        }
+        assert_eq!(context.cached("packs", "new-a.bin").unwrap().unwrap().id, "new-a");
+        let requests = api.requests.lock().unwrap();
+        assert_eq!(requests.len(), 8, "only the initial two pages and each newest-first confirmation are needed");
+        assert!(requests[5].headers.lines().next().unwrap().contains("cursor=last-page"));
+        for request in &requests[6..] {
+            assert!(request.headers.lines().next().unwrap().contains("sort=createdAt%2Cdesc"));
+        }
+    });
+}
+
+#[test]
+fn concurrent_listing_changes_preserve_additions_and_removals_in_both_paths() {
+    use crate::external_storage::http::{HttpTransport, NativeHttpTransport};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct PausedListing {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        calls: AtomicUsize,
+        inner: NativeHttpTransport,
+    }
+    impl HttpTransport for PausedListing {
+        fn send<'a>(&'a self, request: HttpRequest, cancel: &'a Cancellation) -> ProviderFuture<'a, HttpResponse> {
+            Box::pin(async move {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                self.inner.send(request, cancel).await
+            })
+        }
+    }
+    runtime().block_on(async {
+        for confirm in [false, true] {
+            for remove in [false, true] {
+                let old = resource("old.bin", "old-id", "file", 5);
+                let new = resource("new.bin", "new-id", "file", 7);
+                let current = if remove { vec![] } else { vec![old.clone(), new] };
+                let server = WireServer::start(vec![
+                    json(200, &listing(&[old], None)),
+                    json(200, &listing(&current, None)),
+                ]);
+                let transport = Arc::new(PausedListing {
+                    entered: Default::default(), release: Default::default(), calls: AtomicUsize::new(0),
+                    inner: NativeHttpTransport::for_loopback_tests(),
+                });
+                let test = crate::external_storage::fake::with_transport(transport.clone(), MemoryVault::with(SECRET, &token(NOW_MS + DAY_MS)), NOW_MS);
+                let provider = Mybox { deps: test.dependencies };
+                let context = Context {
+                    identity: "synthetic".into(), account: AccountKey::new("mybox", &server.url, "synthetic").unwrap(),
+                    plan: MyboxPlan::Plan30gb, base: server.url.clone(), secret: secret(),
+                    folders: BTreeMap::from([("packs".into(), "folder-packs".into())]),
+                    max_file_bytes: 1000, free_bytes: 1000, entries: Mutex::new(BTreeMap::new()),
+                };
+                let cancel = Cancellation::default();
+                let target = if remove { "old.bin" } else { "new.bin" };
+                let listing = async {
+                    if confirm {
+                        provider.confirm(&context, "packs", target, &cancel).await
+                    } else {
+                        provider.lookup(&context, "packs", target, &cancel).await
+                    }
+                };
+                let mutation = async {
+                    transport.entered.notified().await;
+                    if remove {
+                        context.forget("packs");
+                    } else {
+                        context.record("packs", "new.bin", Entry { id: "new-id".into(), size: 7 });
+                    }
+                    transport.release.notify_one();
+                };
+                let (result, ()) = tokio::join!(listing, mutation);
+                let found = result.unwrap();
+                if remove {
+                    assert!(found.is_none());
+                    assert!(context.cached("packs", "old.bin").unwrap().is_none());
+                } else {
+                    assert_eq!(found.unwrap().id, "new-id");
+                    assert_eq!(context.cached("packs", "new.bin").unwrap().unwrap().size, 7);
+                }
+                assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+            }
+        }
+    });
+}
+
+#[test]
+fn concurrent_identical_listings_do_not_exhaust_generation_retries() {
+    use crate::external_storage::http::HttpTransport;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct ListingRounds {
+        calls: AtomicUsize,
+        rounds: [tokio::sync::Barrier; 3],
+        body: Vec<u8>,
+    }
+    impl HttpTransport for ListingRounds {
+        fn send<'a>(&'a self, _: HttpRequest, _: &'a Cancellation) -> ProviderFuture<'a, HttpResponse> {
+            Box::pin(async move {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let round = match call { 0..=3 => 0, 4..=6 => 1, 7..=8 => 2, _ => panic!("unexpected listing retry") };
+                self.rounds[round].wait().await;
+                Ok(HttpResponse {
+                    status: 200, headers: BTreeMap::new(),
+                    body: Box::pin(std::io::Cursor::new(self.body.clone())),
+                })
+            })
+        }
+    }
+    runtime().block_on(async {
+        for confirm in [false, true] {
+            let base = url::Url::parse("https://synthetic.invalid").unwrap();
+            let transport = Arc::new(ListingRounds {
+                calls: AtomicUsize::new(0),
+                rounds: [tokio::sync::Barrier::new(4), tokio::sync::Barrier::new(3), tokio::sync::Barrier::new(2)],
+                body: listing(&[resource("new.bin", "new-id", "file", 7)], None).into_bytes(),
+            });
+            let test = crate::external_storage::fake::with_transport(transport.clone(),
+                MemoryVault::with(SECRET, &token(NOW_MS + DAY_MS)), NOW_MS);
+            let provider = Mybox { deps: test.dependencies };
+            let context = Context {
+                identity: "synthetic".into(), account: AccountKey::new("mybox", &base, "synthetic").unwrap(),
+                plan: MyboxPlan::Plan30gb, base, secret: secret(),
+                folders: BTreeMap::from([("packs".into(), "folder-packs".into())]),
+                max_file_bytes: 1000, free_bytes: 1000, entries: Mutex::new(BTreeMap::new()),
+            };
+            let cancel = Cancellation::default();
+            let listings = futures::future::join_all((0..4).map(|_| async {
+                if confirm {
+                    provider.confirm(&context, "packs", "new.bin", &cancel).await.map(|found| {
+                        assert_eq!(found.unwrap().id, "new-id");
+                    })
+                } else {
+                    provider.load(&context, "packs", &cancel).await
+                }
+            }));
+            let results = tokio::time::timeout(std::time::Duration::from_secs(5), listings).await.unwrap();
+            assert!(results.iter().all(Result::is_ok), "unchanged listings must not invalidate each other");
+            assert_eq!(transport.calls.load(Ordering::SeqCst), 7);
+            assert_eq!(context.cached("packs", "new.bin").unwrap().unwrap().id, "new-id");
+            assert!(context.cached("packs", "missing.bin").unwrap().is_none());
+
+            let before_removal = context.generation("packs");
+            assert!(context.store("packs", before_removal, BTreeMap::new(), true));
+            assert!(!context.store("packs", before_removal,
+                BTreeMap::from([("new.bin".into(), Entry { id: "new-id".into(), size: 7 })]), true));
+            assert!(context.cached("packs", "new.bin").is_none());
+            let before_addition = context.generation("packs");
+            assert!(context.store("packs", before_addition,
+                BTreeMap::from([("new.bin".into(), Entry { id: "replacement-id".into(), size: 9 })]), true));
+            assert!(!context.store("packs", before_addition, BTreeMap::new(), true));
+            assert_eq!(context.cached("packs", "new.bin").unwrap().unwrap().id, "replacement-id");
+        }
     });
 }

@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../sionyw', () => ({ fetchProtectedResource: mocks.fetchProtectedResource }))
 vi.mock('../globalApi.svelte', () => ({ forageStorage: { isAccount: true } }))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 vi.mock('../stores.svelte', () => ({ DBState: { db: mocks.database } }))
 vi.mock('../alert', () => ({
     alertClear: vi.fn(),
@@ -17,7 +17,6 @@ vi.mock('../alert', () => ({
     alertError: vi.fn(),
     alertWait: vi.fn(),
 }))
-vi.mock('src/lang', () => ({ language: {} }))
 
 beforeEach(() => {
     mocks.fetchProtectedResource.mockReset()

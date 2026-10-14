@@ -15,6 +15,7 @@ import { isDeepStrictEqual } from "node:util";
 import { parseArgs, readJson, requireArg, writeJson } from "./common.mjs";
 import { assertAppIdentifier, mergeTauriConfig } from "./tauri-config.mjs";
 import { assertBinaryArchitecture } from "./platform/native.mjs";
+import { writeZipArchive } from "./platform/package.mjs";
 
 function run(program, args, capture = false, cwd) {
   const child = spawnSync(program, args, {
@@ -195,7 +196,7 @@ function desktopAssets({ os, arch, bundleDirectory, binary, output, releaseInput
       copyFileSync(binary, join(stage, "RisuNest.exe"));
       copyFileSync(resolve("LICENSE"), join(stage, "LICENSE"));
       const zip = join(output, "app.zip");
-      run("tar", ["-a", "-cf", zip, "-C", stage, "."]);
+      writeZipArchive(stage, zip);
       const installer = unique(bundleDirectory, (path) => path.endsWith("-setup.exe"), "NSIS installer");
       const installerStage = mkdtempSync(join(output, ".nsis-proof-"));
       run("7z", ["x", "-y", `-o${installerStage}`, installer]);

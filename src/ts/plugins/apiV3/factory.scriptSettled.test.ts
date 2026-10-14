@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SandboxHost } from './factory'
+import { invoke } from '@tauri-apps/api/core'
+import { consoleLog } from '../../consoleLog'
+const platform = vi.hoisted(() => ({ native: false }))
+vi.mock('../../platform', async () => (await import('../../platform.testSupport')).platformModule(() => ({ runtime: platform.native ? 'tauri' : 'web', os: 'windows' })))
+vi.mock('@tauri-apps/api/core', async importOriginal => ({
+    ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke: vi.fn(async () => {}),
+}))
 import { collectPluginReadProvenance, PluginReadBaselines } from '../pluginReadBaselines'
 import type { fetchNative, GlobalFetchArgs } from '../../globalApi.svelte'
 
@@ -8,7 +15,7 @@ import type { fetchNative, GlobalFetchArgs } from '../../globalApi.svelte'
  * opened for that script must stay open until the calls the script already made
  * have answered.
  */
-async function runGuest(host: SandboxHost, code: string): Promise<Window & typeof globalThis> {
+async function runGuest(host: SandboxHost, code: string, prepare?: (child: Window & typeof globalThis) => void): Promise<Window & typeof globalThis> {
     const frame = document.createElement('iframe')
     document.body.appendChild(frame)
     host.run(frame, code, 'settled-test')
@@ -38,6 +45,7 @@ async function runGuest(host: SandboxHost, code: string): Promise<Window & typeo
     })
     const source = frame.srcdoc.match(/<script nonce="[^"]+">([\s\S]*)<\/script>/)?.[1]
     if (!source) throw new Error('Sandbox guest script was not found')
+    prepare?.(child)
     await childRealm.eval(source)
     return child
 }
@@ -51,6 +59,147 @@ function bridgeStubs(): Record<string, unknown> {
 }
 
 describe('sandbox script completion', () => {
+    beforeEach(() => consoleLog.clear())
+
+    it.each([false, true])('lets the plugin handle file-read failure without reporting it on native=%s', async native => {
+        platform.native = native
+        vi.mocked(invoke).mockClear()
+        const alertError = vi.fn()
+        const host = new SandboxHost({ ...bridgeStubs(), alertError })
+        const child = await runGuest(host, `
+            const reader = new FileReader();
+            reader.onerror = () => { globalThis.readError = reader.error.name; };
+            reader.readAsArrayBuffer(new File(['synthetic'], 'synthetic.risup'));
+        `, child => {
+            vi.spyOn(child.FileReader.prototype, 'readAsArrayBuffer').mockImplementation(function () {
+                Object.defineProperty(this, 'error', { value: new child.DOMException('Provider denied access', 'NotReadableError') })
+                this.dispatchEvent(new child.Event('error'))
+            })
+        })
+        await vi.waitFor(() => expect((child as any).readError).toBe('NotReadableError'))
+        expect(alertError).not.toHaveBeenCalled()
+        expect(consoleLog.snapshot().some(entry => entry.level === 'error')).toBe(false)
+        expect(invoke).not.toHaveBeenCalledWith('native_log_error', expect.anything())
+        host.terminate()
+    })
+
+    it('preserves a handled promise-based read failure without reporting it', async () => {
+        const alertError = vi.fn()
+        const host = new SandboxHost({ ...bridgeStubs(), alertError })
+        const failure = new DOMException('File disappeared', 'NotFoundError')
+        const child = await runGuest(host, `
+            try { await new File(['synthetic'], 'synthetic.risup').arrayBuffer(); }
+            catch (error) { globalThis.readError = error.message; }
+        `, child => {
+            vi.spyOn(child.Blob.prototype, 'arrayBuffer').mockRejectedValue(failure)
+        })
+        await vi.waitFor(() => expect((child as any).readError).toBe('File disappeared'))
+        expect(alertError).not.toHaveBeenCalled()
+        expect(consoleLog.snapshot().some(entry => entry.level === 'error')).toBe(false)
+        host.terminate()
+    })
+
+    it.each([false, true])('records top-level failures and causes without a popup on native=%s', async native => {
+        platform.native = native
+        vi.mocked(invoke).mockClear()
+        const alertError = vi.fn()
+        const host = new SandboxHost({ ...bridgeStubs(), alertError })
+        await runGuest(host, `throw new Error('Failed to read file', {cause: new DOMException('Provider failed', 'NotReadableError')});`)
+        await vi.waitFor(() => expect(consoleLog.snapshot()).toContainEqual(expect.objectContaining({
+            level: 'error', source: 'settled-test', message: 'Error: Failed to read file\nNotReadableError: Provider failed',
+        })))
+        expect(alertError).not.toHaveBeenCalled()
+        const logged = { message: '[settled-test] Error: Failed to read file\nNotReadableError: Provider failed' }
+        if (native) expect(invoke).toHaveBeenCalledWith('native_log_error', logged)
+        else expect(invoke).not.toHaveBeenCalledWith('native_log_error', logged)
+        expect(host.isIdle()).toBe(true)
+        host.terminate()
+    })
+
+    it.each([
+        'Object.create(null)',
+        'new Proxy({}, { get() { throw new Error("getter failed"); } })',
+        'Object.defineProperty(new Error("original"), "cause", { get() { throw new Error("cause getter failed"); } })',
+    ])('settles even when error reporting cannot stringify %s', async (expression) => {
+        const alertError = vi.fn()
+        const host = new SandboxHost({ ...bridgeStubs(), alertError })
+        await runGuest(host, `throw ${expression};`)
+        await vi.waitFor(() => expect(host.isIdle()).toBe(true))
+        expect(consoleLog.snapshot().filter(entry => entry.level === 'error')).toHaveLength(1)
+        expect(alertError).not.toHaveBeenCalled()
+        host.terminate()
+    })
+
+    it('accepts console entries only from its live plugin frame with the host-owned name', () => {
+        const alertError = vi.fn()
+        const host = new SandboxHost({ alertError })
+        const frame = document.createElement('iframe')
+        document.body.append(frame)
+        host.run(frame, '', 'file-plugin')
+        const tsMs = 0
+        const data = { type: 'PLUGIN_CONSOLE', generation: consoleLog.generation, source: 'forged', entries: [{ level: 'log', message: 'synthetic', tsMs }] }
+        window.dispatchEvent(new MessageEvent('message', { source: window, data }))
+        expect(consoleLog.snapshot()).toEqual([])
+        const source = frame.contentWindow
+        window.dispatchEvent(new MessageEvent('message', { source, data }))
+        expect(consoleLog.snapshot()).toEqual([{ level: 'log', source: 'file-plugin', message: 'synthetic', tsMs }])
+        host.terminate()
+        window.dispatchEvent(new MessageEvent('message', { source, data }))
+        expect(consoleLog.snapshot()).toHaveLength(1)
+        expect(alertError).not.toHaveBeenCalled()
+    })
+
+    it('captures ordinary iframe output at every level and still allows explicit alerts', async () => {
+        const alertError = vi.fn()
+        const host = new SandboxHost({ ...bridgeStubs(), alertError })
+        await runGuest(host, `
+            for (const level of ['log', 'info', 'debug', 'warn', 'error']) console[level]('synthetic-' + level, { count: 3 });
+            await risuai.alertError('explicit alert');
+        `)
+        await vi.waitFor(() => expect(host.isIdle()).toBe(true))
+        for (const level of ['log', 'info', 'debug', 'warn', 'error']) {
+            expect(consoleLog.snapshot()).toContainEqual(expect.objectContaining({
+                level, source: 'settled-test', message: 'synthetic-' + level + ' {count: 3}',
+            }))
+        }
+        expect(alertError).toHaveBeenCalledWith('explicit alert')
+        host.terminate()
+        expect(consoleLog.snapshot().some(entry => entry.message.startsWith('synthetic-log'))).toBe(true)
+    })
+
+    it('discards a delayed iframe batch from before clear and keeps later output', () => {
+        const host = new SandboxHost(bridgeStubs())
+        const frame = document.createElement('iframe')
+        document.body.append(frame)
+        host.run(frame, '', 'clear-test')
+        const post = vi.spyOn(frame.contentWindow!, 'postMessage')
+        const beforeClear = consoleLog.generation
+        consoleLog.clear()
+        post.mockClear()
+        window.dispatchEvent(new MessageEvent('message', { source: frame.contentWindow, data: {
+            type: 'PLUGIN_CONSOLE', generation: beforeClear, entries: [{ level: 'log', message: 'old', tsMs: 0 }],
+        } }))
+        expect(post).toHaveBeenCalledWith({ type: 'CLEAR_CONSOLE', generation: consoleLog.generation }, '*')
+        window.dispatchEvent(new MessageEvent('message', { source: frame.contentWindow, data: {
+            type: 'PLUGIN_CONSOLE', generation: consoleLog.generation, entries: [{ level: 'info', message: 'new', tsMs: 0 }],
+        } }))
+        expect(consoleLog.snapshot().map(entry => entry.message)).toEqual(['new'])
+        host.terminate()
+    })
+
+    it('keeps the end of an iframe log burst and reports omitted entries', async () => {
+        const host = new SandboxHost(bridgeStubs())
+        await runGuest(host, `for (let n = 0; n < 201; n++) console.log('burst-' + n);`, child => {
+            vi.spyOn(child.console, 'log').mockImplementation(() => {})
+        })
+        await vi.waitFor(() => expect(host.isIdle()).toBe(true))
+        expect(consoleLog.snapshot()).toContainEqual(expect.objectContaining({ message: 'burst-200' }))
+        expect(consoleLog.snapshot().some(entry => entry.message === 'burst-0')).toBe(false)
+        expect(consoleLog.snapshot().some(entry => entry.message.includes('console messages omitted'))).toBe(true)
+        expect(consoleLog.snapshot().length).toBeLessThanOrEqual(200)
+        host.terminate()
+    })
+
     it('stays busy after a callback returns until its stream finishes', async () => {
         let callback!: () => Promise<{content: ReadableStream}>
         const host = new SandboxHost({ register: (fn: typeof callback) => { callback = fn } })

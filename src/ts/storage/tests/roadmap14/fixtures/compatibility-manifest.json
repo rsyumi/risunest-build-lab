@@ -1,7 +1,6 @@
 {
     "version": 1,
     "canonicalSha256": "18ab5d7a47214f1d78587ff41ee1791aec487e8590a1eb20891b830f8b9bfc50",
-    "referenceGraphSha256": "c394a8c3f2a745f8801888200f269e5cb78051c59ea4ac8e29a70809f51dd62f",
     "payloadCount": 32,
     "payloads": {
         "assets/characters/main.PNG": "ce93c75fb081569e3902c2ec5f98dec0ff493d99653a5744f9d6e8c31c2d8352",

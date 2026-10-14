@@ -13,7 +13,10 @@ use crate::external_storage::{
     quota::AccountKey,
 };
 use serde::Deserialize;
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, OnceLock, Weak},
+};
 use zeroize::Zeroizing;
 
 /// A token is refreshed this far before its stated expiry.
@@ -60,13 +63,16 @@ struct TokenResponse {
 
 #[derive(Deserialize)]
 struct TokenInfo {
-    issued_to: Option<String>,
+    aud: Option<String>,
+    azp: Option<String>,
     scope: Option<String>,
 }
 
 pub(crate) struct AuthorizedSecret {
     pub secret: SecretBytes,
     pub account_id: String,
+    /// The account's email address, when Drive reports one.
+    pub account_label: Option<String>,
 }
 fn reauth() -> ProviderError {
     ProviderError::new(ErrorKind::ReauthRequired)
@@ -205,8 +211,8 @@ pub(super) async fn verify_google_grant(
     cancel: &Cancellation,
 ) -> Result<()> {
     let mut url = token_info_endpoint;
-    // Google OAuth2 API v2 documents access_token as a tokeninfo query
-    // parameter. HttpRequest is intentionally neither Debug nor Serialize,
+    // Tokeninfo accepts access_token as a query parameter.
+    // HttpRequest is intentionally neither Debug nor Serialize,
     // and transport errors discard URLs so this value cannot reach logs.
     url.query_pairs_mut()
         .append_pair("access_token", access_token);
@@ -228,7 +234,9 @@ pub(super) async fn verify_google_grant(
     }
     wire::require_status(&mut response, &[200], dependencies.clock.now_ms(), cancel).await?;
     let token = wire::json::<TokenInfo>(&mut response, cancel).await?;
-    if token.issued_to.as_deref() != Some(expected_client_id) {
+    if token.aud.as_deref() != Some(expected_client_id)
+        || token.azp.as_deref() != Some(expected_client_id)
+    {
         return Err(reauth());
     }
     let granted_scopes = token.scope.as_deref().unwrap_or_default();
@@ -242,16 +250,16 @@ pub(super) async fn verify_google_grant(
     Ok(())
 }
 
-async fn account_id(
+async fn account_identity(
     dependencies: &Dependencies,
     settings: &AuthorizationSettings,
     access_token: &str,
     account: &AccountKey,
     cancel: &Cancellation,
-) -> Result<String> {
+) -> Result<(String, Option<String>)> {
     let mut url = settings.api("/about")?;
     url.query_pairs_mut()
-        .append_pair("fields", "user(permissionId)");
+        .append_pair("fields", "user(permissionId,emailAddress)");
     let mut headers = BTreeMap::new();
     headers.insert("authorization".to_owned(), format!("Bearer {access_token}"));
     let request = HttpRequest {
@@ -271,31 +279,51 @@ async fn account_id(
         return Err(reauth());
     }
     wire::require_status(&mut response, &[200], dependencies.clock.now_ms(), cancel).await?;
-    let permission_id = wire::json::<About>(&mut response, cancel)
+    let user = wire::json::<About>(&mut response, cancel)
         .await?
         .user
-        .and_then(|user| user.permission_id)
         .ok_or_else(reauth)?;
+    let permission_id = user.permission_id.ok_or_else(reauth)?;
     if permission_id.len() > 128 || !config::is_drive_id(&permission_id) {
         return Err(reauth());
     }
-    Ok(permission_id)
+    Ok((permission_id, user.email_address))
 }
 
-/// Returns a usable access token, refreshing and persisting rotation when the
-/// cached and stored tokens are expired or `force_refresh` is set.
+// Vault instances can differ across handles; the opaque reference identifies
+// the credential. The registry shares only exclusion, never token material.
+fn refresh_lock(secret: &SecretRef) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS.get_or_init(|| Mutex::new(BTreeMap::new())).lock().unwrap();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&secret.0).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(secret.0.clone(), Arc::downgrade(&lock));
+    lock
+}
+
+/// Returns a usable token, persisting rotation before publishing the cache.
+/// A rejected token is refreshed only if another request has not replaced it.
 pub(super) async fn access_token(
     dependencies: &Dependencies,
     settings: &Settings,
     secret: &SecretRef,
     account: &AccountKey,
     cache: &Mutex<Option<CachedToken>>,
-    force_refresh: bool,
+    rejected: Option<&str>,
     cancel: &Cancellation,
 ) -> Result<Zeroizing<String>> {
+    let lock = refresh_lock(secret);
+    let _guard = tokio::select! {
+        _ = cancel.cancelled() => return Err(ProviderError::new(ErrorKind::Cancelled)),
+        guard = lock.lock() => guard,
+    };
+    cancel.check()?;
     let now_ms = dependencies.clock.now_ms();
     let fresh = |expires_at_ms: u64| expires_at_ms > now_ms.saturating_add(EXPIRY_SKEW_MS);
-    if !force_refresh {
+    if rejected.is_none() {
         let cached = cache
             .lock()
             .unwrap()
@@ -307,17 +335,14 @@ pub(super) async fn access_token(
         }
     }
     let payload = decode(&dependencies.vault.read(secret).await?)?;
-    if !force_refresh {
-        if let (Some(access), Some(expires_at_ms)) = (&payload.access_token, payload.expires_at_ms)
-        {
-            if fresh(expires_at_ms) {
-                let token = CachedToken {
-                    access: Zeroizing::new(access.to_string()),
-                    expires_at_ms,
-                };
-                *cache.lock().unwrap() = Some(token.duplicate());
-                return Ok(token.access);
-            }
+    if let (Some(access), Some(expires_at_ms)) = (&payload.access_token, payload.expires_at_ms) {
+        if fresh(expires_at_ms) && rejected != Some(access.as_str()) {
+            let token = CachedToken {
+                access: Zeroizing::new(access.to_string()),
+                expires_at_ms,
+            };
+            *cache.lock().unwrap() = Some(token.duplicate());
+            return Ok(token.access);
         }
     }
     let mut refresh_form = vec![
@@ -534,7 +559,8 @@ pub(crate) async fn exchange_authorization_code(
         cancel,
     )
     .await?;
-    let account_id = account_id(dependencies, &settings, &access_token, &pending, cancel).await?;
+    let (account_id, account_label) =
+        account_identity(dependencies, &settings, &access_token, &pending, cancel).await?;
     let account = AccountKey::new(config::PROVIDER_ID, &settings.api("/")?, &account_id)?;
     dependencies.requests.resolve_pending(&pending, &account)?;
     let secret = encode(&SecretPayload {
@@ -543,5 +569,5 @@ pub(crate) async fn exchange_authorization_code(
         expires_at_ms: Some(expires_at_ms),
         client_secret,
     })?;
-    Ok(AuthorizedSecret { secret, account_id })
+    Ok(AuthorizedSecret { secret, account_id, account_label })
 }

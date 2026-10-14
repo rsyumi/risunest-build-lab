@@ -1,6 +1,6 @@
 import { defineConfig, mergeConfig } from 'vitest/config'
 import { sharedVitestConfig } from './tests/vitestShared'
-import { appTestIncludes, extendedAppTests, harnessVitestTests, separateRunnerPaths } from './tests/suiteOwnership.mjs'
+import { appTestIncludes, extendedAppTests, harnessVitestTests, nodeAppTests, separateRunnerPaths } from './tests/suiteOwnership.mjs'
 
 export default mergeConfig(sharedVitestConfig(), defineConfig({
   test: {
@@ -31,8 +31,12 @@ export default mergeConfig(sharedVitestConfig(), defineConfig({
         test: {
           name: 'app',
           include: appTestIncludes,
-          exclude: [...extendedAppTests, ...harnessVitestTests, ...separateRunnerPaths],
+          exclude: [...extendedAppTests, ...nodeAppTests, ...harnessVitestTests, ...separateRunnerPaths],
         },
+      },
+      {
+        extends: true,
+        test: { name: 'app-node', include: nodeAppTests, environment: 'node' },
       },
       {
         extends: true,

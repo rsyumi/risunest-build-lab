@@ -43,6 +43,20 @@ pub(crate) fn spool_bytes(directory: &Path) -> u64 {
 /// What one job directory is holding, for deciding whether more may be
 /// written. A directory that cannot be read is unknown usage, not none.
 pub(crate) fn held_spool_bytes(directory: &Path) -> Result<u64> {
+    let mut bytes = held_spool_bytes_at(directory)?;
+    // One LWW publication owns an asset journal here and its control journal
+    // in data/. They share one job identity and one in-flight reservation count.
+    let data = directory.join("data");
+    match std::fs::symlink_metadata(&data) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(storage(error)),
+        Ok(metadata) if crate::trust_boundary::is_link_like(&metadata) || !metadata.is_dir() => return Err(corrupt()),
+        Ok(_) => bytes = bytes.saturating_add(held_spool_bytes_at(&data)?),
+    }
+    Ok(bytes)
+}
+
+fn held_spool_bytes_at(directory: &Path) -> Result<u64> {
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -84,9 +98,8 @@ pub(crate) fn admitted_spool_writes(job_id: &str) -> u64 {
 }
 
 /// How many pack families may be active at once in this application. A family
-/// is one pack from the moment its plaintext is allocated until its upload is
-/// settled or its job stops: the plaintext, the ciphertext sealed from it, and
-/// the wave that registers and sends it.
+/// is one pack from plaintext allocation through sealing and plaintext
+/// release. Sealed files remain charged to the spool while they await upload.
 pub(crate) const ACTIVE_PACK_FAMILIES: usize = 2;
 
 /// The admission every pack family of this application passes, whichever job
@@ -110,8 +123,8 @@ pub(crate) struct PackFamilies {
     changed: tokio::sync::Notify,
 }
 
-/// One active pack family. Dropping it ends the family, whether its upload
-/// settled or its job stopped and left the sealed bytes for a later attempt.
+/// One active preparation family, released after sealing or when preparation
+/// stops. Retained ciphertext is accounted for separately by the spool budget.
 pub(crate) struct FamilyPermit(Arc<PackFamilies>);
 
 impl Drop for FamilyPermit {
@@ -252,11 +265,13 @@ impl PackFamilies {
 /// The application-wide transfer spool as one job sees it: every job that is
 /// still holding sealed ciphertext, this one included, since what it already
 /// holds is on the same disk as what it is about to write.
+#[derive(Clone)]
 pub(crate) struct SpoolBudget {
     job_id: String,
-    retaining: Box<dyn Fn() -> Result<Vec<(String, PathBuf)>> + Send + Sync>,
+    retaining: Arc<dyn Fn() -> Result<Vec<(String, PathBuf)>> + Send + Sync>,
     limit: u64,
     families: Arc<PackFamilies>,
+    pipeline_pending: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 pub(crate) struct SpoolExecution {
     job_id: String,
@@ -307,8 +322,9 @@ impl SpoolBudget {
     ) -> Self {
         Self {
             job_id,
-            retaining: Box::new(retaining),
+            retaining: Arc::new(retaining),
             limit: TRANSFER_SPOOL_BUDGET,
+            pipeline_pending: None,
             families: PackFamilies::shared(),
         }
     }
@@ -362,8 +378,10 @@ impl SpoolBudget {
             cancel.check()?;
             if let Some(reservation) = self.try_reserve(bytes)? { return Ok(Some(reservation)); }
             // An ended, paused, or likewise waiting owner cannot release room for this wave.
-            if !self.executing_peer_holds_spool()? { return Ok(None); }
-            if waiter.is_none() {
+            let own_uploads = self.pipeline_pending.as_ref().is_some_and(|pending|
+                pending.load(std::sync::atomic::Ordering::Acquire) > 0);
+            if !own_uploads && !self.executing_peer_holds_spool()? { return Ok(None); }
+            if !own_uploads && waiter.is_none() {
                 *self.families.state().spool_waiting.entry(self.job_id.clone()).or_default() += 1;
                 waiter = Some(SpoolWaiter { families: &self.families, job_id: &self.job_id });
                 self.families.changed.notify_waiters();
@@ -492,6 +510,31 @@ pub(crate) struct TransferJournal {
     families: Arc<PackFamilies>,
 }
 impl TransferJournal {
+    /// The sealing stage inserts new identities; the upload owner alone
+    /// settles attempted rows. Both connections use the same durable journal.
+    pub(crate) fn preparation_handle(&self, pending: Arc<std::sync::atomic::AtomicUsize>) -> Result<Self> {
+        let mut journal = Self::open(&self.directory, self.identity.clone())?;
+        journal.families = self.families.clone();
+        journal.spool_budget = self.spool_budget.clone().map(|mut budget| {
+            budget.pipeline_pending = Some(pending);
+            budget
+        });
+        journal.verification = self.verification.clone();
+        Ok(journal)
+    }
+
+    pub(crate) fn settle_pipeline_wave(&self, pending: &std::sync::atomic::AtomicUsize, count: usize) {
+        pending.fetch_sub(count, std::sync::atomic::Ordering::AcqRel);
+        // Reconciled, already released rows may have no spool file to unlink.
+        self.families.changed.notify_waiters();
+    }
+
+    pub(crate) fn registration_headroom_members(&self, waiting: usize) -> usize {
+        self.spool_budget.as_ref().and_then(|budget| budget.pipeline_pending.as_ref())
+            .map(|pending| pending.load(std::sync::atomic::Ordering::Acquire).saturating_add(1).min(16))
+            .unwrap_or(waiting + 1)
+    }
+
     /// Charges every sealed object this journal writes from now on to the
     /// application-wide transfer spool, and admits its packs among the
     /// application's active pack families.
@@ -833,7 +876,9 @@ impl TransferJournal {
         if page_object.is_empty() || members.is_empty() {
             return Err(corrupt());
         }
-        let transaction = self.db.unchecked_transaction().map_err(storage)?;
+        let transaction = self.db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage)?;
         for member in members {
             let row: Option<(Option<String>, Option<i64>, Option<String>)> = transaction
                 .query_row(
@@ -1216,6 +1261,44 @@ mod tests {
     }
 
     #[test]
+    fn cover_waits_for_the_preparation_writer_before_reading_members() {
+        thread_local! {
+            static WAITING: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
+        }
+        fn wait_for_writer(attempt: i32) -> bool {
+            WAITING.with(|waiting| {
+                if let Some(waiting) = waiting.borrow_mut().take() { let _ = waiting.send(()); }
+            });
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            attempt < 5_000
+        }
+        let (_root, _store, identity, directory) = fixture();
+        let mut journal = TransferJournal::open(&directory, identity).unwrap();
+        let writer = journal.preparation_handle(Arc::new(std::sync::atomic::AtomicUsize::new(0))).unwrap();
+        let member = WaveMember {
+            object_id: "pack".into(), plaintext_length: 5, plaintext_sha256: "a".repeat(64),
+        };
+        writer.db.execute_batch("BEGIN IMMEDIATE; UPDATE objects SET attempted=1 WHERE id='pack';").unwrap();
+        let (waiting, contended) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            WAITING.with(|slot| *slot.borrow_mut() = Some(waiting));
+            journal.db.busy_handler(Some(wait_for_writer)).unwrap();
+            let result = journal.cover("inventory-page", &[member]);
+            (journal, result)
+        });
+        let waited = contended.recv_timeout(std::time::Duration::from_secs(10));
+        writer.db.execute_batch("COMMIT").unwrap();
+        let (journal, result) = worker.join().unwrap();
+        waited.expect("coverage must wait without first retaining a read lock");
+        result.unwrap();
+        let row = journal.record("pack").unwrap().unwrap();
+        assert!(row.attempted);
+        assert_eq!(journal.covered_by("pack").unwrap().as_deref(), Some("inventory-page"));
+        let members = journal.page_members("inventory-page").unwrap();
+        assert_eq!((members[0].1, members[0].2.as_str()), (5, "a".repeat(64).as_str()));
+    }
+
+    #[test]
     fn upload_progress_survives_reopening_and_only_secret_references_are_removed() {
         use crate::external_storage::{auth::{SecretBytes, SecretVault}, contract::ResumeData};
         tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -1307,6 +1390,27 @@ mod tests {
             journal
         }).collect();
         (root, store, journals, families)
+    }
+
+    #[test]
+    fn settling_a_released_pipeline_row_wakes_spool_wait_without_unlinking() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let (_root, _store, journals, _) = three_budgeted_journals();
+            // A paused peer keeps its ciphertext; only this pipeline can make
+            // progress, and its last row already has no local spool to remove.
+            std::fs::write(journals[1].spool_path("retained"), vec![7; 900]).unwrap();
+            let pending = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+            let sealer = journals[0].preparation_handle(pending.clone()).unwrap();
+            let cancel = Cancellation::default();
+            let wait = sealer.reserve_spool_after_release(200, &cancel);
+            tokio::pin!(wait);
+            assert!(futures::poll!(&mut wait).is_pending());
+            journals[0].settle_pipeline_wave(&pending, 1);
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), wait).await
+                .expect("settled pipeline did not wake spool admission").unwrap();
+            assert!(matches!(result, SpoolAdmission::Full));
+            assert_eq!(held_spool_bytes(journals[1].directory()).unwrap(), 900);
+        });
     }
 
     #[test]

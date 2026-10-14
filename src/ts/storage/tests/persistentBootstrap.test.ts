@@ -1,9 +1,10 @@
 import { UNOWNED_PLUGIN_OWNER } from '../../plugins/pluginOwner'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Database } from '../database.svelte'
+import { createPersistentStoreHarness } from '../../../../tests/support/persistentStoreHarness'
+import type { character, Database } from '../database.svelte'
 import { IndexedDbPersistentDataStore } from '../indexedDbPersistentDataStore'
-import { RevisionConflictError, type PersistentDataStore } from '../persistentDataStore'
+import { RevisionConflictError } from '../persistentDataStore'
 import { bootstrapPersistentDatabase } from '../persistentBootstrap'
 import {
     createCatalogPresetWorkingSet,
@@ -34,54 +35,6 @@ function plugin(version: '2.1', enabled: boolean): Database['plugins'][number] {
     return { enabled, version } as Database['plugins'][number]
 }
 
-function createStore(input?: {
-    revision?: number
-    database?: Database
-    replacementRevision?: number
-}): PersistentDataStore {
-    const revision = input?.revision ?? 0
-    const database = structuredClone(input?.database ?? fixtureDatabase)
-    return {
-        open: vi.fn(async () => undefined),
-        queryPresets: vi.fn(async () => ({ revision: input?.revision ?? 7, items: [] })),
-        readPreset: vi.fn(async () => null),
-        readRoot: vi.fn(async () => ({
-            revision,
-            value: Object.fromEntries(
-                Object.entries(database).filter(
-                    ([key]) => key !== 'characters' && key !== 'botPresets',
-                ),
-            ) as Omit<Database, 'characters' | 'botPresets'>,
-        })),
-        materializeDatabase: vi.fn(async () => structuredClone(database)),
-        replaceFromDatabase: vi.fn(async () => ({
-            revision: input?.replacementRevision ?? revision + 1,
-        })),
-        queryCharacters: vi.fn(),
-        readCharacterSummary: vi.fn(async () => null),
-        readCharacter: vi.fn(),
-        queryConversations: vi.fn(),
-        readConversation: vi.fn(),
-        readConversationMetadata: vi.fn(),
-        readConversationWindow: vi.fn(),
-        listPluginStorage: vi.fn(async () => []),
-        readPluginStorageValues: vi.fn(async () => ({ revision, items: [], nextCursor: null })),
-        queryPluginStorage: vi.fn(async () => ({ revision, items: [] as never[] })),
-        readPluginStorage: vi.fn(async () => null),
-        readAssetAlias: vi.fn(async () => null),
-        readAssetAliasesByKeys: vi.fn(async () => ({ revision, value: [] })),
-        listAssetAliases: vi.fn(async () => ({ revision, items: [] })),
-        readAssetOwnerHead: vi.fn(async () => null),
-        commitAssetAlias: vi.fn(),
-        deleteAssetAlias: vi.fn(),
-        commit: vi.fn(),
-        archivePreview: vi.fn(),
-        archiveCharacter: vi.fn(),
-        restoreCharacter: vi.fn(),
-        acquireRevision: vi.fn(),
-    }
-}
-
 describe('bootstrapPersistentDatabase', () => {
     beforeEach(() => {
         scheduling.yieldToMainThread.mockReset()
@@ -89,21 +42,22 @@ describe('bootstrapPersistentDatabase', () => {
     })
 
     it('starts a blank store from one prepared empty database', async () => {
-        const store = createStore({ revision: 0, replacementRevision: 1 })
+        const harness = await createPersistentStoreHarness()
+        const materialize = harness.spy('materializeDatabase')
         const prepared = structuredClone(fixtureDatabase)
         const prepareDatabase = vi.fn(async (input) =>
             preparedResult(input, prepared),
         )
 
-        const result = await bootstrapPersistentDatabase({ store, prepareDatabase })
+        const result = await bootstrapPersistentDatabase({ store: harness.store, prepareDatabase })
 
         expect(prepareDatabase).toHaveBeenCalledTimes(1)
         expect(prepareDatabase).toHaveBeenCalledWith({
             streamingDisplayOptimizationMode: 'balanced',
         })
-        expect(store.materializeDatabase).not.toHaveBeenCalled()
-        expect(store.replaceFromDatabase).toHaveBeenCalledWith(prepared, 0)
+        expect(materialize).not.toHaveBeenCalled()
         expect(result).toEqual({ database: prepared, revision: 1 })
+        expect(await harness.store.materializeDatabase(1)).toEqual(prepared)
     })
 
     it('reads a nonblank persistent revision without rewriting it', async () => {
@@ -111,37 +65,31 @@ describe('bootstrapPersistentDatabase', () => {
         persistent.username = 'Persistent user'
         persistent.plugins = [plugin('2.1', true)]
         persistent.streamingDisplayOptimizationMode = 'off'
-        const store = createStore({ revision: 7, database: persistent })
+        const harness = await createPersistentStoreHarness(persistent)
 
         const result = await bootstrapPersistentDatabase({
-            store,
+            store: harness.store,
             prepareDatabase: async (database) =>
                 preparedResult(database, database),
         })
 
-        expect(store.materializeDatabase).toHaveBeenCalledWith(7)
-        expect(store.replaceFromDatabase).not.toHaveBeenCalled()
         expect(result).toEqual({
             database: persistent,
-            revision: 7,
+            revision: harness.revision,
         })
+        expect((await harness.store.readRoot()).revision).toBe(harness.revision)
     })
 
     it('awaits visible storage and compatibility phases before their expensive work', async () => {
         const persistent = structuredClone(fixtureDatabase)
         persistent.plugins = [plugin('2.1', true)]
         persistent.language = 'ko'
-        const store = createStore({ revision: 7, database: persistent })
+        const harness = await createPersistentStoreHarness(persistent)
         const events: string[] = []
-        vi.mocked(store.open).mockImplementation(async () => {
-            events.push('open')
-        })
-        vi.mocked(store.materializeDatabase).mockImplementation(async () => {
-            events.push('materialize')
-            return persistent
-        })
+        harness.observe('open', () => { events.push('open') })
+        harness.observe('materializeDatabase', () => { events.push('materialize') })
         await bootstrapPersistentDatabase({
-            store,
+            store: harness.store,
             onPhase: async (phase, locale) => {
                 await Promise.resolve()
                 if (phase !== 'storage') expect(locale).toBe('ko')
@@ -192,20 +140,21 @@ describe('bootstrapPersistentDatabase', () => {
         persistent.plugins = [plugin('2.1', true)]
         const changed = structuredClone(persistent)
         changed.username = 'Normalized user'
-        const store = createStore({ revision: 4, database: persistent, replacementRevision: 5 })
+        const harness = await createPersistentStoreHarness(persistent)
 
         const result = await bootstrapPersistentDatabase({
-            store,
+            store: harness.store,
             prepareDatabase: async (database) =>
                 preparedResult(database, changed),
         })
 
-        expect(store.replaceFromDatabase).not.toHaveBeenCalled()
-        expect(store.commit).not.toHaveBeenCalled()
         expect(result).toEqual({
             database: changed,
-            revision: 4,
+            revision: harness.revision,
         })
+        const stored = await harness.store.readRoot()
+        expect(stored.revision).toBe(harness.revision)
+        expect(stored.value.username).toBe(persistent.username)
     })
 
     it('boots a scalable nonblank revision from root, preset, and catalog queries only', async () => {
@@ -333,54 +282,54 @@ describe('bootstrapPersistentDatabase', () => {
         const persistent = structuredClone(fixtureDatabase)
         persistent.plugins = [plugin('2.1', false)]
         persistent.botPresetsId = -1
-        const store = createStore({ revision: 7, database: persistent })
+        persistent.characters = Array.from({ length: 3 }, (_, index) => ({
+            type: 'character', chaId: `char-${index}`, name: `Character ${index}`, chats: [],
+        }) as unknown as character)
+        const harness = await createPersistentStoreHarness(persistent)
         const events: string[] = []
         scheduling.yieldToMainThread.mockImplementation(async () => {
             events.push('yield')
         })
-        vi.mocked(store.queryCharacters).mockImplementation(async (query) => {
-            events.push(
-                `${query.trash ? 'trash' : 'active'}:${query.cursor ?? 'first'}`,
-            )
-            if (!query.trash && query.cursor === undefined) {
-                return { revision: 7, items: [], nextCursor: 'active-page-2' }
-            }
-            return { revision: 7, items: [] }
+        harness.observe('queryCharacters', (query) => {
+            events.push(`${query.trash ? 'trash' : 'active'}:${query.cursor === undefined ? 'first' : 'next'}`)
         })
 
-        await bootstrapPersistentDatabase({
-            store,
+        const result = await bootstrapPersistentDatabase({
+            store: harness.store,
+            catalogPageSize: 2,
             prepareDatabase: async (database) =>
                 preparedResult(database, database),
             prepareRoot: async (root) => structuredClone(root),
-            projectScalableWorkingSet: () => structuredClone(fixtureDatabase),
+            projectScalableWorkingSet: (input) => projectCatalogWorkingSet(
+                input.root,
+                input.characters,
+                createCatalogPresetWorkingSet(input.presetCatalog, input.activePreset),
+            ),
         })
 
         expect(events).toEqual([
             'active:first',
             'yield',
-            'active:active-page-2',
+            'active:next',
             'yield',
             'trash:first',
         ])
-        expect(scheduling.yieldToMainThread).toHaveBeenCalledTimes(2)
+        expect(result.database.characters).toHaveLength(3)
     })
 
     it('rejects a stale catalog page returned after a cooperative yield', async () => {
         const persistent = structuredClone(fixtureDatabase)
         persistent.plugins = [plugin('2.1', false)]
         persistent.botPresetsId = -1
-        const store = createStore({ revision: 7, database: persistent })
-        vi.mocked(store.queryCharacters).mockImplementation(async (query) => {
-            if (!query.trash && query.cursor === undefined) {
-                return { revision: 7, items: [], nextCursor: 'active-page-2' }
-            }
-            return { revision: 8, items: [] }
+        const harness = await createPersistentStoreHarness(persistent)
+        scheduling.yieldToMainThread.mockImplementationOnce(async () => {
+            const root = (await harness.store.readRoot()).value
+            await harness.store.commit({ expectedRevision: harness.revision, root: { ...root, username: 'Concurrent user' } })
         })
 
         await expect(
             bootstrapPersistentDatabase({
-                store,
+                store: harness.store,
                 prepareDatabase: async (database) =>
                     preparedResult(database, database),
                 prepareRoot: async (root) => structuredClone(root),
@@ -432,20 +381,17 @@ describe('bootstrapPersistentDatabase', () => {
 
     it.each([1, 'preset-alpha'] as const)('projects selection %s without rewriting the stored boundary value', async (selection) => {
         const database = structuredClone(fixtureDatabase)
-        const store = createStore({revision:7,database})
-        vi.mocked(store.readRoot).mockResolvedValue({revision:7,value:{...capturePersistentRoot(database),botPresetsId:selection}})
-        vi.mocked(store.queryPresets).mockResolvedValue({revision:7,items:database.botPresets.map((preset,configuredIndex)=>({id:preset['id'] as string,name:preset.name,configuredIndex}))})
-        vi.mocked(store.readPreset).mockImplementation(async(id)=>({revision:7,value:database.botPresets.find((value)=>value['id']===id)!}))
-        vi.mocked(store.queryCharacters).mockResolvedValue({revision:7,items:[]})
-        const result = await bootstrapPersistentDatabase({store,prepareDatabase:async(value)=>preparedResult(value,value),prepareRoot:async(root)=>root,
+        const harness = await createPersistentStoreHarness(database)
+        const {revision} = await harness.store.commit({expectedRevision:harness.revision,root:{...capturePersistentRoot(database),botPresetsId:selection}})
+        const result = await bootstrapPersistentDatabase({store:harness.store,prepareDatabase:async(value)=>preparedResult(value,value),prepareRoot:async(root)=>root,
             projectScalableWorkingSet:(input)=>projectCatalogWorkingSet(input.root,input.characters,createCatalogPresetWorkingSet(input.presetCatalog,input.activePreset)),
         })
         expect(result.database.botPresetsId).toBe(1)
         expect(result.database.botPresets[1]['id']).toBe('preset-alpha')
-        expect(result.revision).toBe(7)
-        expect(store.commit).not.toHaveBeenCalled()
-        expect(store.replaceFromDatabase).not.toHaveBeenCalled()
-        expect((await store.readRoot()).value.botPresetsId).toBe(selection)
+        expect(result.revision).toBe(revision)
+        const stored = await harness.store.readRoot()
+        expect(stored.revision).toBe(revision)
+        expect(stored.value.botPresetsId).toBe(selection)
     })
 
     it('projects a newly prepared scalable database after committing the complete import', async () => {

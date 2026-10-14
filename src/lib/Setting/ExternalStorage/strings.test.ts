@@ -1,7 +1,36 @@
 import { describe, expect, it } from 'vitest'
-import { externalErrorMessage, externalFolderErrorKind, externalStorageStrings } from './strings'
+import { externalConnectionFolder, externalConnectionPlace, externalConnectionTitle, externalErrorMessage, externalFolderErrorKind, externalStorageStrings } from './strings'
 
 const strings = externalStorageStrings('en')
+
+describe('the connection title and place', () => {
+    const connection = (providerId: 'webdav' | 'google_drive' | 'onedrive', endpoint: { authority: string; repositoryHint: string; accountHint?: string }) =>
+        ({ providerId, endpoint: { providerId, warnings: [], remoteVerified: true, ...endpoint } })
+
+    it('shows the server and folder of a self-hosted repository', () => {
+        const webdav = connection('webdav', { authority: 'https://synthetic.invalid', repositoryHint: '/RisuNest', accountHint: 'synthetic-user' })
+        expect(externalConnectionTitle(strings, webdav)).toBe('WebDAV · synthetic-user')
+        expect(externalConnectionPlace(strings, webdav)).toBe('https://synthetic.invalid · /RisuNest')
+    })
+
+    it('leaves out the fixed API host of a signed-in service', () => {
+        const drive = connection('google_drive', { authority: 'https://www.googleapis.com', repositoryHint: 'RisuNest', accountHint: 'synthetic@example.invalid' })
+        expect(externalConnectionTitle(strings, drive)).toBe('Google Drive · synthetic@example.invalid')
+        expect(externalConnectionPlace(strings, drive)).toBe('RisuNest')
+        expect(externalConnectionPlace(strings, connection('onedrive', { authority: 'https://graph.microsoft.com', repositoryHint: '' }))).toBe('')
+    })
+
+    it('names the fixed app folders as the form does', () => {
+        for (const locale of ['ko', 'en']) {
+            const copy = externalStorageStrings(locale)
+            const hidden = connection('google_drive', { authority: 'https://www.googleapis.com', repositoryHint: 'appDataFolder' })
+            const appFolder = connection('onedrive', { authority: 'https://graph.microsoft.com', repositoryHint: 'special/approot' })
+            expect(externalConnectionFolder(copy, hidden)).toBe(copy.options['google_drive.space.appDataFolder'])
+            expect(externalConnectionPlace(copy, appFolder)).toBe(copy.options['onedrive.accountType.appFolder'])
+        }
+        expect(externalConnectionFolder(strings, connection('webdav', { authority: 'https://synthetic.invalid', repositoryHint: 'appDataFolder' }))).toBe('appDataFolder')
+    })
+})
 
 describe('the storage usage copy', () => {
     it('names the repository data this device knows of without calling it a lower bound', () => {

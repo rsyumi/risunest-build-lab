@@ -34,6 +34,8 @@ import {
     setChatVarOnConversation,
 } from "../parser/chatVar.svelte";
 import { findActiveHistoryWindow, resolveHistoryWindowChat, toWindowIndex } from "./historyWindowIndex";
+import { recordAmbientChatVariableReads, recordChatVariableReads, DisplayReadRecord } from "./scriptVariableReads";
+import { beginDisplayScriptRun } from "./scriptTimeoutNotice";
 import { openHistoryWindowCopy, writeHistoryWindowMessage, type HistoryWindowCopy } from "./historyWindowWrite";
 
 export type ScriptMode = 'editinput'|'editoutput'|'editprocess'|'editdisplay'
@@ -47,6 +49,8 @@ export interface ProcessScriptOptions {
     captureContext?: ProcessScriptCaptureContext
     projectedChatID?: number
     promptOperationScope?: PromptScriptOperationScope
+    /** Collects the chat variables a display row's pipeline reads. */
+    variableReads?: DisplayReadRecord
 }
 
 export interface ProcessScriptCaptureContext {
@@ -123,11 +127,21 @@ export async function importRegex(o?:customscript[]):Promise<customscript[]>{
 let bestMatchCache = new Map<string, string>()
 let processScriptCache = createScriptCache()
 
+interface CachedScriptResult {
+    data: string
+    /** Chat variables the cached regex work read, replayed into the row that reuses it. */
+    reads: readonly string[]
+    untrackedReads: boolean
+}
+
 function createScriptCache() {
     const budgets = getRuntimePerformanceBudgets()
-    return new ByteBudgetLru<string, string>(
+    return new ByteBudgetLru<string, CachedScriptResult>(
         budgets.scriptResultCacheBytes,
-        (key, result) => 2 * (key.length + result.length),
+        (key, result) => 2 * (
+            key.length + result.data.length +
+            result.reads.reduce((total, read) => total + read.length, 0)
+        ),
         budgets.scriptResultCacheEntries,
     )
 }
@@ -154,8 +168,8 @@ function generateScriptCacheKey(
     return hash;
 }
 
-function cacheScript(hash:string, result:string){
-    processScriptCache.set(hash, result)
+function cacheScript(hash:string, data:string, reads:DisplayReadRecord){
+    processScriptCache.set(hash, { data, reads: [...reads.keys], untrackedReads: reads.untracked })
 }
 
 function getScriptCache(hash:string){
@@ -276,10 +290,6 @@ function requireScriptConversationOwner(owner: ScriptConversationOwner): void {
     }
 }
 
-const MUTATING_CONVERSATION_CBS_NAMES = new Set([
-    'addvar', 'setvar', 'setdefaultvar',
-])
-
 function containsCbs(value: string, names: ReadonlySet<string>): boolean {
     for (const match of value.matchAll(/(?:{{|<)\s*#?\/?\s*([^}:|>\s]+)/gi)) {
         if (names.has(match[1].toLowerCase())) return true
@@ -289,6 +299,10 @@ function containsCbs(value: string, names: ReadonlySet<string>): boolean {
 
 type ConversationAccess = 'none' | 'read-only' | 'mutating'
 
+/**
+ * Script parses run without `runVar`, so setvar-family tags stay unexecuted and only
+ * `inject` edits the conversation.
+ */
 function classifyConversationAccess(
     plan: ReturnType<typeof getRegexExecutionPlan>,
     data: string,
@@ -296,14 +310,8 @@ function classifyConversationAccess(
     let access: ConversationAccess = containsCbs(data, HISTORY_SENSITIVE_CBS_NAMES)
         ? 'read-only'
         : 'none'
-    if (containsCbs(data, MUTATING_CONVERSATION_CBS_NAMES)) return 'mutating'
     for (const entry of plan.entries) {
-        if (
-            entry.actions.includes('inject') ||
-            entry.replacement.startsWith('@@inject') ||
-            (entry.dynamicPattern && containsCbs(entry.pattern, MUTATING_CONVERSATION_CBS_NAMES)) ||
-            containsCbs(entry.replacement, MUTATING_CONVERSATION_CBS_NAMES)
-        ) {
+        if (entry.actions.includes('inject') || entry.replacement.startsWith('@@inject')) {
             return 'mutating'
         }
         if (
@@ -511,6 +519,7 @@ export async function processScriptFull(
     const owner = captureScriptConversationOwner(char)
     const session = owner.session
     if (!session || !owner.chat) {
+        options.variableReads?.markUntracked()
         return processScriptFullImpl(
             char,
             data,
@@ -535,6 +544,8 @@ export async function processScriptFull(
             invalidated = true
         }
     })
+    // Include queued pipelines so serialized Lua runs share the same timeout notice.
+    const endDisplayRun = beginDisplayScriptRun()
     try {
         // Protect the whole live script pipeline. A Lua-only lock still lets the
         // next row change variables while this row awaits plugins or regex work.
@@ -556,17 +567,27 @@ export async function processScriptFull(
                 ...owner,
                 version: session.version,
             })
-            return processScriptFullImpl(
-                char,
-                data,
-                mode,
-                chatID,
-                cbsConditions,
-                options,
-            )
+            // Display pipelines of this conversation run one at a time, so reads by its
+            // Lua listeners and display triggers belong to this row.
+            const stopRecording = options.variableReads
+                ? recordAmbientChatVariableReads(options.variableReads)
+                : null
+            try {
+                return await processScriptFullImpl(
+                    char,
+                    data,
+                    mode,
+                    chatID,
+                    cbsConditions,
+                    options,
+                )
+            } finally {
+                stopRecording?.()
+            }
         })
     } finally {
         unsubscribe()
+        endDisplayRun()
     }
 }
 
@@ -618,6 +639,8 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
         ? conversationOwner.session.acquirePin('compatibility')
         : null
     if(usesPluginCompatibility){
+        // A plugin hook can read chat variables without notice.
+        options.variableReads?.markUntracked()
         try {
             for(const plugin of pluginV2[mode]){
                 const res = await plugin(data)
@@ -703,7 +726,18 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
             : character) }
         : db)
     const operationChat = conversationOperation?.chat ?? conversationOwner?.chat ?? null
-    const parseCbs = (value: string) => captureContext
+    const parsedReads = new DisplayReadRecord()
+    const parseReads = {
+        note(key: string) {
+            parsedReads.note(key)
+            options.variableReads?.note(key)
+        },
+        markUntracked() {
+            parsedReads.markUntracked()
+            options.variableReads?.markUntracked()
+        },
+    }
+    const parseCbs = (value: string) => recordChatVariableReads(parseReads, () => captureContext
         ? risuChatParserOrg(value, {
             chatID,
             projectedChatID: options.projectedChatID,
@@ -741,7 +775,7 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
                     setChatVarOnConversation(operationChat, key, value)
                 }
                 : undefined,
-        })
+        }))
     let conversationOperationCommitted = false
     const finish = <T>(result: T): T => {
         options.signal?.throwIfAborted()
@@ -777,13 +811,17 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
     if(hash !== undefined){
         const cached = getScriptCache(hash)
         if(cached !== undefined){
-            return finish({data: cached, emoChanged: false})
+            for(const key of cached.reads){
+                options.variableReads?.note(key)
+            }
+            if (cached.untrackedReads) options.variableReads?.markUntracked()
+            return finish({data: cached.data, emoChanged: false})
         }
     }
     
     if(scripts.length === 0){
         if(hash !== undefined){
-            cacheScript(hash, data)
+            cacheScript(hash, data, parsedReads)
         }
         return finish({data, emoChanged})
     }
@@ -1013,7 +1051,7 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
         if((!dynamicAssetsEditDisplay && mode === 'editdisplay')
             || mode === 'editinput' || mode === 'editprocess'){
             if(hash !== undefined){
-                cacheScript(hash, data)
+                cacheScript(hash, data, parsedReads)
             }
             return finish({data, emoChanged})
         }
@@ -1053,7 +1091,7 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
     }
 
     if(hash !== undefined){
-        cacheScript(hash, data)
+        cacheScript(hash, data, parsedReads)
     }
 
     return finish({data, emoChanged})

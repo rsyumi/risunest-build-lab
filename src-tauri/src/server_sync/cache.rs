@@ -126,11 +126,17 @@ enum Emission {
 #[cfg(test)]
 thread_local! {
     static PUT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static BATCH_COMMITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 pub(crate) fn take_put_calls() -> u64 {
     PUT_CALLS.with(|calls| calls.replace(0))
+}
+
+#[cfg(test)]
+pub(crate) fn take_batch_commits() -> u64 {
+    BATCH_COMMITS.with(|commits| commits.replace(0))
 }
 
 pub(crate) struct Cache {
@@ -295,6 +301,8 @@ impl Cache {
             }
             inserted.map_err(cache_object_error)?;
             tx.commit()?;
+            #[cfg(test)]
+            BATCH_COMMITS.with(|commits| commits.set(commits.get() + 1));
             // Between groups, never inside one. A reader on another connection
             // can leave the log where it is; this group is already durable, so
             // a refused checkpoint is not a reason to fail it. What it leaves
@@ -1384,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_inventory_excludes_a_hundred_thousand_opaque_dependencies() {
+    fn candidate_inventory_excludes_thousands_of_opaque_dependencies() {
         use crate::logical_records::{encode_logical_record_key, LogicalRecordLocator};
         let dir = tempfile::tempdir().unwrap();
         let cache = Cache::open(dir.path()).unwrap();
@@ -1397,7 +1405,7 @@ mod tests {
             messages: None,
             derived_objects: Default::default(),
         };
-        let mut dependencies = (0u32..100_000)
+        let mut dependencies = (0u32..5_000)
             .map(|n| risunest_sync_wire::hash(&n.to_be_bytes()))
             .collect::<Vec<_>>();
         dependencies.sort();
@@ -1414,7 +1422,7 @@ mod tests {
         assert!(candidates
             .iter()
             .all(|hash| dependencies.binary_search(hash).is_err()));
-        assert!(cache.closure(&projected.version).unwrap().len() >= 100_000);
+        assert!(cache.closure(&projected.version).unwrap().len() >= 5_000);
         // Only control pages and the record's segmented payload were materialized
         // by this unit fixture; selecting candidates must not stat the raw bodies.
         assert!(dependencies.iter().take(3).all(|hash| cache

@@ -4,8 +4,16 @@
     import { language } from 'src/lang'
     import { alertConfirm, alertError, alertToast } from 'src/ts/alert'
     import { captureChatBindingTarget, chatBindingBlockedByGeneration, saveChatBinding, updateChatBinding } from 'src/ts/chatBindings.svelte'
-    import { countToggleChanges, snapshotToggleValues, type ToggleValues } from 'src/ts/toggleBindings'
+    import { countToggleChanges, snapshotToggleValues, toggleValueChanged, type ToggleValues } from 'src/ts/toggleBindings'
     import TogglePresetPopup from './TogglePresetPopup.svelte'
+    interface Props {
+        values?: ToggleValues
+        unpinKeys?: string[]
+        onApplyPreset?: (values: ToggleValues, keys: readonly string[]) => void
+        saving?: boolean
+    }
+    let { values, unpinKeys = [], onApplyPreset, saving = $bindable(false) }: Props = $props()
+    let currentValues = $derived(values ?? DBState.db.globalChatVariables)
     let presetsOpen = $state(false)
     let chat = $derived(
         DBState.db.characters[$selectedCharID]?.chats[DBState.db.characters[$selectedCharID]?.chatPage],
@@ -13,23 +21,31 @@
     let disabled = $derived(!!DBState.db.disableToggleBinding)
     let bound = $derived(chat?.savedToggleValues !== undefined)
     let changes = $derived(
-        bound && !disabled ? countToggleChanges(DBState.db.globalChatVariables, chat.savedToggleValues!) : 0,
+        bound && !disabled ? countToggleChanges(currentValues, chat.savedToggleValues!)
+            + unpinKeys.filter(key => !toggleValueChanged(currentValues[key], chat.savedToggleValues![key])).length : 0,
     )
     let hasLocalOverrides = $derived(
         Object.keys(chat?.GLGlobalVariables ?? {}).some((key) => key.startsWith('toggle_')),
     )
     async function write(values: ToggleValues | undefined, message: string, target = captureChatBindingTarget()) {
         if (chatBindingBlockedByGeneration()) return
-        if (!target?.isCurrent() || disabled) return
+        if (!target?.isCurrent() || disabled || saving) return
+        const patch = { savedToggleValues: values }
+        const localValues = values !== undefined && unpinKeys.length > 0
+            ? { ...target.conversation.GLGlobalVariables } : undefined
+        if (localValues) for (const key of unpinKeys) delete localValues[key]
+        saving = true
         try {
-            await updateChatBinding(target.conversation, { savedToggleValues: values })
+            await updateChatBinding(target.conversation, localValues ? { ...patch, GLGlobalVariables: localValues } : patch)
             await saveChatBinding()
             alertToast(message)
         } catch (error) {
             alertError(language.toggleBindingSaveFailed)
+        } finally {
+            saving = false
         }
     }
-    const bind = () => write(snapshotToggleValues(DBState.db.globalChatVariables), language.togglesBound)
+    const bind = () => write(snapshotToggleValues(currentValues), language.togglesBound)
     async function unbind() {
         if (chatBindingBlockedByGeneration()) return
         const target = captureChatBindingTarget()
@@ -49,7 +65,7 @@
                 class="{button} shrink-0 w-10 px-0 bg-primary-500 border-primary-500 text-primary-foreground hover:bg-primary-600"
                 title={language.unbindToggles}
                 aria-pressed="true"
-                {disabled}
+                disabled={disabled || saving}
                 onclick={unbind}><PinIcon size={16} /></button
             >
             <button
@@ -57,7 +73,7 @@
                     ? 'bg-draculared/15 border-draculared/40 text-draculared hover:bg-draculared/25'
                     : neutral}"
                 title={language.saveToggleChanges}
-                disabled={disabled || changes === 0}
+                disabled={disabled || saving || changes === 0}
                 onclick={() => bind()}
             >
                 <SaveIcon size={16} class="shrink-0" />
@@ -72,7 +88,7 @@
                 class="{button} {neutral} flex-1 min-w-0"
                 title={language.bindToggles}
                 aria-pressed="false"
-                {disabled}
+                disabled={disabled || saving}
                 onclick={() => bind()}
             >
                 <PinIcon size={16} class="shrink-0" />
@@ -83,6 +99,7 @@
             class="{button} {neutral} shrink-0 w-10 px-0"
             title={language.togglePresets}
             aria-haspopup="dialog"
+            disabled={saving}
             onclick={() => {
                 presetsOpen = true
             }}><FolderHeartIcon size={16} /></button
@@ -97,6 +114,8 @@
 </div>
 {#if presetsOpen}
     <TogglePresetPopup
+        values={currentValues}
+        onApply={onApplyPreset}
         close={() => {
             presetsOpen = false
         }}

@@ -1,4 +1,4 @@
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 import type { WindowedConversationMutationController } from '../storage/activeWorkingSet.svelte'
 import type { Chat, Message } from '../storage/database.svelte'
 import type { HistoryWindowController } from './historyWindowController'

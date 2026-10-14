@@ -66,12 +66,18 @@ export interface CommitTransportDependencies {
     ): Promise<T>
     encode(input: CommitEnvelope): Promise<Uint8Array>
     shared(): SharedWebview | undefined
+    /** Largest request sent to any target; defaults to the native limit. */
+    maxRequestBytes?: number
 }
 
 export class NativeCommitTransport {
     private rawUnavailable = false
     private pending: Promise<unknown> = Promise.resolve()
     constructor(private readonly dependencies: CommitTransportDependencies) {}
+
+    private get maxRequestBytes(): number {
+        return this.dependencies.maxRequestBytes ?? MAX_NATIVE_REQUEST_BYTES
+    }
 
     commit(input: CommitEnvelope): Promise<{ revision: number }> {
         const run = this.pending.then(() => this.send(input))
@@ -88,7 +94,7 @@ export class NativeCommitTransport {
         const json = JSON.stringify(args)
         const head = `{"command":${JSON.stringify(command)},"args":`
         const byteLength = utf8ByteLength(head) + utf8ByteLength(json) + 1
-        if (byteLength > MAX_NATIVE_REQUEST_BYTES) throw new PayloadTooLargeError(kind, byteLength)
+        if (byteLength > this.maxRequestBytes) throw new PayloadTooLargeError(kind, byteLength)
         const deps = this.dependencies
         if (!(deps.android?.() ?? false) || byteLength <= STAGED_REQUEST_BYTES) {
             await deps.invoke(command, args)
@@ -148,7 +154,7 @@ export class NativeCommitTransport {
         }
         // The Android transport assembles at most this much, and every target
         // keeps the same limit so a save that works on one works on all.
-        if (bytes.byteLength > MAX_NATIVE_REQUEST_BYTES) throw new PayloadTooLargeError('commit', bytes.byteLength)
+        if (bytes.byteLength > this.maxRequestBytes) throw new PayloadTooLargeError('commit', bytes.byteLength)
         if (android) {
             return sendAndroidCommit(
                 bytes,

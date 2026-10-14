@@ -6,7 +6,7 @@
     "useDefineForClassFields": true,
 
     /* Bundler Mode - Vite handles the actual build */
-    "noEmit": false,
+    "noEmit": true,
     "moduleResolution": "bundler",
     "isolatedModules": true,
     "verbatimModuleSyntax": true,

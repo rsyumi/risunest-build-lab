@@ -3,6 +3,28 @@ import Darwin
 
 enum PortableSourceError: Error { case busy, unavailable, notSeekable, ownership, changed }
 
+struct PortableSourceCopyProgress: Encodable {
+    let copiedBytes: UInt64
+    let totalBytes: UInt64
+}
+
+final class PortableSourceCopyProgressReporter {
+    private let now: () -> TimeInterval
+    private let emit: (PortableSourceCopyProgress) -> Void
+    private var lastBytes: UInt64 = 0
+    private var lastSentAt: TimeInterval?
+    init(now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, emit: @escaping (PortableSourceCopyProgress) -> Void) {
+        self.now = now; self.emit = emit
+    }
+    func report(copied: UInt64, total: UInt64) {
+        guard copied > lastBytes else { return }
+        let time = now()
+        if let previous = lastSentAt, time - previous < 0.25, copied != total { return }
+        lastBytes = copied; lastSentAt = time
+        emit(PortableSourceCopyProgress(copiedBytes: copied, totalBytes: total))
+    }
+}
+
 final class PortableSourceCustody {
     static let shared = PortableSourceCustody()
     private final class Source {
@@ -18,6 +40,7 @@ final class PortableSourceCustody {
         var releasing = false
         var format: String?
         var copying = false
+        var copyCancelled = false
         let copied = DispatchSemaphore(value: 0)
         var probeId: String?
         var probeFinished: DispatchSemaphore?
@@ -164,9 +187,22 @@ final class PortableSourceCustody {
         return true
     }
 
-    func materialize(token: String, staging: URL) throws -> [String: Any] {
+    func cancelCopy(token: String, jobId: String?) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard jobId == nil, let source = active[token], source.jobId == nil, source.claimRequest == nil,
+              source.format == "block-risu-save" || source.format == "local-backup" else { return false }
+        source.copyCancelled = true
+        return true
+    }
+
+    private func checkCopyCancellation(_ source: Source) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !source.releasing, !source.copyCancelled else { throw PortableSourceError.ownership }
+    }
+
+    func materialize(token: String, staging: URL, onProgress: @escaping (PortableSourceCopyProgress) -> Void = { _ in }) throws -> [String: Any] {
         lock.lock()
-        guard let source = active[token], source.jobId == nil, source.claimRequest == nil, !retiredOwners.contains(source.owner), !source.releasing, !source.copying, source.probeId == nil,
+        guard let source = active[token], source.jobId == nil, source.claimRequest == nil, !retiredOwners.contains(source.owner), !source.releasing, !source.copying, !source.copyCancelled, source.probeId == nil,
               source.format == "block-risu-save" || source.format == "local-backup" else {
             lock.unlock(); throw PortableSourceError.ownership
         }
@@ -175,8 +211,8 @@ final class PortableSourceCustody {
         let folder = staging.appendingPathComponent(UUID().uuidString, isDirectory: true)
         var success = false
         defer {
-            source.copied.signal()
             if !success { try? FileManager.default.removeItem(at: folder) }
+            source.copied.signal()
         }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let destination = folder.appendingPathComponent("source.risudat")
@@ -187,16 +223,19 @@ final class PortableSourceCustody {
         guard fstat(source.handle.fileDescriptor, &info) == 0, Identity(info) == source.identity else { throw PortableSourceError.changed }
         try source.handle.seek(toOffset: 0)
         var copied: UInt64 = 0
+        let progress = PortableSourceCopyProgressReporter(emit: onProgress)
         while copied < source.bytes {
-            lock.lock(); let cancelled = source.releasing; lock.unlock()
-            guard !cancelled else { throw PortableSourceError.ownership }
+            try checkCopyCancellation(source)
             let bytes = try source.handle.read(upToCount: Int(min(65536, source.bytes - copied))) ?? Data()
             guard !bytes.isEmpty else { throw PortableSourceError.changed }
             try output.write(contentsOf: bytes)
             copied += UInt64(bytes.count)
+            progress.report(copied: copied, total: source.bytes)
         }
+        try checkCopyCancellation(source)
         guard fstat(source.handle.fileDescriptor, &info) == 0, Identity(info) == source.identity else { throw PortableSourceError.changed }
         try output.synchronize()
+        try checkCopyCancellation(source)
         success = true
         return ["cancelled": false, "path": destination.path, "name": source.name, "bytes": copied]
     }

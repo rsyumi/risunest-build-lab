@@ -1,13 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { writable } from 'svelte/store'
-import { languageEnglish } from 'src/lang/en'
 import RegexList from './RegexList.svelte'
 import TriggerList from './TriggerV1List.svelte'
 
 const sortable = vi.hoisted(() => ({ create: vi.fn() }))
 vi.mock('sortablejs', () => ({ default: { create: sortable.create } }))
-vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/stores.svelte', () => ({ ReloadGUIPointer: writable(0) }))
 vi.mock('src/ts/util', () => ({ sortableOptions: {}, sleep: vi.fn() }))
 vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(async () => true) }))

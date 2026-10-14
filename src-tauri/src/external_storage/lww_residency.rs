@@ -6,6 +6,7 @@ use super::{
 use risunest_external_storage_format::snapshot::StoredObject;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use futures::StreamExt;
 use std::{
     borrow::Borrow,
     collections::{BTreeMap, BTreeSet},
@@ -139,6 +140,38 @@ fn database(root: &Path, create: bool) -> Result<Option<Connection>> {
 pub(crate) struct RemoteBodies {
     root:PathBuf,
     db:Option<Connection>,
+}
+
+pub(super) fn usage_receipts(root: &Path, connection: &StoredConnection) -> Result<Vec<ObjectReceipt>> {
+    let Some(db) = database(root, false)? else { return Ok(Vec::new()); };
+    let mut receipts = Vec::new();
+    let mut bodies = db.prepare("SELECT DISTINCT json_extract(source,'$.body') FROM sources
+        WHERE library=?1 AND json_extract(source,'$.connectionId')=?2").map_err(local)?;
+    let rows = bodies.query_map(params![connection.descriptor.repository_id, connection.id], |row| row.get::<_, String>(0)).map_err(local)?;
+    for row in rows {
+        let body: LargeBody = serde_json::from_str(&row.map_err(local)?).map_err(local)?;
+        let locator = body.locator.ok_or_else(segment::corrupt)?;
+        if locator.connection_identity != connection.descriptor_locator.connection_identity { continue; }
+        receipts.push(ObjectReceipt { locator, byte_length: body.byte_length.0, version: None, checksum: None, complete: true });
+    }
+    // A catalog or pack can be shared by thousands of assets. Decode each file once.
+    let mut packed = db.prepare("SELECT json_extract(source,'$.catalog') FROM packed_sources
+        WHERE library=?1 AND json_extract(source,'$.connectionId')=?2
+        UNION SELECT member.value FROM packed_sources,json_each(source,'$.packs') member
+        WHERE library=?1 AND json_extract(source,'$.connectionId')=?2").map_err(local)?;
+    let rows = packed.query_map(params![connection.descriptor.repository_id, connection.id], |row| row.get::<_, String>(0)).map_err(local)?;
+    for row in rows {
+        let object: StoredObject = serde_json::from_str(&row.map_err(local)?).map_err(local)?;
+        object.validate().map_err(local)?;
+        if object.locator.connection_identity != connection.descriptor_locator.connection_identity
+            || object.header.repository_id != connection.provider_repository_id { continue; }
+        receipts.push(ObjectReceipt {
+            locator: RemoteLocator { connection_identity: object.locator.connection_identity,
+                collection: object.locator.collection, object: object.locator.object },
+            byte_length: object.ciphertext_length, version: None, checksum: None, complete: true,
+        });
+    }
+    Ok(receipts)
 }
 /// Hashes one registry query asks about.
 const LOOKUP_PAGE:usize=512;
@@ -462,6 +495,7 @@ fn pack_groups<T:PackMember>(members:Vec<T>,priority:&BTreeSet<String>)->Vec<Vec
 /// after which a batch closes early. They size a batch, not a hydration: every
 /// body is published, in as many batches as it takes.
 pub(crate) const PUBLISH_BATCH_BODIES:usize=64;
+const _: () = assert!(PUBLISH_BATCH_BODIES <= crate::asset_repository::parallel_stage::MAX_BATCH);
 pub(crate) const PUBLISH_BATCH_BYTES:u64=64*1024*1024;
 fn hydration_error(_:impl std::fmt::Display)->crate::server_sync::SyncError {crate::server_sync::SyncError::new("external-body-unavailable",502)}
 fn remote_error(error:ProviderError)->crate::server_sync::SyncError {
@@ -492,8 +526,8 @@ pub(crate) fn hydrate_registered_many(root:&Path,digests:&[String],priority:&BTr
     for page in digests.chunks(ASSET_OBJECT_CATALOG_MAX_PAGE as usize) {
         publisher.checked()?;
         let mut sizes=BTreeMap::new();
-        for &hash in page {
-            if let Some(size)=cas.stat_object(hash)? {sizes.insert(hash,size);}
+        for (&hash,size) in page.iter().zip(cas.stat_objects(page.iter().copied())?) {
+            if let Some(size)=size {sizes.insert(hash,size);}
         }
         let mut registered=remote.registered(page).map_err(hydration_error)?;
         #[cfg(test)]
@@ -643,6 +677,8 @@ fn hydrate_pack_group(root:&Path,connection:&OpenedSource,group:Vec<SharedPacked
                     if current_repository.repository_id!=repository.repository_id || current_repository.connection_identity!=repository.connection_identity {return Err(segment::corrupt());}
                     let engine=super::lww_engine::ExternalLwwEngine {provider:provider.clone(),repository:current_repository,library:library_id.clone(),
                         root_key:zeroize::Zeroizing::new(**key),admission:None,connection_id:connection_id.clone(),connection_root:connection_root.clone(),
+                        #[cfg(test)]
+                        test_lease_clock:None,
                         capabilities:stored.capabilities.clone(),descriptor:stored.descriptor.clone()};
                     let stale=missing.iter().map(SharedPackedSource::unshared).collect::<Vec<_>>();
                     let refreshed=engine.refresh_packed_sources(&stale,&scratch.join("current-catalogs"),cancel).await?;
@@ -679,26 +715,55 @@ fn hydrate_standalone(connection:&OpenedSource,sources:Vec<Source>,scratch:&Path
         let protection=connection.protection(&writer);
         let owner=admit(&protection,cancel).await?;
         owner.run(&protection,cancel,async {
-            let mut spools=Vec::new();let mut bytes=0u64;
             let mut sources=sources.into_iter().peekable();
-            while let Some(source)=sources.next() {
-                let size=source.body.plaintext_byte_length.0;
-                match publisher.cas.stat_object(&source.hash).map_err(local)? {
-                    Some(actual) if actual!=size=>return Err(segment::corrupt()),
-                    Some(_)=>opened(&source.hash,HydrationOutcome::AlreadyLocal),
-                    None=>{
+            while sources.peek().is_some() {
+                let mut batch=Vec::new();let mut bytes=0u64;let mut hashes=BTreeSet::new();
+                while let Some(source)=sources.next() {
+                    cancel.check()?;
+                    let size=source.body.plaintext_byte_length.0;
+                    if !hashes.insert(source.hash.clone()) {continue;}
+                    match publisher.cas.stat_object(&source.hash).map_err(local)? {
+                        Some(actual) if actual!=size=>return Err(segment::corrupt()),
+                        Some(_)=>opened(&source.hash,HydrationOutcome::AlreadyLocal),
+                        None=>{
+                            bytes=bytes.saturating_add(size);
+                            batch.push(source);
+                        }
+                    }
+                    if batch.len()>=PUBLISH_BATCH_BODIES || bytes>=PUBLISH_BATCH_BYTES {break;}
+                }
+                let width=provider.transfer_concurrency();
+                let stopped=std::sync::atomic::AtomicBool::new(false);
+                let mut downloads=futures::stream::iter(batch.iter()).map(|source| {
+                    let stopped=&stopped;
+                    async move {
+                        if stopped.load(std::sync::atomic::Ordering::Acquire) {return (source,Err(ProviderError::new(ErrorKind::Cancelled)));}
+                        let result=download_standalone(source,scratch,provider.as_ref(),repository,cancel).await;
+                        if result.is_err() {stopped.store(true,std::sync::atomic::Ordering::Release);}
+                        (source,result)
+                    }
+                }).buffered(width);
+                let mut spools=Vec::new();let mut failure=None;
+                while let Some((source,result))=downloads.next().await {
+                    let staged=match result {Ok(staged)=>staged,Err(error)=>{if failure.is_none() {failure=Some(error);}continue;}};
+                    let opened=async {
+                        cancel.check()?;
                         let mut output=tempfile::NamedTempFile::new_in(scratch).map_err(local)?;
-                        spool_standalone(&source,&mut output,scratch,key,provider.as_ref(),repository,cancel).await?;
-                        bytes=bytes.saturating_add(size);
-                        spools.push((source.hash,size,output));
+                        let _cpu=super::packaging::cpu_permit().await?;
+                        open_standalone(source,&mut output,&staged.path().join("ciphertext"),key)?;
+                        Ok(output)
+                    }.await;
+                    match opened {
+                        Ok(output)=>spools.push((source.hash.clone(),source.body.plaintext_byte_length.0,output)),
+                        Err(error)=>{stopped.store(true,std::sync::atomic::Ordering::Release);if failure.is_none() {failure=Some(error);}},
                     }
                 }
-                if !spools.is_empty() && (spools.len()>=PUBLISH_BATCH_BODIES || bytes>=PUBLISH_BATCH_BYTES || sources.peek().is_none()) {
+                if !spools.is_empty() {
                     if let Some(reason)=owner.recheck(&protection,cancel).await? {return Err(super::leases::yield_error(reason));}
                     let bodies=spools.iter().map(|(hash,size,file)|StagedBody{hash:hash.clone(),size:*size,path:file.path().to_owned()}).collect();
                     publisher.publish(bodies,opened).map_err(|error| {installer_error.replace(Some(error));segment::corrupt()})?;
-                    spools.clear();bytes=0;
                 }
+                if let Some(error)=failure {return Err(error);}
             }
             Ok(())
         }).await
@@ -752,20 +817,30 @@ impl Publisher<'_> {
         for (hash,outcome) in outcomes {opened(hash,outcome);}
         Ok(())
     }
-    /// Takes each body's hydration lock in hash order and stages the body under
-    /// it. The batch is published while every lock is still held, so no other
+    /// Takes each body's hydration lock in hash order. Preparation and
+    /// publication retain every lock, so no other
     /// hydration of these bodies runs between staging and publication.
-    fn stage_locked<'b>(&self,rest:&'b [StagedBody],staged:&mut Vec<crate::asset_repository::StagedPayload>,
+    fn stage_locked<'b>(&self,rest:&'b [StagedBody],staged:&mut Vec<&'b StagedBody>,
         outcomes:&mut Vec<(&'b str,crate::server_sync::residency::HydrationOutcome)>)->crate::server_sync::Result<()> {
         use crate::server_sync::residency::HydrationOutcome;
-        let Some((body,rest))=rest.split_first() else {return self.publish_staged(std::mem::take(staged))};
+        let Some((body,rest))=rest.split_first() else {
+            let cas=self.cas;
+            let prepared=crate::asset_repository::parallel_stage::stage_batch(staged,&||self.checked(),&|body,stopped| {
+                Self::stage(cas,body,&|| {
+                    if stopped.load(std::sync::atomic::Ordering::Acquire) {Err(crate::server_sync::SyncError::new("cancelled",409))}
+                    else {Ok(())}
+                })
+            });
+            self.checked()?;
+            return self.publish_staged(prepared?);
+        };
         crate::server_sync::residency::with_hydration_lock(self.root,&body.hash,self.check,|| {
             self.checked()?;
             if let Some(actual)=self.cas.stat_object(&body.hash)? {
                 if actual!=body.size {return Err(hydration_error("invalid-body"));}
                 outcomes.push((&body.hash,HydrationOutcome::AlreadyLocal));
             } else {
-                staged.push(self.stage(body)?);
+                staged.push(body);
                 outcomes.push((&body.hash,HydrationOutcome::Downloaded));
             }
             self.stage_locked(rest,staged,outcomes)
@@ -773,7 +848,7 @@ impl Publisher<'_> {
     }
     /// Copies a body into repository staging. The staged copy keeps its sync,
     /// because a torn file of the right size would pass every presence check.
-    fn stage(&self,body:&StagedBody)->crate::server_sync::Result<crate::asset_repository::StagedPayload> {
+    fn stage(cas:&crate::asset_repository::PayloadCas,body:&StagedBody,check:&dyn Fn()->crate::server_sync::Result<()>)->crate::server_sync::Result<crate::asset_repository::StagedPayload> {
         #[cfg(test)]
         let _scope=crate::asset_repository::body_io::object_scope(&body.hash);
         let input=crate::trust_boundary::open_regular_source(&body.path);
@@ -784,7 +859,7 @@ impl Publisher<'_> {
         let mut input=crate::asset_repository::body_io::TrackedBodyFile::new(input,&body.hash);
         #[cfg(not(test))]
         let mut input=input;
-        crate::server_sync::transfer::stage_checked(self.cas,&mut input,&body.hash,body.size,&|| self.checked())
+        crate::server_sync::transfer::stage_checked(cas,&mut input,&body.hash,body.size,check)
     }
     fn publish_staged(&self,staged:Vec<crate::asset_repository::StagedPayload>)->crate::server_sync::Result<()> {
         if staged.is_empty() {return Ok(());}
@@ -863,6 +938,8 @@ pub(crate) async fn spool_frozen_remote_body(source:&FrozenBodySource,destinatio
                     if current_repository.repository_id!=repository.repository_id || current_repository.connection_identity!=repository.connection_identity {return Err(segment::corrupt());}
                     let engine=super::lww_engine::ExternalLwwEngine{provider:provider.clone(),repository:current_repository,library:source.library_id.clone(),
                         root_key:zeroize::Zeroizing::new(*key),admission:None,connection_id:connection_id.clone(),connection_root:connection_root.clone(),
+                        #[cfg(test)]
+                        test_lease_clock:None,
                         capabilities:stored.capabilities.clone(),descriptor:stored.descriptor.clone()};
                     let mut refreshed=engine.refresh_packed_sources(std::slice::from_ref(source),&scratch.path().join("current-catalogs"),cancel).await?;
                     let refreshed=refreshed.pop().ok_or_else(segment::corrupt)?;
@@ -884,6 +961,12 @@ pub(crate) async fn spool_frozen_remote_body(source:&FrozenBodySource,destinatio
 /// `output`, which then holds exactly the verified plaintext.
 async fn spool_standalone(source:&Source,output:&mut tempfile::NamedTempFile,destination:&Path,key:&[u8;32],provider:&dyn Provider,
     repository:&RepositoryHandle,cancel:&Cancellation)->Result<()> {
+    let scratch=download_standalone(source,destination,provider,repository,cancel).await?;
+    open_standalone(source,output,&scratch.path().join("ciphertext"),key)
+}
+async fn download_standalone(source:&Source,destination:&Path,provider:&dyn Provider,
+    repository:&RepositoryHandle,cancel:&Cancellation)->Result<tempfile::TempDir> {
+    cancel.check()?;
     let scratch=tempfile::tempdir_in(destination).map_err(local)?;
     let locator=source.body.locator.as_ref().ok_or_else(segment::corrupt)?;
     locator.validate_for(repository)?;
@@ -893,9 +976,12 @@ async fn spool_standalone(source:&Source,output:&mut tempfile::NamedTempFile,des
         ReadReceipt::Body(receipt)=>receipt,
         ReadReceipt::NotModified(_)=>return Err(segment::corrupt()),
     };
-    if receipt.locator!=*locator || receipt.byte_length!=source.body.byte_length.0 || !sink.is_verified() {return Err(segment::corrupt());}
+    if receipt.locator!=*locator || !receipt.complete || receipt.byte_length!=source.body.byte_length.0 || !sink.is_verified() {return Err(segment::corrupt());}
     let _verified=super::transfer::SpoolSource::verified(&cipher,source.body.byte_length.0,&source.body.sha256)?;
-    let mut input=crate::trust_boundary::open_regular_source(&cipher).map_err(local)?;
+    Ok(scratch)
+}
+fn open_standalone(source:&Source,output:&mut tempfile::NamedTempFile,cipher:&Path,key:&[u8;32])->Result<()> {
+    let mut input=crate::trust_boundary::open_regular_source(cipher).map_err(local)?;
     segment::open_body_stream(&mut input,output,&source.library_id,&source.body.object_id,key,source.body.plaintext_byte_length.0)?;
     if !super::snapshot_restore::verify_body_file(output.path(),source.body.plaintext_byte_length.0,&source.hash)? {return Err(segment::corrupt());}
     Ok(())
@@ -932,6 +1018,9 @@ mod registration_tests {
 #[path="lww_residency_hydration_tests.rs"]
 mod hydration_tests;
 #[cfg(test)]
+#[path="lww_download_tests.rs"]
+mod download_tests;
+#[cfg(test)]
 pub(crate) use hydration_tests::{forget_registry_opens, register_synthetic_source, registry_opens, synthetic_packed};
 #[cfg(test)]
 fn test_source_connections()->&'static std::sync::Mutex<std::collections::BTreeMap<(std::path::PathBuf,String),std::sync::Arc<super::connection_commands::ConnectedRepository>>> {
@@ -953,7 +1042,7 @@ pub(crate) fn install_test_source_connection(root:&Path,connection:std::sync::Ar
     Ok(TestSourceConnection{key})
 }
 /// Opens a body source's connection, with the stored record it was opened from.
-async fn open_source_connection(connection_root:&Path,connection_id:&str,library_id:&str,cancel:&Cancellation)->Result<(std::sync::Arc<dyn Provider>,RepositoryHandle,zeroize::Zeroizing<[u8;32]>,StoredConnection)> {
+pub(crate) async fn open_source_connection(connection_root:&Path,connection_id:&str,library_id:&str,cancel:&Cancellation)->Result<(std::sync::Arc<dyn Provider>,RepositoryHandle,zeroize::Zeroizing<[u8;32]>,StoredConnection)> {
     #[cfg(test)]
     hydration_tests::observe("source-connection",connection_root,connection_root);
     #[cfg(test)]
@@ -971,9 +1060,17 @@ async fn open_source_connection(connection_root:&Path,connection_id:&str,library
     if stored.descriptor.repository_id != library_id {
         return Err(segment::corrupt());
     }
-    let dependencies =
-        super::connection::dependencies_for_config(&connection_root, &stored.config)?;
-    let provider = super::connection::provider_for(&stored.config, dependencies)?;
+    let load = || {
+        let dependencies = super::connection::dependencies_for_config(connection_root, &stored.config)?;
+        super::connection::provider_for(&stored.config, dependencies)
+    };
+    #[cfg(test)]
+    let injected = super::transfer_factory_tests::inputs(connection_root, connection_id);
+    #[cfg(test)]
+    let provider = match &injected { Some(inputs) => inputs.provider.clone(), None => load()? };
+    #[cfg(not(test))]
+    let provider = load()?;
+    let provider = super::transfer_limit::wrap(connection_root,connection_id,provider)?;
     let (repository, _) = provider
         .open_repository(
             &stored.config,
@@ -982,10 +1079,14 @@ async fn open_source_connection(connection_root:&Path,connection_id:&str,library
             cancel,
         )
         .await?;
-    let key = super::connection_commands::read_root_key(
-        super::secrets::repository_key_vault(&connection_root).as_ref(),
+    let vault = super::secrets::repository_key_vault(connection_root);
+    let load_key = super::connection_commands::read_root_key(
+        vault.as_ref(),
         &stored.root_key_ref,
-    )
-    .await?;
+    );
+    #[cfg(test)]
+    let key = match injected { Some(inputs) => { drop(load_key); inputs.root_key }, None => load_key.await? };
+    #[cfg(not(test))]
+    let key = load_key.await?;
     Ok((provider, repository, key, stored))
 }

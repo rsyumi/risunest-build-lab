@@ -1,11 +1,16 @@
 pub(crate) mod commands;
 pub(crate) mod coordinator;
 pub(crate) mod job_pins;
+pub(crate) mod import_payloads;
+pub(crate) mod parallel_stage;
+mod workers;
 mod journal_frame;
 pub(crate) mod migration_gc;
 #[path = "../owner_manifest_codec.rs"]
 pub(crate) mod owner_manifest_codec;
 mod payload_cas;
+#[cfg(test)]
+mod payload_cas_tests;
 #[cfg(test)]
 pub(crate) mod body_io;
 

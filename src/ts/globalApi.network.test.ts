@@ -1,160 +1,51 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import type { PlatformShape } from './platform.testSupport'
 
 const state = vi.hoisted(() => ({
-    isTauri: false,
+    platform: { runtime: 'web', os: 'windows' } as PlatformShape,
     database: { usePlainFetch: true },
-    isTauriMobile: false,
     blobStore: null as any,
 }))
 
-vi.mock('./platform', () => ({
-    get isTauri() {
-        return state.isTauri
-    },
-    get isTauriMobile() {
-        return state.isTauriMobile
-    },
-}))
-vi.mock('./storage/platformBlobStore', () => ({
-    configureBlobStoreStorageProvider: vi.fn(),
-    readBlobForFacade: vi.fn(),
-    resolveBlobStore: async () => state.blobStore,
-    subscribeNativeMediaEndpointChanges: vi.fn(() => vi.fn()),
-}))
-vi.mock('./storage/autoStorage', () => ({
-    AutoStorage: class {
-        isAccount = false
-        realStorage = {}
-        async Init() {
-            /* no-op */
-        }
-        async getItem() {
-            return null
-        }
-        async setItem() {
-            /* no-op */
-        }
-        async removeItem() {
-            /* no-op */
-        }
-        async keys() {
-            return []
-        }
-    },
-}))
-vi.mock('./characterCards', () => ({
-    hubURL: 'https://hub.example',
-    // `/rs/` is a Realm-classified path (scripts/realmBlocklist.mjs), so the
-    // account asset route must build it from realmHubURL, not hubURL.
-    realmHubURL: 'https://realm-hub.example',
-    characterURLImport: vi.fn(),
-}))
-vi.mock('./util', () => ({
-    changeFullscreen: vi.fn(),
-    sleep: async () => undefined,
-}))
-vi.mock('./storage/database.svelte', () => ({
-    getDatabase: () => state.database,
-    getCurrentCharacter: () => ({ chats: [], chatPage: 0 }),
-    defaultSdDataFunc: () => [],
-    appVer: '0.0.0',
-    appSubVer: '',
-}))
-vi.mock('./stores.svelte', () => ({
-    MobileGUI: { set: vi.fn() },
-    botMakerMode: { set: vi.fn() },
-    selectedCharID: { set: vi.fn() },
-    loadedStore: { set: vi.fn() },
-    DBState: { db: { characters: [] } },
-    LoadingStatusState: {},
-    selIdState: { selId: 0 },
-    ReloadGUIPointer: { set: vi.fn() },
-    bodyIntercepterStore: [],
-}))
-vi.mock('./alert', () => ({
-    alertConfirm: vi.fn(),
-    alertError: vi.fn(),
-    alertMd: vi.fn(),
-    alertNormal: vi.fn(),
-    alertNormalWait: vi.fn(),
-    alertSelect: vi.fn(),
-    alertTOS: vi.fn(), alertRisuServiceTOS: vi.fn(),
-    waitAlert: vi.fn(),
-}))
-vi.mock('./storage/persistentDataRuntime.svelte', () => ({
-    activateConversation: vi.fn(),
-    configurePersistentDataRuntime: vi.fn(),
-    markPersistentDataDirty: vi.fn(),
-    replacePersistentDatabase: vi.fn(),
-}))
-vi.mock('./storage/persistentSaveNotifications', () => ({
-    createPersistentSaveObserverInstallation: () => ({ install: vi.fn() }),
-    installPersistentSaveNotifications: vi.fn(),
-}))
-vi.mock('./storage/databasePreparation', () => ({ checkCharOrder: vi.fn() }))
-vi.mock('./storage/risuSave', () => ({ decodeRisuSave: vi.fn() }))
-vi.mock('./storage/defaultPrompts', () => ({
-    defaultJailbreak: '',
-    defaultMainPrompt: '',
-    oldJailbreak: '',
-    oldMainPrompt: '',
-}))
-vi.mock('./process/modules', () => ({ moduleUpdate: vi.fn() }))
-vi.mock('./process/coldstorage.svelte', () => ({
-    getColdStorageItem: vi.fn(),
-    makeColdData: vi.fn(),
-}))
-vi.mock('./process/coldstorageData', () => ({
-    listCharacterResources: () => [],
-    listDatabaseRootResources: () => [],
-    replaceCharacterResources: vi.fn(),
-    replaceDatabaseRootResources: vi.fn(),
-}))
-vi.mock('./plugins/plugins.svelte', () => ({ loadPlugins: vi.fn() }))
-vi.mock('./parser/parser.svelte', () => ({
-    hasher: vi.fn(async () => 'hashed'),
-}))
-vi.mock('./drive/accounter', () => ({ loadRisuAccountData: vi.fn() }))
-vi.mock('./update', () => ({ checkRisuUpdate: vi.fn() }))
-vi.mock('./observer.svelte', () => ({ startObserveDom: vi.fn() }))
-vi.mock('./characters', () => ({ updateLorebooks: vi.fn() }))
-vi.mock('./hotkey', () => ({ initMobileGesture: vi.fn() }))
-vi.mock('./gui/animation', () => ({ updateAnimationSpeed: vi.fn() }))
-vi.mock('./gui/colorscheme', () => ({
-    updateColorScheme: vi.fn(),
-    updateTextThemeAndCSS: vi.fn(),
-}))
-vi.mock('./gui/guisize', () => ({ updateGuisize: vi.fn() }))
-vi.mock('src/lang', () => ({ language: {} }))
-vi.mock('streamsaver', () => ({ default: { createWriteStream: vi.fn() } }))
-vi.mock('@tauri-apps/plugin-fs', () => ({
-    writeFile: vi.fn(),
-    readFile: vi.fn(),
-    exists: vi.fn(),
-    mkdir: vi.fn(),
-    readDir: vi.fn(),
-    remove: vi.fn(),
-    BaseDirectory: { Download: 1, AppData: 2 },
-}))
-vi.mock('@tauri-apps/api/core', () => ({
-    convertFileSrc: (path: string) => `asset://${path}`,
-}))
-vi.mock('@tauri-apps/api/path', () => ({
-    join: vi.fn(async (...parts: string[]) => parts.join('/')),
-}))
-vi.mock('@tauri-apps/plugin-shell', () => ({ open: vi.fn() }))
-vi.mock('@tauri-apps/plugin-dialog', () => ({ save: vi.fn() }))
-vi.mock('@tauri-apps/api/webviewWindow', () => ({
-    getCurrentWebviewWindow: vi.fn(() => ({})),
-}))
-vi.mock('@tauri-apps/plugin-http', () => ({ fetch: vi.fn() }))
+vi.mock('./platform', async () => (await import('./platform.testSupport')).platformModule(() => state.platform))
+vi.mock('./storage/platformBlobStore', async () => (await import('./globalApi.testSupport')).platformBlobStoreModule(async () => state.blobStore))
+vi.mock('./storage/autoStorage', async () => (await import('./globalApi.testSupport')).autoStorageModule())
+vi.mock('./characterCards', async () => (await import('./globalApi.testSupport')).characterCardsModule())
+vi.mock('./util', async () => (await import('./globalApi.testSupport')).utilModule())
+vi.mock('./storage/database.svelte', async () => (await import('./globalApi.testSupport')).databaseModule(() => state.database))
+vi.mock('./stores.svelte', async () => (await import('./globalApi.testSupport')).storesModule({ characters: [] }))
+vi.mock('./alert', async () => (await import('./globalApi.testSupport')).alertModule())
+vi.mock('./storage/persistentDataRuntime.svelte', async () => (await import('./globalApi.testSupport')).persistentDataRuntimeModule())
+vi.mock('./storage/persistentSaveNotifications', async () => (await import('./globalApi.testSupport')).persistentSaveNotificationsModule())
+vi.mock('./storage/databasePreparation', async () => (await import('./globalApi.testSupport')).databasePreparationModule())
+vi.mock('./storage/risuSave', async () => (await import('./globalApi.testSupport')).risuSaveModule())
+vi.mock('./storage/defaultPrompts', async () => (await import('./globalApi.testSupport')).defaultPromptsModule())
+vi.mock('./process/modules', async () => (await import('./globalApi.testSupport')).modulesModule())
+vi.mock('./process/coldstorageData', async () => (await import('./globalApi.testSupport')).coldStorageDataModule())
+vi.mock('./plugins/plugins.svelte', async () => (await import('./globalApi.testSupport')).pluginsModule())
+vi.mock('./parser/parser.svelte', async () => (await import('./parser/parser.testSupport')).parserStubModule())
+vi.mock('./drive/accounter', async () => (await import('./globalApi.testSupport')).accounterModule())
+vi.mock('./observer.svelte', async () => (await import('./globalApi.testSupport')).observerModule())
+vi.mock('./characters', async () => (await import('./globalApi.testSupport')).charactersModule())
+vi.mock('./hotkey', async () => (await import('./globalApi.testSupport')).hotkeyModule())
+vi.mock('./gui/animation', async () => (await import('./globalApi.testSupport')).animationModule())
+vi.mock('./gui/colorscheme', async () => (await import('./globalApi.testSupport')).colorschemeModule())
+vi.mock('./gui/guisize', async () => (await import('./globalApi.testSupport')).guisizeModule())
+vi.mock('streamsaver', async () => (await import('./globalApi.testSupport')).streamsaverModule())
+vi.mock('@tauri-apps/plugin-fs', async () => (await import('./globalApi.testSupport')).tauriFsModule())
+vi.mock('@tauri-apps/api/core', async () => (await import('./globalApi.testSupport')).tauriCoreModule())
+vi.mock('@tauri-apps/api/path', async () => (await import('./globalApi.testSupport')).tauriPathModule())
+vi.mock('@tauri-apps/plugin-shell', async () => (await import('./globalApi.testSupport')).tauriShellModule())
+vi.mock('@tauri-apps/plugin-dialog', async () => (await import('./globalApi.testSupport')).tauriDialogModule())
+vi.mock('@tauri-apps/api/webviewWindow', async () => (await import('./globalApi.testSupport')).webviewWindowModule())
+vi.mock('@tauri-apps/plugin-http', async () => (await import('./globalApi.testSupport')).tauriHttpModule())
 
 import { fetch as pluginFetch } from '@tauri-apps/plugin-http'
 import { fetchNative, getFetchLogs, globalFetch } from './globalApi.svelte'
 
 describe('network requests without application URL restrictions', () => {
     beforeEach(() => {
-        state.isTauri = false
+        state.platform = { runtime: 'web', os: 'windows' }
         state.database.usePlainFetch = true
         vi.stubGlobal(
             'fetch',
@@ -250,7 +141,7 @@ describe('network requests without application URL restrictions', () => {
 
 describe('Tauri route request bodies', () => {
     beforeEach(() => {
-        state.isTauri = true
+        state.platform = { runtime: 'tauri', os: 'windows' }
         state.database.usePlainFetch = false
         vi.mocked(pluginFetch).mockReset()
         vi.mocked(pluginFetch).mockImplementation(
@@ -259,7 +150,7 @@ describe('Tauri route request bodies', () => {
     })
 
     afterEach(() => {
-        state.isTauri = false
+        state.platform = { runtime: 'web', os: 'windows' }
         state.database.usePlainFetch = true
     })
 

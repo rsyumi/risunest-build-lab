@@ -4,13 +4,7 @@ import { get } from 'svelte/store'
 import { flushSync } from 'svelte'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 
-vi.mock('../parser/parser.svelte', () => ({
-    assetRegex: /$^/,
-    hasher: vi.fn(async () => 'hash'),
-    parseMarkdownSafe: (value: string) => value,
-    ParseMarkdown: vi.fn(async (value: string) => value),
-    risuChatParser: (value: string) => value,
-}))
+vi.mock('../parser/parser.svelte', async () => (await import('../parser/parser.testSupport')).parserStubModule())
 const displaySettings = vi.hoisted(() => ({ apply: vi.fn(async () => undefined) }))
 vi.mock('../gui/receivedDisplaySettings', () => ({ applyReceivedDisplaySettings: displaySettings.apply }))
 const pluginRuntime = vi.hoisted(() => ({ load: vi.fn(async () => undefined) }))
@@ -26,6 +20,7 @@ import {
 import { getV2PluginAPIs } from '../plugins/plugins.svelte'
 import type { Database } from './database.svelte'
 import type { PersistentDataStore, PersistentUnitMutation, WorkingSetCommit } from './persistentDataStore'
+import { createStoreStub } from './persistentDataStore.testSupport'
 import { captureCurrentPreset, getDatabase, getEffectivePresetId, normalizeDatabaseDefaults, setDatabase, setDatabaseLite, setEffectivePresetOverride, setPreset } from './database.svelte'
 import { createPresetWorkingSetController } from './presetWorkingSetOperations'
 import {
@@ -39,7 +34,7 @@ import {
     projectCompleteScalableWorkingSet,
 } from './workingSetCatalog'
 import { workingSetResidency } from './workingSetResidency'
-import { canonicalJson, SaveCoordinator } from './saveCoordinator'
+import { canonicalJson, SaveCoordinator, type PersistentCharacterAssetOwnerHead } from './saveCoordinator'
 import { capturePersistentRoot, createPersistentDataRuntime } from './persistentDataRuntime'
 import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
 import { observePersistentSaveChanges } from './persistentSaveObserver.svelte'
@@ -53,6 +48,35 @@ afterEach(() => {
 })
 
 describe('production persistent working-set publication', () => {
+    it.each(['absent', 'empty', 'populated'] as const)('persists a prepared owner head when an existing character has unchanged %s assets', async (shape) => {
+        const initial = {
+            username: 'Before', botPresets: [], botPresetsId: 0, plugins: [],
+            characters: [{ type: 'character', chaId: 'prepared-owner', name: 'Owner', chatPage: 0, chatFolders: [], chats: [],
+                ...(shape === 'absent' ? {} : { additionalAssets: shape === 'empty' ? [] : [['synthetic', 'assets/imported', 'bin']] }),
+            }],
+        } as unknown as Database
+        const indexedDB = new IDBFactory()
+        const name = `prepared-existing-owner-${shape}`
+        const store = new IndexedDbPersistentDataStore(name, indexedDB, IDBKeyRange)
+        await store.open()
+        await store.replaceFromDatabase(initial)
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(-1)
+        const runtime = createPersistentDataRuntime({ store, state: createProductionStateAdapter(), prepareDatabase: async value => value })
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        const owner: PersistentCharacterAssetOwnerHead['owner'] = { kind: 'character-additional-assets', characterId: 'prepared-owner' }
+        const head: PersistentCharacterAssetOwnerHead = shape === 'absent'
+            ? { owner, present: false, manifestHash: null, entryCount: 0 }
+            : { owner, present: true, manifestHash: 'ab'.repeat(32), entryCount: shape === 'populated' ? 1 : 0 }
+        await runtime.upsertPersistentCompleteCharacter('prepared-owner', 'prepared-existing-import', current => current!, { assetOwnerHeads: [head] })
+        expect((await store.readAssetOwnerHead(owner))?.value).toEqual(head)
+        await runtime.mutatePersistentCharacterDetail('prepared-owner', 'edit-after-import', ({ character }) => { character.name = 'Edited after import' })
+        const reopened = new IndexedDbPersistentDataStore(name, indexedDB, IDBKeyRange)
+        await reopened.open()
+        expect((await reopened.readCharacter('prepared-owner'))?.value.name).toBe('Edited after import')
+        expect((await reopened.readAssetOwnerHead(owner))?.value).toEqual(head)
+    })
+
     it('invalidates the actual shared device keyspace after a remote plugin-local change', async () => {
         const owner = `received-device-plugin-${crypto.randomUUID()}`
         const keyspace = getPluginDeviceKeyspace(owner)
@@ -381,7 +405,7 @@ describe('production persistent working-set publication', () => {
             selectedCharID.set(-1)
             const adapter = createProductionStateAdapter()
             const commit = vi.fn(async ({expectedRevision}) => ({revision: expectedRevision + 1}))
-            const coordinator = new SaveCoordinator({store: {commit} as unknown as PersistentDataStore, ...adapter})
+            const coordinator = new SaveCoordinator({store: createStoreStub({commit}), ...adapter})
             coordinator.initialize(1)
             const accepted = adapter.captureRoot()
             delete accepted[field]
@@ -416,7 +440,7 @@ describe('production persistent working-set publication', () => {
             selectedCharID.set(-1)
             const adapter = createProductionStateAdapter()
             const commit = vi.fn(async ({expectedRevision}) => ({revision: expectedRevision + 1}))
-            const coordinator = new SaveCoordinator({store: {commit} as unknown as PersistentDataStore, ...adapter})
+            const coordinator = new SaveCoordinator({store: createStoreStub({commit}), ...adapter})
             coordinator.initialize(1)
             const accepted = adapter.captureRoot()
             delete accepted[field]
@@ -453,7 +477,7 @@ describe('production persistent working-set publication', () => {
         const adapter = createProductionStateAdapter()
         const commit = vi.fn().mockRejectedValueOnce(new Error('Synthetic failure'))
             .mockImplementation(async ({expectedRevision}) => ({revision: expectedRevision + 1}))
-        const coordinator = new SaveCoordinator({store: {commit} as unknown as PersistentDataStore, ...adapter})
+        const coordinator = new SaveCoordinator({store: createStoreStub({commit}), ...adapter})
         coordinator.initialize(1)
         const accepted = adapter.captureRoot()
         delete accepted.explicitGlobalChatVariables
@@ -501,7 +525,7 @@ describe('production persistent working-set publication', () => {
             captureRoot: () => {
                 throw new Error('Must use the production canonical capture')
             },
-            store: { commit } as unknown as PersistentDataStore,
+            store: createStoreStub({ commit }),
         })
         coordinator.initialize(1)
         getDatabase().username = 'Immediately changed'
@@ -938,14 +962,14 @@ describe('production persistent working-set publication', () => {
         const storage = createPluginStorageStore({
             getStorageAuthorityEpoch: () => 0,
             assertPersistentMutationAllowed: vi.fn(),
-            store: {
+            store: createStoreStub({
                 open: async () => undefined,
                 queryPluginStorage: async () => ({
                     revision: 1,
                     items: [{ owner: UNOWNED_PLUGIN_OWNER, key: 'nested', byteSize: 1 }],
                 }),
                 readPluginStorage: async () => ({ revision: 1, value: nestedValue }),
-            } as unknown as PersistentDataStore,
+            }),
             mutate: async () => undefined,
         })
         const unregister = registerPluginStorageLifecycle(storage)

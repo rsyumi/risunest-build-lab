@@ -640,8 +640,8 @@ final class NativeUITests: XCTestCase {
         XCTFail("The native file picker has no reachable Cancel action")
     }
 
-    private func openPublishedFile(_ app: XCUIApplication) {
-        let file = app.cells.containing(NSPredicate(format: "label CONTAINS %@", "synthetic.bin")).firstMatch
+    private func openPublishedFile(_ app: XCUIApplication, name: String = "synthetic.bin") {
+        let file = app.cells.containing(NSPredicate(format: "label CONTAINS %@", name)).firstMatch
         // A new import picker opens Recents, which does not include a newly exported file.
         let browse = app.buttons["Browse"]
         if browse.waitForExistence(timeout: 5) { browse.tap() }
@@ -698,8 +698,40 @@ final class NativeUITests: XCTestCase {
         XCTAssertTrue(input.waitForExistence(timeout: 15))
         input.tap()
         input.typeText("synthetic draft")
-        XCTAssertTrue((input.value as? String)?.contains("synthetic draft") == true)
+        let typed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            (input.value as? String)?.contains("synthetic draft") == true
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [typed], timeout: 5), .completed)
         attachScreenshot(app, name: "05-product-chat")
+    }
+
+    func testSidebarTouchGestures() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "io.github.rsyumi.risunest.ios.bench")
+        app.launchEnvironment["RISUNEST_IOS_PHASE"] = "sidebar-touch"
+        app.launch()
+        let web = app.webViews
+        let reset = web.buttons["Reset sidebar"]
+        XCTAssertTrue(reset.waitForExistence(timeout: 60))
+        web.buttons["Bot 1"].tap()
+        XCTAssertTrue(web.staticTexts["sidebar-clicks:1"].waitForExistence(timeout: 5))
+        reset.tap()
+        web.buttons["Bot 4"].press(forDuration: 0.05, thenDragTo: web.buttons["Bot 1"])
+        XCTAssertTrue(web.staticTexts["sidebar-scrolled"].waitForExistence(timeout: 5))
+        XCTAssertTrue(web.staticTexts["sidebar-drops:0"].exists)
+        XCTAssertTrue(web.staticTexts["sidebar-clicks:0"].exists)
+        reset.tap()
+        web.buttons["Bot 3"].press(forDuration: 0.6, thenDragTo: web.buttons["Before Bot 1"])
+        let events = web.staticTexts.containing(NSPredicate(format: "label BEGINSWITH %@", "sidebar-events:")).firstMatch
+        if events.exists { print(events.label) }
+        XCTAssertTrue(web.staticTexts["sidebar-drops:1"].waitForExistence(timeout: 5))
+        XCTAssertTrue(web.staticTexts["sidebar-first:3"].exists)
+        XCTAssertTrue(web.staticTexts["sidebar-clicks:0"].exists)
+        reset.tap()
+        web.buttons["Bot 1"].press(forDuration: 0.7)
+        XCTAssertTrue(web.staticTexts["sidebar-menus:1"].waitForExistence(timeout: 5))
+        XCTAssertTrue(web.staticTexts["sidebar-drops:0"].exists)
+        XCTAssertTrue(web.staticTexts["sidebar-clicks:0"].exists)
     }
 
     func testProductOnboardingScreenshots() throws {
@@ -825,6 +857,24 @@ final class NativeUITests: XCTestCase {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    func testNativeGeneralFileSelection() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "io.github.rsyumi.risunest.ios.bench")
+        app.launchEnvironment["RISUNEST_IOS_PHASE"] = "general-files"
+        app.launch()
+        let single = app.webViews.buttons["General single synthetic file"]
+        XCTAssertTrue(single.waitForExistence(timeout: 30))
+        single.tap()
+        openPublishedFile(app, name: "native-general.risup")
+        XCTAssertTrue(app.webViews.staticTexts["general-single-exact"].waitForExistence(timeout: 30))
+        app.webViews.buttons["General sliced synthetic file"].tap()
+        openPublishedFile(app, name: "native-general.risup")
+        XCTAssertTrue(app.webViews.staticTexts["general-slice-exact"].waitForExistence(timeout: 30))
+        app.webViews.buttons["General multiple synthetic files"].tap()
+        cancelPicker(app, step: 207)
+        XCTAssertTrue(app.webViews.staticTexts["general-multiple-cancelled"].waitForExistence(timeout: 10))
     }
 
     func testExportPublication() throws {

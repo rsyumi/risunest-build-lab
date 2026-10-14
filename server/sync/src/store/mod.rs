@@ -117,9 +117,7 @@ pub struct DurableWork {
 }
 
 pub(super) fn random_id() -> Result<String> {
-    let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes).map_err(|_| Error::new("entropy-unavailable", 503))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    crate::identity::new_uuid()
 }
 
 pub(super) fn json<T: Serialize>(value: &T) -> Result<String> {
@@ -191,7 +189,7 @@ impl Store {
             uploads: count("uploads")?,
         })
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "source-observer"))]
     pub(crate) fn source_observer_body_work(
         &self,
     ) -> Result<crate::source_observer::PendingBodyWork> {
@@ -425,7 +423,7 @@ impl Store {
         name: &str,
         request: Option<&str>,
     ) -> Result<DeviceCredential> {
-        let token = random_id()?;
+        let token = crate::identity::secret_token()?;
         let device_id = random_id()?;
         let db = self.db()?;
         if let Some(request) = request {

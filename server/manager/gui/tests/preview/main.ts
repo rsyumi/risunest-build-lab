@@ -78,7 +78,7 @@ const backend: Backend = {
   updateCheck: async () => ({ result: "current" }),
   trayStartup: async () => {},
   uninstall: async () => {},
-  requestId: async () => "a".repeat(64),
+  requestId: async () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   qr: async () => "",
 };
 mount(App, { target: document.getElementById("app")!, props: { backend } });

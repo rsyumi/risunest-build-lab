@@ -9,22 +9,11 @@ const testState = vi.hoisted(() => ({
     onTokenizeChat: null as null | (() => void | Promise<void>),
     cbsCallbacks: new Map<string, (...args: any[]) => any>(),
     pluginV2: {
-        providers: new Map(),
-        providerOptions: new Map(),
-        editdisplay: new Set<(content: string) => string | Promise<string>>(),
-        editoutput: new Set<(content: string) => string | Promise<string>>(),
         editprocess: new Set<(content: string) => string | Promise<string>>(),
-        editinput: new Set<(content: string) => string | Promise<string>>(),
-        replacerbeforeRequest: new Set(),
-        replacerafterRequest: new Set(),
-        chatOutput: new Set(),
-        unload: new Set(),
-        loaded: false,
     },
 }))
 
-vi.mock('../parser/parser.svelte', () => ({
-    assetRegex: /$^/g,
+vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule({
     risuChatParser: (data: string, args: Record<string, any> = {}) => data.replace(
         /{{([^{}]+)}}/g,
         (source, body: string) => {
@@ -47,25 +36,16 @@ vi.mock('../parser/parser.svelte', () => ({
     ),
 }))
 
-vi.mock('../storage/persistentDataRuntime.svelte', () => ({
-    assertPersistentMutationAllowed: vi.fn(),
-    getPersistentStorageAuthorityEpoch: () => 0,
-    getPersistentNavigationGeneration: () => 0,
-    acknowledgeGenerationCompletion: vi.fn(async () => undefined),
-    drainDeferredLwwReceives: vi.fn(async () => undefined),
+vi.mock('../storage/persistentDataRuntime.svelte', async () => (await import('./tests/sendChatTestHarness')).persistentRuntimeModule({
     acquireCompleteConversation: testState.unexpectedNativeRuntimeAccess,
     acquireDestructiveReplacementFence: testState.unexpectedNativeRuntimeAccess,
-    captureSelectedConversationTarget: () => null,
-    captureSelectedConversationAuthority: () => null,
     capturePersistentMutationToken: testState.unexpectedNativeRuntimeAccess,
     getActiveConversationSession: () => testState.activeSession,
     getPersistentDataRuntime: testState.unexpectedNativeRuntimeAccess,
     peekActiveConversationSession: () => testState.activeSession,
 }))
 
-vi.mock('../plugins/plugins.svelte', () => ({
-    pluginV2: testState.pluginV2,
-}))
+vi.mock('../plugins/plugins.svelte', async () => (await import('./tests/sendChatTestHarness')).pluginsModule(testState.pluginV2))
 
 vi.mock('./triggers', () => ({
     runTrigger: testState.runTrigger,
@@ -85,9 +65,7 @@ vi.mock('../tokenizer', async () => (await import('./tests/sendChatTestHarness')
 
 vi.mock('./lorebook.svelte', async () => (await import('./tests/sendChatTestHarness')).lorebookModule())
 
-vi.mock('./request/request', () => ({
-    requestChatData: vi.fn(),
-}))
+vi.mock('./request/request', async () => (await import('./tests/sendChatTestHarness')).requestModule(vi.fn()))
 
 vi.mock('./stableDiff', async () => (await import('./tests/sendChatTestHarness')).stableDiffModule())
 vi.mock('./tts', async () => (await import('./tests/sendChatTestHarness')).ttsModule())
@@ -104,7 +82,7 @@ vi.mock('./files/inlays', async () => (await import('./tests/sendChatTestHarness
     getInlayAssetMetadata: vi.fn(async () => null),
 }))
 vi.mock('./models/modelString', async () => (await import('./tests/sendChatTestHarness')).modelStringModule())
-vi.mock('./inlayScreen', () => ({ runInlayScreen: vi.fn() }))
+vi.mock('./inlayScreen', async () => (await import('./tests/sendChatTestHarness')).inlayScreenModule({ runInlayScreen: vi.fn() }))
 vi.mock('./transformers', async () => (await import('./tests/sendChatTestHarness')).transformersModule({
     runImageEmbedding: vi.fn(async () => []),
 }))
@@ -137,7 +115,7 @@ import {
     setDatabaseLite,
 } from '../storage/database.svelte'
 import { roadmap14Corpus } from '../storage/tests/roadmap14/losslessCorpus'
-import { ActiveConversationSession } from '../storage/activeConversationSession'
+import { ActiveConversationSession, cloneConversationMetadata } from '../storage/activeConversationSession'
 import { DBState, selectedCharID } from '../stores.svelte'
 import { doingChat } from './generationState'
 import { previewFormated, sendChat } from './index.svelte'
@@ -496,6 +474,77 @@ describe('sendChat prompt history characterization', () => {
         expect(session.activePinReasons).toEqual([])
     })
 
+    it.each([
+        ['display Lua variable', (session: ActiveConversationSession) => {
+            session.updateChatVariables(new Map([['scratch', 'display']]), { origin: 'display' })
+        }],
+        ['trigger variable', (session: ActiveConversationSession) => {
+            session.updateChatVariables(new Map([['scratch', 'trigger']]))
+        }],
+        ['plugin scriptstate patch', (session: ActiveConversationSession, chat: Chat) => {
+            const expectedMetadata = cloneConversationMetadata(chat)
+            session.applyOperation({
+                expectedVersion: session.version,
+                expectedMetadata,
+                metadata: { ...expectedMetadata, scriptstate: { ...chat.scriptstate, $scratch: 'plugin' } },
+            })
+        }],
+    ] as const)('keeps a pending prompt operation and history when a %s commits while the prompt builds', async (_name, writeVariable) => {
+        setDatabaseLite(makeDatabase())
+        const selectedCharacter = DBState.db.characters[0] as character
+        const liveChat = selectedCharacter.chats[0]
+        liveChat.message = [
+            { role: 'user', data: 'WRITE:first', chatId: 'first' },
+            { role: 'char', data: 'second', chatId: 'second' },
+            { role: 'user', data: 'third', chatId: 'third' },
+        ]
+        liveChat.fmIndex = -1
+        liveChat.scriptstate = { $kept: 'before' }
+        selectedCharacter.customscript = [{
+            comment: 'Prepare stored content',
+            in: 'WRITE:',
+            out: 'STORED:',
+            type: 'editprocess',
+            flag: 'g',
+            ableFlag: true,
+        }, {
+            comment: 'Persist processed content',
+            in: 'STORED:',
+            out: '@@inject',
+            type: 'editprocess',
+            flag: 'g',
+            ableFlag: true,
+        }]
+        const session = new ActiveConversationSession({
+            characterId: selectedCharacter.chaId,
+            conversationId: liveChat.id!,
+            conversation: liveChat,
+            storeRevision: 51,
+        })
+        testState.activeSession = session
+        mockTriggerClone()
+
+        let tokenizeCalls = 0
+        let written = false
+        testState.onTokenizeChat = () => {
+            tokenizeCalls += 1
+            if (written || tokenizeCalls < 2) return
+            written = true
+            writeVariable(session, liveChat)
+        }
+
+        await expect(sendChat({ preview: true })).resolves.toBe(true)
+
+        expect(written).toBe(true)
+        expect(liveChat.message.map((message) => message.data)).toEqual([
+            'STORED:first',
+            'second',
+            'third',
+        ])
+        expect(liveChat.scriptstate).toEqual({ $kept: 'before', $scratch: expect.any(String) })
+        expect(session.activePinReasons).toEqual([])
+    })
+
     it('discards a pending prompt operation when a same-owner session edit advances the version', async () => {
         setDatabaseLite(makeDatabase())
         const selectedCharacter = DBState.db.characters[0] as character
@@ -582,7 +631,7 @@ describe('sendChat prompt history characterization', () => {
         selectedCharacter.customscript = [{
             comment: 'Must not route to the aliased session',
             in: 'WRITE:',
-            out: '{{setvar::wrong_owner::value}}',
+            out: '@@inject',
             type: 'editprocess',
             flag: 'g',
             ableFlag: true,

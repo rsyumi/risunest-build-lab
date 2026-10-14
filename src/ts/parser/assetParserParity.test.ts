@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { writable } from 'svelte/store'
 
-vi.mock('../platform', () => ({ get isTauri() { return parserMocks.native }, isNodeServer: false }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({ runtime: parserMocks.native ? 'tauri' : 'web', os: 'windows' })))
 
 const parserMocks = vi.hoisted(() => ({
     native: false,

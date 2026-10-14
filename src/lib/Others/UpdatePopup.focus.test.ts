@@ -8,7 +8,7 @@ vi.mock('src/ts/update/controller', () => ({ applyAppUpdate: vi.fn(), cancelAppU
 vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => ({ language: 'en' }) }))
 vi.mock('src/ts/globalApi.svelte', () => ({ openURL: vi.fn() }))
 vi.mock('@tauri-apps/plugin-process', () => ({ exit: vi.fn() }))
-vi.mock('src/lang', () => ({ language: { risuNest: { update: { dialogTitle: 'Update', downloading: 'Downloading', cancel: 'Cancel' } } } }))
+import { language } from 'src/lang'
 import UpdatePopup from './UpdatePopup.svelte'
 
 const update: AvailableAppUpdate = {
@@ -31,7 +31,7 @@ it('retains Cancel focus through progress and focuses the panel again on reopen'
     component = mount(UpdatePopup, { target })
     flushSync()
     expect(document.activeElement).toBe(target.querySelector('[role=dialog]'))
-    const cancel = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Cancel')!
+    const cancel = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === language.risuNest.update.cancel)!
     cancel.focus()
     for (const downloaded of [10, 20, 30]) {
         appUpdateState.update(value => ({ ...value, progress: { handleId: 'synthetic', downloaded, total: 100 } }))

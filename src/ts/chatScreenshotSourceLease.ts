@@ -56,10 +56,10 @@ function assertOpeningSession(
     if (
         dependencies.getNavigationGeneration() !== navigationGeneration
         || dependencies.getActiveConversationSession() !== session
-        || !session.isActive
         || session.characterId !== input.characterId
         || session.conversationId !== input.chatId
-        || session.version !== sessionVersion
+        // Variable-only commits leave the messages the screenshot reads.
+        || !session.isContentUnchangedSince(sessionVersion)
     ) {
         throw new PersistentConversationReadStaleError()
     }
@@ -172,7 +172,7 @@ export async function openChatScreenshotSourceLease(
     } catch {
         throw new Error('Screenshot conversation changed while opening')
     }
-    if (session && session.persistedVersion !== sessionVersion) {
+    if (session && session.persistedVersion < sessionVersion) {
         throw new Error('Screenshot conversation has unpersisted changes after flush')
     }
 
@@ -229,7 +229,7 @@ export async function openChatScreenshotSourceLease(
             throw new Error('Screenshot conversation changed while opening')
         }
         if (
-            (session && session.persistedVersion !== sessionVersion)
+            (session && session.persistedVersion < sessionVersion)
             || (session ? session.totalMessages : committedAuthority!.totalMessages) !==
                 evidence.totalMessages
         ) {

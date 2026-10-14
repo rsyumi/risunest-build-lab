@@ -480,7 +480,7 @@ impl<'a> Transfer<'a> {
                                 &bases.iter().map(Vec::as_slice).collect::<Vec<_>>(),
                                 &bytes,
                             ) {
-                                if recipe.encode()?.len() + 64 < bytes.len() {
+                                if recipe.encoded_len()? + 64 < bytes.len() {
                                     frame = Some(Frame::Delta(recipe));
                                 }
                             }
@@ -490,9 +490,9 @@ impl<'a> Transfer<'a> {
                     }
                 }
                 let frame = frame.unwrap_or(Frame::Full(bytes));
-                let encoded = encode_frames(std::slice::from_ref(&frame));
+                let encoded = transfer::encoded_len(std::slice::from_ref(&frame));
                 let length = match encoded {
-                    Ok(bytes) => bytes.len() - 8,
+                    Ok(length) => length - 8,
                     Err(_) if size >= CHUNK as u64 => {
                         self.upload_large(target, size, base_candidates)?;
                         self.client.verified(size);
@@ -570,7 +570,7 @@ impl<'a> Transfer<'a> {
         // on the coordinator only after both workers have joined.
         let mut remaining = frames;
         while !remaining.is_empty() {
-            if encode_frames(&remaining[..1])?.len() > self.frame_limit.get() {
+            if transfer::encoded_len(&remaining[..1])? > self.frame_limit.get() {
                 let (target, size) = match &remaining[0] {
                     Frame::Full(bytes) => (transfer_hash(bytes), bytes.len() as u64),
                     Frame::Delta(recipe) => (recipe.target_hash.clone(), recipe.target_size),
@@ -595,7 +595,7 @@ impl<'a> Transfer<'a> {
                 let mut split = 0;
                 let mut used = 8;
                 while split < remaining.len() {
-                    let size = encode_frames(&remaining[split..split + 1])?.len() - 8;
+                    let size = transfer::encoded_len(&remaining[split..split + 1])? - 8;
                     if used + size > self.frame_limit.get() {
                         break;
                     }

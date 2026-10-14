@@ -220,7 +220,7 @@ describe('generation conversation operation', () => {
         expect(harness.session?.pinCount('transaction')).toBe(0)
     })
 
-    it('invalidates an empty tail lease after a concurrent session append', () => {
+    it('keeps an empty tail lease across a variable commit and invalidates it after a concurrent session append', () => {
         const harness = createHarness([])
         const operation = captureGenerationTailFallbackOperation({
             session: harness.session,
@@ -229,6 +229,8 @@ describe('generation conversation operation', () => {
             getCurrentChat: () => harness.chat,
         })
 
+        harness.session?.updateChatVariables(new Map([['scratch', 'display']]), { origin: 'display' })
+        expect(operation.isOwned()).toBe(true)
         harness.session?.append(message('concurrent response', 'response-1'))
 
         expect(operation.isOwned()).toBe(false)

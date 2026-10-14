@@ -296,7 +296,7 @@ impl GoogleDrive {
         let body =
             serde_json::to_vec(&serde_json::json!({ "name": name, "mimeType": FOLDER_MIME }))
                 .map_err(|_| corrupt())?;
-        let access = self.token(session, false, cancel).await?;
+        let access = self.token(session, None, cancel).await?;
         let mut headers = authorized_headers(&access);
         headers.insert(
             "content-type".into(),
@@ -387,7 +387,7 @@ impl GoogleDrive {
     async fn token(
         &self,
         session: Session<'_>,
-        force_refresh: bool,
+        rejected: Option<&str>,
         cancel: &Cancellation,
     ) -> Result<zeroize::Zeroizing<String>> {
         auth::access_token(
@@ -396,7 +396,7 @@ impl GoogleDrive {
             session.secret,
             session.account,
             session.token,
-            force_refresh,
+            rejected,
             cancel,
         )
         .await
@@ -415,7 +415,7 @@ impl GoogleDrive {
     ) -> Result<HttpResponse> {
         let mut refreshed = false;
         loop {
-            let token = self.token(session, refreshed, cancel).await?;
+            let token = self.token(session, None, cancel).await?;
             let request = HttpRequest {
                 method: method.clone(),
                 url: url.clone(),
@@ -431,6 +431,7 @@ impl GoogleDrive {
             let mut response = self.dispatch(request, cancel).await?;
             if response.status == 401 && !refreshed {
                 refreshed = true;
+                self.token(session, Some(token.as_str()), cancel).await?;
                 continue;
             }
             self.require_status(&mut response, allowed, session.account, cancel)
@@ -575,7 +576,7 @@ impl GoogleDrive {
             session.settings.upload("/files")?,
             &[("uploadType", "resumable"), ("fields", FILE_FIELDS)],
         );
-        let token = self.token(session, false, cancel).await?;
+        let token = self.token(session, None, cancel).await?;
         let metadata = self.object_metadata(session.settings, intent, file_id);
         let length = metadata.len() as u64;
         let mut headers = authorized_headers(&token);
@@ -655,7 +656,7 @@ impl GoogleDrive {
         total: u64,
         cancel: &Cancellation,
     ) -> Result<SessionStatus> {
-        let token = self.token(session, false, cancel).await?;
+        let token = self.token(session, None, cancel).await?;
         let mut headers = authorized_headers(&token);
         headers.insert("content-range".to_owned(), format!("bytes */{total}"));
         let request = HttpRequest {
@@ -705,7 +706,7 @@ impl GoogleDrive {
             cancel.check()?;
             let length = UPLOAD_CHUNK_BYTES.min(total - offset);
             let reader = source.open(offset, length, cancel).await?;
-            let token = self.token(session, false, cancel).await?;
+            let token = self.token(session, None, cancel).await?;
             let mut headers = authorized_headers(&token);
             headers.insert(
                 "content-range".to_owned(),
@@ -727,7 +728,7 @@ impl GoogleDrive {
             let mut response = self.dispatch(request, cancel).await?;
             if response.status == 401 && !refreshed {
                 refreshed = true;
-                self.token(session, true, cancel).await?;
+                self.token(session, Some(token.as_str()), cancel).await?;
                 match self.session_status(session, session_uri, total, cancel).await? {
                     SessionStatus::Complete(file) => return self.completed_receipt(
                         session.settings, intent, &file, Some(&upload.file_id)),
@@ -813,7 +814,7 @@ impl GoogleDrive {
     async fn verify_file(&self, session: Session<'_>, intent: &ObjectIntent, file: &DriveFile,
         cancel: &Cancellation) -> Result<()> {
         matches_intent(intent, file)?;
-        let token = self.token(session, false, cancel).await?;
+        let token = self.token(session, None, cancel).await?;
         let mut response = self.dispatch(HttpRequest {
             method: reqwest::Method::GET,
             url: with_query(session.settings.api(&format!("/files/{}", file.file_id()?))?, &[("alt", "media")]),
@@ -870,7 +871,7 @@ impl GoogleDrive {
         let mut refreshed = false;
         loop {
         let content = source.open(0, intent.byte_length, cancel).await?;
-        let token = self.token(session, false, cancel).await?;
+        let token = self.token(session, None, cancel).await?;
         let (body, length, content_type) = multipart_body(&metadata, content, intent.byte_length);
         let mut headers = authorized_headers(&token);
         headers.insert("content-type".to_owned(), content_type);
@@ -889,7 +890,7 @@ impl GoogleDrive {
         let mut response = self.dispatch(request, cancel).await?;
         if response.status == 401 && !refreshed {
             refreshed = true;
-            self.token(session, true, cancel).await?;
+            self.token(session, Some(token.as_str()), cancel).await?;
             continue;
         }
         self.require_status(&mut response, &[200, 201], session.account, cancel)
@@ -1218,7 +1219,7 @@ impl Provider for GoogleDrive {
             let length = metadata.byte_length()?;
             let mut refreshed = false;
             let mut response = loop {
-            let token = self.token(session, false, cancel).await?;
+            let token = self.token(session, None, cancel).await?;
             let request = HttpRequest {
                 method: reqwest::Method::GET,
                 url: with_query(
@@ -1237,7 +1238,7 @@ impl Provider for GoogleDrive {
             let response = self.dispatch(request, cancel).await?;
             if response.status == 401 && !refreshed {
                 refreshed = true;
-                self.token(session, true, cancel).await?;
+                self.token(session, Some(token.as_str()), cancel).await?;
                 continue;
             }
             break response;
@@ -1364,7 +1365,7 @@ impl Provider for GoogleDrive {
             };
             let bytes = head.as_bytes().to_vec();
             let length = bytes.len() as u64;
-            let token = self.token(session, false, cancel).await?;
+            let token = self.token(session, None, cancel).await?;
             let mut headers = authorized_headers(&token);
             let request = if present {
                 headers.insert("content-type".to_owned(), OCTET_STREAM.to_owned());

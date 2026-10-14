@@ -2,6 +2,7 @@
     import { language } from 'src/lang'
     import { alertCheckboxConfirm, alertConfirm, alertNormal } from 'src/ts/alert'
     import { isTauri } from 'src/ts/platform'
+    import { hasLibraryCharacters } from 'src/ts/storage/libraryCharacters'
     import { LoadLocalBackup } from 'src/ts/drive/backuplocal'
     import { openSyncConflictBackups } from 'src/ts/storage/sync/syncConflictRestore'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
@@ -45,6 +46,7 @@
         if (
             kind === 'import' &&
             !isTauri &&
+            (await hasLibraryCharacters()) &&
             !(await alertCheckboxConfirm({
                 title: language.risuSaveImportConfirm,
                 description: language.checkboxConfirmation.dataReplacementDescription,

@@ -153,6 +153,24 @@ fn source(run:&str)->Result<source_process::SourceProcess,String> {
         &environment("LWW_SOURCE_FINGERPRINT")?,&environment("LWW_SOURCE_BINARY_SHA")?,run)
 }
 
+const RENDERER_DEVICE_REQUESTS:[(&str,&str,&str);2]=[
+    ("windows-registration.uri","synthetic-renderer-windows","72000000-0000-4000-8000-000000000000"),
+    ("android-registration.uri","synthetic-renderer-android","73000000-0000-4000-8000-000000000000"),
+];
+
+#[test]
+fn renderer_peer_registration_requests_are_accepted_by_sync() {
+    let root=tempfile::tempdir().unwrap();
+    let store=risunest_sync_server::store::Store::init(root.path()).unwrap();
+    let mut devices=BTreeSet::new();
+    for (_,name,request) in RENDERER_DEVICE_REQUESTS {
+        let uri=store.issue_named_registration(name,request,Some("http://127.0.0.1:8080")).unwrap();
+        let registration=risunest_sync_connect::Registration::parse_uri(&uri).unwrap();
+        assert!(devices.insert(registration.device_id));
+    }
+    assert_eq!(store.managed_devices().unwrap().len(),RENDERER_DEVICE_REQUESTS.len());
+}
+
 pub(super) fn renderer_setup()->Result<(),String> {
     if environment("RISUNEST_LWW_FINAL_STAGE")?!="authorized-synthetic" {return Err("renderer setup gate is closed".into());}
     let checkpoint=environment("RISUNEST_LWW_FINAL_CHECKPOINT")?;
@@ -183,7 +201,7 @@ pub(super) fn renderer_setup()->Result<(),String> {
     if shutdown_file.exists() {return Err("renderer setup shutdown sentinel already exists".into());}
     let mut child=source(&format!("renderer-{}",uuid::Uuid::new_v4()))?;
     let setup=(||->Result<(),String> {
-        let producer=native_bootstrap::source_client(&mut child,&store,"synthetic-renderer-producer",&"71".repeat(32),false)?;
+        let producer=native_bootstrap::source_client(&mut child,&store,"synthetic-renderer-producer","71000000-0000-4000-8000-000000000000",false)?;
         let config=producer.client.config();
         bind(&mut store,SyncTarget::Server(config.endpoint.clone()),&config.endpoint,&config.library_id);
         let initial=queue_initial_producer(&mut store,&certificate,certificate.assets.len())?;
@@ -196,9 +214,10 @@ pub(super) fn renderer_setup()->Result<(),String> {
         if acknowledged==0 || submitted<initial["units"].as_u64().ok_or("actual initial unit count missing")? {
             return Err("renderer source lacks acknowledged complete producer publication".into());
         }
-        let registrations=[("producer-registration.uri",config.encode_uri().map_err(|_|"producer URI encoding failed")?),
-            ("windows-registration.uri",child.register("synthetic-renderer-windows",&"72".repeat(32))?.uri),
-            ("android-registration.uri",child.register("synthetic-renderer-android",&"73".repeat(32))?.uri)];
+        let mut registrations=vec![("producer-registration.uri",config.encode_uri().map_err(|_|"producer URI encoding failed")?)];
+        for (file,name,request) in RENDERER_DEVICE_REQUESTS {
+            registrations.push((file,child.register(name,request)?.uri));
+        }
         for (name,uri) in registrations {
             use std::io::Write;
             let mut file=std::fs::OpenOptions::new().create_new(true).write(true).open(output.join(name)).map_err(|e|e.to_string())?;
@@ -475,7 +494,7 @@ fn costly_server(output:&Path,producer:&mut PersistentStore,server:LocalServerFi
                 },
                 "server-sync-first-binding"=>{
                     let mut child=source(&format!("final-{label}"))?;
-                    let sender=native_bootstrap::source_client(&mut child,producer,"synthetic-final-producer",&hex::encode(sha2::Sha256::digest(label.as_bytes())),false)?;
+                    let sender=native_bootstrap::source_client(&mut child,producer,"synthetic-final-producer",&uuid::Uuid::new_v4().to_string(),false)?;
                     let config=sender.client.config();
                     bind(producer,SyncTarget::Server(config.endpoint.clone()),&config.endpoint,&config.library_id);
                     let initial=queue_initial_producer(producer,certificate,hashes.len())?;
@@ -486,7 +505,7 @@ fn costly_server(output:&Path,producer:&mut PersistentStore,server:LocalServerFi
                     let roles=observed.body_objects.iter().map(|(hash,object)|(hash.clone(),object.purposes.iter().cloned().collect()))
                         .collect::<BTreeMap<String,BTreeSet<String>>>();
                     let candidate=native_bootstrap::source_client(&mut child,&destination,"synthetic-final-destination",
-                        &hex::encode(sha2::Sha256::digest(format!("destination-{label}").as_bytes())),true)?;
+                        &uuid::Uuid::new_v4().to_string(),true)?;
                     if scenario==Scenario::DuringAssetTransfer {
                         let hash=delta.as_ref().ok_or("excluded large Asset delta absent")?["payloadHash"].as_str().ok_or("large Asset delta hash absent")?;
                         let mut roles=roles;roles.entry(hash.into()).or_default().insert("Asset".into());
@@ -525,7 +544,7 @@ async fn external_tier(output:&Path,store:PersistentStore,certificate:&scale_cer
     fixture.sender.receive_and_apply(&mut fixture.a,authority_a,&[],&cancel).await.map_err(|e|e.to_string())?;
     verify_bootstrap(&fixture.a,&fixture.b);verify_settled(&fixture.a,&fixture.sender);verify_settled(&fixture.b,&fixture.receiver);
     if selected==Some(Scenario::OrdinaryResume) {
-        let CycleFixture {directory_a,directory_b,a,b,provider,sender,receiver}=fixture;
+        let CycleFixture {directory_a,directory_b,a,b,provider,clock:_,sender,receiver}=fixture;
         let _directories=(directory_a,directory_b);
         let mut pair=Some((a,b,sender,receiver));let mut samples=Vec::new();
         for direction in [FinalDirection::AtoB,FinalDirection::BtoA] {for iteration in 0..final_runner::WARMUPS+final_runner::REPETITIONS {
@@ -580,7 +599,7 @@ async fn connected(fixture:&CycleFixture)->Result<Arc<crate::external_storage::c
         stored:StoredConnection {id:fixture.sender.connection_id.clone(),config,descriptor:fixture.sender.descriptor.clone(),
             descriptor_locator:RemoteLocator {connection_identity:handle.connection_identity.clone(),collection:None,object:"descriptor".into()},
             provider_repository_id:handle.repository_id.clone(),credential_ref:"fixture".into(),root_key_ref:"fixture-key".into(),
-            recovery_key_ref:"fixture-recovery".into(),retention_policy:None,capabilities,
+            recovery_key_ref:"fixture-recovery".into(),retention_policy:None,transfer_concurrency:None,labels:Default::default(),capabilities,
             created_at_ms:crate::external_storage::runtime::now_ms(),verified_at_ms:crate::external_storage::runtime::now_ms(),
             last_sync_at_ms:None,last_backup_at_ms:None},provider:fixture.provider.clone(),handle,dependencies,
         root_key:zeroize::Zeroizing::new(*fixture.sender.root_key)}))
@@ -715,6 +734,7 @@ async fn costly_external(output:&Path,fixture:&mut CycleFixture,hashes:&[String]
                 }
                 engines.push(crate::external_storage::lww_engine::ExternalLwwEngine {provider:engine.provider.clone(),repository:handle,
                     library:engine.library.clone(),root_key:zeroize::Zeroizing::new(*engine.root_key),admission:engine.admission.clone(),
+                    test_lease_clock:engine.test_lease_clock.clone(),
                     connection_id:engine.connection_id.clone(),connection_root:engine.connection_root.clone(),
                     capabilities,descriptor:engine.descriptor.clone()});
             }
@@ -775,6 +795,7 @@ async fn costly_external(output:&Path,fixture:&mut CycleFixture,hashes:&[String]
             let job_id=uuid::Uuid::new_v4().to_string();
             let compactor=crate::external_storage::lww_engine::ExternalLwwEngine {provider:fixture.sender.provider.clone(),repository:crate::external_storage::fake::repository(),
                 library:fixture.sender.library.clone(),root_key:zeroize::Zeroizing::new(*fixture.sender.root_key),admission:fixture.sender.admission.clone(),
+                test_lease_clock:fixture.sender.test_lease_clock.clone(),
                 connection_id:fixture.sender.connection_id.clone(),connection_root:fixture.sender.connection_root.clone(),
                 capabilities:fixture.sender.capabilities.clone(),descriptor:fixture.sender.descriptor.clone()};
             let context=leases::LeaseContext {root:&compactor.connection_root,connection_id:&compactor.connection_id,writer_id:&writer,
@@ -812,6 +833,7 @@ async fn fake_transfer_overlap(slot:&costly_runner::CostlySlot,destination:&mut 
         }
         engines.push(crate::external_storage::lww_engine::ExternalLwwEngine {provider:fixture.sender.provider.clone(),repository,
             library:fixture.sender.library.clone(),root_key:zeroize::Zeroizing::new(*fixture.sender.root_key),admission:fixture.sender.admission.clone(),
+            test_lease_clock:fixture.sender.test_lease_clock.clone(),
             connection_id:fixture.sender.connection_id.clone(),connection_root:root.to_owned(),capabilities,descriptor:fixture.sender.descriptor.clone()});
     }
     let peer_engine=engines.pop().ok_or("actual transfer peer engine absent")?;

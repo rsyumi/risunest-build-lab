@@ -59,23 +59,34 @@ impl Drop for ReceiptGuard {
     }
 }
 
+pub(crate) struct WorkerScope {
+    state: Option<Arc<Mutex<State>>>,
+}
+
+pub(crate) fn capture_scope() -> WorkerScope {
+    let state = CURRENT.with(|current| current.borrow().clone());
+    if let Some(state) = &state { state.lock().unwrap().pending += 1; }
+    WorkerScope { state }
+}
+
+pub(crate) fn with_scope<T>(scope: WorkerScope, operation: impl FnOnce() -> T) -> T {
+    hash_work::reset_hash_work();
+    let previous = CURRENT.with(|current| current.replace(scope.state.clone()));
+    let mut receipt = ReceiptGuard { state: scope.state, previous, completed: false };
+    let result = operation();
+    receipt.completed = true;
+    result
+}
+
 pub(crate) fn spawn_blocking<F, T>(operation: F) -> tokio::task::JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
     let body_scope = body_io::capture_body_io_scope();
-    let state = CURRENT.with(|current| current.borrow().clone());
-    if let Some(state) = &state { state.lock().unwrap().pending += 1; }
+    let worker_scope = capture_scope();
     tokio::task::spawn_blocking(move || {
-        body_io::with_body_io_scope(body_scope, || {
-            hash_work::reset_hash_work();
-            let previous = CURRENT.with(|current| current.replace(state.clone()));
-            let mut receipt = ReceiptGuard { state, previous, completed: false };
-            let result = operation();
-            receipt.completed = true;
-            result
-        })
+        body_io::with_body_io_scope(body_scope, || with_scope(worker_scope, operation))
     })
 }
 

@@ -2,22 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-    REQUIRED_COMPATIBILITY_CLASSES,
     createOracleBenchmarkFixtures,
     loadTokenizerCorpus,
     percentile,
-    verifyArtifactHashes,
     verifyTokenizerCorpus,
 } from './corpus.mjs'
-
-test('the checked-in artifacts match the literal corpus provenance', async () => {
-    const corpus = await loadTokenizerCorpus()
-
-    assert.deepEqual(await verifyArtifactHashes(corpus), {
-        cl100k_base: corpus.artifacts.cl100k_base.sha256,
-        o200k_base: corpus.artifacts.o200k_base.sha256,
-    })
-})
 
 test('both JavaScript oracle artifacts match every literal token ID and error', async () => {
     const corpus = await loadTokenizerCorpus()
@@ -26,15 +15,6 @@ test('both JavaScript oracle artifacts match every literal token ID and error', 
         cl100k_base: { idCases: 34, errorCases: 10 },
         o200k_base: { idCases: 34, errorCases: 4 },
     })
-})
-
-test('the retained corpus covers every Roadmap 14 compatibility class', async () => {
-    const corpus = await loadTokenizerCorpus()
-    const classes = new Set(corpus.cases.map((entry) => entry.class))
-
-    for (const requiredClass of REQUIRED_COMPATIBILITY_CLASSES) {
-        assert.ok(classes.has(requiredClass), `missing compatibility class: ${requiredClass}`)
-    }
 })
 
 test('oracle benchmark fixtures retain ordered batch and long-input shapes', async () => {

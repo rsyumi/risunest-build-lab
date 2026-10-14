@@ -1,6 +1,6 @@
 import { portableBackupSuggestedName } from './portableBackupName'
 import { invoke } from '@tauri-apps/api/core'
-import { open, save } from '@tauri-apps/plugin-dialog'
+import { open, save } from './fileSelection'
 import { language } from 'src/lang'
 import { alertCheckboxConfirm, alertConfirm, alertNormal } from '../alert'
 import { pickIOSBackupSource, materializeIOSBackupSource, discardIOSFile } from './iosFiles'
@@ -49,12 +49,6 @@ export type BackupSourceFactory = (
 export type BackupRestoreResult = NativeFileJobResult | { warningCodes: string[] }
 export interface BackupRestoreOptions extends NativeFileRestoreJobOptions {
     onSource?(source: SourceInfo): void
-    /**
-     * The device holds nothing worth keeping yet, as on the first-run
-     * screen: skip the replacement confirmation and describe the section
-     * choice as a first import rather than an overwrite.
-     */
-    firstRun?: boolean
 }
 
 function combineSignals(...signals: (AbortSignal | undefined)[]) {
@@ -234,9 +228,27 @@ export async function restoreBackupFromNativeSource(
                 >('native_backup_source_format', { source: input })
                 checkSignal(joined.signal)
                 if (format !== 'portable') {
-                    if (input.type === 'androidSeekable') input = await materializeAndroidBackupSource(input.token)
+                    if (input.type === 'androidSeekable') input = await materializeAndroidBackupSource(input.token, {
+                        signal: joined.signal,
+                        onProgress: progress => onStatus(syntheticNativeFileJobStatus(
+                            { jobId: progress.requestId, kind: format === 'local-backup' ? 'restore-legacy-local-backup' : 'restore-block-risu-save' },
+                            'copying-source',
+                            {
+                                stageUnit: 'bytes', stageCompleted: progress.copiedBytes,
+                                ...(progress.totalBytes === null ? {} : { stageTotal: progress.totalBytes }),
+                            },
+                        )),
+                    })
                     else if (input.type === 'iosScoped') {
-                        const materialized = await materializeIOSBackupSource(input.token)
+                        const token = input.token
+                        const materialized = await materializeIOSBackupSource(token, {
+                            signal: joined.signal,
+                            onProgress: progress => onStatus(syntheticNativeFileJobStatus(
+                                { jobId: token, kind: format === 'local-backup' ? 'restore-legacy-local-backup' : 'restore-block-risu-save' },
+                                'copying-source',
+                                { stageUnit: 'bytes', stageCompleted: progress.copiedBytes, stageTotal: progress.totalBytes },
+                            )),
+                        })
                         materializedIOSPath = materialized.path
                         input = { type: 'desktopPath', path: materialized.path }
                     }
@@ -310,6 +322,7 @@ export async function restoreBackupFromNativeSource(
                                     setSource: onSource,
                                     setPartialWritesPossible: context.setPartialWritesPossible,
                                 }, {
+                                    firstRun: options.firstRun,
                                     beforeActivation: async () => {
                                         await restoreOptions.beforeActivation?.()
                                     },

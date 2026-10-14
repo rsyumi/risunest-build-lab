@@ -10,7 +10,7 @@ import { ActiveConversationSession } from './activeConversationSession'
 import { WorkingSetResidencyRegistry } from './workingSetResidency'
 import { captureRoot, deferred, makeDatabase, makeStore, SaveCoordinator } from './saveCoordinator.testSupport'
 
-vi.mock('../platform', () => ({ isTauri: false }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 afterEach(() => vi.useRealTimers())
 
 async function durableHarness(database: Database, selectedCharacterId?: string) {

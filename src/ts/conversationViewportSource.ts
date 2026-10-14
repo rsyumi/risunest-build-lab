@@ -1,5 +1,5 @@
 import { ChatRenderIdentityRegistry } from './chatRenderIdentity'
-import { safeStructuredClone } from './polyfill'
+import { safeStructuredClone } from './safeStructuredClone'
 import type {
     CapturedChatMessageTarget,
     CurrentChatMessageTarget,
@@ -306,8 +306,10 @@ implements ConversationViewportSource {
         // Lua display listeners may store per-row scratch variables. Restarting
         // all rows for those writes creates a render -> write -> abort loop.
         // Keep render rows valid, while session locators and persistence advance.
+        // Other variable commits leave messages unchanged too; the rows that read
+        // a changed variable are refreshed by the script display refresh instead.
         if (
-            event.displayVariableUpdate &&
+            (event.displayVariableUpdate || event.variableUpdate) &&
             event.previousVersion === this.lastSessionVersion
         ) {
             this.lastSessionVersion = event.sessionVersion

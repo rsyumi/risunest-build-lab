@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
     decodePreparedNativePngCardMetadata,
+    INLINE_ASSET_ENCODED_LIMIT,
     InvalidPreparedNativePngCardError,
 } from './nativePngCardAdapter'
 
@@ -15,18 +16,6 @@ function encoded(value: unknown): string {
  * repeated run is spliced in as whole base64 quanta ('AAA' is 'QUFB') instead of
  * passing tens of MiB through the byte-wise encoder.
  */
-function encodedWithRepeatedA(value: unknown, marker: string, count: number): string {
-    const parts = JSON.stringify(value).split(marker)
-    if (parts.length !== 2 || /[^\x00-\x7f]/.test(parts[0])) throw new Error('Expected one marker after ASCII JSON')
-    const [head, tail] = parts
-    const lead = (3 - head.length % 3) % 3
-    const quanta = count < lead ? 0 : Math.floor((count - lead) / 3)
-    if (quanta === 0) return Buffer.from(head + 'A'.repeat(count) + tail, 'utf8').toString('base64')
-    return Buffer.from(head + 'A'.repeat(lead), 'utf8').toString('base64')
-        + 'QUFB'.repeat(quanta)
-        + Buffer.from('A'.repeat(count - lead - quanta * 3) + tail, 'utf8').toString('base64')
-}
-
 function v2(name = 'V2'): Record<string, unknown> {
     return {
         spec: 'chara_card_v2',
@@ -205,29 +194,17 @@ describe('prepared native PNG card metadata adapter', () => {
         expect(result.data.assets.map((asset: any) => asset.uri)).toEqual(['__asset:inline', '__asset:existing', 'ccdefault:'])
     })
 
-    it('builds a spliced repeated payload identical to its whole encoding', () => {
-        for (const name of ['V3', 'V3x', 'V3xy']) {
-            for (const count of [0, 1, 2, 3, 4, 5, 6, 7, 64]) {
-                const whole = v3(name) as any
-                whole.data.assets = [{ uri: `data:application/octet-stream;base64,${'A'.repeat(count)}` }]
-                const marked = v3(name) as any
-                marked.data.assets = [{ uri: 'data:application/octet-stream;base64,<repeat>' }]
-                expect(encodedWithRepeatedA(marked, '<repeat>', count)).toBe(encoded(whole))
-            }
-        }
-    })
-
-    it('skips an encoded data URI at the legacy fifty MiB boundary', async () => {
+    it('skips an encoded data URI at the inline asset limit and stages one below it', async () => {
+        expect(INLINE_ASSET_ENCODED_LIMIT).toBe(50 * 1024 * 1024)
         const inline = v3() as any
-        inline.data.assets = [{ uri: 'data:application/octet-stream;base64,<repeat>' }]
-        const stageInlineAsset = vi.fn()
+        inline.data.assets = [{ uri: 'data:application/octet-stream;base64,AAAA' }, { uri: 'data:application/octet-stream;base64,AAAAAAAA' }]
+        const stageInlineAsset = vi.fn(async (_bytes: Uint8Array, _name: string) => ({ token: 'staged' }) as any)
         const onOversizedInlineAsset = vi.fn()
-        const ccv3 = encodedWithRepeatedA(inline, '<repeat>', 50 * 1024 * 1024)
-        const result = await decodePreparedNativePngCardMetadata({ ccv3 }, {
-            ...unusedRccDependencies, stageInlineAsset, onOversizedInlineAsset,
+        const result = await decodePreparedNativePngCardMetadata({ ccv3: encoded(inline) }, {
+            ...unusedRccDependencies, stageInlineAsset, onOversizedInlineAsset, inlineAssetEncodedLimit: 8,
         }) as any
-        expect(result.data.assets).toEqual([])
-        expect(stageInlineAsset).not.toHaveBeenCalled()
+        expect(result.data.assets.map((asset: any) => asset.uri)).toEqual(['__asset:staged'])
+        expect(stageInlineAsset).toHaveBeenCalledExactlyOnceWith(Buffer.from('AAAA', 'base64'), '')
         expect(onOversizedInlineAsset).toHaveBeenCalledOnce()
     })
 

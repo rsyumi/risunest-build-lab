@@ -37,6 +37,16 @@ impl MyboxPlan {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_DAILY_DOWNLOADS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+/// Replaces every plan's daily download allowance on this thread.
+#[cfg(test)]
+pub(crate) fn set_daily_downloads_for_test(limit: u64) {
+    TEST_DAILY_DOWNLOADS.with(|value| value.set(Some(limit)));
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum MyboxCounter {
     DownloadDay,
@@ -65,6 +75,8 @@ impl MyboxCounter {
     }
     pub fn limit(self, plan: MyboxPlan) -> u64 {
         let (downloads, lists, general) = plan.limits();
+        #[cfg(test)]
+        let downloads = TEST_DAILY_DOWNLOADS.with(std::cell::Cell::get).unwrap_or(downloads);
         match self {
             Self::DownloadDay => downloads,
             Self::ListMinute => lists,

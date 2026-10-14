@@ -2,7 +2,6 @@ import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { describe, expect, it, vi } from 'vitest'
 import { createRawSnippet, mount, tick, unmount } from 'svelte'
 import { writable } from 'svelte/store'
-import { languageEnglish } from '../../lang/en'
 import { DBState } from 'src/ts/stores.svelte'
 import type { Database } from 'src/ts/storage/database.svelte'
 import { IndexedDbPersistentDataStore } from 'src/ts/storage/indexedDbPersistentDataStore'
@@ -16,7 +15,6 @@ import SelectedConversationEditor from './SelectedConversationEditor.svelte'
 const state = vi.hoisted(() => ({
     runtime: null as ReturnType<typeof createPersistentDataRuntime> | null,
 }))
-vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/stores.svelte', () => ({
     DBState: { db: {} },
     selectedCharID: writable(0),

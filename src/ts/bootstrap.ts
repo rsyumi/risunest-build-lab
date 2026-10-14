@@ -71,6 +71,7 @@ import {
     publishCurrentOfficialRevision,
 } from "./storage/persistentDataRuntime.svelte";
 import { registerLifecycleCommitListeners } from "./storage/lifecycleCommit";
+import { createLifecycleFlush } from "./storage/lifecycleFlush";
 import { releaseIdleTransformerModels } from "./process/transformers";
 import { forgetInlayProviderImages } from "./process/files/inlayProviderImage";
 import { platform as nativePlatform } from '@tauri-apps/plugin-os'
@@ -232,8 +233,9 @@ export async function loadData() {
         const markers = getDeviceMarkers()
         applyHubSelection(markers)
         const deviceSettings = loadDeviceSettings(markers)
+        const pluginsExcludedAtStart = excluded('plugins')
         // A restore or a received change later in this run must not start the plugins either.
-        if (excluded('plugins')) keepPluginsOffForThisStart()
+        if (pluginsExcludedAtStart) keepPluginsOffForThisStart()
         if (isTauri) {
             stage = 'native-log'
             try {
@@ -261,13 +263,14 @@ export async function loadData() {
         const recoveredNativeRestoreJobs =
             recoveredNativeFileJobs.pendingRestoreAcknowledgements
         const runtime = getPersistentDataRuntime()
-        const flushLifecycle = (reason: string, locally = false): Promise<void> => {
-            forgetInlayProviderImages()
-            void releaseIdleTransformerModels().catch(() => {
-                console.warn('Optional model memory cleanup failed')
-            })
-            return locally ? runtime.flushPendingDataLocally(reason) : runtime.flushPendingData(reason)
-        }
+        const { flush: flushLifecycle, flushForLifecycle } = createLifecycleFlush({
+            runtime,
+            isTauriAndroid,
+            isTauriDesktop,
+            nativePlatform,
+            forgetInlayProviderImages,
+            releaseIdleTransformerModels,
+        })
         const resolvePersistentWorkingSet = () => bootstrapPersistentDatabase({
             store: runtime.store,
             onPhase: async (phase, locale) => {
@@ -745,14 +748,7 @@ export async function loadData() {
         })
         configureSyncExitCoordinator(syncExitCoordinator)
         disposeLifecycleCommitListeners ??= registerLifecycleCommitListeners(
-            (reason) => flushLifecycle(
-                reason,
-                isTauriAndroid
-                    ? reason === 'stop' || reason === 'trim-memory'
-                    : isTauriDesktop
-                        && (nativePlatform() === 'windows' || nativePlatform() === 'linux')
-                        && reason === 'stop',
-            ),
+            flushForLifecycle,
             syncExitCoordinator,
         )
 
@@ -901,6 +897,11 @@ export async function loadData() {
             if (accepted === false) {
                 location.reload()
                 return
+            }
+            if (isTauri && !pluginsExcludedAtStart) {
+                void import('./plugins/defaultPluginBootstrap.svelte')
+                    .then(({ startDefaultPluginBootstrap }) => startDefaultPluginBootstrap())
+                    .catch(error => console.error('Default plugin bootstrap failed', error))
             }
             if (isTauri && !isTauriAndroid && await takeRendererRecovery()) {
                 // A dialog replaces the toast, so it waits for queued dialogs.

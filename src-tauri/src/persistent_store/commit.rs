@@ -182,10 +182,11 @@ fn commit_inner(
                 }
             }
             super::lww::validate_local_targets(transaction,input)?;
-            validate_changed_owner_shapes(transaction, active, input)?;
             reject_archived_targets(transaction, active, input)?;
-            validate_owner_heads_for_commit(input)?;
-            let retained = retained_commit_owner_heads(transaction, active, input)?;
+            let owner_input = owner_validation_commit(transaction, active, input)?;
+            validate_changed_owner_shapes(transaction, active, &owner_input)?;
+            validate_owner_heads_for_commit(&owner_input)?;
+            let retained = retained_commit_owner_heads(transaction, active, &owner_input)?;
             let mut conversation_orders = BTreeSet::new();
             for mutation in input.conversations.iter().flatten() {
                 match mutation {
@@ -212,9 +213,9 @@ fn commit_inner(
                 }
             }
             let capture = LocalCapture::begin(transaction, active, capture_targets, asset_aliases, conversation_orders)?;
-            Ok((retained, capture))
+            Ok((owner_input, retained, capture))
         },
-        |transaction, generation, (retained, capture)| {
+        |transaction, generation, (owner_input, retained, capture)| {
             if let Some(root) = &input.root {
                 put_root(transaction, generation, root)?;
             }
@@ -254,7 +255,7 @@ fn commit_inner(
             for alias in asset_aliases {
                 put_asset_alias(transaction, generation, alias)?;
             }
-            replace_changed_owner_heads(transaction, generation, input, &retained)?;
+            replace_changed_owner_heads(transaction, generation, &owner_input, &retained)?;
             if let Some((header, stamp, digest)) = lww {
                 capture.record(transaction, generation, header, stamp)?;
                 transaction.execute("INSERT INTO lww_requests(request_id,digest,revision) VALUES(?1,?2,?3)", params![header.request_id, digest, current_revision(transaction)?+1])?;
@@ -299,6 +300,104 @@ fn reject_archived_targets(
         }
     }
     Ok(())
+}
+
+fn owner_validation_commit<'a>(
+    connection: &Connection,
+    generation: &str,
+    input: &'a WorkingSetCommit,
+) -> StoreResult<std::borrow::Cow<'a, WorkingSetCommit>> {
+    use super::lww::UnitMutation;
+    let mut projected = std::borrow::Cow::Borrowed(input);
+    let mut characters = HashMap::<String, Value>::new();
+    for mutation in input.unit_mutations.iter().flatten() {
+        let parts = mutation.key().components();
+        let next = match mutation {
+            UnitMutation::Set { value, .. } => Some(value),
+            UnitMutation::Delete { .. } => None,
+        };
+        let character_id = match parts.as_slice() {
+            [kind, id, field] if kind == "character" && field == "additionalAssets" => Some(id),
+            [kind, scope, id] if kind == "exists" && scope == "character" => Some(id),
+            _ => None,
+        };
+        if let Some(id) = character_id {
+            let value = if let Some(value) = characters.get_mut(id) { value } else {
+                let parent = input.character.iter().chain(input.character_details.iter().flatten())
+                    .chain(input.replace_character.iter()).chain(input.add_character.iter())
+                    .filter(|value| value.get("chaId").and_then(Value::as_str) == Some(id))
+                    .last().cloned();
+                let parent = if let Some(parent) = parent { parent } else {
+                    let stored: Option<String> = connection.query_row(
+                        "SELECT detail FROM characters WHERE generation=?1 AND character_id=?2",
+                        params![generation, id], |row| row.get(0),
+                    ).optional()?;
+                    stored.map(|value| serde_json::from_str(&value)).transpose()?.unwrap_or(Value::Null)
+                };
+                characters.entry(id.clone()).or_insert(parent)
+            };
+            if parts[0] == "exists" {
+                if next.is_none() {
+                    *value = Value::Null;
+                } else if value.is_null() {
+                    *value = serde_json::json!({"chaId":id,"type":"character","name":""});
+                }
+            } else {
+                let parent = value.as_object_mut().ok_or_else(|| validation("Character asset owner occurrence does not exist"))?;
+                if let Some(next) = next { parent.insert("additionalAssets".into(), next.clone()); }
+                else { parent.shift_remove("additionalAssets"); }
+            }
+            continue;
+        }
+        let (collection, id, field) = match parts.as_slice() {
+            [kind, collection] if kind == "root" && matches!(collection.as_str(), "modules" | "personas") => (collection.as_str(), None, None),
+            [kind, collection, id] if kind == "record" && matches!(collection.as_str(), "modules" | "personas") => (collection.as_str(), Some(id), None),
+            [kind, id, field] if kind == "persona" && field == "embeddedModule" => ("personas", Some(id), Some(field)),
+            [kind, scope, id] if kind == "exists" && matches!(scope.as_str(), "modules" | "persona") => (if scope == "persona" { "personas" } else { "modules" }, Some(id), None),
+            _ => continue,
+        };
+        let projected = projected.to_mut();
+        if projected.root.is_none() { projected.root = Some(replacement_root(connection, generation)?); }
+        let root = projected.root.as_mut().unwrap().as_object_mut().ok_or_else(|| validation("Root must be an object"))?;
+        let Some(id) = id else {
+            if let Some(next) = next { root.insert(collection.into(), next.clone()); }
+            else { root.shift_remove(collection); }
+            continue;
+        };
+        let values = root.entry(collection).or_insert_with(|| serde_json::json!([]))
+            .as_array_mut().ok_or_else(|| validation("Asset owner collection must be an array"))?;
+        let position = values.iter().position(|value| value.get("id").and_then(Value::as_str) == Some(id));
+        if let Some(field) = field {
+            let position = position.unwrap_or_else(|| { values.push(serde_json::json!({"id":id})); values.len()-1 });
+            let parent = values[position].as_object_mut().ok_or_else(|| validation("Persona must be an object"))?;
+            if let Some(next) = next { parent.insert(field.clone(), next.clone()); }
+            else { parent.shift_remove(field); }
+        } else if let Some(next) = next {
+            if parts[0] == "exists" {
+                if position.is_none() && collection == "personas" { values.push(serde_json::json!({"id":id})); }
+            } else if let Some(position) = position { values[position] = next.clone(); }
+            else { values.push(next.clone()); }
+        } else if let Some(position) = position { values.remove(position); }
+    }
+    if !characters.is_empty() {
+        let projected = projected.to_mut();
+        let mut parents = projected.character.iter().chain(projected.character_details.iter().flatten())
+            .chain(projected.replace_character.iter()).chain(projected.add_character.iter())
+            .filter_map(|value| value.get("chaId").and_then(Value::as_str).map(|id| (id.to_owned(), value.clone())))
+            .collect::<HashMap<_, _>>();
+        for (id, value) in characters {
+            if value.is_null() {
+                parents.remove(&id);
+                projected.delete_character_ids.get_or_insert_default().push(id);
+            } else { parents.insert(id, value); }
+        }
+        projected.character = None;
+        projected.replace_character = None;
+        projected.add_character = None;
+        projected.character_details = Some(parents.into_values().collect());
+    }
+    // This view is only for owner validation and retention; persistence still applies the original units.
+    Ok(projected)
 }
 
 fn validate_changed_owner_shapes(connection: &Connection, generation: &str, input: &WorkingSetCommit) -> StoreResult<()> {

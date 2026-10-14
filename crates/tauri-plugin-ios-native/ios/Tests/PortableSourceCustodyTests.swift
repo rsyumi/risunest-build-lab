@@ -78,10 +78,48 @@ final class PortableSourceCustodyTests: XCTestCase {
         XCTAssertThrowsError(try custody.materialize(token: token, staging: root))
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).count, 1)
         try custody.confirm(token: token, format: "block-risu-save")
-        let copied = try custody.materialize(token: token, staging: root)
+        XCTAssertFalse(custody.cancelCopy(token: token, jobId: UUID().uuidString))
+        var progress = [PortableSourceCopyProgress]()
+        let copied = try custody.materialize(token: token, staging: root) { progress.append($0) }
         XCTAssertEqual(copied["bytes"] as? UInt64, 131072)
+        XCTAssertEqual(progress.last?.copiedBytes, 131072)
+        XCTAssertEqual(progress.last?.totalBytes, 131072)
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: copied["path"] as! String)), Data(repeating: 7, count: 131072))
         XCTAssertTrue(custody.release(token: token, jobId: nil))
+    }
+
+    func testCopyCancellationBeforeDuringAndAtCompletionRemovesPartialFiles() throws {
+        for cancelledAt: UInt64 in [0, 65536, 131072] {
+            let custody = PortableSourceCustody()
+            let token = try select(custody, owner: "owner")
+            try custody.confirm(token: token, format: "local-backup")
+            if cancelledAt == 0 { XCTAssertTrue(custody.cancelCopy(token: token, jobId: nil)) }
+            XCTAssertThrowsError(try custody.materialize(token: token, staging: root) { progress in
+                if progress.copiedBytes == cancelledAt {
+                    XCTAssertTrue(custody.cancelCopy(token: token, jobId: nil))
+                }
+            })
+            XCTAssertTrue(custody.release(token: token, jobId: nil))
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["synthetic.risunest"])
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("synthetic.risunest")), Data(repeating: 7, count: 131072))
+        }
+    }
+
+    func testCopyProgressThrottlesLargeByteCountsAndAlwaysSendsCompletion() {
+        var time: TimeInterval = 10
+        var progress = [PortableSourceCopyProgress]()
+        let reporter = PortableSourceCopyProgressReporter(now: { time }, emit: { progress.append($0) })
+        let gib: UInt64 = 1024 * 1024 * 1024
+        reporter.report(copied: gib, total: 8 * gib)
+        time = 10.1
+        reporter.report(copied: 2 * gib, total: 8 * gib)
+        time = 10.25
+        reporter.report(copied: 4 * gib, total: 8 * gib)
+        reporter.report(copied: 4 * gib, total: 8 * gib)
+        reporter.report(copied: 3 * gib, total: 8 * gib)
+        reporter.report(copied: 8 * gib, total: 8 * gib)
+        XCTAssertEqual(progress.map { $0.copiedBytes }, [gib, 4 * gib, 8 * gib])
+        XCTAssertEqual(progress.map { $0.totalBytes }, [8 * gib, 8 * gib, 8 * gib])
     }
 
     func testRetiredOwnerWaitsForItsExactProbeAndRefusesNewClaim() throws {

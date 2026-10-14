@@ -5,6 +5,10 @@ use risunest_sync_wire::{
     stamp::Stamp,
     unit::{UnitKey, UnitValue},
 };
+use std::time::Duration;
+/// Turns a lost response into a failure. Loopback replies arrive far
+/// sooner, so it never decides an outcome.
+pub const HANG_BOUND: Duration = Duration::from_secs(60);
 pub const WRITER_A: &str = "00000000-0000-4000-8000-000000000001";
 pub const WRITER_B: &str = "00000000-0000-4000-8000-000000000002";
 pub fn device(store: &Store) -> Device {

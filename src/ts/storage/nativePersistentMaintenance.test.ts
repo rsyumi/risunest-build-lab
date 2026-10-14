@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
     invoke: vi.fn(),
-    isTauriMobile: true,
+    os: 'windows' as 'windows' | 'android',
     relaunch: vi.fn(),
     runtime: {synthetic: 'runtime'},
     snapshotRestore: vi.fn(),
@@ -16,13 +16,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
 vi.mock('../desktopRelaunch', () => ({ relaunch: mocks.relaunch }))
 vi.mock('./persistentDataRuntime.svelte',()=>({getPersistentDataRuntime:()=>mocks.runtime}))
 vi.mock('./nativeFileJobs',async importOriginal=>({...await importOriginal<typeof import('./nativeFileJobs')>(),runNativeSnapshotRestore:mocks.snapshotRestore}))
-vi.mock('../platform', () => ({
-    isTauriIOS: false,
-    isTauriAndroid: false,
-    get isTauriMobile() {
-        return mocks.isTauriMobile
-    },
-}))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({ runtime: 'tauri', os: mocks.os })))
 
 import {
     applyNativeDataHealthRepair,
@@ -64,7 +58,7 @@ describe('native persistent maintenance', () => {
             if (command === 'native_snapshot_restore_bodies_start') return bodyReceipt
             if (command === 'native_snapshot_restore_bodies_status') return bodyStatus
         })
-        mocks.isTauriMobile = true
+        mocks.os = 'windows'
         mocks.relaunch.mockReset()
         mocks.snapshotRestore.mockReset().mockResolvedValue(activation)
         nativeFileOperationOutcome.set(null)
@@ -461,6 +455,7 @@ describe('native persistent maintenance', () => {
     })
 
     it('requests an Android cold restart through the lifecycle bridge', async () => {
+        mocks.os = 'android'
         const requestRestart = vi.fn()
         ;(window as Window & {
             RisuLifecycleBridge?: { requestRestart(): void }
@@ -473,6 +468,7 @@ describe('native persistent maintenance', () => {
     })
 
     it('does not fall back to the unsupported process relauncher on Android', async () => {
+        mocks.os = 'android'
         await expect(restartNativeApp()).rejects.toThrow(
             'Android restart bridge is unavailable',
         )
@@ -481,7 +477,6 @@ describe('native persistent maintenance', () => {
     })
 
     it('uses the process relauncher outside Tauri mobile', async () => {
-        mocks.isTauriMobile = false
         mocks.relaunch.mockResolvedValue(undefined)
 
         await restartNativeApp()

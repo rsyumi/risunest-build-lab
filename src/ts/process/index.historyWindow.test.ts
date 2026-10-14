@@ -30,40 +30,26 @@ const mocks = vi.hoisted(() => ({
     onModelRequest: null as null | (() => void),
 }))
 
-vi.mock('../iosNative', () => ({
-    beginIOSGeneration: async (signal?: AbortSignal) => ({
-        signal,
-        progress: () => undefined,
-        dispose: async () => undefined,
-    }),
-    notifyIOSGenerationComplete: vi.fn(),
-    isBackgroundExpiryReason: () => false,
-}))
+vi.mock('../iosNative', async () => (await import('./tests/sendChatTestHarness')).iosNativeModule())
 vi.mock('../tokenizer', async () => (await import('./tests/sendChatTestHarness')).tokenizerModule({
     // Every message costs ten tokens in the window walk.
     tokenize: vi.fn(async () => 10),
     encodeWithTokenizer: vi.fn(async () => new Array(10).fill(0)),
 }))
-vi.mock('../../lang', async () => (await import('./tests/sendChatTestHarness')).langModule({
-    generationConversationChanged: 'conversation changed',
-    chatConversationActionFailed: 'conversation action failed',
-}))
 vi.mock('../alert', async () => (await import('./tests/sendChatTestHarness')).alertModule({
     alertError: mocks.alertError,
 }))
 vi.mock('../parser/chatML', async () => (await import('./tests/sendChatTestHarness')).chatMLModule())
-vi.mock('../parser/parser.svelte', async () => (await import('./tests/sendChatTestHarness')).parserModule())
+vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('./lorebook.svelte', async () => (await import('./tests/sendChatTestHarness')).lorebookModule())
 vi.mock('../util', async () => (await import('./tests/sendChatTestHarness')).utilModule({
     findCharacterbyId: () => mocks.currentCharacter,
 }))
-vi.mock('./request/request', () => ({
-    requestChatData: vi.fn(async (request: unknown) => {
-        mocks.modelRequests.push(request)
-        mocks.onModelRequest?.()
-        return mocks.modelResponse
-    }),
-}))
+vi.mock('./request/request', async () => (await import('./tests/sendChatTestHarness')).requestModule(vi.fn(async (request: unknown) => {
+    mocks.modelRequests.push(request)
+    mocks.onModelRequest?.()
+    return mocks.modelResponse
+})))
 vi.mock('./stableDiff', async () => (await import('./tests/sendChatTestHarness')).stableDiffModule())
 vi.mock('./scripts', async () => (await import('./tests/sendChatTestHarness')).scriptsModule({
     processScriptFull: mocks.processScriptFull,
@@ -83,14 +69,10 @@ vi.mock('./memory/hypamemory', async () => (await import('./tests/sendChatTestHa
 vi.mock('./embedding/addinfo', async () => (await import('./tests/sendChatTestHarness')).addinfoModule())
 vi.mock('./files/inlays', async () => (await import('./tests/sendChatTestHarness')).inlaysModule())
 vi.mock('./models/modelString', async () => (await import('./tests/sendChatTestHarness')).modelStringModule())
-vi.mock('./inlayScreen', () => ({ runInlayScreen: (_char: unknown, data: string) => ({ text: data }) }))
+vi.mock('./inlayScreen', async () => (await import('./tests/sendChatTestHarness')).inlayScreenModule())
 vi.mock('./transformers', async () => (await import('./tests/sendChatTestHarness')).transformersModule())
-vi.mock('./memory/hanuraiMemory', () => ({
-    hanuraiMemory: vi.fn(async (chats, { currentTokens }) => ({ chats, tokens: currentTokens })),
-}))
-vi.mock('./memory/hypav2', () => ({
-    hypaMemoryV2: vi.fn(async (chats, currentTokens) => ({ chats, currentTokens })),
-}))
+vi.mock('./memory/hanuraiMemory', async () => (await import('./tests/sendChatTestHarness')).hanuraiMemoryModule())
+vi.mock('./memory/hypav2', async () => (await import('./tests/sendChatTestHarness')).hypav2Module())
 vi.mock('./memory/hypav3', async () => (await import('./tests/sendChatTestHarness')).hypav3Module({
     getCurrentHypaV3Preset: () => ({ settings: mocks.hypaSettings }),
     hypaMemoryV3: mocks.hypaMemoryV3,
@@ -99,36 +81,29 @@ vi.mock('./scriptings', async () => (await import('./tests/sendChatTestHarness')
 vi.mock('../model/modellist', async () => (await import('./tests/sendChatTestHarness')).modellistModule())
 vi.mock('./modules', async () => (await import('./tests/sendChatTestHarness')).modulesModule())
 vi.mock('../globalApi.svelte', async () => (await import('./tests/sendChatTestHarness')).globalApiModule())
-vi.mock('../plugins/plugins.svelte', () => ({ pluginV2: { chatOutput: new Set(), editprocess: new Set() } }))
-vi.mock('../plugins/pluginDatabaseAccess', async (importOriginal) => (await import('./tests/sendChatTestHarness')).pluginDatabaseAccessModule(importOriginal as () => Promise<Record<string, unknown>>))
+vi.mock('../plugins/plugins.svelte', async () => (await import('./tests/sendChatTestHarness')).pluginsModule())
+vi.mock('../plugins/pluginDatabaseAccess', async (importOriginal) => (await import('./tests/sendChatTestHarness')).pluginDatabaseAccessModule(importOriginal))
 vi.mock('./presetChain', () => ({ activatePresetChainForRequest: vi.fn(async () => undefined) }))
 vi.mock('../storage/deviceSettings', () => ({ getDeviceSettings: () => mocks.deviceSettings }))
-vi.mock('../storage/persistentDataRuntime.svelte', () => ({
-    assertPersistentMutationAllowed: () => undefined,
-    getPersistentStorageAuthorityEpoch: () => 0,
-    getPersistentNavigationGeneration: () => 0,
-    acknowledgeGenerationCompletion: vi.fn(async () => undefined),
-    drainDeferredLwwReceives: vi.fn(async () => undefined),
+vi.mock('../storage/persistentDataRuntime.svelte', async () => (await import('./tests/sendChatTestHarness')).persistentRuntimeModule({
     captureSelectedConversationTarget: () => mocks.selectedTarget,
     captureSelectedConversationAuthority: () => mocks.selectedAuthority,
-    recordSelectedCharacterLastInteraction: vi.fn(() => true),
     captureWindowedConversationMutationController: (...args: any[]) => mocks.windowedController?.(...args) ?? null,
     acquireCompleteConversation: mocks.acquireCompleteConversation,
     flushPendingData: mocks.flushPendingData,
     getActiveConversationSession: () => mocks.session,
-    invalidateActiveConversationSession: () => undefined,
 }))
-vi.mock('../storage/persistentDataStoreFactory', () => ({
-    getPersistentDataStore: () => mocks.persistentStore,
-}))
+vi.mock('../storage/persistentDataStoreFactory', async () => (await import('./tests/sendChatTestHarness')).persistentDataStoreFactoryModule(() => mocks.persistentStore))
 
 import type { character, Chat, Database, Message } from '../storage/database.svelte'
 import { ActiveConversationSession } from '../storage/activeConversationSession'
+import { createLeaseStub } from '../storage/persistentDataStore.testSupport'
 import { createMetadataOnlySelectedConversation } from '../storage/selectedConversationLifecycle'
 import { DBState, selectedCharID } from '../stores.svelte'
 import { doingChat, openSelectedHistoryWindow, sendChat } from './index.svelte'
 import { findActiveHistoryWindow, getHistoryWindowStart } from './historyWindowIndex'
 import { setChatVarOnConversation } from '../parser/chatVar.svelte'
+import { language } from '../../lang'
 
 function messages(count: number): Message[] {
     return Array.from({ length: count }, (_, index): Message => ({
@@ -231,7 +206,7 @@ function installWindowed(stored: Message[], conversation: Partial<Chat> = {}) {
         sessionVersion: 0,
         get totalMessages() { return stored.length },
     }
-    const page = (startIndex: number, items: unknown[]) => ({
+    const page = <T>(startIndex: number, items: T[]) => ({
         revision: 1,
         value: {
             characterId: 'character-a',
@@ -240,20 +215,22 @@ function installWindowed(stored: Message[], conversation: Partial<Chat> = {}) {
             startIndex,
             endIndex: startIndex + items.length,
             totalMessages: stored.length,
+            hasMoreBefore: startIndex > 0,
+            hasMoreAfter: startIndex + items.length < stored.length,
         },
     })
-    const lease = {
+    const lease = createLeaseStub({
         revision: 1,
-        async readConversationWindow(input: any) {
+        async readConversationWindow(input) {
             bodyReads.push([input.startIndex, input.limit])
             return page(input.startIndex, structuredClone(stored.slice(input.startIndex, input.startIndex + input.limit)))
         },
-        async readConversationMessageMetadataWindow(input: any) {
+        async readConversationMessageMetadataWindow(input) {
             return page(input.startIndex, stored.slice(input.startIndex, input.startIndex + input.limit)
                 .map((message) => ({ chatId: message.chatId, role: message.role, disabled: message.disabled, parserInert: true })))
         },
         release: vi.fn(async () => undefined),
-    }
+    })
     mocks.persistentStore = { acquireRevision: vi.fn(async () => lease) }
     mocks.windowedController = (_target: unknown, chat: Chat, absoluteStartIndex: number) => {
         if (!windowed.current || absoluteStartIndex + chat.message.length !== stored.length) return null
@@ -431,6 +408,22 @@ describe('sendChat with the history window', () => {
         const after = session.materializeCompatibilityArray()
         expect(after.slice(0, 200)).toEqual(before)
         expect(after.map((message) => message.data)).toEqual(windowedStore.map((message) => message.data))
+    })
+
+    it('opens the window of a complete conversation when a chat variable commits while it is measured', async () => {
+        const { owner, session } = installComplete(messages(300))
+        const tokenizer = await import('../tokenizer')
+        vi.mocked(tokenizer.tokenize).mockImplementationOnce(async () => {
+            session.updateChatVariables(new Map([['scratch', 'display']]), { origin: 'display' })
+            return 10
+        })
+        mocks.modelResponse = streamingResponse('answer')
+
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
+
+        expect(session.materializeCompatibilityArray().at(-1)?.data).toBe('answer')
+        expect(owner.chats[0].scriptstate).toEqual({ $scratch: 'display' })
+        expect(mocks.alertError).not.toHaveBeenCalled()
     })
 
     it('passes absolute message indices to editprocess scripts', async () => {
@@ -674,14 +667,14 @@ describe('sendChat with the history window', () => {
 
         expect(mocks.flushPendingData).toHaveBeenCalledWith('generation-history-window')
         expect(mocks.modelRequests).toHaveLength(0)
-        expect(mocks.alertError).toHaveBeenCalledWith('conversation action failed')
+        expect(mocks.alertError).toHaveBeenCalledWith(language.chatConversationActionFailed)
     })
 
     it('tells the user when the conversation changes while the window is read', async () => {
         const stored = messages(1000)
         const { lease } = installWindowed(stored)
         const read = lease.readConversationWindow
-        lease.readConversationWindow = async (input: any) => {
+        lease.readConversationWindow = async (input) => {
             const page = await read(input)
             mocks.selectedAuthority = { ...mocks.selectedAuthority, sessionVersion: 1, persistedSessionVersion: 1 }
             return page
@@ -690,7 +683,7 @@ describe('sendChat with the history window', () => {
         await expect(sendChat({ historyLimit: true })).resolves.toBe(false)
 
         expect(mocks.modelRequests).toHaveLength(0)
-        expect(mocks.alertError).toHaveBeenCalledWith('conversation action failed')
+        expect(mocks.alertError).toHaveBeenCalledWith(language.chatConversationActionFailed)
     })
 
     it('refuses to write the response when the promoted conversation no longer holds the window', async () => {
@@ -713,7 +706,7 @@ describe('sendChat with the history window', () => {
         await expect(sendChat({ historyLimit: true })).resolves.toBe(false)
 
         expect((mocks.session as ActiveConversationSession).totalMessages).toBe(999)
-        expect(mocks.alertError).toHaveBeenCalledWith('conversation changed')
+        expect(mocks.alertError).toHaveBeenCalledWith(language.generationConversationChanged)
     })
 })
 

@@ -78,7 +78,5 @@ impl Discovery {
 }
 
 pub fn request_id() -> Result<String> {
-    let mut bytes = [0; 32];
-    getrandom::getrandom(&mut bytes).map_err(|_| Error::new("entropy-unavailable", 503))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    crate::identity::new_uuid()
 }

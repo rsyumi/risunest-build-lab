@@ -7,7 +7,7 @@ import { tokenize } from "../tokenizer";
 import { getModuleTriggers } from "./modules";
 import { get } from "svelte/store";
 import { ReloadChatPointer, ReloadGUIPointer, CurrentTriggerIdStore, DBState } from "../stores.svelte";
-import { processMultiCommand } from "./command";
+import { processMultiCommand, type CommandGeneration } from "./command";
 import { parseKeyValue, sleep } from "../util";
 import { alertError, alertInput, alertNormal, alertSelect } from "../alert";
 import type { OpenAIChat } from "./index.svelte";
@@ -18,10 +18,12 @@ import { writeInlayImage } from "./files/inlays";
 import { runScripted } from "./scriptings";
 import { calcString } from "./infunctions";
 import {
-    createConversationOperationContext,
     type ConversationOperationContext,
     type ConversationCommitObserver,
 } from "./conversationOperationContext";
+import { createScriptConversationAccess, type ScriptConversationAccess } from './scriptConversationAccess';
+import { requestScriptDisplayRefresh } from './scriptDisplayRefresh';
+import { noteChatVariableRead } from './scriptVariableReads';
 import { peekActiveConversationSession } from "../storage/persistentDataRuntime.svelte";
 import { runSerializedUserTrigger } from './conversationUserTrigger';
 import { getHistoryMessage, historyLength, inheritHistoryWindow, sliceHistory } from './historyWindowIndex';
@@ -1111,7 +1113,10 @@ interface RunTriggerArguments {
     displayData?: string
     tempVars?: Record<string, string>
     conversationOperation?: ConversationOperationContext
+    /** The selected conversation's access, shared with a trigger this trigger runs. */
+    access?: ScriptConversationAccess
     onConversationCommit?: ConversationCommitObserver
+    generation?: CommandGeneration
 }
 
 export async function runTrigger(
@@ -1119,7 +1124,7 @@ export async function runTrigger(
     mode: triggerMode,
     arg: RunTriggerArguments,
 ) {
-    if (mode === 'manual' && !arg.displayMode && !arg.conversationOperation) {
+    if (mode === 'manual' && !arg.displayMode && !arg.conversationOperation && !arg.access) {
         return runSerializedUserTrigger(char.chaId, arg.chat, () =>
             runTriggerImpl(char, mode, arg),
         )
@@ -1133,25 +1138,23 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
     if (char.triggerscript.length === 0 && moduleTriggers.length === 0) {
         return null
     }
-    let ownedConversationOperation: ConversationOperationContext | null = null
-    if (!arg.displayMode && !arg.conversationOperation) {
-        const activeSession = peekActiveConversationSession()
-        if (
-            activeSession?.isActive &&
-            activeSession.materializeCompatibilityArray() === arg.chat.message
-        ) {
-            ownedConversationOperation = createConversationOperationContext(
-                activeSession,
-                arg.chat,
-                arg.onConversationCommit,
-            )
-        }
+    let access = arg.access ?? null
+    let ownsAccess = false
+    if (!access && !arg.displayMode && !arg.conversationOperation) {
+        access = createScriptConversationAccess(arg.chat, getDatabase(), {
+            onCommitted: arg.onConversationCommit,
+            onVariablesCommitted: (keys) => requestScriptDisplayRefresh({ keys }),
+        })
+        ownsAccess = access !== null
     }
-    const conversationOperation = arg.conversationOperation ?? ownedConversationOperation
+    const conversationOperation = arg.conversationOperation ?? null
     let displayHistoryPin: ActiveConversationPin | null = null
-    let conversationOperationClosed = false
+    let accessClosed = false
     try {
-    let chat = conversationOperation?.chat ?? (
+    // Trigger conditions read messages from the start, so a later edit applies only
+    // if the messages are unchanged since then.
+    access?.readChat()
+    let chat = access?.currentChat() ?? conversationOperation?.chat ?? (
         arg.displayMode
             ? arg.chat
             : safeStructuredClone(arg.chat ?? char.chats[char.chatPage])
@@ -1189,7 +1192,32 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
             displayHistoryPin = activeSession.acquirePin('compatibility')
         }
     }
-    const operationDatabase = conversationOperation?.createDatabaseView(db) ?? db
+    let operationDatabase = access?.databaseView(db) ??
+        conversationOperation?.createDatabaseView(db) ?? db
+    const adoptChat = (next: Chat) => {
+        if (!access) {
+            chat = next
+            return
+        }
+        if (next === chat) return
+        inheritHistoryWindow(arg.chat, next)
+        chat = next
+        char.chats[char.chatPage] = next
+        operationDatabase = access.databaseView(db)
+    }
+    /** The conversation an effect edits: the access copies it on the first edit. */
+    const writableChat = () => {
+        if (access) adoptChat(access.writeChat())
+        return chat
+    }
+    const commandOperation = () => {
+        if (!access) return conversationOperation ?? undefined
+        // Commands such as /getvar and /setvar use the stored chat variables.
+        access.flushVariables()
+        const operation = access.writeOperation()
+        adoptChat(operation.chat)
+        return operation
+    }
     let operationGetChatVar: ((key: string) => string) | undefined
     let operationSetChatVar: ((key: string, value: string) => void) | undefined
     const risuChatParser = (
@@ -1199,7 +1227,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
         ...parserArgument,
         db: parserArgument.db ?? operationDatabase,
         selectedCharacterId: parserArgument.selectedCharacterId ??
-            conversationOperation?.characterId,
+            access?.characterId ?? conversationOperation?.characterId,
         getChatVar: parserArgument.getChatVar ??
             operationGetChatVar,
         setChatVar: parserArgument.setChatVar ??
@@ -1289,7 +1317,8 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
         if(localVar !== null){
             return localVar
         }
-        
+        if (access) return access.getVariable(key)
+        noteChatVariableRead(key)
         const state = chat.scriptstate?.['$' + key]
         if(state === undefined || state === null){
             const findResult = defaultVariables.find((f) => {
@@ -1319,6 +1348,11 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
         if(localVar !== null){
             return setLocalVar(key, value, currentIndent)
         }
+        if (access) {
+            if (!access.setVariable(key, value)) return false
+            varChanged = true
+            return true
+        }
         
         chat.scriptstate ??= {}
         const stateKey = '$' + key
@@ -1331,13 +1365,14 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
         if (!conversationOperation) arg.chat.scriptstate = chat.scriptstate
         return true
     }
-    if (conversationOperation) {
+    if (conversationOperation || access) {
         operationGetChatVar = getVar
         operationSetChatVar = setVar
     }
     
     
     for(const trigger of triggers){
+        if (arg.generation?.signal.aborted) break
         let tempVars:Record<string, number> = {}
 
         if(trigger.effect[0]?.type === 'triggercode' || trigger.effect[0]?.type === 'triggerlua'){
@@ -1434,6 +1469,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
         }
 
         for(let index = 0; index < trigger.effect.length; index++){
+            if (arg.generation?.signal.aborted) break
             const effect = trigger.effect[index]
             if(mode === 'display' && !displayAllowList.includes(effect.type)){
                 continue
@@ -1490,16 +1526,16 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                 case 'impersonate':{
                     const effectValue = risuChatParser(effect.value,{chara:char})
                     if(effect.role === 'user'){
-                        chat.message.push({role: 'user', data: effectValue, chatId: v4()})
+                        writableChat().message.push({role: 'user', data: effectValue, chatId: v4()})
                     }
                     else if(effect.role === 'char'){
-                        chat.message.push({role: 'char', data: effectValue, chatId: v4()})
+                        writableChat().message.push({role: 'char', data: effectValue, chatId: v4()})
                     }
                     break
                 }
                 case 'command':{
                     const effectValue = risuChatParser(effect.value,{chara:char})
-                    await processMultiCommand(effectValue, conversationOperation ?? undefined)
+                    await processMultiCommand(effectValue, commandOperation(), arg.generation)
                     break
                 }
                 case 'stop':
@@ -1517,10 +1553,12 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                             stopSending,
                             manualName: effect.value,
                             conversationOperation,
+                            access: access ?? undefined,
+                            generation: arg.generation,
                         })
                         if(r){
                             additonalSysPrompt = r.additonalSysPrompt
-                            chat = r.chat
+                            adoptChat(r.chat)
                             stopSending = r.stopSending
                         }
                     }
@@ -1529,13 +1567,14 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                 case 'cutchat':{
                     const start = Number(risuChatParser(effect.start,{chara:char}))
                     const end = Number(risuChatParser(effect.end,{chara:char}))
-                    chat.message = sliceHistory(chat, start, end)
+                    const target = writableChat()
+                    target.message = sliceHistory(target, start, end)
                     break
                 }
                 case 'modifychat':{
                     const index = Number(risuChatParser(effect.index,{chara:char}))
                     const value = risuChatParser(effect.value,{chara:char})
-                    const message = getHistoryMessage(chat, index)
+                    const message = getHistoryMessage(writableChat(), index)
                     if(message){
                         message.data = value
                     }
@@ -1565,11 +1604,13 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                             break
                         }
                         case 'input':{
+                            access?.flushVariables()
                             const val = await alertInput(effectValue)
                             setVar(inputVar, val)
                             break;
                         }
                         case 'select':{
+                            access?.flushVariables()
                             const val = await alertSelect(effectValue.split('§'))
                             setVar(inputVar, val)
                         }
@@ -1672,12 +1713,14 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                         char: char,
                         chat: chat,
                         operationContext: conversationOperation,
+                        access: access ?? undefined,
+                        userStarted: mode === 'manual',
                     })
 
                     if(triggerCodeResult.stopSending){
                         stopSending = true
                     }
-                    chat = triggerCodeResult.chat
+                    adoptChat(triggerCodeResult.chat)
                     break
                 }
 
@@ -1918,10 +1961,12 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                             stopSending,
                             manualName: effect.target,
                             conversationOperation,
+                            access: access ?? undefined,
+                            generation: arg.generation,
                         })
                         if(r){
                             additonalSysPrompt = r.additonalSysPrompt
-                            chat = r.chat
+                            adoptChat(r.chat)
                             stopSending = r.stopSending
                         }
                     }
@@ -1946,13 +1991,14 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                         end = historyLength(chat)
                     }
                     
-                    chat.message = sliceHistory(chat, start, end)
+                    const target = writableChat()
+                    target.message = sliceHistory(target, start, end)
                     break
                 }
                 case 'v2ModifyChat':{
                     let index = effect.indexType === 'value' ? Number(risuChatParser(effect.index,{chara:char})) : Number(getVar(risuChatParser(effect.index,{chara:char})))
                     let value = effect.valueType === 'value' ? risuChatParser(effect.value,{chara:char}) : getVar(risuChatParser(effect.value,{chara:char}))
-                    const message = getHistoryMessage(chat, index)
+                    const message = getHistoryMessage(writableChat(), index)
                     if(message){
                         message.data = value
                     }
@@ -1966,16 +2012,16 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                 case 'v2Impersonate':{
                     let value = effect.valueType === 'value' ? risuChatParser(effect.value,{chara:char}) : getVar(risuChatParser(effect.value,{chara:char}))
                     if(effect.role === 'user'){
-                        chat.message.push({role: 'user', data: value, chatId: v4()})
+                        writableChat().message.push({role: 'user', data: value, chatId: v4()})
                     }
                     else if(effect.role === 'char'){
-                        chat.message.push({role: 'char', data: value, chatId: v4()})
+                        writableChat().message.push({role: 'char', data: value, chatId: v4()})
                     }
                     break
                 }
                 case 'v2Command':{
                     let value = effect.valueType === 'value' ? risuChatParser(effect.value,{chara:char}) : getVar(risuChatParser(effect.value,{chara:char}))
-                    await processMultiCommand(value, conversationOperation ?? undefined)
+                    await processMultiCommand(value, commandOperation(), arg.generation)
                     break
                 }
                 case 'v2SendAIprompt':{
@@ -2430,6 +2476,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                     if(arg.displayMode){
                         return
                     }
+                    access?.flushVariables()
                     let value = await alertInput(
                         effect.displayType === 'value' ? risuChatParser(effect.display,{chara:char}) : getVar(risuChatParser(effect.display,{chara:char}))
                     )
@@ -2443,6 +2490,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                     const display = effect.displayType === 'value' ? risuChatParser(effect.display,{chara:char}) : getVar(risuChatParser(effect.display,{chara:char}))
                     const value = effect.valueType === 'value' ? risuChatParser(effect.value,{chara:char}) : getVar(risuChatParser(effect.value,{chara:char}))
                     const options = value.split('|')
+                    access?.flushVariables()
                     let result = await alertSelect(options, display)
                     setVar(risuChatParser(effect.outputVar, {chara:char}), result)
                     break
@@ -2480,10 +2528,12 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                     break
                 }
                 case 'v2UpdateGUI':{
-                    ReloadGUIPointer.set(get(ReloadGUIPointer) + 1)
+                    access?.flushVariables()
+                    requestScriptDisplayRefresh({ all: true })
                     break
                 }
                 case 'v2UpdateChatAt':{
+                    access?.flushVariables()
                     ReloadChatPointer.update((v) => {
                         v[effect.index] = (v[effect.index] ?? 0) + 1
                         return v
@@ -2727,8 +2777,8 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                 }
                 case 'v2SetAuthorNote':{
                     const value = effect.valueType === 'value' ? risuChatParser(effect.value,{chara:char}) : getVar(risuChatParser(effect.value,{chara:char}))
-                    chat.note = value
-                    if (!conversationOperation && !arg.displayMode) arg.chat.note = value
+                    writableChat().note = value
+                    if (!conversationOperation && !access && !arg.displayMode) arg.chat.note = value
                     break
                 }
                 case 'v2MakeDictVar':{
@@ -2917,25 +2967,21 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
         CurrentTriggerIdStore.set(previousTriggerId)
     }
 
-    if (ownedConversationOperation) {
-        const activeSession = peekActiveConversationSession()
-        conversationOperationClosed = true
-        ownedConversationOperation.commit(activeSession)
+    if (ownsAccess) {
+        accessClosed = true
+        access.commit()
         chat = arg.chat
     }
-    if(varChanged){
+    // The access requests the refresh for the variables it commits.
+    if(varChanged && !access){
         ReloadGUIPointer.set(get(ReloadGUIPointer) + 1)
     }
     
     return {additonalSysPrompt, chat, tokens:caculatedTokens, stopSending, sendAIprompt, displayData: arg.displayData, tempVars: arg.tempVars}
     } finally {
-        if (ownedConversationOperation && !conversationOperationClosed) {
-            conversationOperationClosed = true
-            if (ownedConversationOperation.hasPendingMetadataMutations()) {
-                ownedConversationOperation.commitMetadata(peekActiveConversationSession())
-            } else {
-                ownedConversationOperation.release()
-            }
+        if (ownsAccess && !accessClosed) {
+            accessClosed = true
+            access.commitWithoutMessages()
         }
         displayHistoryPin?.release()
     }

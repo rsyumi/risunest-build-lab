@@ -4,7 +4,7 @@ const invoke = vi.hoisted(() => vi.fn())
 const invalidateOwner = vi.hoisted(() => vi.fn())
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
-vi.mock('../platform', () => ({ isTauri: true }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
 vi.mock('./plugins.svelte', () => ({
     pluginStorageStore: { invalidateOwner },
 }))

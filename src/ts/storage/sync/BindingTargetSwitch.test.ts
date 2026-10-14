@@ -53,7 +53,7 @@ function installFlow() {
         gate: { runTransition: operation => operation(), runWrite: operation => operation(), runKeyedWrite: (_key, operation) => operation() },
         plugins: { fenceExecution: async () => {}, invalidateCaches: async () => {}, restart: async () => {} },
         withPausedWrites: operation => operation(),
-        hasNonDefaultData: async () => false,
+        hasLocalCharacters: async () => true,
         hasNonDefaultSharedData: async () => true,
         confirmReplacement: confirmSyncBindingReplacement,
         refreshActivatedLibrary: async () => {},

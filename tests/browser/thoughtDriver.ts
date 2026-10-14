@@ -1,3 +1,4 @@
+import '../../src/styles.css'
 import { mount, unmount } from 'svelte'
 import Harness from '../../src/lib/ChatScreens/StreamingThoughtPreviewHarness.test.svelte'
 import { getStreamingThoughtPreview } from '../../src/ts/parser/streamingThoughtPreview'
@@ -7,12 +8,10 @@ import {
     wrapThought,
 } from '../../src/ts/parser/largeThoughtFixtures.testUtils'
 
-// Mirrors the chat message column and the shared thought styles in src/styles.css.
+// A mobile-width chat column; the font size and line height are the defaults Chat.svelte sets inline.
 const css = `
-.thought-column { width: 100%; max-width: 393px; padding: 0 0.5rem; box-sizing: border-box; font-family: Arial, sans-serif, serif; }
-.thought-column .chattext { font-size: 0.875rem; line-height: 1.25rem; max-width: calc(100% - 0.5rem); word-break: normal; overflow-wrap: anywhere; }
-.whitespace-pre-wrap { white-space: pre-wrap; }
-.x-risu-streaming-thought-preview { display: block; margin: 0.5em 0; padding: 0.5em 0.75em; border: 1px solid #444; border-radius: 0.5rem; }
+.thought-column { width: 100%; max-width: 393px; padding: 0 0.5rem; box-sizing: border-box; }
+.thought-column .chattext { font-size: 0.875rem; line-height: 1.25rem; }
 `
 
 let active: ReturnType<typeof mount> | undefined

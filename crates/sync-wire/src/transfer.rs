@@ -15,6 +15,30 @@ pub enum Frame {
     Delta(Recipe),
     FullRequired { hash: String, size: u64 },
 }
+/// Returns the wire length without reading or copying full-frame bodies.
+pub fn encoded_len(frames: &[Frame]) -> Result<usize> {
+    if frames.len() > MAX_BATCH_OBJECTS {
+        return Err(WireError("too-many-frames"));
+    }
+    let mut length = 8usize;
+    for frame in frames {
+        let payload = match frame {
+            Frame::Full(bytes) => 41usize.checked_add(bytes.len()),
+            Frame::Delta(recipe) => recipe.encoded_len()?.checked_add(1),
+            Frame::FullRequired { hash, .. } => {
+                validate_hash(hash)?;
+                Some(41)
+            }
+        }
+        .ok_or(WireError("batch-too-large"))?;
+        length = length
+            .checked_add(4)
+            .and_then(|n| n.checked_add(payload))
+            .filter(|n| *n <= MAX_BATCH_BYTES)
+            .ok_or(WireError("batch-too-large"))?;
+    }
+    Ok(length)
+}
 pub fn encode(frames: &[Frame]) -> Result<Vec<u8>> {
     if frames.len() > MAX_BATCH_OBJECTS {
         return Err(WireError("too-many-frames"));
@@ -27,7 +51,7 @@ pub fn encode(frames: &[Frame]) -> Result<Vec<u8>> {
             Frame::Full(bytes) => {
                 payload.push(0);
                 let digest = hash(bytes);
-                #[cfg(test)]
+                #[cfg(any(test, feature = "source-observer"))]
                 super::delta::source_test_observer::completed(
                     &digest,
                     "transfer-full-encode-sha256",
@@ -85,14 +109,14 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Frame>> {
                     }
                     let bytes = take(&mut payload, size as usize)?;
                     let actual = hash(bytes);
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "source-observer"))]
                     super::delta::source_test_observer::completed(
                         &digest,
                         "transfer-full-decode-sha256",
                         bytes.len(),
                     );
                     if actual != digest {
-                        #[cfg(test)]
+                        #[cfg(any(test, feature = "source-observer"))]
                         super::delta::source_test_observer::failed(
                             &digest,
                             "transfer-full-decode-sha256",

@@ -1662,6 +1662,19 @@ fn pds_asset_gc_execute_all(
     Ok(result)
 }
 
+/// Candidates one cleanup page deletes.
+const ASSET_GC_EXECUTE_PAGE: i64 = 1024;
+#[cfg(test)]
+thread_local! {
+    static TEST_ASSET_GC_EXECUTE_PAGE: std::cell::Cell<i64> = const { std::cell::Cell::new(ASSET_GC_EXECUTE_PAGE) };
+}
+fn asset_gc_execute_page() -> i64 {
+    #[cfg(test)]
+    return TEST_ASSET_GC_EXECUTE_PAGE.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    ASSET_GC_EXECUTE_PAGE
+}
+
 fn pds_asset_gc_execute_page(
     state: &PersistentStoreState,
     operation_guard: &RendererOperationGuard,
@@ -1671,7 +1684,7 @@ fn pds_asset_gc_execute_page(
     now: i64,
 ) -> StoreResult<crate::asset_repository::migration_gc::AssetGcDryRunPage> {
     with_store_mutex_mut_admitted(state, operation_guard, |store| {
-        store.asset_gc_delete_marked_page_reusing_library(marks, library, 1024, cursor, now, 7 * 24 * 60 * 60 * 1_000, |_| Ok(()))
+        store.asset_gc_delete_marked_page_reusing_library(marks, library, asset_gc_execute_page(), cursor, now, 7 * 24 * 60 * 60 * 1_000, |_| Ok(()))
     })
 }
 
@@ -3169,7 +3182,9 @@ mod tests {
         let directory = tempdir().expect("create execute command directory");
         let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
         let cas = crate::asset_repository::PayloadCas::new(directory.path()).expect("open CAS");
-        let total = 3_000;
+        super::TEST_ASSET_GC_EXECUTE_PAGE.with(|page| page.set(10));
+        // Two full pages and a partial one.
+        let total = 25;
         let mut prepared = Vec::new();
         for index in 0..total {
             let payload = cas
