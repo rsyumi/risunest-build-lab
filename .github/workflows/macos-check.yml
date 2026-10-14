@@ -14,7 +14,7 @@ on:
       scope:
         type: choice
         default: full
-        options: [full, harness, sync, external-storage, external-storage-http, external-sync, backup-file, streaming, termination-probe, termination-dispatch, build-termination-dispatch, appearance-runtime, appearance-light, appearance-dark, appearance-codec-experiment, appearance-bgra-experiment]
+        options: [full, cleanup, harness, sync, external-storage, external-storage-http, external-sync, backup-file, streaming, termination-probe, termination-dispatch, build-termination-dispatch, appearance-runtime, appearance-light, appearance-dark, appearance-codec-experiment, appearance-bgra-experiment]
 permissions:
   contents: read
 concurrency:
@@ -44,7 +44,7 @@ jobs:
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
           case "$RUNNER_LABEL" in macos-15|macos-14|macos-15-intel|macos-26) ;; *) exit 1;; esac
-          case "$CHECK_SCOPE" in full|harness|sync|external-storage|external-storage-http|external-sync|backup-file|streaming|termination-probe|termination-dispatch|build-termination-dispatch|appearance-runtime|appearance-light|appearance-dark|appearance-codec-experiment|appearance-bgra-experiment) ;; *) exit 1;; esac
+          case "$CHECK_SCOPE" in full|cleanup|harness|sync|external-storage|external-storage-http|external-sync|backup-file|streaming|termination-probe|termination-dispatch|build-termination-dispatch|appearance-runtime|appearance-light|appearance-dark|appearance-codec-experiment|appearance-bgra-experiment) ;; *) exit 1;; esac
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
@@ -96,13 +96,13 @@ jobs:
       - name: Install locked frontend inputs
         run: pnpm install --frozen-lockfile
       - name: Build agent frontend once
-        if: inputs.scope == 'full' || inputs.scope == 'build-termination-dispatch'
+        if: inputs.scope == 'full' || inputs.scope == 'cleanup' || inputs.scope == 'build-termination-dispatch'
         run: pnpm build:agent 2>&1 | tee artifacts/frontend.log
       - name: Verify agent configuration and frontend
         if: inputs.scope == 'full' || inputs.scope == 'build-termination-dispatch'
         run: node ../control/scripts/verify-macos-inputs.mjs .
       - name: Rust contracts
-        if: inputs.scope == 'full'
+        if: inputs.scope == 'full' || inputs.scope == 'cleanup'
         run: |
           set -euo pipefail
           # macOS defaults to /var/folders; /var is a symlink rejected by the
@@ -110,6 +110,11 @@ jobs:
           contract_tmp="$(mktemp -d "$RUNNER_TEMP/risunest-contracts.XXXXXX")"
           export TMPDIR="$(cd "$contract_tmp" && pwd -P)"
           printf 'rust_test_tmpdir=%s\n' "$TMPDIR" >> artifacts/environment.txt
+          if [[ "$CHECK_SCOPE" == cleanup ]]; then
+            cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib app_cleanup:: -- --test-threads=1 2>&1 | tee artifacts/cleanup-contracts.log
+            cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib cleanup_webview:: -- --test-threads=1 2>&1 | tee artifacts/webview-cleanup-contracts.log
+            exit 0
+          fi
           cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/rust-contracts.log
           cargo test --manifest-path src-tauri/Cargo.toml --release --locked --test ios_native_contracts -- --test-threads=1 2>&1 | tee artifacts/ios-native-contracts.log
           cargo test --manifest-path src-tauri/Cargo.toml --package tauri-plugin-window-state --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/window-state-contracts.log
@@ -165,6 +170,7 @@ jobs:
           command -v rclone >/dev/null || brew install rclone
           rclone version | head -1 | tee artifacts/rclone.txt
       - name: Build isolated Mac WKWebView harness
+        if: inputs.scope != 'cleanup'
         run: |
           set -euo pipefail
           if [[ "$CHECK_SCOPE" != full && "$CHECK_SCOPE" != build-termination-dispatch ]]; then
@@ -183,6 +189,7 @@ jobs:
           fi
           (cd benchmarks/macos/native && node ../../../node_modules/@tauri-apps/cli/tauri.js "${harness_args[@]}" -- --locked) 2>&1 | tee artifacts/harness-native.log
       - name: Actual WKWebView contracts and desktop lifecycle
+        if: inputs.scope != 'cleanup'
         run: |
           set -euo pipefail
           profile=release
