@@ -1,5 +1,7 @@
 {
   "username": "Synthetic PocketRisu restore",
+  "hypaModel": "voyageContext4",
+  "voyageApiKey": "synthetic-voyage-key",
   "characters": [
     {
       "type": "character",

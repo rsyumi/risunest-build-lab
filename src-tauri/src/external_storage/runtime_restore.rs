@@ -11,6 +11,7 @@ use super::{
 use crate::persistent_store::{
     commands::PersistentStoreState,
     external_apply::{ExternalSnapshotApplication, ExternalSnapshotObject, ExternalSnapshotRecord},
+    lww::{StagingObserver, StagingProgress},
     PersistentStore, StoreError,
 };
 use crate::native_log::logged;
@@ -518,6 +519,7 @@ pub(crate) async fn run_restore<R: Runtime>(
     let worker_app = app.clone();
     let worker_job = job.clone();
     let worker_cancel = cancel.clone();
+    let report_staging = observation.staging_reporter();
     let prepared = spawn_blocking(move || {
         prepare_local_restore(
             &worker_app,
@@ -531,6 +533,7 @@ pub(crate) async fn run_restore<R: Runtime>(
             database.sources,
             database.present,
             permit,
+            &report_staging,
         )
     })
     .await.map_err(runtime::local_error)?;
@@ -700,6 +703,7 @@ fn stage_original_backup_controls(
     snapshot:&PreparedRemoteSnapshot,
     units:&snapshot_restore::OriginalUnits,
     cancel:&Cancellation,
+    report:&dyn Fn(Option<StagingProgress>),
 ) -> Result<()> {
     use crate::persistent_store::external_capture::{original_unit_control_lengths,streamed_unit_dependency_inventory,BackupBodyRole};
     let content=super::content_store::ContentStore::open(&snapshot.staging_root.join("external-storage")).map_err(pds_error)?;
@@ -719,18 +723,22 @@ fn stage_original_backup_controls(
     };
     let size=|hash:&str| Ok(declared.get(hash).map(|object| object.byte_length));
     let probe=runtime::CancelProbe(cancel.clone());
+    let mut emit=|progress:StagingProgress| -> crate::persistent_store::StoreResult<()> {report(Some(progress));Ok(())};
+    let mut progress=StagingObserver::new(&mut emit);
+    // Both passes read every unit, so one share counts the units twice.
+    progress.begin("read",Some(units.count()?.saturating_mul(2))).map_err(pds_error)?;
     // Nothing above the bound is read here. Message pages and large unit
     // bodies are read once, in the second pass, at the lengths their
     // manifests and the snapshot declare.
     let mut failure=None;
-    let metadata=original_unit_control_lengths(store_units(units,&content,&mut failure),
+    let metadata=original_unit_control_lengths(store_units(units,&content,&mut failure).map(|unit| {progress.advance()?;unit}),
         &|hash| read(hash,risunest_sync_wire::MAX_METADATA_BYTES as u64),
         &size,&size,&probe);
     cancel.check()?;
     if let Some(failure)=failure.take() {return Err(failure)}
     let metadata=metadata.map_err(pds_error)?;
     let mut spool=super::capture::BackupDependencySpool::new(&snapshot.staging_root.join("verified-original-controls")).map_err(pds_error)?;
-    let inventory=streamed_unit_dependency_inventory(store_units(units,&content,&mut failure),
+    let inventory=streamed_unit_dependency_inventory(store_units(units,&content,&mut failure).map(|unit| {progress.advance()?;unit}),
         &|hash| match metadata.controls.get(hash) {Some(length)=>read(hash,*length),None=>Ok(None)},
         &size,&probe,true,&mut |hash,bytes,role| Ok(spool.push(hash,bytes,role)?),
     );
@@ -740,10 +748,12 @@ fn stage_original_backup_controls(
     if !inventory.spooled_payloads.is_empty() {return Err(corrupt())}
     cancel.check()?;
     spool.seal().map_err(pds_error)?;
+    progress.begin("copy",Some(spool.count().map_err(pds_error)?)).map_err(pds_error)?;
     let result=spool.visit(&mut |hash,bytes,role| {
         if cancel.check().is_err() {return Err(StoreError::Validation{message:"External restore cancelled".into()})}
         if role != BackupBodyRole::Control {return Err(StoreError::Validation{message:"Backup control role differs".into()})}
-        store.lww_put_object(hash,bytes)
+        store.lww_put_object(hash,bytes)?;
+        progress.advance()
     });
     cancel.check()?;
     result.map_err(pds_error)
@@ -780,10 +790,11 @@ fn prepare_local_restore<R: Runtime>(
     sources:Vec<super::lww_residency::SharedPackedSource>,
     present:BTreeSet<String>,
     permit:crate::native_file_jobs::admission::Permit,
+    report:&dyn Fn(Option<StagingProgress>),
 ) -> Result<(Value,crate::native_file_jobs::admission::Permit,PersistentStore)> {
     let app_data_dir=crate::app_paths::data_root(app).map_err(runtime::local_error)?;
     let mut store=runtime::native_store(app)?;
-    let (result,permit)=prepare_local_restore_in_store(&mut store,&app.state::<PersistentStoreState>(),&app_data_dir,job,expected_revision,snapshot,original_units,selection,sections,cancel,sources,present,permit)?;
+    let (result,permit)=prepare_local_restore_in_store(&mut store,&app.state::<PersistentStoreState>(),&app_data_dir,job,expected_revision,snapshot,original_units,selection,sections,cancel,sources,present,permit,report)?;
     Ok((result,permit,store))
 }
 
@@ -817,6 +828,7 @@ fn prepare_local_restore_in_store(
     sources:Vec<super::lww_residency::SharedPackedSource>,
     present:BTreeSet<String>,
     mut permit:crate::native_file_jobs::admission::Permit,
+    report:&dyn Fn(Option<StagingProgress>),
 ) -> Result<(Value,crate::native_file_jobs::admission::Permit)> {
     cancel.check()?;
     // The caller opened this dedicated native connection while renderer
@@ -832,7 +844,9 @@ fn prepare_local_restore_in_store(
     if store.revision().map_err(pds_error)? != expected_revision {
         return Err(ProviderError::new(ErrorKind::PreconditionFailed));
     }
-    stage_original_backup_controls(store,&snapshot,&original_units,&cancel)?;
+    stage_original_backup_controls(store,&snapshot,&original_units,&cancel,report)?;
+    // The steps up to the snapshot application report no share.
+    report(None);
     JobStore::open(&root)?.freeze_restore_bodies(job,&sources,&present)?;
     // A catalog row needs its body or its remote source, so the sources are registered first.
     super::lww_residency::register_verified_packed_many(store.repository_root(),&sources)?;
@@ -873,7 +887,7 @@ fn prepare_local_restore_in_store(
         let probe = runtime::CancelProbe(cancel.clone());
         Some(
             store
-                .prepare_external_snapshot_application(
+                .prepare_external_snapshot_application_observed(
                     &ExternalSnapshotApplication {
                         expected_revision,
                         staging_root: &staging_root,
@@ -883,6 +897,7 @@ fn prepare_local_restore_in_store(
                     },
                     records,
                     objects,
+                    &mut |progress| { report(Some(progress)); Ok(()) },
                 )
                 .map_err(|error| {
                     if cancel.check().is_err() {
@@ -895,6 +910,8 @@ fn prepare_local_restore_in_store(
     } else {
         None
     };
+    // The steps after the snapshot application report no share.
+    report(None);
 
     // Preparing every selected section before touching the device file keeps a
     // bundle with a missing object from installing half of itself.
@@ -1023,12 +1040,22 @@ pub(crate) fn activate_database_first_backup(
     prepared:snapshot_restore::DatabaseFirstSnapshot,sections:Vec<super::sections::CapturedSection>,
     cancel:Cancellation,permit:crate::native_file_jobs::admission::Permit,
 )->Result<(Value,crate::native_file_jobs::admission::Permit)> {
+    activate_database_first_backup_observed(store,state,job,prepared,sections,cancel,permit,&|_|{})
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn activate_database_first_backup_observed(
+    store:&mut PersistentStore,state:&PersistentStoreState,job:&DurableJob,
+    prepared:snapshot_restore::DatabaseFirstSnapshot,sections:Vec<super::sections::CapturedSection>,
+    cancel:Cancellation,permit:crate::native_file_jobs::admission::Permit,report:&dyn Fn(Option<StagingProgress>),
+)->Result<(Value,crate::native_file_jobs::admission::Permit)> {
     let expected=job.request.target_revision.as_deref().ok_or_else(corrupt)?.parse::<i64>().map_err(|_|corrupt())?;
     let selection=restore_selection(job.request.restore_areas.as_deref())?;
     require_restorable_sections(&selection,&prepared.snapshot,&job.admission_identity.store_id)?;
     let app_data_dir=store.repository_root().to_owned();
     prepare_local_restore_in_store(store,state,&app_data_dir,job,expected,prepared.snapshot,prepared.original_units,
-        selection,sections,cancel,prepared.sources,prepared.present,permit)
+        selection,sections,cancel,prepared.sources,prepared.present,permit,report)
 }
 
 #[cfg(test)]
@@ -1102,9 +1129,9 @@ pub(super) mod tests {
         invalid.dependency_root=Some("ab".repeat(32));
         invalid_units.insert(UnitKey::new(&["z-future-unit","missing-tree"]).unwrap(),UnitValue::object(invalid).unwrap());
         let (invalid_units,units)=(snapshot_restore::OriginalUnits::staged(&mut content,&invalid_units),snapshot_restore::OriginalUnits::staged(&mut content,&units));
-        assert!(stage_original_backup_controls(&mut store,&snapshot,&invalid_units,&Cancellation::default()).is_err());
+        assert!(stage_original_backup_controls(&mut store,&snapshot,&invalid_units,&Cancellation::default(),&|_|{}).is_err());
         assert!(store.lww_object_body(&manifest.hash).unwrap().is_none());
-        stage_original_backup_controls(&mut store,&snapshot,&units,&Cancellation::default()).unwrap();
+        stage_original_backup_controls(&mut store,&snapshot,&units,&Cancellation::default(),&|_|{}).unwrap();
         assert_eq!(store.lww_object_body(&manifest.hash).unwrap(),Some(manifest.bytes));
     }
 
@@ -1120,7 +1147,7 @@ pub(super) mod tests {
         snapshot.objects.push(snapshot_restore::PreparedObject {content_hash:body.content_hash.clone(),byte_length:body.byte_size,source:super::super::content_store::ObjectSource::Library(body.content_hash)});
         let units=snapshot_restore::OriginalUnits::staged(&mut super::super::content_store::ContentStore::open(&snapshot.staging_root.join("external-storage")).unwrap(),&units);
         crate::asset_repository::body_io::reset_body_io();
-        stage_original_backup_controls(&mut store,&snapshot,&units,&Cancellation::default()).unwrap();
+        stage_original_backup_controls(&mut store,&snapshot,&units,&Cancellation::default(),&|_|{}).unwrap();
         let observed=crate::asset_repository::body_io::take_body_io();
         assert!(observed.complete());
         assert_eq!(observed.asset_work(),Default::default());
@@ -1146,10 +1173,10 @@ pub(super) mod tests {
         content.commit().unwrap();
         let mut unit=|key:&[&str],bytes:&[u8]| snapshot_restore::OriginalUnits::staged(&mut content,&std::collections::BTreeMap::from([(UnitKey::new(key).unwrap(),UnitValue::object(RecordDescriptor::content(risunest_sync_wire::hash(bytes))).unwrap())]));
         let (padded_units,body_units)=(unit(&["root","additionalPrompt"],&padded),unit(&["root","additionalPrompt"],&body));
-        assert!(stage_original_backup_controls(&mut store,&snapshot,&padded_units,&Cancellation::default()).is_err());
+        assert!(stage_original_backup_controls(&mut store,&snapshot,&padded_units,&Cancellation::default(),&|_|{}).is_err());
         assert!(store.lww_object_body(&risunest_sync_wire::hash(&body)).unwrap().is_none());
         crate::persistent_store::hash_work::reset_hash_work();
-        stage_original_backup_controls(&mut store,&snapshot,&body_units,&Cancellation::default()).unwrap();
+        stage_original_backup_controls(&mut store,&snapshot,&body_units,&Cancellation::default(),&|_|{}).unwrap();
         let work=crate::persistent_store::hash_work::take_hash_work();
         assert_eq!(work.domains["native_backup_large_unit_source"].calls,1);
         assert!(store.lww_object_body(&risunest_sync_wire::hash(&body)).unwrap()==Some(body));
@@ -1901,6 +1928,44 @@ pub(super) mod tests {
     async fn restore_over(root:&Path,store:&mut PersistentStore,backup:&PackagedBackup) -> Result<Value> {
         let job=admit(root,store,backup);
         run_job(root,store,backup,&job).await
+    }
+
+    #[test]
+    fn a_restore_reports_each_counted_preparation_step_and_clears_the_share_between_them() {
+        run(async {
+            let backup=packaged_backup_seeded(&[vec![53;4096]],|store|{
+                let staging=store.replace_begin().unwrap().staging_id;
+                store.replace_put_root(&staging,&json!({"temperature":1})).unwrap();
+                store.replace_add_characters(&staging,&[json!({"chaId":"synthetic-character","type":"character","name":"Synthetic","chatPage":0,
+                    "chats":[{"id":"synthetic-conversation","name":"Synthetic","message":[{"role":"user","data":"synthetic message","chatId":"synthetic-message"}]}]})]).unwrap();
+                store.replace_commit(&staging,Some(store.revision().unwrap())).unwrap();
+            }).await;
+            let directory=tempfile::tempdir().unwrap();
+            let root=directory.path();
+            let mut store=PersistentStore::open(root).unwrap();
+            let job=admit(root,&store,&backup);
+            let (database,sections)=prepare_database_first_backup(root,&backup.connected,&job,&Cancellation::default()).await.unwrap();
+            let (units,objects,records)=(database.original_units.count().unwrap(),database.snapshot.objects.len() as u64,database.snapshot.records.len() as u64);
+            assert!(units>0 && objects>0 && records>0);
+            let seen=std::cell::RefCell::new(Vec::new());
+            let admission=std::sync::Arc::new(crate::native_file_jobs::admission::Admission::default());
+            activate_database_first_backup_observed(&mut store,&PersistentStoreState::default(),&job,database,sections,Cancellation::default(),
+                admission.staging().unwrap(),&|progress:Option<StagingProgress>| seen.borrow_mut().push(progress.map(|progress|(progress.phase,progress.done,progress.total)))).unwrap();
+            let seen=seen.into_inner();
+            // The steps between and after the counted ones clear the share instead of keeping a full bar.
+            let mut steps=seen.iter().map(|progress|progress.map(|(phase,..)|phase)).collect::<Vec<_>>();
+            steps.dedup();
+            assert_eq!(steps,[Some("read"),Some("copy"),None,Some("validate"),Some("project"),None]);
+            assert_eq!(seen.iter().filter(|progress|progress.is_none()).count(),2);
+            // Each phase is one bar that fills to the count its input declares; both control passes read every unit.
+            let mut phases=seen.iter().flatten().map(|&(phase,_,total)|(phase,total)).collect::<Vec<_>>();
+            phases.dedup();
+            assert!(matches!(phases[1],("copy",Some(controls)) if controls>0),"{phases:?}");
+            assert_eq!([phases[0],phases[2],phases[3]],[("read",Some(2*units)),("validate",Some(objects)),("project",Some(records))]);
+            for (phase,total) in phases {
+                assert_eq!(seen.iter().flatten().rev().find(|(name,..)|*name==phase).map(|&(_,done,_)|done),total,"{phase}");
+            }
+        });
     }
 
     fn request_id(job:&DurableJob) -> String {

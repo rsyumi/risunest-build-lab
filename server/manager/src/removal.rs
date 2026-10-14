@@ -205,8 +205,7 @@ fn read_record(path: &Path) -> Result<Registration> {
             format!("removal-registration-read-failed: {}", path.display())
         }
     })?;
-    serde_json::from_slice(&bytes)
-        .map_err(|_| "removal-registration-invalid".into())
+    serde_json::from_slice(&bytes).map_err(|_| "removal-registration-invalid".into())
 }
 
 fn record_path(registry: &Path, root: &Path) -> PathBuf {
@@ -299,11 +298,8 @@ fn register_at_with(
     update::write_json(&local, &record, "removal-registration-write-failed")
         .map_err(|error| format!("{error}: {}", local.display()))?;
     let path = record_path(registry, root);
-    update::write_json(
-        &path,
-        &record,
-        "removal-registration-write-failed",
-    ).map_err(|error| format!("{error}: {}", path.display()))
+    update::write_json(&path, &record, "removal-registration-write-failed")
+        .map_err(|error| format!("{error}: {}", path.display()))
 }
 
 pub fn plan(root: &Path, server: &Path, delete_data: bool) -> Result<RemovalPlan> {
@@ -314,11 +310,22 @@ fn plan_at(registry: &Path, root: &Path, server: &Path, delete_data: bool) -> Re
     plan_at_with_force(registry, root, server, delete_data, false)
 }
 
-pub fn plan_with_force(root: &Path, server: &Path, delete_data: bool, force: bool) -> Result<RemovalPlan> {
+pub fn plan_with_force(
+    root: &Path,
+    server: &Path,
+    delete_data: bool,
+    force: bool,
+) -> Result<RemovalPlan> {
     plan_at_with_force(&registry()?, root, server, delete_data, force)
 }
 
-fn plan_at_with_force(registry: &Path, root: &Path, server: &Path, delete_data: bool, force: bool) -> Result<RemovalPlan> {
+fn plan_at_with_force(
+    registry: &Path,
+    root: &Path,
+    server: &Path,
+    delete_data: bool,
+    force: bool,
+) -> Result<RemovalPlan> {
     let install = install_directory(server)?;
     for path in [registry, root, server, &install] {
         safe_path(path)?;
@@ -346,14 +353,22 @@ fn plan_at_with_force(registry: &Path, root: &Path, server: &Path, delete_data: 
     for path in [record_path(registry, root), root.join(RECORD)] {
         match read_record(&path) {
             Ok(record) => {
-                if record.schema != 1 || record.data != root || record.install != install
-                    || record.server != server || record.instance != platform::instance_name(root)
+                if record.schema != 1
+                    || record.data != root
+                    || record.install != install
+                    || record.server != server
+                    || record.instance != platform::instance_name(root)
                 {
                     return Err("removal-registration-invalid".into());
                 }
                 records.push(record);
             }
-            Err(error) if error == "removal-registration-missing" && (force || (!root.exists() && !records.is_empty())) => (),
+            Err(error)
+                if error == "removal-registration-missing"
+                    && (force || (!root.exists() && !records.is_empty())) =>
+            {
+                ()
+            }
             Err(error) => return Err(error),
         }
     }
@@ -469,32 +484,47 @@ fn remove_file(path: &Path) -> Result<()> {
 pub fn remove_obsolete_owned_files(server: &Path, previous: &Path) -> Result<bool> {
     let install = install_directory(server)?;
     safe_path(&install)?;
-    let Some(previous) = update::previous_owned_files(previous)? else { return Ok(false) };
-    let current = update::previous_owned_files(&marker(&install))?
-        .ok_or("managed-install-marker-invalid")?;
+    let Some(previous) = update::previous_owned_files(previous)? else {
+        return Ok(false);
+    };
+    let current =
+        update::previous_owned_files(&marker(&install))?.ok_or("managed-install-marker-invalid")?;
     let mut obsolete = Vec::new();
     for relative in previous {
-        if current.iter().any(|file| if cfg!(windows) {
-            file.to_string_lossy().eq_ignore_ascii_case(&relative.to_string_lossy())
-        } else { file == &relative }) {
+        if current.iter().any(|file| {
+            if cfg!(windows) {
+                file.to_string_lossy()
+                    .eq_ignore_ascii_case(&relative.to_string_lossy())
+            } else {
+                file == &relative
+            }
+        }) {
             continue;
         }
         let file = install.join(relative);
         safe_path(&file)?;
         obsolete.push(file);
     }
-    for file in obsolete { remove_file(&file)?; }
+    for file in obsolete {
+        remove_file(&file)?;
+    }
     Ok(true)
 }
 
 #[cfg(windows)]
 pub fn remove_owned_files(root: &Path, server: &Path, force: bool) -> Result<()> {
     let plan = plan_with_force(root, server, false, force)?;
-    if !plan.blockers.is_empty() { return Err(plan.blockers.join(", ")); }
-    if lifecycle::owner_active(root)? { return Err("removal-process-still-running".into()); }
+    if !plan.blockers.is_empty() {
+        return Err(plan.blockers.join(", "));
+    }
+    if lifecycle::owner_active(root)? {
+        return Err("removal-process-still-running".into());
+    }
     let inventory = marker(&plan.install);
     for file in &plan.files {
-        if file != &inventory { remove_file(file)?; }
+        if file != &inventory {
+            remove_file(file)?;
+        }
     }
     remove_file(&inventory)
 }
@@ -604,7 +634,12 @@ pub async fn execute(root: &Path, server: &Path, delete_data: bool) -> Result<()
     execute_with_force(root, server, delete_data, false).await
 }
 
-async fn execute_with_force(root: &Path, server: &Path, delete_data: bool, force: bool) -> Result<()> {
+async fn execute_with_force(
+    root: &Path,
+    server: &Path,
+    delete_data: bool,
+    force: bool,
+) -> Result<()> {
     let plan = plan_with_force(root, server, delete_data, force)?;
     if !plan.blockers.is_empty() {
         return Err(plan.blockers.join(", "));
@@ -624,9 +659,12 @@ async fn execute_with_force(root: &Path, server: &Path, delete_data: bool, force
         if force {
             command.arg("/FORCE");
         }
-        command
-            .spawn()
-            .map_err(|error| format!("removal-uninstaller-launch-failed: {} ({error})", uninstaller.display()))?;
+        command.spawn().map_err(|error| {
+            format!(
+                "removal-uninstaller-launch-failed: {} ({error})",
+                uninstaller.display()
+            )
+        })?;
         return Ok(());
     }
     #[cfg(not(windows))]
@@ -965,7 +1003,9 @@ mod tests {
         fs::create_dir(root.join("manager-update")).unwrap();
         fs::write(root.join("manager-update/transaction.json"), "{}").unwrap();
         let plan = plan_at_with_force(&registry, &root, &server, true, true).unwrap();
-        assert!(plan.blockers.contains(&"removal-shared-installation-or-data".into()));
+        assert!(plan
+            .blockers
+            .contains(&"removal-shared-installation-or-data".into()));
         assert!(plan.blockers.contains(&"update-recovery-required".into()));
         fs::write(root.join(RECORD), "{}").unwrap();
         assert!(plan_at_with_force(&registry, &root, &server, false, true).is_err());
@@ -979,17 +1019,25 @@ mod tests {
         let unowned = server.with_file_name("keep.txt");
         fs::write(&old_file, "synthetic old").unwrap();
         fs::write(&unowned, "synthetic unowned").unwrap();
-        fs::write(&previous, serde_json::json!({
-            "schema":"risunest-sync-bundle/v1", "product":"sync", "variant":"managed",
-            "version":"0.1.0", "protocolId":"old-protocol", "storeFormatId":"old-format",
-            "files":["old.exe", "server"]
-        }).to_string()).unwrap();
+        fs::write(
+            &previous,
+            serde_json::json!({
+                "schema":"risunest-sync-bundle/v1", "product":"sync", "variant":"managed",
+                "version":"0.1.0", "protocolId":"old-protocol", "storeFormatId":"old-format",
+                "files":["old.exe", "server"]
+            })
+            .to_string(),
+        )
+        .unwrap();
         assert!(remove_obsolete_owned_files(&server, &previous).unwrap());
         assert!(!old_file.exists());
         assert!(server.exists() && unowned.exists());
         assert!(remove_obsolete_owned_files(&server, &previous).unwrap());
         fs::remove_file(&unowned).unwrap();
-        assert!(plan_at(&registry, &root, &server, false).unwrap().blockers.is_empty());
+        assert!(plan_at(&registry, &root, &server, false)
+            .unwrap()
+            .blockers
+            .is_empty());
         fs::write(&previous, "invalid").unwrap();
         assert!(!remove_obsolete_owned_files(&server, &previous).unwrap());
         fs::write(&previous, serde_json::json!({"schema":"risunest-sync-bundle/v1", "product":"sync", "variant":"managed", "files":["server", "../outside"]}).to_string()).unwrap();

@@ -270,8 +270,12 @@ try {
 "#;
 
 pub(super) fn startup(root: &Path, executable: &Path, action: &str) -> Result<StartupStatus> {
-    let mut file = tempfile::NamedTempFile::new()
-        .map_err(|_| format!("startup-file-create-failed: {}", std::env::temp_dir().display()))?;
+    let mut file = tempfile::NamedTempFile::new().map_err(|_| {
+        format!(
+            "startup-file-create-failed: {}",
+            std::env::temp_dir().display()
+        )
+    })?;
     let definition = task_xml(root, executable)?;
     let definition = if action == "manual" {
         definition.replace("<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>__CURRENT_SID__</UserId></LogonTrigger></Triggers>", "<Triggers/>")
@@ -307,7 +311,10 @@ pub(super) fn startup(root: &Path, executable: &Path, action: &str) -> Result<St
         .output()
         .map_err(|error| format!("task-scheduler-launch-failed: {error}"))?;
     if !output.status.success() {
-        return Err(scheduler_error("task-scheduler-operation-failed", &output.stderr));
+        return Err(scheduler_error(
+            "task-scheduler-operation-failed",
+            &output.stderr,
+        ));
     }
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).map_err(|_| "task-scheduler-response-invalid")?;
@@ -341,8 +348,12 @@ pub(super) fn update_schedule(
     if effective == "install" && !program.is_file() {
         return Err("manager-executable-missing".into());
     }
-    let mut file = tempfile::NamedTempFile::new()
-        .map_err(|_| format!("update-task-file-create-failed: {}", std::env::temp_dir().display()))?;
+    let mut file = tempfile::NamedTempFile::new().map_err(|_| {
+        format!(
+            "update-task-file-create-failed: {}",
+            std::env::temp_dir().display()
+        )
+    })?;
     file.write_all(update_task_xml(root, &program, server)?.as_bytes())
         .map_err(|_| format!("update-task-file-write-failed: {}", file.path().display()))?;
     let path = file.into_temp_path();
@@ -372,7 +383,10 @@ pub(super) fn update_schedule(
         .output()
         .map_err(|error| format!("task-scheduler-launch-failed: {error}"))?;
     if !output.status.success() {
-        return Err(scheduler_error("update-task-scheduler-operation-failed", &output.stderr));
+        return Err(scheduler_error(
+            "update-task-scheduler-operation-failed",
+            &output.stderr,
+        ));
     }
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).map_err(|_| "task-scheduler-response-invalid")?;
@@ -392,8 +406,11 @@ pub(super) fn update_schedule(
 fn scheduler_error(code: &str, stderr: &[u8]) -> String {
     let detail = String::from_utf8_lossy(stderr);
     let detail = detail.trim();
-    if !detail.is_empty() && detail.len() < 80
-        && detail.chars().all(|c| c.is_ascii_hexdigit() || c.is_ascii_lowercase() || c == '-' || c == ':')
+    if !detail.is_empty()
+        && detail.len() < 80
+        && detail
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c.is_ascii_lowercase() || c == '-' || c == ':')
     {
         format!("{code}:{detail}")
     } else {
@@ -407,10 +424,20 @@ mod tests {
 
     #[test]
     fn scheduler_failures_keep_the_stage_and_hresult_without_arbitrary_output() {
-        assert_eq!(scheduler_error("update-task-scheduler-operation-failed", b"register:80070005\r\n"),
-            "update-task-scheduler-operation-failed:register:80070005");
-        assert_eq!(scheduler_error("task-scheduler-operation-failed", b"unexpected private output"),
-            "task-scheduler-operation-failed");
+        assert_eq!(
+            scheduler_error(
+                "update-task-scheduler-operation-failed",
+                b"register:80070005\r\n"
+            ),
+            "update-task-scheduler-operation-failed:register:80070005"
+        );
+        assert_eq!(
+            scheduler_error(
+                "task-scheduler-operation-failed",
+                b"unexpected private output"
+            ),
+            "task-scheduler-operation-failed"
+        );
     }
 
     #[test]

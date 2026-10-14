@@ -127,12 +127,30 @@ fn source_retirement_suppresses_descendants_and_order_uses_creation_stamps() {
     let dir = tempfile::tempdir().unwrap(); let mut store = PersistentStore::open(dir.path()).unwrap();
     let mut retired = change(&["exists","character","retired"], json!(true)); retired.value = UnitValue::Deleted;
     let mut first = change(&["exists","character","a"], json!(true)); first.stamp.physical_ms = 3.into();
-    let incoming = vec![retired, change(&["character","retired","name"], json!("hidden")), change(&["exists","character","b"], json!(true)), first, change(&["order","characters"], json!(["retired","b"]))];
+    let mut incoming = vec![retired, change(&["character","retired","name"], json!("hidden")), change(&["exists","character","b"], json!(true)), first, change(&["order","characters"], json!(["retired","b"]))];
+    for (character, own) in [("a", "a-only"), ("b", "b-only")] {
+        incoming.push(change(&["exists","conversation",character,"shared"], json!(true)));
+        incoming.push(change(&["exists","conversation",character,own], json!(true)));
+    }
+    incoming.extend([
+        deleted_at(&["exists","conversation","a","retired-chat"], 7),
+        change(&["conversation","a","retired-chat","name"], json!("hidden")),
+        change(&["order","conversations","a"], json!({"ids":["b-only","shared","retired-chat","a-only"],"folders":[]})),
+        change(&["order","conversations","b"], json!({"ids":["a-only","b-only","shared"],"folders":[]})),
+    ]);
+    let assert_orders = |value: &Value| {
+        for (index, ids) in [(0, ["b-only", "shared"]), (1, ["shared", "a-only"])] {
+            assert_eq!(value["characters"][index]["chats"].as_array().unwrap().iter()
+                .map(|chat| chat["id"].as_str().unwrap()).collect::<Vec<_>>(), ids);
+        }
+    };
     let (header, inspection) = context(&store); let stage = store.lww_stage_binding_units(&header,&inspection,&incoming,7.into()).unwrap();
     let value = catalog(&store,&stage.staging_id);
     assert_eq!(value["characters"].as_array().unwrap().iter().map(|c| c["chaId"].as_str().unwrap()).collect::<Vec<_>>(), ["b","a"]);
+    assert_orders(&value);
     activate(&mut store,&header,&inspection,&stage);
-    assert_eq!(store.connection.query_row("SELECT count(*) FROM lww_retired", [], |r| r.get::<_,i64>(0)).unwrap(), 1);
+    assert_orders(&catalog(&store,&active_generation(&store.connection).unwrap()));
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM lww_retired", [], |r| r.get::<_,i64>(0)).unwrap(), 2);
     assert_eq!(store.connection.query_row("SELECT count(*) FROM lww_receive_rows WHERE status='held'", [], |r| r.get::<_,i64>(0)).unwrap(), 0);
     assert_eq!(read_unit(&store.connection,&incoming[1].key).unwrap(), Some((incoming[1].stamp.clone(),incoming[1].value.clone())));
 }
@@ -228,6 +246,29 @@ fn crash_after_atomic_copy_retains_exact_receipt_before_caller_registration() {
     drop(store); let mut store=PersistentStore::open(dir.path()).unwrap();
     let stage: super::super::BindingUnitStage =store.lww_stage_binding_units(&header,&inspection,&incoming,7.into()).unwrap();
     assert_eq!((stage.staging_id,stage.source_digest),frozen); assert_eq!(store.revision().unwrap(),0);
+}
+
+#[test]
+fn cancellation_after_the_stage_commits_returns_the_committed_stage() {
+    let dir = tempfile::tempdir().unwrap(); let mut store = PersistentStore::open(dir.path()).unwrap();
+    let (header, inspection) = context(&store);
+    let incoming = vec![change(&["root","language"], json!("remote"))];
+    let path: String = store.connection.query_row("SELECT file FROM pragma_database_list WHERE name='main'", [], |row| row.get(0)).unwrap();
+    let reader = crate::sqlite_open::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let stage = store.lww_stage_binding_units_observed(&header, &inspection, &incoming, 7.into(), |_| {
+        let committed: bool = reader.query_row("SELECT EXISTS(SELECT 1 FROM lww_binding_sources WHERE request_id=?1)", [&header.request_id], |row| row.get(0))?;
+        if committed { return Err(error("synthetic-observer-after-commit")); }
+        Ok(())
+    }).unwrap();
+    drop(reader);
+    let frozen = store.connection.query_row("SELECT staging_id,source_digest FROM lww_binding_sources WHERE request_id=?1", [&header.request_id], |row| {
+        Ok(BindingUnitStage { staging_id: row.get(0)?, source_digest: row.get(1)? })
+    }).unwrap();
+    assert_eq!(stage, frozen);
+    activate(&mut store, &header, &inspection, &stage);
+    assert_eq!(active_generation(&store.connection).unwrap(), stage.staging_id);
+    assert_eq!(catalog(&store, &stage.staging_id)["language"], "remote");
+    assert_eq!(store.revision().unwrap(), 1);
 }
 
 #[test]
@@ -463,7 +504,7 @@ fn binding_copy_streams_large_multicolumn_catalog_without_changing_source_types(
     store.connection.execute("ATTACH DATABASE ?1 AS binding_incoming", [path.to_string_lossy().as_ref()]).unwrap();
     {
         let tx = store.connection.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
-        for &(table, _) in GENERATION_TABLES { copy_binding_table(&tx, table, "copied").unwrap(); }
+        for &(table, _) in GENERATION_TABLES { copy_binding_table_observed(&tx, table, "copied", &mut || Ok(())).unwrap(); }
         assert_eq!(catalog_digest(&tx, "copied").unwrap(), expected);
         tx.commit().unwrap();
     }
@@ -522,16 +563,69 @@ fn binding_replacement_applies_large_shared_and_device_units_from_their_bodies()
     let language = json!("l".repeat(limit + 1)); let plugin = "p".repeat(limit + 7);
     let mut root = change(&["root","language"], Value::Null); root.value = object(&store, &language);
     let mut local = change(&["plugin-local","synthetic-owner","string","large"], Value::Null); local.value = object(&store, &json!(plugin));
-    let incoming = vec![root.clone(), local.clone()];
+    let description = json!("d".repeat(limit + 3));
+    let mut detail = change(&["character","synthetic","desc"], Value::Null); detail.value = object(&store, &description);
+    let incoming = vec![root.clone(), local.clone(), change(&["exists","character","synthetic"], json!(true)), detail,
+        change(&["character","synthetic","name"], json!("Synthetic")), change(&["character","synthetic","notes"], json!("retained notes"))];
     let (header, inspection) = context(&store);
     let stage = store.lww_stage_binding_units(&header, &inspection, &incoming, 7.into()).unwrap();
     assert_eq!(catalog(&store, &stage.staging_id)["language"], language);
+    let character = catalog(&store, &stage.staging_id)["characters"][0].clone();
+    assert_eq!(character["desc"], description);
+    assert_eq!(character["name"], "Synthetic");
+    assert_eq!(character["notes"], "retained notes");
     activate(&mut store, &header, &inspection, &stage);
     assert_eq!(store.read_root(None).unwrap().value["language"], language);
+    assert_eq!(catalog(&store, &active_generation(&store.connection).unwrap())["characters"][0], character);
     assert_eq!(read_unit(&store.connection, &root.key).unwrap(), Some((root.stamp.clone(), root.value.clone())));
     let device = store.device_store().unwrap().connection();
     assert_eq!(read_unit(device, &local.key).unwrap(), Some((local.stamp.clone(), local.value.clone())));
     assert_eq!(device.query_row("SELECT value FROM plugin_device_storage WHERE owner='synthetic-owner' AND space='string' AND key='large' AND tombstone=0", [], |r| r.get::<_,String>(0)).unwrap(), plugin);
+}
+
+#[test]
+fn binding_character_fields_preserve_each_owner_and_flush_the_final_group() {
+    let dir = tempfile::tempdir().unwrap(); let mut store = PersistentStore::open(dir.path()).unwrap();
+    let incoming = vec![
+        change(&["exists","character","a"], json!(true)), change(&["exists","character","z"], json!(true)),
+        change(&["character","a","desc"], json!("first description")),
+        change(&["character","a","futureField"], json!("unprojected")),
+        change(&["character","a","name"], json!("First")),
+        change(&["character","missing","name"], json!("held")),
+        change(&["character","z","desc"], json!("final description")),
+        change(&["character","z","name"], json!("Last")),
+        deleted_at(&["character","z","notes"], 7),
+    ];
+    let (header, inspection) = context(&store);
+    let stage = store.lww_stage_binding_units(&header, &inspection, &incoming, 7.into()).unwrap();
+    let characters = catalog(&store, &stage.staging_id)["characters"].clone();
+    assert_eq!(characters.as_array().unwrap().len(), 2);
+    for (index, id, name, description) in [(0, "a", "First", "first description"), (1, "z", "Last", "final description")] {
+        assert_eq!(characters[index]["chaId"], id);
+        assert_eq!(characters[index]["name"], name);
+        assert_eq!(characters[index]["desc"], description);
+        assert!(characters[index].get("futureField").is_none());
+    }
+    assert!(characters[1].get("notes").is_none());
+    activate(&mut store, &header, &inspection, &stage);
+    assert_eq!(catalog(&store, &active_generation(&store.connection).unwrap())["characters"], characters);
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM lww_receive_rows WHERE status='held'", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
+}
+
+#[test]
+fn binding_character_group_rejects_invalid_or_deleted_name_before_copy() {
+    for name in [change(&["character","synthetic","name"], json!(42)), deleted_at(&["character","synthetic","name"], 7)] {
+        let dir = tempfile::tempdir().unwrap(); let mut store = PersistentStore::open(dir.path()).unwrap();
+        let generation = active_generation(&store.connection).unwrap();
+        let incoming = vec![change(&["exists","character","synthetic"], json!(true)), name,
+            change(&["character","synthetic","notes"], json!("later field cannot repair name"))];
+        let (header, inspection) = context(&store);
+        let failed = store.lww_stage_binding_units(&header, &inspection, &incoming, 7.into());
+        assert!(failed.unwrap_err().to_string().contains("requires name"));
+        assert_eq!(active_generation(&store.connection).unwrap(), generation);
+        assert_eq!(store.revision().unwrap(), 0);
+        assert_eq!(store.connection.query_row("SELECT count(*) FROM lww_binding_stages", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+    }
 }
 
 #[test]
@@ -582,11 +676,13 @@ fn streaming_binding_rejects_late_producer_failure_and_retries_without_partial_s
     let mut store = PersistentStore::open(dir.path()).unwrap();
     let (header, inspection) = context(&store);
     let generation = active_generation(&store.connection).unwrap();
-    let failed = store.lww_stage_binding_units_stream(&header, &inspection, 7.into(), |emit| {
+    let mut observed = Vec::new();
+    let failed = store.lww_stage_binding_units_stream_observed(&header, &inspection, 7.into(), |emit| {
         for index in 0..1025 { emit(change(&["root", &format!("synthetic-{index:04}")], json!(index)))?; }
         Err(error("synthetic-producer-tail"))
-    });
+    }, |progress| { observed.push(progress); Ok(()) });
     assert!(failed.is_err());
+    assert!(observed.iter().any(|progress| progress.phase == "read" && progress.done == 0 && progress.total.is_none()));
     for table in ["lww_binding_stages", "lww_binding_sources", "lww_binding_source_units"] {
         assert_eq!(store.connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get::<_,i64>(0)).unwrap(), 0);
     }
@@ -605,6 +701,68 @@ fn streaming_binding_rejects_late_producer_failure_and_retries_without_partial_s
     activate(&mut store, &header, &inspection, &stage);
     assert_eq!(store.revision().unwrap(), 1);
     assert_eq!(store.connection.query_row("SELECT count(*) FROM lww_units", [], |row| row.get::<_,i64>(0)).unwrap(), 1025);
+}
+
+#[test]
+fn observed_binding_reports_stored_work_and_cancellation_retries_without_partial_stage() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(dir.path()).unwrap();
+    let (header, inspection) = context(&store);
+    let generation = active_generation(&store.connection).unwrap();
+    let original = catalog(&store, &generation);
+    let incoming = (0..129).map(|index|
+        change(&["variable", &format!("synthetic-{index:03}")], json!(index))
+    ).collect::<Vec<_>>();
+    let expected = (0..129).map(|index| (format!("synthetic-{index:03}"), json!(index)))
+        .collect::<serde_json::Map<String, Value>>();
+    struct RestoreInterval(std::time::Duration);
+    impl Drop for RestoreInterval { fn drop(&mut self) { REPORT_INTERVAL.with(|interval| interval.set(self.0)); } }
+    let _restore = RestoreInterval(REPORT_INTERVAL.with(|interval| interval.replace(std::time::Duration::ZERO)));
+    for phase in ["validate", "project", "copy", "check"] {
+        let mut cancelled_at = None;
+        let failed = store.lww_stage_binding_units_observed(&header, &inspection, &incoming, 7.into(), |progress| {
+            if progress.phase == phase && progress.done > 0 {
+                cancelled_at = Some(progress.done);
+                return Err(error("synthetic-observer-cancelled"));
+            }
+            Ok(())
+        });
+        assert!(failed.unwrap_err().to_string().contains("synthetic-observer-cancelled"));
+        assert_eq!(cancelled_at, Some(1), "{phase}");
+        for &(table, _) in GENERATION_TABLES {
+            assert_eq!(store.connection.query_row(&format!("SELECT count(*) FROM {table} WHERE generation LIKE 'staging-%'"), [], |row| row.get::<_,i64>(0)).unwrap(), 0, "{phase}: {table}");
+        }
+        for table in ["lww_binding_stages", "lww_binding_sources", "lww_binding_source_units"] {
+            assert_eq!(store.connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get::<_,i64>(0)).unwrap(), 0, "{phase}: {table}");
+        }
+        assert_eq!(active_generation(&store.connection).unwrap(), generation);
+        assert_eq!(store.revision().unwrap(), 0);
+        assert_eq!(catalog(&store, &generation), original);
+    }
+    let mut observed = Vec::new();
+    let stage = store.lww_stage_binding_units_observed(&header, &inspection, &incoming, 7.into(), |progress| {
+        observed.push(progress);
+        Ok(())
+    }).unwrap();
+    let count = incoming.len() as u64;
+    let copied: u64 = GENERATION_TABLES.iter().map(|(table, _)| {
+        store.connection.query_row(&format!("SELECT count(*) FROM {table} WHERE generation=?1"), [&stage.staging_id], |row| row.get::<_,i64>(0)).unwrap() as u64
+    }).sum();
+    assert!(copied > 0);
+    // Each phase is one bar with a fixed total that fills without restarting.
+    let mut phases = observed.iter().map(|progress| (progress.phase, progress.total)).collect::<Vec<_>>();
+    phases.dedup();
+    assert_eq!(phases, [("read", None), ("validate", Some(count * 2)), ("project", Some(count * 4)), ("copy", Some(copied)), ("check", Some(copied))]);
+    assert!(observed.windows(2).all(|pair| pair[0].phase != pair[1].phase || pair[0].done <= pair[1].done));
+    assert!(observed.iter().any(|progress| progress.phase == "read" && progress.done == count));
+    for (phase, total) in &phases[1..] {
+        assert_eq!(Some(observed.iter().rev().find(|progress| progress.phase == *phase).unwrap().done), *total, "{phase}");
+    }
+    assert_eq!(catalog(&store, &stage.staging_id)["explicitGlobalChatVariables"], json!(expected));
+    assert_eq!(active_generation(&store.connection).unwrap(), generation);
+    assert_eq!(store.lww_stage_binding_units(&header, &inspection, &incoming, 7.into()).unwrap(), stage);
+    activate(&mut store, &header, &inspection, &stage);
+    assert_eq!(catalog(&store, &active_generation(&store.connection).unwrap())["explicitGlobalChatVariables"], json!(expected));
 }
 
 #[test]

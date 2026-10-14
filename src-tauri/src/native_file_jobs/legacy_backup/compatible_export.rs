@@ -986,6 +986,7 @@ mod tests {
                 )
                 .unwrap();
             let mut root = json!({"account":{"token":"synthetic-token"},"characterOrder":[{"name":"Empty","data":[],"id":"empty-folder"},{"name":"Folder","data":["synthetic","second"],"id":"folder","color":"red","img":"assets/nested/icon.webp"},"second"],"plugins":[],"modules":[],"personas":[{"id":"persona-first","name":"First persona"},{"id":"persona-selected","name":"Stale persona"}],"selectedPersona":1,"username":"Current persona","mainPrompt":"Current preset prompt","loadouts":[],"disableToggleBinding":true,"defaultToggleValues":{"test":"1"},"risunestInlayMode":"unsupported","streamingThoughtMode":"unsupported","unknownRoot":true});
+            root["hypaModel"] = json!("voyageContext4");
             root["pluginCustomStorage"] = json!({"10":null,"2":true,"01":"leading zero","z":{"exact":"assets/nested/icon.webp","opaque":"prefix assets/nested/icon.webp suffix","large":"큰".repeat(65536)},"4294967295":9007199254740991u64});
             store.replace_put_upstream_root(&staging, &root).unwrap();
             store
@@ -1106,6 +1107,20 @@ mod tests {
                 .unwrap();
             assert_eq!(scoped.affected_conversations.as_deref(), Some("1"));
             let db = decode(&output);
+            assert_eq!(db["hypaModel"], if target == CompatibilityTarget::RisuAi {
+                "voyageContext3"
+            } else {
+                "voyageContext4"
+            });
+            let setting_losses = report.excluded.iter()
+                .find(|item| item.code == "unsupported-option-value");
+            assert_eq!(setting_losses.map(|item| item.items.as_str()),
+                if target == CompatibilityTarget::RisuAi { Some("1") } else { None });
+            if let Some(item) = setting_losses {
+                assert_eq!(item.affected_conversations, None);
+            }
+            let source_root = PersistentStore::open(directory.path()).unwrap().read_root(None).unwrap().value;
+            assert_eq!(source_root["hypaModel"], "voyageContext4");
             assert_eq!(db["botPresetsId"], 0);
             assert_eq!(db["selectedPersona"], 1);
             assert_eq!(db["username"], "Current persona");

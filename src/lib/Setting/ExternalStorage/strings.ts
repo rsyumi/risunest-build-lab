@@ -1,4 +1,6 @@
 import { externalErrorKind } from 'src/ts/storage/sync/external/connection'
+import { languageEnglish } from 'src/lang/en'
+import { languageKorean } from 'src/lang/ko'
 export { externalErrorKind } from 'src/ts/storage/sync/external/connection'
 import type {
     ExternalConnectionSummary,
@@ -7,6 +9,7 @@ import type {
 } from 'src/ts/storage/sync/external/types'
 
 const english = {
+    staging: languageEnglish.risuNest.serverSync.staging,
     title: 'External storage',
     help: 'Upload backups to a cloud service or your own server. All data is encrypted on this device before it is uploaded.',
     unsupported: 'External storage is available in the Android and desktop apps.',
@@ -203,6 +206,7 @@ const english = {
 }
 
 const korean: typeof english = {
+    staging: languageKorean.risuNest.serverSync.staging,
     title: '외부 저장소',
     help: '클라우드나 개인 서버에 백업을 올릴 수 있습니다. 모든 데이터는 업로드하기 전 이 기기에서 암호화됩니다.',
     unsupported: '외부 저장소는 Android 및 데스크톱 앱에서 사용할 수 있습니다.',

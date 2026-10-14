@@ -3,6 +3,8 @@ mod paths;
 pub(crate) mod mobile;
 
 use files::{failed, Result};
+#[cfg(desktop)]
+use crate::{app_paths::DesktopProfiles, launch_profile::ProfileName};
 use crate::native_log::logged;
 use paths::Paths;
 use serde::{Deserialize, Serialize};
@@ -15,9 +17,12 @@ use std::path::Path;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
+/// `PrepareRemoval` covers every launch profile; `RemoveProfile` covers only the
+/// profile whose journal holds it, so an interrupted single-profile removal can
+/// never resume as a wider one.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Mode { Reset, PrepareRemoval }
+pub(crate) enum Mode { Reset, PrepareRemoval, RemoveProfile }
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +53,12 @@ fn read_request(paths: &Paths) -> Result<Option<Request>> {
 
 pub(crate) struct CleanupState {
     paths: Paths,
+    #[cfg(desktop)]
+    profile: Option<ProfileName>,
+    /// The other profiles of the product layout. An entry that manages its own
+    /// roots has none, so its cleanup can never reach the product's profiles.
+    #[cfg(desktop)]
+    profiles: Option<DesktopProfiles>,
     unavailable: Option<String>,
     pending: AtomicBool,
     running: AtomicBool,
@@ -69,7 +80,17 @@ struct Maintenance {
 impl CleanupState {
     pub(crate) fn initialize(app: &AppHandle) -> Result<Self> {
         let paths = Paths::from_app(app)?;
-        Self::from_paths(paths)
+        #[allow(unused_mut)]
+        let mut state = Self::from_paths(paths)?;
+        #[cfg(desktop)]
+        {
+            state.profile = crate::launch_profile::current(app);
+            let profiles = DesktopProfiles::new(app.config());
+            let product = profiles.manifest(state.profile.as_ref())
+                .is_ok_and(|manifest| manifest.cleanup_control == state.paths.control);
+            state.profiles = product.then_some(profiles);
+        }
+        Ok(state)
     }
 
     fn from_paths(paths: Paths) -> Result<Self> {
@@ -81,6 +102,8 @@ impl CleanupState {
         } else { !matches!(read_request(&paths), Ok(None)) };
         Ok(Self { paths, unavailable, pending: AtomicBool::new(pending), running: AtomicBool::new(false),
             closing: AtomicBool::new(false),
+            #[cfg(desktop)] profile: None,
+            #[cfg(desktop)] profiles: None,
             #[cfg(desktop)] _owner: owner,
             #[cfg(mobile)] maintenance: Mutex::new(None),
             #[cfg(mobile)] ready: AtomicBool::new(false),
@@ -90,6 +113,18 @@ impl CleanupState {
     fn available(&self) -> Result<()> {
         if let Some(error) = &self.unavailable { return Err(error.clone()); }
         self.paths.preflight()
+    }
+
+    /// The selected profile's name and whether the build has named profiles, so
+    /// the settings screen can say which data a reset or removal covers.
+    fn profile_status(&self) -> (Option<String>, bool) {
+        #[cfg(desktop)]
+        return (
+            self.profile.as_ref().map(|profile| profile.as_str().to_owned()),
+            self.profiles.as_ref().and_then(|profiles| profiles.names().ok()).is_some_and(|names| !names.is_empty()),
+        );
+        #[cfg(mobile)]
+        return (None, false);
     }
 }
 
@@ -103,14 +138,19 @@ pub(crate) fn closing(app: &AppHandle) -> bool {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct Status { pending: bool, mode: Option<Mode>, error: Option<String>, can_cancel: bool }
+pub(crate) struct Status {
+    pending: bool, mode: Option<Mode>, error: Option<String>, can_cancel: bool,
+    profile: Option<String>, named_profiles: bool,
+}
 
 #[tauri::command]
 pub(crate) fn app_cleanup_status(app: AppHandle) -> Result<Status> {
     logged("app_cleanup_status", (|| {
         let state = app.try_state::<CleanupState>().ok_or("cleanup-state-unavailable")?;
+        let (profile, named_profiles) = state.profile_status();
+        let status = |pending, mode, error, can_cancel| Status { pending, mode, error, can_cancel, profile: profile.clone(), named_profiles };
         if let Some(error) = &state.unavailable {
-            return Ok(Status { pending: state.pending.load(Ordering::Acquire), mode: None, error: Some(error.clone()), can_cancel: false });
+            return Ok(status(state.pending.load(Ordering::Acquire), None, Some(error.clone()), false));
         }
         #[cfg(mobile)]
         if state.ready.load(Ordering::Acquire) {
@@ -122,10 +162,10 @@ pub(crate) fn app_cleanup_status(app: AppHandle) -> Result<Status> {
             state.ready.store(false, Ordering::Release);
         }
         match read_request(&state.paths) {
-            Ok(Some(request)) => Ok(Status { pending: true, mode: Some(request.mode), error: request.error,
-                can_cancel: !request.roots_started && !state.running.load(Ordering::Acquire) && !state.closing.load(Ordering::Acquire) }),
-            Ok(None) => Ok(Status { pending: false, mode: None, error: None, can_cancel: false }),
-            Err(error) => Ok(Status { pending: true, mode: None, error: Some(error), can_cancel: false }),
+            Ok(Some(request)) => Ok(status(true, Some(request.mode), request.error,
+                !request.roots_started && !state.running.load(Ordering::Acquire) && !state.closing.load(Ordering::Acquire))),
+            Ok(None) => Ok(status(false, None, None, false)),
+            Err(error) => Ok(status(true, None, Some(error), false)),
         }
     })())
 }
@@ -141,10 +181,18 @@ fn navigate(app: &AppHandle) -> Result<()> {
 #[tauri::command]
 pub(crate) async fn app_cleanup_request(app: AppHandle, mode: Mode) -> Result<()> {
     logged("app_cleanup_request", async move {
+        // Only the command line removes a single profile.
+        if mode == Mode::RemoveProfile { return Err("cleanup-mode-unavailable".into()); }
         #[cfg(mobile)]
         if mode == Mode::PrepareRemoval { return Err("cleanup-mode-unavailable".into()); }
         let state = app.state::<CleanupState>();
         state.available()?;
+        #[cfg(desktop)]
+        if mode == Mode::PrepareRemoval {
+            if let Some(profiles) = &state.profiles {
+                refuse_while_other_profiles_run(profiles, state.profile.as_ref())?;
+            }
+        }
         crate::cleanup_webview::preflight(&app).await?;
         if state.pending.swap(true, Ordering::AcqRel) { return Err("cleanup-already-pending".into()); }
         let request = Request {
@@ -246,6 +294,7 @@ async fn resume(app: &AppHandle, request: &mut Request) -> Result<()> {
         let executable = std::env::current_exe().map_err(|error| failed("cleanup-executable-unavailable", error))?;
         let mut command = std::process::Command::new(executable);
         command.args(["--cleanup-worker", &request.token]);
+        if let Some(profile) = &state.profile { command.arg(profile.argument()); }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -282,18 +331,34 @@ fn begin_roots(paths: &Paths, request: &mut Request) -> Result<()> {
     files::write_json(&paths.request(), request)
 }
 
+#[cfg_attr(desktop, allow(dead_code))]
 fn erase(paths: &Paths, request: &mut Request) -> Result<()> {
-    erase_with(paths, request, crate::cleanup_secrets::remove_all, files::remove)
+    erase_with(paths, request, &crate::cleanup_secrets::remove_all, files::remove)
 }
 
 fn erase_with(paths: &Paths, request: &mut Request,
-    remove_secrets: impl FnOnce(&std::path::Path) -> Result<()>,
+    remove_secrets: &dyn Fn(&std::path::Path) -> Result<()>,
     mut remove_root: impl FnMut(&std::path::Path) -> Result<()>) -> Result<()> {
     paths.preflight()?;
     remove_secrets(&paths.data)?;
     begin_roots(paths, request)?;
     for root in &paths.roots { remove_root(root)?; }
     Ok(())
+}
+
+/// The effects of a desktop cleanup outside the profile directories.
+#[cfg(desktop)]
+struct Effects<'a> {
+    remove_secrets: &'a dyn Fn(&std::path::Path) -> Result<()>,
+    remove_webview: &'a dyn Fn(Option<&ProfileName>) -> Result<()>,
+    relaunch: &'a dyn Fn(&Request, Option<&ProfileName>) -> Result<()>,
+}
+
+/// A lock attempt that failed only because another process holds the lock.
+#[cfg(desktop)]
+fn contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error().is_some() && error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
 #[cfg(desktop)]
@@ -306,84 +371,206 @@ fn lock(paths: &Paths, timeout: Duration) -> Result<fs::File> {
     loop {
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => return Ok(file),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            Err(error) if contended(&error) && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
             Err(error) => return Err(failed("cleanup-app-still-running", error)),
         }
     }
 }
 
+/// Whether a profile's owner lock is held. Only an existing lock file is
+/// opened, so checking another profile creates nothing inside it.
 #[cfg(desktop)]
-pub(crate) fn run_cli(manifest: &crate::app_paths::AppPaths) -> Option<i32> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if !args.first().is_some_and(|arg| matches!(arg.as_str(), "--remove-local-data" | "--cleanup-worker")) { return None; }
-    let result = (|| {
-        let paths = Paths::from_manifest(manifest);
-        match args.as_slice() {
-            [command, yes] if command == "--remove-local-data" && yes == "--yes" => {
-                let owner = lock(&paths, Duration::from_secs(30))?;
-                paths.preflight()?;
-                let mut request = read_request(&paths)?.unwrap_or(Request {
-                    version: 1, token: uuid::Uuid::new_v4().to_string(), mode: Mode::PrepareRemoval,
-                    webview_cleared: false, roots_started: false, error: None, appimage: None,
-                });
-                files::write_json(&paths.request(), &request)?;
-                let deadline = Instant::now() + Duration::from_secs(10);
-                loop {
-                    match erase(&paths, &mut request) {
-                        Ok(()) => break,
-                        Err(error) if error == "cleanup-files-busy-or-denied" && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
-                        Err(error) => return Err(error),
-                    }
-                }
-                drop(owner);
-                files::remove(&paths.control)
-            },
-            [command, token] if command == "--cleanup-worker" => {
-                let owner = lock(&paths, Duration::from_secs(60))?;
-                let mut request = read_request(&paths)?.ok_or("cleanup-not-pending")?;
-                if request.token != *token || !request.webview_cleared { return Err("cleanup-request-mismatch".into()); }
-                let result = (|| {
-                    let deadline = Instant::now() + Duration::from_secs(10);
-                    loop {
-                        match erase(&paths, &mut request) {
-                            Ok(()) => break,
-                            Err(error) if error == "cleanup-files-busy-or-denied" && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    if request.mode == Mode::PrepareRemoval { remove_integration(manifest, &request)?; }
-                    Ok(())
-                })();
-                if let Err(error) = result {
-                    request.error = Some(error.clone());
-                    let _ = files::write_json(&paths.request(), &request);
-                    drop(owner);
-                    let _ = relaunch(&request);
-                    return Err(error);
-                }
-                drop(owner);
-                files::remove(&paths.control)?;
-                if request.mode == Mode::Reset {
-                    relaunch(&request)?;
-                }
-                Ok(())
-            },
-            _ => Err("cleanup-confirmation-required".into()),
+fn owner_running(paths: &Paths) -> Result<bool> {
+    files::validate(&paths.control)?;
+    let file = match fs::OpenOptions::new().read(true).write(true).open(paths.control.join("owner.lock")) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(failed("cleanup-lock-unavailable", error)),
+    };
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(false),
+        Err(error) if contended(&error) => Ok(true),
+        Err(error) => Err(failed("cleanup-lock-unavailable", error)),
+    }
+}
+
+/// Every profile other than `profile`, the default one first.
+#[cfg(desktop)]
+fn other_profiles(profiles: &DesktopProfiles, profile: Option<&ProfileName>) -> Result<Vec<Option<ProfileName>>> {
+    let names = profiles.names().map_err(|error| failed("cleanup-profiles-unavailable", error))?;
+    Ok(profile.map(|_| None).into_iter()
+        .chain(names.into_iter().filter(|name| Some(name) != profile).map(Some))
+        .collect())
+}
+
+#[cfg(desktop)]
+fn profile_paths(profiles: &DesktopProfiles, profile: Option<&ProfileName>) -> Result<Paths> {
+    let manifest = profiles.manifest(profile).map_err(|error| failed("cleanup-path-unavailable", error))?;
+    Ok(Paths::from_manifest(&manifest))
+}
+
+/// Prepare app removal deletes every profile, so it refuses to start while
+/// another one runs instead of deleting data that profile still uses.
+#[cfg(desktop)]
+fn refuse_while_other_profiles_run(profiles: &DesktopProfiles, profile: Option<&ProfileName>) -> Result<()> {
+    for other in other_profiles(profiles, profile)? {
+        if owner_running(&profile_paths(profiles, other.as_ref())?)? {
+            return Err("cleanup-other-profiles-running".into());
         }
+    }
+    Ok(())
+}
+
+#[cfg(desktop)]
+fn erase_retrying(paths: &Paths, request: &mut Request, effects: &Effects) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match erase_with(paths, request, effects.remove_secrets, files::remove) {
+            Ok(()) => return Ok(()),
+            Err(error) if error == "cleanup-files-busy-or-denied" && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Once nothing of a named profile remains, its directories go, and so do the
+/// profile namespaces when they are empty.
+#[cfg(desktop)]
+fn remove_profile_directories(profiles: &DesktopProfiles, profile: Option<&ProfileName>) -> Result<()> {
+    if let Some(profile) = profile {
+        for directory in profiles.directories(profile).map_err(|error| failed("cleanup-path-unavailable", error))? {
+            files::remove(&directory)?;
+        }
+    }
+    if let Ok(bases) = profiles.bases() {
+        for base in std::iter::once(bases.profiles).chain(bases.caches) {
+            let _ = fs::remove_dir(base);
+        }
+    }
+    Ok(())
+}
+
+/// Erases a profile other than the one holding the removal request, under its
+/// own owner lock and its own `RemoveProfile` journal. An interruption leaves it
+/// pending cleanup rather than started without its credentials.
+#[cfg(desktop)]
+fn erase_other(profiles: &DesktopProfiles, profile: Option<&ProfileName>, effects: &Effects) -> Result<()> {
+    let paths = profile_paths(profiles, profile)?;
+    let owner = lock(&paths, Duration::from_secs(30))?;
+    paths.preflight()?;
+    let mut request = read_request(&paths)?.unwrap_or_else(|| new_request(Mode::RemoveProfile));
+    // No WebView of this profile is running, and its WebView data goes with it.
+    request.mode = Mode::RemoveProfile;
+    request.webview_cleared = true;
+    files::write_json(&paths.request(), &request)?;
+    let result = erase_retrying(&paths, &mut request, effects)
+        .and_then(|()| (effects.remove_webview)(profile));
+    if let Err(error) = result {
+        request.error = Some(error.clone());
+        let _ = files::write_json(&paths.request(), &request);
+        return Err(error);
+    }
+    drop(owner);
+    files::remove(&paths.control)?;
+    remove_profile_directories(profiles, profile)
+}
+
+#[cfg(desktop)]
+fn new_request(mode: Mode) -> Request {
+    Request {
+        version: 1, token: uuid::Uuid::new_v4().to_string(), mode,
+        webview_cleared: false, roots_started: false, error: None, appimage: None,
+    }
+}
+
+/// Erases what the request covers, the profile holding the request last, then
+/// its journal and, for a removal, its directories.
+#[cfg(desktop)]
+fn remove(profiles: &DesktopProfiles, profile: Option<&ProfileName>, paths: &Paths, request: &mut Request,
+    owner: fs::File, effects: &Effects) -> Result<()> {
+    let result = (|| -> Result<()> {
+        if request.mode == Mode::PrepareRemoval {
+            for other in other_profiles(profiles, profile)? {
+                erase_other(profiles, other.as_ref(), effects)?;
+            }
+        }
+        erase_retrying(paths, request, effects)?;
+        if request.mode != Mode::Reset && profile.is_some() {
+            (effects.remove_webview)(profile)?;
+        }
+        if request.mode == Mode::PrepareRemoval {
+            let manifest = profiles.manifest(None).map_err(|error| failed("cleanup-path-unavailable", error))?;
+            remove_integration(&manifest, request)?;
+        }
+        Ok(())
     })();
-    match result {
+    if let Err(error) = result {
+        request.error = Some(error.clone());
+        let _ = files::write_json(&paths.request(), request);
+        return Err(error);
+    }
+    drop(owner);
+    files::remove(&paths.control)?;
+    if request.mode == Mode::Reset { Ok(()) } else { remove_profile_directories(profiles, profile) }
+}
+
+#[cfg(desktop)]
+pub(crate) fn run_cli(arguments: &[std::ffi::OsString], profiles: &DesktopProfiles, profile: Option<&ProfileName>) -> Option<i32> {
+    let args = arguments.iter().map(|argument| argument.to_string_lossy().into_owned()).collect::<Vec<_>>();
+    if !args.first().is_some_and(|arg| matches!(arg.as_str(), "--remove-local-data" | "--cleanup-worker")) { return None; }
+    let remove_webview = |profile: Option<&ProfileName>| crate::cleanup_webview::remove_profile_store(profiles.agent(), profile);
+    let effects = Effects { remove_secrets: &crate::cleanup_secrets::remove_all, remove_webview: &remove_webview, relaunch: &relaunch };
+    match cli(&args, profiles, profile, &effects) {
         Ok(()) => Some(0),
         Err(error) => { eprintln!("{error}"); Some(1) },
     }
 }
 
 #[cfg(desktop)]
-fn relaunch(request: &Request) -> Result<()> {
+fn cli(args: &[String], profiles: &DesktopProfiles, profile: Option<&ProfileName>, effects: &Effects) -> Result<()> {
+    let paths = profile_paths(profiles, profile)?;
+    match args {
+        [command, yes] if command == "--remove-local-data" && yes == "--yes" => {
+            // Without a profile the command removes every profile, as the
+            // Windows uninstaller expects; with one it removes only that one.
+            let mode = if profile.is_some() { Mode::RemoveProfile } else { Mode::PrepareRemoval };
+            if let Some(profile) = profile {
+                let directories = profiles.directories(profile).map_err(|error| failed("cleanup-path-unavailable", error))?;
+                if !directories.iter().any(|directory| fs::symlink_metadata(directory).is_ok()) { return Ok(()); }
+            }
+            let owner = lock(&paths, Duration::from_secs(30))?;
+            paths.preflight()?;
+            let mut request = read_request(&paths)?.unwrap_or_else(|| new_request(mode));
+            request.mode = mode;
+            files::write_json(&paths.request(), &request)?;
+            remove(profiles, profile, &paths, &mut request, owner, effects)
+        },
+        [command, token] if command == "--cleanup-worker" => {
+            let owner = lock(&paths, Duration::from_secs(60))?;
+            let mut request = read_request(&paths)?.ok_or("cleanup-not-pending")?;
+            if request.token != *token || !request.webview_cleared { return Err("cleanup-request-mismatch".into()); }
+            match remove(profiles, profile, &paths, &mut request, owner, effects) {
+                Err(error) => {
+                    let _ = (effects.relaunch)(&request, profile);
+                    Err(error)
+                },
+                Ok(()) if request.mode == Mode::Reset => (effects.relaunch)(&request, profile),
+                Ok(()) => Ok(()),
+            }
+        },
+        _ => Err("cleanup-confirmation-required".into()),
+    }
+}
+
+#[cfg(desktop)]
+fn relaunch(request: &Request, profile: Option<&ProfileName>) -> Result<()> {
     let executable = match &request.appimage {
         Some(path) => path.clone(),
         None => std::env::current_exe().map_err(|error| failed("cleanup-executable-unavailable", error))?,
     };
-    std::process::Command::new(executable).spawn().map_err(|error| failed("cleanup-relaunch-failed", error))?;
+    let mut command = std::process::Command::new(executable);
+    if let Some(profile) = profile { command.arg(profile.argument()); }
+    command.spawn().map_err(|error| failed("cleanup-relaunch-failed", error))?;
     Ok(())
 }
 
@@ -416,7 +603,7 @@ mod tests {
         image_geometry::write(&paths.data, &[ImageGeometry { content_hash: "a".repeat(64), width: 10, height: 20 }]).unwrap();
         drop(store);
         assert!(paths.data.join("persistent/image-geometry.sqlite").exists());
-        erase_with(&paths, &mut request(), |_| Ok(()), files::remove).unwrap();
+        erase_with(&paths, &mut request(), &|_| Ok(()), files::remove).unwrap();
         assert!(!paths.data.exists());
     }
     #[test]
@@ -445,7 +632,7 @@ mod tests {
         assert!(matches!(LocalLeaseLedger::open(&cache), Err(error) if error.kind == ErrorKind::RepositoryBusy));
         drop(held);
         state.close_lease_ledger_for_cleanup().unwrap();
-        erase_with(&paths, &mut request(), |_| Ok(()), files::remove).unwrap();
+        erase_with(&paths, &mut request(), &|_| Ok(()), files::remove).unwrap();
         assert!(!cache.exists());
         state.open_lease_ledger(&cache).unwrap();
         assert!(state.lease_ledger().is_err());
@@ -550,7 +737,7 @@ mod tests {
         let paths = paths(root.path());
         let mut request = request();
         files::write_json(&paths.request(), &request).unwrap();
-        let error = erase_with(&paths, &mut request, |_| Err("secret-cleanup-unavailable".into()),
+        let error = erase_with(&paths, &mut request, &|_| Err("secret-cleanup-unavailable".into()),
             |_| panic!("must not remove roots while credentials remain")).unwrap_err();
         assert_eq!(error, "secret-cleanup-unavailable");
         assert!(!cancellable_request(&paths).unwrap().roots_started);
@@ -567,7 +754,7 @@ mod tests {
         let paths = paths(root.path());
         let mut request = request();
         files::write_json(&paths.request(), &request).unwrap();
-        let error = erase_with(&paths, &mut request, |_| Ok(()), |_| {
+        let error = erase_with(&paths, &mut request, &|_| Ok(()), |_| {
             assert!(read_request(&paths).unwrap().unwrap().roots_started);
             Err("cleanup-files-busy-or-denied".into())
         }).unwrap_err();
@@ -582,7 +769,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = paths(root.path());
         fs::create_dir_all(paths.request()).unwrap();
-        assert!(erase_with(&paths, &mut request(), |_| Ok(()),
+        assert!(erase_with(&paths, &mut request(), &|_| Ok(()),
             |_| panic!("must persist phase before deletion")).is_err());
     }
 
@@ -645,5 +832,203 @@ mod tests {
         assert!(lock(&paths, Duration::ZERO).is_err());
         drop(state);
         assert!(lock(&paths, Duration::ZERO).is_ok());
+    }
+
+    #[cfg(desktop)]
+    mod profiles {
+        use super::*;
+        use std::{cell::RefCell, path::PathBuf};
+
+        struct Fixture {
+            _root: tempfile::TempDir,
+            profiles: DesktopProfiles,
+        }
+
+        impl Fixture {
+            fn new() -> Self {
+                let root = tempfile::tempdir().unwrap();
+                // macOS hands out temporary directories behind the /var link,
+                // which cleanup rightly refuses.
+                let base = fs::canonicalize(root.path()).unwrap();
+                let base = if cfg!(target_os = "macos") { base } else { root.path().to_owned() };
+                let profiles = DesktopProfiles::synthetic(&base, false);
+                Self { _root: root, profiles }
+            }
+
+            fn create(&self, profile: Option<&str>) -> PathBuf {
+                let manifest = self.profiles.manifest(name(profile).as_ref()).unwrap();
+                for root in manifest.owned_roots() {
+                    fs::create_dir_all(&root).unwrap();
+                    fs::write(root.join("synthetic"), b"fixture").unwrap();
+                }
+                manifest.data
+            }
+
+            fn exists(&self, profile: Option<&str>) -> bool {
+                let manifest = self.profiles.manifest(name(profile).as_ref()).unwrap();
+                manifest.data.join("synthetic").exists()
+            }
+
+            fn paths(&self, profile: Option<&str>) -> Paths {
+                profile_paths(&self.profiles, name(profile).as_ref()).unwrap()
+            }
+
+            fn run(&self, args: &[&str], profile: Option<&str>, secrets: &dyn Fn(&std::path::Path) -> Result<()>,
+                relaunched: &RefCell<Vec<Option<String>>>) -> Result<()> {
+                let webview = |_: Option<&ProfileName>| Ok(());
+                let relaunch = |_: &Request, profile: Option<&ProfileName>| {
+                    relaunched.borrow_mut().push(profile.map(|profile| profile.as_str().to_owned()));
+                    Ok(())
+                };
+                let effects = Effects { remove_secrets: secrets, remove_webview: &webview, relaunch: &relaunch };
+                let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+                cli(&args, &self.profiles, name(profile).as_ref(), &effects)
+            }
+        }
+
+        fn name(profile: Option<&str>) -> Option<ProfileName> {
+            profile.map(|profile| ProfileName::parse(profile).unwrap())
+        }
+
+        const REMOVE: [&str; 2] = ["--remove-local-data", "--yes"];
+
+        #[test]
+        fn removing_one_profile_keeps_every_other_profile() {
+            let fixture = Fixture::new();
+            fixture.create(None);
+            let work = fixture.create(Some("work"));
+            fixture.create(Some("test"));
+            let removed = RefCell::new(Vec::new());
+            let secrets = |root: &std::path::Path| { removed.borrow_mut().push(root.to_owned()); Ok(()) };
+            let relaunched = RefCell::new(Vec::new());
+            fixture.run(&REMOVE, Some("work"), &secrets, &relaunched).unwrap();
+            assert_eq!(*removed.borrow(), vec![work]);
+            for directory in fixture.profiles.directories(&ProfileName::parse("work").unwrap()).unwrap() {
+                assert!(!directory.exists(), "{}", directory.display());
+            }
+            assert!(fixture.exists(None));
+            assert!(fixture.exists(Some("test")));
+            assert_eq!(fixture.profiles.names().unwrap(), vec![ProfileName::parse("test").unwrap()]);
+            // A profile that was never created is already removed.
+            fixture.run(&REMOVE, Some("absent"), &secrets, &relaunched).unwrap();
+            assert!(!fixture.profiles.directories(&ProfileName::parse("absent").unwrap()).unwrap()[0].exists());
+            assert!(relaunched.borrow().is_empty());
+        }
+
+        #[test]
+        fn removing_without_a_profile_removes_every_profile_and_the_namespace() {
+            let fixture = Fixture::new();
+            let default = fixture.create(None);
+            let work = fixture.create(Some("work"));
+            let test = fixture.create(Some("test"));
+            let removed = RefCell::new(Vec::new());
+            let secrets = |root: &std::path::Path| { removed.borrow_mut().push(root.to_owned()); Ok(()) };
+            fixture.run(&REMOVE, None, &secrets, &RefCell::new(Vec::new())).unwrap();
+            // The profile holding the request goes last.
+            assert_eq!(*removed.borrow(), vec![test, work, default]);
+            assert!(!fixture.exists(None));
+            assert!(!fixture.paths(None).control.exists());
+            let bases = fixture.profiles.bases().unwrap();
+            assert!(!bases.profiles.exists());
+            assert!(bases.caches.is_none_or(|caches| !caches.exists()));
+        }
+
+        #[test]
+        fn an_interrupted_removal_of_every_profile_finishes_when_repeated() {
+            let fixture = Fixture::new();
+            fixture.create(None);
+            fixture.create(Some("work"));
+            let test = fixture.create(Some("test"));
+            let failing = |root: &std::path::Path| if root == test { Err("secret-cleanup-unavailable".into()) } else { Ok(()) };
+            assert_eq!(fixture.run(&REMOVE, None, &failing, &RefCell::new(Vec::new())),
+                Err("secret-cleanup-unavailable".into()));
+            // The failed profile keeps its data behind its own pending journal,
+            // so it can never start without its credentials.
+            assert!(fixture.exists(Some("test")));
+            let pending = read_request(&fixture.paths(Some("test"))).unwrap().unwrap();
+            assert_eq!(pending.mode, Mode::RemoveProfile);
+            assert_eq!(pending.error.as_deref(), Some("secret-cleanup-unavailable"));
+            assert_eq!(read_request(&fixture.paths(None)).unwrap().unwrap().mode, Mode::PrepareRemoval);
+            assert!(fixture.exists(None));
+            fixture.run(&REMOVE, None, &|_| Ok(()), &RefCell::new(Vec::new())).unwrap();
+            for profile in [None, Some("work"), Some("test")] {
+                assert!(!fixture.exists(profile));
+            }
+            assert!(!fixture.profiles.bases().unwrap().profiles.exists());
+        }
+
+        #[test]
+        fn an_interrupted_single_profile_removal_never_resumes_as_a_wider_one() {
+            let fixture = Fixture::new();
+            fixture.create(None);
+            fixture.create(Some("work"));
+            fixture.create(Some("test"));
+            assert!(fixture.run(&REMOVE, Some("work"), &|_| Err("secret-cleanup-unavailable".into()),
+                &RefCell::new(Vec::new())).is_err());
+            // The app resumes the pending journal after clearing its WebView.
+            let paths = fixture.paths(Some("work"));
+            let mut request = read_request(&paths).unwrap().unwrap();
+            assert_eq!(request.mode, Mode::RemoveProfile);
+            request.webview_cleared = true;
+            files::write_json(&paths.request(), &request).unwrap();
+            let relaunched = RefCell::new(Vec::new());
+            fixture.run(&["--cleanup-worker", &request.token], Some("work"), &|_| Ok(()), &relaunched).unwrap();
+            assert!(!fixture.exists(Some("work")));
+            assert!(fixture.exists(None));
+            assert!(fixture.exists(Some("test")));
+            assert!(relaunched.borrow().is_empty());
+        }
+
+        #[test]
+        fn the_worker_relaunches_the_profile_it_cleaned() {
+            let fixture = Fixture::new();
+            fixture.create(None);
+            fixture.create(Some("work"));
+            let paths = fixture.paths(Some("work"));
+            let mut request = new_request(Mode::Reset);
+            request.webview_cleared = true;
+            files::write_json(&paths.request(), &request).unwrap();
+            let relaunched = RefCell::new(Vec::new());
+            assert!(fixture.run(&["--cleanup-worker", &request.token], Some("work"),
+                &|_| Err("secret-cleanup-unavailable".into()), &relaunched).is_err());
+            fixture.run(&["--cleanup-worker", &request.token], Some("work"), &|_| Ok(()), &relaunched).unwrap();
+            assert_eq!(*relaunched.borrow(), vec![Some("work".to_owned()), Some("work".to_owned())]);
+            // A reset keeps the profile itself, and every other profile.
+            assert!(!fixture.exists(Some("work")));
+            assert!(fixture.profiles.directories(&ProfileName::parse("work").unwrap()).unwrap()[0].exists());
+            assert!(fixture.exists(None));
+        }
+
+        #[test]
+        fn prepare_removal_refuses_while_another_profile_runs_and_creates_nothing() {
+            let fixture = Fixture::new();
+            fixture.create(Some("work"));
+            fixture.create(Some("test"));
+            let work = ProfileName::parse("work").unwrap();
+            refuse_while_other_profiles_run(&fixture.profiles, Some(&work)).unwrap();
+            // The default profile was never started, and checking it left no trace.
+            assert!(!fixture.paths(None).control.exists());
+            let running = lock(&fixture.paths(Some("test")), Duration::ZERO).unwrap();
+            assert_eq!(refuse_while_other_profiles_run(&fixture.profiles, Some(&work)),
+                Err("cleanup-other-profiles-running".into()));
+            assert!(fixture.exists(Some("test")));
+            drop(running);
+            let default = lock(&fixture.paths(None), Duration::ZERO).unwrap();
+            assert_eq!(refuse_while_other_profiles_run(&fixture.profiles, Some(&work)),
+                Err("cleanup-other-profiles-running".into()));
+            drop(default);
+            refuse_while_other_profiles_run(&fixture.profiles, Some(&work)).unwrap();
+        }
+
+        #[test]
+        fn removal_waits_for_a_closing_profile_to_release_its_lock() {
+            let fixture = Fixture::new();
+            fixture.create(Some("work"));
+            let paths = fixture.paths(Some("work"));
+            let held = lock(&paths, Duration::ZERO).unwrap();
+            let release = std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(300)); drop(held); });
+            lock(&paths, Duration::from_secs(10)).unwrap();
+            release.join().unwrap();
+        }
     }
 }

@@ -32,6 +32,13 @@ async function finishedEdit(name: string) {
 }
 // Registered before every boot so each boot's module graph gets its own recorders.
 function recordEditsOfNextBoot() {
+    vi.doMock('src/ts/chatBindings.svelte', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('src/ts/chatBindings.svelte')>()
+        return {
+            ...actual,
+            saveChatBinding: () => recordEdit('chat-binding', actual.saveChatBinding()),
+        } satisfies typeof actual
+    })
     vi.doMock('src/ts/characters', async (importOriginal) => {
         const actual = await importOriginal<typeof import('src/ts/characters')>()
         return {
@@ -271,7 +278,8 @@ it.each([
     db.globalChatVariables.toggle_probe = '0'
     await current.svelte.tick()
     target.querySelector<HTMLButtonElement>(`button[title="${language.bindToggles}"]`)!.click()
-    await vi.waitFor(async () => expect((await savedChat())?.savedToggleValues).toEqual({ toggle_probe: '0' }))
+    await finishedEdit('chat-binding')
+    expect((await savedChat())?.savedToggleValues).toEqual({ toggle_probe: '0' })
     const save = () => target.querySelector<HTMLButtonElement>(`button[title="${language.saveToggleChanges}"]`)!
     await vi.waitFor(() => expect(save().disabled).toBe(true))
     await toggleSwitch('Probe toggle')
@@ -294,7 +302,8 @@ it.each([
     expect(db.globalChatVariables.toggle_probe).toBe('0')
     expect(save().disabled).toBe(false)
     save().click()
-    await vi.waitFor(async () => expect((await savedChat())?.savedToggleValues).toEqual({ toggle_probe: '1' }))
+    await finishedEdit('chat-binding')
+    expect((await savedChat())?.savedToggleValues).toEqual({ toggle_probe: '1' })
     await vi.waitFor(() => expect(db.globalChatVariables.toggle_probe).toBe('1'))
     await vi.waitFor(() => expect(save().disabled).toBe(true))
     disposeToggleObserver()
@@ -317,7 +326,8 @@ it.each([
     await current.runtime.flushPendingData('sidebar-preset-draft')
     expect((await savedChat())?.savedToggleValues).toEqual({ toggle_probe: '1' })
     save().click()
-    await vi.waitFor(async () => expect((await savedChat())?.savedToggleValues).toEqual({ toggle_probe: '0' }))
+    await finishedEdit('chat-binding')
+    expect((await savedChat())?.savedToggleValues).toEqual({ toggle_probe: '0' })
     await vi.waitFor(() => expect(db.globalChatVariables.toggle_probe).toBe('0'))
     await vi.waitFor(() => expect(save().disabled).toBe(true))
 
@@ -332,7 +342,8 @@ it.each([
     expect(selectedChat().GLGlobalVariables?.toggle_probe).toBe('1')
     expect(save().disabled).toBe(false)
     save().click()
-    await vi.waitFor(async () => expect((await savedChat())?.GLGlobalVariables?.toggle_probe).toBeUndefined())
+    await finishedEdit('chat-binding')
+    expect((await savedChat())?.GLGlobalVariables?.toggle_probe).toBeUndefined()
     await vi.waitFor(() => expect(save().disabled).toBe(true))
 
     await toggleSwitch(language.ToggleHypaMemory)

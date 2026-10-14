@@ -4,6 +4,7 @@ import { formatElapsed } from '../../gui/nativeFileJobDialogModel'
 import { formatRisuNestStorageBytes } from '../risuNestStorageDashboard'
 import { formatRemaining } from './remainingTime'
 import type { TransferRateSample } from './transferRate'
+import { stagingProgressView, type StagingProgress } from './stagingProgress'
 export { createRateMeter } from './transferRate'
 
 export type ServerSyncLaneName = 'send' | 'receive' | 'hydrate' | 'binding' | 'assets'
@@ -16,6 +17,7 @@ export interface ServerSyncLane {
     listed: number
     /** The current state pin's listing. A restarted read replaces the abandoned work. */
     listing?: { done: number; total: number } | null
+    staging?: StagingProgress | null
     itemsDone: number
     itemsTotal: number
     filesDone: number
@@ -167,6 +169,7 @@ export function serverSyncProgressView(attempt: ServerSyncAttempt, text: Text, n
     const current = attempt.active.at(-1) ?? attempt.current
     const lane = stageLane(attempt, current)
     const work = lane && stageWork(attempt, lane)
+    const staging = lane?.step === 'staging' ? stagingProgressView(lane.staging, text.staging) : undefined
     const stages = attempt.stages.map(stage => ({ stage, label: text.stage[stage], state: attempt.active.includes(stage) ? 'active' as const : 'done' as const }))
     const lanes = attempt.lanes ?? []
     const sum = (key: (typeof COUNTS)[number]) => lanes.reduce((total, entry) => total + entry[key], 0)
@@ -189,9 +192,9 @@ export function serverSyncProgressView(attempt: ServerSyncAttempt, text: Text, n
     if (attempt.remainingMs !== undefined) counters.push({ key: 'remaining', label: text.remaining, value: formatRemaining(attempt.remainingMs) })
     return {
         // Asset downloads have one native step, so their stage names them more precisely.
-        label: lane && current !== 'assets' ? text.activity[ACTIVITY[lane.step as Exclude<ServerSyncNativeStep, 'idle'>]] : text.progress[current],
+        label: staging?.label ?? (lane && current !== 'assets' ? text.activity[ACTIVITY[lane.step as Exclude<ServerSyncNativeStep, 'idle'>]] : text.progress[current]),
         detail: lane ? laneDetail(attempt, lane, text) : '',
-        fraction: work ? share(work) : null,
+        fraction: staging ? staging.fraction : work ? share(work) : null,
         stages,
         counters,
     }
