@@ -5,6 +5,7 @@ use std::io::{Cursor, Seek, SeekFrom};
 
 const V110: &[u8] = include_bytes!("fixtures/pocket-risu-v1.10.0.bin");
 const V112: &[u8] = include_bytes!("fixtures/pocket-risu-v1.12.0.bin");
+const V114: &[u8] = include_bytes!("fixtures/pocket-risu-v1.14.0.bin");
 
 struct StoreSink {
     store: Mutex<PersistentStore>,
@@ -134,8 +135,8 @@ fn seed(root: &std::path::Path) {
 }
 
 #[test]
-fn both_pocket_versions_restore_database_and_media_into_the_persistent_store() {
-    for archive in [V110, V112] {
+fn pocket_versions_restore_database_and_media_into_the_persistent_store() {
+    for archive in [V110, V112, V114] {
         let directory = tempfile::tempdir().unwrap();
         seed(directory.path());
         let job = JobRegistry::default()

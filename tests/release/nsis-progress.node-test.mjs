@@ -83,6 +83,7 @@ LoadLanguageFile "${'$'}{NSISDIR}\Contrib\Language files\English.nlf"
 LoadLanguageFile "${'$'}{NSISDIR}\Contrib\Language files\Korean.nlf"
 !define MAINBINARYNAME "SyntheticRisuNest"
 !define PRODUCTNAME "Synthetic RisuNest"
+!define BUNDLEID "synthetic.risunest.progress"
 Var UpdateMode
 Var DeleteAppDataCheckboxState
 Var FixtureFail

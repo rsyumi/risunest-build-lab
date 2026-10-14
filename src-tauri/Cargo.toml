@@ -111,7 +111,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
+    "Win32_System_Console",
     "Win32_System_Shutdown",
+    "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
@@ -178,3 +180,5 @@ tauri-plugin-updater = { path = "../crates/tauri-plugin-updater" }
 tauri-plugin-window-state = { path = "../crates/tauri-plugin-window-state" }
 # Accept a string request body as text instead of a JSON number array.
 tauri-plugin-http = { path = "../crates/tauri-plugin-http" }
+# Key each launch profile's single instance separately on every desktop platform.
+tauri-plugin-single-instance = { path = "../crates/tauri-plugin-single-instance" }

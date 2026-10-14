@@ -37,6 +37,9 @@ mod final_matrix;
 #[path = "../../../benchmarks/lww-native/src/ladder.rs"]
 mod ladder;
 
+#[path = "../../../benchmarks/lww-native/src/staging.rs"]
+mod staging;
+
 #[path = "../../../benchmarks/lww-native/src/receive_traffic.rs"]
 mod receive_traffic;
 

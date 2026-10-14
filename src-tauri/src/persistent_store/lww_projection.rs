@@ -1550,7 +1550,12 @@ pub(in crate::persistent_store) fn refresh_orders(
             other => other,
         };
         let units: Vec<(String, String)> = {
-            let mut s=tx.prepare("SELECT u.key,u.stamp FROM lww_units u LEFT JOIN lww_retired r ON r.key=u.key WHERE r.key IS NULL AND json_extract(u.key,'$[0]')=?4 AND json_extract(u.key,'$[1]')=?1 AND u.value<>?2 AND (?3 IS NULL OR json_extract(u.key,'$[2]')=?3)")?;
+            let scope_filter = if exists_kind == "conversation" {
+                "json_extract(u.key,'$[2]')=?3"
+            } else {
+                "?3 IS NULL"
+            };
+            let mut s=tx.prepare(&format!("SELECT u.key,u.stamp FROM lww_units u LEFT JOIN lww_retired r ON r.key=u.key WHERE r.key IS NULL AND json_extract(u.key,'$[0]')=?4 AND json_extract(u.key,'$[1]')=?1 AND u.value<>?2 AND {scope_filter}"))?;
             let v = s
                 .query_map(
                     params![

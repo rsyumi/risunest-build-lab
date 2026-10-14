@@ -1,5 +1,6 @@
 import { vi } from 'vitest'
 import * as coldStorageData from '../process/coldstorageData'
+import { decryptBuffer, encryptBuffer } from '../bufferCrypto'
 import type { BlobStore } from '../storage/blobStore'
 import type { Database } from '../storage/database.svelte'
 
@@ -66,8 +67,8 @@ export function relaunchModule() {
 
 export function utilModule() {
     return {
-        decryptBuffer: vi.fn(),
-        encryptBuffer: vi.fn(),
+        decryptBuffer,
+        encryptBuffer,
         sleep: vi.fn(async () => undefined),
     } satisfies Partial<typeof import('../util')>
 }

@@ -763,10 +763,14 @@ pub(crate) fn binding_stage_digest(db: &Connection, staging_id: &str) -> StoreRe
 
 /// Proves the stage catalog once against both digests recorded for it.
 pub(crate) fn validate_binding_stage_content(db: &Connection, staging_id: &str) -> StoreResult<()> {
+    validate_binding_stage_content_observed(db, staging_id, &mut || Ok(()))
+}
+
+pub(in crate::persistent_store) fn validate_binding_stage_content_observed(db: &Connection, staging_id: &str, observe: &mut dyn FnMut() -> StoreResult<()>) -> StoreResult<()> {
     let expected:Option<String> = db.query_row("SELECT library_digest FROM lww_binding_stages WHERE staging_id=?1", [staging_id], |r| r.get(0)).optional()?;
     let source:Option<String> = db.query_row("SELECT catalog_digest FROM lww_binding_sources WHERE staging_id=?1", [staging_id], |r| r.get(0)).optional()?;
     if expected.is_none() && source.is_none() { return Ok(()); }
-    let actual = binding_stage_digest(db,staging_id)?;
+    let actual = super::lww::catalog_digest_observed(db, staging_id, observe)?;
     if expected.is_some_and(|expected| expected != actual) { return Err(invalid("Binding stage content changed")); }
     if source.is_some_and(|source| source != actual) { return Err(super::lww::error("binding-source-integrity")); }
     Ok(())

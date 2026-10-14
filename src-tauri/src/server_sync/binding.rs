@@ -403,7 +403,7 @@ pub(crate) fn stage(
     let mut core = LwwClient::with_cancellation(
         store.repository_root(),
         target.config.resolve(store.repository_root())?,
-        cancelled,
+        cancelled.clone(),
     )?;
     core.access = Some(target.config.clone());
     if core.client.resolve_identity()?.epoch != target.epoch {
@@ -416,7 +416,15 @@ pub(crate) fn stage(
     }
     assert_authority(store, header)?;
     core.client.lane().step(super::progress::Step::Staging);
-    let staged = store.lww_stage_binding_units(header, inspection_id, &changes, upper)?;
+    let mut cancelled_seen = false;
+    let staged = store.lww_stage_binding_units_observed(header, inspection_id, &changes, upper, |progress| {
+        if cancelled.as_ref().is_some_and(|cancelled| cancelled.load(std::sync::atomic::Ordering::Acquire)) {
+            cancelled_seen = true;
+            return Err(crate::persistent_store::StoreError::Validation { message: "Binding staging cancelled".into() });
+        }
+        core.client.lane().staging(progress);
+        Ok(())
+    }).map_err(|error| if cancelled_seen { SyncError::new("cancelled", 409) } else { error.into() })?;
     let result = StagedTarget {
         target_id: target.target_id.clone(),
         library_id: target.config.library_id.clone(),

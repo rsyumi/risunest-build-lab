@@ -1,6 +1,8 @@
 use super::{
-    default_install_dirs, overlaps, platform_store_root, resolve_platform_root, AppPaths, Hives, Integration, Platform,
+    default_install_dirs, overlaps, platform_store_root, resolve_platform_root, AppPaths, DesktopProfiles, Hives,
+    Integration, Platform, ProfileBases,
 };
+use crate::launch_profile::ProfileName;
 use crate::asset_repository::{ExactObjectUnlink, PayloadCas};
 use std::{fs, io::ErrorKind, path::Path, path::PathBuf};
 
@@ -111,6 +113,108 @@ fn every_platform_row_matches_the_recorded_matrix() {
         assert_eq!(paths.logs, paths.data.join("logs"));
         assert_eq!(paths.install, None);
     }
+}
+
+fn profiles(platform: Platform, hives: Hives, agent: bool) -> DesktopProfiles {
+    DesktopProfiles { platform, hives, identifier: IDENTIFIER.to_owned(), agent, install: None }
+}
+
+fn name(value: &str) -> ProfileName {
+    ProfileName::parse(value).unwrap()
+}
+
+#[test]
+fn named_profiles_match_the_recorded_matrix() {
+    let test = name("test");
+    let windows = profiles(Platform::Windows, hives(), false).manifest(Some(&test)).unwrap();
+    let directory = base("local").join("RisuNestProfiles").join("test");
+    assert_eq!(windows.data, directory.join("data"));
+    assert_eq!(windows.logs, directory.join("data").join("logs"));
+    assert_eq!(windows.webview, Some(directory.join("webview")));
+    assert_eq!(windows.cache, directory.join("cache"));
+    assert_eq!(windows.cleanup_control, directory.join("cleanup"));
+
+    let macos = profiles(Platform::MacOs, hives(), false).manifest(Some(&test)).unwrap();
+    let directory = base("roaming").join("RisuNestProfiles").join("test");
+    assert_eq!(macos.data, directory.join("data"));
+    assert_eq!(macos.webview, None);
+    assert_eq!(macos.cache, base("cache").join("RisuNestProfiles").join("test"));
+    assert_eq!(macos.cleanup_control, directory.join("cleanup"));
+
+    let linux = profiles(Platform::Linux, hives(), false).manifest(Some(&test)).unwrap();
+    let directory = base("roaming").join("risunest-profiles").join("test");
+    assert_eq!(linux.data, directory.join("data"));
+    assert_eq!(linux.webview, Some(directory.join("webview")));
+    assert_eq!(linux.cache, base("cache").join("risunest-profiles").join("test"));
+    assert_eq!(linux.cleanup_control, directory.join("cleanup"));
+
+    for paths in [windows, macos, linux] {
+        assert!(paths.tauri_derived.is_empty());
+        assert_eq!(paths.integration, None);
+        assert_eq!(paths.install, None);
+    }
+    for platform in [Platform::Windows, Platform::MacOs, Platform::Linux] {
+        assert_eq!(profiles(platform, hives(), false).manifest(None).unwrap(), layout(platform));
+        let agent = profiles(platform, hives(), true).bases().unwrap();
+        let product = profiles(platform, hives(), false).bases().unwrap();
+        assert_eq!(agent.profiles, product.profiles.with_file_name(format!(
+            "{}-agent", product.profiles.file_name().unwrap().to_str().unwrap())));
+        if product.caches.is_some() {
+            assert_ne!(agent.caches, product.caches);
+        }
+    }
+    assert_eq!(profiles(Platform::Windows, hives(), false).bases().unwrap(),
+        ProfileBases { profiles: base("local").join("RisuNestProfiles"), caches: None });
+    for platform in [Platform::Android, Platform::Ios] {
+        assert!(profiles(platform, platform_hives(platform), false).manifest(Some(&test)).is_err());
+    }
+}
+
+#[test]
+fn no_profile_root_reaches_the_default_profile_or_another_profile() {
+    for platform in [Platform::Windows, Platform::MacOs, Platform::Linux] {
+        for agent in [false, true] {
+            let profiles = profiles(platform, hives(), agent);
+            let manifests = [None, Some(name("test")), Some(name("test-cleanup")), Some(name("tests"))]
+                .map(|profile| profiles.manifest(profile.as_ref()).unwrap());
+            for (index, left) in manifests.iter().enumerate() {
+                for right in &manifests[index + 1..] {
+                    for left_root in left.owned_roots().iter().chain([&left.cleanup_control]) {
+                        for right_root in right.owned_roots().iter().chain([&right.cleanup_control]) {
+                            assert!(!overlaps(left_root, right_root), "{platform:?} {} overlaps {}",
+                                left_root.display(), right_root.display());
+                        }
+                    }
+                }
+            }
+            let directories = profiles.directories(&name("test")).unwrap();
+            let test = &manifests[1];
+            for root in test.owned_roots().iter().chain([&test.cleanup_control]) {
+                assert!(directories.iter().any(|directory| root.starts_with(directory)), "{}", root.display());
+            }
+        }
+    }
+}
+
+#[test]
+fn only_real_directories_with_valid_names_are_profiles() {
+    let fixture = tempfile::tempdir().unwrap();
+    let mut synthetic = hives();
+    synthetic.roaming = Some(fixture.path().join("data-home"));
+    synthetic.cache = Some(fixture.path().join("cache-home"));
+    let linux = profiles(Platform::Linux, synthetic, false);
+    assert_eq!(linux.names().unwrap(), Vec::<ProfileName>::new());
+    let bases = linux.bases().unwrap();
+    let caches = bases.caches.clone().unwrap();
+    for directory in ["work", "Invalid", "has.dot", "default"] {
+        fs::create_dir_all(bases.profiles.join(directory)).unwrap();
+    }
+    fs::create_dir_all(caches.join("cache-only")).unwrap();
+    fs::create_dir_all(caches.join("work")).unwrap();
+    fs::write(bases.profiles.join("file"), b"synthetic").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    link_directory(outside.path(), &bases.profiles.join("linked"));
+    assert_eq!(linux.names().unwrap(), vec![name("cache-only"), name("work")]);
 }
 
 #[test]

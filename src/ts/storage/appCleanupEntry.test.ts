@@ -158,12 +158,17 @@ describe('app cleanup startup gate', () => {
         expect(invoke).not.toHaveBeenCalledWith('app_cleanup_cancel')
     })
 
-    it('keeps a corrupt journal fail closed and names the record to remove outside the app', async () => {
-        stubNavigator({ userAgent: windowsAgent, language: 'en-US' })
-        vi.mocked(invoke).mockResolvedValue({ pending: true, mode: null, error: 'cleanup-journal-corrupt', canCancel: false })
+    it.each([
+        [windowsAgent, null, '%LOCALAPPDATA%\\RisuNest-cleanup'],
+        [windowsAgent, 'work', '%LOCALAPPDATA%\\RisuNestProfiles\\work\\cleanup'],
+        ['Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)', 'work', '~/Library/Application Support/RisuNestProfiles/work/cleanup'],
+        ['Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko)', 'work', '~/.local/share/risunest-profiles/work/cleanup'],
+    ])('keeps a corrupt journal fail closed and names the record to remove outside the app (%#)', async (userAgent, profile, folder) => {
+        stubNavigator({ userAgent, language: 'en-US' })
+        vi.mocked(invoke).mockResolvedValue({ pending: true, mode: null, error: 'cleanup-journal-corrupt', canCancel: false, profile, namedProfiles: profile !== null })
         const bootstrap = vi.fn()
         void appCleanupBeforeBootstrap().then(bootstrap)
-        await vi.waitFor(() => expect(statusText()).toContain('%LOCALAPPDATA%\\RisuNest-cleanup'))
+        await vi.waitFor(() => expect(statusText()).toContain(folder))
         expect(cancelButton().hidden).toBe(true)
         expect(bootstrap).not.toHaveBeenCalled()
     })

@@ -13,8 +13,8 @@ use std::{
 mod archive;
 mod transaction;
 pub use archive::{
-    extract_package, managed_bundle_version, validate_installed_marker, validate_removal_inventory,
-    ExtractedBundle, previous_owned_files,
+    extract_package, managed_bundle_version, previous_owned_files, validate_installed_marker,
+    validate_removal_inventory, ExtractedBundle,
 };
 mod engine;
 pub use engine::{run, run_helper, run_recovery_helper, run_while_locked, RunMode, RunOutcome};
@@ -740,8 +740,12 @@ pub fn begin_installer_guard(root: &Path, server: &Path, owner: Option<u32>) -> 
             return Ok(nonce);
         }
         if error.is_file() {
-            if let Ok(value) = read_json::<serde_json::Value>(&error, "installer-guard-prepare-failed") {
-                let cause = value["error"].as_str().unwrap_or("installer-guard-prepare-failed");
+            if let Ok(value) =
+                read_json::<serde_json::Value>(&error, "installer-guard-prepare-failed")
+            {
+                let cause = value["error"]
+                    .as_str()
+                    .unwrap_or("installer-guard-prepare-failed");
                 if value["restartFailed"].as_bool() == Some(true) {
                     return Err(format!("installer-guard-restart-failed: {cause}"));
                 }

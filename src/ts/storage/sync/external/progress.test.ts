@@ -6,6 +6,29 @@ import type { ExternalJobSummary } from './types'
 const reading = (sequence: number, uploadedBytes: string): ExternalTransferSnapshot => ({ sequence, stage: 'uploading', uploadedBytes, preparedBytes: '0', downloadedBytes: '0', uploadedObjects: '1', downloadedObjects: '0' })
 afterEach(() => { for (const id of ['a', 'b']) clearExternalProgress(id); vi.useRealTimers(); native.invoke.mockReset() })
 describe('external progress ownership', () => {
+    it('keeps staging with its native phase and ignores delayed staging after a new command or local phase', async () => {
+        let state: ReadonlyMap<string, ExternalOperationProgress> = new Map()
+        const stop = subscribeExternalProgress(value => state = value)
+        native.invoke.mockResolvedValue(undefined)
+        const run = beginExternalProgress('a', 'binding')
+        await run.invoke('first', {})
+        const first = native.invoke.mock.calls[0][1].progress
+        const staged = { ...reading(1, '0'), stage: 'applying', staging: { phase: 'read', done: 30, total: null } }
+        first.onmessage(staged)
+        expect(externalProgressFor(state, 'a')?.staging).toEqual(staged.staging)
+        first.onmessage({ ...staged, sequence: 2, staging: { phase: 'validate', done: 2, total: 30 } })
+        expect(externalProgressFor(state, 'a')?.staging).toEqual({ phase: 'validate', done: 2, total: 30 })
+        await run.invoke('second', {})
+        expect(externalProgressFor(state, 'a')?.staging).toBeUndefined()
+        first.onmessage({ ...staged, sequence: 3 })
+        expect(externalProgressFor(state, 'a')?.staging).toBeUndefined()
+        const second = native.invoke.mock.calls[1][1].progress
+        second.onmessage(staged)
+        run.stage('applying')
+        second.onmessage({ ...staged, sequence: 2 })
+        expect(externalProgressFor(state, 'a')?.staging).toBeUndefined()
+        run.finish('complete'); stop()
+    })
     it('keeps body throughput separate from confirmed amounts and rejects samples from replaced operations', async () => {
         let state: ReadonlyMap<string, ExternalOperationProgress> = new Map()
         const stop = subscribeExternalProgress(value => state = value)

@@ -3,6 +3,7 @@
 //! Transfer counters only grow, so a reader subtracts its initial values.
 //! Listing, backlog and asset scopes describe the current work instead.
 //! Lanes that can run at the same time never share counters.
+use crate::persistent_store::lww::StagingProgress;
 use std::cell::RefCell;
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
@@ -56,6 +57,7 @@ pub(crate) struct ProgressLane {
     /// Units read from the server, before their bodies are fetched.
     listed: AtomicU64,
     listing: Mutex<Option<ListingProgress>>,
+    staging: Mutex<Option<StagingProgress>>,
     items_done: AtomicU64,
     items_total: AtomicU64,
     files_done: AtomicU64,
@@ -82,7 +84,13 @@ pub(crate) struct ListingProgress {
 
 impl ProgressLane {
     pub(crate) fn step(&self, step: Step) {
+        if step != Step::Staging {
+            *self.staging.lock().unwrap_or_else(|error| error.into_inner()) = None;
+        }
         self.step.store(step as u8, Relaxed);
+    }
+    pub(crate) fn staging(&self, progress: StagingProgress) {
+        *self.staging.lock().unwrap_or_else(|error| error.into_inner()) = Some(progress);
     }
     pub(crate) fn listed(&self, count: usize) {
         self.listed.fetch_add(count as u64, Relaxed);
@@ -143,6 +151,7 @@ impl ProgressLane {
             step: if active { Step::name(self.step.load(Relaxed)) } else { "idle" },
             listed: self.listed.load(Relaxed),
             listing: *self.listing.lock().unwrap_or_else(|error| error.into_inner()),
+            staging: self.staging.lock().unwrap_or_else(|error| error.into_inner()).clone(),
             items_done: self.items_done.load(Relaxed),
             items_total: self.items_total.load(Relaxed),
             files_done: self.files_done.load(Relaxed),
@@ -168,6 +177,7 @@ pub(crate) struct LaneSnapshot {
     pub step: &'static str,
     pub listed: u64,
     pub listing: Option<ListingProgress>,
+    pub staging: Option<StagingProgress>,
     pub items_done: u64,
     pub items_total: u64,
     pub files_done: u64,
@@ -263,6 +273,7 @@ pub(crate) fn within<T>(lane: &Arc<ProgressLane>, operation: impl FnOnce() -> T)
         }
     }
     if lane.active.fetch_add(1, Relaxed) == 0 {
+        *lane.staging.lock().unwrap_or_else(|error| error.into_inner()) = None;
         *lane.asset_scope.lock().unwrap_or_else(|error| error.into_inner()) = None;
     }
     let previous = CURRENT.with(|current| current.borrow_mut().replace(lane.clone()));
@@ -293,11 +304,20 @@ mod tests {
             assert!(inside.active);
             assert_eq!(inside.step, "uploading");
             assert_eq!((inside.files_done, inside.files_total, inside.bytes_done, inside.bytes_total), (1, 2, 100, 300));
+            reporting.step(Step::Staging);
+            reporting.staging(StagingProgress { phase: "copy", done: 3, total: Some(8) });
+            let staging = lane.snapshot("send").staging.unwrap();
+            assert_eq!((staging.phase, staging.done, staging.total), ("copy", 3, Some(8)));
+            reporting.step(Step::Confirming);
+            assert!(lane.snapshot("send").staging.is_none());
+            reporting.step(Step::Staging);
+            reporting.staging(StagingProgress { phase: "check", done: 0, total: None });
         });
         assert!(current().is_none());
         let after = lane.snapshot("send");
         assert!(!after.active);
         assert_eq!(after.step, "idle");
+        assert!(after.staging.is_none());
         assert_eq!((after.sent_bytes, after.received_bytes), (120, 40));
     }
 

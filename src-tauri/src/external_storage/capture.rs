@@ -204,6 +204,10 @@ impl BackupDependencySpool {
         self.sealed = true;
         Ok(())
     }
+    pub(crate) fn count(&self) -> Result<u64> {
+        let count: i64 = self.db.query_row("SELECT COUNT(*) FROM bodies", [], |row| row.get(0))?;
+        u64::try_from(count).map_err(|_| invalid("Backup dependency spool count is invalid"))
+    }
     pub(crate) fn control(&self,hash:&str)->Result<Option<Vec<u8>>> {
         self.body_with_role(hash,1)
     }

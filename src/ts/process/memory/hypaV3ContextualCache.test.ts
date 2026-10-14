@@ -4,6 +4,7 @@ const state = vi.hoisted(() => ({
     database: { hypaModel: 'voyageContext3', hypaCustomSettings: { url: '', key: '', model: '' } },
     groups: [] as string[][][],
     width: 4,
+    queryVector: null as number[] | null,
     distinct: false,
     cache: null as unknown,
 }))
@@ -11,24 +12,6 @@ const state = vi.hoisted(() => ({
 vi.mock('../transformers', () => ({ runEmbedding: vi.fn() }))
 // The app graph runs store effects on import that a loaded database would feed.
 vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
-
-vi.mock('./contextualEmbedding', () => ({
-    isContextModel: (model: string) => model === 'voyageContext3',
-    getContextProvider: () => ({
-        modelId: 'voyage-context-3',
-        async embedDocumentGroups(groups: string[][]) {
-            state.groups.push(groups.map((group) => [...group]))
-            return groups.map((group) =>
-                group.map(() => new Float32Array(state.width).fill(state.distinct && group.includes('second context') ? 2 : 1)),
-            )
-        },
-        async embedQueries(queries: string[]) {
-            return queries.map(() => new Float32Array(state.width))
-        },
-        getCacheKeySuffix: (contextTexts?: string[]) =>
-            `|voyageContext3${contextTexts?.length > 1 ? `|ctx:${contextTexts.join('')}` : ''}`,
-    }),
-}))
 
 vi.mock('src/ts/storage/hypaEmbeddingCache', async (importOriginal) => ({
     ...(await importOriginal<typeof import('src/ts/storage/hypaEmbeddingCache')>()),
@@ -38,6 +21,9 @@ vi.mock('src/ts/storage/hypaEmbeddingCache', async (importOriginal) => ({
 import { DBState } from 'src/ts/stores.svelte'
 import { setDatabaseLite } from 'src/ts/storage/database.svelte'
 import { HypaProcesserEx } from './hypav3'
+import { HypaProcessorV2 } from './hypamemoryv2'
+import { getContextProvider } from './contextualEmbedding'
+import * as globalApi from 'src/ts/globalApi.svelte'
 import type {
     HypaCachedEmbedding,
     HypaEmbeddingCache,
@@ -85,14 +71,27 @@ const groups = [
 beforeEach(() => {
     state.groups = []
     state.width = 4
+    state.queryVector = null
+    vi.spyOn(globalApi, 'globalFetch').mockImplementation(async (_url, options) => {
+        const groups = options.body.inputs as string[][]
+        if (options.body.input_type === 'document') state.groups.push(groups.map(group => [...group]))
+        return {
+            ok: true, status: 200, headers: {},
+            data: { data: groups.map(group => ({ data: group.map(() => ({
+                embedding: options.body.input_type === 'query' && state.queryVector
+                    ? state.queryVector
+                    : new Array(state.width).fill(state.distinct && group.includes('second context') ? 2 : 1),
+            })) })) },
+        }
+    })
     state.distinct = false
-    setDatabaseLite(state.database as never)
+    setDatabaseLite({ ...state.database, voyageApiKey: 'synthetic-voyage-key' } as never)
     expect(DBState.db.hypaModel).toBe('voyageContext3')
 })
 
 afterEach(() => {
     state.cache = null
-    vi.clearAllMocks()
+    vi.restoreAllMocks()
 })
 
 describe('HypaProcesserEx contextual chunks', () => {
@@ -191,7 +190,85 @@ it.each(['cold', 'warm', 'mixed'] as const)('preserves repeated text vector iden
     await processor.addSummaryChunks(chunks)
     expect(processor.summaryChunkVectors.map(({ chunk, vector }) => [chunks.indexOf(chunk), [...vector.embedding]]))
         .toEqual([[0, [1, 1, 1, 1]], [1, [1, 1, 1, 1]], [2, [2, 2, 2, 2]], [3, [2, 2, 2, 2]]])
-    vi.spyOn(processor, 'getEmbeds').mockResolvedValue([new Float32Array([1, 0, 0, 0])])
+    state.queryVector = [1, 0, 0, 0]
     const ranked = await processor.similaritySearchScoredEx('query')
     expect(ranked.map(([chunk, score]) => [chunks.indexOf(chunk), score])).toEqual([[2, 2], [3, 2], [0, 1], [1, 1]])
+})
+
+
+describe.each([
+    ['voyageContext3', 'voyage-context-3'],
+    ['voyageContext4', 'voyage-context-4'],
+] as const)('%s provider integration', (model, apiModel) => {
+    it.each(['standard', 'experimental'] as const)('embeds summary groups and queries through the %s processor', async (implementation) => {
+        state.cache = recordingCache().cache
+        setDatabaseLite({ ...state.database, hypaModel: model, voyageApiKey: '  synthetic-voyage-key  ' } as never)
+        const chunks = chunksOf(groups)
+        if (implementation === 'standard') {
+            const processor = new HypaProcesserEx()
+            await processor.addSummaryChunks(chunks)
+            const results = await processor.similaritySearchScoredEx('recent conversation')
+            expect(results.map(([chunk]) => chunk)).toEqual(chunks)
+        } else {
+            const processor = new HypaProcessorV2()
+            const texts = chunks.map((chunk, index) => ({ id: String(index), content: chunk.text, metadata: chunk.summary }))
+            await processor.addTexts(texts)
+            const results = await processor.similaritySearchScored('recent conversation')
+            expect(results.map(([result]) => result.content)).toEqual(chunks.map(chunk => chunk.text))
+            expect(results.every(([, score]) => Number.isFinite(score))).toBe(true)
+        }
+        const requests = vi.mocked(globalApi.globalFetch).mock.calls
+        expect(requests.map(([url, options]) => ({ url, headers: options.headers, body: options.body }))).toEqual([
+            {
+                url: 'https://api.voyageai.com/v1/contextualizedembeddings',
+                headers: { Authorization: 'Bearer synthetic-voyage-key', 'Content-Type': 'application/json' },
+                body: { model: apiModel, inputs: groups, input_type: 'document' },
+            },
+            {
+                url: 'https://api.voyageai.com/v1/contextualizedembeddings',
+                headers: { Authorization: 'Bearer synthetic-voyage-key', 'Content-Type': 'application/json' },
+                body: { model: apiModel, inputs: [['recent conversation']], input_type: 'query' },
+            },
+        ])
+    })
+
+    it('keeps cancelled document results out of the cache', async () => {
+        const recorder = recordingCache()
+        state.cache = recorder.cache
+        const controller = new AbortController()
+        const processor = new HypaProcesserEx(model)
+        processor.signal = controller.signal
+        vi.mocked(globalApi.globalFetch).mockImplementationOnce(async (_url, options) => {
+            expect(options.abortSignal).toBe(controller.signal)
+            controller.abort()
+            return { ok: true, status: 200, headers: {}, data: { data: [] } }
+        })
+        await expect(processor.addSummaryChunks(chunksOf(groups))).rejects.toMatchObject({ name: 'AbortError' })
+        expect(recorder.stored.size).toBe(0)
+        expect(processor.summaryChunkVectors).toEqual([])
+    })
+
+    it('rejects a missing Voyage key before sending a request', async () => {
+        setDatabaseLite({ ...state.database, hypaModel: model, voyageApiKey: ' ' } as never)
+        await expect(getContextProvider(model).embedQueries(['query'])).rejects.toThrow('requires a Voyage API Key')
+        expect(globalApi.globalFetch).not.toHaveBeenCalled()
+    })
+})
+
+it.each(['standard', 'experimental'] as const)('separates Context 3 and 4 caches in the %s processor', async (implementation) => {
+    const recorder = recordingCache()
+    state.cache = recorder.cache
+    const chunks = chunksOf(groups)
+    for (const model of ['voyageContext3', 'voyageContext4', 'voyageContext3', 'voyageContext4'] as const) {
+        if (implementation === 'standard') await new HypaProcesserEx(model).addSummaryChunks(chunks)
+        else await new HypaProcessorV2({ model }).addTexts(chunks.map((chunk, index) => ({
+            id: String(index), content: chunk.text, metadata: chunk.summary,
+        })))
+    }
+    expect(state.groups).toEqual([groups, groups])
+    expect(new Set(recorder.writes.flat().map(entry => entry.model))).toEqual(new Set(['voyageContext3', 'voyageContext4']))
+    expect(recorder.stored.size).toBe(10)
+    // These suffixes are part of the persisted Context 3 cache identity.
+    expect(getContextProvider('voyageContext3').getCacheKeySuffix()).toBe('|voyageContext3')
+    expect(getContextProvider('voyageContext4').getCacheKeySuffix()).toBe('|voyageContext4')
 })
