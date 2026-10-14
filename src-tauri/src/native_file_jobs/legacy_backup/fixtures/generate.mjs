@@ -1,4 +1,4 @@
-// Synthetic fixtures only. Run with a read-only PocketRisu checkout containing both tags:
+// Synthetic fixtures only. Run with a read-only PocketRisu checkout containing the fixture tags:
 // node src-tauri/src/native_file_jobs/legacy_backup/fixtures/generate.mjs <PocketRisu checkout>
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
@@ -29,6 +29,8 @@ const coldGroup = {
 };
 const expected = {
   username: "Synthetic PocketRisu restore",
+  hypaModel: "voyageContext4",
+  voyageApiKey: "synthetic-voyage-key",
   characters: [
     {
       type: "character",
@@ -128,6 +130,7 @@ writeFileSync(
 for (const [tag, compression] of [
   ["v1.10.0", "compression"],
   ["v1.12.0", "noCompression"],
+  ["v1.14.0", "compression"],
 ]) {
   const source = execFileSync(
     "git",

@@ -1,6 +1,7 @@
 // @vitest-environment node
 
 import { beforeAll, expect, test, vi } from 'vitest'
+import { runScripted } from './scriptings'
 
 const runtimeState = vi.hoisted(() => ({
     createLuaFactory: vi.fn(),
@@ -25,11 +26,8 @@ vi.mock('./luaRuntime', () => ({
     runLuaSource: vi.fn(async (engine, source) => engine.doString(source)),
 }))
 
-let runScripted: typeof import('./scriptings').runScripted
-
-beforeAll(async () => {
+beforeAll(() => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 200 })))
-    runScripted = (await import('./scriptings')).runScripted
 })
 
 test('rethrows a shared factory failure to concurrent callers and retries later', async () => {

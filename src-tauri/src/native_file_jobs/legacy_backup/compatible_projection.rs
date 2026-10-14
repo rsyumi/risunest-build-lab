@@ -101,6 +101,13 @@ impl Projector {
                 for (local, upstream) in [("messageNameTemplate", "groupTemplate"), ("namedMessageRole", "groupOtherBotRole")] {
                     if let Some(setting) = object.shift_remove(local) { object.insert(upstream.to_owned(), setting); }
                 }
+                if matches!(name, "Database" | "DataBase")
+                    && self.target == CompatibilityTarget::RisuAi
+                    && object.get("hypaModel").and_then(Value::as_str) == Some("voyageContext4")
+                {
+                    object.insert("hypaModel".to_owned(), Value::String("voyageContext3".to_owned()));
+                    self.losses.add("unsupported-option-value", 1);
+                }
             }
             &external
         } else { value };
@@ -623,6 +630,33 @@ mod tests {
             assert!(result.get("unknownRoot").is_none());
             assert_eq!(result["pluginCustomStorage"], value["pluginCustomStorage"]);
             assert!(result["plugins"][0].get("unknownPluginField").is_none());
+        }
+    }
+
+    #[test]
+    fn compatible_projection_falls_back_to_context_3_only_for_risuai() {
+        for name in ["Database", "DataBase"] {
+            for target in [CompatibilityTarget::RisuAi, CompatibilityTarget::PocketRisu] {
+                for model in ["voyageContext3", "voyageContext4"] {
+                    let mut projector = Projector::new(target).unwrap();
+                    let source = json!({"hypaModel": model, "voyageApiKey": "synthetic-key"});
+                    let fallback = target == CompatibilityTarget::RisuAi && model == "voyageContext4";
+                    let projected = projector.project(name, &source).unwrap();
+                    assert_eq!(projected, json!({
+                        "hypaModel": if fallback { "voyageContext3" } else { model },
+                        "voyageApiKey": "synthetic-key",
+                    }));
+                    let expected_losses = if fallback {
+                        BTreeMap::from([("unsupported-option-value".to_owned(), 1)])
+                    } else {
+                        BTreeMap::new()
+                    };
+                    assert_eq!(projector.losses.0, expected_losses);
+                    assert_eq!(source["hypaModel"], model);
+                }
+                let mut projector = Projector::new(target).unwrap();
+                assert!(projector.project(name, &json!({"hypaModel": "unknown-model"})).is_err());
+            }
         }
     }
 

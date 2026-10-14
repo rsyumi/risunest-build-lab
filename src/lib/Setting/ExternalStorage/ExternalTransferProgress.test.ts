@@ -24,6 +24,32 @@ afterEach(async () => {
     component = undefined; target?.remove(); clearExternalProgress('synthetic'); vi.useRealTimers()
 })
 describe('external storage shared panel', () => {
+    it('shows the staging phase share beside its operation after completed transfers without inventing a total or completing the operation', async () => {
+        await show({ onboarding: true })
+        const run = beginExternalProgress('synthetic', 'binding')
+        let report!: (reading: unknown) => void
+        native.invoke.mockImplementation(async (_name, { progress }) => { report = progress.onmessage })
+        await run.invoke('synthetic', {})
+        const statusValues = () => [...target.querySelectorAll('[role="status"] .tabular-nums')].map(node => node.textContent)
+        const reading = { sequence: 1, stage: 'applying', preparedBytes: '0', uploadedBytes: '0', downloadedBytes: '1024', uploadedObjects: '0', downloadedObjects: '100' }
+        report({ ...reading, staging: { phase: 'validate', done: 25, total: 100 } }); await tick()
+        expect(target.textContent).toContain(strings.staging.validate)
+        expect(statusValues()).toEqual([strings.transfer.connecting, '25%'])
+        expect(counterRows()).toEqual([[strings.transfer.downloaded, objectsValue(1024, '100')]])
+        expect(target.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('25')
+        report({ ...reading, sequence: 2, staging: { phase: 'project', done: 3, total: null } }); await tick()
+        expect(target.textContent).toContain(strings.staging.project)
+        expect(statusValues()).toEqual([strings.transfer.connecting])
+        expect(target.querySelector('[role="progressbar"]')?.hasAttribute('aria-valuenow')).toBe(false)
+        report({ ...reading, sequence: 3, staging: { phase: 'check', done: 100, total: 100 } }); await tick()
+        expect(target.textContent).toContain(strings.staging.check)
+        expect(target.textContent).not.toContain(strings.transfer.connectionComplete)
+        run.stage('finalizing'); await tick()
+        expect(target.textContent).not.toContain(strings.staging.check)
+        expect(target.querySelector('[role="progressbar"]')?.hasAttribute('aria-valuenow')).toBe(false)
+        run.finish('complete'); await tick()
+        expect(target.textContent).toContain(strings.transfer.connectionComplete)
+    })
     it.each(['backup', 'restore'] as const)('shows %s network speed from live job samples and hides it when paused', async kind => {
         vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'performance'] })
         const network = { id: kind, atMs: 0, sentBytes: '0', receivedBytes: '0', sending: kind === 'backup', receiving: kind === 'restore' }
@@ -148,15 +174,23 @@ describe('external storage shared panel', () => {
         expect(target.querySelector('[class*="animate-spin"]')).not.toBeNull()
         binding.finish('complete')
     })
-    it('displays preparation and confirmed upload separately, then removes the byte fraction during local restore', async () => {
+    it('displays preparation and confirmed upload separately, then shows only the local restore preparation share', async () => {
         const base: ExternalJobSummary = { id: 'backup', connectionId: 'synthetic', kind: 'backup', state: 'running', phase: 'prepare', counters: 'prepared', completedBytes: '20', totalBytes: '100', completedItems: '1', totalItems: '5', startedAtMs: '0', updatedAtMs: '0', transfer: { sequence: 1, stage: 'uploading', preparedBytes: '0', downloadedBytes: '0', downloadedObjects: '0', uploadedBytes: '50', uploadedObjects: '2' } }
         await show({ job: base, onboarding: true })
         expect(target.textContent).toContain(strings.jobCounters.prepared)
         expect(counterRows()).toEqual([[strings.transfer.uploaded, objectsValue(50, '2')]])
         expect(target.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('20')
         await unmount(component!); target.remove(); component = undefined
-        await show({ job: { ...base, kind: 'restore', phase: 'applying-local', counters: 'transferred', completedBytes: '100' }, onboarding: true })
+        const preparing: ExternalJobSummary = { ...base, kind: 'restore', phase: 'preparing-local', counters: 'transferred', completedBytes: '100', transfer: { ...base.transfer!, staging: { phase: 'project', done: 30, total: 120 } } }
+        await show({ job: preparing, onboarding: true })
+        expect(target.textContent).toContain(strings.staging.project)
+        expect([...target.querySelectorAll('[role="status"] .tabular-nums')].map(node => node.textContent)).toEqual([strings.restorePhases['preparing-local'], '25%'])
+        expect(target.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('25')
+        await unmount(component!); target.remove(); component = undefined
+        // A share left over from preparation never carries into applying the restore.
+        await show({ job: { ...preparing, phase: 'applying-local', transfer: { ...preparing.transfer!, staging: { phase: 'project', done: 120, total: 120 } } }, onboarding: true })
         expect(target.textContent).toContain(strings.restorePhases['applying-local'])
+        expect(target.textContent).not.toContain(strings.staging.project)
         expect(target.querySelector('[role="progressbar"]')?.hasAttribute('aria-valuenow')).toBe(false)
     })
 })

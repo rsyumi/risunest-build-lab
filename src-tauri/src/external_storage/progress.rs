@@ -1,5 +1,6 @@
 use super::{capabilities::Capabilities, contract::*, phase_progress::{PhaseCounters, PhaseProgress}};
 use serde::Serialize;
+use crate::persistent_store::lww::StagingProgress;
 use std::{cell::RefCell, collections::{BTreeMap, BTreeSet}, future::Future, path::{Path, PathBuf}, pin::Pin, sync::{Arc, Mutex, OnceLock}, task::{Context, Poll}, time::{Duration, Instant}};
 use tauri::ipc::Channel;
 use tokio::io::{AsyncRead, ReadBuf};
@@ -26,6 +27,7 @@ pub(crate) struct Snapshot {
     uploaded_objects: String,
     downloaded_objects: String,
     network: NetworkSnapshot,
+    staging: Option<StagingProgress>,
 }
 struct Reading {
     snapshot: Snapshot,
@@ -52,7 +54,10 @@ impl Run {
     fn change(&self, stage: Option<&'static str>, change: impl FnOnce(&mut Reading), force: bool) {
         if let Ok(mut reading) = self.reading.lock() {
             let changed = stage.is_some_and(|stage| reading.snapshot.stage != stage);
-            if let Some(stage) = stage { reading.snapshot.stage = stage; }
+            if let Some(stage) = stage {
+                reading.snapshot.stage = stage;
+                if stage != "applying" { reading.snapshot.staging = None; }
+            }
             change(&mut reading);
             let network_stopped = (reading.snapshot.network.sending && reading.sending == 0)
                 || (reading.snapshot.network.receiving && reading.receiving == 0);
@@ -117,6 +122,19 @@ impl Observer {
 tokio::task_local! { static NETWORK: Option<Arc<Run>>; }
 thread_local! { static BLOCKING_NETWORK: RefCell<Option<Arc<Run>>> = const { RefCell::new(None) }; }
 
+/// Retain this operation's owner even when another task begins a run.
+pub(crate) fn staging_reporter() -> impl Fn(Option<StagingProgress>) + Send + 'static {
+    reporter(NETWORK.try_with(Clone::clone).unwrap_or_else(|_| BLOCKING_NETWORK.with(|slot| slot.borrow().clone())))
+}
+/// `None` ends the reported phase before the run does.
+fn reporter(run: Option<Arc<Run>>) -> impl Fn(Option<StagingProgress>) + Send + 'static {
+    move |progress| {
+        if let Some(run) = &run {
+            run.update("applying", |reading| reading.snapshot.staging = progress, true);
+        }
+    }
+}
+
 /// Count only HTTP body consumption, never provider source verification or local cache reads.
 pub(crate) fn network_reader(reader: Pin<Box<dyn AsyncRead + Send>>, upload: bool) -> Pin<Box<dyn AsyncRead + Send>> {
     let run = NETWORK.try_with(Clone::clone).unwrap_or_else(|_| BLOCKING_NETWORK.with(|slot| slot.borrow().clone()));
@@ -167,6 +185,8 @@ impl JobProgress {
     }
     pub(crate) fn wrap(&self, provider: Arc<dyn Provider>) -> Arc<dyn Provider> { self.observer.wrap(provider) }
     pub(crate) async fn scope<T>(&self, work: impl Future<Output = T>) -> T { self.observer.scope(work).await }
+    /// Reports the job's local staging from any thread, including a blocking worker.
+    pub(crate) fn staging_reporter(&self) -> impl Fn(Option<StagingProgress>) + Send + 'static { reporter(self.observer.current()) }
 }
 impl Drop for JobProgress {
     fn drop(&mut self) { if let Some(jobs) = JOBS.get() { if let Ok(mut jobs) = jobs.lock() { jobs.remove(&self.key); } } }
@@ -181,7 +201,7 @@ impl Drop for Guard {
     fn drop(&mut self) {
         if let Some(run) = &self.run {
             let stage = run.reading.lock().map(|r| r.snapshot.stage).unwrap_or("checking");
-            run.update(stage, |_| {}, true);
+            run.update(stage, |reading| reading.snapshot.staging = None, true);
         }
         if let Ok(mut current) = self.observer.0.lock() {
             if current.as_ref().zip(self.run.as_ref()).is_some_and(|(a,b)| Arc::ptr_eq(a,b)) { *current = None; }
@@ -306,6 +326,45 @@ mod tests {
         assert!(job_snapshot(&root.path().join("two")).is_none());
         drop(job);
         assert!(job_snapshot(&root.path().join("one")).is_none());
+    }
+
+    #[test]
+    fn staging_snapshots_keep_their_operation_and_clear_at_boundaries() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let observer = Observer::default();
+            let snapshots = Arc::new(Mutex::new(Vec::new()));
+            let sink = snapshots.clone();
+            let first = observer.begin_sink(Some(Box::new(move |value| sink.lock().unwrap().push(value))));
+            let report = observer.scope(async { staging_reporter() }).await;
+            report(Some(StagingProgress { phase: "copy", done: 3, total: Some(8) }));
+            let sample = snapshots.lock().unwrap().last().unwrap().clone();
+            assert_eq!(sample.stage, "applying");
+            let staging = sample.staging.unwrap();
+            assert_eq!((staging.phase, staging.done, staging.total), ("copy", 3, Some(8)));
+            assert_eq!((&sample.downloaded_bytes, &sample.uploaded_bytes), (&"0".into(), &"0".into()));
+            observer.wrap(Arc::new(FakeProvider::new(true))).progress_stage("checking");
+            assert!(snapshots.lock().unwrap().last().unwrap().staging.is_none());
+            let next = Arc::new(Mutex::new(Vec::new()));
+            let sink = next.clone();
+            let _second = observer.begin_sink(Some(Box::new(move |value| sink.lock().unwrap().push(value))));
+            tokio::task::yield_now().await;
+            report(Some(StagingProgress { phase: "check", done: 0, total: None }));
+            assert_eq!(snapshots.lock().unwrap().last().unwrap().staging.as_ref().unwrap().total, None);
+            assert!(next.lock().unwrap().last().unwrap().staging.is_none());
+            drop(first);
+            assert!(snapshots.lock().unwrap().last().unwrap().staging.is_none());
+            assert!(observer.current().is_some());
+            // A job's blocking worker reports through the job until it ends the share itself.
+            let root = tempfile::tempdir().unwrap();
+            let key = root.path().join("job");
+            let job = JobProgress::begin(key.clone());
+            let report = job.staging_reporter();
+            report(Some(StagingProgress { phase: "project", done: 2, total: Some(5) }));
+            let staging = job_snapshot(&key).unwrap().staging.unwrap();
+            assert_eq!((staging.phase, staging.done, staging.total), ("project", 2, Some(5)));
+            report(None);
+            assert!(job_snapshot(&key).unwrap().staging.is_none());
+        });
     }
 
     #[test]

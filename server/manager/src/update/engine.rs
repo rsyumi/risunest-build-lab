@@ -283,7 +283,12 @@ fn prepare_stage(path: &Path, required: u64) -> Result<()> {
     let probe = tempfile::Builder::new()
         .prefix(".risunest-sync-update-probe-")
         .tempdir_in(parent)
-        .map_err(|_| format!("update-install-create-directory-failed: {}", parent.display()))?;
+        .map_err(|_| {
+            format!(
+                "update-install-create-directory-failed: {}",
+                parent.display()
+            )
+        })?;
     let file = probe.path().join("write");
     let renamed = probe.path().join("renamed");
     OpenOptions::new()
@@ -296,7 +301,8 @@ fn prepare_stage(path: &Path, required: u64) -> Result<()> {
     fs::remove_file(&renamed)
         .map_err(|_| format!("update-install-delete-file-failed: {}", renamed.display()))?;
     let path = probe.path().to_owned();
-    probe.close()
+    probe
+        .close()
         .map_err(|_| format!("update-install-delete-directory-failed: {}", path.display()))
 }
 
@@ -537,11 +543,19 @@ fn remove_previous_helper(path: &Path) -> Result<()> {
             Ok(()) => return Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             // The guard can publish completion just before its process releases the executable.
-            Err(error) if cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32))
-                && std::time::Instant::now() < deadline => {
+            Err(error)
+                if cfg!(windows)
+                    && matches!(error.raw_os_error(), Some(5 | 32))
+                    && std::time::Instant::now() < deadline =>
+            {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(error) => return Err(format!("update-helper-remove-failed: {} ({error})", path.display())),
+            Err(error) => {
+                return Err(format!(
+                    "update-helper-remove-failed: {} ({error})",
+                    path.display()
+                ))
+            }
         }
     }
 }
@@ -1369,13 +1383,24 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("previous-helper.exe");
         fs::write(&path, "synthetic").unwrap();
-        let handle = OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        let handle = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
         let (send, receive) = std::sync::mpsc::channel();
         let helper = path.clone();
-        let worker = std::thread::spawn(move || send.send(remove_previous_helper(&helper)).unwrap());
-        assert!(matches!(receive.recv_timeout(Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+        let worker =
+            std::thread::spawn(move || send.send(remove_previous_helper(&helper)).unwrap());
+        assert!(matches!(
+            receive.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
         drop(handle);
-        receive.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        receive
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
         worker.join().unwrap();
         assert!(!path.exists());
     }
@@ -1386,21 +1411,50 @@ mod tests {
         use std::{ffi::c_void, os::windows::ffi::OsStrExt};
         #[link(name = "advapi32")]
         extern "system" {
-            fn ConvertStringSecurityDescriptorToSecurityDescriptorW(value: *const u16, revision: u32, descriptor: *mut *mut c_void, size: *mut u32) -> i32;
-            fn SetFileSecurityW(path: *const u16, information: u32, descriptor: *const c_void) -> i32;
+            fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                value: *const u16,
+                revision: u32,
+                descriptor: *mut *mut c_void,
+                size: *mut u32,
+            ) -> i32;
+            fn SetFileSecurityW(
+                path: *const u16,
+                information: u32,
+                descriptor: *const c_void,
+            ) -> i32;
         }
         let parent = tempfile::tempdir().unwrap();
-        let path: Vec<_> = parent.path().as_os_str().encode_wide().chain(Some(0)).collect();
+        let path: Vec<_> = parent
+            .path()
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
         // The deny applies only to this directory, like the create-file restriction at a drive root.
-        let sddl: Vec<_> = "D:(D;;0x2;;;WD)(A;OICI;FA;;;WD)".encode_utf16().chain(Some(0)).collect();
+        let sddl: Vec<_> = "D:(D;;0x2;;;WD)(A;OICI;FA;;;WD)"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
         let mut descriptor = std::ptr::null_mut();
         unsafe {
-            assert_ne!(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), 1, &mut descriptor, std::ptr::null_mut()), 0);
+            assert_ne!(
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    1,
+                    &mut descriptor,
+                    std::ptr::null_mut()
+                ),
+                0
+            );
             let applied = SetFileSecurityW(path.as_ptr(), 4, descriptor);
             windows_sys::Win32::Foundation::LocalFree(descriptor);
             assert_ne!(applied, 0);
         }
-        assert!(OpenOptions::new().write(true).create_new(true).open(parent.path().join("file-probe")).is_err());
+        assert!(OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(parent.path().join("file-probe"))
+            .is_err());
         prepare_stage(&parent.path().join("RisuNest Sync.stage"), 0).unwrap();
         assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
     }

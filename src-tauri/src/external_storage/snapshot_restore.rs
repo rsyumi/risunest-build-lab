@@ -2354,6 +2354,10 @@ impl OriginalUnits {
         self.db.execute("INSERT INTO records VALUES(?1,?2,?3)",rusqlite::params![key,hash,i64::try_from(length).map_err(corrupt)?]).map_err(corrupt)?;
         Ok(())
     }
+    pub(crate) fn count(&self) -> Result<u64> {
+        let count: i64 = self.db.query_row("SELECT COUNT(*) FROM records", [], |row| row.get(0)).map_err(transient)?;
+        u64::try_from(count).map_err(corrupt)
+    }
     pub(crate) fn units<'a>(&'a self, content: &'a ContentStore) -> impl Iterator<Item = Result<(risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue)>> + 'a {
         let mut after = String::new();
         let mut page = std::collections::VecDeque::<(String,String,i64)>::new();

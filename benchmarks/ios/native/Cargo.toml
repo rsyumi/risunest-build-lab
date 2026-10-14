@@ -39,3 +39,4 @@ wry = { path = "../../../crates/wry" }
 tauri-plugin-updater = { path = "../../../crates/tauri-plugin-updater" }
 tauri-plugin-http = { path = "../../../crates/tauri-plugin-http" }
 tauri-plugin-window-state = { path = "../../../crates/tauri-plugin-window-state" }
+tauri-plugin-single-instance = { path = "../../../crates/tauri-plugin-single-instance" }

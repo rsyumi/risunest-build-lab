@@ -864,6 +864,20 @@ describe('nativeFileJobDialogModel', () => {
         expect(failureReason('whatever')).toBe(copy.reasonUnknown)
     })
 
+    it.each([
+        ['backup-encryption-invalid', 'reasonBackupEncryptionInvalid'],
+        ['backup-key-request-failed', 'reasonBackupKeyRequest'],
+        ['backup-key-http-error', 'reasonBackupKeyHttp'],
+        ['backup-key-invalid', 'reasonBackupKeyInvalid'],
+        ['backup-decryption-failed', 'reasonBackupDecryption'],
+        ['backup-database-invalid', 'reasonBackupDatabase'],
+    ] as const)('explains %s in the failure dialog', (code, reasonKey) => {
+        const model = buildNativeFileJobDialogModel(null, outcome({
+            state: 'failed', error: { code, message: 'Backup restore failed', recoveryRequired: false },
+        }), 0)
+        expect(model.terminal?.reason).toBe(copy[reasonKey])
+    })
+
     it('never exposes stage identifiers in labels', () => {
         const stages: NativeFileJobStage[] = [
             'copying-source',

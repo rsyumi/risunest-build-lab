@@ -59,10 +59,16 @@ async fn run(entry: Entry, installer_diagnostics: &mut bool) -> Result<()> {
         }
     }
     let command_parts = command.iter().map(String::as_str).collect::<Vec<_>>();
-    *installer_diagnostics = cfg!(windows) && matches!(command_parts.as_slice(),
-        ["installer", ..] | ["prepare-update", ..] | ["start", "lock-held"]
-        | ["uninstall", "lock-held", ..] | ["autostart", "install", "lock-held"]
-        | ["update", "schedule", "reconcile", "lock-held"]);
+    *installer_diagnostics = cfg!(windows)
+        && matches!(
+            command_parts.as_slice(),
+            ["installer", ..]
+                | ["prepare-update", ..]
+                | ["start", "lock-held"]
+                | ["uninstall", "lock-held", ..]
+                | ["autostart", "install", "lock-held"]
+                | ["update", "schedule", "reconcile", "lock-held"]
+        );
     if entry == Entry::Background && !background_command(&command_parts) {
         return Err("invalid-command".into());
     }
@@ -172,22 +178,44 @@ async fn run(entry: Entry, installer_diagnostics: &mut bool) -> Result<()> {
         ["installer", "register"] => crate::removal::register(&root, &executable),
         #[cfg(windows)]
         ["installer", "obsolete-files", previous] => {
-            let removed = crate::removal::remove_obsolete_owned_files(&executable, &PathBuf::from(previous))?;
+            let removed =
+                crate::removal::remove_obsolete_owned_files(&executable, &PathBuf::from(previous))?;
             println!("{}", if removed { "checked" } else { "skipped" });
             Ok(())
         }
         #[cfg(windows)]
         ["installer", "removal-check", mode, data] => {
-            let force = match *mode { "force" => true, "normal" => false, _ => return Err("invalid-uninstall-option".into()) };
-            let delete = match *data { "delete" => true, "preserve" => false, _ => return Err("invalid-uninstall-option".into()) };
+            let force = match *mode {
+                "force" => true,
+                "normal" => false,
+                _ => return Err("invalid-uninstall-option".into()),
+            };
+            let delete = match *data {
+                "delete" => true,
+                "preserve" => false,
+                _ => return Err("invalid-uninstall-option".into()),
+            };
             let plan = crate::removal::plan_with_force(&root, &executable, delete, force)?;
-            if !plan.blockers.is_empty() { return Err(plan.blockers.join(", ")); }
-            println!("{}", if plan.delete_data { "delete-data" } else { "keep-data" });
+            if !plan.blockers.is_empty() {
+                return Err(plan.blockers.join(", "));
+            }
+            println!(
+                "{}",
+                if plan.delete_data {
+                    "delete-data"
+                } else {
+                    "keep-data"
+                }
+            );
             Ok(())
         }
         #[cfg(windows)]
         ["installer", "remove-files", mode] => {
-            let force = match *mode { "force" => true, "normal" => false, _ => return Err("invalid-uninstall-option".into()) };
+            let force = match *mode {
+                "force" => true,
+                "normal" => false,
+                _ => return Err("invalid-uninstall-option".into()),
+            };
             crate::removal::remove_owned_files(&root, &executable, force)
         }
         #[cfg(not(windows))]
@@ -204,7 +232,9 @@ async fn run(entry: Entry, installer_diagnostics: &mut bool) -> Result<()> {
         #[cfg(windows)]
         ["uninstall", "lock-held", "--force"] => {
             let plan = crate::removal::plan_with_force(&root, &executable, false, true)?;
-            if !plan.blockers.is_empty() { return Err(plan.blockers.join(", ")); }
+            if !plan.blockers.is_empty() {
+                return Err(plan.blockers.join(", "));
+            }
             crate::removal::cleanup_services(&root, &executable).await
         }
         ["installer", "forget-removal"] => crate::removal::forget_registration(&root, &executable),
