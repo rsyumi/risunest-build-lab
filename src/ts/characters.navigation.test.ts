@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
 
@@ -162,6 +164,7 @@ import { SelectedConversationPromotionStaleError } from './storage/activeWorking
 import { PersistentMutationFencedError } from './storage/saveCoordinator'
 import { MobileGUIStack, OpenRealmStore, selectedCharID } from './stores.svelte'
 import { doingChat } from './process/index.svelte'
+import { translateHTML } from './translator/translator'
 import { createConversationSummaryStub } from './storage/conversationResidency'
 import {
     beginNavigationActivity,
@@ -1459,6 +1462,25 @@ describe('chat list operations', () => {
         expect(exported.data.message).toEqual([
             { role: 'user', data: 'authoritative body' },
         ])
+    })
+
+    it('filters markup added by translation from an HTML export and shows names as text', async () => {
+        const character = buildCharacter()
+        character.name = '<b>A&B</b>'
+        mocks.database.characters.push(character)
+        selectedCharID.set(0)
+        mocks.readPersistentConversation.mockResolvedValue({ ...character.chats[0], fmIndex: -1 })
+        // HTML file, then the default '0' answers translate the content and keep names.
+        mocks.alertSelect.mockResolvedValueOnce('2')
+        vi.mocked(translateHTML).mockResolvedValue('<p>translated <img src="x" onerror="alert(1)"></p>')
+
+        await exportChat(0)
+
+        const exported = Buffer.from(mocks.downloadFile.mock.calls[0][1]).toString()
+        expect(exported).toContain('<p>translated <img src="x"></p>')
+        expect(exported).not.toContain('onerror')
+        expect(exported).toContain('<h2>&lt;b&gt;A&amp;B&lt;/b&gt;</h2>')
+        expect(exported).not.toContain('<b>A')
     })
 
     it('reads the complete character authoritatively before exporting all chats', async () => {

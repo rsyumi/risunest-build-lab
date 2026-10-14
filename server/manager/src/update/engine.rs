@@ -280,16 +280,24 @@ fn prepare_stage(path: &Path, required: u64) -> Result<()> {
     if free < required.saturating_mul(3).saturating_add(16 * 1024 * 1024) {
         return Err("update-disk-space-insufficient".into());
     }
-    let probe = parent.join(format!(
-        ".risunest-sync-update-probe-{}",
-        std::process::id()
-    ));
+    let probe = tempfile::Builder::new()
+        .prefix(".risunest-sync-update-probe-")
+        .tempdir_in(parent)
+        .map_err(|_| format!("update-install-create-directory-failed: {}", parent.display()))?;
+    let file = probe.path().join("write");
+    let renamed = probe.path().join("renamed");
     OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&probe)
-        .map_err(|_| "update-install-not-writable".to_owned())?;
-    fs::remove_file(probe).map_err(|_| "update-install-not-writable".to_owned())
+        .open(&file)
+        .map_err(|_| format!("update-install-create-file-failed: {}", file.display()))?;
+    fs::rename(&file, &renamed)
+        .map_err(|_| format!("update-install-rename-file-failed: {}", file.display()))?;
+    fs::remove_file(&renamed)
+        .map_err(|_| format!("update-install-delete-file-failed: {}", renamed.display()))?;
+    let path = probe.path().to_owned();
+    probe.close()
+        .map_err(|_| format!("update-install-delete-directory-failed: {}", path.display()))
 }
 
 #[cfg(target_os = "macos")]
@@ -516,10 +524,26 @@ pub(super) fn copy_helper(root: &Path) -> Result<PathBuf> {
     let temporary = directory.join(format!("{name}.new"));
     fs::copy(current, &temporary).map_err(|_| "update-helper-write-failed".to_owned())?;
     if target.exists() {
-        fs::remove_file(&target).map_err(|_| "update-helper-write-failed".to_owned())?;
+        remove_previous_helper(&target)?;
     }
     fs::rename(temporary, &target).map_err(|_| "update-helper-write-failed".to_owned())?;
     Ok(target)
+}
+
+fn remove_previous_helper(path: &Path) -> Result<()> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            // The guard can publish completion just before its process releases the executable.
+            Err(error) if cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32))
+                && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(format!("update-helper-remove-failed: {} ({error})", path.display())),
+        }
+    }
 }
 
 async fn cancel_prepared_after_shutdown(
@@ -1329,6 +1353,57 @@ mod tests {
     use crate::client::tests::read_request;
     use fs2::FileExt;
     use std::{io::Write, net::TcpListener, sync::Arc};
+
+    #[test]
+    fn stage_preflight_creates_and_cleans_a_sibling_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let stage = parent.path().join("RisuNest Sync.stage");
+        prepare_stage(&stage, 0).unwrap();
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_finishing_guard_can_release_its_executable_before_the_next_operation() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("previous-helper.exe");
+        fs::write(&path, "synthetic").unwrap();
+        let handle = OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let helper = path.clone();
+        let worker = std::thread::spawn(move || send.send(remove_previous_helper(&helper)).unwrap());
+        assert!(matches!(receive.recv_timeout(Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+        drop(handle);
+        receive.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        worker.join().unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stage_preflight_accepts_a_parent_that_allows_directories_but_denies_files() {
+        use std::{ffi::c_void, os::windows::ffi::OsStrExt};
+        #[link(name = "advapi32")]
+        extern "system" {
+            fn ConvertStringSecurityDescriptorToSecurityDescriptorW(value: *const u16, revision: u32, descriptor: *mut *mut c_void, size: *mut u32) -> i32;
+            fn SetFileSecurityW(path: *const u16, information: u32, descriptor: *const c_void) -> i32;
+        }
+        let parent = tempfile::tempdir().unwrap();
+        let path: Vec<_> = parent.path().as_os_str().encode_wide().chain(Some(0)).collect();
+        // The deny applies only to this directory, like the create-file restriction at a drive root.
+        let sddl: Vec<_> = "D:(D;;0x2;;;WD)(A;OICI;FA;;;WD)".encode_utf16().chain(Some(0)).collect();
+        let mut descriptor = std::ptr::null_mut();
+        unsafe {
+            assert_ne!(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), 1, &mut descriptor, std::ptr::null_mut()), 0);
+            let applied = SetFileSecurityW(path.as_ptr(), 4, descriptor);
+            windows_sys::Win32::Foundation::LocalFree(descriptor);
+            assert_ne!(applied, 0);
+        }
+        assert!(OpenOptions::new().write(true).create_new(true).open(parent.path().join("file-probe")).is_err());
+        prepare_stage(&parent.path().join("RisuNest Sync.stage"), 0).unwrap();
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn package_download_timeout_tracks_read_progress() {

@@ -1,5 +1,6 @@
 import { offerHtmlClipboardExport } from './htmlClipboardExport'
 import { defaultChatToggleBinding } from './toggleBindings'
+import DOMPurify from 'dompurify'
 import { get, writable } from "svelte/store";
 import { saveImage, type character, type Chat, defaultSdDataFunc, type loreBook, getDatabase, getCharacterByIndex, setCharacterByIndex } from "./storage/database.svelte";
 import { alertAddCharacter, alertCheckboxConfirm, alertError, alertNormal, alertSelect, alertStore, alertToast, alertWait } from "./alert";
@@ -216,6 +217,9 @@ export function rmCharEmotion(charId:number, emotionId:number) {
     DBState.db.characters[charId] = dbChar
 }
 
+function escapeHtmlText(value: unknown) {
+    return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
 
 export async function exportChat(page:number){
     try {
@@ -235,7 +239,11 @@ export async function exportChat(page:number){
             v = parseMarkdownSafe(v)
 
             if(doTranslate){
-                v = await translateHTML(v, false, '', -1)
+                // Translation can return new markup, so it gets the same filter as parseMarkdownSafe.
+                v = DOMPurify.sanitize(await translateHTML(v, false, '', -1), {
+                    FORBID_TAGS: ["a", "style"],
+                    FORBID_ATTR: ["style", "href", "class"]
+                })
             }
 
             if(anonymous){
@@ -272,7 +280,7 @@ export async function exportChat(page:number){
                 alertWait(`Translating... ${i++}/${chat.message.length}`)
                 const name = v.saying ? findCharacterbyId(v.saying).name : v.role === 'char' ? char.name : anonymous ? '×××' : getUserName()
                 chatContentHTML += `<div class="chat">
-                    <h2>${name}</h2>
+                    <h2>${escapeHtmlText(name)}</h2>
                     <div>${await htmlChatParse(v.data)}</div>
                 </div>`
             }
@@ -281,7 +289,7 @@ export async function exportChat(page:number){
                 <!DOCTYPE html>
                 <html>
                     <head>
-                        <title>${char.name} Chat</title>
+                        <title>${escapeHtmlText(char.name)} Chat</title>
                         <style>
                             body{
                                 font-family: Arial, sans-serif;
@@ -318,7 +326,7 @@ export async function exportChat(page:number){
                     <body>
                         <div class="container">
                             <div class="chat">
-                                <h2>${char.name}</h2>
+                                <h2>${escapeHtmlText(char.name)}</h2>
                                 <div>${await htmlChatParse(
                                     chat.fmIndex === -1 ? char.firstMessage : char.alternateGreetings?.[chat.fmIndex ?? 0]
                                 )}</div>
@@ -343,7 +351,7 @@ export async function exportChat(page:number){
                 alertWait(`Translating... ${i++}/${chat.message.length}`)
                 const name = v.saying ? findCharacterbyId(v.saying).name : v.role === 'char' ? char.name : anonymous ? '×××' : getUserName()
                 chatContentHTML += `<tr>
-                    <td>${name}</td>
+                    <td>${escapeHtmlText(name)}</td>
                     <td>${await htmlChatParse(v.data)}</td>
                 </tr>`
             }
@@ -355,7 +363,7 @@ export async function exportChat(page:number){
                         <th>Message</th>
                     </tr>
                     <tr>
-                        <td>${char.name}</td>
+                        <td>${escapeHtmlText(char.name)}</td>
                         <td>${await htmlChatParse(char.firstMessage)}</td>
                     </tr>
                     ${chatContentHTML}

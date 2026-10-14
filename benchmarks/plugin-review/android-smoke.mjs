@@ -30,12 +30,15 @@ async function run(args, timeout = 10000, allowFailure = false) {
     try { return await execute(adb, android.args(args), { env: android.env, windowsHide: true, timeout, encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 }) }
     catch (error) { if (allowFailure) return { stdout: '' }; throw new Error(`Synthetic ADB ${args[0]} failed`, { cause: error }) }
 }
+function isAppOrigin(url) {
+    try { return new URL(url).origin === 'http://tauri.localhost' } catch { return false }
+}
 async function connect() {
     let target
     const deadline = Date.now() + 30000
     while (Date.now() < deadline) {
         const targets = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(3000) }).then(res => res.json()).catch(() => [])
-        target = targets.find(item => item.type === 'page' && item.title === title && item.url.startsWith('http://tauri.localhost'))
+        target = targets.find(item => item.type === 'page' && item.title === title && isAppOrigin(item.url))
         if (target) break
         await delay(250)
     }

@@ -11,6 +11,9 @@ if (process.env.RISUNEST_REQUIRE_NSIS === '1' && skip) throw new Error('NSIS com
 const quote = value => value.replaceAll('$', '$$').replaceAll('"', '$\\"');
 const nonce = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const stages = {
+  register: 'Registering this RisuNest Sync installation...',
+  obsolete: 'Removing obsolete RisuNest Sync program files...',
+  files: 'Removing RisuNest Sync program files...',
   prepare: 'Stopping RisuNest Sync and preparing the installation...',
   schedule: 'Applying scheduled update settings...',
   autostart: 'Registering automatic server startup...',
@@ -26,7 +29,10 @@ const stages = {
 };
 
 function commandStage(command) {
-  if (command.includes('uninstall --dry-run')) return 'check';
+  if (command.includes('installer register')) return 'register';
+  if (command.includes('obsolete-files')) return 'obsolete';
+  if (command.includes('remove-files')) return 'files';
+  if (command.includes('installer removal-check')) return 'check';
   if (command.includes('installer prepare')) return 'prepare';
   if (command.includes('schedule reconcile')) return 'schedule';
   if (command.includes('autostart install')) return 'autostart';
@@ -53,11 +59,13 @@ test('NSIS displays the active operation and does not complete failed Sync setup
     // Manager processes and modal error dialogs are simulated to keep failures unattended.
     const syncHook = readFileSync(resolve('server/manager/install/windows.nsh'), 'utf8')
       .replaceAll('$LOCALAPPDATA', '$INSTDIR\\local')
+      .replace(/!include [^\r\n]+windows-common.nsh"/, `!include "${resolve('src-tauri/windows-common.nsh')}"`)
       .replace(/MessageBox MB_OK\|MB_ICON(?:STOP|EXCLAMATION) "\$SyncFailureMessage"/g, 'DetailPrint "$SyncFailureMessage"')
       .replace(/nsExec::ExecToStack '([^\r\n]+)'/g, (_, command) => `!insertmacro Manager "${commandStage(command)}"`)
       .replace('StrCpy $R6 300', '!insertmacro Capture "finish-removal"\n  StrCpy $R6 1');
     writeFileSync(join(root, 'sync.nsh'), syncHook);
     const appHook = readFileSync(resolve('src-tauri/windows.nsh'), 'utf8')
+      .replace(/!include [^\r\n]+windows-common.nsh"/, `!include "${resolve('src-tauri/windows-common.nsh')}"`)
       .replace(/(ExecWait [^\r\n]+)/, '$1\n    !insertmacro Capture "app"');
     writeFileSync(join(root, 'app.nsh'), appHook);
     const cleanup = compile('cleanup', `Unicode true\nRequestExecutionLevel user\nSilentInstall silent\nOutFile "${quote(join(root, 'cleanup.exe'))}"\nSection\nSectionEnd\n`);
@@ -71,6 +79,8 @@ AutoCloseWindow true
 OutFile "${quote(join(root, `${product}.exe`))}"
 !include LogicLib.nsh
 !include FileFunc.nsh
+LoadLanguageFile "${'$'}{NSISDIR}\Contrib\Language files\English.nlf"
+LoadLanguageFile "${'$'}{NSISDIR}\Contrib\Language files\Korean.nlf"
 !define MAINBINARYNAME "SyntheticRisuNest"
 !define PRODUCTNAME "Synthetic RisuNest"
 Var UpdateMode
@@ -105,10 +115,11 @@ Var ProbeHadError
 !macroend
 !macro Manager stage
   !insertmacro Capture "${'$'}{stage}"
-  Push "${nonce}"
   ${'$'}{If} $FixtureFail == "${'$'}{stage}"
+    Push "synthetic-failure:80070005$\r$\nignored diagnostic text"
     Push 9
   ${'$'}{Else}
+    Push "${nonce}"
     Push 0
   ${'$'}{EndIf}
 !macroend
@@ -143,9 +154,11 @@ FunctionEnd
   ReadEnvStr $DeleteAppDataCheckboxState RISUNEST_NSIS_FIXTURE_DELETE
 !macroend
 Function .onInit
+  StrCpy $LANGUAGE 1033
   !insertmacro InitFixture
 FunctionEnd
 Function un.onInit
+  StrCpy $LANGUAGE 1033
   !insertmacro InitFixture
 FunctionEnd
 !macro Failed
@@ -175,6 +188,8 @@ Section Uninstall
   SetAutoClose true
   !insertmacro NSIS_HOOK_PREUNINSTALL
   DetailPrint "Delete: synthetic program files"
+  ; A retained unowned file makes the template's nonrecursive RMDir set this flag.
+  SetErrors
   ${product === 'sync' ? '!insertmacro NSIS_HOOK_POSTUNINSTALL' : ''}
   FileOpen $ProbeFile "$INSTDIR\removed" w
   FileClose $ProbeFile
@@ -208,33 +223,37 @@ SectionEnd
     const expectStages = (result, names, overrides = {}) => {
       assert.deepEqual(result.progress, names.map(name => [name, overrides[name] ?? stages[name]]));
     };
-    expectStages(run('sync', 'install'), ['prepare', 'schedule', 'autostart', 'start', 'finish']);
-    expectStages(run('sync', 'fresh', { existing: false }), ['schedule', 'autostart', 'start']);
+    expectStages(run('sync', 'install'), ['prepare', 'register', 'obsolete', 'schedule', 'autostart', 'start', 'finish']);
+    expectStages(run('sync', 'fresh', { existing: false }), ['register', 'schedule', 'autostart', 'start']);
     const removing = { prepare: 'Stopping RisuNest Sync and preparing removal...', finish: 'Preparing to remove RisuNest Sync server data...' };
-    expectStages(run('sync', 'preserve', { remove: true }), ['check', 'prepare', 'cleanup', 'finish-removal', 'forget'], removing);
-    expectStages(run('sync', 'delete', { remove: true, deleteData: true }), ['check', 'prepare', 'cleanup', 'finish', 'data', 'forget'], removing);
+    expectStages(run('sync', 'preserve', { remove: true }), ['check', 'prepare', 'cleanup', 'files', 'finish-removal', 'forget'], removing);
+    expectStages(run('sync', 'delete', { remove: true, deleteData: true }), ['check', 'prepare', 'cleanup', 'finish', 'data', 'files', 'forget'], removing);
     expectStages(run('sync', 'update', { remove: true, update: true, deleteData: true }), ['update']);
     expectStages(run('app', 'app-delete', { remove: true, deleteData: true }), ['app']);
     expectStages(run('app', 'app-preserve', { remove: true }), []);
     expectStages(run('app', 'app-update', { remove: true, update: true, deleteData: true }), []);
 
     for (const [stage, message] of [
-      ['prepare', /prepared for installation/], ['schedule', /Scheduled update settings could not be applied/],
+      ['register', /installation could not be registered/], ['obsolete', /program files could not be removed/], ['prepare', /prepared for installation/], ['schedule', /Scheduled update settings could not be applied/],
       ['autostart', /Automatic server startup could not be registered/], ['start', /could not be started or verified/],
       ['finish', /installation could not be finalized/],
     ]) {
       const result = run('sync', `install-fail-${stage}`, { fail: stage });
       assert.match(result.failure, message);
+      assert.match(result.failure, /synthetic-failure:80070005/);
+      assert.doesNotMatch(result.failure, /ignored diagnostic text/);
       assert.equal(result.progress.at(-1)[0], stage, 'failed installation stops before the next manager command');
     }
     assert.match(run('sync', 'fresh-failure', { existing: false, fail: 'autostart' }).failure, /Automatic server startup could not be registered/);
     for (const [stage, message] of [
-      ['check', /removal checks did not pass/], ['prepare', /prepared for removal/],
+      ['files', /removal is incomplete/], ['check', /removal checks did not pass/], ['prepare', /prepared for removal/],
       ['cleanup', /could not stop the server or remove/], ['finish', /preparing to remove server data/],
       ['data', /server data could not be completely removed/], ['forget', /installation registration could not be removed/], ['update', /prepared for the update/],
     ]) {
       const result = run('sync', `remove-fail-${stage}`, { remove: true, deleteData: true, update: stage === 'update', fail: stage });
       assert.match(result.failure, message);
+      assert.match(result.failure, /synthetic-failure:80070005/);
+      assert.doesNotMatch(result.failure, /ignored diagnostic text/);
       assert.equal(result.progress.at(-1)[0], stage, 'failed removal stops before the next manager command');
     }
     const waiting = run('sync', 'remove-wait-failure', { remove: true, fail: 'wait' });

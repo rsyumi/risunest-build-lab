@@ -20,6 +20,9 @@
     "createUpdaterArtifacts": false,
     "windows": {
       "nsis": {
+        "template": "windows-installer.nsi",
+        "languages": ["English", "Korean"],
+        "displayLanguageSelector": false,
         "installerIcon": "icons/icon.ico",
         "installerHooks": "windows.nsh"
       }

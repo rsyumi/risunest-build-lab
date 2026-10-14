@@ -603,8 +603,8 @@
     {
       "path": "benchmarks/plugin-review/android-smoke.mjs",
       "mode": "100644",
-      "bytes": 8420,
-      "sha256": "6842f69024984a882d54b8169b8b5ece97b8d14d32ae6ebdd64f8404742e9c3f"
+      "bytes": 8517,
+      "sha256": "491cce38b7ccf8ac371d6b32f018f4747cc07a8a9222f7cd83f64c86f4a502cd"
     },
     {
       "path": "benchmarks/plugin-review/index.html",
@@ -843,8 +843,8 @@
     {
       "path": "benchmarks/streaming/android-smoke.mjs",
       "mode": "100644",
-      "bytes": 12107,
-      "sha256": "00451dc52f379c23f5223314eecbcaf82980ed115a4807d685d9b1506d38f701"
+      "bytes": 12209,
+      "sha256": "e7fefa2db2db59f00c30cc37da10c81da84d2a983f0bc552d6dee1b2ec80e285"
     },
     {
       "path": "benchmarks/streaming/fixture.ts",
@@ -3831,8 +3831,8 @@
     {
       "path": "server/manager/gui/src-tauri/tauri.bundle.conf.json",
       "mode": "100644",
-      "bytes": 411,
-      "sha256": "3ad2392f61edc9ea126cd2ed282c805ecfd30b1c67c4943fe8bf1c2ca1201422"
+      "bytes": 564,
+      "sha256": "0ff3bad8ab116f03bf44f48cf8f305acca6ba5d723b941ad995bbf00abef45f6"
     },
     {
       "path": "server/manager/gui/src-tauri/tauri.conf.json",
@@ -3975,20 +3975,20 @@
     {
       "path": "server/manager/install/package.mjs",
       "mode": "100644",
-      "bytes": 22251,
-      "sha256": "d90c8af96a378e70dd803c27f52293c81d621a1d4dbc360bbf8d6eef9769ad7a"
+      "bytes": 22855,
+      "sha256": "0ed8441afeb86af767c7b642f662ad384f776ffb0b8ee7e739df36761de18f2b"
     },
     {
       "path": "server/manager/install/windows.nsh",
       "mode": "100644",
-      "bytes": 9174,
-      "sha256": "cac9d3804ece988ffac039ea3eaf40b2ebb537c182f76590a0df7f3ca42924df"
+      "bytes": 18754,
+      "sha256": "36229ef63b1cbfb559e833219c14ab665bc0bd0a135c2a85b5a527dbdd630d6d"
     },
     {
       "path": "server/manager/install/windows.test.ps1",
       "mode": "100644",
-      "bytes": 5225,
-      "sha256": "e934a6837c028866d52032839f1dc771e495d74d705212c5cfea25f6fd26f5d0"
+      "bytes": 27302,
+      "sha256": "ab8f9ae1ad0b48b40b5f89319a045be35c58a15b72b4c7d0841df775fc791d72"
     },
     {
       "path": "server/manager/src/bin/risunest-sync-manager-background.rs",
@@ -3999,8 +3999,8 @@
     {
       "path": "server/manager/src/cli.rs",
       "mode": "100644",
-      "bytes": 15204,
-      "sha256": "ffdca2b279aba1ec239c27583b456884a2297a46f4daa8aca8b427808f21e4d7"
+      "bytes": 17438,
+      "sha256": "b57748424485b30f56125dbee9bcfb31606758cc13fd2974f980d1b0756f3d84"
     },
     {
       "path": "server/manager/src/client.rs",
@@ -4035,8 +4035,8 @@
     {
       "path": "server/manager/src/platform/mod.rs",
       "mode": "100644",
-      "bytes": 26935,
-      "sha256": "edbe929e6cfb893803926119de440999f4087b6eb8867721b12786cd7a7f4fbb"
+      "bytes": 27017,
+      "sha256": "6bd0a46587e2b18387de5d42c4cd56ccab97984915082a2a09cd6fd247050de0"
     },
     {
       "path": "server/manager/src/platform/paths.rs",
@@ -4053,14 +4053,14 @@
     {
       "path": "server/manager/src/platform/windows.rs",
       "mode": "100644",
-      "bytes": 21933,
-      "sha256": "9610d7b51a4fa1a837bda4005e4f5e4077e1b2b0e96b9a6eea84fd21154c4919"
+      "bytes": 22658,
+      "sha256": "fb5e485c365ef9ea766e8c0ffba4395d48cd913dbf2b21290ed96162daebf713"
     },
     {
       "path": "server/manager/src/removal.rs",
       "mode": "100644",
-      "bytes": 37278,
-      "sha256": "8676e3800e5841aa6e4c7ebb8c0f01f0302076325a0b3507e0fcc4081ef77835"
+      "bytes": 44763,
+      "sha256": "b8daa92ef74e99f1e40c53294df45beb1ee29376fa5e6842301bec77fe9f134c"
     },
     {
       "path": "server/manager/src/terminal.rs",
@@ -4077,20 +4077,20 @@
     {
       "path": "server/manager/src/update/archive.rs",
       "mode": "100644",
-      "bytes": 26808,
-      "sha256": "d298301668cefd4f01fb277ea40783642d3779956469c75aec0506a5319e4f49"
+      "bytes": 27760,
+      "sha256": "c4490007cc7e1565bba5851a7ba1cc57dd021320aa7d94d06d5bdb467f0920c8"
     },
     {
       "path": "server/manager/src/update/engine.rs",
       "mode": "100644",
-      "bytes": 67514,
-      "sha256": "ae48affffc80cf63173ecb3f89701a5a358d1073491673c1491d0558d1d392aa"
+      "bytes": 71467,
+      "sha256": "d3f580ffb560da97ff4d0595855a810b4ebeda3eb7567783cfb39e2d5bddb3c6"
     },
     {
       "path": "server/manager/src/update/mod.rs",
       "mode": "100644",
-      "bytes": 47190,
-      "sha256": "126badda976485cc4e760a677454beeaa9dc34615c5166d9e3ac0fce4bda7be6"
+      "bytes": 47362,
+      "sha256": "ad0d4e6c8cf015f4b5cf0a00bac81bba5682d176c89fef0ffd24f02768bf7108"
     },
     {
       "path": "server/manager/src/update/transaction.rs",
@@ -4149,8 +4149,8 @@
     {
       "path": "server/manager/tests/removal.rs",
       "mode": "100644",
-      "bytes": 4798,
-      "sha256": "1124fd61b60d0fd8eb6f93feaa3d88ffd9d2b730aed25e1c152907342db1bc73"
+      "bytes": 10140,
+      "sha256": "a0fe83f2ae488ab4afb4700558fa1a3924fd215b97cec01206927f2e7f3ee70b"
     },
     {
       "path": "server/manager/tests/update_helper.rs",
@@ -8133,8 +8133,8 @@
     {
       "path": "src-tauri/tauri.conf.json",
       "mode": "100644",
-      "bytes": 3067,
-      "sha256": "6167376e64612b2ed13e6e5c4f70cb8b8db4ec64f9f5fb04bcfc5a154238ddf1"
+      "bytes": 3198,
+      "sha256": "64716b3085d673af2e1211c606e40e1a37b19ddf70d5038d4e8be52c542a6465"
     },
     {
       "path": "src-tauri/tauri.ios.conf.json",
@@ -8209,10 +8209,22 @@
       "sha256": "4636f3ba46080315ac3277d473d433b79c00863c9cdca1c93c0c83554c6a3d43"
     },
     {
+      "path": "src-tauri/windows-common.nsh",
+      "mode": "100644",
+      "bytes": 4109,
+      "sha256": "e79136e7b95592f3a410130cf7c8868ddc9f75b368194086f2d784509a41952b"
+    },
+    {
+      "path": "src-tauri/windows-installer.nsi",
+      "mode": "100644",
+      "bytes": 35403,
+      "sha256": "09f63a75ce83da798f842f28cb68cc227bed6e41c754c5516e62dc2d78e8ee23"
+    },
+    {
       "path": "src-tauri/windows.nsh",
       "mode": "100644",
-      "bytes": 763,
-      "sha256": "446e704d2f9e1b7f4908eda365bc0a0574086acca5c893dd31d601f7c001c8a5"
+      "bytes": 1592,
+      "sha256": "cee8c5e68253a396c2a9f8d7df6d56d6916f93e6d0c118b96edaaf43b1793ead"
     },
     {
       "path": "src/App.svelte",
@@ -11043,8 +11055,8 @@
     {
       "path": "src/ts/characters.navigation.test.ts",
       "mode": "100644",
-      "bytes": 65440,
-      "sha256": "9e01e5cc7d1d97a318d091ef2a7a45246b5891f3b9458f2f8878fea61e1c0277"
+      "bytes": 66501,
+      "sha256": "d43f5939d762af39f0342f3a1a4352d9dc51c262e88945eaf9b852d6afbc0ba3"
     },
     {
       "path": "src/ts/characters.selectedRemoval.test.ts",
@@ -11055,8 +11067,8 @@
     {
       "path": "src/ts/characters.ts",
       "mode": "100644",
-      "bytes": 44434,
-      "sha256": "dabdcf05cd29169bc506fb5306e2202c103a9b8926aa71bb229ec41b1dfeb252"
+      "bytes": 44937,
+      "sha256": "78d723926027421e449c276c4c061c062a7c7da9bca5be853d2730123f15b1a9"
     },
     {
       "path": "src/ts/chatBindings.svelte.ts",
@@ -14229,8 +14241,8 @@
     {
       "path": "src/ts/sionyw.ts",
       "mode": "100644",
-      "bytes": 10731,
-      "sha256": "82f454b9ff4f6fd0a954e435b7a76ba7b182fccee8a1ec9c59b7834603a413a7"
+      "bytes": 10795,
+      "sha256": "b768da8ea4c2d9595368b448de2e825b37f430c4eff279245ae92c43e6a2c9d7"
     },
     {
       "path": "src/ts/sortableOptions.ts",
@@ -17955,8 +17967,8 @@
     {
       "path": "tests/release/app-nsis-uninstall.node-test.mjs",
       "mode": "100644",
-      "bytes": 5951,
-      "sha256": "aea1df8791ee698c5104e4b389ca2a842c53a5ede8c07714e68f16afeacf6eee"
+      "bytes": 8845,
+      "sha256": "165ec3faa79025bd5332af514f91a57f18e3ecb1079d5f8be94543479bc9a544"
     },
     {
       "path": "tests/release/build-collect.node-test.mjs",
@@ -18051,8 +18063,8 @@
     {
       "path": "tests/release/nsis-progress.node-test.mjs",
       "mode": "100644",
-      "bytes": 12401,
-      "sha256": "eb1732ea317c7a939e9afa0b4d82c8c4b03caae915b81fa3970e4ea9a0967f7c"
+      "bytes": 13808,
+      "sha256": "c60d95369ddac0e1c2d2f7dd5e09029ab0aa9e0b47c1c5c0e918ed7b04765dd9"
     },
     {
       "path": "tests/release/publication.node-test.mjs",
@@ -18099,8 +18111,8 @@
     {
       "path": "tests/release/sync-nsis-uninstall.node-test.mjs",
       "mode": "100644",
-      "bytes": 9425,
-      "sha256": "419687cb5750318b11b536ac225ce4e623c345282cc536142a386fbdebb378e2"
+      "bytes": 11480,
+      "sha256": "9e2916dfbd0f1e4ee32bbd895f81d52299fd5d1f6ca4557d7d0026a0022638c7"
     },
     {
       "path": "tests/release/vendor-download.node-test.mjs",
